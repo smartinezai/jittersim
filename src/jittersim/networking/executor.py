@@ -85,6 +85,11 @@ class SubprocessExecutor:
                 f"networking command timed out: {command.purpose}",
                 timed_out=True,
             ) from error
+        except OSError as error:
+            raise CommandExecutionError(
+                f"could not start networking command: {command.purpose}",
+                stderr=str(error),
+            ) from error
 
         command_result = CommandResult(
             return_code=result.returncode,

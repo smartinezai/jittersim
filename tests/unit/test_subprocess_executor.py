@@ -88,6 +88,15 @@ class SubprocessExecutorTests(unittest.TestCase):
 
         self.assertTrue(context.exception.timed_out)
 
+    @patch("jittersim.networking.executor.subprocess.run")
+    def test_reports_missing_executables(self, run_command) -> None:
+        run_command.side_effect = FileNotFoundError("tc not found")
+
+        with self.assertRaisesRegex(CommandExecutionError, "could not start") as context:
+            SubprocessExecutor().run(Command("tc", ("qdisc",), "apply queue"))
+
+        self.assertIn("tc not found", context.exception.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
