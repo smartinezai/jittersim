@@ -8,7 +8,7 @@ The main use case is a private classroom or home lab. A Mac or another computer 
 
 ## Project status
 
-The project now has validated device and profile models, deterministic plan compilation, SQLite configuration storage, a read-only dashboard and authenticated configuration upserts. It does not yet apply rules to a Raspberry Pi. The next milestone is a guarded apply/reset workflow with recovery checks.
+The project now has validated device and profile models, deterministic plan compilation, SQLite configuration storage, a read-only dashboard, authenticated configuration upserts and a guarded apply/reset engine. It does not yet connect the dashboard to live networking or apply rules to a Raspberry Pi. The next milestone is a privileged helper with hardware-only checks.
 
 ## Why this project exists
 
@@ -122,6 +122,11 @@ The data plane will use Linux networking commands through a narrow adapter. The 
 - Restore a known normal state when requested.
 
 The web service should not run as root. A later milestone will add a small privileged helper with a Unix-domain socket and a restricted command vocabulary. During early development the engine can use a fake executor so policy logic can be tested without changing a real network.
+
+The current apply engine is deliberately separate from the dashboard. It can run against the fake
+executor in tests, reports the command that failed and attempts project-owned cleanup before
+returning an error. No local command in this repository currently connects that engine to the
+Mac's network or exposes it through the web API.
 
 ## Profiles and state
 

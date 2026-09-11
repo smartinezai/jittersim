@@ -68,18 +68,17 @@ Goal: apply a plan through a controlled adapter and recover from failure.
 - [x] Add a subprocess executor that never invokes a shell.
 - [x] Add explicit simulation mode.
 - [x] Add bounded command timeouts.
-- [ ] Add apply and reset operations.
-- [ ] Make repeated apply operations idempotent.
+- [x] Add apply and reset operations.
+- [ ] Prove repeated apply operations are idempotent on Linux.
 - [x] Record command output and failures.
-- [ ] Add a global reset operation that removes only project-owned state.
+- [x] Add a global reset operation that removes only project-owned state.
 
 Suggested commits:
 
 1. `Add the fake command executor`
 2. `Add bounded subprocess execution`
-3. `Add dry-run apply mode`
-4. `Add idempotent reset operations`
-5. `Test failed apply recovery`
+3. `Add guarded apply and reset operations`
+4. `Test guarded apply recovery`
 
 ## Milestone 4: device and profile storage
 
@@ -115,9 +114,9 @@ Goal: control the emulator from a Mac without a screen or keyboard attached to t
 
 Suggested commits:
 
-1. `Add the control API skeleton`
-2. `Protect state-changing API actions`
-3. `Add device and profile endpoints`
+1. `Add read-only control API`
+2. `Protect configuration writes`
+3. `Test protected configuration writes`
 4. `Add apply and reset endpoints`
 5. `Add the first dashboard page`
 6. `Show network state and apply errors`
