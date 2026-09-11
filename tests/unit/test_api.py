@@ -30,12 +30,12 @@ class ControlServerTests(unittest.TestCase):
         self.server.server_close()
         self.repository.close()
 
-    def test_health_response_identifies_read_only_mode(self) -> None:
+    def test_health_response_identifies_configuration_only_mode(self) -> None:
         status, content_type, body = self.server.response_for("/api/health")
 
         self.assertEqual(status, 200)
         self.assertEqual(content_type, "application/json")
-        self.assertEqual(json.loads(body), {"mode": "read-only", "status": "ok"})
+        self.assertEqual(json.loads(body), {"mode": "configuration-only", "status": "ok"})
 
     def test_configuration_endpoints_serialize_validated_values(self) -> None:
         status, _, body = self.server.response_for("/api/profiles")
