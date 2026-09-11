@@ -16,6 +16,7 @@ dependencies = []
 
 [project.scripts]
 jittersim = "jittersim.cli:main"
+jittersim-dashboard = "jittersim.api.server:main"
 
 [project.optional-dependencies]
 dev = [
