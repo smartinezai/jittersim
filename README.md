@@ -8,7 +8,7 @@ The main use case is a private classroom or home lab. A Mac or another computer 
 
 ## Project status
 
-The project now has validated device and profile models, a deterministic policy compiler, a simulation command and a bounded networking command adapter. It does not yet apply rules to a Raspberry Pi. The next milestone is persistence and a controlled apply/reset workflow before adding the dashboard.
+The project now has validated device and profile models, deterministic plan compilation, SQLite configuration storage, a read-only dashboard and authenticated configuration upserts. It does not yet apply rules to a Raspberry Pi. The next milestone is a guarded apply/reset workflow with recovery checks.
 
 ## Why this project exists
 
@@ -206,6 +206,41 @@ The project will distinguish between two test modes:
 2. **Hardware mode** runs on the Pi and applies rules to explicitly configured test interfaces.
 
 The project must never assume that a developer's ordinary network interface is safe to modify.
+
+### Local dashboard and API
+
+The first control-plane server is safe to run on a Mac because it only reads configuration and
+compiles plans. It binds to `127.0.0.1` by default and does not execute `tc`, `nft` or `ip`.
+
+Start it with a local database:
+
+```bash
+PYTHONPATH=src python3 -m jittersim.api --database ./jittersim.db
+```
+
+Open <http://127.0.0.1:8080/> in a browser. The page currently shows profiles, devices and the
+compiled plan. The API also provides `/api/health`, `/api/profiles`, `/api/devices` and
+`/api/plan`.
+
+Profile and device upserts require a bearer token. Keep the token in the environment instead of
+putting it in a command or a repository:
+
+```bash
+export JITTERSIM_ADMIN_TOKEN='use-a-long-local-token'
+PYTHONPATH=src python3 -m jittersim.api --database ./jittersim.db
+```
+
+The current write API accepts JSON at `POST /api/profiles` and `POST /api/devices`. For example:
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/profiles \
+  -H "Authorization: Bearer $JITTERSIM_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"terrible-wifi","name":"Terrible Wi-Fi","upload":{"delay_ms":3000,"jitter_ms":700,"loss_percent":10,"bandwidth_kbit":2000},"download":{"delay_ms":3000,"jitter_ms":700,"loss_percent":10,"bandwidth_kbit":2000}}'
+```
+
+The write endpoints only change the SQLite desired configuration. They do not apply network
+changes yet. The default server has writes disabled when `JITTERSIM_ADMIN_TOKEN` is missing.
 
 ### Safe local simulation
 

@@ -64,13 +64,13 @@ Suggested commits:
 
 Goal: apply a plan through a controlled adapter and recover from failure.
 
-- [ ] Add a fake executor for unit tests.
-- [ ] Add a subprocess executor that never invokes a shell.
-- [ ] Add explicit dry-run mode.
-- [ ] Add bounded command timeouts.
+- [x] Add a fake executor for unit tests.
+- [x] Add a subprocess executor that never invokes a shell.
+- [x] Add explicit simulation mode.
+- [x] Add bounded command timeouts.
 - [ ] Add apply and reset operations.
 - [ ] Make repeated apply operations idempotent.
-- [ ] Record command output and failures.
+- [x] Record command output and failures.
 - [ ] Add a global reset operation that removes only project-owned state.
 
 Suggested commits:
@@ -85,8 +85,8 @@ Suggested commits:
 
 Goal: persist configuration without requiring a cloud service.
 
-- [ ] Add SQLite storage.
-- [ ] Store devices, profiles and assignments.
+- [x] Add SQLite storage.
+- [x] Store devices, profiles and assignments.
 - [ ] Store desired state separately from observed state.
 - [ ] Add configuration versioning.
 - [ ] Add import and export of non-secret JSON configuration.
@@ -104,11 +104,11 @@ Suggested commits:
 
 Goal: control the emulator from a Mac without a screen or keyboard attached to the Pi.
 
-- [ ] Add a small HTTP API.
-- [ ] Add authentication for state-changing operations.
-- [ ] Add device and profile listing.
+- [x] Add a small HTTP API.
+- [x] Add authentication for state-changing operations.
+- [x] Add device and profile listing.
 - [ ] Add enable, disable and reset actions.
-- [ ] Add a simple dashboard served by the Pi.
+- [x] Add a simple read-only dashboard served by the Pi.
 - [ ] Show desired state, observed state and last apply result.
 - [ ] Add an event log.
 - [ ] Keep the dashboard exempt from impairment.
