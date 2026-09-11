@@ -10,7 +10,7 @@ from .topology import Topology
 
 
 PROJECT_TABLE = "jittersim"
-ROOT_HANDLE = "1:"
+ROOT_HANDLE = "10:"
 
 
 def _format_impairment_arguments(queue: QueueSpec) -> List[str]:
@@ -92,7 +92,7 @@ def _render_tc_commands(
                         "dev",
                         interface,
                         "parent",
-                        f"1:{band}",
+                        f"{ROOT_HANDLE}{band}",
                         "handle",
                         child_handle,
                         *_format_impairment_arguments(queue),
@@ -101,6 +101,27 @@ def _render_tc_commands(
                         f"apply {queue.direction.value} impairment for "
                         f"device {queue.device_id} on {interface}"
                     ),
+                )
+            )
+        else:
+            commands.append(
+                Command(
+                    executable="tc",
+                    arguments=(
+                        "qdisc",
+                        "del",
+                        "dev",
+                        interface,
+                        "parent",
+                        f"{ROOT_HANDLE}{band}",
+                        "handle",
+                        child_handle,
+                    ),
+                    purpose=(
+                        f"remove stale impairment for device {queue.device_id} "
+                        f"on {interface}"
+                    ),
+                    ignore_failure=True,
                 )
             )
         commands.append(
@@ -119,7 +140,7 @@ def _render_tc_commands(
                     str(queue.mark),
                     "fw",
                     "flowid",
-                    f"1:{band}",
+                    f"{ROOT_HANDLE}{band}",
                 ),
                 purpose=f"route mark {queue.mark} on {interface}",
             )
@@ -160,4 +181,27 @@ def render_command_plan(*, plan: NetworkPlan, topology: Topology) -> Sequence[Co
             device_count=len(plan.mark_rules),
         )
     )
+    return tuple(commands)
+
+
+def render_reset_commands(*, topology: Topology) -> Sequence[Command]:
+    """Render cleanup operations limited to jittersim-owned state."""
+
+    commands = [
+        Command(
+            executable="nft",
+            arguments=("delete", "table", "inet", PROJECT_TABLE),
+            purpose="remove the project-owned nftables table",
+            ignore_failure=True,
+        )
+    ]
+    for interface in (topology.uplink_interface, topology.test_interface):
+        commands.append(
+            Command(
+                executable="tc",
+                arguments=("qdisc", "del", "dev", interface, "root", "handle", ROOT_HANDLE),
+                purpose=f"remove the project-owned root queue from {interface}",
+                ignore_failure=True,
+            )
+        )
     return tuple(commands)
