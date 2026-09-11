@@ -8,7 +8,7 @@ The main use case is a private classroom or home lab. A Mac or another computer 
 
 ## Project status
 
-The project now has validated device and profile models, deterministic plan compilation, SQLite configuration storage, a read-only dashboard, authenticated configuration upserts and a guarded apply/reset engine. It does not yet connect the dashboard to live networking or apply rules to a Raspberry Pi. The next milestone is a privileged helper with hardware-only checks.
+The project now has validated device and profile models, deterministic plan compilation, SQLite configuration storage, a configuration dashboard, authenticated upserts and a guarded apply/reset engine. It does not yet connect the dashboard to live networking or apply rules to a Raspberry Pi. The next milestone is a privileged helper with hardware-only checks.
 
 ## Why this project exists
 
@@ -214,8 +214,8 @@ The project must never assume that a developer's ordinary network interface is s
 
 ### Local dashboard and API
 
-The first control-plane server is safe to run on a Mac because it only reads configuration and
-compiles plans. It binds to `127.0.0.1` by default and does not execute `tc`, `nft` or `ip`.
+The first control-plane server is safe to run on a Mac because it only changes SQLite configuration
+and compiles plans. It binds to `127.0.0.1` by default and does not execute `tc`, `nft` or `ip`.
 
 Start it with a local database:
 
@@ -223,9 +223,9 @@ Start it with a local database:
 PYTHONPATH=src python3 -m jittersim.api --database ./jittersim.db
 ```
 
-Open <http://127.0.0.1:8080/> in a browser. The page currently shows profiles, devices and the
-compiled plan. The API also provides `/api/health`, `/api/profiles`, `/api/devices` and
-`/api/plan`.
+Open <http://127.0.0.1:8080/> in a browser. The page currently shows forms for profiles and device
+assignments plus the compiled plan. The API also provides `/api/health`, `/api/profiles`,
+`/api/devices` and `/api/plan`.
 
 Profile and device upserts require a bearer token. Keep the token in the environment instead of
 putting it in a command or a repository:
@@ -235,7 +235,8 @@ export JITTERSIM_ADMIN_TOKEN='use-a-long-local-token'
 PYTHONPATH=src python3 -m jittersim.api --database ./jittersim.db
 ```
 
-The current write API accepts JSON at `POST /api/profiles` and `POST /api/devices`. For example:
+The current write API accepts JSON at `POST /api/profiles` and `POST /api/devices`. The browser
+forms call these same endpoints. For example:
 
 ```bash
 curl -X POST http://127.0.0.1:8080/api/profiles \

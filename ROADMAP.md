@@ -107,7 +107,7 @@ Goal: control the emulator from a Mac without a screen or keyboard attached to t
 - [x] Add authentication for state-changing operations.
 - [x] Add device and profile listing.
 - [ ] Add enable, disable and reset actions.
-- [x] Add a simple read-only dashboard served by the Pi.
+- [x] Add a simple dashboard served by the Pi.
 - [ ] Show desired state, observed state and last apply result.
 - [ ] Add an event log.
 - [ ] Keep the dashboard exempt from impairment.
