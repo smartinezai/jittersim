@@ -36,11 +36,85 @@ DASHBOARD_HTML = """<!doctype html>
     code, pre { font-family: ui-monospace, SFMono-Regular, monospace; }
     pre { overflow-x: auto; padding: 1rem; border: 1px solid #8886; border-radius: 0.5rem; }
     .notice { padding: 0.75rem 1rem; border-left: 0.3rem solid #cc8b00; }
+    .card { border: 1px solid #8886; border-radius: 0.5rem; margin: 1rem 0; padding: 1rem; }
+    .fields {
+      display: grid;
+      gap: 0.75rem;
+      grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+    }
+    label { display: grid; gap: 0.25rem; }
+    input { box-sizing: border-box; max-width: 100%; padding: 0.4rem; }
+    button { margin-top: 1rem; padding: 0.45rem 0.8rem; }
+    #message { min-height: 1.5rem; }
   </style>
 </head>
 <body>
   <h1>jittersim</h1>
-  <p class="notice">Read-only inspection mode. No network commands can be run from this page.</p>
+  <p class="notice">
+    Configuration mode. These forms update SQLite only. No network commands can be run from this
+    page.
+  </p>
+  <section class="card">
+    <h2>Control token</h2>
+    <label>Bearer token (kept in this page only)
+      <input id="admin-token" type="password" autocomplete="off">
+    </label>
+  </section>
+  <section class="card">
+    <h2>Save profile</h2>
+    <form id="profile-form">
+      <div class="fields">
+        <label>Profile ID
+          <input id="profile-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}">
+        </label>
+        <label>Name <input id="profile-name" required></label>
+      </div>
+      <h3>Upload</h3>
+      <div class="fields">
+        <label>Delay (ms) <input id="upload-delay" type="number" min="0" value="0" required></label>
+        <label>Jitter (ms)
+          <input id="upload-jitter" type="number" min="0" value="0" required>
+        </label>
+        <label>Loss (%)
+          <input id="upload-loss" type="number" min="0" max="100" value="0" required>
+        </label>
+        <label>Bandwidth (kbit/s, optional)
+          <input id="upload-bandwidth" type="number" min="1">
+        </label>
+      </div>
+      <h3>Download</h3>
+      <div class="fields">
+        <label>Delay (ms)
+          <input id="download-delay" type="number" min="0" value="0" required>
+        </label>
+        <label>Jitter (ms)
+          <input id="download-jitter" type="number" min="0" value="0" required>
+        </label>
+        <label>Loss (%)
+          <input id="download-loss" type="number" min="0" max="100" value="0" required>
+        </label>
+        <label>Bandwidth (kbit/s, optional)
+          <input id="download-bandwidth" type="number" min="1">
+        </label>
+      </div>
+      <button type="submit">Save profile</button>
+    </form>
+  </section>
+  <section class="card">
+    <h2>Assign a device</h2>
+    <form id="device-form">
+      <div class="fields">
+        <label>Device ID <input id="device-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}"></label>
+        <label>Name <input id="device-name" required></label>
+        <label>Reserved IPv4 address
+          <input id="device-ip" required placeholder="192.168.50.10">
+        </label>
+        <label>Profile ID <input id="device-profile" required></label>
+      </div>
+      <button type="submit">Save device</button>
+    </form>
+  </section>
+  <p id="message" role="status"></p>
   <h2>Profiles</h2>
   <pre id="profiles">Loading...</pre>
   <h2>Devices</h2>
@@ -48,19 +122,90 @@ DASHBOARD_HTML = """<!doctype html>
   <h2>Compiled plan</h2>
   <pre id="plan">Loading...</pre>
   <script>
-    async function show(endpoint, elementId, key) {
-      const response = await fetch(endpoint, { cache: "no-store" });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || response.statusText);
-      document.getElementById(elementId).textContent = JSON.stringify(data[key], null, 2);
+    const element = (id) => document.getElementById(id);
+
+    function optionalNumber(id) {
+      const value = element(id).value.trim();
+      return value === "" ? null : Number(value);
     }
 
-    Promise.all([
-      show("/api/profiles", "profiles", "profiles"),
-      show("/api/devices", "devices", "devices"),
-      show("/api/plan", "plan", "plan")
-    ]).catch((error) => {
-      document.getElementById("plan").textContent = error.message;
+    function impairment(prefix) {
+      return {
+        delay_ms: Number(element(prefix + "-delay").value),
+        jitter_ms: Number(element(prefix + "-jitter").value),
+        loss_percent: Number(element(prefix + "-loss").value),
+        bandwidth_kbit: optionalNumber(prefix + "-bandwidth")
+      };
+    }
+
+    async function request(path, method, body) {
+      const headers = {};
+      const token = element("admin-token").value.trim();
+      if (token) headers.Authorization = "Bearer " + token;
+      if (body !== undefined) headers["Content-Type"] = "application/json";
+      const response = await fetch(path, {
+        method: method,
+        headers: headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+        cache: "no-store"
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || response.statusText);
+      return data;
+    }
+
+    async function show(endpoint, elementId, key) {
+      const data = await request(endpoint, "GET");
+      element(elementId).textContent = JSON.stringify(data[key], null, 2);
+    }
+
+    async function refresh() {
+      await Promise.all([
+        show("/api/profiles", "profiles", "profiles"),
+        show("/api/devices", "devices", "devices"),
+        show("/api/plan", "plan", "plan")
+      ]);
+    }
+
+    function showMessage(message) {
+      element("message").textContent = message;
+    }
+
+    element("profile-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        await request("/api/profiles", "POST", {
+          id: element("profile-id").value,
+          name: element("profile-name").value,
+          upload: impairment("upload"),
+          download: impairment("download")
+        });
+        showMessage("Profile saved.");
+        await refresh();
+      } catch (error) {
+        showMessage(error.message);
+      }
+    });
+
+    element("device-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        await request("/api/devices", "POST", {
+          id: element("device-id").value,
+          name: element("device-name").value,
+          ipv4_address: element("device-ip").value,
+          profile_id: element("device-profile").value
+        });
+        showMessage("Device saved.");
+        await refresh();
+      } catch (error) {
+        showMessage(error.message);
+      }
+    });
+
+    refresh().catch((error) => {
+      showMessage(error.message);
+      element("plan").textContent = error.message;
     });
   </script>
 </body>
