@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.config.storage import ConfigRepository, DatabasePath, StorageError
 from jittersim.engine.compiler import PlanError
-from jittersim.engine.plan import NetworkPlan
+from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.service import compile_stored_plan
 
 
@@ -236,28 +236,6 @@ def _device_payload(device: Device) -> Dict[str, Any]:
     }
 
 
-def _plan_payload(plan: NetworkPlan) -> Dict[str, Any]:
-    return {
-        "mark_rules": [
-            {
-                "device_id": rule.device_id,
-                "ipv4_address": str(rule.ipv4_address),
-                "mark": rule.mark,
-            }
-            for rule in plan.mark_rules
-        ],
-        "queues": [
-            {
-                "device_id": queue.device_id,
-                "direction": queue.direction.value,
-                "mark": queue.mark,
-                "impairment": _impairment_payload(queue.impairment),
-            }
-            for queue in plan.queues
-        ],
-    }
-
-
 def _json_bytes(payload: Dict[str, Any]) -> bytes:
     return (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
 
@@ -296,7 +274,7 @@ class ControlServer(HTTPServer):
             return HTTPStatus.OK, "application/json", _json_bytes({"devices": devices})
         if path == "/api/plan":
             return HTTPStatus.OK, "application/json", _json_bytes(
-                {"plan": _plan_payload(compile_stored_plan(repository=self.repository))}
+                {"plan": plan_to_payload(compile_stored_plan(repository=self.repository))}
             )
         return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
 
