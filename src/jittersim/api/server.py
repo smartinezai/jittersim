@@ -3,9 +3,11 @@
 import argparse
 from dataclasses import asdict
 import json
+import hmac
 import logging
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
@@ -18,6 +20,8 @@ from jittersim.engine.service import compile_stored_plan
 
 
 LOGGER = logging.getLogger(__name__)
+MAX_JSON_BODY_BYTES = 64 * 1024
+WRITE_PATHS = frozenset(("/api/profiles", "/api/devices"))
 
 
 DASHBOARD_HTML = """<!doctype html>
@@ -118,8 +122,16 @@ class ControlServer(HTTPServer):
 
     allow_reuse_address = True
 
-    def __init__(self, server_address: Tuple[str, int], repository: ConfigRepository) -> None:
+    def __init__(
+        self,
+        server_address: Tuple[str, int],
+        repository: ConfigRepository,
+        admin_token: Optional[str] = None,
+    ) -> None:
+        if admin_token == "":
+            raise ValueError("admin_token must not be empty")
         self.repository = repository
+        self.admin_token = admin_token
         super().__init__(server_address, ControlRequestHandler)
 
     def response_for(self, path: str) -> Tuple[int, str, bytes]:
@@ -143,6 +155,43 @@ class ControlServer(HTTPServer):
             )
         return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
 
+    def write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
+        """Validate and persist one supported control-plane write request."""
+
+        if path == "/api/profiles":
+            try:
+                profile = _profile_from_payload(payload)
+            except (KeyError, TypeError, ValueError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid profile configuration"}
+                )
+            self.repository.save_profile(profile)
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {"profile": _profile_payload(profile)}
+            )
+
+        if path == "/api/devices":
+            try:
+                device = _device_from_payload(payload)
+            except (KeyError, TypeError, ValueError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid device configuration"}
+                )
+            self.repository.save_device(device)
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {"device": _device_payload(device)}
+            )
+
+        return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
+
+    def is_authorized(self, authorization_header: Optional[str]) -> bool:
+        """Return whether an Authorization header matches the configured admin token."""
+
+        return _authorization_matches(
+            expected_token=self.admin_token,
+            authorization_header=authorization_header,
+        )
+
 
 class ControlRequestHandler(BaseHTTPRequestHandler):
     """Handle the read-only control-plane routes."""
@@ -161,36 +210,155 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         self._send_response(status=status, content_type=content_type, body=body)
 
     def do_POST(self) -> None:
+        self._handle_write()
+
+    def do_PUT(self) -> None:
+        self._handle_write()
+
+    def do_DELETE(self) -> None:
         self._send_response(
             status=HTTPStatus.METHOD_NOT_ALLOWED,
             content_type="application/json",
-            body=_json_bytes({"error": "state-changing actions are not enabled"}),
+            body=_json_bytes({"error": "delete actions are not enabled"}),
         )
-
-    def do_PUT(self) -> None:
-        self.do_POST()
-
-    def do_DELETE(self) -> None:
-        self.do_POST()
 
     def log_message(self, format_string: str, *args: Any) -> None:
         LOGGER.info("%s - %s", self.address_string(), format_string % args)
 
-    def _send_response(self, *, status: int, content_type: str, body: bytes) -> None:
+    def _handle_write(self) -> None:
+        path = urlsplit(self.path).path
+        if path not in WRITE_PATHS:
+            self._send_response(
+                status=HTTPStatus.NOT_FOUND,
+                content_type="application/json",
+                body=_json_bytes({"error": "not found"}),
+            )
+            return
+        if self.server.admin_token is None:
+            self._send_response(
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+                content_type="application/json",
+                body=_json_bytes({"error": "state-changing actions are disabled"}),
+            )
+            return
+        if not self.server.is_authorized(self.headers.get("Authorization")):
+            self._send_response(
+                status=HTTPStatus.UNAUTHORIZED,
+                content_type="application/json",
+                body=_json_bytes({"error": "valid bearer authentication is required"}),
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+            return
+
+        try:
+            payload = self._read_json_body()
+            status, content_type, body = self.server.write_response_for(path, payload)
+        except RequestError as error:
+            status = HTTPStatus.BAD_REQUEST
+            content_type = "application/json"
+            body = _json_bytes({"error": str(error)})
+        except StorageError:
+            LOGGER.exception("could not persist control-plane request for %s", path)
+            status = HTTPStatus.CONFLICT
+            content_type = "application/json"
+            body = _json_bytes({"error": "configuration could not be saved"})
+        self._send_response(status=status, content_type=content_type, body=body)
+
+    def _read_json_body(self) -> Dict[str, Any]:
+        length_header = self.headers.get("Content-Length")
+        if length_header is None:
+            raise RequestError("request body is required")
+        try:
+            length = int(length_header)
+        except ValueError as error:
+            raise RequestError("request body length is invalid") from error
+        if length < 0 or length > MAX_JSON_BODY_BYTES:
+            raise RequestError("request body is too large")
+        raw_body = self.rfile.read(length)
+        if len(raw_body) != length:
+            raise RequestError("request body is incomplete")
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RequestError("request body must be valid JSON") from error
+        if not isinstance(payload, dict):
+            raise RequestError("request body must contain a JSON object")
+        return payload
+
+    def _send_response(
+        self,
+        *,
+        status: int,
+        content_type: str,
+        body: bytes,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
 
-def run_server(*, database_path: DatabasePath, host: str = "127.0.0.1", port: int = 8080) -> None:
+class RequestError(ValueError):
+    """Raised when an HTTP request body cannot be safely decoded."""
+
+
+def _impairment_from_payload(payload: Any) -> Impairment:
+    if payload is None:
+        return Impairment()
+    if not isinstance(payload, dict):
+        raise ValueError("impairment must be an object")
+    return Impairment(**payload)
+
+
+def _profile_from_payload(payload: Dict[str, Any]) -> Profile:
+    return Profile(
+        id=payload["id"],
+        name=payload["name"],
+        upload=_impairment_from_payload(payload.get("upload")),
+        download=_impairment_from_payload(payload.get("download")),
+        random_seed=payload.get("random_seed"),
+    )
+
+
+def _device_from_payload(payload: Dict[str, Any]) -> Device:
+    return Device(
+        id=payload["id"],
+        name=payload["name"],
+        ipv4_address=payload["ipv4_address"],
+        profile_id=payload["profile_id"],
+    )
+
+
+def _authorization_matches(
+    *, expected_token: Optional[str], authorization_header: Optional[str]
+) -> bool:
+    if expected_token is None or authorization_header is None:
+        return False
+    scheme, separator, token = authorization_header.partition(" ")
+    return (
+        separator == " "
+        and scheme.lower() == "bearer"
+        and hmac.compare_digest(token, expected_token)
+    )
+
+
+def run_server(
+    *,
+    database_path: DatabasePath,
+    host: str = "127.0.0.1",
+    port: int = 8080,
+    admin_token: Optional[str] = None,
+) -> None:
     """Run the read-only dashboard until the process receives Ctrl-C."""
 
     with ConfigRepository(database_path) as repository:
-        with ControlServer((host, port), repository) as server:
+        with ControlServer((host, port), repository, admin_token=admin_token) as server:
             LOGGER.info("jittersim dashboard listening on %s:%s", host, port)
             try:
                 server.serve_forever()
@@ -210,5 +378,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     """Parse server options and start the read-only dashboard."""
 
     arguments = _build_parser().parse_args(argv)
-    run_server(database_path=arguments.database, host=arguments.host, port=arguments.port)
+    run_server(
+        database_path=arguments.database,
+        host=arguments.host,
+        port=arguments.port,
+        admin_token=os.environ.get("JITTERSIM_ADMIN_TOKEN"),
+    )
     return 0
