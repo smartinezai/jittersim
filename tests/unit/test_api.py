@@ -71,6 +71,58 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(content_type, "application/json")
         self.assertEqual(json.loads(body), {"error": "not found"})
 
+    def test_persists_valid_profile_and_device_writes(self) -> None:
+        status, _, body = self.server.write_response_for(
+            "/api/profiles",
+            {
+                "id": "normal",
+                "name": "Normal",
+                "upload": {},
+                "download": {},
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["profile"]["id"], "normal")
+
+        status, _, body = self.server.write_response_for(
+            "/api/devices",
+            {
+                "id": "bob",
+                "name": "Bob's phone",
+                "ipv4_address": "192.168.50.11",
+                "profile_id": "normal",
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["device"]["id"], "bob")
+        self.assertIsNotNone(self.repository.get_device("bob"))
+
+    def test_rejects_invalid_profile_writes_before_persistence(self) -> None:
+        status, content_type, body = self.server.write_response_for(
+            "/api/profiles",
+            {"id": "unsafe id", "name": "Invalid"},
+        )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(content_type, "application/json")
+        self.assertEqual(json.loads(body), {"error": "invalid profile configuration"})
+        self.assertIsNone(self.repository.get_profile("unsafe id"))
+
+    def test_state_changes_require_a_matching_bearer_token(self) -> None:
+        self.assertFalse(self.server.is_authorized("Bearer anything"))
+        token_server = ControlServer(
+            ("127.0.0.1", 0),
+            self.repository,
+            admin_token="test-token-123456",
+        )
+        try:
+            self.assertFalse(token_server.is_authorized(None))
+            self.assertFalse(token_server.is_authorized("Basic test-token-123456"))
+            self.assertFalse(token_server.is_authorized("Bearer wrong-token"))
+            self.assertTrue(token_server.is_authorized("Bearer test-token-123456"))
+        finally:
+            token_server.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()
