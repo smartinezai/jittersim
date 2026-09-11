@@ -81,6 +81,18 @@ class CompilePlanTests(unittest.TestCase):
                 profiles={},
             )
 
+    def test_rejects_more_devices_than_the_prio_layout_supports(self) -> None:
+        devices = tuple(
+            make_device(f"device-{index}", f"192.168.50.{index + 10}")
+            for index in range(16)
+        )
+
+        with self.assertRaisesRegex(PlanError, "more than 15 devices"):
+            compile_plan(
+                devices=devices,
+                profiles={"normal": Profile(id="normal", name="Normal")},
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
