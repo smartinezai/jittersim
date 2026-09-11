@@ -1,7 +1,7 @@
 """Structured commands used by the networking execution boundary."""
 
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 
 
 class CommandError(ValueError):
@@ -15,6 +15,8 @@ class Command:
     executable: str
     arguments: Tuple[str, ...]
     purpose: str
+    stdin: Optional[str] = None
+    ignore_failure: bool = False
 
     def __post_init__(self) -> None:
         if not self.executable or "/" in self.executable or " " in self.executable:

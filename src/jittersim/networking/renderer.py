@@ -1,0 +1,161 @@
+"""Render a network plan into inspectable Linux command operations."""
+
+from typing import List, Sequence
+
+from jittersim.config.models import Impairment
+from jittersim.engine.plan import Direction, NetworkPlan, QueueSpec
+
+from .commands import Command
+from .topology import Topology
+
+
+PROJECT_TABLE = "jittersim"
+ROOT_HANDLE = "1:"
+
+
+def _format_impairment_arguments(queue: QueueSpec) -> List[str]:
+    impairment = queue.impairment
+    arguments = ["netem"]
+    if impairment.delay_ms:
+        arguments.extend(["delay", f"{impairment.delay_ms}ms"])
+        if impairment.jitter_ms:
+            arguments.append(f"{impairment.jitter_ms}ms")
+    if impairment.loss_percent:
+        arguments.extend(["loss", "random", f"{impairment.loss_percent}%"])
+    if impairment.reorder_percent:
+        arguments.extend(["reorder", f"{impairment.reorder_percent}%"])
+    if impairment.duplicate_percent:
+        arguments.extend(["duplicate", f"{impairment.duplicate_percent}%"])
+    if impairment.corrupt_percent:
+        arguments.extend(["corrupt", f"{impairment.corrupt_percent}%"])
+    if impairment.bandwidth_kbit is not None:
+        arguments.extend(["rate", f"{impairment.bandwidth_kbit}kbit"])
+    return arguments
+
+
+def _render_nft_script(plan: NetworkPlan) -> str:
+    lines = [
+        f"add table inet {PROJECT_TABLE}",
+        (
+            f"add chain inet {PROJECT_TABLE} forward "
+            "{ type filter hook forward priority -150; policy accept; }"
+        ),
+    ]
+    for rule in plan.mark_rules:
+        lines.append(
+            f"add rule inet {PROJECT_TABLE} forward "
+            f"ip saddr {rule.ipv4_address} meta mark set {rule.mark}"
+        )
+        lines.append(
+            f"add rule inet {PROJECT_TABLE} forward "
+            f"ip daddr {rule.ipv4_address} meta mark set {rule.mark}"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _render_tc_commands(
+    *,
+    queues: Sequence[QueueSpec],
+    interface: str,
+    device_count: int,
+) -> List[Command]:
+    commands = [
+        Command(
+            executable="tc",
+            arguments=(
+                "qdisc",
+                "replace",
+                "dev",
+                interface,
+                "root",
+                "handle",
+                ROOT_HANDLE,
+                "prio",
+                "bands",
+                str(device_count + 1),
+            ),
+            purpose=f"create project queue root on {interface}",
+        )
+    ]
+    for queue in queues:
+        band = str(queue.mark)
+        child_handle = f"{queue.mark + 10}:"
+        if queue.impairment != Impairment():
+            commands.append(
+                Command(
+                    executable="tc",
+                    arguments=(
+                        "qdisc",
+                        "replace",
+                        "dev",
+                        interface,
+                        "parent",
+                        f"1:{band}",
+                        "handle",
+                        child_handle,
+                        *_format_impairment_arguments(queue),
+                    ),
+                    purpose=(
+                        f"apply {queue.direction.value} impairment for "
+                        f"device {queue.device_id} on {interface}"
+                    ),
+                )
+            )
+        commands.append(
+            Command(
+                executable="tc",
+                arguments=(
+                    "filter",
+                    "replace",
+                    "dev",
+                    interface,
+                    "protocol",
+                    "ip",
+                    "parent",
+                    ROOT_HANDLE,
+                    "handle",
+                    str(queue.mark),
+                    "fw",
+                    "flowid",
+                    f"1:{band}",
+                ),
+                purpose=f"route mark {queue.mark} on {interface}",
+            )
+        )
+    return commands
+
+
+def render_command_plan(*, plan: NetworkPlan, topology: Topology) -> Sequence[Command]:
+    """Render a validated plan into commands for simulation or later execution."""
+
+    commands = [
+        Command(
+            executable="nft",
+            arguments=("delete", "table", "inet", PROJECT_TABLE),
+            purpose="remove the previous project-owned nftables table",
+            ignore_failure=True,
+        ),
+        Command(
+            executable="nft",
+            arguments=("-f", "-"),
+            purpose="install project-owned device mark rules",
+            stdin=_render_nft_script(plan),
+        ),
+    ]
+    upload_queues = tuple(queue for queue in plan.queues if queue.direction == Direction.UPLOAD)
+    download_queues = tuple(queue for queue in plan.queues if queue.direction == Direction.DOWNLOAD)
+    commands.extend(
+        _render_tc_commands(
+            queues=upload_queues,
+            interface=topology.uplink_interface,
+            device_count=len(plan.mark_rules),
+        )
+    )
+    commands.extend(
+        _render_tc_commands(
+            queues=download_queues,
+            interface=topology.test_interface,
+            device_count=len(plan.mark_rules),
+        )
+    )
+    return tuple(commands)
