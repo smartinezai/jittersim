@@ -1,0 +1,64 @@
+"""Compile validated configuration into a deterministic network plan."""
+
+from typing import Mapping, Sequence
+
+from jittersim.config.models import Device, Profile
+
+from .plan import Direction, MarkRule, NetworkPlan, QueueSpec
+
+
+class PlanError(ValueError):
+    """Raised when a collection of devices cannot form one safe network plan."""
+
+
+def compile_plan(*, devices: Sequence[Device], profiles: Mapping[str, Profile]) -> NetworkPlan:
+    """Compile device assignments into deterministic marks and directional queues."""
+
+    devices_by_id = {}
+    addresses_by_value = {}
+    for device in devices:
+        if device.id in devices_by_id:
+            raise PlanError(f"duplicate device id: {device.id}")
+        if device.ipv4_address in addresses_by_value:
+            other_device_id = addresses_by_value[device.ipv4_address]
+            raise PlanError(
+                f"IPv4 address {device.ipv4_address} is assigned to both "
+                f"{other_device_id} and {device.id}"
+            )
+        if device.profile_id not in profiles:
+            raise PlanError(f"device {device.id} references missing profile {device.profile_id}")
+
+        devices_by_id[device.id] = device
+        addresses_by_value[device.ipv4_address] = device.id
+
+    mark_rules = []
+    queues = []
+    for index, device_id in enumerate(sorted(devices_by_id), start=1):
+        device = devices_by_id[device_id]
+        profile = profiles[device.profile_id]
+        mark = index
+        mark_rules.append(
+            MarkRule(
+                device_id=device.id,
+                ipv4_address=device.ipv4_address,
+                mark=mark,
+            )
+        )
+        queues.extend(
+            (
+                QueueSpec(
+                    device_id=device.id,
+                    direction=Direction.UPLOAD,
+                    mark=mark,
+                    impairment=profile.upload,
+                ),
+                QueueSpec(
+                    device_id=device.id,
+                    direction=Direction.DOWNLOAD,
+                    mark=mark,
+                    impairment=profile.download,
+                ),
+            )
+        )
+
+    return NetworkPlan(mark_rules=tuple(mark_rules), queues=tuple(queues))
