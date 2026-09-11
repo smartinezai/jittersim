@@ -2,7 +2,7 @@ import unittest
 
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.engine.compiler import compile_plan
-from jittersim.networking.renderer import render_command_plan
+from jittersim.networking.renderer import render_command_plan, render_reset_commands
 from jittersim.networking.topology import Topology, TopologyError
 
 
@@ -62,7 +62,9 @@ class RendererTests(unittest.TestCase):
         self.assertIn("ip saddr 192.168.50.10 meta mark set 1", commands[1].stdin or "")
         self.assertIn("ip daddr 192.168.50.11 meta mark set 2", commands[1].stdin or "")
 
-        root_commands = [command for command in commands if "create project queue root" in command.purpose]
+        root_commands = [
+            command for command in commands if "create project queue root" in command.purpose
+        ]
         self.assertEqual([command.argv[4] for command in root_commands], ["eth0", "wlan0"])
         for command in root_commands:
             priomap_start = command.argv.index("priomap") + 1
@@ -82,6 +84,12 @@ class RendererTests(unittest.TestCase):
 
         bob_filters = [command for command in commands if "route mark 2" in command.purpose]
         self.assertEqual(len(bob_filters), 2)
+        bob_cleanup = [
+            command
+            for command in commands
+            if "remove stale impairment for device bob" in command.purpose
+        ]
+        self.assertEqual(len(bob_cleanup), 2)
 
     def test_renders_jitter_even_without_a_base_delay(self) -> None:
         profile = Profile(
@@ -107,6 +115,21 @@ class RendererTests(unittest.TestCase):
         self.assertIn("delay", upload_command.argv)
         self.assertIn("0ms", upload_command.argv)
         self.assertIn("250ms", upload_command.argv)
+
+    def test_reset_targets_only_project_owned_state(self) -> None:
+        commands = render_reset_commands(
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0")
+        )
+
+        self.assertEqual(commands[0].argv, ("nft", "delete", "table", "inet", "jittersim"))
+        self.assertTrue(all(command.ignore_failure for command in commands))
+        self.assertEqual(
+            [command.argv for command in commands[1:]],
+            [
+                ("tc", "qdisc", "del", "dev", "eth0", "root", "handle", "10:"),
+                ("tc", "qdisc", "del", "dev", "wlan0", "root", "handle", "10:"),
+            ],
+        )
 
 
 if __name__ == "__main__":
