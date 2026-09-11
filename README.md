@@ -8,7 +8,7 @@ The main use case is a private classroom or home lab. A Mac or another computer 
 
 ## Project status
 
-The project is in the design and scaffolding stage. The first milestone will support one device, one profile and a reversible fixed impairment. Later milestones will add device-specific policies, a dashboard and scheduled outages.
+The project now has validated device and profile models, a deterministic policy compiler, a simulation command and a bounded networking command adapter. It does not yet apply rules to a Raspberry Pi. The next milestone is persistence and a controlled apply/reset workflow before adding the dashboard.
 
 ## Why this project exists
 
@@ -206,6 +206,28 @@ The project will distinguish between two test modes:
 2. **Hardware mode** runs on the Pi and applies rules to explicitly configured test interfaces.
 
 The project must never assume that a developer's ordinary network interface is safe to modify.
+
+### Safe local simulation
+
+The current command is simulation-only. It prints the `nft` and `tc` operations that a later Pi deployment may execute:
+
+```bash
+PYTHONPATH=src python3 -m jittersim \
+  --uplink eth0 \
+  --test-interface wlan0 \
+  --delay-ms 3000 \
+  --jitter-ms 700 \
+  --loss-percent 10 \
+  --bandwidth-kbit 2000
+```
+
+Run the tests without installing packages globally:
+
+```bash
+PYTHONPATH=src python3 -B -m unittest discover -s tests -t .
+```
+
+The printed commands are not executed by the CLI. The subprocess adapter is a separate component and is not connected to the default command path.
 
 ## Testing strategy
 
