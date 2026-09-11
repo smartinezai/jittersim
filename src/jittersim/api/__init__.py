@@ -1,4 +1,4 @@
-"""Read-only HTTP control plane for local development and inspection."""
+"""HTTP control plane for local development and configuration."""
 
 from .server import ControlServer, run_server
 

@@ -1,4 +1,4 @@
-"""Run the read-only jittersim dashboard server."""
+"""Run the jittersim dashboard server."""
 
 from .server import main
 

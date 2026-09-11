@@ -1,4 +1,4 @@
-"""Small read-only HTTP server for the jittersim control plane."""
+"""Small HTTP server for the jittersim control plane."""
 
 import argparse
 from dataclasses import asdict
@@ -263,7 +263,7 @@ def _json_bytes(payload: Dict[str, Any]) -> bytes:
 
 
 class ControlServer(HTTPServer):
-    """Serve read-only configuration and plan data from one repository."""
+    """Serve configuration and plan data from one repository."""
 
     allow_reuse_address = True
 
@@ -286,7 +286,7 @@ class ControlServer(HTTPServer):
             return HTTPStatus.OK, "text/html; charset=utf-8", DASHBOARD_HTML.encode("utf-8")
         if path == "/api/health":
             return HTTPStatus.OK, "application/json", _json_bytes(
-                {"status": "ok", "mode": "read-only"}
+                {"status": "ok", "mode": "configuration-only"}
             )
         if path == "/api/profiles":
             profiles = [_profile_payload(profile) for profile in self.repository.list_profiles()]
@@ -339,7 +339,7 @@ class ControlServer(HTTPServer):
 
 
 class ControlRequestHandler(BaseHTTPRequestHandler):
-    """Handle the read-only control-plane routes."""
+    """Handle the control-plane routes."""
 
     server: ControlServer
 
@@ -500,7 +500,7 @@ def run_server(
     port: int = 8080,
     admin_token: Optional[str] = None,
 ) -> None:
-    """Run the read-only dashboard until the process receives Ctrl-C."""
+    """Run the dashboard until the process receives Ctrl-C."""
 
     with ConfigRepository(database_path) as repository:
         with ControlServer((host, port), repository, admin_token=admin_token) as server:
@@ -512,7 +512,7 @@ def run_server(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run the read-only jittersim dashboard.")
+    parser = argparse.ArgumentParser(description="Run the jittersim dashboard.")
     parser.add_argument("--database", type=Path, default=Path("jittersim.db"))
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
@@ -520,7 +520,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    """Parse server options and start the read-only dashboard."""
+    """Parse server options and start the dashboard."""
 
     arguments = _build_parser().parse_args(argv)
     run_server(
