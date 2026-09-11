@@ -1,5 +1,6 @@
 """Command execution adapters used by simulation and hardware modes."""
 
+import subprocess
 from typing import List, Optional, Protocol
 
 from .commands import Command, CommandResult
@@ -7,6 +8,21 @@ from .commands import Command, CommandResult
 
 class CommandExecutionError(RuntimeError):
     """Raised when a network operation cannot be completed."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        return_code: Optional[int] = None,
+        stdout: str = "",
+        stderr: str = "",
+        timed_out: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.return_code = return_code
+        self.stdout = stdout
+        self.stderr = stderr
+        self.timed_out = timed_out
 
 
 class CommandExecutor(Protocol):
@@ -29,7 +45,57 @@ class FakeExecutor:
         command_index = len(self.commands)
         self.commands.append(command)
         if command_index == self.fail_on_index:
+            if command.ignore_failure:
+                return CommandResult(return_code=1, stderr="simulated failure")
             raise CommandExecutionError(
                 f"simulated failure while executing command {command_index}: {command.purpose}"
             )
         return CommandResult(return_code=0)
+
+
+class SubprocessExecutor:
+    """Execute only supported Linux networking commands with a bounded timeout."""
+
+    _ALLOWED_EXECUTABLES = frozenset(("ip", "nft", "tc"))
+
+    def __init__(self, timeout_seconds: float = 10.0) -> None:
+        if timeout_seconds <= 0 or timeout_seconds > 60:
+            raise ValueError("timeout_seconds must be greater than 0 and no more than 60")
+        self.timeout_seconds = timeout_seconds
+
+    def run(self, command: Command) -> CommandResult:
+        """Execute one allowlisted command without invoking a shell."""
+
+        if command.executable not in self._ALLOWED_EXECUTABLES:
+            raise CommandExecutionError(
+                f"unsupported networking executable: {command.executable}"
+            )
+
+        try:
+            result = subprocess.run(
+                command.argv,
+                input=command.stdin,
+                text=True,
+                capture_output=True,
+                timeout=self.timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise CommandExecutionError(
+                f"networking command timed out: {command.purpose}",
+                timed_out=True,
+            ) from error
+
+        command_result = CommandResult(
+            return_code=result.returncode,
+            stdout=result.stdout,
+            stderr=result.stderr,
+        )
+        if result.returncode != 0 and not command.ignore_failure:
+            raise CommandExecutionError(
+                f"networking command failed with exit code {result.returncode}: {command.purpose}",
+                return_code=result.returncode,
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
+        return command_result
