@@ -11,8 +11,14 @@ class PlanError(ValueError):
     """Raised when a collection of devices cannot form one safe network plan."""
 
 
+MAX_DEVICES_PER_PLAN = 15
+
+
 def compile_plan(*, devices: Sequence[Device], profiles: Mapping[str, Profile]) -> NetworkPlan:
     """Compile device assignments into deterministic marks and directional queues."""
+
+    if len(devices) > MAX_DEVICES_PER_PLAN:
+        raise PlanError(f"a plan cannot contain more than {MAX_DEVICES_PER_PLAN} devices")
 
     devices_by_id = {}
     addresses_by_value = {}
