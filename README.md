@@ -194,7 +194,7 @@ The target environment is Linux on the Raspberry Pi. Development can happen on m
 
 Planned prerequisites:
 
-- Python 3.11 or newer
+- Python 3.9 or newer
 - Git
 - A virtual environment
 - `pytest` for tests
