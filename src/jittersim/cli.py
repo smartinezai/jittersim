@@ -7,6 +7,7 @@ from typing import Optional, Sequence
 
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.engine.compiler import compile_plan
+from jittersim.networking.commands import Command
 from jittersim.networking.renderer import render_command_plan
 from jittersim.networking.topology import Topology
 
@@ -26,9 +27,8 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _format_command(command: object) -> str:
-    arguments = getattr(command, "argv")
-    return " ".join(shlex.quote(argument) for argument in arguments)
+def _format_command(command: Command) -> str:
+    return " ".join(shlex.quote(argument) for argument in command.argv)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -69,12 +69,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     print("Simulation mode. No commands are being executed.")
     for command in commands:
-        if getattr(command, "ignore_failure"):
+        if command.ignore_failure:
             print("(ignore failure)", end=" ")
         print("$", _format_command(command))
-        stdin = getattr(command, "stdin")
-        if stdin:
-            print(stdin, end="")
+        if command.stdin:
+            print(command.stdin, end="")
     return 0
 
 
