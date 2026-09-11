@@ -6,12 +6,12 @@ This roadmap breaks the project into small deliverable slices. Each slice should
 
 Goal: establish the project contract before touching live networking.
 
-- [ ] Create the private `jittersim` repository.
-- [ ] Add the project README and safety boundary.
-- [ ] Add the implementation plan and roadmap.
-- [ ] Add the Python package metadata.
-- [ ] Add formatting, linting and test commands.
-- [ ] Add a development-only fake networking executor.
+- [x] Create the private `jittersim` repository.
+- [x] Add the project README and safety boundary.
+- [x] Add the implementation plan and roadmap.
+- [x] Add the Python package metadata.
+- [x] Add formatting, linting and test commands.
+- [x] Add a development-only fake networking executor.
 
 Suggested commits:
 
@@ -24,12 +24,12 @@ Suggested commits:
 
 Goal: represent a device impairment policy safely and predictably.
 
-- [ ] Define device, direction and impairment value objects.
-- [ ] Define profile and device-assignment models.
-- [ ] Validate ranges for delay, jitter, loss, rate and outage duration.
-- [ ] Normalize IPv4 addresses and reject unsafe addresses.
-- [ ] Add useful validation error messages.
-- [ ] Add tests for boundaries and contradictory settings.
+- [x] Define device, direction and impairment value objects.
+- [x] Define profile and device-assignment models.
+- [x] Validate ranges for delay, jitter, loss and rate.
+- [x] Normalize IPv4 addresses and reject unsafe addresses.
+- [x] Add useful validation error messages.
+- [x] Add tests for boundaries and contradictory settings.
 
 Suggested commits:
 
@@ -42,14 +42,14 @@ Suggested commits:
 
 Goal: turn a safe high-level policy into an explicit network plan without changing the host network.
 
-- [ ] Define a command-plan data structure.
-- [ ] Compile device identities into nftables mark operations.
-- [ ] Compile upload and download settings into traffic-control operations.
-- [ ] Represent ingress shaping through an `ifb` plan.
-- [ ] Include project-owned handles and names so cleanup is bounded.
-- [ ] Make compilation deterministic.
-- [ ] Add a text renderer for simulation and debugging.
-- [ ] Test that the same policy produces the same plan.
+- [x] Define a command-plan data structure.
+- [x] Compile device identities into nftables mark operations.
+- [x] Compile upload and download settings into traffic-control operations.
+- [ ] Represent advanced ingress shaping through an `ifb` plan if later measurements require it.
+- [x] Include project-owned handles and names so cleanup is bounded.
+- [x] Make compilation deterministic.
+- [x] Add a text renderer for simulation and debugging.
+- [x] Test that the same policy produces the same plan.
 
 Suggested commits:
 
@@ -210,4 +210,3 @@ The project is ready for presentation when it can:
 7. Restore normal traffic with one reset action.
 8. Explain what is measured at packet level versus application level.
 9. Show tests and measured evidence.
-
