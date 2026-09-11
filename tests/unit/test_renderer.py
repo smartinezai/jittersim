@@ -64,6 +64,9 @@ class RendererTests(unittest.TestCase):
 
         root_commands = [command for command in commands if "create project queue root" in command.purpose]
         self.assertEqual([command.argv[4] for command in root_commands], ["eth0", "wlan0"])
+        for command in root_commands:
+            priomap_start = command.argv.index("priomap") + 1
+            self.assertEqual(command.argv[priomap_start:], ("3",) * 16)
 
         alice_upload = [
             command
@@ -79,6 +82,31 @@ class RendererTests(unittest.TestCase):
 
         bob_filters = [command for command in commands if "route mark 2" in command.purpose]
         self.assertEqual(len(bob_filters), 2)
+
+    def test_renders_jitter_even_without_a_base_delay(self) -> None:
+        profile = Profile(
+            id="jitter-only",
+            name="Jitter only",
+            upload=Impairment(jitter_ms=250),
+        )
+        plan = compile_plan(
+            devices=(make_device("alice", "192.168.50.10", "jitter-only"),),
+            profiles={"jitter-only": profile},
+        )
+
+        commands = render_command_plan(
+            plan=plan,
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+        )
+
+        upload_command = next(
+            command
+            for command in commands
+            if "upload impairment for device alice" in command.purpose
+        )
+        self.assertIn("delay", upload_command.argv)
+        self.assertIn("0ms", upload_command.argv)
+        self.assertIn("250ms", upload_command.argv)
 
 
 if __name__ == "__main__":

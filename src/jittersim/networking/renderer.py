@@ -16,7 +16,7 @@ ROOT_HANDLE = "1:"
 def _format_impairment_arguments(queue: QueueSpec) -> List[str]:
     impairment = queue.impairment
     arguments = ["netem"]
-    if impairment.delay_ms:
+    if impairment.delay_ms or impairment.jitter_ms:
         arguments.extend(["delay", f"{impairment.delay_ms}ms"])
         if impairment.jitter_ms:
             arguments.append(f"{impairment.jitter_ms}ms")
@@ -73,6 +73,8 @@ def _render_tc_commands(
                 "prio",
                 "bands",
                 str(device_count + 1),
+                "priomap",
+                *(str(device_count + 1) for _ in range(16)),
             ),
             purpose=f"create project queue root on {interface}",
         )
