@@ -62,7 +62,9 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(content_type, "text/html; charset=utf-8")
         self.assertEqual(body.decode("utf-8"), DASHBOARD_HTML)
-        self.assertIn("Read-only inspection mode", DASHBOARD_HTML)
+        self.assertIn("Configuration mode", DASHBOARD_HTML)
+        self.assertIn("Save profile", DASHBOARD_HTML)
+        self.assertIn("Save device", DASHBOARD_HTML)
 
     def test_unknown_paths_return_json_not_found(self) -> None:
         status, content_type, body = self.server.response_for("/missing")
