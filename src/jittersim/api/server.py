@@ -12,16 +12,18 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
 
-from jittersim.config.models import Device, Impairment, Profile
+from jittersim.config.models import Device, Impairment, Profile, RuntimeState
 from jittersim.config.storage import ConfigRepository, DatabasePath, StorageError
 from jittersim.engine.compiler import PlanError
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.service import compile_stored_plan
+from jittersim.networking.helper import HelperClient, HelperClientError
 
 
 LOGGER = logging.getLogger(__name__)
 MAX_JSON_BODY_BYTES = 64 * 1024
-WRITE_PATHS = frozenset(("/api/profiles", "/api/devices"))
+WRITE_PATHS = frozenset(("/api/profiles", "/api/devices", "/api/apply", "/api/reset"))
+ACTION_PATHS = frozenset(("/api/apply", "/api/reset"))
 
 
 DASHBOARD_HTML = """<!doctype html>
@@ -59,6 +61,12 @@ DASHBOARD_HTML = """<!doctype html>
     <label>Bearer token (kept in this page only)
       <input id="admin-token" type="password" autocomplete="off">
     </label>
+  </section>
+  <section class="card">
+    <h2>Network actions</h2>
+    <p>Actions call the helper only when the server was started with a helper socket.</p>
+    <button id="apply-button" type="button">Apply current configuration</button>
+    <button id="reset-button" type="button">Reset network</button>
   </section>
   <section class="card">
     <h2>Save profile</h2>
@@ -121,6 +129,8 @@ DASHBOARD_HTML = """<!doctype html>
   <pre id="devices">Loading...</pre>
   <h2>Compiled plan</h2>
   <pre id="plan">Loading...</pre>
+  <h2>Runtime state</h2>
+  <pre id="state">Loading...</pre>
   <script>
     const element = (id) => document.getElementById(id);
 
@@ -163,13 +173,32 @@ DASHBOARD_HTML = """<!doctype html>
       await Promise.all([
         show("/api/profiles", "profiles", "profiles"),
         show("/api/devices", "devices", "devices"),
-        show("/api/plan", "plan", "plan")
+        show("/api/plan", "plan", "plan"),
+        show("/api/state", "state", "state")
       ]);
     }
 
     function showMessage(message) {
       element("message").textContent = message;
     }
+
+    async function runAction(path, successMessage) {
+      try {
+        await request(path, "POST", {});
+        showMessage(successMessage);
+        await refresh();
+      } catch (error) {
+        showMessage(error.message);
+      }
+    }
+
+    element("apply-button").addEventListener("click", () => {
+      runAction("/api/apply", "Configuration applied.");
+    });
+
+    element("reset-button").addEventListener("click", () => {
+      runAction("/api/reset", "Network reset requested.");
+    });
 
     element("profile-form").addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -236,6 +265,16 @@ def _device_payload(device: Device) -> Dict[str, Any]:
     }
 
 
+def _runtime_state_payload(state: RuntimeState) -> Dict[str, Any]:
+    return {
+        "configuration_version": state.configuration_version,
+        "observed_state": state.observed_state,
+        "last_action": state.last_action,
+        "last_result": state.last_result,
+        "last_error": state.last_error,
+    }
+
+
 def _json_bytes(payload: Dict[str, Any]) -> bytes:
     return (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
 
@@ -250,11 +289,13 @@ class ControlServer(HTTPServer):
         server_address: Tuple[str, int],
         repository: ConfigRepository,
         admin_token: Optional[str] = None,
+        helper_client: Optional[HelperClient] = None,
     ) -> None:
         if admin_token == "":
             raise ValueError("admin_token must not be empty")
         self.repository = repository
         self.admin_token = admin_token
+        self.helper_client = helper_client
         super().__init__(server_address, ControlRequestHandler)
 
     def response_for(self, path: str) -> Tuple[int, str, bytes]:
@@ -264,7 +305,11 @@ class ControlServer(HTTPServer):
             return HTTPStatus.OK, "text/html; charset=utf-8", DASHBOARD_HTML.encode("utf-8")
         if path == "/api/health":
             return HTTPStatus.OK, "application/json", _json_bytes(
-                {"status": "ok", "mode": "configuration-only"}
+                {
+                    "status": "ok",
+                    "mode": "configuration-only",
+                    "helper_configured": self.helper_client is not None,
+                }
             )
         if path == "/api/profiles":
             profiles = [_profile_payload(profile) for profile in self.repository.list_profiles()]
@@ -276,10 +321,14 @@ class ControlServer(HTTPServer):
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {"plan": plan_to_payload(compile_stored_plan(repository=self.repository))}
             )
+        if path == "/api/state":
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {"state": _runtime_state_payload(self.repository.get_runtime_state())}
+            )
         return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
 
     def write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
-        """Validate and persist one supported control-plane write request."""
+        """Handle one supported configuration or network action request."""
 
         if path == "/api/profiles":
             try:
@@ -305,7 +354,87 @@ class ControlServer(HTTPServer):
                 {"device": _device_payload(device)}
             )
 
+        if path == "/api/apply":
+            return self._apply_configuration()
+
+        if path == "/api/reset":
+            return self._reset_network()
+
         return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
+
+    def _apply_configuration(self) -> Tuple[int, str, bytes]:
+        if self.helper_client is None:
+            return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                {"error": "network helper is not configured"}
+            )
+        try:
+            plan = compile_stored_plan(repository=self.repository)
+        except (PlanError, StorageError):
+            return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+                {"error": "stored configuration cannot be applied"}
+            )
+        self.repository.update_runtime_state(
+            observed_state="applying",
+            last_action="apply",
+            last_result=None,
+            last_error=None,
+        )
+        try:
+            result = self.helper_client.apply(plan=plan)
+        except HelperClientError:
+            LOGGER.exception("network helper apply failed")
+            state = self.repository.update_runtime_state(
+                observed_state="error",
+                last_action="apply",
+                last_result="failure",
+                last_error="network helper apply failed",
+            )
+            return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
+                {"error": "network helper apply failed", "state": _runtime_state_payload(state)}
+            )
+        state = self.repository.update_runtime_state(
+            observed_state="applied",
+            last_action="apply",
+            last_result="success",
+            last_error=None,
+        )
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {"result": result, "state": _runtime_state_payload(state)}
+        )
+
+    def _reset_network(self) -> Tuple[int, str, bytes]:
+        if self.helper_client is None:
+            return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                {"error": "network helper is not configured"}
+            )
+        self.repository.update_runtime_state(
+            observed_state="resetting",
+            last_action="reset",
+            last_result=None,
+            last_error=None,
+        )
+        try:
+            result = self.helper_client.reset()
+        except HelperClientError:
+            LOGGER.exception("network helper reset failed")
+            state = self.repository.update_runtime_state(
+                observed_state="error",
+                last_action="reset",
+                last_result="failure",
+                last_error="network helper reset failed",
+            )
+            return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
+                {"error": "network helper reset failed", "state": _runtime_state_payload(state)}
+            )
+        state = self.repository.update_runtime_state(
+            observed_state="reset",
+            last_action="reset",
+            last_result="success",
+            last_error=None,
+        )
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {"result": result, "state": _runtime_state_payload(state)}
+        )
 
     def is_authorized(self, authorization_header: Optional[str]) -> bool:
         """Return whether an Authorization header matches the configured admin token."""
@@ -374,7 +503,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            payload = self._read_json_body()
+            payload = self._read_json_body(required=path not in ACTION_PATHS)
             status, content_type, body = self.server.write_response_for(path, payload)
         except RequestError as error:
             status = HTTPStatus.BAD_REQUEST
@@ -387,9 +516,11 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             body = _json_bytes({"error": "configuration could not be saved"})
         self._send_response(status=status, content_type=content_type, body=body)
 
-    def _read_json_body(self) -> Dict[str, Any]:
+    def _read_json_body(self, *, required: bool = True) -> Dict[str, Any]:
         length_header = self.headers.get("Content-Length")
         if length_header is None:
+            if not required:
+                return {}
             raise RequestError("request body is required")
         try:
             length = int(length_header)
@@ -397,6 +528,8 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             raise RequestError("request body length is invalid") from error
         if length < 0 or length > MAX_JSON_BODY_BYTES:
             raise RequestError("request body is too large")
+        if length == 0 and not required:
+            return {}
         raw_body = self.rfile.read(length)
         if len(raw_body) != length:
             raise RequestError("request body is incomplete")
@@ -477,11 +610,26 @@ def run_server(
     host: str = "127.0.0.1",
     port: int = 8080,
     admin_token: Optional[str] = None,
+    helper_socket_path: Optional[Path] = None,
+    helper_timeout_seconds: float = 5.0,
 ) -> None:
     """Run the dashboard until the process receives Ctrl-C."""
 
+    helper_client = (
+        None
+        if helper_socket_path is None
+        else HelperClient(
+            socket_path=helper_socket_path,
+            timeout_seconds=helper_timeout_seconds,
+        )
+    )
     with ConfigRepository(database_path) as repository:
-        with ControlServer((host, port), repository, admin_token=admin_token) as server:
+        with ControlServer(
+            (host, port),
+            repository,
+            admin_token=admin_token,
+            helper_client=helper_client,
+        ) as server:
             LOGGER.info("jittersim dashboard listening on %s:%s", host, port)
             try:
                 server.serve_forever()
@@ -494,6 +642,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--database", type=Path, default=Path("jittersim.db"))
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--helper-socket", type=Path)
+    parser.add_argument("--helper-timeout-seconds", type=float, default=5.0)
     return parser
 
 
@@ -506,5 +656,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         host=arguments.host,
         port=arguments.port,
         admin_token=os.environ.get("JITTERSIM_ADMIN_TOKEN"),
+        helper_socket_path=arguments.helper_socket,
+        helper_timeout_seconds=arguments.helper_timeout_seconds,
     )
     return 0
