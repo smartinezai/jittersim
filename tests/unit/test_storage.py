@@ -98,6 +98,35 @@ class ConfigRepositoryTests(unittest.TestCase):
         with self.assertRaisesRegex(StorageError, "stored impairment is malformed"):
             self.repository.get_profile("broken")
 
+    def test_tracks_desired_version_separately_from_observed_state(self) -> None:
+        self.assertEqual(self.repository.get_runtime_state().configuration_version, 0)
+        self.assertEqual(self.repository.get_runtime_state().observed_state, "unknown")
+
+        self.repository.save_profile(Profile(id="normal", name="Normal"))
+        applying = self.repository.update_runtime_state(
+            observed_state="applying",
+            last_action="apply",
+            last_result=None,
+            last_error=None,
+        )
+
+        self.assertEqual(applying.configuration_version, 1)
+        self.assertEqual(applying.observed_state, "applying")
+        self.assertEqual(applying.last_action, "apply")
+
+        self.repository.save_device(
+            Device(
+                id="alice",
+                name="Alice",
+                ipv4_address="192.168.50.10",
+                profile_id="normal",
+            )
+        )
+        updated = self.repository.get_runtime_state()
+        self.assertEqual(updated.configuration_version, 2)
+        self.assertEqual(updated.observed_state, "unknown")
+        self.assertIsNone(updated.last_action)
+
 
 if __name__ == "__main__":
     unittest.main()

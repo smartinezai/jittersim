@@ -1,7 +1,7 @@
 import unittest
 from ipaddress import IPv4Address
 
-from jittersim.config.models import Device, Impairment, Profile, ValidationError
+from jittersim.config.models import Device, Impairment, Profile, RuntimeState, ValidationError
 
 
 class ImpairmentTests(unittest.TestCase):
@@ -100,6 +100,22 @@ class DeviceTests(unittest.TestCase):
                 ipv4_address="192.168.50.10",
                 profile_id="Not a valid identifier",
             )
+
+
+class RuntimeStateTests(unittest.TestCase):
+    def test_accepts_known_observed_states(self) -> None:
+        for observed_state in ("unknown", "applying", "resetting", "applied", "reset", "error"):
+            with self.subTest(observed_state=observed_state):
+                self.assertEqual(
+                    RuntimeState(observed_state=observed_state).observed_state,
+                    observed_state,
+                )
+
+    def test_rejects_unknown_state_and_negative_version(self) -> None:
+        with self.assertRaises(ValidationError):
+            RuntimeState(observed_state="running")
+        with self.assertRaises(ValidationError):
+            RuntimeState(configuration_version=-1)
 
 
 if __name__ == "__main__":
