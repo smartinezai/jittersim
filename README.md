@@ -8,7 +8,7 @@ The main use case is a private classroom or home lab. A Mac or another computer 
 
 ## Project status
 
-The project now has validated device and profile models, deterministic plan compilation, SQLite configuration storage, a configuration dashboard, authenticated upserts and a guarded apply/reset engine. It does not yet connect the dashboard to live networking or apply rules to a Raspberry Pi. The next milestone is a privileged helper with hardware-only checks.
+The project now has validated device and profile models, deterministic plan compilation, SQLite configuration storage, a configuration dashboard, authenticated upserts, apply/reset endpoints and a guarded Unix-socket helper. It has not yet been tested against live Raspberry Pi interfaces. The next milestone is hardware-only startup checks and headless deployment.
 
 ## Why this project exists
 
@@ -123,10 +123,10 @@ The data plane will use Linux networking commands through a narrow adapter. The 
 
 The web service should not run as root. A later milestone will add a small privileged helper with a Unix-domain socket and a restricted command vocabulary. During early development the engine can use a fake executor so policy logic can be tested without changing a real network.
 
-The current apply engine is deliberately separate from the dashboard. It can run against the fake
-executor in tests, reports the command that failed and attempts project-owned cleanup before
-returning an error. No local command in this repository currently connects that engine to the
-Mac's network or exposes it through the web API.
+The apply engine runs in the helper process rather than in the dashboard. It reports the command
+that failed and attempts project-owned cleanup before returning an error. The dashboard can call
+the helper only when started with an explicit Unix-socket path. Without that option, apply and
+reset return a safe “helper is not configured” response.
 
 ## Profiles and state
 
@@ -246,7 +246,26 @@ curl -X POST http://127.0.0.1:8080/api/profiles \
 ```
 
 The write endpoints only change the SQLite desired configuration. They do not apply network
-changes yet. The default server has writes disabled when `JITTERSIM_ADMIN_TOKEN` is missing.
+changes unless the dashboard was started with `--helper-socket`. The default server has all
+state-changing actions disabled when `JITTERSIM_ADMIN_TOKEN` is missing.
+
+The action endpoints are `POST /api/apply` and `POST /api/reset`. Both require the bearer token.
+`GET /api/state` reports the desired configuration version, observed helper state and the last
+result. The dashboard exposes the same actions as buttons.
+
+On the Raspberry Pi, the helper is a separate process. Start it only on the isolated test gateway
+after the interface names have been checked:
+
+```bash
+sudo jittersim-helper \
+  --socket /run/jittersim/helper.sock \
+  --uplink eth0 \
+  --test-interface wlan0 \
+  --enable-hardware
+```
+
+Then start the dashboard with the same socket path. This command sequence is not a Mac workflow
+and has not been run by the project tests.
 
 ### Safe local simulation
 

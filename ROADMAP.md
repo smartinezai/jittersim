@@ -106,9 +106,9 @@ Goal: control the emulator from a Mac without a screen or keyboard attached to t
 - [x] Add a small HTTP API.
 - [x] Add authentication for state-changing operations.
 - [x] Add device and profile listing.
-- [ ] Add enable, disable and reset actions.
+- [x] Add apply and reset actions.
 - [x] Add a simple dashboard served by the Pi.
-- [ ] Show desired state, observed state and last apply result.
+- [x] Show desired state, observed state and last apply result.
 - [ ] Add an event log.
 - [ ] Keep the dashboard exempt from impairment.
 
@@ -116,8 +116,8 @@ Suggested commits:
 
 1. `Add read-only control API`
 2. `Protect configuration writes`
-3. `Test protected configuration writes`
-4. `Add apply and reset endpoints`
+3. `Add apply and reset endpoints`
+4. `Test apply and reset endpoints`
 5. `Add the first dashboard page`
 6. `Show network state and apply errors`
 7. `Record control-plane events`
