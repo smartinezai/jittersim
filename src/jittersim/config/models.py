@@ -119,3 +119,29 @@ class Device:
         _validate_name(self.name, "name")
         object.__setattr__(self, "ipv4_address", _parse_test_address(self.ipv4_address))
         _validate_identifier(self.profile_id, "profile_id")
+
+
+_OBSERVED_STATES = frozenset(("unknown", "applying", "resetting", "applied", "reset", "error"))
+
+
+@dataclass(frozen=True)
+class RuntimeState:
+    """Observed helper state associated with the persisted desired configuration."""
+
+    configuration_version: int = 0
+    observed_state: str = "unknown"
+    last_action: Optional[str] = None
+    last_result: Optional[str] = None
+    last_error: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        _validate_number(self.configuration_version, "configuration_version", 0, 2**63 - 1)
+        if self.observed_state not in _OBSERVED_STATES:
+            raise ValidationError("observed_state is not supported")
+        for value, field_name in (
+            (self.last_action, "last_action"),
+            (self.last_result, "last_result"),
+            (self.last_error, "last_error"),
+        ):
+            if value is not None and (not isinstance(value, str) or len(value) > 500):
+                raise ValidationError(f"{field_name} must be no more than 500 characters")

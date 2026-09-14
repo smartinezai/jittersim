@@ -6,7 +6,7 @@ from pathlib import Path
 import sqlite3
 from typing import Optional, Union
 
-from .models import Device, Impairment, Profile, ValidationError
+from .models import Device, Impairment, Profile, RuntimeState, ValidationError
 
 
 class StorageError(RuntimeError):
@@ -66,6 +66,17 @@ class ConfigRepository:
                 ipv4_address TEXT NOT NULL UNIQUE,
                 profile_id TEXT NOT NULL REFERENCES profiles(id)
             );
+            CREATE TABLE IF NOT EXISTS runtime_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                configuration_version INTEGER NOT NULL,
+                observed_state TEXT NOT NULL,
+                last_action TEXT,
+                last_result TEXT,
+                last_error TEXT
+            );
+            INSERT OR IGNORE INTO runtime_state (
+                id, configuration_version, observed_state
+            ) VALUES (1, 0, 'unknown');
             """
         )
         self._connection.commit()
@@ -73,25 +84,30 @@ class ConfigRepository:
     def save_profile(self, profile: Profile) -> None:
         """Insert or update one validated profile."""
 
-        self._connection.execute(
-            """
-            INSERT INTO profiles (id, name, upload_json, download_json, random_seed)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                upload_json = excluded.upload_json,
-                download_json = excluded.download_json,
-                random_seed = excluded.random_seed
-            """,
-            (
-                profile.id,
-                profile.name,
-                _serialize_impairment(profile.upload),
-                _serialize_impairment(profile.download),
-                profile.random_seed,
-            ),
-        )
-        self._connection.commit()
+        try:
+            self._connection.execute(
+                """
+                INSERT INTO profiles (id, name, upload_json, download_json, random_seed)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    upload_json = excluded.upload_json,
+                    download_json = excluded.download_json,
+                    random_seed = excluded.random_seed
+                """,
+                (
+                    profile.id,
+                    profile.name,
+                    _serialize_impairment(profile.upload),
+                    _serialize_impairment(profile.download),
+                    profile.random_seed,
+                ),
+            )
+            self._bump_configuration_version()
+            self._connection.commit()
+        except sqlite3.IntegrityError as error:
+            self._connection.rollback()
+            raise StorageError(f"could not save profile {profile.id}") from error
 
     def save_device(self, device: Device) -> None:
         """Insert or update one validated device assignment."""
@@ -108,9 +124,81 @@ class ConfigRepository:
                 """,
                 (device.id, device.name, str(device.ipv4_address), device.profile_id),
             )
+            self._bump_configuration_version()
             self._connection.commit()
         except sqlite3.IntegrityError as error:
+            self._connection.rollback()
             raise StorageError(f"could not save device {device.id}") from error
+
+    def get_runtime_state(self) -> RuntimeState:
+        """Return the desired-configuration version and observed helper state."""
+
+        row = self._connection.execute(
+            """
+            SELECT configuration_version, observed_state, last_action, last_result, last_error
+            FROM runtime_state
+            WHERE id = 1
+            """
+        ).fetchone()
+        if row is None:
+            raise StorageError("runtime state is missing")
+        try:
+            return RuntimeState(
+                configuration_version=row["configuration_version"],
+                observed_state=row["observed_state"],
+                last_action=row["last_action"],
+                last_result=row["last_result"],
+                last_error=row["last_error"],
+            )
+        except (KeyError, TypeError, ValidationError) as error:
+            raise StorageError("runtime state is malformed") from error
+
+    def update_runtime_state(
+        self,
+        *,
+        observed_state: str,
+        last_action: Optional[str],
+        last_result: Optional[str],
+        last_error: Optional[str],
+    ) -> RuntimeState:
+        """Persist one observed helper state without changing desired configuration."""
+
+        current = self.get_runtime_state()
+        updated = RuntimeState(
+            configuration_version=current.configuration_version,
+            observed_state=observed_state,
+            last_action=last_action,
+            last_result=last_result,
+            last_error=last_error,
+        )
+        self._connection.execute(
+            """
+            UPDATE runtime_state
+            SET observed_state = ?, last_action = ?, last_result = ?, last_error = ?
+            WHERE id = 1
+            """,
+            (
+                updated.observed_state,
+                updated.last_action,
+                updated.last_result,
+                updated.last_error,
+            ),
+        )
+        self._connection.commit()
+        return updated
+
+    def _bump_configuration_version(self) -> None:
+        self._connection.execute(
+            """
+            UPDATE runtime_state
+            SET configuration_version = configuration_version + 1,
+                observed_state = 'unknown',
+                last_action = NULL,
+                last_result = NULL,
+                last_error = NULL
+            WHERE id = 1
+            """
+        )
 
     def get_profile(self, profile_id: str) -> Optional[Profile]:
         """Return one profile or `None` when it is not stored."""
