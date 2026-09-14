@@ -4,6 +4,26 @@ import unittest
 from jittersim.api.server import ControlServer, DASHBOARD_HTML
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.config.storage import ConfigRepository
+from jittersim.networking.helper import HelperClientError
+
+
+class FakeHelper:
+    def __init__(self, fail_action: str = "") -> None:
+        self.fail_action = fail_action
+        self.applied_plan = None
+        self.reset_called = False
+
+    def apply(self, *, plan):
+        if self.fail_action == "apply":
+            raise HelperClientError("simulated helper failure")
+        self.applied_plan = plan
+        return {"ok": True, "action": "apply", "commands_run": 3}
+
+    def reset(self):
+        if self.fail_action == "reset":
+            raise HelperClientError("simulated helper failure")
+        self.reset_called = True
+        return {"ok": True, "action": "reset", "commands_run": 3}
 
 
 class ControlServerTests(unittest.TestCase):
@@ -35,7 +55,14 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(content_type, "application/json")
-        self.assertEqual(json.loads(body), {"mode": "configuration-only", "status": "ok"})
+        self.assertEqual(
+            json.loads(body),
+            {
+                "helper_configured": False,
+                "mode": "configuration-only",
+                "status": "ok",
+            },
+        )
 
     def test_configuration_endpoints_serialize_validated_values(self) -> None:
         status, _, body = self.server.response_for("/api/profiles")
@@ -56,7 +83,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(plan["mark_rules"][0]["mark"], 1)
         self.assertEqual(plan["queues"][0]["impairment"]["delay_ms"], 3_000)
 
-    def test_dashboard_is_explicitly_read_only(self) -> None:
+    def test_dashboard_contains_configuration_and_network_controls(self) -> None:
         status, content_type, body = self.server.response_for("/")
 
         self.assertEqual(status, 200)
@@ -65,6 +92,25 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("Configuration mode", DASHBOARD_HTML)
         self.assertIn("Save profile", DASHBOARD_HTML)
         self.assertIn("Save device", DASHBOARD_HTML)
+        self.assertIn("Apply current configuration", DASHBOARD_HTML)
+        self.assertIn("Reset network", DASHBOARD_HTML)
+        self.assertIn("Runtime state", DASHBOARD_HTML)
+
+    def test_state_endpoint_reports_desired_version_and_observed_state(self) -> None:
+        status, content_type, body = self.server.response_for("/api/state")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, "application/json")
+        self.assertEqual(
+            json.loads(body)["state"],
+            {
+                "configuration_version": 2,
+                "last_action": None,
+                "last_error": None,
+                "last_result": None,
+                "observed_state": "unknown",
+            },
+        )
 
     def test_unknown_paths_return_json_not_found(self) -> None:
         status, content_type, body = self.server.response_for("/missing")
@@ -109,6 +155,43 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(content_type, "application/json")
         self.assertEqual(json.loads(body), {"error": "invalid profile configuration"})
         self.assertIsNone(self.repository.get_profile("unsafe id"))
+
+    def test_apply_and_reset_require_a_configured_helper(self) -> None:
+        apply_status, _, apply_body = self.server.write_response_for("/api/apply", {})
+        reset_status, _, reset_body = self.server.write_response_for("/api/reset", {})
+
+        self.assertEqual(apply_status, 503)
+        self.assertEqual(reset_status, 503)
+        self.assertEqual(json.loads(apply_body)["error"], "network helper is not configured")
+        self.assertEqual(json.loads(reset_body)["error"], "network helper is not configured")
+
+    def test_apply_and_reset_update_runtime_state(self) -> None:
+        helper = FakeHelper()
+        self.server.helper_client = helper
+
+        apply_status, _, apply_body = self.server.write_response_for("/api/apply", {})
+        apply_response = json.loads(apply_body)
+        self.assertEqual(apply_status, 200)
+        self.assertIsNotNone(helper.applied_plan)
+        self.assertEqual(apply_response["state"]["observed_state"], "applied")
+        self.assertEqual(apply_response["state"]["last_result"], "success")
+
+        reset_status, _, reset_body = self.server.write_response_for("/api/reset", {})
+        reset_response = json.loads(reset_body)
+        self.assertEqual(reset_status, 200)
+        self.assertTrue(helper.reset_called)
+        self.assertEqual(reset_response["state"]["observed_state"], "reset")
+
+    def test_helper_failure_is_recorded_without_exposing_internal_details(self) -> None:
+        self.server.helper_client = FakeHelper(fail_action="apply")
+
+        status, _, body = self.server.write_response_for("/api/apply", {})
+
+        self.assertEqual(status, 502)
+        self.assertEqual(json.loads(body)["error"], "network helper apply failed")
+        state = self.repository.get_runtime_state()
+        self.assertEqual(state.observed_state, "error")
+        self.assertEqual(state.last_error, "network helper apply failed")
 
     def test_state_changes_require_a_matching_bearer_token(self) -> None:
         self.assertFalse(self.server.is_authorized("Bearer anything"))
