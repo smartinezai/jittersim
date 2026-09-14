@@ -381,8 +381,8 @@ class ControlServer(HTTPServer):
         )
         try:
             result = self.helper_client.apply(plan=plan)
-        except HelperClientError:
-            LOGGER.exception("network helper apply failed")
+        except HelperClientError as error:
+            LOGGER.error("network helper apply failed: %s", error)
             state = self.repository.update_runtime_state(
                 observed_state="error",
                 last_action="apply",
@@ -415,8 +415,8 @@ class ControlServer(HTTPServer):
         )
         try:
             result = self.helper_client.reset()
-        except HelperClientError:
-            LOGGER.exception("network helper reset failed")
+        except HelperClientError as error:
+            LOGGER.error("network helper reset failed: %s", error)
             state = self.repository.update_runtime_state(
                 observed_state="error",
                 last_action="reset",
