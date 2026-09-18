@@ -1,0 +1,15 @@
+[Unit]
+Description=JitterSim management-interface firewall
+After=network-pre.target
+Before=jittersim-dashboard.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStartPre=-/usr/sbin/nft delete table inet jittersim_control
+ExecStart=/usr/sbin/nft -f /etc/jittersim/jittersim-control-firewall.nft
+ExecStop=/usr/sbin/nft delete table inet jittersim_control
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

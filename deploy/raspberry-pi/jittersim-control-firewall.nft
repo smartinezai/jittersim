@@ -1,0 +1,10 @@
+table inet jittersim_control {
+    chain input {
+        type filter hook input priority filter; policy accept;
+
+        # Test-network clients may use the Pi as a gateway, but never as an
+        # administration endpoint.
+        iifname "wlan0" tcp dport 22 counter drop comment "deny SSH from test Wi-Fi"
+        iifname "wlan0" tcp dport 8080 counter drop comment "deny dashboard from test Wi-Fi"
+    }
+}
