@@ -25,6 +25,7 @@ apt-get install -y nftables openssl python3-venv
 
 install -d -m 0750 -o root -g jittersim "$CONFIG_DIR"
 install -d -m 0750 -o jittersim -g jittersim "$DATA_DIR"
+chown -R jittersim:jittersim "$DATA_DIR"
 install -d -m 0755 -o root -g root "$INSTALL_DIR"
 
 if [ "$SOURCE_DIR" != "$INSTALL_DIR" ]; then
