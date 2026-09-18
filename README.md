@@ -193,6 +193,12 @@ Recommended first hardware setup:
 - A separate test Wi-Fi network hosted by the Pi
 - Optional USB Ethernet adapter for a separate wired test segment
 
+The versioned Raspberry Pi installer and management firewall are in
+[`deploy/raspberry-pi/`](deploy/raspberry-pi/README.md). The installer generates
+the dashboard and test-network credentials on the Pi rather than storing them
+in source control. It also blocks SSH and dashboard traffic arriving from the
+test Wi-Fi interface.
+
 ## Development setup
 
 The target environment is Linux on the Raspberry Pi. Development can happen on macOS with the policy compiler and web service running in a simulated mode.
