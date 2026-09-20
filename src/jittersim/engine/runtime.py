@@ -247,4 +247,3 @@ class RuntimeScheduler:
     def _run(self) -> None:
         while not self._stop_event.wait(self._poll_seconds):
             self.tick()
-

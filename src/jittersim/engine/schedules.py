@@ -39,4 +39,3 @@ def active_schedule(
         and is_schedule_active(schedule=schedule, moment=moment)
     ]
     return min(active, key=lambda schedule: schedule.id, default=None)
-

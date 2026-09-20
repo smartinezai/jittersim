@@ -166,4 +166,3 @@ def _random_interval(
         return 0
     variation = base_seconds * randomness.variation_percent / 100
     return max(1, round(generator.uniform(base_seconds - variation, base_seconds + variation)))
-
