@@ -5,6 +5,7 @@ from typing import Optional
 
 from jittersim.engine.plan import NetworkPlan
 
+from .commands import Command
 from .executor import CommandExecutionError, CommandExecutor
 from .renderer import render_command_plan, render_reset_commands
 from .topology import Topology
@@ -71,6 +72,48 @@ class NetworkApplier:
         for command in commands:
             self._executor.run(command)
         return len(commands)
+
+    def list_connected_devices(self) -> str:
+        """Read IPv4 neighbors visible on the test interface without changing network state."""
+
+        result = self._executor.run(
+            Command(
+                executable="ip",
+                arguments=("-4", "neigh", "show", "dev", self._topology.test_interface),
+                purpose=f"inspect clients on {self._topology.test_interface}",
+            )
+        )
+        return result.stdout
+
+    def capture_dns_queries(self) -> str:
+        """Capture a bounded sample of DNS packets arriving from the test network."""
+
+        result = self._executor.run(
+            Command(
+                executable="tcpdump",
+                arguments=(
+                    "-i",
+                    self._topology.test_interface,
+                    "-n",
+                    "-l",
+                    "-s",
+                    "256",
+                    "-c",
+                    "128",
+                    "udp",
+                    "port",
+                    "53",
+                    "or",
+                    "tcp",
+                    "port",
+                    "53",
+                ),
+                purpose=f"sample DNS queries on {self._topology.test_interface}",
+                timeout_seconds=5.0,
+                timeout_is_success=True,
+            )
+        )
+        return result.stdout
 
     def _try_reset(self) -> Optional[CommandExecutionError]:
         try:

@@ -5,11 +5,15 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import socket
 import socketserver
 import stat
-from typing import Any, Dict, Optional, Sequence
+import time
+from ipaddress import IPv4Address, IPv4Network
+from typing import Any, Dict, List, Optional, Sequence
 
+from jittersim.config.models import ValidationError, normalize_domain
 from jittersim.engine.codec import PlanCodecError, plan_from_payload, plan_to_payload
 from jittersim.engine.plan import NetworkPlan
 
@@ -20,6 +24,17 @@ from .topology import Topology
 
 LOGGER = logging.getLogger(__name__)
 MAX_MESSAGE_BYTES = 256 * 1024
+_MAC_ADDRESS_PATTERN = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
+_DNS_QUERY_PATTERN = re.compile(
+    r"\bIP\s+(?P<source>\d{1,3}(?:\.\d{1,3}){3})\.\d+\s+>\s+"
+    r"\d{1,3}(?:\.\d{1,3}){3}\.53:.*?\b"
+    r"(?:A|AAAA|HTTPS|SVCB|MX|TXT)\?\s+(?P<domain>[A-Za-z0-9][A-Za-z0-9.-]*)"
+)
+_PRIVATE_NETWORKS = (
+    IPv4Network("10.0.0.0/8"),
+    IPv4Network("172.16.0.0/12"),
+    IPv4Network("192.168.0.0/16"),
+)
 
 
 class HelperError(RuntimeError):
@@ -46,9 +61,37 @@ class HelperService:
             return {"ok": True, "action": "ping"}
         if action == "reset":
             return self._handle_reset()
+        if action == "clients":
+            return self._handle_clients()
+        if action == "observe-dns":
+            return self._handle_dns_observation()
         if action == "apply":
             return self._handle_apply(payload.get("plan"))
         return {"ok": False, "error": "unknown action"}
+
+    def _handle_clients(self) -> Dict[str, Any]:
+        try:
+            output = self._applier.list_connected_devices()
+        except CommandExecutionError:
+            LOGGER.exception("connected-device inspection failed")
+            return {"ok": False, "error": "connected-device inspection failed"}
+        return {
+            "ok": True,
+            "action": "clients",
+            "devices": _parse_neighbor_output(output),
+        }
+
+    def _handle_dns_observation(self) -> Dict[str, Any]:
+        try:
+            output = self._applier.capture_dns_queries()
+        except CommandExecutionError:
+            LOGGER.exception("DNS observation failed")
+            return {"ok": False, "error": "DNS observation failed"}
+        return {
+            "ok": True,
+            "action": "observe-dns",
+            "observations": _parse_dns_query_output(output, observed_at=int(time.time())),
+        }
 
     def _handle_apply(self, payload: Any) -> Dict[str, Any]:
         try:
@@ -144,7 +187,7 @@ class UnixHelperServer(socketserver.UnixStreamServer):
 class HelperClient:
     """Send bounded requests to a local privileged helper."""
 
-    def __init__(self, *, socket_path: Path, timeout_seconds: float = 5.0) -> None:
+    def __init__(self, *, socket_path: Path, timeout_seconds: float = 8.0) -> None:
         if timeout_seconds <= 0 or timeout_seconds > 60:
             raise ValueError("timeout_seconds must be greater than 0 and no more than 60")
         self.socket_path = socket_path
@@ -164,6 +207,28 @@ class HelperClient:
         """Ask the helper to remove project-owned network state."""
 
         return self._request({"action": "reset"})
+
+    def connected_devices(self) -> List[Dict[str, str]]:
+        """Return IPv4 clients currently visible on the test interface."""
+
+        response = self._request({"action": "clients"})
+        devices = response.get("devices")
+        if not isinstance(devices, list) or any(
+            not isinstance(device, dict) for device in devices
+        ):
+            raise HelperClientError("helper returned invalid connected-device data")
+        return devices
+
+    def observe_dns_queries(self) -> List[Dict[str, Any]]:
+        """Capture one bounded DNS sample from the test interface."""
+
+        response = self._request({"action": "observe-dns"})
+        observations = response.get("observations")
+        if not isinstance(observations, list) or any(
+            not isinstance(observation, dict) for observation in observations
+        ):
+            raise HelperClientError("helper returned invalid DNS observations")
+        return observations
 
     def _request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         encoded = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
@@ -240,6 +305,63 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         enable_hardware=arguments.enable_hardware,
     )
     return 0
+
+
+def _parse_neighbor_output(output: str) -> List[Dict[str, str]]:
+    """Convert Linux neighbor output into safe dashboard records."""
+
+    devices: List[Dict[str, str]] = []
+    for line in output.splitlines():
+        fields = line.split()
+        if len(fields) < 5 or fields[1] != "dev" or fields[3] != "lladdr":
+            continue
+        try:
+            ipv4_address = str(IPv4Address(fields[0]))
+        except ValueError:
+            continue
+        mac_address = fields[4].lower()
+        if not _MAC_ADDRESS_PATTERN.fullmatch(mac_address):
+            continue
+        state = fields[5].lower() if len(fields) > 5 else "unknown"
+        if state in {"failed", "incomplete"}:
+            continue
+        devices.append(
+            {
+                "ipv4_address": ipv4_address,
+                "mac_address": mac_address,
+                "state": state,
+            }
+        )
+    return sorted(devices, key=lambda device: int(IPv4Address(device["ipv4_address"])))
+
+
+def _parse_dns_query_output(output: str, *, observed_at: int) -> List[Dict[str, Any]]:
+    """Convert bounded tcpdump DNS output into per-device domain aggregates."""
+
+    counts: Dict[tuple, int] = {}
+    for line in output.splitlines():
+        match = _DNS_QUERY_PATTERN.search(line)
+        if match is None:
+            continue
+        try:
+            source = IPv4Address(match.group("source"))
+            domain = normalize_domain(match.group("domain"))
+        except (ValueError, ValidationError):
+            continue
+        if not any(source in network for network in _PRIVATE_NETWORKS):
+            continue
+        key = (str(source), domain)
+        counts[key] = counts.get(key, 0) + 1
+    return [
+        {
+            "ipv4_address": ipv4_address,
+            "domain": domain,
+            "query_count": query_count,
+            "first_seen": observed_at,
+            "last_seen": observed_at,
+        }
+        for (ipv4_address, domain), query_count in sorted(counts.items())
+    ]
 
 
 if __name__ == "__main__":
