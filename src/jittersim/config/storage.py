@@ -4,9 +4,17 @@ from dataclasses import asdict
 import json
 from pathlib import Path
 import sqlite3
-from typing import Optional, Union
+import time
+from typing import Optional, Sequence, Union
 
-from .models import Device, Impairment, Profile, RuntimeState, ValidationError
+from .models import (
+    Device,
+    DomainObservation,
+    Impairment,
+    Profile,
+    RuntimeState,
+    ValidationError,
+)
 
 
 class StorageError(RuntimeError):
@@ -14,6 +22,9 @@ class StorageError(RuntimeError):
 
 
 DatabasePath = Union[str, Path]
+_DOMAIN_RETENTION_SECONDS = 30 * 24 * 60 * 60
+_MAX_DOMAIN_OBSERVATIONS = 20_000
+_MAX_OBSERVATIONS_PER_DEVICE = 50
 
 
 def _serialize_impairment(impairment: Impairment) -> str:
@@ -74,6 +85,16 @@ class ConfigRepository:
                 last_result TEXT,
                 last_error TEXT
             );
+            CREATE TABLE IF NOT EXISTS domain_observations (
+                ipv4_address TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                query_count INTEGER NOT NULL,
+                first_seen INTEGER NOT NULL,
+                last_seen INTEGER NOT NULL,
+                PRIMARY KEY (ipv4_address, domain)
+            );
+            CREATE INDEX IF NOT EXISTS domain_observations_last_seen_idx
+                ON domain_observations (last_seen);
             INSERT OR IGNORE INTO runtime_state (
                 id, configuration_version, observed_state
             ) VALUES (1, 0, 'unknown');
@@ -222,6 +243,17 @@ class ConfigRepository:
             return None
         return self._device_from_row(row)
 
+    def get_device_by_ipv4_address(self, ipv4_address: str) -> Optional[Device]:
+        """Return the device assignment using one IPv4 address or `None`."""
+
+        row = self._connection.execute(
+            "SELECT id, name, ipv4_address, profile_id FROM devices WHERE ipv4_address = ?",
+            (ipv4_address,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._device_from_row(row)
+
     def list_profiles(self) -> tuple:
         """Return all stored profiles in stable identifier order."""
 
@@ -238,6 +270,97 @@ class ConfigRepository:
             "SELECT id, name, ipv4_address, profile_id FROM devices ORDER BY id"
         ).fetchall()
         return tuple(self._device_from_row(row) for row in rows)
+
+    def save_domain_observations(
+        self,
+        observations: Sequence[DomainObservation],
+        *,
+        now: Optional[int] = None,
+    ) -> None:
+        """Merge one bounded DNS sample without changing desired configuration."""
+
+        current_time = int(time.time()) if now is None else now
+        try:
+            for observation in observations:
+                self._connection.execute(
+                    """
+                    INSERT INTO domain_observations (
+                        ipv4_address, domain, query_count, first_seen, last_seen
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(ipv4_address, domain) DO UPDATE SET
+                        query_count = MIN(
+                            domain_observations.query_count + excluded.query_count,
+                            ?
+                        ),
+                        first_seen = MIN(
+                            domain_observations.first_seen, excluded.first_seen
+                        ),
+                        last_seen = MAX(
+                            domain_observations.last_seen, excluded.last_seen
+                        )
+                    """,
+                    (
+                        str(observation.ipv4_address),
+                        observation.domain,
+                        observation.query_count,
+                        observation.first_seen,
+                        observation.last_seen,
+                        1_000_000_000,
+                    ),
+                )
+            self._prune_domain_observations(now=current_time)
+            self._connection.commit()
+        except (sqlite3.IntegrityError, sqlite3.OperationalError) as error:
+            self._connection.rollback()
+            raise StorageError("could not save domain observations") from error
+
+    def list_domain_observations(self) -> tuple:
+        """Return recent domain aggregates ordered by device and query count."""
+
+        rows = self._connection.execute(
+            """
+            SELECT ipv4_address, domain, query_count, first_seen, last_seen
+            FROM domain_observations
+            ORDER BY ipv4_address, query_count DESC, domain
+            """
+        ).fetchall()
+        observations = []
+        counts_by_device = {}
+        for row in rows:
+            ipv4_address = row["ipv4_address"]
+            count = counts_by_device.get(ipv4_address, 0)
+            if count >= _MAX_OBSERVATIONS_PER_DEVICE:
+                continue
+            observations.append(
+                DomainObservation(
+                    ipv4_address=ipv4_address,
+                    domain=row["domain"],
+                    query_count=row["query_count"],
+                    first_seen=row["first_seen"],
+                    last_seen=row["last_seen"],
+                )
+            )
+            counts_by_device[ipv4_address] = count + 1
+        return tuple(observations)
+
+    def _prune_domain_observations(self, *, now: int) -> None:
+        cutoff = max(0, now - _DOMAIN_RETENTION_SECONDS)
+        self._connection.execute(
+            "DELETE FROM domain_observations WHERE last_seen < ?",
+            (cutoff,),
+        )
+        self._connection.execute(
+            """
+            DELETE FROM domain_observations
+            WHERE rowid IN (
+                SELECT rowid
+                FROM domain_observations
+                ORDER BY last_seen DESC
+                LIMIT -1 OFFSET ?
+            )
+            """,
+            (_MAX_DOMAIN_OBSERVATIONS,),
+        )
 
     @staticmethod
     def _profile_from_row(row: sqlite3.Row) -> Profile:

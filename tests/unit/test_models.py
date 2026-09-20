@@ -1,7 +1,14 @@
 import unittest
 from ipaddress import IPv4Address
 
-from jittersim.config.models import Device, Impairment, Profile, RuntimeState, ValidationError
+from jittersim.config.models import (
+    Device,
+    DomainObservation,
+    Impairment,
+    Profile,
+    RuntimeState,
+    ValidationError,
+)
 
 
 class ImpairmentTests(unittest.TestCase):
@@ -101,6 +108,37 @@ class DeviceTests(unittest.TestCase):
                 profile_id="Not a valid identifier",
             )
 
+
+class DomainObservationTests(unittest.TestCase):
+    def test_normalizes_dns_names_and_tracks_time_bounds(self) -> None:
+        observation = DomainObservation(
+            ipv4_address="192.168.50.10",
+            domain="Amazon.COM.",
+            query_count=3,
+            first_seen=10,
+            last_seen=20,
+        )
+
+        self.assertEqual(observation.domain, "amazon.com")
+        self.assertEqual(observation.query_count, 3)
+
+    def test_rejects_invalid_dns_names_and_time_bounds(self) -> None:
+        invalid_values = (
+            {"domain": "-not-a-domain.com"},
+            {"domain": "a" * 254},
+            {"first_seen": 21, "last_seen": 20},
+            {"query_count": 0},
+        )
+        for values in invalid_values:
+            with self.subTest(values=values):
+                with self.assertRaises(ValidationError):
+                    DomainObservation(
+                        ipv4_address="192.168.50.10",
+                        domain=values.get("domain", "example.com"),
+                        query_count=values.get("query_count", 1),
+                        first_seen=values.get("first_seen", 10),
+                        last_seen=values.get("last_seen", 20),
+                    )
 
 class RuntimeStateTests(unittest.TestCase):
     def test_accepts_known_observed_states(self) -> None:

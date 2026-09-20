@@ -11,6 +11,7 @@ class ValidationError(ValueError):
 
 
 _IDENTIFIER_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_DOMAIN_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _RFC1918_NETWORKS = (
     IPv4Network("10.0.0.0/8"),
     IPv4Network("172.16.0.0/12"),
@@ -48,6 +49,20 @@ def _validate_number(
 
 def _validate_percent(value: int, field_name: str) -> int:
     return _validate_number(value, field_name, minimum=0, maximum=100)
+
+
+def normalize_domain(value: str) -> str:
+    """Return one safe lowercase DNS name without its optional trailing dot."""
+
+    if not isinstance(value, str):
+        raise ValidationError("domain must be a string")
+    domain = value.strip().lower().rstrip(".")
+    if not domain or len(domain) > 253:
+        raise ValidationError("domain must contain between 1 and 253 characters")
+    labels = domain.split(".")
+    if any(len(label) > 63 or not _DOMAIN_LABEL_PATTERN.fullmatch(label) for label in labels):
+        raise ValidationError("domain must contain valid DNS labels")
+    return domain
 
 
 def _parse_test_address(value: IPv4Input) -> IPv4Address:
@@ -119,6 +134,26 @@ class Device:
         _validate_name(self.name, "name")
         object.__setattr__(self, "ipv4_address", _parse_test_address(self.ipv4_address))
         _validate_identifier(self.profile_id, "profile_id")
+
+
+@dataclass(frozen=True)
+class DomainObservation:
+    """One bounded aggregate of a DNS name observed from a test client."""
+
+    ipv4_address: IPv4Input
+    domain: str
+    query_count: int
+    first_seen: int
+    last_seen: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "ipv4_address", _parse_test_address(self.ipv4_address))
+        object.__setattr__(self, "domain", normalize_domain(self.domain))
+        _validate_number(self.query_count, "query_count", 1, 1_000_000_000)
+        _validate_number(self.first_seen, "first_seen", 0, 2**63 - 1)
+        _validate_number(self.last_seen, "last_seen", 0, 2**63 - 1)
+        if self.first_seen > self.last_seen:
+            raise ValidationError("first_seen must not be later than last_seen")
 
 
 _OBSERVED_STATES = frozenset(("unknown", "applying", "resetting", "applied", "reset", "error"))

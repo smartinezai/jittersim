@@ -1,6 +1,6 @@
 import unittest
 
-from jittersim.config.models import Device, Impairment, Profile
+from jittersim.config.models import Device, DomainObservation, Impairment, Profile
 from jittersim.config.storage import ConfigRepository, StorageError
 
 
@@ -126,6 +126,27 @@ class ConfigRepositoryTests(unittest.TestCase):
         self.assertEqual(updated.configuration_version, 2)
         self.assertEqual(updated.observed_state, "unknown")
         self.assertIsNone(updated.last_action)
+
+    def test_merges_and_lists_domain_observations_without_bumping_configuration(self) -> None:
+        self.repository.save_domain_observations(
+            [
+                DomainObservation("192.168.50.10", "Amazon.COM.", 2, 10, 10),
+                DomainObservation("192.168.50.10", "chat.openai.com", 1, 11, 11),
+            ],
+            now=11,
+        )
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.10", "amazon.com", 3, 12, 12)],
+            now=12,
+        )
+
+        observations = self.repository.list_domain_observations()
+
+        self.assertEqual(self.repository.get_runtime_state().configuration_version, 0)
+        self.assertEqual(
+            [(observation.domain, observation.query_count) for observation in observations],
+            [("amazon.com", 5), ("chat.openai.com", 1)],
+        )
 
 
 if __name__ == "__main__":
