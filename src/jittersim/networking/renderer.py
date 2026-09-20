@@ -74,7 +74,7 @@ def _render_tc_commands(
                 "bands",
                 str(device_count + 1),
                 "priomap",
-                *(str(device_count) for _ in range(16)),
+                *("0" for _ in range(16)),
             ),
             purpose=f"create project queue root on {interface}",
         )

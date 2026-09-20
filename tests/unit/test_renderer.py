@@ -68,7 +68,7 @@ class RendererTests(unittest.TestCase):
         self.assertEqual([command.argv[4] for command in root_commands], ["eth0", "wlan0"])
         for command in root_commands:
             priomap_start = command.argv.index("priomap") + 1
-            self.assertEqual(command.argv[priomap_start:], ("2",) * 16)
+        self.assertEqual(command.argv[priomap_start:], ("0",) * 16)
 
         alice_upload = [
             command
