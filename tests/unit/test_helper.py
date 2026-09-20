@@ -81,6 +81,28 @@ class HelperServiceTests(unittest.TestCase):
         self.assertEqual(response["action"], "reset")
         self.assertEqual(response["commands_run"], 3)
 
+    def test_configures_the_local_access_point_without_router_commands(self) -> None:
+        response = self.service.handle_payload(
+            {
+                "action": "configure-ap",
+                "ssid": "JitterSim-Test",
+                "password": "test-password-123",
+            }
+        )
+
+        self.assertEqual(response["action"], "configure-ap")
+        self.assertEqual(response["commands_run"], 3)
+        self.assertEqual(self.executor.commands[0].executable, "nmcli")
+        self.assertEqual(self.executor.commands[0].arguments[2], "jittersim-ap")
+
+    def test_rejects_short_access_point_passwords(self) -> None:
+        response = self.service.handle_payload(
+            {"action": "configure-ap", "ssid": "JitterSim-Test", "password": "short"}
+        )
+
+        self.assertEqual(response, {"ok": False, "error": "invalid access point settings"})
+        self.assertEqual(self.executor.commands, [])
+
     def test_lists_valid_ipv4_neighbors_without_failed_entries(self) -> None:
         executor = OutputExecutor(
             """
@@ -208,6 +230,13 @@ class UnixHelperServerTests(unittest.TestCase):
         self.assertEqual(client.ping()["action"], "ping")
         self.assertEqual(client.apply(plan=make_plan())["action"], "apply")
         self.assertEqual(client.reset()["action"], "reset")
+        self.assertEqual(
+            client.configure_access_point(
+                ssid="JitterSim-Test",
+                password="test-password-123",
+            )["action"],
+            "configure-ap",
+        )
 
     def test_existing_regular_file_is_never_replaced_by_a_socket(self) -> None:
         self.server.shutdown()

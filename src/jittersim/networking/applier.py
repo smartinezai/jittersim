@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
+from jittersim.config.models import ValidationError
 from jittersim.engine.plan import NetworkPlan
 
 from .commands import Command
@@ -115,9 +116,54 @@ class NetworkApplier:
         )
         return result.stdout
 
+    def configure_access_point(self, *, ssid: str, password: str) -> int:
+        """Set the local test AP credentials without touching the upstream router."""
+
+        _validate_access_point_settings(ssid=ssid, password=password)
+        commands = (
+            Command(
+                executable="nmcli",
+                arguments=(
+                    "connection",
+                    "modify",
+                    "jittersim-ap",
+                    "802-11-wireless.ssid",
+                    ssid,
+                    "802-11-wireless-security.key-mgmt",
+                    "wpa-psk",
+                    "802-11-wireless-security.psk",
+                    password,
+                ),
+                purpose="update the local JitterSim access point credentials",
+            ),
+            Command(
+                executable="nmcli",
+                arguments=("connection", "down", "jittersim-ap"),
+                purpose="restart the local JitterSim access point",
+                ignore_failure=True,
+            ),
+            Command(
+                executable="nmcli",
+                arguments=("connection", "up", "jittersim-ap"),
+                purpose="start the local JitterSim access point",
+            ),
+        )
+        for command in commands:
+            self._executor.run(command)
+        return len(commands)
+
     def _try_reset(self) -> Optional[CommandExecutionError]:
         try:
             self.reset()
         except CommandExecutionError as error:
             return error
         return None
+
+
+def _validate_access_point_settings(*, ssid: str, password: str) -> None:
+    if not isinstance(ssid, str) or not 1 <= len(ssid.encode("utf-8")) <= 32:
+        raise ValidationError("ssid must contain between 1 and 32 UTF-8 bytes")
+    if any(ord(character) < 32 for character in ssid):
+        raise ValidationError("ssid contains a control character")
+    if not isinstance(password, str) or not 8 <= len(password) <= 63:
+        raise ValidationError("password must contain between 8 and 63 characters")

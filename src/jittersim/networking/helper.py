@@ -65,6 +65,8 @@ class HelperService:
             return self._handle_clients()
         if action == "observe-dns":
             return self._handle_dns_observation()
+        if action == "configure-ap":
+            return self._handle_configure_ap(payload)
         if action == "apply":
             return self._handle_apply(payload.get("plan"))
         return {"ok": False, "error": "unknown action"}
@@ -108,6 +110,19 @@ class HelperService:
                 "cleanup_failed": error.reset_error is not None,
             }
         return {"ok": True, "action": "apply", "commands_run": report.commands_run}
+
+    def _handle_configure_ap(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            commands_run = self._applier.configure_access_point(
+                ssid=payload["ssid"],
+                password=payload["password"],
+            )
+        except (KeyError, TypeError, ValidationError):
+            return {"ok": False, "error": "invalid access point settings"}
+        except CommandExecutionError:
+            LOGGER.exception("access point configuration failed")
+            return {"ok": False, "error": "access point configuration failed"}
+        return {"ok": True, "action": "configure-ap", "commands_run": commands_run}
 
     def _handle_reset(self) -> Dict[str, Any]:
         try:
@@ -207,6 +222,13 @@ class HelperClient:
         """Ask the helper to remove project-owned network state."""
 
         return self._request({"action": "reset"})
+
+    def configure_access_point(self, *, ssid: str, password: str) -> Dict[str, Any]:
+        """Set the local test AP credentials through the privileged helper."""
+
+        return self._request(
+            {"action": "configure-ap", "ssid": ssid, "password": password}
+        )
 
     def connected_devices(self) -> List[Dict[str, str]]:
         """Return IPv4 clients currently visible on the test interface."""
