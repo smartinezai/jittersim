@@ -25,6 +25,29 @@ class FakeHelper:
         self.reset_called = True
         return {"ok": True, "action": "reset", "commands_run": 3}
 
+    def connected_devices(self):
+        return [
+            {
+                "ipv4_address": "192.168.50.178",
+                "mac_address": "dc:1e:d5:3e:97:4c",
+                "state": "reachable",
+                "assigned_device_id": None,
+                "assigned_device_name": None,
+                "assigned_profile_id": None,
+            }
+        ]
+
+    def observe_dns_queries(self):
+        return [
+            {
+                "ipv4_address": "192.168.50.178",
+                "domain": "amazon.com",
+                "query_count": 2,
+                "first_seen": 10,
+                "last_seen": 10,
+            }
+        ]
+
 
 class ControlServerTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -91,6 +114,86 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(devices[0]["ipv4_address"], "192.168.50.10")
 
+    def test_connected_devices_endpoint_reports_unavailable_without_helper(self) -> None:
+        status, content_type, body = self.server.response_for("/api/connected-devices")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, "application/json")
+        self.assertEqual(
+            json.loads(body),
+            {
+                "available": False,
+                "devices": [],
+                "message": "connected-client information is unavailable in configuration-only mode",
+            },
+        )
+
+    def test_connected_devices_endpoint_uses_the_network_helper(self) -> None:
+        self.server.helper_client = FakeHelper()
+
+        status, content_type, body = self.server.response_for("/api/connected-devices")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, "application/json")
+        self.assertEqual(
+            json.loads(body),
+            {
+                "available": True,
+                "devices": [
+                    {
+                        "ipv4_address": "192.168.50.178",
+                        "mac_address": "dc:1e:d5:3e:97:4c",
+                        "state": "reachable",
+                        "assigned_device_id": None,
+                        "assigned_device_name": None,
+                        "assigned_profile_id": None,
+                    }
+                ],
+            },
+        )
+
+    def test_connected_device_profile_assignment_saves_and_applies(self) -> None:
+        self.server.helper_client = FakeHelper()
+
+        status, content_type, body = self.server.write_response_for(
+            "/api/connected-devices/apply-profile",
+            {
+                "ipv4_address": "192.168.50.178",
+                "profile_id": "slow",
+            },
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, "application/json")
+        response = json.loads(body)
+        self.assertEqual(response["device"]["id"], "client-192-168-50-178")
+        self.assertEqual(response["device"]["profile_id"], "slow")
+        self.assertEqual(
+            self.repository.get_device_by_ipv4_address("192.168.50.178").profile_id,
+            "slow",
+        )
+        self.assertEqual(self.server.helper_client.applied_plan.mark_rules[0].device_id, "alice")
+        self.assertEqual(len(self.server.helper_client.applied_plan.mark_rules), 2)
+
+    def test_observation_scan_persists_and_lists_domains(self) -> None:
+        self.server.helper_client = FakeHelper()
+
+        status, _, body = self.server.write_response_for(
+            "/api/observations/scan",
+            {},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["captured_observations"], 1)
+
+        status, _, body = self.server.response_for("/api/observations")
+
+        self.assertEqual(status, 200)
+        response = json.loads(body)
+        self.assertTrue(response["available"])
+        self.assertEqual(response["devices"][0]["ipv4_address"], "192.168.50.178")
+        self.assertEqual(response["devices"][0]["domains"][0]["domain"], "amazon.com")
+
     def test_plan_endpoint_uses_the_deterministic_compiler(self) -> None:
         status, _, body = self.server.response_for("/api/plan")
 
@@ -105,12 +208,20 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(content_type, "text/html; charset=utf-8")
         self.assertEqual(body.decode("utf-8"), DASHBOARD_HTML)
-        self.assertIn("Configuration mode", DASHBOARD_HTML)
+        self.assertIn("Checking control mode", DASHBOARD_HTML)
         self.assertIn("Save profile", DASHBOARD_HTML)
         self.assertIn("Save device", DASHBOARD_HTML)
         self.assertIn("Apply current configuration", DASHBOARD_HTML)
         self.assertIn("Reset network", DASHBOARD_HTML)
+        self.assertIn("Connected clients", DASHBOARD_HTML)
+        self.assertIn("connected-devices", DASHBOARD_HTML)
+        self.assertIn("Apply profile", DASHBOARD_HTML)
+        self.assertIn("mode-badge", DASHBOARD_HTML)
+        self.assertIn("action-message", DASHBOARD_HTML)
         self.assertIn("Runtime state", DASHBOARD_HTML)
+        self.assertIn("Traffic discovery", DASHBOARD_HTML)
+        self.assertIn("/api/observations", DASHBOARD_HTML)
+        self.assertIn("Scan now", DASHBOARD_HTML)
 
     def test_state_endpoint_reports_desired_version_and_observed_state(self) -> None:
         status, content_type, body = self.server.response_for("/api/state")
