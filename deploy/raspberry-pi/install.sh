@@ -21,7 +21,7 @@ if ! getent passwd jittersim >/dev/null; then
     exit 1
 fi
 
-apt-get install -y nftables openssl python3-venv
+apt-get install -y nftables openssl python3-venv tcpdump
 
 install -d -m 0750 -o root -g jittersim "$CONFIG_DIR"
 install -d -m 0750 -o jittersim -g jittersim "$DATA_DIR"
