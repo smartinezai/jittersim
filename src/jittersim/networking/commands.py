@@ -17,6 +17,8 @@ class Command:
     purpose: str
     stdin: Optional[str] = None
     ignore_failure: bool = False
+    timeout_seconds: Optional[float] = None
+    timeout_is_success: bool = False
 
     def __post_init__(self) -> None:
         if not self.executable or "/" in self.executable or " " in self.executable:
@@ -25,6 +27,12 @@ class Command:
             raise CommandError("arguments must contain at least one string")
         if not self.purpose.strip():
             raise CommandError("purpose must not be empty")
+        if self.timeout_seconds is not None and (
+            self.timeout_seconds <= 0 or self.timeout_seconds > 60
+        ):
+            raise CommandError("timeout_seconds must be greater than 0 and no more than 60")
+        if self.timeout_is_success and self.timeout_seconds is None:
+            raise CommandError("timeout_is_success requires timeout_seconds")
 
     @property
     def argv(self) -> Tuple[str, ...]:

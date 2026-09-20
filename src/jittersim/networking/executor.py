@@ -56,7 +56,7 @@ class FakeExecutor:
 class SubprocessExecutor:
     """Execute only supported Linux networking commands with a bounded timeout."""
 
-    _ALLOWED_EXECUTABLES = frozenset(("ip", "nft", "tc"))
+    _ALLOWED_EXECUTABLES = frozenset(("ip", "nft", "tc", "tcpdump"))
 
     def __init__(self, timeout_seconds: float = 10.0) -> None:
         if timeout_seconds <= 0 or timeout_seconds > 60:
@@ -77,12 +77,22 @@ class SubprocessExecutor:
                 input=command.stdin,
                 text=True,
                 capture_output=True,
-                timeout=self.timeout_seconds,
+                timeout=command.timeout_seconds or self.timeout_seconds,
                 check=False,
             )
         except subprocess.TimeoutExpired as error:
+            stdout = error.stdout or ""
+            stderr = error.stderr or ""
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode("utf-8", errors="replace")
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode("utf-8", errors="replace")
+            if command.timeout_is_success:
+                return CommandResult(return_code=0, stdout=stdout, stderr=stderr)
             raise CommandExecutionError(
                 f"networking command timed out: {command.purpose}",
+                stdout=stdout,
+                stderr=stderr,
                 timed_out=True,
             ) from error
         except OSError as error:

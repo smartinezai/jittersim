@@ -89,6 +89,32 @@ class SubprocessExecutorTests(unittest.TestCase):
         self.assertTrue(context.exception.timed_out)
 
     @patch("jittersim.networking.executor.subprocess.run")
+    def test_returns_partial_output_when_timeout_is_an_expected_end(self, run_command) -> None:
+        run_command.side_effect = subprocess.TimeoutExpired(
+            cmd=("tcpdump",), timeout=2, output="partial packet\n"
+        )
+        command = Command(
+            "tcpdump",
+            ("-c", "128"),
+            "sample DNS queries",
+            timeout_seconds=2,
+            timeout_is_success=True,
+        )
+
+        result = SubprocessExecutor(timeout_seconds=10).run(command)
+
+        self.assertEqual(result.return_code, 0)
+        self.assertEqual(result.stdout, "partial packet\n")
+        run_command.assert_called_once_with(
+            ("tcpdump", "-c", "128"),
+            input=None,
+            text=True,
+            capture_output=True,
+            timeout=2,
+            check=False,
+        )
+
+    @patch("jittersim.networking.executor.subprocess.run")
     def test_reports_missing_executables(self, run_command) -> None:
         run_command.side_effect = FileNotFoundError("tc not found")
 
