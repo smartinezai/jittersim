@@ -1,6 +1,15 @@
 import unittest
 
-from jittersim.config.models import Device, DomainObservation, Impairment, Profile
+from jittersim.config.models import (
+    Device,
+    DomainObservation,
+    Impairment,
+    MacPolicy,
+    Profile,
+    Randomness,
+    Schedule,
+    WebsitePolicy,
+)
 from jittersim.config.storage import ConfigRepository, StorageError
 
 
@@ -18,12 +27,17 @@ class ConfigRepositoryTests(unittest.TestCase):
             upload=Impairment(delay_ms=3_000, loss_percent=10),
             download=Impairment(bandwidth_kbit=2_000),
             random_seed=42,
+            reroll_interval_seconds=300,
+            reroll_interval_randomness=Randomness(variation_percent=20),
+            website_mode="allow_only",
+            website_domains=("example.com",),
         )
         device = Device(
             id="alice-laptop",
             name="Alice's laptop",
             ipv4_address="192.168.50.10",
             profile_id=profile.id,
+            mac_address="aa:bb:cc:dd:ee:ff",
         )
 
         self.repository.save_profile(profile)
@@ -31,6 +45,37 @@ class ConfigRepositoryTests(unittest.TestCase):
 
         self.assertEqual(self.repository.get_profile(profile.id), profile)
         self.assertEqual(self.repository.get_device(device.id), device)
+
+    def test_round_trips_schedules_and_network_policies(self) -> None:
+        self.repository.save_profile(Profile(id="slow", name="Slow"))
+        self.repository.save_device(
+            Device("alice", "Alice", "192.168.50.10", "slow")
+        )
+        schedule = Schedule(
+            id="work-hours",
+            device_id="alice",
+            profile_id="slow",
+            days_of_week=(0, 1, 2, 3, 4),
+            start_minute=540,
+            end_minute=1_020,
+        )
+        self.repository.save_schedule(schedule)
+        self.repository.save_mac_policy(
+            MacPolicy(mode="denylist", denylist=("aa:bb:cc:dd:ee:ff",))
+        )
+        self.repository.save_website_policy(
+            WebsitePolicy(mode="allow_only", allowed_domains=("example.com",))
+        )
+
+        self.assertEqual(self.repository.list_schedules(), (schedule,))
+        self.assertEqual(
+            self.repository.get_mac_policy().denylist,
+            ("aa:bb:cc:dd:ee:ff",),
+        )
+        self.assertEqual(
+            self.repository.get_website_policy().allowed_domains,
+            ("example.com",),
+        )
 
     def test_lists_values_in_stable_identifier_order(self) -> None:
         self.repository.save_profile(Profile(id="z-profile", name="Z"))

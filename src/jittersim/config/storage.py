@@ -11,9 +11,13 @@ from .models import (
     Device,
     DomainObservation,
     Impairment,
+    MacPolicy,
     Profile,
+    Randomness,
     RuntimeState,
+    Schedule,
     ValidationError,
+    WebsitePolicy,
 )
 
 
@@ -31,14 +35,54 @@ def _serialize_impairment(impairment: Impairment) -> str:
     return json.dumps(asdict(impairment), sort_keys=True)
 
 
+def _deserialize_randomness(data: dict, field_name: str) -> None:
+    value = data.get(field_name)
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must contain an object")
+    data[field_name] = Randomness(**value)
+
+
 def _deserialize_impairment(value: str) -> Impairment:
     try:
         data = json.loads(value)
         if not isinstance(data, dict):
             raise ValueError("impairment JSON must contain an object")
+        for field_name in (
+            "delay_randomness",
+            "jitter_randomness",
+            "loss_randomness",
+            "bandwidth_randomness",
+            "reorder_randomness",
+            "duplicate_randomness",
+            "corrupt_randomness",
+        ):
+            _deserialize_randomness(data, field_name)
         return Impairment(**data)
-    except (TypeError, ValueError, json.JSONDecodeError) as error:
+    except (TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
         raise StorageError("stored impairment is malformed") from error
+
+
+def _serialize_profile_settings(profile: Profile) -> str:
+    settings = asdict(profile)
+    for field_name in ("id", "name", "upload", "download", "random_seed"):
+        settings.pop(field_name, None)
+    return json.dumps(settings, sort_keys=True)
+
+
+def _deserialize_profile_settings(value: str) -> dict:
+    data = json.loads(value or "{}")
+    if not isinstance(data, dict):
+        raise ValueError("profile settings JSON must contain an object")
+    for field_name in (
+        "reroll_interval_randomness",
+        "outage_duration_randomness",
+        "outage_interval_randomness",
+        "website_randomness",
+    ):
+        _deserialize_randomness(data, field_name)
+    return data
 
 
 class ConfigRepository:
@@ -69,13 +113,33 @@ class ConfigRepository:
                 name TEXT NOT NULL,
                 upload_json TEXT NOT NULL,
                 download_json TEXT NOT NULL,
-                random_seed INTEGER
+                random_seed INTEGER,
+                settings_json TEXT NOT NULL DEFAULT '{}'
             );
             CREATE TABLE IF NOT EXISTS devices (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 ipv4_address TEXT NOT NULL UNIQUE,
-                profile_id TEXT NOT NULL REFERENCES profiles(id)
+                profile_id TEXT NOT NULL REFERENCES profiles(id),
+                mac_address TEXT
+            );
+            CREATE TABLE IF NOT EXISTS schedules (
+                id TEXT PRIMARY KEY,
+                device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                days_json TEXT NOT NULL,
+                start_minute INTEGER NOT NULL,
+                end_minute INTEGER NOT NULL,
+                enabled INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS network_policies (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                mac_mode TEXT NOT NULL,
+                mac_allowlist_json TEXT NOT NULL,
+                mac_denylist_json TEXT NOT NULL,
+                website_mode TEXT NOT NULL,
+                website_allowed_json TEXT NOT NULL,
+                website_blocked_json TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS runtime_state (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -98,9 +162,25 @@ class ConfigRepository:
             INSERT OR IGNORE INTO runtime_state (
                 id, configuration_version, observed_state
             ) VALUES (1, 0, 'unknown');
+            INSERT OR IGNORE INTO network_policies (
+                id, mac_mode, mac_allowlist_json, mac_denylist_json,
+                website_mode, website_allowed_json, website_blocked_json
+            ) VALUES (1, 'disabled', '[]', '[]', 'unrestricted', '[]', '[]');
             """
         )
+        self._add_column_if_missing("profiles", "settings_json", "TEXT NOT NULL DEFAULT '{}'")
+        self._add_column_if_missing("devices", "mac_address", "TEXT")
         self._connection.commit()
+
+    def _add_column_if_missing(self, table_name: str, column_name: str, column_definition: str) -> None:
+        columns = {
+            row["name"]
+            for row in self._connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        if column_name not in columns:
+            self._connection.execute(
+                f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
+            )
 
     def save_profile(self, profile: Profile) -> None:
         """Insert or update one validated profile."""
@@ -108,13 +188,15 @@ class ConfigRepository:
         try:
             self._connection.execute(
                 """
-                INSERT INTO profiles (id, name, upload_json, download_json, random_seed)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO profiles (
+                    id, name, upload_json, download_json, random_seed, settings_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     upload_json = excluded.upload_json,
                     download_json = excluded.download_json,
-                    random_seed = excluded.random_seed
+                    random_seed = excluded.random_seed,
+                    settings_json = excluded.settings_json
                 """,
                 (
                     profile.id,
@@ -122,6 +204,7 @@ class ConfigRepository:
                     _serialize_impairment(profile.upload),
                     _serialize_impairment(profile.download),
                     profile.random_seed,
+                    _serialize_profile_settings(profile),
                 ),
             )
             self._bump_configuration_version()
@@ -136,14 +219,21 @@ class ConfigRepository:
         try:
             self._connection.execute(
                 """
-                INSERT INTO devices (id, name, ipv4_address, profile_id)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO devices (id, name, ipv4_address, profile_id, mac_address)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     ipv4_address = excluded.ipv4_address,
-                    profile_id = excluded.profile_id
+                    profile_id = excluded.profile_id,
+                    mac_address = excluded.mac_address
                 """,
-                (device.id, device.name, str(device.ipv4_address), device.profile_id),
+                (
+                    device.id,
+                    device.name,
+                    str(device.ipv4_address),
+                    device.profile_id,
+                    device.mac_address,
+                ),
             )
             self._bump_configuration_version()
             self._connection.commit()
@@ -225,7 +315,10 @@ class ConfigRepository:
         """Return one profile or `None` when it is not stored."""
 
         row = self._connection.execute(
-            "SELECT id, name, upload_json, download_json, random_seed FROM profiles WHERE id = ?",
+            """
+            SELECT id, name, upload_json, download_json, random_seed, settings_json
+            FROM profiles WHERE id = ?
+            """,
             (profile_id,),
         ).fetchone()
         if row is None:
@@ -236,7 +329,7 @@ class ConfigRepository:
         """Return one device assignment or `None` when it is not stored."""
 
         row = self._connection.execute(
-            "SELECT id, name, ipv4_address, profile_id FROM devices WHERE id = ?",
+            "SELECT id, name, ipv4_address, profile_id, mac_address FROM devices WHERE id = ?",
             (device_id,),
         ).fetchone()
         if row is None:
@@ -247,7 +340,7 @@ class ConfigRepository:
         """Return the device assignment using one IPv4 address or `None`."""
 
         row = self._connection.execute(
-            "SELECT id, name, ipv4_address, profile_id FROM devices WHERE ipv4_address = ?",
+            "SELECT id, name, ipv4_address, profile_id, mac_address FROM devices WHERE ipv4_address = ?",
             (ipv4_address,),
         ).fetchone()
         if row is None:
@@ -259,6 +352,7 @@ class ConfigRepository:
 
         rows = self._connection.execute(
             "SELECT id, name, upload_json, download_json, random_seed "
+            ", settings_json "
             "FROM profiles ORDER BY id"
         ).fetchall()
         return tuple(self._profile_from_row(row) for row in rows)
@@ -267,9 +361,133 @@ class ConfigRepository:
         """Return all stored device assignments in stable identifier order."""
 
         rows = self._connection.execute(
-            "SELECT id, name, ipv4_address, profile_id FROM devices ORDER BY id"
+            "SELECT id, name, ipv4_address, profile_id, mac_address FROM devices ORDER BY id"
         ).fetchall()
         return tuple(self._device_from_row(row) for row in rows)
+
+    def save_schedule(self, schedule: Schedule) -> None:
+        """Insert or update one repeating schedule."""
+
+        try:
+            self._connection.execute(
+                """
+                INSERT INTO schedules (
+                    id, device_id, profile_id, days_json, start_minute, end_minute, enabled
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    device_id = excluded.device_id,
+                    profile_id = excluded.profile_id,
+                    days_json = excluded.days_json,
+                    start_minute = excluded.start_minute,
+                    end_minute = excluded.end_minute,
+                    enabled = excluded.enabled
+                """,
+                (
+                    schedule.id,
+                    schedule.device_id,
+                    schedule.profile_id,
+                    json.dumps(list(schedule.days_of_week)),
+                    schedule.start_minute,
+                    schedule.end_minute,
+                    int(schedule.enabled),
+                ),
+            )
+            self._bump_configuration_version()
+            self._connection.commit()
+        except sqlite3.IntegrityError as error:
+            self._connection.rollback()
+            raise StorageError(f"could not save schedule {schedule.id}") from error
+
+    def delete_schedule(self, schedule_id: str) -> None:
+        """Delete one schedule when it exists."""
+
+        cursor = self._connection.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
+        if cursor.rowcount:
+            self._bump_configuration_version()
+            self._connection.commit()
+
+    def list_schedules(self) -> tuple:
+        """Return all schedules in stable identifier order."""
+
+        rows = self._connection.execute(
+            """
+            SELECT id, device_id, profile_id, days_json, start_minute, end_minute, enabled
+            FROM schedules ORDER BY id
+            """
+        ).fetchall()
+        return tuple(self._schedule_from_row(row) for row in rows)
+
+    def get_mac_policy(self) -> MacPolicy:
+        """Return the saved MAC filtering policy."""
+
+        row = self._connection.execute(
+            """
+            SELECT mac_mode, mac_allowlist_json, mac_denylist_json
+            FROM network_policies WHERE id = 1
+            """
+        ).fetchone()
+        if row is None:
+            raise StorageError("network policy is missing")
+        try:
+            return MacPolicy(
+                mode=row["mac_mode"],
+                allowlist=tuple(json.loads(row["mac_allowlist_json"])),
+                denylist=tuple(json.loads(row["mac_denylist_json"])),
+            )
+        except (TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
+            raise StorageError("stored MAC policy is malformed") from error
+
+    def save_mac_policy(self, policy: MacPolicy) -> None:
+        """Persist MAC filtering rules."""
+
+        self._connection.execute(
+            """
+            UPDATE network_policies
+            SET mac_mode = ?, mac_allowlist_json = ?, mac_denylist_json = ?
+            WHERE id = 1
+            """,
+            (policy.mode, json.dumps(list(policy.allowlist)), json.dumps(list(policy.denylist))),
+        )
+        self._bump_configuration_version()
+        self._connection.commit()
+
+    def get_website_policy(self) -> WebsitePolicy:
+        """Return the saved global website policy."""
+
+        row = self._connection.execute(
+            """
+            SELECT website_mode, website_allowed_json, website_blocked_json
+            FROM network_policies WHERE id = 1
+            """
+        ).fetchone()
+        if row is None:
+            raise StorageError("network policy is missing")
+        try:
+            return WebsitePolicy(
+                mode=row["website_mode"],
+                allowed_domains=tuple(json.loads(row["website_allowed_json"])),
+                blocked_domains=tuple(json.loads(row["website_blocked_json"])),
+            )
+        except (TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
+            raise StorageError("stored website policy is malformed") from error
+
+    def save_website_policy(self, policy: WebsitePolicy) -> None:
+        """Persist global website rules."""
+
+        self._connection.execute(
+            """
+            UPDATE network_policies
+            SET website_mode = ?, website_allowed_json = ?, website_blocked_json = ?
+            WHERE id = 1
+            """,
+            (
+                policy.mode,
+                json.dumps(list(policy.allowed_domains)),
+                json.dumps(list(policy.blocked_domains)),
+            ),
+        )
+        self._bump_configuration_version()
+        self._connection.commit()
 
     def save_domain_observations(
         self,
@@ -371,6 +589,7 @@ class ConfigRepository:
                 upload=_deserialize_impairment(row["upload_json"]),
                 download=_deserialize_impairment(row["download_json"]),
                 random_seed=row["random_seed"],
+                **_deserialize_profile_settings(row["settings_json"]),
             )
         except (KeyError, TypeError, ValidationError) as error:
             raise StorageError("stored profile is malformed") from error
@@ -383,6 +602,25 @@ class ConfigRepository:
                 name=row["name"],
                 ipv4_address=row["ipv4_address"],
                 profile_id=row["profile_id"],
+                mac_address=row["mac_address"],
             )
         except (KeyError, TypeError, ValidationError) as error:
             raise StorageError("stored device is malformed") from error
+
+    @staticmethod
+    def _schedule_from_row(row: sqlite3.Row) -> Schedule:
+        try:
+            days = json.loads(row["days_json"])
+            if not isinstance(days, list):
+                raise ValueError("schedule days must be a list")
+            return Schedule(
+                id=row["id"],
+                device_id=row["device_id"],
+                profile_id=row["profile_id"],
+                days_of_week=tuple(days),
+                start_minute=row["start_minute"],
+                end_minute=row["end_minute"],
+                enabled=bool(row["enabled"]),
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
+            raise StorageError("stored schedule is malformed") from error

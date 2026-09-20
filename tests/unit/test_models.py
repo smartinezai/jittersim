@@ -5,9 +5,13 @@ from jittersim.config.models import (
     Device,
     DomainObservation,
     Impairment,
+    MacPolicy,
     Profile,
+    Randomness,
     RuntimeState,
+    Schedule,
     ValidationError,
+    WebsitePolicy,
 )
 
 
@@ -70,6 +74,25 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(profile.id, "terrible-wifi")
         self.assertEqual(profile.random_seed, 42)
 
+    def test_accepts_reroll_outage_and_website_settings(self) -> None:
+        profile = Profile(
+            id="variable",
+            name="Variable",
+            upload=Impairment(
+                delay_ms=200,
+                delay_randomness=Randomness(variation_percent=30, enabled_probability=90),
+            ),
+            reroll_interval_seconds=300,
+            reroll_interval_randomness=Randomness(variation_percent=20),
+            outage_probability=10,
+            outage_duration_seconds=60,
+            website_mode="allow_only",
+            website_domains=("Chat.OpenAI.com.", "youtube.com"),
+        )
+
+        self.assertEqual(profile.upload.delay_randomness.variation_percent, 30)
+        self.assertEqual(profile.website_domains, ("chat.openai.com", "youtube.com"))
+
     def test_rejects_invalid_identifiers(self) -> None:
         for identifier in ("Terrible Wi-Fi", "", "contains spaces"):
             with self.subTest(identifier=identifier):
@@ -87,6 +110,17 @@ class DeviceTests(unittest.TestCase):
         )
 
         self.assertEqual(device.ipv4_address, IPv4Address("192.168.50.10"))
+
+    def test_normalizes_a_device_mac_address(self) -> None:
+        device = Device(
+            id="alice-laptop",
+            name="Alice's laptop",
+            ipv4_address="192.168.50.10",
+            profile_id="normal",
+            mac_address="AA-BB-CC-DD-EE-FF",
+        )
+
+        self.assertEqual(device.mac_address, "aa:bb:cc:dd:ee:ff")
 
     def test_rejects_non_private_addresses(self) -> None:
         for address in ("8.8.8.8", "127.0.0.1", "169.254.10.20"):
@@ -139,6 +173,37 @@ class DomainObservationTests(unittest.TestCase):
                         first_seen=values.get("first_seen", 10),
                         last_seen=values.get("last_seen", 20),
                     )
+
+
+class PolicyAndScheduleTests(unittest.TestCase):
+    def test_requires_an_allowlist_entry_when_allowlist_mode_is_enabled(self) -> None:
+        with self.assertRaises(ValidationError):
+            MacPolicy(mode="allowlist")
+
+    def test_normalizes_policy_lists_and_supports_overnight_schedule(self) -> None:
+        policy = MacPolicy(
+            mode="denylist",
+            allowlist=("AA:BB:CC:DD:EE:FF",),
+            denylist=("11-22-33-44-55-66",),
+        )
+        website_policy = WebsitePolicy(
+            mode="allow_only",
+            allowed_domains=("Example.COM",),
+            blocked_domains=("Ads.Example.com.",),
+        )
+        schedule = Schedule(
+            id="late-night",
+            device_id="alice",
+            profile_id="terrible-wifi",
+            days_of_week=(0, 2, 2),
+            start_minute=1_380,
+            end_minute=60,
+        )
+
+        self.assertEqual(policy.allowlist, ("aa:bb:cc:dd:ee:ff",))
+        self.assertEqual(policy.denylist, ("11:22:33:44:55:66",))
+        self.assertEqual(website_policy.blocked_domains, ("ads.example.com",))
+        self.assertEqual(schedule.days_of_week, (0, 2))
 
 class RuntimeStateTests(unittest.TestCase):
     def test_accepts_known_observed_states(self) -> None:
