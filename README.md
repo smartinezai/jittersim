@@ -1,104 +1,74 @@
 # JitterSim
 
-JitterSim is a Raspberry Pi tool for testing how apps behave on an unreliable
-internet connection. The Pi connects to your normal router by Ethernet. It
-creates a separate test Wi-Fi network where you can try slower speeds, delays,
-packet loss and short outages.
+JitterSim is a Raspberry Pi tool for testing apps on an unreliable internet
+connection. The Pi connects to your Vodafone router by Ethernet then creates a
+separate Wi-Fi network for test devices.
 
-Use JitterSim only on equipment and networks that you own or are allowed to
-test. It is a private lab tool, not a replacement for a home router.
+Use it only on equipment and networks that you own or are allowed to test. It
+is a private lab tool, not a replacement for a home router.
 
-## What works now
+## What works
 
-- A web dashboard for saving profiles and assigning them to devices.
-- Profiles with delay, delay variation, packet loss and speed limits.
-- A list of devices currently connected to the test Wi-Fi network.
-- One-click profile assignment for a connected device.
-- Apply and reset buttons with a clear status message.
-- A separate protected service that performs network changes with limited commands.
-- A traffic discovery scan that shows internet names such as `amazon.com`
-  requested by each test device.
+- Profiles for delay, jitter, packet loss, speed limits and packet changes.
+- Per-device profile assignment from the dashboard.
+- Multiple daily schedules with overnight time ranges.
+- Seeded randomness for values, feature enablement, rerolls and short outages.
+- MAC address allowlists and denylists.
+- Global blocked websites and profile-specific allow-only website lists.
+- Connected-device discovery and short DNS traffic summaries.
+- Buttons that add observed domains to a profile or the global block list.
+- A protected helper service with Apply and Reset controls.
+- Local Pi test Wi-Fi name and password changes from the dashboard.
 
-Traffic discovery is a review tool. It stores short local summaries of these
-names and how often they were requested. It does not prove that a person
-opened a page. Apps often contact services in the background. Privacy tools
-such as encrypted name lookups or a VPN can hide the names.
+The dashboard shows the current mode, connected devices, schedules, access
+rules and the last network action near the top of the page.
+
+Traffic discovery stores local summaries of DNS names and query counts. It does
+not prove that someone opened a page. A VPN, encrypted DNS or direct IP access
+can hide or bypass these observations and website rules. Website rules cover
+IPv4 destinations only.
 
 ## Network layout
 
 ```text
-Normal router ── Ethernet ──> Raspberry Pi
-                              │
-                              ├── JitterSim test Wi-Fi
-                              └── JitterSim dashboard
+Vodafone router ── Ethernet ──> Raspberry Pi
+                                  │
+                                  ├── JitterSim test Wi-Fi
+                                  └── JitterSim dashboard
 ```
 
-Only devices connected through the Pi are affected. A device that stays on the
-normal router Wi-Fi bypasses JitterSim.
+Only devices on the JitterSim test Wi-Fi are affected. Devices that stay on the
+router Wi-Fi bypass JitterSim. The first version uses IPv4. IPv6 traffic is not
+handled.
 
-The current setup uses the common IPv4 address format and an isolated test
-network. IPv6 traffic is not handled by the first version.
+## Dashboard modes
 
-## Dashboard
+- **Configuration only** saves settings and builds plans without changing live
+  traffic.
+- **Hardware mode** uses the Pi helper to apply the saved plan.
 
-The dashboard lets you:
-
-1. Create a profile such as `bad-wifi`.
-2. Set the delay, delay variation, packet loss and speed limits.
-3. Assign the profile to a saved device or a device shown as connected.
-4. Apply the configuration.
-5. Use Reset network to remove JitterSim's network rules.
-
-The dashboard runs in two modes:
-
-- **Configuration mode** saves settings but does not change network traffic.
-- **Hardware mode** uses the Raspberry Pi helper to apply the settings.
+The Vodafone TG3442DE Wi-Fi switch is still a manual router action. JitterSim
+can change its own test access point but does not read or store router
+credentials. See the [Pi deployment guide](deploy/raspberry-pi/README.md).
 
 ## Run locally
 
-Local mode is safe for development. It stores settings and builds the network
-plan without changing the computer's own network.
+Local mode is safe for development:
 
 ```bash
 export JITTERSIM_ADMIN_TOKEN='use-a-long-local-token'
 PYTHONPATH=src python3 -m jittersim.api --database ./jittersim.db
 ```
 
-Open <http://127.0.0.1:8080/> in a browser.
-
-Run the tests with:
+Open <http://127.0.0.1:8080/>. Run the tests with:
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -p 'test*.py'
 ```
 
-## Raspberry Pi setup
-
-The Pi installer and its service files are in
-[`deploy/raspberry-pi/`](deploy/raspberry-pi/README.md). The installer creates
-the local credentials on the Pi and installs the dashboard, helper, test
-Wi-Fi and internet-sharing services.
-
-The Pi should use Ethernet for its connection to the normal router. The test
-devices should connect to the JitterSim Wi-Fi network instead.
-
-## Not implemented yet
-
-These ideas are planned but are not part of the current release:
-
-- schedules with several active time ranges;
-- random changes to delay, loss, speed and outage timing;
-- website and service allowlists or denylists;
-- device hardware-address (MAC address) allowlists and denylists;
-- automatic suggestions for services based on longer traffic history;
-- automatic control of the Vodafone TG3442DE router's Wi-Fi.
-
-The router's Wi-Fi can be disabled manually while the Pi remains connected by
-Ethernet. JitterSim does not copy or retrieve the router's password.
-
 ## Project layout
 
-- `src/jittersim/` — dashboard, profiles, plan building and network helper
+- `src/jittersim/` — dashboard, profiles, schedules and network helper
 - `deploy/raspberry-pi/` — Pi services and installation files
-- `tests/` — unit and integration tests
-- [`ROADMAP.md`](ROADMAP.md) — longer-term plans
+- `tests/` — automated checks
+- [`ROADMAP.md`](ROADMAP.md) — future work and known limits

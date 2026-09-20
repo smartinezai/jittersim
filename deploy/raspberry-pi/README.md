@@ -39,6 +39,10 @@ The installer creates a virtual environment, installs the package, writes the
 systemd units and enables the management firewall. It preserves existing
 credential files so an update does not silently invalidate access.
 
+After an update, the dashboard supports schedules, MAC rules, website rules,
+traffic observations and randomized profile changes. The helper applies these
+rules on the Pi and reset pauses scheduled changes before removing them.
+
 Read the credentials only on the Pi:
 
 ```sh
@@ -59,3 +63,14 @@ http://jittersim.local:8080
 From a device connected to `JitterSim-Test`, the dashboard and SSH ports must
 not be reachable. The device should still receive internet access through the
 Pi gateway.
+
+## Vodafone router note
+
+For a Vodafone TG3442DE, the router Wi-Fi must be turned off manually in the
+router web interface if the goal is to make the Pi test network the only Wi-Fi
+network in use. JitterSim does not log in to the router, copy its password or
+change its Wi-Fi settings.
+
+The dashboard can change the Pi's own test SSID and password. This does not
+change the upstream router and the new test password is not stored in the
+JitterSim database.

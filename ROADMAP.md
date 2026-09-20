@@ -86,6 +86,8 @@ Goal: persist configuration without requiring a cloud service.
 
 - [x] Add SQLite storage.
 - [x] Store devices, profiles and assignments.
+- [x] Store schedules, MAC rules and website rules.
+- [x] Store optional device MAC addresses.
 - [ ] Store desired state separately from observed state.
 - [ ] Add configuration versioning.
 - [ ] Add import and export of non-secret JSON configuration.
@@ -109,6 +111,10 @@ Goal: control the emulator from a Mac without a screen or keyboard attached to t
 - [x] Add apply and reset actions.
 - [x] Add a simple dashboard served by the Pi.
 - [x] Show desired state, observed state and last apply result.
+- [x] Show connected devices with one-click profile assignment.
+- [x] Edit schedules, MAC rules and website rules from the dashboard.
+- [x] Add observed domains to a profile or the global block list.
+- [x] Keep Apply and Reset feedback in a sticky action area.
 - [ ] Add an event log.
 - [ ] Keep the dashboard exempt from impairment.
 
@@ -127,12 +133,14 @@ Suggested commits:
 Goal: create realistic changing conditions without making tests irreproducible.
 
 - [ ] Define normal, degraded and offline states.
-- [ ] Add fixed-duration outages.
-- [ ] Add repeating schedules.
-- [ ] Add seeded random choices.
+- [x] Add fixed-duration outages.
+- [x] Add repeating schedules.
+- [x] Add seeded random choices.
+- [x] Reroll values and feature enablement at separate intervals.
+- [x] Vary reroll timing and outage timing.
 - [ ] Add burst loss and correlated impairment presets.
 - [ ] Ensure only one scheduler owns transitions.
-- [ ] Stop schedules cleanly during reset and shutdown.
+- [x] Stop schedules cleanly during reset and shutdown.
 
 Suggested commits:
 
@@ -147,10 +155,10 @@ Suggested commits:
 
 Goal: run the system headlessly on the Pi while preserving a reliable recovery path.
 
-- [ ] Document Raspberry Pi OS setup.
-- [ ] Add systemd units for the dashboard and helper.
-- [ ] Add a configuration file for management and test interfaces.
-- [ ] Add interface safety checks at startup.
+- [x] Document Raspberry Pi OS setup.
+- [x] Add systemd units for the dashboard and helper.
+- [x] Add a configuration file for management and test interfaces.
+- [x] Add interface safety checks at startup.
 - [ ] Add a boot-time cleanup or reconciliation step.
 - [ ] Document DHCP, NAT and the test Wi-Fi network.
 - [ ] Add an SSH reset procedure.
@@ -196,6 +204,10 @@ These should remain outside the first class-project scope:
 - Unbounded traffic logging
 - Modifying networks that are not explicitly configured as the test network
 
+The Vodafone TG3442DE Wi-Fi switch remains a manual action because the project
+does not have a supported router control API. JitterSim also does not inspect
+HTTPS pages or promise complete website blocking.
+
 ## Definition of done for the class project
 
 The project is ready for presentation when it can:
@@ -204,7 +216,7 @@ The project is ready for presentation when it can:
 2. Serve a private dashboard reachable from the Mac.
 3. Assign separate profiles to at least two test devices.
 4. Demonstrate delay, jitter, packet loss and bandwidth throttling.
-5. Demonstrate a scheduled outage.
+5. Demonstrate a scheduled outage and a seeded reroll.
 6. Leave an unaffected management path.
 7. Restore normal traffic with one reset action.
 8. Explain what is measured at packet level versus application level.
