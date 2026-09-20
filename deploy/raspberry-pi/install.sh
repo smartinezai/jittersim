@@ -80,8 +80,9 @@ install -m 0644 -o root -g root \
 
 systemctl daemon-reload
 systemctl enable --now jittersim-control-firewall.service
-systemctl enable --now jittersim-helper.service
-systemctl enable --now jittersim-dashboard.service
+systemctl enable jittersim-helper.service jittersim-dashboard.service
+systemctl restart jittersim-helper.service
+systemctl restart jittersim-dashboard.service
 
 echo "JitterSim installed. Read the generated credentials locally from:" >&2
 echo "  $CONFIG_DIR/control.env" >&2

@@ -307,7 +307,7 @@ class ControlServer(HTTPServer):
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {
                     "status": "ok",
-                    "mode": "configuration-only",
+                    "mode": "hardware" if self.helper_client is not None else "configuration-only",
                     "helper_configured": self.helper_client is not None,
                 }
             )

@@ -64,6 +64,22 @@ class ControlServerTests(unittest.TestCase):
             },
         )
 
+    def test_health_response_identifies_hardware_mode_when_helper_is_configured(self) -> None:
+        self.server.helper_client = FakeHelper()
+
+        status, content_type, body = self.server.response_for("/api/health")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, "application/json")
+        self.assertEqual(
+            json.loads(body),
+            {
+                "helper_configured": True,
+                "mode": "hardware",
+                "status": "ok",
+            },
+        )
+
     def test_configuration_endpoints_serialize_validated_values(self) -> None:
         status, _, body = self.server.response_for("/api/profiles")
         profiles = json.loads(body)["profiles"]
