@@ -25,6 +25,9 @@ class FakeHelper:
         self.reset_called = True
         return {"ok": True, "action": "reset", "commands_run": 3}
 
+    def configure_access_point(self, *, ssid, password):
+        return {"ok": True, "action": "configure-ap", "commands_run": 3}
+
     def connected_devices(self):
         return [
             {
@@ -113,6 +116,14 @@ class ControlServerTests(unittest.TestCase):
         devices = json.loads(body)["devices"]
         self.assertEqual(status, 200)
         self.assertEqual(devices[0]["ipv4_address"], "192.168.50.10")
+
+    def test_router_endpoint_describes_the_safe_manual_boundary(self) -> None:
+        status, _, body = self.server.response_for("/api/router")
+
+        self.assertEqual(status, 200)
+        router = json.loads(body)
+        self.assertEqual(router["model"], "Vodafone TG3442DE")
+        self.assertFalse(router["automatic_wifi_control"])
 
     def test_connected_devices_endpoint_reports_unavailable_without_helper(self) -> None:
         status, content_type, body = self.server.response_for("/api/connected-devices")
@@ -308,6 +319,18 @@ class ControlServerTests(unittest.TestCase):
         policies = json.loads(body)
         self.assertEqual(policies["mac"]["mode"], "denylist")
         self.assertEqual(policies["websites"]["blocked_domains"], ["ads.example.com"])
+
+    def test_updates_the_local_test_access_point_without_returning_password(self) -> None:
+        self.server.helper_client = FakeHelper()
+
+        status, _, body = self.server.write_response_for(
+            "/api/access-point",
+            {"ssid": "JitterSim-Test", "password": "test-password-123"},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["result"]["action"], "configure-ap")
+        self.assertNotIn("test-password-123", body.decode("utf-8"))
 
     def test_can_promote_an_observed_domain_to_a_profile_or_global_block(self) -> None:
         status, _, body = self.server.write_response_for(

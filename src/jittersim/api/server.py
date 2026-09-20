@@ -41,6 +41,7 @@ WRITE_PATHS = frozenset(
         "/api/devices",
         "/api/schedules",
         "/api/policies",
+        "/api/access-point",
         "/api/connected-devices/apply-profile",
         "/api/observations/scan",
         "/api/observations/add-to-profile",
@@ -221,6 +222,15 @@ DASHBOARD_HTML = """<!doctype html>
     .observation-domain-list { display: grid; gap: 0.35rem; margin: 0.65rem 0 0; padding: 0; list-style: none; }
     .observation-domain { display: flex; justify-content: space-between; gap: 1rem; padding: 0.45rem 0.55rem; border-radius: 0.35rem; background: #102238; color: #c7d7eb; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
     .observation-domain-count { color: #8de2bc; white-space: nowrap; }
+    .policy-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+    .policy-grid > div { min-width: 0; }
+    .policy-note, .form-note { margin: 0.7rem 0 0; color: #91a8c1; font-size: 0.82rem; }
+    textarea { min-height: 5rem; resize: vertical; }
+    details { margin-top: 1rem; border-top: 1px solid #2b435f; padding-top: 0.8rem; }
+    summary { cursor: pointer; color: #a8c7e8; font-weight: 700; }
+    .schedule-list { display: grid; gap: 0.5rem; margin-top: 1rem; }
+    .schedule-row { display: flex; justify-content: space-between; gap: 1rem; padding: 0.6rem 0.7rem; border-radius: 0.45rem; background: #0d1b2d; color: #c7d7eb; font-size: 0.82rem; }
+    .schedule-row span:last-child { color: #91a8c1; text-align: right; }
     .fields {
       display: grid;
       gap: 0.75rem;
@@ -247,6 +257,7 @@ DASHBOARD_HTML = """<!doctype html>
       .action-buttons { flex-wrap: wrap; }
       .action-buttons button { margin-top: 0.9rem; }
       .content-grid, .data-grid { grid-template-columns: 1fr; }
+      .policy-grid { grid-template-columns: 1fr; }
       .connected-row { grid-template-columns: auto minmax(0, 1fr) auto; }
       .connected-controls { grid-column: 1 / -1; }
       .connected-controls select { flex: 1; }
@@ -349,6 +360,126 @@ DASHBOARD_HTML = """<!doctype html>
             <input id="download-bandwidth" type="number" min="1">
           </label>
         </div>
+        <details>
+          <summary>Randomness, outages and website access</summary>
+          <p class="form-note">Values are rerolled at each interval. Enable chance controls whether a feature is active for that interval.</p>
+          <div class="fields">
+            <label>Reroll every (seconds)
+              <input id="profile-reroll" type="number" min="0" value="0">
+            </label>
+            <label>Interval variation (%)
+              <input id="profile-reroll-variation" type="number" min="0" max="100" value="0">
+            </label>
+            <label>Outage chance (%)
+              <input id="profile-outage-probability" type="number" min="0" max="100" value="0">
+            </label>
+            <label>Outage length (seconds)
+              <input id="profile-outage-duration" type="number" min="0" value="0">
+            </label>
+            <label>Outage check interval (seconds)
+              <input id="profile-outage-interval" type="number" min="0" value="0">
+            </label>
+            <label>Random seed (optional)
+              <input id="profile-seed" type="number" min="0">
+            </label>
+            <label>Website mode
+              <select id="profile-website-mode">
+                <option value="unrestricted">Unrestricted</option>
+                <option value="allow_only">Allow only listed domains</option>
+              </select>
+            </label>
+            <label>Profile domains (comma separated)
+              <input id="profile-website-domains" placeholder="linkedin.com, chat.openai.com">
+            </label>
+            <label>Website entry chance (%)
+              <input id="profile-website-enabled" type="number" min="0" max="100" value="100">
+            </label>
+          </div>
+          <h3>Upload variation</h3>
+          <div class="fields">
+            <label>Value variation (%)
+              <input id="upload-random-variation" type="number" min="0" max="100" value="0">
+            </label>
+            <label>Feature enabled chance (%)
+              <input id="upload-random-enabled" type="number" min="0" max="100" value="100">
+            </label>
+            <label>Reorder (%) <input id="upload-reorder" type="number" min="0" max="100" value="0"></label>
+            <label>Duplicate (%) <input id="upload-duplicate" type="number" min="0" max="100" value="0"></label>
+            <label>Corrupt (%) <input id="upload-corrupt" type="number" min="0" max="100" value="0"></label>
+          </div>
+          <div class="fields">
+            <label>Delay variation / chance (%)
+              <input id="upload-delay-random-variation" type="number" min="0" max="100" value="0">
+              <input id="upload-delay-random-enabled" type="number" min="0" max="100" value="100">
+            </label>
+            <label>Jitter variation / chance (%)
+              <input id="upload-jitter-random-variation" type="number" min="0" max="100" value="0">
+              <input id="upload-jitter-random-enabled" type="number" min="0" max="100" value="100">
+            </label>
+            <label>Loss variation / chance (%)
+              <input id="upload-loss-random-variation" type="number" min="0" max="100" value="0">
+              <input id="upload-loss-random-enabled" type="number" min="0" max="100" value="100">
+            </label>
+            <label>Bandwidth variation / chance (%)
+              <input id="upload-bandwidth-random-variation" type="number" min="0" max="100" value="0">
+              <input id="upload-bandwidth-random-enabled" type="number" min="0" max="100" value="100">
+            </label>
+            <label>Reorder variation / chance (%)
+              <input id="upload-reorder-random-variation" type="number" min="0" max="100" value="0">
+              <input id="upload-reorder-random-enabled" type="number" min="0" max="100" value="100">
+            </label>
+            <label>Duplicate variation / chance (%)
+              <input id="upload-duplicate-random-variation" type="number" min="0" max="100" value="0">
+              <input id="upload-duplicate-random-enabled" type="number" min="0" max="100" value="100">
+            </label>
+            <label>Corrupt variation / chance (%)
+              <input id="upload-corrupt-random-variation" type="number" min="0" max="100" value="0">
+              <input id="upload-corrupt-random-enabled" type="number" min="0" max="100" value="100">
+            </label>
+          </div>
+          <h3>Download variation</h3>
+          <div class="fields">
+            <label>Value variation (%)
+              <input id="download-random-variation" type="number" min="0" max="100" value="0">
+            </label>
+            <label>Feature enabled chance (%)
+              <input id="download-random-enabled" type="number" min="0" max="100" value="100">
+            </label>
+            <label>Reorder (%) <input id="download-reorder" type="number" min="0" max="100" value="0"></label>
+            <label>Duplicate (%) <input id="download-duplicate" type="number" min="0" max="100" value="0"></label>
+            <label>Corrupt (%) <input id="download-corrupt" type="number" min="0" max="100" value="0"></label>
+          </div>
+          <div class="fields">
+            <label>Delay variation / chance (%)
+              <input id="download-delay-random-variation" type="number" min="0" max="100" value="0">
+              <input id="download-delay-random-enabled" type="number" min="0" max="100" value="100">
+            </label>
+            <label>Jitter variation / chance (%)
+              <input id="download-jitter-random-variation" type="number" min="0" max="100" value="0">
+              <input id="download-jitter-random-enabled" type="number" min="0" max="100" value="100">
+            </label>
+            <label>Loss variation / chance (%)
+              <input id="download-loss-random-variation" type="number" min="0" max="100" value="0">
+              <input id="download-loss-random-enabled" type="number" min="0" max="100" value="100">
+            </label>
+            <label>Bandwidth variation / chance (%)
+              <input id="download-bandwidth-random-variation" type="number" min="0" max="100" value="0">
+              <input id="download-bandwidth-random-enabled" type="number" min="0" max="100" value="100">
+            </label>
+            <label>Reorder variation / chance (%)
+              <input id="download-reorder-random-variation" type="number" min="0" max="100" value="0">
+              <input id="download-reorder-random-enabled" type="number" min="0" max="100" value="100">
+            </label>
+            <label>Duplicate variation / chance (%)
+              <input id="download-duplicate-random-variation" type="number" min="0" max="100" value="0">
+              <input id="download-duplicate-random-enabled" type="number" min="0" max="100" value="100">
+            </label>
+            <label>Corrupt variation / chance (%)
+              <input id="download-corrupt-random-variation" type="number" min="0" max="100" value="0">
+              <input id="download-corrupt-random-enabled" type="number" min="0" max="100" value="100">
+            </label>
+          </div>
+        </details>
         <button type="submit">Save profile</button>
       </form>
     </section>
@@ -362,11 +493,96 @@ DASHBOARD_HTML = """<!doctype html>
             <input id="device-ip" required placeholder="192.168.50.10">
           </label>
           <label>Profile ID <input id="device-profile" required></label>
+          <label>MAC address (optional)
+            <input id="device-mac" placeholder="aa:bb:cc:dd:ee:ff">
+          </label>
         </div>
         <button type="submit">Save device</button>
       </form>
     </section>
   </div>
+  <div class="content-grid">
+    <section class="card">
+      <h2>Network access rules</h2>
+      <form id="policy-form">
+        <div class="policy-grid">
+          <div>
+            <h3>MAC filtering</h3>
+            <div class="fields">
+              <label>Mode
+                <select id="mac-mode">
+                  <option value="disabled">Disabled</option>
+                  <option value="allowlist">Allow only these MAC addresses</option>
+                  <option value="denylist">Block these MAC addresses</option>
+                </select>
+              </label>
+              <label>Allowlist (comma separated)
+                <textarea id="mac-allowlist" placeholder="aa:bb:cc:dd:ee:ff"></textarea>
+              </label>
+              <label>Denylist (comma separated)
+                <textarea id="mac-denylist" placeholder="11:22:33:44:55:66"></textarea>
+              </label>
+            </div>
+          </div>
+          <div>
+            <h3>Website filtering</h3>
+            <div class="fields">
+              <label>Global mode
+                <select id="website-mode">
+                  <option value="unrestricted">Unrestricted</option>
+                  <option value="allow_only">Allow only these domains</option>
+                </select>
+              </label>
+              <label>Global allowed domains (comma separated)
+                <textarea id="website-allowlist" placeholder="example.com"></textarea>
+              </label>
+              <label>Global blocked domains (comma separated)
+                <textarea id="website-blocklist" placeholder="ads.example.com"></textarea>
+              </label>
+            </div>
+          </div>
+        </div>
+        <p class="policy-note">Website rules use resolved IPv4 destinations and are best effort. VPNs, encrypted DNS and direct IP connections can bypass them.</p>
+        <button id="save-policies" type="submit">Save access rules</button>
+      </form>
+    </section>
+    <section class="card">
+      <h2>Schedule a profile</h2>
+      <form id="schedule-form">
+        <div class="fields">
+          <label>Schedule ID <input id="schedule-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}"></label>
+          <label>Device
+            <select id="schedule-device" required></select>
+          </label>
+          <label>Profile
+            <select id="schedule-profile" required></select>
+          </label>
+          <label>Days (0=Mon, 6=Sun)
+            <input id="schedule-days" value="0,1,2,3,4" required>
+          </label>
+          <label>Start <input id="schedule-start" type="time" value="09:00" required></label>
+          <label>End <input id="schedule-end" type="time" value="17:00" required></label>
+        </div>
+        <button type="submit">Save schedule</button>
+      </form>
+      <div id="schedule-list" class="schedule-list" aria-live="polite">No schedules yet.</div>
+    </section>
+  </div>
+  <section class="card">
+    <h2>Pi test Wi-Fi</h2>
+    <form id="access-point-form">
+      <div class="fields">
+        <label>Test network name (SSID)
+          <input id="access-point-ssid" value="JitterSim-Test" maxlength="32" required>
+        </label>
+        <label>Test network password
+          <input id="access-point-password" type="password" minlength="8" maxlength="63" autocomplete="new-password" required>
+        </label>
+      </div>
+      <p class="policy-note">These values configure the Pi only. For a Vodafone TG3442DE, turn off the router Wi-Fi manually in its web interface before using the same name and password here. The password is sent to the helper and is not saved in the dashboard database.</p>
+      <button type="submit">Update Pi access point</button>
+    </form>
+  </section>
   <div class="data-grid">
     <section class="card">
       <div class="section-heading"><h2>Profiles</h2><p>Saved network behavior</p></div>
@@ -384,6 +600,10 @@ DASHBOARD_HTML = """<!doctype html>
       <div class="section-heading"><h2>Runtime state</h2><p>Last helper result</p></div>
       <pre id="state">Loading...</pre>
     </section>
+    <section class="card">
+      <div class="section-heading"><h2>Access rules</h2><p>Saved MAC and website policy</p></div>
+      <pre id="policies">Loading...</pre>
+    </section>
   </div>
   <script>
     const element = (id) => document.getElementById(id);
@@ -393,13 +613,48 @@ DASHBOARD_HTML = """<!doctype html>
       return value === "" ? null : Number(value);
     }
 
+    function commaList(id) {
+      return element(id).value.split(",").map((value) => value.trim()).filter(Boolean);
+    }
+
+    function randomness(prefix) {
+      return {
+        variation_percent: Number(element(prefix + "-random-variation").value),
+        enabled_probability: Number(element(prefix + "-random-enabled").value)
+      };
+    }
+
+    function featureRandomness(prefix, feature) {
+      const variation = element(prefix + "-" + feature + "-random-variation");
+      const enabled = element(prefix + "-" + feature + "-random-enabled");
+      return variation && enabled ? {
+        variation_percent: Number(variation.value),
+        enabled_probability: Number(enabled.value)
+      } : randomness(prefix);
+    }
+
     function impairment(prefix) {
       return {
         delay_ms: Number(element(prefix + "-delay").value),
         jitter_ms: Number(element(prefix + "-jitter").value),
         loss_percent: Number(element(prefix + "-loss").value),
-        bandwidth_kbit: optionalNumber(prefix + "-bandwidth")
+        bandwidth_kbit: optionalNumber(prefix + "-bandwidth"),
+        reorder_percent: Number(element(prefix + "-reorder").value),
+        duplicate_percent: Number(element(prefix + "-duplicate").value),
+        corrupt_percent: Number(element(prefix + "-corrupt").value),
+        delay_randomness: featureRandomness(prefix, "delay"),
+        jitter_randomness: featureRandomness(prefix, "jitter"),
+        loss_randomness: featureRandomness(prefix, "loss"),
+        bandwidth_randomness: featureRandomness(prefix, "bandwidth"),
+        reorder_randomness: featureRandomness(prefix, "reorder"),
+        duplicate_randomness: featureRandomness(prefix, "duplicate"),
+        corrupt_randomness: featureRandomness(prefix, "corrupt")
       };
+    }
+
+    function timeToMinute(id) {
+      const parts = element(id).value.split(":").map(Number);
+      return parts[0] * 60 + parts[1];
     }
 
     async function request(path, method, body) {
@@ -541,6 +796,7 @@ DASHBOARD_HTML = """<!doctype html>
       try {
         await request("/api/connected-devices/apply-profile", "POST", {
           ipv4_address: device.ipv4_address,
+          mac_address: device.mac_address,
           profile_id: profileId
         });
         await refresh();
@@ -595,6 +851,19 @@ DASHBOARD_HTML = """<!doctype html>
         const address = document.createElement("p");
         address.textContent = device.ipv4_address;
         heading.append(title, address);
+        const targetProfile = document.createElement("select");
+        targetProfile.setAttribute("aria-label", "Profile for discovered domains");
+        profiles.forEach((profile) => {
+          const option = document.createElement("option");
+          option.value = profile.id;
+          option.textContent = "Add to " + profile.name;
+          option.selected = profile.id === device.assigned_profile_id;
+          targetProfile.appendChild(option);
+        });
+        const targetRow = document.createElement("div");
+        targetRow.className = "observation-actions";
+        targetRow.append(targetProfile);
+        card.append(heading, targetRow);
         const list = document.createElement("ul");
         list.className = "observation-domain-list";
         (device.domains || []).forEach((observation) => {
@@ -605,12 +874,56 @@ DASHBOARD_HTML = """<!doctype html>
           const queryCount = document.createElement("span");
           queryCount.className = "observation-domain-count";
           queryCount.textContent = observation.query_count + " queries";
-          item.append(domain, queryCount);
+          const profileButton = document.createElement("button");
+          profileButton.type = "button";
+          profileButton.textContent = "Add to profile";
+          profileButton.disabled = profiles.length === 0;
+          profileButton.addEventListener("click", () => addDomainToProfile(
+            observation.domain,
+            targetProfile.value,
+            profileButton
+          ));
+          const blockButton = document.createElement("button");
+          blockButton.type = "button";
+          blockButton.textContent = "Block globally";
+          blockButton.addEventListener("click", () => addGlobalBlock(
+            observation.domain,
+            blockButton
+          ));
+          item.append(domain, queryCount, profileButton, blockButton);
           list.appendChild(item);
         });
-        card.append(heading, list);
+        card.append(list);
         container.appendChild(card);
       });
+    }
+
+    async function addDomainToProfile(domain, profileId, button) {
+      if (!profileId) return;
+      button.disabled = true;
+      try {
+        await request("/api/observations/add-to-profile", "POST", {
+          domain: domain,
+          profile_id: profileId
+        });
+        await refresh();
+        showMessage("Added " + domain + " to the profile.", "success");
+      } catch (error) {
+        showMessage(error.message, "error");
+        button.disabled = false;
+      }
+    }
+
+    async function addGlobalBlock(domain, button) {
+      button.disabled = true;
+      try {
+        await request("/api/observations/add-global-block", "POST", { domain: domain });
+        await refresh();
+        showMessage("Added " + domain + " to the global block list.", "success");
+      } catch (error) {
+        showMessage(error.message, "error");
+        button.disabled = false;
+      }
     }
 
     async function loadObservations() {
@@ -652,6 +965,65 @@ DASHBOARD_HTML = """<!doctype html>
       const data = await request("/api/profiles", "GET");
       profiles = data.profiles;
       element("profiles").textContent = JSON.stringify(profiles, null, 2);
+      const profileSelect = element("schedule-profile");
+      profileSelect.replaceChildren();
+      profiles.forEach((profile) => {
+        const option = document.createElement("option");
+        option.value = profile.id;
+        option.textContent = profile.name + " (" + profile.id + ")";
+        profileSelect.appendChild(option);
+      });
+    }
+
+    async function loadDevicesForSchedule() {
+      const data = await request("/api/devices", "GET");
+      const deviceSelect = element("schedule-device");
+      deviceSelect.replaceChildren();
+      data.devices.forEach((device) => {
+        const option = document.createElement("option");
+        option.value = device.id;
+        option.textContent = device.name + " (" + device.ipv4_address + ")";
+        deviceSelect.appendChild(option);
+      });
+    }
+
+    function renderSchedules(schedules) {
+      const container = element("schedule-list");
+      container.replaceChildren();
+      if (!schedules.length) {
+        container.textContent = "No schedules yet.";
+        return;
+      }
+      schedules.forEach((schedule) => {
+        const row = document.createElement("div");
+        row.className = "schedule-row";
+        const name = document.createElement("span");
+        name.textContent = schedule.id + " · " + schedule.device_id + " → " + schedule.profile_id;
+        const time = document.createElement("span");
+        time.textContent = schedule.days_of_week.join(",") + " · " +
+          String(Math.floor(schedule.start_minute / 60)).padStart(2, "0") + ":" +
+          String(schedule.start_minute % 60).padStart(2, "0") + "–" +
+          String(Math.floor(schedule.end_minute / 60)).padStart(2, "0") + ":" +
+          String(schedule.end_minute % 60).padStart(2, "0");
+        row.append(name, time);
+        container.appendChild(row);
+      });
+    }
+
+    async function loadSchedules() {
+      const data = await request("/api/schedules", "GET");
+      renderSchedules(data.schedules);
+    }
+
+    async function loadPolicies() {
+      const data = await request("/api/policies", "GET");
+      element("policies").textContent = JSON.stringify(data, null, 2);
+      element("mac-mode").value = data.mac.mode;
+      element("mac-allowlist").value = data.mac.allowlist.join(", ");
+      element("mac-denylist").value = data.mac.denylist.join(", ");
+      element("website-mode").value = data.websites.mode;
+      element("website-allowlist").value = data.websites.allowed_domains.join(", ");
+      element("website-blocklist").value = data.websites.blocked_domains.join(", ");
     }
 
     async function loadState() {
@@ -663,10 +1035,13 @@ DASHBOARD_HTML = """<!doctype html>
     async function refresh() {
       await loadProfiles();
       await loadHealth();
-      await Promise.all([
+        await Promise.all([
         show("/api/devices", "devices", "devices"),
         show("/api/plan", "plan", "plan"),
         loadState(),
+        loadDevicesForSchedule(),
+        loadSchedules(),
+        loadPolicies(),
         loadConnectedDevices(),
         loadObservations()
       ]);
@@ -717,7 +1092,24 @@ DASHBOARD_HTML = """<!doctype html>
           id: element("profile-id").value,
           name: element("profile-name").value,
           upload: impairment("upload"),
-          download: impairment("download")
+          download: impairment("download"),
+          random_seed: optionalNumber("profile-seed"),
+          reroll_interval_seconds: Number(element("profile-reroll").value),
+          reroll_interval_randomness: {
+            variation_percent: Number(element("profile-reroll-variation").value),
+            enabled_probability: 100
+          },
+          outage_probability: Number(element("profile-outage-probability").value),
+          outage_duration_seconds: Number(element("profile-outage-duration").value),
+          outage_interval_seconds: Number(element("profile-outage-interval").value),
+          outage_duration_randomness: { variation_percent: 0, enabled_probability: 100 },
+          outage_interval_randomness: { variation_percent: 0, enabled_probability: 100 },
+          website_mode: element("profile-website-mode").value,
+          website_domains: commaList("profile-website-domains"),
+          website_randomness: {
+            variation_percent: 0,
+            enabled_probability: Number(element("profile-website-enabled").value)
+          }
         });
         showMessage("Profile saved.", "success");
         await refresh();
@@ -733,10 +1125,66 @@ DASHBOARD_HTML = """<!doctype html>
           id: element("device-id").value,
           name: element("device-name").value,
           ipv4_address: element("device-ip").value,
-          profile_id: element("device-profile").value
+          profile_id: element("device-profile").value,
+          mac_address: element("device-mac").value.trim() || null
         });
         showMessage("Device saved.", "success");
         await refresh();
+      } catch (error) {
+        showMessage(error.message, "error");
+      }
+    });
+
+    element("policy-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        await request("/api/policies", "POST", {
+          mac: {
+            mode: element("mac-mode").value,
+            allowlist: commaList("mac-allowlist"),
+            denylist: commaList("mac-denylist")
+          },
+          websites: {
+            mode: element("website-mode").value,
+            allowed_domains: commaList("website-allowlist"),
+            blocked_domains: commaList("website-blocklist")
+          }
+        });
+        showMessage("Access rules saved. Apply the configuration to enforce them.", "success");
+        await refresh();
+      } catch (error) {
+        showMessage(error.message, "error");
+      }
+    });
+
+    element("schedule-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        await request("/api/schedules", "POST", {
+          id: element("schedule-id").value,
+          device_id: element("schedule-device").value,
+          profile_id: element("schedule-profile").value,
+          days_of_week: commaList("schedule-days").map(Number),
+          start_minute: timeToMinute("schedule-start"),
+          end_minute: timeToMinute("schedule-end"),
+          enabled: true
+        });
+        showMessage("Schedule saved. Apply the configuration to start it.", "success");
+        await refresh();
+      } catch (error) {
+        showMessage(error.message, "error");
+      }
+    });
+
+    element("access-point-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        await request("/api/access-point", "POST", {
+          ssid: element("access-point-ssid").value,
+          password: element("access-point-password").value
+        });
+        element("access-point-password").value = "";
+        showMessage("Pi access point updated. Reconnect the test device if its Wi-Fi name changed.", "success");
       } catch (error) {
         showMessage(error.message, "error");
       }
@@ -855,6 +1303,17 @@ class ControlServer(HTTPServer):
         if path == "/api/policies":
             return HTTPStatus.OK, "application/json", _json_bytes(
                 _policies_payload(self.repository)
+            )
+        if path == "/api/router":
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {
+                    "model": "Vodafone TG3442DE",
+                    "automatic_wifi_control": False,
+                    "message": (
+                        "The router Wi-Fi must be turned off manually in the router web interface. "
+                        "JitterSim can configure its own test access point but does not store or read router credentials."
+                    ),
+                }
             )
         if path == "/api/connected-devices":
             if self.helper_client is None:
@@ -998,6 +1457,27 @@ class ControlServer(HTTPServer):
             return HTTPStatus.OK, "application/json", _json_bytes(
                 _policies_payload(self.repository)
             )
+
+        if path == "/api/access-point":
+            if self.helper_client is None:
+                return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                    {"error": "network helper is not configured"}
+                )
+            try:
+                result = self.helper_client.configure_access_point(
+                    ssid=payload["ssid"],
+                    password=payload["password"],
+                )
+            except (KeyError, TypeError, ValueError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid access point settings"}
+                )
+            except HelperClientError:
+                LOGGER.exception("access point configuration failed")
+                return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
+                    {"error": "access point configuration failed"}
+                )
+            return HTTPStatus.OK, "application/json", _json_bytes({"result": result})
 
         if path == "/api/connected-devices/apply-profile":
             return self._apply_profile_to_connected_device(payload)
