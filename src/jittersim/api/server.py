@@ -1,7 +1,7 @@
 """Small HTTP server for the jittersim control plane."""
 
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 import hmac
 import logging
@@ -13,11 +13,23 @@ import time
 from typing import Any, Dict, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
 
-from jittersim.config.models import Device, DomainObservation, Impairment, Profile, RuntimeState
+from jittersim.config.models import (
+    Device,
+    DomainObservation,
+    Impairment,
+    MacPolicy,
+    Profile,
+    Randomness,
+    RuntimeState,
+    Schedule,
+    WebsitePolicy,
+    normalize_domain,
+)
 from jittersim.config.storage import ConfigRepository, DatabasePath, StorageError
 from jittersim.engine.compiler import PlanError
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.service import compile_stored_plan
+from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.networking.helper import HelperClient, HelperClientError
 
 
@@ -27,8 +39,12 @@ WRITE_PATHS = frozenset(
     (
         "/api/profiles",
         "/api/devices",
+        "/api/schedules",
+        "/api/policies",
         "/api/connected-devices/apply-profile",
         "/api/observations/scan",
+        "/api/observations/add-to-profile",
+        "/api/observations/add-global-block",
         "/api/apply",
         "/api/reset",
     )
@@ -744,13 +760,7 @@ def _impairment_payload(impairment: Impairment) -> Dict[str, Any]:
 
 
 def _profile_payload(profile: Profile) -> Dict[str, Any]:
-    return {
-        "id": profile.id,
-        "name": profile.name,
-        "upload": _impairment_payload(profile.upload),
-        "download": _impairment_payload(profile.download),
-        "random_seed": profile.random_seed,
-    }
+    return asdict(profile)
 
 
 def _device_payload(device: Device) -> Dict[str, Any]:
@@ -759,6 +769,20 @@ def _device_payload(device: Device) -> Dict[str, Any]:
         "name": device.name,
         "ipv4_address": str(device.ipv4_address),
         "profile_id": device.profile_id,
+        "mac_address": device.mac_address,
+    }
+
+
+def _schedule_payload(schedule: Schedule) -> Dict[str, Any]:
+    return asdict(schedule)
+
+
+def _policies_payload(repository: ConfigRepository) -> Dict[str, Any]:
+    mac_policy = repository.get_mac_policy()
+    website_policy = repository.get_website_policy()
+    return {
+        "mac": asdict(mac_policy),
+        "websites": asdict(website_policy),
     }
 
 
@@ -796,12 +820,14 @@ class ControlServer(HTTPServer):
         repository: ConfigRepository,
         admin_token: Optional[str] = None,
         helper_client: Optional[HelperClient] = None,
+        scheduler: Optional[RuntimeScheduler] = None,
     ) -> None:
         if admin_token == "":
             raise ValueError("admin_token must not be empty")
         self.repository = repository
         self.admin_token = admin_token
         self.helper_client = helper_client
+        self.scheduler = scheduler
         super().__init__(server_address, ControlRequestHandler)
 
     def response_for(self, path: str) -> Tuple[int, str, bytes]:
@@ -823,6 +849,13 @@ class ControlServer(HTTPServer):
         if path == "/api/devices":
             devices = [_device_payload(device) for device in self.repository.list_devices()]
             return HTTPStatus.OK, "application/json", _json_bytes({"devices": devices})
+        if path == "/api/schedules":
+            schedules = [_schedule_payload(schedule) for schedule in self.repository.list_schedules()]
+            return HTTPStatus.OK, "application/json", _json_bytes({"schedules": schedules})
+        if path == "/api/policies":
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                _policies_payload(self.repository)
+            )
         if path == "/api/connected-devices":
             if self.helper_client is None:
                 return HTTPStatus.OK, "application/json", _json_bytes(
@@ -941,11 +974,42 @@ class ControlServer(HTTPServer):
                 {"device": _device_payload(device)}
             )
 
+        if path == "/api/schedules":
+            try:
+                schedule = _schedule_from_payload(payload)
+            except (KeyError, TypeError, ValueError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid schedule configuration"}
+                )
+            self.repository.save_schedule(schedule)
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {"schedule": _schedule_payload(schedule)}
+            )
+
+        if path == "/api/policies":
+            try:
+                mac_policy, website_policy = _policies_from_payload(payload)
+            except (KeyError, TypeError, ValueError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid network policy configuration"}
+                )
+            self.repository.save_mac_policy(mac_policy)
+            self.repository.save_website_policy(website_policy)
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                _policies_payload(self.repository)
+            )
+
         if path == "/api/connected-devices/apply-profile":
             return self._apply_profile_to_connected_device(payload)
 
         if path == "/api/observations/scan":
             return self._scan_dns_observations()
+
+        if path == "/api/observations/add-to-profile":
+            return self._add_observation_to_profile(payload)
+
+        if path == "/api/observations/add-global-block":
+            return self._add_observation_to_global_block(payload)
 
         if path == "/api/apply":
             return self._apply_configuration()
@@ -990,6 +1054,48 @@ class ControlServer(HTTPServer):
                     for observation in observations
                 ],
             }
+        )
+
+    def _add_observation_to_profile(
+        self, payload: Dict[str, Any]
+    ) -> Tuple[int, str, bytes]:
+        try:
+            profile_id = payload["profile_id"]
+            domain = normalize_domain(payload["domain"])
+            profile = self.repository.get_profile(profile_id)
+            if profile is None:
+                raise ValueError("profile does not exist")
+            updated = replace(
+                profile,
+                website_mode="allow_only",
+                website_domains=tuple(dict.fromkeys(profile.website_domains + (domain,))),
+            )
+            self.repository.save_profile(updated)
+        except (KeyError, TypeError, ValueError, StorageError):
+            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                {"error": "could not add domain to profile"}
+            )
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {"profile": _profile_payload(updated)}
+        )
+
+    def _add_observation_to_global_block(
+        self, payload: Dict[str, Any]
+    ) -> Tuple[int, str, bytes]:
+        try:
+            domain = normalize_domain(payload["domain"])
+            policy = self.repository.get_website_policy()
+            updated = replace(
+                policy,
+                blocked_domains=tuple(dict.fromkeys(policy.blocked_domains + (domain,))),
+            )
+            self.repository.save_website_policy(updated)
+        except (KeyError, TypeError, ValueError, StorageError):
+            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                {"error": "could not add domain to global block list"}
+            )
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {"policies": _policies_payload(self.repository)}
         )
 
     def _apply_profile_to_connected_device(
@@ -1047,6 +1153,8 @@ class ControlServer(HTTPServer):
             last_result="success",
             last_error=None,
         )
+        if self.scheduler is not None:
+            self.scheduler.activate(applied_payload=plan_to_payload(plan))
         return HTTPStatus.OK, "application/json", _json_bytes(
             {"result": result, "state": _runtime_state_payload(state)}
         )
@@ -1056,6 +1164,8 @@ class ControlServer(HTTPServer):
             return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
                 {"error": "network helper is not configured"}
             )
+        if self.scheduler is not None:
+            self.scheduler.pause()
         self.repository.update_runtime_state(
             observed_state="resetting",
             last_action="reset",
@@ -1218,7 +1328,28 @@ def _impairment_from_payload(payload: Any) -> Impairment:
         return Impairment()
     if not isinstance(payload, dict):
         raise ValueError("impairment must be an object")
-    return Impairment(**payload)
+    impairment_data = dict(payload)
+    for field_name in (
+        "delay_randomness",
+        "jitter_randomness",
+        "loss_randomness",
+        "bandwidth_randomness",
+        "reorder_randomness",
+        "duplicate_randomness",
+        "corrupt_randomness",
+    ):
+        randomness_data = impairment_data.get(field_name)
+        if isinstance(randomness_data, dict):
+            impairment_data[field_name] = Randomness(**randomness_data)
+    return Impairment(**impairment_data)
+
+
+def _randomness_from_payload(payload: Any) -> Randomness:
+    if payload is None:
+        return Randomness()
+    if not isinstance(payload, dict):
+        raise ValueError("randomness must be an object")
+    return Randomness(**payload)
 
 
 def _profile_from_payload(payload: Dict[str, Any]) -> Profile:
@@ -1228,6 +1359,22 @@ def _profile_from_payload(payload: Dict[str, Any]) -> Profile:
         upload=_impairment_from_payload(payload.get("upload")),
         download=_impairment_from_payload(payload.get("download")),
         random_seed=payload.get("random_seed"),
+        reroll_interval_seconds=payload.get("reroll_interval_seconds", 0),
+        reroll_interval_randomness=_randomness_from_payload(
+            payload.get("reroll_interval_randomness")
+        ),
+        outage_probability=payload.get("outage_probability", 0),
+        outage_duration_seconds=payload.get("outage_duration_seconds", 0),
+        outage_duration_randomness=_randomness_from_payload(
+            payload.get("outage_duration_randomness")
+        ),
+        outage_interval_seconds=payload.get("outage_interval_seconds", 0),
+        outage_interval_randomness=_randomness_from_payload(
+            payload.get("outage_interval_randomness")
+        ),
+        website_mode=payload.get("website_mode", "unrestricted"),
+        website_domains=tuple(payload.get("website_domains", ())),
+        website_randomness=_randomness_from_payload(payload.get("website_randomness")),
     )
 
 
@@ -1237,6 +1384,38 @@ def _device_from_payload(payload: Dict[str, Any]) -> Device:
         name=payload["name"],
         ipv4_address=payload["ipv4_address"],
         profile_id=payload["profile_id"],
+        mac_address=payload.get("mac_address"),
+    )
+
+
+def _schedule_from_payload(payload: Dict[str, Any]) -> Schedule:
+    return Schedule(
+        id=payload["id"],
+        device_id=payload["device_id"],
+        profile_id=payload["profile_id"],
+        days_of_week=tuple(payload["days_of_week"]),
+        start_minute=payload["start_minute"],
+        end_minute=payload["end_minute"],
+        enabled=payload.get("enabled", True),
+    )
+
+
+def _policies_from_payload(payload: Dict[str, Any]) -> Tuple[MacPolicy, WebsitePolicy]:
+    mac_payload = payload.get("mac", {})
+    website_payload = payload.get("websites", {})
+    if not isinstance(mac_payload, dict) or not isinstance(website_payload, dict):
+        raise ValueError("policy sections must be objects")
+    return (
+        MacPolicy(
+            mode=mac_payload.get("mode", "disabled"),
+            allowlist=tuple(mac_payload.get("allowlist", ())),
+            denylist=tuple(mac_payload.get("denylist", ())),
+        ),
+        WebsitePolicy(
+            mode=website_payload.get("mode", "unrestricted"),
+            allowed_domains=tuple(website_payload.get("allowed_domains", ())),
+            blocked_domains=tuple(website_payload.get("blocked_domains", ())),
+        ),
     )
 
 
@@ -1247,6 +1426,7 @@ def _connected_device_from_payload(
 
     ipv4_address = payload["ipv4_address"]
     profile_id = payload["profile_id"]
+    mac_address = payload.get("mac_address")
     if repository.get_profile(profile_id) is None:
         raise ValueError("profile does not exist")
 
@@ -1263,6 +1443,7 @@ def _connected_device_from_payload(
             name=existing_by_address.name,
             ipv4_address=address_only.ipv4_address,
             profile_id=profile_id,
+            mac_address=mac_address or existing_by_address.mac_address,
         )
 
     generated_id = "client-" + str(address_only.ipv4_address).replace(".", "-")
@@ -1274,6 +1455,7 @@ def _connected_device_from_payload(
         name=f"Client {address_only.ipv4_address}",
         ipv4_address=address_only.ipv4_address,
         profile_id=profile_id,
+        mac_address=mac_address,
     )
 
 
@@ -1310,17 +1492,24 @@ def run_server(
         )
     )
     with ConfigRepository(database_path) as repository:
+        scheduler = RuntimeScheduler(
+            database_path=database_path,
+            helper_client=helper_client,
+        )
         with ControlServer(
             (host, port),
             repository,
             admin_token=admin_token,
             helper_client=helper_client,
+            scheduler=scheduler,
         ) as server:
             LOGGER.info("jittersim dashboard listening on %s:%s", host, port)
             try:
                 server.serve_forever()
             except KeyboardInterrupt:
                 pass
+            finally:
+                scheduler.stop()
 
 
 def _build_parser() -> argparse.ArgumentParser:

@@ -159,6 +159,7 @@ class ControlServerTests(unittest.TestCase):
             "/api/connected-devices/apply-profile",
             {
                 "ipv4_address": "192.168.50.178",
+                "mac_address": "dc:1e:d5:3e:97:4c",
                 "profile_id": "slow",
             },
         )
@@ -168,6 +169,7 @@ class ControlServerTests(unittest.TestCase):
         response = json.loads(body)
         self.assertEqual(response["device"]["id"], "client-192-168-50-178")
         self.assertEqual(response["device"]["profile_id"], "slow")
+        self.assertEqual(response["device"]["mac_address"], "dc:1e:d5:3e:97:4c")
         self.assertEqual(
             self.repository.get_device_by_ipv4_address("192.168.50.178").profile_id,
             "slow",
@@ -271,6 +273,62 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["device"]["id"], "bob")
         self.assertIsNotNone(self.repository.get_device("bob"))
+
+    def test_persists_schedules_and_network_policies(self) -> None:
+        status, _, body = self.server.write_response_for(
+            "/api/schedules",
+            {
+                "id": "work-hours",
+                "device_id": "alice",
+                "profile_id": "slow",
+                "days_of_week": [0, 1, 2, 3, 4],
+                "start_minute": 540,
+                "end_minute": 1020,
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["schedule"]["id"], "work-hours")
+
+        status, _, body = self.server.write_response_for(
+            "/api/policies",
+            {
+                "mac": {
+                    "mode": "denylist",
+                    "allowlist": [],
+                    "denylist": ["aa:bb:cc:dd:ee:ff"],
+                },
+                "websites": {
+                    "mode": "allow_only",
+                    "allowed_domains": ["example.com"],
+                    "blocked_domains": ["ads.example.com"],
+                },
+            },
+        )
+        self.assertEqual(status, 200)
+        policies = json.loads(body)
+        self.assertEqual(policies["mac"]["mode"], "denylist")
+        self.assertEqual(policies["websites"]["blocked_domains"], ["ads.example.com"])
+
+    def test_can_promote_an_observed_domain_to_a_profile_or_global_block(self) -> None:
+        status, _, body = self.server.write_response_for(
+            "/api/observations/add-to-profile",
+            {"profile_id": "slow", "domain": "Chat.OpenAI.com."},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            self.repository.get_profile("slow").website_domains,
+            ("chat.openai.com",),
+        )
+
+        status, _, body = self.server.write_response_for(
+            "/api/observations/add-global-block",
+            {"domain": "Ads.Example.com."},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            self.repository.get_website_policy().blocked_domains,
+            ("ads.example.com",),
+        )
 
     def test_rejects_invalid_profile_writes_before_persistence(self) -> None:
         status, content_type, body = self.server.write_response_for(
