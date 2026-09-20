@@ -22,6 +22,7 @@ def compile_plan(
     mac_policy: MacPolicy = MacPolicy(),
     global_blocked_addresses: Sequence[IPv4Address] = (),
     website_filters: Sequence[WebsiteFilter] = (),
+    blocked_device_addresses: Sequence[IPv4Address] = (),
 ) -> NetworkPlan:
     """Compile device assignments into deterministic marks and directional queues."""
 
@@ -94,4 +95,5 @@ def compile_plan(
         mac_policy=mac_policy,
         global_blocked_addresses=tuple(sorted(set(global_blocked_addresses), key=str)),
         website_filters=tuple(website_filters),
+        blocked_device_addresses=tuple(sorted(set(blocked_device_addresses), key=str)),
     )

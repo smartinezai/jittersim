@@ -51,3 +51,4 @@ class NetworkPlan:
     mac_policy: MacPolicy = MacPolicy()
     global_blocked_addresses: Tuple[IPv4Address, ...] = ()
     website_filters: Tuple[WebsiteFilter, ...] = ()
+    blocked_device_addresses: Tuple[IPv4Address, ...] = ()

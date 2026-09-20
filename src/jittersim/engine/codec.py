@@ -96,6 +96,9 @@ def plan_to_payload(plan: NetworkPlan) -> Dict[str, Any]:
             }
             for website_filter in plan.website_filters
         ],
+        "blocked_device_addresses": [
+            str(address) for address in plan.blocked_device_addresses
+        ],
     }
 
 
@@ -228,6 +231,13 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
                     allowed_addresses=allowed_addresses,
                 )
             )
+        blocked_device_addresses = tuple(
+            IPv4Address(value)
+            for value in _as_list(
+                plan_data.get("blocked_device_addresses", []),
+                "blocked_device_addresses",
+            )
+        )
     except (AddressValueError, KeyError, TypeError, ValueError) as error:
         if isinstance(error, PlanCodecError):
             raise
@@ -239,4 +249,5 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
         mac_policy=mac_policy,
         global_blocked_addresses=blocked_addresses,
         website_filters=tuple(website_filters),
+        blocked_device_addresses=blocked_device_addresses,
     )
