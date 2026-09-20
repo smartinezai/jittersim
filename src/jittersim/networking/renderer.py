@@ -13,6 +13,10 @@ PROJECT_TABLE = "jittersim"
 ROOT_HANDLE = "10:"
 
 
+def _render_set(values: Sequence[object]) -> str:
+    return "{ " + ", ".join(str(value) for value in values) + " }"
+
+
 def _format_impairment_arguments(queue: QueueSpec) -> List[str]:
     impairment = queue.impairment
     arguments = ["netem"]
@@ -41,6 +45,38 @@ def _render_nft_script(plan: NetworkPlan) -> str:
             "{ type filter hook forward priority -150; policy accept; }"
         ),
     ]
+    if plan.mac_policy.denylist:
+        lines.append(
+            f"add rule inet {PROJECT_TABLE} forward iifname \"wlan0\" "
+            f"ether saddr {_render_set(plan.mac_policy.denylist)} drop "
+            "comment \"deny listed test client\""
+        )
+    if plan.mac_policy.mode == "allowlist":
+        lines.append(
+            f"add rule inet {PROJECT_TABLE} forward iifname \"wlan0\" "
+            f"ether saddr != {_render_set(plan.mac_policy.allowlist)} drop "
+            "comment \"allow only listed test clients\""
+        )
+    if plan.global_blocked_addresses:
+        lines.append(
+            f"add rule inet {PROJECT_TABLE} forward iifname \"wlan0\" "
+            f"ip daddr {_render_set(plan.global_blocked_addresses)} drop "
+            "comment \"block global website destinations\""
+        )
+    for website_filter in plan.website_filters:
+        allowed = _render_set(website_filter.allowed_addresses)
+        if website_filter.allowed_addresses:
+            lines.append(
+                f"add rule inet {PROJECT_TABLE} forward iifname \"wlan0\" "
+                f"ip saddr {website_filter.device_ip} ip daddr != {allowed} drop "
+                "comment \"enforce profile website allowlist\""
+            )
+        else:
+            lines.append(
+                f"add rule inet {PROJECT_TABLE} forward iifname \"wlan0\" "
+                f"ip saddr {website_filter.device_ip} drop "
+                "comment \"profile website allowlist has no resolved addresses\""
+            )
     for rule in plan.mark_rules:
         lines.append(
             f"add rule inet {PROJECT_TABLE} forward "

@@ -1,11 +1,19 @@
 """Encode and validate network plans for the control-plane wire format."""
 
+from dataclasses import asdict
+from ipaddress import AddressValueError, IPv4Address
 from typing import Any, Dict, List, Mapping, Set
 
-from jittersim.config.models import Device, Impairment, ValidationError
+from jittersim.config.models import (
+    Device,
+    Impairment,
+    MacPolicy,
+    Randomness,
+    ValidationError,
+)
 
 from .compiler import MAX_DEVICES_PER_PLAN
-from .plan import Direction, MarkRule, NetworkPlan, QueueSpec
+from .plan import Direction, MarkRule, NetworkPlan, QueueSpec, WebsiteFilter
 
 
 class PlanCodecError(ValueError):
@@ -33,6 +41,18 @@ def _as_integer(value: Any, field_name: str) -> int:
 def _impairment_from_payload(value: Any) -> Impairment:
     impairment_data = _as_mapping(value, "impairment")
     try:
+        for field_name in (
+            "delay_randomness",
+            "jitter_randomness",
+            "loss_randomness",
+            "bandwidth_randomness",
+            "reorder_randomness",
+            "duplicate_randomness",
+            "corrupt_randomness",
+        ):
+            randomness_data = impairment_data.get(field_name)
+            if isinstance(randomness_data, dict):
+                impairment_data[field_name] = Randomness(**randomness_data)
         return Impairment(**impairment_data)
     except (TypeError, ValueError) as error:
         raise PlanCodecError("impairment is invalid") from error
@@ -55,17 +75,26 @@ def plan_to_payload(plan: NetworkPlan) -> Dict[str, Any]:
                 "device_id": queue.device_id,
                 "direction": queue.direction.value,
                 "mark": queue.mark,
-                "impairment": {
-                    "delay_ms": queue.impairment.delay_ms,
-                    "jitter_ms": queue.impairment.jitter_ms,
-                    "loss_percent": queue.impairment.loss_percent,
-                    "bandwidth_kbit": queue.impairment.bandwidth_kbit,
-                    "reorder_percent": queue.impairment.reorder_percent,
-                    "duplicate_percent": queue.impairment.duplicate_percent,
-                    "corrupt_percent": queue.impairment.corrupt_percent,
-                },
+                "impairment": asdict(queue.impairment),
             }
             for queue in plan.queues
+        ],
+        "mac_policy": {
+            "mode": plan.mac_policy.mode,
+            "allowlist": list(plan.mac_policy.allowlist),
+            "denylist": list(plan.mac_policy.denylist),
+        },
+        "global_blocked_addresses": [
+            str(address) for address in plan.global_blocked_addresses
+        ],
+        "website_filters": [
+            {
+                "device_ip": str(website_filter.device_ip),
+                "allowed_addresses": [
+                    str(address) for address in website_filter.allowed_addresses
+                ],
+            }
+            for website_filter in plan.website_filters
         ],
     }
 
@@ -153,4 +182,61 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
         raise PlanCodecError("each device must have upload and download queues")
     if len(directions_by_device) != len(marks_by_device):
         raise PlanCodecError("each device must have upload and download queues")
-    return NetworkPlan(mark_rules=tuple(mark_rules), queues=tuple(queues))
+
+    try:
+        mac_policy_data = _as_mapping(plan_data.get("mac_policy", {}), "mac_policy")
+        mac_policy = MacPolicy(
+            mode=mac_policy_data.get("mode", "disabled"),
+            allowlist=tuple(mac_policy_data.get("allowlist", ())),
+            denylist=tuple(mac_policy_data.get("denylist", ())),
+        )
+        blocked_addresses = tuple(
+            IPv4Address(value)
+            for value in _as_list(
+                plan_data.get("global_blocked_addresses", []),
+                "global_blocked_addresses",
+            )
+        )
+        website_filters_data = _as_list(
+            plan_data.get("website_filters", []),
+            "website_filters",
+        )
+        website_filters = []
+        filter_addresses = set()
+        for index, raw_filter in enumerate(website_filters_data):
+            filter_data = _as_mapping(raw_filter, f"website_filters[{index}]")
+            device_ip = IPv4Address(filter_data["device_ip"])
+            allowed_addresses = tuple(
+                IPv4Address(value)
+                for value in _as_list(
+                    filter_data.get("allowed_addresses", []),
+                    f"website_filters[{index}].allowed_addresses",
+                )
+            )
+            if str(device_ip) not in addresses_by_device.values():
+                raise PlanCodecError(
+                    f"website_filters[{index}] references an unknown device"
+                )
+            if device_ip in filter_addresses:
+                raise PlanCodecError(
+                    f"duplicate website filter for device address {device_ip}"
+                )
+            filter_addresses.add(device_ip)
+            website_filters.append(
+                WebsiteFilter(
+                    device_ip=device_ip,
+                    allowed_addresses=allowed_addresses,
+                )
+            )
+    except (AddressValueError, KeyError, TypeError, ValueError) as error:
+        if isinstance(error, PlanCodecError):
+            raise
+        raise PlanCodecError("network policy is invalid") from error
+
+    return NetworkPlan(
+        mark_rules=tuple(mark_rules),
+        queues=tuple(queues),
+        mac_policy=mac_policy,
+        global_blocked_addresses=blocked_addresses,
+        website_filters=tuple(website_filters),
+    )

@@ -1,7 +1,9 @@
 import unittest
+from ipaddress import IPv4Address
 
-from jittersim.config.models import Device, Impairment, Profile
+from jittersim.config.models import Device, Impairment, MacPolicy, Profile
 from jittersim.engine.compiler import compile_plan
+from jittersim.engine.plan import WebsiteFilter
 from jittersim.networking.renderer import render_command_plan, render_reset_commands
 from jittersim.networking.topology import Topology, TopologyError
 
@@ -130,6 +132,29 @@ class RendererTests(unittest.TestCase):
                 ("tc", "qdisc", "del", "dev", "wlan0", "root", "handle", "10:"),
             ],
         )
+
+    def test_renders_mac_and_website_filters_before_marks(self) -> None:
+        plan = compile_plan(
+            devices=(make_device("alice", "192.168.50.10", "normal"),),
+            profiles={"normal": Profile(id="normal", name="Normal")},
+            mac_policy=MacPolicy(mode="denylist", denylist=("aa:bb:cc:dd:ee:ff",)),
+            global_blocked_addresses=(IPv4Address("203.0.113.10"),),
+            website_filters=(
+                WebsiteFilter(
+                    device_ip=IPv4Address("192.168.50.10"),
+                    allowed_addresses=(IPv4Address("203.0.113.20"),),
+                ),
+            ),
+        )
+
+        nft_script = render_command_plan(
+            plan=plan,
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+        )[1].stdin
+
+        self.assertIn("ether saddr { aa:bb:cc:dd:ee:ff } drop", nft_script or "")
+        self.assertIn("ip daddr { 203.0.113.10 } drop", nft_script or "")
+        self.assertIn("ip daddr != { 203.0.113.20 } drop", nft_script or "")
 
 
 if __name__ == "__main__":

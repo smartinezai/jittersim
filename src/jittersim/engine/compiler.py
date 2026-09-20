@@ -1,10 +1,11 @@
 """Compile validated configuration into a deterministic network plan."""
 
+from ipaddress import IPv4Address
 from typing import Mapping, Sequence
 
-from jittersim.config.models import Device, Profile
+from jittersim.config.models import Device, MacPolicy, Profile
 
-from .plan import Direction, MarkRule, NetworkPlan, QueueSpec
+from .plan import Direction, MarkRule, NetworkPlan, QueueSpec, WebsiteFilter
 
 
 class PlanError(ValueError):
@@ -14,7 +15,14 @@ class PlanError(ValueError):
 MAX_DEVICES_PER_PLAN = 15
 
 
-def compile_plan(*, devices: Sequence[Device], profiles: Mapping[str, Profile]) -> NetworkPlan:
+def compile_plan(
+    *,
+    devices: Sequence[Device],
+    profiles: Mapping[str, Profile],
+    mac_policy: MacPolicy = MacPolicy(),
+    global_blocked_addresses: Sequence[IPv4Address] = (),
+    website_filters: Sequence[WebsiteFilter] = (),
+) -> NetworkPlan:
     """Compile device assignments into deterministic marks and directional queues."""
 
     if len(devices) > MAX_DEVICES_PER_PLAN:
@@ -67,4 +75,23 @@ def compile_plan(*, devices: Sequence[Device], profiles: Mapping[str, Profile]) 
             )
         )
 
-    return NetworkPlan(mark_rules=tuple(mark_rules), queues=tuple(queues))
+    device_addresses = set(addresses_by_value)
+    seen_filter_devices = set()
+    for website_filter in website_filters:
+        if website_filter.device_ip not in device_addresses:
+            raise PlanError(
+                f"website filter references unknown device address {website_filter.device_ip}"
+            )
+        if website_filter.device_ip in seen_filter_devices:
+            raise PlanError(
+                f"duplicate website filter for device address {website_filter.device_ip}"
+            )
+        seen_filter_devices.add(website_filter.device_ip)
+
+    return NetworkPlan(
+        mark_rules=tuple(mark_rules),
+        queues=tuple(queues),
+        mac_policy=mac_policy,
+        global_blocked_addresses=tuple(sorted(set(global_blocked_addresses), key=str)),
+        website_filters=tuple(website_filters),
+    )

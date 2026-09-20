@@ -5,7 +5,7 @@ from enum import Enum
 from ipaddress import IPv4Address
 from typing import Tuple
 
-from jittersim.config.models import Impairment
+from jittersim.config.models import Impairment, MacPolicy
 
 
 class Direction(str, Enum):
@@ -35,9 +35,19 @@ class QueueSpec:
 
 
 @dataclass(frozen=True)
+class WebsiteFilter:
+    """Resolved destination addresses allowed for one test client."""
+
+    device_ip: IPv4Address
+    allowed_addresses: Tuple[IPv4Address, ...]
+
+
+@dataclass(frozen=True)
 class NetworkPlan:
     """The complete device-specific plan without executable commands."""
 
     mark_rules: Tuple[MarkRule, ...]
     queues: Tuple[QueueSpec, ...]
-
+    mac_policy: MacPolicy = MacPolicy()
+    global_blocked_addresses: Tuple[IPv4Address, ...] = ()
+    website_filters: Tuple[WebsiteFilter, ...] = ()
