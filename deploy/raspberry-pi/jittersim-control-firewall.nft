@@ -7,4 +7,16 @@ table inet jittersim_control {
         iifname "wlan0" tcp dport 22 counter drop comment "deny SSH from test Wi-Fi"
         iifname "wlan0" tcp dport 8080 counter drop comment "deny dashboard from test Wi-Fi"
     }
+
+    chain forward {
+        type filter hook forward priority -300; policy accept;
+
+        # Test-network clients may use the Pi for public internet access, but
+        # must not reach the router or other private networks through eth0.
+        iifname "wlan0" oifname "eth0" ip daddr {
+            10.0.0.0/8,
+            172.16.0.0/12,
+            192.168.0.0/16
+        } counter drop comment "deny test Wi-Fi access to private upstream networks"
+    }
 }
