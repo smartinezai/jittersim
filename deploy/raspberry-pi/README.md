@@ -14,8 +14,10 @@ The Pi has two network roles:
 The dashboard still listens on the Pi so the operator can reach it from the
 management network. The nftables service blocks SSH and dashboard traffic
 arriving from `wlan0`, so a person who receives the test Wi-Fi password cannot
-use the Pi as an administration endpoint. State-changing API requests also
-require the generated bearer token.
+use the Pi as an administration endpoint. It also blocks IPv4 private-network
+destinations forwarded from `wlan0` to `eth0`, including the Vodafone router's
+web interface. Public internet forwarding remains available. State-changing
+API requests also require the generated bearer token.
 
 Do not expose port 8080 or SSH to the public internet. Keep the Pi's router
 connection on `eth0` and use the dashboard from the management network.
@@ -61,8 +63,10 @@ http://jittersim.local:8080
 ```
 
 From a device connected to `JitterSim-Test`, the dashboard and SSH ports must
-not be reachable. The device should still receive internet access through the
-Pi gateway.
+not be reachable and `192.168.0.1` must not be reachable through the Pi. The
+device should still receive public internet access through the Pi gateway.
+This is an intentional block rather than a password redirect because a
+redirect cannot safely intercept HTTPS or router traffic.
 
 ## Vodafone router note
 

@@ -43,6 +43,10 @@ Only devices on the JitterSim test Wi-Fi are affected. Devices that stay on the
 router Wi-Fi bypass JitterSim. The first version uses IPv4. IPv6 traffic is not
 handled.
 
+Test Wi-Fi clients can use the Pi for public internet access but cannot reach
+the dashboard or private upstream addresses such as the Vodafone router's
+`192.168.0.1`. Dashboard changes also require the administrator token.
+
 ## Dashboard modes
 
 - **Configuration only** saves settings and builds plans without changing live
