@@ -1,7 +1,8 @@
 """Apply and reset operations built on the structured networking boundary."""
 
 from dataclasses import dataclass
-from typing import Optional
+import re
+from typing import Dict, Optional
 
 from jittersim.config.models import ValidationError
 from jittersim.engine.plan import NetworkPlan
@@ -85,6 +86,31 @@ class NetworkApplier:
             )
         )
         return result.stdout
+
+    def uplink_info(self) -> Dict[str, Optional[str]]:
+        """Read the Pi's Ethernet connection name and default gateway."""
+
+        interface = self._topology.uplink_interface
+        connection_result = self._executor.run(
+            Command(
+                executable="nmcli",
+                arguments=("-g", "GENERAL.CONNECTION", "device", "show", interface),
+                purpose=f"inspect the NetworkManager connection on {interface}",
+            )
+        )
+        route_result = self._executor.run(
+            Command(
+                executable="ip",
+                arguments=("-4", "route", "show", "default", "dev", interface),
+                purpose=f"inspect the default gateway on {interface}",
+            )
+        )
+        gateway_match = re.search(r"\bvia\s+(\d{1,3}(?:\.\d{1,3}){3})\b", route_result.stdout)
+        return {
+            "interface": interface,
+            "connection_name": connection_result.stdout.strip() or None,
+            "gateway": gateway_match.group(1) if gateway_match else None,
+        }
 
     def capture_dns_queries(self) -> str:
         """Capture a bounded sample of DNS packets arriving from the test network."""

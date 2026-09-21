@@ -63,6 +63,8 @@ class HelperService:
             return self._handle_reset()
         if action == "clients":
             return self._handle_clients()
+        if action == "uplink-info":
+            return self._handle_uplink_info()
         if action == "observe-dns":
             return self._handle_dns_observation()
         if action == "configure-ap":
@@ -82,6 +84,14 @@ class HelperService:
             "action": "clients",
             "devices": _parse_neighbor_output(output),
         }
+
+    def _handle_uplink_info(self) -> Dict[str, Any]:
+        try:
+            uplink = self._applier.uplink_info()
+        except CommandExecutionError:
+            LOGGER.exception("upstream connection inspection failed")
+            return {"ok": False, "error": "upstream connection inspection failed"}
+        return {"ok": True, "action": "uplink-info", "uplink": uplink}
 
     def _handle_dns_observation(self) -> Dict[str, Any]:
         try:
@@ -240,6 +250,27 @@ class HelperClient:
         ):
             raise HelperClientError("helper returned invalid connected-device data")
         return devices
+
+    def uplink_info(self) -> Dict[str, Optional[str]]:
+        """Return the Pi's Ethernet connection details."""
+
+        response = self._request({"action": "uplink-info"})
+        uplink = response.get("uplink")
+        if not isinstance(uplink, dict):
+            raise HelperClientError("helper returned invalid upstream connection data")
+        interface = uplink.get("interface")
+        connection_name = uplink.get("connection_name")
+        gateway = uplink.get("gateway")
+        if not isinstance(interface, str) or any(
+            value is not None and not isinstance(value, str)
+            for value in (connection_name, gateway)
+        ):
+            raise HelperClientError("helper returned invalid upstream connection data")
+        return {
+            "interface": interface,
+            "connection_name": connection_name,
+            "gateway": gateway,
+        }
 
     def observe_dns_queries(self) -> List[Dict[str, Any]]:
         """Capture one bounded DNS sample from the test interface."""

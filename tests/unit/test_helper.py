@@ -42,6 +42,17 @@ class OutputExecutor(FakeExecutor):
         return CommandResult(return_code=0, stdout=self.output)
 
 
+class UplinkOutputExecutor(FakeExecutor):
+    def run(self, command):
+        self.commands.append(command)
+        if command.executable == "nmcli":
+            return CommandResult(return_code=0, stdout="netplan-eth0\n")
+        return CommandResult(
+            return_code=0,
+            stdout="default via 192.168.0.1 dev eth0 proto dhcp src 192.168.0.17\n",
+        )
+
+
 class HelperServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.executor = FakeExecutor()
@@ -142,6 +153,34 @@ class HelperServiceTests(unittest.TestCase):
             ("ip", "-4", "neigh", "show", "dev", "wlan0"),
         )
 
+    def test_reports_the_pi_ethernet_connection_and_gateway(self) -> None:
+        executor = UplinkOutputExecutor()
+        service = HelperService(
+            NetworkApplier(
+                executor=executor,
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            )
+        )
+
+        response = service.handle_payload({"action": "uplink-info"})
+
+        self.assertEqual(response["action"], "uplink-info")
+        self.assertEqual(
+            response["uplink"],
+            {
+                "interface": "eth0",
+                "connection_name": "netplan-eth0",
+                "gateway": "192.168.0.1",
+            },
+        )
+        self.assertEqual(
+            [command.argv for command in executor.commands],
+            [
+                ("nmcli", "-g", "GENERAL.CONNECTION", "device", "show", "eth0"),
+                ("ip", "-4", "route", "show", "default", "dev", "eth0"),
+            ],
+        )
+
     def test_parses_dns_observations_by_client_and_domain(self) -> None:
         executor = OutputExecutor(
             """
@@ -236,6 +275,10 @@ class UnixHelperServerTests(unittest.TestCase):
                 password="test-password-123",
             )["action"],
             "configure-ap",
+        )
+        self.assertEqual(
+            client.uplink_info(),
+            {"interface": "eth0", "connection_name": None, "gateway": None},
         )
 
     def test_existing_regular_file_is_never_replaced_by_a_socket(self) -> None:
