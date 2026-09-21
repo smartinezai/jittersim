@@ -40,6 +40,13 @@ class FakeHelper:
             }
         ]
 
+    def uplink_info(self):
+        return {
+            "interface": "eth0",
+            "connection_name": "netplan-eth0",
+            "gateway": "192.168.0.1",
+        }
+
     def observe_dns_queries(self):
         return [
             {
@@ -124,6 +131,44 @@ class ControlServerTests(unittest.TestCase):
         router = json.loads(body)
         self.assertEqual(router["model"], "Vodafone TG3442DE")
         self.assertFalse(router["automatic_wifi_control"])
+
+    def test_uplink_endpoint_reports_the_pi_connection_and_manual_router_boundary(self) -> None:
+        self.server.helper_client = FakeHelper()
+
+        status, content_type, body = self.server.response_for("/api/uplink")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, "application/json")
+        self.assertEqual(
+            json.loads(body),
+            {
+                "available": True,
+                "router": {
+                    "model": "Vodafone TG3442DE",
+                    "settings_url": "http://192.168.0.1",
+                    "wifi_control": "manual",
+                },
+                "uplink": {
+                    "connection_name": "netplan-eth0",
+                    "gateway": "192.168.0.1",
+                    "interface": "eth0",
+                },
+            },
+        )
+
+    def test_uplink_endpoint_reports_unavailable_without_helper(self) -> None:
+        status, content_type, body = self.server.response_for("/api/uplink")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, "application/json")
+        self.assertEqual(
+            json.loads(body),
+            {
+                "available": False,
+                "message": "upstream connection information is unavailable in configuration-only mode",
+                "uplink": None,
+            },
+        )
 
     def test_connected_devices_endpoint_reports_unavailable_without_helper(self) -> None:
         status, content_type, body = self.server.response_for("/api/connected-devices")
@@ -228,6 +273,10 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("Reset network", DASHBOARD_HTML)
         self.assertIn("Connected clients", DASHBOARD_HTML)
         self.assertIn("connected-devices", DASHBOARD_HTML)
+        self.assertIn("Upstream router connection", DASHBOARD_HTML)
+        self.assertIn("/api/uplink", DASHBOARD_HTML)
+        self.assertIn("Open router Wi-Fi settings", DASHBOARD_HTML)
+        self.assertIn("Match the Pi test Wi-Fi manually", DASHBOARD_HTML)
         self.assertIn("Apply profile", DASHBOARD_HTML)
         self.assertIn("mode-badge", DASHBOARD_HTML)
         self.assertIn("action-message", DASHBOARD_HTML)

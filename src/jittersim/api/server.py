@@ -213,6 +213,12 @@ DASHBOARD_HTML = """<!doctype html>
     }
     .device-empty { margin: 0; color: #91a8c1; }
     .connected-card { margin-top: 1rem; }
+    .uplink-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.75rem; margin-top: 1rem; }
+    .uplink-value { padding: 0.75rem; border: 1px solid #2b435f; border-radius: 0.6rem; background: #0d1b2d; }
+    .uplink-value strong { display: block; color: #edf5ff; font-size: 0.95rem; overflow-wrap: anywhere; }
+    .uplink-value span { display: block; margin-bottom: 0.2rem; color: #91a8c1; font-size: 0.76rem; }
+    .button-link { display: inline-block; margin-top: 1rem; padding: 0.62rem 0.9rem; border: 1px solid #46627f; border-radius: 0.55rem; background: #1a2d46; color: #edf5ff; font-weight: 700; text-decoration: none; }
+    .button-link:hover { filter: brightness(1.18); }
     .observations-card { margin-top: 1rem; }
     .observation-actions { display: flex; align-items: center; gap: 0.75rem; }
     .observation-actions button { margin-top: 0; white-space: nowrap; }
@@ -321,6 +327,7 @@ DASHBOARD_HTML = """<!doctype html>
       .action-buttons button { margin-top: 0.9rem; }
       .content-grid, .data-grid { grid-template-columns: 1fr; }
       .policy-grid { grid-template-columns: 1fr; }
+      .uplink-grid { grid-template-columns: 1fr; }
       .connected-row { grid-template-columns: auto minmax(0, 1fr) auto; }
       .connected-controls { grid-column: 1 / -1; }
       .connected-controls select { flex: 1; }
@@ -365,6 +372,18 @@ DASHBOARD_HTML = """<!doctype html>
       <span id="connected-count" class="count-badge">Checking...</span>
     </div>
     <div id="connected-devices" class="connected-list" aria-live="polite">Loading...</div>
+  </section>
+  <section class="card uplink-card">
+    <div class="section-heading">
+      <div>
+        <h2>Upstream router connection</h2>
+        <p>What the Pi can see through Ethernet</p>
+      </div>
+      <span id="uplink-state" class="count-badge">Checking...</span>
+    </div>
+    <div id="uplink-details" class="uplink-grid" aria-live="polite">Loading...</div>
+    <p id="uplink-note" class="policy-note">Ethernet does not reveal the Vodafone Wi-Fi name or password. Copy those values manually from the router settings if you want the Pi test Wi-Fi to match.</p>
+    <a id="router-settings-link" class="button-link" href="http://192.168.0.1" target="_blank" rel="noreferrer">Open router Wi-Fi settings</a>
   </section>
   <section class="card observations-card">
     <div class="section-heading">
@@ -675,7 +694,7 @@ DASHBOARD_HTML = """<!doctype html>
     </section>
   </div>
   <section class="card">
-    <h2>Pi test Wi-Fi</h2>
+    <h2>Match the Pi test Wi-Fi manually</h2>
     <form id="access-point-form">
       <div class="fields">
         <label>Test network name (SSID)
@@ -685,8 +704,8 @@ DASHBOARD_HTML = """<!doctype html>
           <input id="access-point-password" type="password" minlength="8" maxlength="63" autocomplete="new-password" required>
         </label>
       </div>
-      <p class="policy-note">These values configure the Pi only. For a Vodafone TG3442DE, turn off the router Wi-Fi manually in its web interface before using the same name and password here. The password is sent to the helper and is not saved in the dashboard database.</p>
-      <button type="submit">Update Pi access point</button>
+      <p class="policy-note">Open the router settings above, copy the Vodafone Wi-Fi name and password into these fields then click this button. These values configure the Pi only. Turn off the router Wi-Fi in the router settings first if you want devices to use the Pi exclusively. The password is sent to the helper and is not saved in the dashboard database.</p>
+      <button type="submit">Use these values on the Pi</button>
     </form>
   </section>
   <div class="data-grid">
@@ -904,6 +923,42 @@ DASHBOARD_HTML = """<!doctype html>
       });
     }
 
+    function renderUplink(data) {
+      const container = element("uplink-details");
+      const state = element("uplink-state");
+      const note = element("uplink-note");
+      const routerLink = element("router-settings-link");
+      container.replaceChildren();
+      if (!data.available || !data.uplink) {
+        state.textContent = "Unavailable";
+        const empty = document.createElement("p");
+        empty.className = "device-empty";
+        empty.textContent = data.message || "Upstream connection information is unavailable.";
+        container.appendChild(empty);
+        note.textContent = "The Pi can only read this information in hardware mode. The Vodafone Wi-Fi name and password still need to be copied manually from the router settings.";
+        return;
+      }
+      state.textContent = "Detected on " + (data.uplink.interface || "Ethernet");
+      [
+        ["Pi interface", data.uplink.interface || "Unknown"],
+        ["Pi Ethernet connection", data.uplink.connection_name || "Unknown"],
+        ["Router gateway", data.uplink.gateway || "Unknown"]
+      ].forEach(([label, value]) => {
+        const item = document.createElement("div");
+        item.className = "uplink-value";
+        const labelElement = document.createElement("span");
+        labelElement.textContent = label;
+        const valueElement = document.createElement("strong");
+        valueElement.textContent = value;
+        item.append(labelElement, valueElement);
+        container.appendChild(item);
+      });
+      if (data.router && data.router.settings_url) {
+        routerLink.href = data.router.settings_url;
+      }
+      note.textContent = "The Ethernet connection name is a Pi-side label, not the Vodafone Wi-Fi name. Ethernet does not provide the router Wi-Fi password, so copy both values manually from the router settings below.";
+    }
+
     async function applyProfileToDevice(device, profileId, button) {
       if (!profileId) {
         showMessage("Choose a profile before applying it.", "error");
@@ -936,6 +991,14 @@ DASHBOARD_HTML = """<!doctype html>
         renderConnectedDevices({ available: false, devices: [], message: error.message });
       } finally {
         connectedDevicesRequestInFlight = false;
+      }
+    }
+
+    async function loadUplink() {
+      try {
+        renderUplink(await request("/api/uplink", "GET"));
+      } catch (error) {
+        renderUplink({ available: false, message: error.message });
       }
     }
 
@@ -1162,6 +1225,7 @@ DASHBOARD_HTML = """<!doctype html>
         loadSchedules(),
         loadPolicies(),
         loadConnectedDevices(),
+        loadUplink(),
         loadObservations()
       ]);
     }
@@ -1437,6 +1501,33 @@ class ControlServer(HTTPServer):
                         "The router Wi-Fi must be turned off manually in the router web interface. "
                         "JitterSim can configure its own test access point but does not store or read router credentials."
                     ),
+                }
+            )
+        if path == "/api/uplink":
+            if self.helper_client is None:
+                return HTTPStatus.OK, "application/json", _json_bytes(
+                    {
+                        "available": False,
+                        "uplink": None,
+                        "message": "upstream connection information is unavailable in configuration-only mode",
+                    }
+                )
+            try:
+                uplink = self.helper_client.uplink_info()
+            except HelperClientError:
+                LOGGER.exception("could not inspect the upstream connection")
+                return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
+                    {"error": "could not inspect the upstream connection"}
+                )
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {
+                    "available": True,
+                    "uplink": uplink,
+                    "router": {
+                        "model": "Vodafone TG3442DE",
+                        "settings_url": "http://192.168.0.1",
+                        "wifi_control": "manual",
+                    },
                 }
             )
         if path == "/api/connected-devices":
