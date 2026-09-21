@@ -22,6 +22,7 @@ from jittersim.config.models import (
     Randomness,
     RuntimeState,
     Schedule,
+    Timer,
     WebsitePolicy,
     normalize_domain,
 )
@@ -40,6 +41,8 @@ WRITE_PATHS = frozenset(
         "/api/profiles",
         "/api/devices",
         "/api/schedules",
+        "/api/timers",
+        "/api/timers/cancel",
         "/api/policies",
         "/api/access-point",
         "/api/connected-devices/apply-profile",
@@ -300,6 +303,13 @@ DASHBOARD_HTML = """<!doctype html>
     .schedule-list { display: grid; gap: 0.5rem; margin-top: 1rem; }
     .schedule-row { display: flex; justify-content: space-between; gap: 1rem; padding: 0.6rem 0.7rem; border-radius: 0.45rem; background: #0d1b2d; color: #c7d7eb; font-size: 0.82rem; }
     .schedule-row span:last-child { color: #91a8c1; text-align: right; }
+    .timer-card { margin-top: 1rem; }
+    .timer-list { display: grid; gap: 0.5rem; margin-top: 1rem; }
+    .timer-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.65rem 0.7rem; border-radius: 0.45rem; background: #0d1b2d; color: #c7d7eb; font-size: 0.82rem; }
+    .timer-details { display: grid; gap: 0.15rem; }
+    .timer-details strong { color: #edf5ff; }
+    .timer-details span { color: #91a8c1; }
+    .timer-row button { margin-top: 0; white-space: nowrap; }
     .fields {
       display: grid;
       gap: 0.75rem;
@@ -335,6 +345,8 @@ DASHBOARD_HTML = """<!doctype html>
       .observation-actions button { width: 100%; }
       .observation-device-heading { display: block; }
       .randomness-inputs { grid-template-columns: 1fr; }
+      .timer-row { display: block; }
+      .timer-row button { width: 100%; margin-top: 0.7rem; }
     }
     @media (prefers-reduced-motion: reduce) {
       button { transition: none; }
@@ -693,6 +705,31 @@ DASHBOARD_HTML = """<!doctype html>
       <div id="schedule-list" class="schedule-list" aria-live="polite">No schedules yet.</div>
     </section>
   </div>
+  <section class="card timer-card">
+    <div class="section-heading">
+      <div>
+        <h2>Run a profile timer</h2>
+        <p>Temporarily use a profile for one device</p>
+      </div>
+      <span id="timer-count" class="count-badge">No active timers</span>
+    </div>
+    <form id="timer-form">
+      <div class="fields">
+        <label>Device
+          <select id="timer-device" required></select>
+        </label>
+        <label>Profile
+          <select id="timer-profile" required></select>
+        </label>
+        <label>Duration (minutes)
+          <input id="timer-duration" type="number" min="1" max="10080" value="10" required>
+        </label>
+      </div>
+      <p class="form-note">The timer starts when saved. It temporarily overrides schedules and the device’s normal profile. The selected profile’s rerolls, outages, website rules and other settings run during the timer then the device returns to its normal profile.</p>
+      <button class="primary" type="submit">Start timer</button>
+    </form>
+    <div id="timer-list" class="timer-list" aria-live="polite">No active timers.</div>
+  </section>
   <section class="card">
     <h2>Match the Pi test Wi-Fi manually</h2>
     <form id="access-point-form">
@@ -1147,25 +1184,29 @@ DASHBOARD_HTML = """<!doctype html>
       const data = await request("/api/profiles", "GET");
       profiles = data.profiles;
       element("profiles").textContent = JSON.stringify(profiles, null, 2);
-      const profileSelect = element("schedule-profile");
-      profileSelect.replaceChildren();
-      profiles.forEach((profile) => {
-        const option = document.createElement("option");
-        option.value = profile.id;
-        option.textContent = profile.name + " (" + profile.id + ")";
-        profileSelect.appendChild(option);
+      ["schedule-profile", "timer-profile"].forEach((selectId) => {
+        const profileSelect = element(selectId);
+        profileSelect.replaceChildren();
+        profiles.forEach((profile) => {
+          const option = document.createElement("option");
+          option.value = profile.id;
+          option.textContent = profile.name + " (" + profile.id + ")";
+          profileSelect.appendChild(option);
+        });
       });
     }
 
     async function loadDevicesForSchedule() {
       const data = await request("/api/devices", "GET");
-      const deviceSelect = element("schedule-device");
-      deviceSelect.replaceChildren();
-      data.devices.forEach((device) => {
-        const option = document.createElement("option");
-        option.value = device.id;
-        option.textContent = device.name + " (" + device.ipv4_address + ")";
-        deviceSelect.appendChild(option);
+      ["schedule-device", "timer-device"].forEach((selectId) => {
+        const deviceSelect = element(selectId);
+        deviceSelect.replaceChildren();
+        data.devices.forEach((device) => {
+          const option = document.createElement("option");
+          option.value = device.id;
+          option.textContent = device.name + " (" + device.ipv4_address + ")";
+          deviceSelect.appendChild(option);
+        });
       });
     }
 
@@ -1197,6 +1238,66 @@ DASHBOARD_HTML = """<!doctype html>
       renderSchedules(data.schedules);
     }
 
+    function formatTimerRemaining(seconds) {
+      const minutes = Math.floor(seconds / 60);
+      const remainingSeconds = seconds % 60;
+      if (minutes === 0) return remainingSeconds + " seconds";
+      if (remainingSeconds === 0) return minutes + " minutes";
+      return minutes + "m " + remainingSeconds + "s";
+    }
+
+    function renderTimers(data) {
+      const container = element("timer-list");
+      const count = element("timer-count");
+      const timers = data.timers || [];
+      container.replaceChildren();
+      count.textContent = timers.length + (timers.length === 1 ? " active timer" : " active timers");
+      if (timers.length === 0) {
+        container.textContent = "No active timers.";
+        return;
+      }
+      timers.forEach((timer) => {
+        const row = document.createElement("div");
+        row.className = "timer-row";
+        const details = document.createElement("div");
+        details.className = "timer-details";
+        const title = document.createElement("strong");
+        title.textContent = timer.device_name + " → " + timer.profile_name;
+        const remaining = document.createElement("span");
+        remaining.textContent = formatTimerRemaining(timer.remaining_seconds) + " remaining";
+        details.append(title, remaining);
+        const cancelButton = document.createElement("button");
+        cancelButton.type = "button";
+        cancelButton.textContent = "Cancel";
+        cancelButton.addEventListener("click", () => cancelTimer(timer.id, cancelButton));
+        row.append(details, cancelButton);
+        container.appendChild(row);
+      });
+    }
+
+    async function loadTimers() {
+      try {
+        renderTimers(await request("/api/timers", "GET"));
+      } catch (error) {
+        renderTimers({ timers: [] });
+      }
+    }
+
+    async function cancelTimer(timerId, button) {
+      button.disabled = true;
+      try {
+        const result = await request("/api/timers/cancel", "POST", { id: timerId });
+        await refresh();
+        showMessage(
+          result.live_applied ? "Timer cancelled and the normal profile is active." : "Timer cancelled.",
+          "success"
+        );
+      } catch (error) {
+        button.disabled = false;
+        showMessage(error.message, "error");
+      }
+    }
+
     async function loadPolicies() {
       const data = await request("/api/policies", "GET");
       element("policies").textContent = JSON.stringify(data, null, 2);
@@ -1223,6 +1324,7 @@ DASHBOARD_HTML = """<!doctype html>
         loadState(),
         loadDevicesForSchedule(),
         loadSchedules(),
+        loadTimers(),
         loadPolicies(),
         loadConnectedDevices(),
         loadUplink(),
@@ -1364,6 +1466,26 @@ DASHBOARD_HTML = """<!doctype html>
       }
     });
 
+    element("timer-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const result = await request("/api/timers", "POST", {
+          device_id: element("timer-device").value,
+          profile_id: element("timer-profile").value,
+          duration_minutes: Number(element("timer-duration").value)
+        });
+        await refresh();
+        showMessage(
+          result.live_applied
+            ? "Timer started and the profile is active now."
+            : "Timer saved. Apply the configuration in hardware mode to start it.",
+          "success"
+        );
+      } catch (error) {
+        showMessage(error.message, "error");
+      }
+    });
+
     element("access-point-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
@@ -1379,6 +1501,7 @@ DASHBOARD_HTML = """<!doctype html>
     });
 
     window.setInterval(loadConnectedDevices, 5000);
+    window.setInterval(loadTimers, 5000);
     window.setInterval(loadObservations, 15000);
 
     refresh().catch((error) => {
@@ -1411,6 +1534,10 @@ def _device_payload(device: Device) -> Dict[str, Any]:
 
 def _schedule_payload(schedule: Schedule) -> Dict[str, Any]:
     return asdict(schedule)
+
+
+def _timer_payload(timer: Timer) -> Dict[str, Any]:
+    return asdict(timer)
 
 
 def _policies_payload(repository: ConfigRepository) -> Dict[str, Any]:
@@ -1488,6 +1615,21 @@ class ControlServer(HTTPServer):
         if path == "/api/schedules":
             schedules = [_schedule_payload(schedule) for schedule in self.repository.list_schedules()]
             return HTTPStatus.OK, "application/json", _json_bytes({"schedules": schedules})
+        if path == "/api/timers":
+            now = int(time.time())
+            timers = []
+            for timer in self.repository.list_active_timers(now=now):
+                device = self.repository.get_device(timer.device_id)
+                profile = self.repository.get_profile(timer.profile_id)
+                timers.append(
+                    {
+                        **_timer_payload(timer),
+                        "device_name": device.name if device is not None else timer.device_id,
+                        "profile_name": profile.name if profile is not None else timer.profile_id,
+                        "remaining_seconds": max(0, timer.expires_at - now),
+                    }
+                )
+            return HTTPStatus.OK, "application/json", _json_bytes({"timers": timers})
         if path == "/api/policies":
             return HTTPStatus.OK, "application/json", _json_bytes(
                 _policies_payload(self.repository)
@@ -1660,6 +1802,55 @@ class ControlServer(HTTPServer):
                 {"schedule": _schedule_payload(schedule)}
             )
 
+        if path == "/api/timers":
+            try:
+                timer = _timer_from_payload(payload)
+                if self.repository.get_device(timer.device_id) is None:
+                    raise ValueError("device does not exist")
+                if self.repository.get_profile(timer.profile_id) is None:
+                    raise ValueError("profile does not exist")
+                self.repository.save_timer(timer)
+            except (KeyError, TypeError, ValueError, StorageError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid timer configuration"}
+                )
+            if self.helper_client is None:
+                return HTTPStatus.OK, "application/json", _json_bytes(
+                    {
+                        "timer": _timer_payload(timer),
+                        "live_applied": False,
+                        "message": "timer saved; apply the configuration in hardware mode to start it",
+                    }
+                )
+            status, content_type, body = self._apply_configuration()
+            response = json.loads(body.decode("utf-8"))
+            response["timer"] = _timer_payload(timer)
+            response["live_applied"] = status == HTTPStatus.OK
+            return status, content_type, _json_bytes(response)
+
+        if path == "/api/timers/cancel":
+            try:
+                timer_id = payload["id"]
+                if not isinstance(timer_id, str) or not timer_id:
+                    raise ValueError("timer id is invalid")
+                if not self.repository.delete_timer(timer_id):
+                    return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                        {"error": "timer does not exist or is already inactive"}
+                    )
+            except (KeyError, TypeError, ValueError, StorageError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid timer cancellation"}
+                )
+            if self.helper_client is None:
+                return HTTPStatus.OK, "application/json", _json_bytes(
+                    {"timer_id": timer_id, "live_applied": False}
+                )
+            status, content_type, body = self._apply_configuration()
+            response = json.loads(body.decode("utf-8"))
+            response["timer_id"] = timer_id
+            response["live_applied"] = status == HTTPStatus.OK
+            return status, content_type, _json_bytes(response)
+
         if path == "/api/policies":
             try:
                 mac_policy, website_policy = _policies_from_payload(payload)
@@ -1818,7 +2009,11 @@ class ControlServer(HTTPServer):
                 {"error": "network helper is not configured"}
             )
         try:
-            plan = compile_stored_plan(repository=self.repository)
+            plan = (
+                self.scheduler.build_plan(repository=self.repository)
+                if self.scheduler is not None
+                else compile_stored_plan(repository=self.repository)
+            )
         except (PlanError, StorageError):
             return HTTPStatus.CONFLICT, "application/json", _json_bytes(
                 {"error": "stored configuration cannot be applied"}
@@ -2092,6 +2287,22 @@ def _schedule_from_payload(payload: Dict[str, Any]) -> Schedule:
         start_minute=payload["start_minute"],
         end_minute=payload["end_minute"],
         enabled=payload.get("enabled", True),
+    )
+
+
+def _timer_from_payload(payload: Dict[str, Any]) -> Timer:
+    duration_minutes = payload["duration_minutes"]
+    if isinstance(duration_minutes, bool) or not isinstance(duration_minutes, int):
+        raise ValueError("duration_minutes must be an integer")
+    if duration_minutes < 1 or duration_minutes > 10_080:
+        raise ValueError("duration_minutes must be between 1 and 10080")
+    started_at = int(time.time())
+    return Timer(
+        id=payload.get("id", f"timer-{time.time_ns()}"),
+        device_id=payload["device_id"],
+        profile_id=payload["profile_id"],
+        started_at=started_at,
+        expires_at=started_at + duration_minutes * 60,
     )
 
 

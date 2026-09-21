@@ -282,6 +282,9 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("action-message", DASHBOARD_HTML)
         self.assertIn("Runtime state", DASHBOARD_HTML)
         self.assertIn("Traffic discovery", DASHBOARD_HTML)
+        self.assertIn("Run a profile timer", DASHBOARD_HTML)
+        self.assertIn("Duration (minutes)", DASHBOARD_HTML)
+        self.assertIn("/api/timers", DASHBOARD_HTML)
         self.assertIn("/api/observations", DASHBOARD_HTML)
         self.assertIn("Scan now", DASHBOARD_HTML)
         self.assertIn('data-day="0"', DASHBOARD_HTML)
@@ -373,6 +376,47 @@ class ControlServerTests(unittest.TestCase):
         policies = json.loads(body)
         self.assertEqual(policies["mac"]["mode"], "denylist")
         self.assertEqual(policies["websites"]["blocked_domains"], ["ads.example.com"])
+
+    def test_starts_and_cancels_a_profile_timer(self) -> None:
+        status, _, body = self.server.write_response_for(
+            "/api/timers",
+            {
+                "id": "ten-minutes",
+                "device_id": "alice",
+                "profile_id": "slow",
+                "duration_minutes": 10,
+            },
+        )
+
+        self.assertEqual(status, 200)
+        timer = json.loads(body)["timer"]
+        self.assertEqual(timer["id"], "ten-minutes")
+        self.assertEqual(timer["expires_at"] - timer["started_at"], 600)
+        self.assertFalse(json.loads(body)["live_applied"])
+
+        status, _, body = self.server.response_for("/api/timers")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["timers"][0]["profile_name"], "Slow")
+
+        status, _, body = self.server.write_response_for(
+            "/api/timers/cancel", {"id": "ten-minutes"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["timer_id"], "ten-minutes")
+        self.assertEqual(json.loads(self.server.response_for("/api/timers")[2]), {"timers": []})
+
+    def test_rejects_timer_duration_outside_the_supported_range(self) -> None:
+        status, _, body = self.server.write_response_for(
+            "/api/timers",
+            {
+                "device_id": "alice",
+                "profile_id": "slow",
+                "duration_minutes": 0,
+            },
+        )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body), {"error": "invalid timer configuration"})
 
     def test_updates_the_local_test_access_point_without_returning_password(self) -> None:
         self.server.helper_client = FakeHelper()
