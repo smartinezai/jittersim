@@ -235,6 +235,11 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("Traffic discovery", DASHBOARD_HTML)
         self.assertIn("/api/observations", DASHBOARD_HTML)
         self.assertIn("Scan now", DASHBOARD_HTML)
+        self.assertIn('data-day="0"', DASHBOARD_HTML)
+        self.assertIn('data-day="6"', DASHBOARD_HTML)
+        self.assertIn("day-toggle", DASHBOARD_HTML)
+        self.assertIn("help-icon", DASHBOARD_HTML)
+        self.assertIn("A 200 ms value with 30% variation", DASHBOARD_HTML)
 
     def test_state_endpoint_reports_desired_version_and_observed_state(self) -> None:
         status, content_type, body = self.server.response_for("/api/state")

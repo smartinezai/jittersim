@@ -162,7 +162,10 @@ DASHBOARD_HTML = """<!doctype html>
       transition: transform 120ms ease, filter 120ms ease, opacity 120ms ease;
     }
     button:hover:not(:disabled) { filter: brightness(1.18); transform: translateY(-1px); }
-    button:focus-visible, input:focus-visible { outline: 2px solid #70b7ff; outline-offset: 2px; }
+    button:focus-visible, input:focus-visible, .help-icon:focus-visible {
+      outline: 2px solid #70b7ff;
+      outline-offset: 2px;
+    }
     button:disabled { cursor: wait; opacity: 0.55; }
     button.primary { border-color: #4c9fe8; background: #2479bd; }
     button.danger { border-color: #a9565d; background: #642b38; }
@@ -228,6 +231,66 @@ DASHBOARD_HTML = """<!doctype html>
     textarea { min-height: 5rem; resize: vertical; }
     details { margin-top: 1rem; border-top: 1px solid #2b435f; padding-top: 0.8rem; }
     summary { cursor: pointer; color: #a8c7e8; font-weight: 700; }
+    .field-label { display: inline-flex; align-items: center; gap: 0.35rem; }
+    .help-icon {
+      position: relative;
+      display: inline-grid;
+      place-items: center;
+      width: 1.05rem;
+      height: 1.05rem;
+      border: 1px solid #6483a4;
+      border-radius: 50%;
+      color: #b9d8f4;
+      font-size: 0.7rem;
+      font-weight: 800;
+      line-height: 1;
+      cursor: help;
+    }
+    .help-icon::after {
+      position: absolute;
+      top: calc(100% + 0.5rem);
+      left: 0;
+      z-index: 20;
+      width: min(22rem, calc(100vw - 3rem));
+      padding: 0.65rem 0.75rem;
+      border: 1px solid #547392;
+      border-radius: 0.45rem;
+      background: #08101c;
+      color: #dcecff;
+      content: attr(data-help);
+      font-size: 0.78rem;
+      font-weight: 400;
+      line-height: 1.4;
+      opacity: 0;
+      pointer-events: none;
+      visibility: hidden;
+      box-shadow: 0 0.6rem 1.2rem rgba(0, 0, 0, 0.35);
+    }
+    .help-icon:hover::after, .help-icon:focus-visible::after {
+      opacity: 1;
+      visibility: visible;
+    }
+    .randomness-fields {
+      display: grid;
+      gap: 0.75rem;
+      grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+    }
+    .randomness-field {
+      display: grid;
+      gap: 0.55rem;
+      padding: 0.75rem;
+      border: 1px solid #2b435f;
+      border-radius: 0.55rem;
+      background: #0d1b2d;
+    }
+    .randomness-title { display: flex; align-items: center; gap: 0.35rem; color: #edf5ff; font-weight: 700; }
+    .randomness-inputs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.55rem; }
+    .randomness-inputs label { color: #91a8c1; font-size: 0.78rem; }
+    .day-field { display: grid; align-content: start; gap: 0.3rem; }
+    .day-picker { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+    .day-toggle { min-width: 2.8rem; margin-top: 0; padding: 0.55rem 0.65rem; }
+    .day-toggle[aria-pressed="true"] { border-color: #4c9fe8; background: #2479bd; }
+    .day-field .form-note { margin-top: 0.15rem; }
     .schedule-list { display: grid; gap: 0.5rem; margin-top: 1rem; }
     .schedule-row { display: flex; justify-content: space-between; gap: 1rem; padding: 0.6rem 0.7rem; border-radius: 0.45rem; background: #0d1b2d; color: #c7d7eb; font-size: 0.82rem; }
     .schedule-row span:last-child { color: #91a8c1; text-align: right; }
@@ -264,6 +327,7 @@ DASHBOARD_HTML = """<!doctype html>
       .observation-actions { margin-top: 0.75rem; }
       .observation-actions button { width: 100%; }
       .observation-device-heading { display: block; }
+      .randomness-inputs { grid-template-columns: 1fr; }
     }
     @media (prefers-reduced-motion: reduce) {
       button { transition: none; }
@@ -362,21 +426,21 @@ DASHBOARD_HTML = """<!doctype html>
         </div>
         <details>
           <summary>Randomness, outages and website access</summary>
-          <p class="form-note">Values are rerolled at each interval. Enable chance controls whether a feature is active for that interval.</p>
+          <p class="form-note">Values are rerolled at each interval. Hover a question mark for an explanation. A 200 ms value with 30% variation can be rerolled anywhere from 140 to 260 ms. Enabled chance controls whether that feature is active for the interval.</p>
           <div class="fields">
-            <label>Reroll every (seconds)
+            <label><span class="field-label">Reroll every (seconds)<span class="help-icon" tabindex="0" role="img" aria-label="Reroll interval help" data-help="The base time between new random values. Set this to 0 to keep the saved values fixed.">?</span></span>
               <input id="profile-reroll" type="number" min="0" value="0">
             </label>
-            <label>Interval variation (%)
+            <label><span class="field-label">Interval variation (%)<span class="help-icon" tabindex="0" role="img" aria-label="Interval variation help" data-help="The reroll interval can move this percentage below or above the base interval. For example, 20% of 5 minutes means 4 to 6 minutes.">?</span></span>
               <input id="profile-reroll-variation" type="number" min="0" max="100" value="0">
             </label>
-            <label>Outage chance (%)
+            <label><span class="field-label">Outage chance (%)<span class="help-icon" tabindex="0" role="img" aria-label="Outage chance help" data-help="The chance that a device is disconnected when the outage check runs.">?</span></span>
               <input id="profile-outage-probability" type="number" min="0" max="100" value="0">
             </label>
-            <label>Outage length (seconds)
+            <label><span class="field-label">Outage length (seconds)<span class="help-icon" tabindex="0" role="img" aria-label="Outage length help" data-help="How long a selected outage lasts before the device is allowed to use the network again.">?</span></span>
               <input id="profile-outage-duration" type="number" min="0" value="0">
             </label>
-            <label>Outage check interval (seconds)
+            <label><span class="field-label">Outage check interval (seconds)<span class="help-icon" tabindex="0" role="img" aria-label="Outage interval help" data-help="How often JitterSim checks whether to start a new outage. Set this to 0 to use the reroll interval.">?</span></span>
               <input id="profile-outage-interval" type="number" min="0" value="0">
             </label>
             <label>Random seed (optional)
@@ -391,93 +455,124 @@ DASHBOARD_HTML = """<!doctype html>
             <label>Profile domains (comma separated)
               <input id="profile-website-domains" placeholder="linkedin.com, chat.openai.com">
             </label>
-            <label>Website entry chance (%)
+            <label><span class="field-label">Website entry chance (%)<span class="help-icon" tabindex="0" role="img" aria-label="Website chance help" data-help="At each profile reroll, this chance controls whether each listed profile domain stays allowed for the next interval.">?</span></span>
               <input id="profile-website-enabled" type="number" min="0" max="100" value="100">
             </label>
           </div>
           <h3>Upload variation</h3>
+          <p class="form-note">Each card controls one feature. Value variation changes the base value. Enabled chance decides whether the feature is used after a reroll.</p>
           <div class="fields">
-            <label>Value variation (%)
-              <input id="upload-random-variation" type="number" min="0" max="100" value="0">
-            </label>
-            <label>Feature enabled chance (%)
-              <input id="upload-random-enabled" type="number" min="0" max="100" value="100">
-            </label>
             <label>Reorder (%) <input id="upload-reorder" type="number" min="0" max="100" value="0"></label>
             <label>Duplicate (%) <input id="upload-duplicate" type="number" min="0" max="100" value="0"></label>
             <label>Corrupt (%) <input id="upload-corrupt" type="number" min="0" max="100" value="0"></label>
           </div>
-          <div class="fields">
-            <label>Delay variation / chance (%)
-              <input id="upload-delay-random-variation" type="number" min="0" max="100" value="0">
-              <input id="upload-delay-random-enabled" type="number" min="0" max="100" value="100">
-            </label>
-            <label>Jitter variation / chance (%)
-              <input id="upload-jitter-random-variation" type="number" min="0" max="100" value="0">
-              <input id="upload-jitter-random-enabled" type="number" min="0" max="100" value="100">
-            </label>
-            <label>Loss variation / chance (%)
-              <input id="upload-loss-random-variation" type="number" min="0" max="100" value="0">
-              <input id="upload-loss-random-enabled" type="number" min="0" max="100" value="100">
-            </label>
-            <label>Bandwidth variation / chance (%)
-              <input id="upload-bandwidth-random-variation" type="number" min="0" max="100" value="0">
-              <input id="upload-bandwidth-random-enabled" type="number" min="0" max="100" value="100">
-            </label>
-            <label>Reorder variation / chance (%)
-              <input id="upload-reorder-random-variation" type="number" min="0" max="100" value="0">
-              <input id="upload-reorder-random-enabled" type="number" min="0" max="100" value="100">
-            </label>
-            <label>Duplicate variation / chance (%)
-              <input id="upload-duplicate-random-variation" type="number" min="0" max="100" value="0">
-              <input id="upload-duplicate-random-enabled" type="number" min="0" max="100" value="100">
-            </label>
-            <label>Corrupt variation / chance (%)
-              <input id="upload-corrupt-random-variation" type="number" min="0" max="100" value="0">
-              <input id="upload-corrupt-random-enabled" type="number" min="0" max="100" value="100">
-            </label>
+          <div class="randomness-fields">
+            <div class="randomness-field">
+              <div class="randomness-title">Delay <span class="help-icon" tabindex="0" role="img" aria-label="Delay randomness help" data-help="Variation changes the base delay up or down. Enabled chance controls whether delay is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="upload-delay-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="upload-delay-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
+            <div class="randomness-field">
+              <div class="randomness-title">Jitter <span class="help-icon" tabindex="0" role="img" aria-label="Jitter randomness help" data-help="Variation changes the base jitter up or down. Enabled chance controls whether jitter is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="upload-jitter-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="upload-jitter-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
+            <div class="randomness-field">
+              <div class="randomness-title">Loss <span class="help-icon" tabindex="0" role="img" aria-label="Loss randomness help" data-help="Variation changes the base packet-loss percentage up or down. Enabled chance controls whether loss is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="upload-loss-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="upload-loss-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
+            <div class="randomness-field">
+              <div class="randomness-title">Bandwidth <span class="help-icon" tabindex="0" role="img" aria-label="Bandwidth randomness help" data-help="Variation changes the base speed limit up or down. Enabled chance controls whether the speed limit is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="upload-bandwidth-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="upload-bandwidth-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
+            <div class="randomness-field">
+              <div class="randomness-title">Reorder <span class="help-icon" tabindex="0" role="img" aria-label="Reorder randomness help" data-help="Variation changes the base packet-reorder percentage up or down. Enabled chance controls whether reorder is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="upload-reorder-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="upload-reorder-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
+            <div class="randomness-field">
+              <div class="randomness-title">Duplicate <span class="help-icon" tabindex="0" role="img" aria-label="Duplicate randomness help" data-help="Variation changes the base packet-duplicate percentage up or down. Enabled chance controls whether duplicate is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="upload-duplicate-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="upload-duplicate-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
+            <div class="randomness-field">
+              <div class="randomness-title">Corrupt <span class="help-icon" tabindex="0" role="img" aria-label="Corrupt randomness help" data-help="Variation changes the base packet-corruption percentage up or down. Enabled chance controls whether corruption is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="upload-corrupt-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="upload-corrupt-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
           </div>
           <h3>Download variation</h3>
           <div class="fields">
-            <label>Value variation (%)
-              <input id="download-random-variation" type="number" min="0" max="100" value="0">
-            </label>
-            <label>Feature enabled chance (%)
-              <input id="download-random-enabled" type="number" min="0" max="100" value="100">
-            </label>
             <label>Reorder (%) <input id="download-reorder" type="number" min="0" max="100" value="0"></label>
             <label>Duplicate (%) <input id="download-duplicate" type="number" min="0" max="100" value="0"></label>
             <label>Corrupt (%) <input id="download-corrupt" type="number" min="0" max="100" value="0"></label>
           </div>
-          <div class="fields">
-            <label>Delay variation / chance (%)
-              <input id="download-delay-random-variation" type="number" min="0" max="100" value="0">
-              <input id="download-delay-random-enabled" type="number" min="0" max="100" value="100">
-            </label>
-            <label>Jitter variation / chance (%)
-              <input id="download-jitter-random-variation" type="number" min="0" max="100" value="0">
-              <input id="download-jitter-random-enabled" type="number" min="0" max="100" value="100">
-            </label>
-            <label>Loss variation / chance (%)
-              <input id="download-loss-random-variation" type="number" min="0" max="100" value="0">
-              <input id="download-loss-random-enabled" type="number" min="0" max="100" value="100">
-            </label>
-            <label>Bandwidth variation / chance (%)
-              <input id="download-bandwidth-random-variation" type="number" min="0" max="100" value="0">
-              <input id="download-bandwidth-random-enabled" type="number" min="0" max="100" value="100">
-            </label>
-            <label>Reorder variation / chance (%)
-              <input id="download-reorder-random-variation" type="number" min="0" max="100" value="0">
-              <input id="download-reorder-random-enabled" type="number" min="0" max="100" value="100">
-            </label>
-            <label>Duplicate variation / chance (%)
-              <input id="download-duplicate-random-variation" type="number" min="0" max="100" value="0">
-              <input id="download-duplicate-random-enabled" type="number" min="0" max="100" value="100">
-            </label>
-            <label>Corrupt variation / chance (%)
-              <input id="download-corrupt-random-variation" type="number" min="0" max="100" value="0">
-              <input id="download-corrupt-random-enabled" type="number" min="0" max="100" value="100">
-            </label>
+          <div class="randomness-fields">
+            <div class="randomness-field">
+              <div class="randomness-title">Delay <span class="help-icon" tabindex="0" role="img" aria-label="Delay randomness help" data-help="Variation changes the base delay up or down. Enabled chance controls whether delay is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="download-delay-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="download-delay-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
+            <div class="randomness-field">
+              <div class="randomness-title">Jitter <span class="help-icon" tabindex="0" role="img" aria-label="Jitter randomness help" data-help="Variation changes the base jitter up or down. Enabled chance controls whether jitter is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="download-jitter-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="download-jitter-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
+            <div class="randomness-field">
+              <div class="randomness-title">Loss <span class="help-icon" tabindex="0" role="img" aria-label="Loss randomness help" data-help="Variation changes the base packet-loss percentage up or down. Enabled chance controls whether loss is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="download-loss-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="download-loss-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
+            <div class="randomness-field">
+              <div class="randomness-title">Bandwidth <span class="help-icon" tabindex="0" role="img" aria-label="Bandwidth randomness help" data-help="Variation changes the base speed limit up or down. Enabled chance controls whether the speed limit is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="download-bandwidth-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="download-bandwidth-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
+            <div class="randomness-field">
+              <div class="randomness-title">Reorder <span class="help-icon" tabindex="0" role="img" aria-label="Reorder randomness help" data-help="Variation changes the base packet-reorder percentage up or down. Enabled chance controls whether reorder is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="download-reorder-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="download-reorder-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
+            <div class="randomness-field">
+              <div class="randomness-title">Duplicate <span class="help-icon" tabindex="0" role="img" aria-label="Duplicate randomness help" data-help="Variation changes the base packet-duplicate percentage up or down. Enabled chance controls whether duplicate is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="download-duplicate-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="download-duplicate-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
+            <div class="randomness-field">
+              <div class="randomness-title">Corrupt <span class="help-icon" tabindex="0" role="img" aria-label="Corrupt randomness help" data-help="Variation changes the base packet-corruption percentage up or down. Enabled chance controls whether corruption is active for the interval.">?</span></div>
+              <div class="randomness-inputs">
+                <label>Value variation (%)<input id="download-corrupt-random-variation" type="number" min="0" max="100" value="0"></label>
+                <label>Enabled chance (%)<input id="download-corrupt-random-enabled" type="number" min="0" max="100" value="100"></label>
+              </div>
+            </div>
           </div>
         </details>
         <button type="submit">Save profile</button>
@@ -557,9 +652,20 @@ DASHBOARD_HTML = """<!doctype html>
           <label>Profile
             <select id="schedule-profile" required></select>
           </label>
-          <label>Days (0=Mon, 6=Sun)
-            <input id="schedule-days" value="0,1,2,3,4" required>
-          </label>
+          <div class="day-field">
+            <span class="field-label">Days of the week</span>
+            <div id="schedule-day-picker" class="day-picker" role="group" aria-label="Days of the week">
+              <button class="day-toggle" type="button" data-day="0" aria-pressed="true">Mon</button>
+              <button class="day-toggle" type="button" data-day="1" aria-pressed="true">Tue</button>
+              <button class="day-toggle" type="button" data-day="2" aria-pressed="true">Wed</button>
+              <button class="day-toggle" type="button" data-day="3" aria-pressed="true">Thu</button>
+              <button class="day-toggle" type="button" data-day="4" aria-pressed="true">Fri</button>
+              <button class="day-toggle" type="button" data-day="5" aria-pressed="false">Sat</button>
+              <button class="day-toggle" type="button" data-day="6" aria-pressed="false">Sun</button>
+            </div>
+            <input id="schedule-days" type="hidden" value="0,1,2,3,4">
+            <p class="form-note">Click a day to select or deselect it. Choose at least one.</p>
+          </div>
           <label>Start <input id="schedule-start" type="time" value="09:00" required></label>
           <label>End <input id="schedule-end" type="time" value="17:00" required></label>
         </div>
@@ -617,20 +723,13 @@ DASHBOARD_HTML = """<!doctype html>
       return element(id).value.split(",").map((value) => value.trim()).filter(Boolean);
     }
 
-    function randomness(prefix) {
-      return {
-        variation_percent: Number(element(prefix + "-random-variation").value),
-        enabled_probability: Number(element(prefix + "-random-enabled").value)
-      };
-    }
-
     function featureRandomness(prefix, feature) {
       const variation = element(prefix + "-" + feature + "-random-variation");
       const enabled = element(prefix + "-" + feature + "-random-enabled");
       return variation && enabled ? {
         variation_percent: Number(variation.value),
         enabled_probability: Number(enabled.value)
-      } : randomness(prefix);
+      } : { variation_percent: 0, enabled_probability: 100 };
     }
 
     function impairment(prefix) {
@@ -656,6 +755,26 @@ DASHBOARD_HTML = """<!doctype html>
       const parts = element(id).value.split(":").map(Number);
       return parts[0] * 60 + parts[1];
     }
+
+    function selectedScheduleDays() {
+      return Array.from(document.querySelectorAll(".day-toggle[aria-pressed='true']"))
+        .map((button) => Number(button.dataset.day));
+    }
+
+    function syncScheduleDays() {
+      const days = selectedScheduleDays();
+      element("schedule-days").value = days.join(",");
+      return days;
+    }
+
+    document.querySelectorAll(".day-toggle").forEach((button) => {
+      button.addEventListener("click", () => {
+        const selected = button.getAttribute("aria-pressed") !== "true";
+        button.setAttribute("aria-pressed", String(selected));
+        syncScheduleDays();
+      });
+    });
+    syncScheduleDays();
 
     async function request(path, method, body) {
       const headers = {};
@@ -1159,12 +1278,17 @@ DASHBOARD_HTML = """<!doctype html>
 
     element("schedule-form").addEventListener("submit", async (event) => {
       event.preventDefault();
+      const days = selectedScheduleDays();
+      if (!days.length) {
+        showMessage("Choose at least one day for the schedule.", "error");
+        return;
+      }
       try {
         await request("/api/schedules", "POST", {
           id: element("schedule-id").value,
           device_id: element("schedule-device").value,
           profile_id: element("schedule-profile").value,
-          days_of_week: commaList("schedule-days").map(Number),
+          days_of_week: days,
           start_minute: timeToMinute("schedule-start"),
           end_minute: timeToMinute("schedule-end"),
           enabled: true
