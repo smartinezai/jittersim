@@ -12,6 +12,7 @@ is a private lab tool, not a replacement for a home router.
 - Profiles for delay, jitter, packet loss, speed limits and packet changes.
 - Per-device profile assignment from the dashboard.
 - Multiple daily schedules with overnight time ranges.
+- Click-to-select schedule days with inline help for random settings.
 - Seeded randomness for values, feature enablement, rerolls and short outages.
 - MAC address allowlists and denylists.
 - Global blocked websites and profile-specific allow-only website lists.
