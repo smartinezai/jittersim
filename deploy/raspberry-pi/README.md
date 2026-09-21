@@ -71,6 +71,11 @@ router web interface if the goal is to make the Pi test network the only Wi-Fi
 network in use. JitterSim does not log in to the router, copy its password or
 change its Wi-Fi settings.
 
+The dashboard shows the Pi's Ethernet connection label and default gateway.
+That label is local to the Pi and is not the router's Wi-Fi name. Ethernet does
+not expose the router Wi-Fi name or password, so copy both values manually from
+the router settings before entering them in the Pi test Wi-Fi form.
+
 The dashboard can change the Pi's own test SSID and password. This does not
 change the upstream router and the new test password is not stored in the
 JitterSim database.

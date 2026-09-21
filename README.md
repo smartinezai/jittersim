@@ -20,6 +20,7 @@ is a private lab tool, not a replacement for a home router.
 - Buttons that add observed domains to a profile or the global block list.
 - A protected helper service with Apply and Reset controls.
 - Local Pi test Wi-Fi name and password changes from the dashboard.
+- The Pi's Ethernet connection name and router gateway in the dashboard.
 
 The dashboard shows the current mode, connected devices, schedules, access
 rules and the last network action near the top of the page.
@@ -49,8 +50,9 @@ handled.
 - **Hardware mode** uses the Pi helper to apply the saved plan.
 
 The Vodafone TG3442DE Wi-Fi switch is still a manual router action. JitterSim
-can change its own test access point but does not read or store router
-credentials. See the [Pi deployment guide](deploy/raspberry-pi/README.md).
+can change its own test access point but Ethernet cannot provide the router
+Wi-Fi name or password. Copy those values manually from the router settings.
+See the [Pi deployment guide](deploy/raspberry-pi/README.md).
 
 ## Run locally
 
