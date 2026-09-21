@@ -16,6 +16,7 @@ from .models import (
     Randomness,
     RuntimeState,
     Schedule,
+    Timer,
     ValidationError,
     WebsitePolicy,
 )
@@ -130,6 +131,14 @@ class ConfigRepository:
                 days_json TEXT NOT NULL,
                 start_minute INTEGER NOT NULL,
                 end_minute INTEGER NOT NULL,
+                enabled INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS timers (
+                id TEXT PRIMARY KEY,
+                device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                started_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
                 enabled INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS network_policies (
@@ -417,6 +426,79 @@ class ConfigRepository:
         ).fetchall()
         return tuple(self._schedule_from_row(row) for row in rows)
 
+    def save_timer(self, timer: Timer) -> None:
+        """Persist one temporary profile override."""
+
+        try:
+            self._connection.execute(
+                "UPDATE timers SET enabled = 0 WHERE device_id = ? AND enabled = 1",
+                (timer.device_id,),
+            )
+            self._connection.execute(
+                """
+                INSERT INTO timers (
+                    id, device_id, profile_id, started_at, expires_at, enabled
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    device_id = excluded.device_id,
+                    profile_id = excluded.profile_id,
+                    started_at = excluded.started_at,
+                    expires_at = excluded.expires_at,
+                    enabled = excluded.enabled
+                """,
+                (
+                    timer.id,
+                    timer.device_id,
+                    timer.profile_id,
+                    timer.started_at,
+                    timer.expires_at,
+                    int(timer.enabled),
+                ),
+            )
+            self._bump_configuration_version()
+            self._connection.commit()
+        except sqlite3.IntegrityError as error:
+            self._connection.rollback()
+            raise StorageError(f"could not save timer {timer.id}") from error
+
+    def delete_timer(self, timer_id: str) -> bool:
+        """Disable one temporary profile override when it exists."""
+
+        cursor = self._connection.execute(
+            "UPDATE timers SET enabled = 0 WHERE id = ? AND enabled = 1",
+            (timer_id,),
+        )
+        if cursor.rowcount:
+            self._bump_configuration_version()
+            self._connection.commit()
+            return True
+        return False
+
+    def list_timers(self) -> tuple:
+        """Return saved timers in newest-first order."""
+
+        rows = self._connection.execute(
+            """
+            SELECT id, device_id, profile_id, started_at, expires_at, enabled
+            FROM timers ORDER BY started_at DESC, id DESC
+            """
+        ).fetchall()
+        return tuple(self._timer_from_row(row) for row in rows)
+
+    def list_active_timers(self, *, now: int) -> tuple:
+        """Return enabled timers that are active at one Unix timestamp."""
+
+        rows = self._connection.execute(
+            """
+            SELECT id, device_id, profile_id, started_at, expires_at, enabled
+            FROM timers
+            WHERE enabled = 1 AND started_at <= ? AND expires_at > ?
+            ORDER BY started_at DESC, id DESC
+            """,
+            (now, now),
+        ).fetchall()
+        return tuple(self._timer_from_row(row) for row in rows)
+
     def get_mac_policy(self) -> MacPolicy:
         """Return the saved MAC filtering policy."""
 
@@ -624,3 +706,17 @@ class ConfigRepository:
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
             raise StorageError("stored schedule is malformed") from error
+
+    @staticmethod
+    def _timer_from_row(row: sqlite3.Row) -> Timer:
+        try:
+            return Timer(
+                id=row["id"],
+                device_id=row["device_id"],
+                profile_id=row["profile_id"],
+                started_at=row["started_at"],
+                expires_at=row["expires_at"],
+                enabled=bool(row["enabled"]),
+            )
+        except (KeyError, TypeError, ValueError, ValidationError) as error:
+            raise StorageError("stored timer is malformed") from error

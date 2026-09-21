@@ -275,6 +275,29 @@ class Schedule:
 
 
 @dataclass(frozen=True)
+class Timer:
+    """One temporary profile override for a device."""
+
+    id: str
+    device_id: str
+    profile_id: str
+    started_at: int
+    expires_at: int
+    enabled: bool = True
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.id, "timer id")
+        _validate_identifier(self.device_id, "device_id")
+        _validate_identifier(self.profile_id, "profile_id")
+        _validate_number(self.started_at, "started_at", 0, 2**63 - 1)
+        _validate_number(self.expires_at, "expires_at", 1, 2**63 - 1)
+        if self.expires_at <= self.started_at:
+            raise ValidationError("expires_at must be later than started_at")
+        if not isinstance(self.enabled, bool):
+            raise ValidationError("enabled must be a boolean")
+
+
+@dataclass(frozen=True)
 class MacPolicy:
     """MAC filtering policy for clients arriving through the test access point."""
 

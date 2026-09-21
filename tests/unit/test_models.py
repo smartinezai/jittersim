@@ -10,6 +10,7 @@ from jittersim.config.models import (
     Randomness,
     RuntimeState,
     Schedule,
+    Timer,
     ValidationError,
     WebsitePolicy,
 )
@@ -204,6 +205,17 @@ class PolicyAndScheduleTests(unittest.TestCase):
         self.assertEqual(policy.denylist, ("11:22:33:44:55:66",))
         self.assertEqual(website_policy.blocked_domains, ("ads.example.com",))
         self.assertEqual(schedule.days_of_week, (0, 2))
+
+    def test_timer_requires_a_positive_window(self) -> None:
+        with self.assertRaisesRegex(ValueError, "expires_at must be later"):
+            Timer(
+                id="ten-minutes",
+                device_id="alice",
+                profile_id="slow",
+                started_at=100,
+                expires_at=100,
+            )
+
 
 class RuntimeStateTests(unittest.TestCase):
     def test_accepts_known_observed_states(self) -> None:

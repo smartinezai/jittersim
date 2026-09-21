@@ -8,6 +8,7 @@ from jittersim.config.models import (
     Profile,
     Randomness,
     Schedule,
+    Timer,
     WebsitePolicy,
 )
 from jittersim.config.storage import ConfigRepository, StorageError
@@ -76,6 +77,36 @@ class ConfigRepositoryTests(unittest.TestCase):
             self.repository.get_website_policy().allowed_domains,
             ("example.com",),
         )
+
+    def test_round_trips_active_timers_and_can_cancel_them(self) -> None:
+        self.repository.save_profile(Profile(id="normal", name="Normal"))
+        self.repository.save_profile(Profile(id="slow", name="Slow"))
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        timer = Timer(
+            id="ten-minutes",
+            device_id="alice",
+            profile_id="slow",
+            started_at=100,
+            expires_at=700,
+        )
+
+        self.repository.save_timer(timer)
+
+        self.assertEqual(self.repository.list_active_timers(now=100), (timer,))
+        self.assertEqual(self.repository.list_active_timers(now=700), ())
+        replacement = Timer(
+            id="replacement",
+            device_id="alice",
+            profile_id="normal",
+            started_at=200,
+            expires_at=800,
+        )
+        self.repository.save_timer(replacement)
+        self.assertEqual(self.repository.list_active_timers(now=300), (replacement,))
+        self.assertFalse(self.repository.delete_timer(timer.id))
+        self.assertTrue(self.repository.delete_timer(replacement.id))
+        self.assertEqual(self.repository.list_active_timers(now=200), ())
+        self.assertFalse(self.repository.delete_timer(replacement.id))
 
     def test_lists_values_in_stable_identifier_order(self) -> None:
         self.repository.save_profile(Profile(id="z-profile", name="Z"))
