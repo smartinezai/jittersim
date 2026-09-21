@@ -41,9 +41,11 @@ The installer creates a virtual environment, installs the package, writes the
 systemd units and enables the management firewall. It preserves existing
 credential files so an update does not silently invalidate access.
 
-After an update, the dashboard supports schedules, MAC rules, website rules,
-traffic observations and randomized profile changes. The helper applies these
-rules on the Pi and reset pauses scheduled changes before removing them.
+After an update, the dashboard supports schedules, one-shot profile timers,
+MAC rules, website rules, traffic observations and randomized profile changes.
+The helper applies these rules on the Pi and reset pauses scheduled changes
+before removing them. A timer temporarily takes priority for its device then
+returns to the normal schedule or profile when it expires.
 
 Read the credentials only on the Pi:
 
