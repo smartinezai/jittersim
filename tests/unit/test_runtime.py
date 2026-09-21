@@ -2,7 +2,7 @@ import unittest
 from datetime import datetime
 from ipaddress import IPv4Address
 
-from jittersim.config.models import Device, Impairment, Profile, Randomness, Schedule
+from jittersim.config.models import Device, Impairment, Profile, Randomness, Schedule, Timer
 from jittersim.config.storage import ConfigRepository
 from jittersim.engine.runtime import RuntimeScheduler
 
@@ -75,6 +75,42 @@ class RuntimeSchedulerTests(unittest.TestCase):
         scheduler.tick(repository=self.repository, now=0)
         scheduler.tick(repository=self.repository, now=datetime(2026, 9, 21, 10, 0).timestamp())
 
+        self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 500)
+
+    def test_timer_overrides_a_schedule_then_returns_to_the_normal_profile(self) -> None:
+        normal = Profile(id="normal", name="Normal")
+        scheduled = Profile(id="scheduled", name="Scheduled", download=Impairment(delay_ms=500))
+        timed = Profile(id="timed", name="Timed", download=Impairment(delay_ms=900))
+        self.repository.save_profile(normal)
+        self.repository.save_profile(scheduled)
+        self.repository.save_profile(timed)
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        self.repository.save_schedule(
+            Schedule(
+                id="work-hours",
+                device_id="alice",
+                profile_id="scheduled",
+                days_of_week=(0,),
+                start_minute=540,
+                end_minute=1_020,
+            )
+        )
+        timer_start = datetime(2026, 9, 21, 10, 0).timestamp()
+        self.repository.save_timer(
+            Timer(
+                id="short-test",
+                device_id="alice",
+                profile_id="timed",
+                started_at=int(timer_start),
+                expires_at=int(timer_start) + 600,
+            )
+        )
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+
+        scheduler.tick(repository=self.repository, now=timer_start)
+        self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 900)
+        scheduler.tick(repository=self.repository, now=timer_start + 601)
         self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 500)
 
     def test_random_outage_marks_a_device_as_disconnected(self) -> None:

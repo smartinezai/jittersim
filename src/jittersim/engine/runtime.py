@@ -94,6 +94,17 @@ class RuntimeScheduler:
             self._paused = False
         self.start()
 
+    def build_plan(
+        self,
+        *,
+        repository: ConfigRepository,
+        now: Optional[float] = None,
+    ):
+        """Build the current runtime plan, including timers and schedules."""
+
+        current_time = time.time() if now is None else now
+        return self._build_plan(repository=repository, now=current_time)
+
     def pause(self) -> None:
         """Pause scheduled reapplication after a manual network reset."""
 
@@ -151,6 +162,9 @@ class RuntimeScheduler:
     def _build_plan(self, *, repository: ConfigRepository, now: float):
         profiles = {profile.id: profile for profile in repository.list_profiles()}
         schedules = repository.list_schedules()
+        active_timers = {}
+        for timer in repository.list_active_timers(now=int(now)):
+            active_timers.setdefault(timer.device_id, timer)
         moment = datetime.fromtimestamp(now).replace(second=0, microsecond=0)
         runtime_devices = []
         runtime_profiles = {}
@@ -158,12 +172,17 @@ class RuntimeScheduler:
         active_device_ids = set()
 
         for device in repository.list_devices():
-            schedule = active_schedule(
+            timer = active_timers.get(device.id)
+            schedule = None if timer is not None else active_schedule(
                 schedules=schedules,
                 device_id=device.id,
                 moment=moment,
             )
-            selected_profile_id = device.profile_id if schedule is None else schedule.profile_id
+            selected_profile_id = (
+                timer.profile_id
+                if timer is not None
+                else device.profile_id if schedule is None else schedule.profile_id
+            )
             selected_profile = profiles.get(selected_profile_id)
             if selected_profile is None:
                 raise PlanError(f"device {device.id} references missing profile {selected_profile_id}")
