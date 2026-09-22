@@ -3215,12 +3215,26 @@ def _service_quota_from_payload(
 
     quota_id = payload.get("id", f"service-{time.time_ns()}")
     existing = repository.get_service_quota(quota_id)
+    normalized_domains = tuple(normalize_domain(domain) for domain in payload["domains"])
+    device = repository.get_device(payload["device_id"])
+    if device is not None:
+        observed_domains = {
+            observation.domain
+            for observation in repository.list_domain_observations()
+            if str(observation.ipv4_address) == str(device.ipv4_address)
+        }
+        previous_domains = set(existing.domains) if existing is not None else set()
+        if any(
+            domain not in observed_domains and domain not in previous_domains
+            for domain in normalized_domains
+        ):
+            raise ValueError("service quota domains must come from DNS observations")
     reset_mode, reset_interval_seconds, reset_times = _quota_schedule_from_payload(payload)
     return ServiceQuota(
         id=quota_id,
         device_id=payload["device_id"],
         name=payload["name"],
-        domains=tuple(payload["domains"]),
+        domains=normalized_domains,
         profile_id=payload["profile_id"],
         limit_bytes=payload["limit_bytes"],
         reset_mode=reset_mode,

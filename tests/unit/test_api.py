@@ -2,7 +2,7 @@ import json
 import unittest
 
 from jittersim.api.server import ControlServer, DASHBOARD_HTML
-from jittersim.config.models import Device, Impairment, Profile
+from jittersim.config.models import Device, DomainObservation, Impairment, Profile
 from jittersim.config.storage import ConfigRepository
 from jittersim.networking.helper import HelperClientError
 
@@ -128,6 +128,25 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(json.loads(body)["data_limit"]["used_bytes"], 0)
 
     def test_service_quota_endpoint_stores_selected_observed_domains(self) -> None:
+        self.repository.save_domain_observations(
+            (
+                DomainObservation(
+                    ipv4_address="192.168.50.10",
+                    domain="netflix.com",
+                    query_count=1,
+                    first_seen=10,
+                    last_seen=10,
+                ),
+                DomainObservation(
+                    ipv4_address="192.168.50.10",
+                    domain="nflxvideo.net",
+                    query_count=1,
+                    first_seen=10,
+                    last_seen=10,
+                ),
+            ),
+            now=10,
+        )
         status, _, body = self.server.write_response_for(
             "/api/service-quotas",
             {
@@ -149,6 +168,22 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(payload["domains"], ["netflix.com", "nflxvideo.net"])
         _, _, body = self.server.response_for("/api/service-quotas")
         self.assertEqual(json.loads(body)["service_quotas"][0]["name"], "Video service")
+
+    def test_service_quota_rejects_a_domain_not_observed_for_the_device(self) -> None:
+        status, _, body = self.server.write_response_for(
+            "/api/service-quotas",
+            {
+                "id": "alice-unknown",
+                "device_id": "alice",
+                "name": "Unknown service",
+                "domains": ["not-observed.example"],
+                "profile_id": "slow",
+                "limit_bytes": 2_000,
+            },
+        )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body), {"error": "invalid service quota configuration"})
 
     def test_health_response_identifies_hardware_mode_when_helper_is_configured(self) -> None:
         self.server.helper_client = FakeHelper()
