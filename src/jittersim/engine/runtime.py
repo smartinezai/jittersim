@@ -71,6 +71,8 @@ class RuntimeScheduler:
         self._thread: Optional[threading.Thread] = None
         self._last_traffic_sample_at = 0.0
         self._last_quota_sample_at = 0.0
+        self._last_device_counters: Dict[str, int] = {}
+        self._device_traffic_bytes: Dict[str, int] = {}
 
     def start(self) -> None:
         """Start the scheduler loop when hardware control is available."""
@@ -103,6 +105,8 @@ class RuntimeScheduler:
         with self._lock:
             self._current_payload = applied_payload
             self._paused = False
+            self._last_device_counters.clear()
+            self._device_traffic_bytes.clear()
         self.start()
 
     def build_plan(
@@ -123,6 +127,14 @@ class RuntimeScheduler:
             self._paused = True
             self._rolls.clear()
             self._current_payload = None
+            self._last_device_counters.clear()
+            self._device_traffic_bytes.clear()
+
+    def device_traffic_bytes(self, *, device_id: str) -> int:
+        """Return cumulative device bytes observed by the active scheduler."""
+
+        with self._lock:
+            return self._device_traffic_bytes.get(device_id, 0)
 
     def tick(
         self,
@@ -219,6 +231,7 @@ class RuntimeScheduler:
                     progression=progression,
                     now=now,
                     traffic_queries=traffic_queries,
+                    traffic_bytes=self._device_traffic_bytes.get(device.id, 0),
                 )
                 selected_profile = interpolate_profile(
                     start=start_profile,
@@ -416,7 +429,7 @@ class RuntimeScheduler:
         repository: ConfigRepository,
         now: float,
     ) -> None:
-        """Merge project-owned nft byte counters and perform due quota resets."""
+        """Sample device and quota byte counters and perform due resets."""
 
         if now - self._last_quota_sample_at < 5:
             return
@@ -428,7 +441,9 @@ class RuntimeScheduler:
         service_quotas = tuple(
             quota for quota in repository.list_service_quotas() if quota.enabled
         )
-        if not data_limits and not service_quotas:
+        progressions = repository.list_active_progressions(now=int(now))
+        has_byte_progression = any(progression.mode == "bytes" for progression in progressions)
+        if not data_limits and not service_quotas and not has_byte_progression:
             return
         get_traffic_counters = getattr(self._helper_client, "traffic_counters", None)
         if get_traffic_counters is None:
@@ -438,6 +453,15 @@ class RuntimeScheduler:
             counters = get_traffic_counters()
             device_counters = counters.get("devices", {})
             service_counters = counters.get("services", {})
+            for device_id, counter in device_counters.items():
+                previous = self._last_device_counters.get(device_id)
+                if previous is None:
+                    self._device_traffic_bytes[device_id] = counter
+                elif counter >= previous:
+                    self._device_traffic_bytes[device_id] = (
+                        self._device_traffic_bytes.get(device_id, 0) + counter - previous
+                    )
+                self._last_device_counters[device_id] = counter
             for data_limit in data_limits:
                 counter = device_counters.get(data_limit.device_id)
                 if counter is not None:

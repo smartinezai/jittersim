@@ -229,6 +229,39 @@ class RuntimeSchedulerTests(unittest.TestCase):
         scheduler.tick(repository=self.repository, now=100)
         self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 1_000)
 
+    def test_byte_progression_advances_with_streaming_and_survives_counter_reset(self) -> None:
+        normal = Profile(id="normal", name="Normal")
+        degraded = Profile(id="degraded", name="Degraded", download=Impairment(delay_ms=1_000))
+        self.repository.save_profile(normal)
+        self.repository.save_profile(degraded)
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        self.repository.save_progression(
+            Progression(
+                id="byte-driven",
+                device_id="alice",
+                start_profile_id="normal",
+                end_profile_id="degraded",
+                started_at=100,
+                duration_seconds=1_000,
+                mode="bytes",
+                traffic_target_bytes=1_000,
+            )
+        )
+        self.helper.counters = {"devices": {"alice": 0}, "services": {}}
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+
+        scheduler.tick(repository=self.repository, now=100)
+        self.helper.counters["devices"]["alice"] = 500
+        scheduler.tick(repository=self.repository, now=106)
+        self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 500)
+
+        self.helper.counters["devices"]["alice"] = 0
+        scheduler.tick(repository=self.repository, now=112)
+        self.helper.counters["devices"]["alice"] = 500
+        scheduler.tick(repository=self.repository, now=118)
+        self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 1_000)
+
     def test_device_quota_switches_to_its_fallback_profile(self) -> None:
         normal = Profile(id="normal", name="Normal")
         fallback = Profile(id="fallback", name="Fallback", download=Impairment(delay_ms=700))
