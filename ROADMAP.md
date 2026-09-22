@@ -194,6 +194,23 @@ Suggested commits:
 4. `Document measured behavior`
 5. `Prepare the class demonstration`
 
+## Milestone 9: byte quotas
+
+Goal: switch a device or a selected observed service to a fallback profile after
+it uses a configured amount of data.
+
+- [x] Store device and service quota settings and usage.
+- [x] Count upload and download bytes for assigned devices.
+- [x] Group several observed DNS domains into one service quota.
+- [x] Support manual, interval and daily resets.
+- [x] Edit limits without discarding current usage.
+- [x] Show usage, remaining data and reset controls in the dashboard.
+- [ ] Verify quota behavior on the deployed Pi with real client traffic.
+
+Quota matching uses observed domain names resolved to IPv4 addresses. Services
+can use changing domains or shared delivery addresses. VPNs, encrypted DNS,
+direct IP access and IPv6 can therefore reduce accuracy.
+
 ## Deliberate non-goals
 
 These should remain outside the first class-project scope:

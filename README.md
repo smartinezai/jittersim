@@ -22,6 +22,9 @@ is a private lab tool, not a replacement for a home router.
 - Per-device website blocking that can grow as a progression session advances.
 - Connected-device discovery and short DNS traffic summaries.
 - Buttons that add observed domains to a profile or the global block list.
+- Device data limits that switch to a fallback profile after a byte quota is reached.
+- Service data limits that group several observed DNS domains such as a streaming service.
+- Manual, timed or daily quota resets without losing the configured limit.
 - A protected helper service with Apply and Reset controls.
 - Local Pi test Wi-Fi name and password changes from the dashboard.
 - The Pi's Ethernet connection name and router gateway in the dashboard.
@@ -29,10 +32,11 @@ is a private lab tool, not a replacement for a home router.
 The dashboard shows the current mode, connected devices, schedules, access
 rules and the last network action near the top of the page.
 
-Traffic discovery stores local summaries of DNS names and query counts. It does
-not prove that someone opened a page. A VPN, encrypted DNS or direct IP access
-can hide or bypass these observations and website rules. Website rules cover
-IPv4 destinations only.
+Traffic discovery stores local summaries of DNS names and query counts. Select
+several observed names when creating a service quota because one service can
+use many domains. The quota counts matching IPv4 traffic as one service group.
+It does not prove that someone opened a page. A VPN, encrypted DNS or direct IP
+access can hide or bypass these observations and website rules.
 
 Progression traffic mode uses DNS query counts as its signal. It does not count
 all packets or measure download bytes.
