@@ -506,6 +506,49 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(json.loads(body)["device"]["id"], "bob")
         self.assertIsNotNone(self.repository.get_device("bob"))
 
+    def test_persists_device_groups_and_shared_quotas(self) -> None:
+        self.repository.save_device(
+            Device(
+                id="bob",
+                name="Bob's phone",
+                ipv4_address="192.168.50.11",
+                profile_id="slow",
+            )
+        )
+        status, _, body = self.server.write_response_for(
+            "/api/groups",
+            {
+                "id": "family",
+                "name": "Family devices",
+                "device_ids": ["alice", "bob"],
+                "profile_id": "slow",
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["group"]["device_ids"], ["alice", "bob"])
+
+        status, _, body = self.server.write_response_for(
+            "/api/group-data-limits",
+            {
+                "group_id": "family",
+                "profile_id": "slow",
+                "limit_bytes": 5_000,
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            json.loads(body)["group_data_limit"]["group_name"],
+            "Family devices",
+        )
+
+        status, _, body = self.server.response_for("/api/groups")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["groups"][0]["profile_id"], "slow")
+        self.assertEqual(
+            self.repository.get_device_group("family").device_ids,
+            ("alice", "bob"),
+        )
+
     def test_persists_schedules_and_network_policies(self) -> None:
         status, _, body = self.server.write_response_for(
             "/api/schedules",
