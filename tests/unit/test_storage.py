@@ -12,6 +12,7 @@ from jittersim.config.models import (
     Schedule,
     ServiceQuota,
     Timer,
+    TimeQuota,
     WebsitePolicy,
 )
 from jittersim.config.storage import ConfigRepository, StorageError
@@ -201,6 +202,39 @@ class ConfigRepositoryTests(unittest.TestCase):
         self.assertEqual(updated.used_bytes, 720)
         self.assertTrue(self.repository.reset_service_quota_usage(service_quota.id, counter_bytes=600))
         self.assertEqual(self.repository.get_service_quota(service_quota.id).used_bytes, 0)
+
+    def test_tracks_active_time_and_starts_a_fresh_window(self) -> None:
+        self.repository.save_profile(Profile(id="normal", name="Normal"))
+        self.repository.save_profile(Profile(id="slow", name="Slow"))
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        quota = TimeQuota(
+            id="alice-video-time",
+            device_id="alice",
+            name="Video time",
+            domains=("netflix.com",),
+            profile_id="slow",
+            limit_seconds=300,
+            window_duration_seconds=3_600,
+            last_reset_at=100,
+        )
+        self.repository.save_time_quota(quota)
+
+        self.assertEqual(self.repository.record_time_usage(quota.id, 100, 100, active=True).used_seconds, 0)
+        self.assertEqual(self.repository.record_time_usage(quota.id, 200, 160, active=True).used_seconds, 60)
+        self.assertEqual(self.repository.record_time_usage(quota.id, 200, 220, active=True).used_seconds, 60)
+        started = self.repository.start_time_quota(
+            quota.id,
+            started_at=300,
+            expires_at=900,
+            counter_bytes=200,
+        )
+        self.assertEqual(started.used_seconds, 0)
+        self.assertEqual(started.started_at, 300)
+        self.assertEqual(started.expires_at, 900)
+
+        self.assertEqual(self.repository.record_time_usage(quota.id, 300, 360, active=True).used_seconds, 60)
+        self.assertTrue(self.repository.stop_time_quota(quota.id))
+        self.assertEqual(self.repository.get_time_quota(quota.id).expires_at, 0)
 
     def test_lists_values_in_stable_identifier_order(self) -> None:
         self.repository.save_profile(Profile(id="z-profile", name="Z"))

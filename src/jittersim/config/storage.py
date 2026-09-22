@@ -20,6 +20,7 @@ from .models import (
     Schedule,
     ServiceQuota,
     Timer,
+    TimeQuota,
     ValidationError,
     WebsitePolicy,
 )
@@ -185,6 +186,25 @@ class ConfigRepository:
                 used_bytes INTEGER NOT NULL,
                 counter_bytes INTEGER NOT NULL,
                 last_reset_at INTEGER NOT NULL,
+                enabled INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS time_quotas (
+                id TEXT PRIMARY KEY,
+                device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                domains_json TEXT NOT NULL,
+                profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                limit_seconds INTEGER NOT NULL,
+                window_duration_seconds INTEGER NOT NULL,
+                reset_mode TEXT NOT NULL,
+                reset_interval_seconds INTEGER NOT NULL,
+                reset_times_json TEXT NOT NULL,
+                used_seconds INTEGER NOT NULL,
+                counter_bytes INTEGER NOT NULL,
+                last_sample_at INTEGER NOT NULL,
+                last_reset_at INTEGER NOT NULL,
+                started_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
                 enabled INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS network_policies (
@@ -930,6 +950,232 @@ class ConfigRepository:
             enabled=quota.enabled,
         )
 
+    def get_time_quota(self, quota_id: str) -> Optional[TimeQuota]:
+        """Return one timed service quota or `None` when it is not stored."""
+
+        row = self._connection.execute(
+            """
+            SELECT id, device_id, name, domains_json, profile_id, limit_seconds,
+                   window_duration_seconds, reset_mode, reset_interval_seconds,
+                   reset_times_json, used_seconds, counter_bytes, last_sample_at,
+                   last_reset_at, started_at, expires_at, enabled
+            FROM time_quotas WHERE id = ?
+            """,
+            (quota_id,),
+        ).fetchone()
+        return None if row is None else self._time_quota_from_row(row)
+
+    def list_time_quotas(self) -> tuple:
+        """Return timed service quotas in stable identifier order."""
+
+        rows = self._connection.execute(
+            """
+            SELECT id, device_id, name, domains_json, profile_id, limit_seconds,
+                   window_duration_seconds, reset_mode, reset_interval_seconds,
+                   reset_times_json, used_seconds, counter_bytes, last_sample_at,
+                   last_reset_at, started_at, expires_at, enabled
+            FROM time_quotas ORDER BY id
+            """
+        ).fetchall()
+        return tuple(self._time_quota_from_row(row) for row in rows)
+
+    def save_time_quota(self, quota: TimeQuota) -> None:
+        """Insert or update one timed service quota without discarding usage."""
+
+        try:
+            self._connection.execute(
+                """
+                INSERT INTO time_quotas (
+                    id, device_id, name, domains_json, profile_id, limit_seconds,
+                    window_duration_seconds, reset_mode, reset_interval_seconds,
+                    reset_times_json, used_seconds, counter_bytes, last_sample_at,
+                    last_reset_at, started_at, expires_at, enabled
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    device_id = excluded.device_id,
+                    name = excluded.name,
+                    domains_json = excluded.domains_json,
+                    profile_id = excluded.profile_id,
+                    limit_seconds = excluded.limit_seconds,
+                    window_duration_seconds = excluded.window_duration_seconds,
+                    reset_mode = excluded.reset_mode,
+                    reset_interval_seconds = excluded.reset_interval_seconds,
+                    reset_times_json = excluded.reset_times_json,
+                    used_seconds = excluded.used_seconds,
+                    counter_bytes = excluded.counter_bytes,
+                    last_sample_at = excluded.last_sample_at,
+                    last_reset_at = excluded.last_reset_at,
+                    started_at = excluded.started_at,
+                    expires_at = excluded.expires_at,
+                    enabled = excluded.enabled
+                """,
+                (
+                    quota.id,
+                    quota.device_id,
+                    quota.name,
+                    json.dumps(list(quota.domains)),
+                    quota.profile_id,
+                    quota.limit_seconds,
+                    quota.window_duration_seconds,
+                    quota.reset_mode,
+                    quota.reset_interval_seconds,
+                    json.dumps(list(quota.reset_times)),
+                    quota.used_seconds,
+                    quota.counter_bytes,
+                    quota.last_sample_at,
+                    quota.last_reset_at,
+                    quota.started_at,
+                    quota.expires_at,
+                    int(quota.enabled),
+                ),
+            )
+            self._bump_configuration_version()
+            self._connection.commit()
+        except sqlite3.IntegrityError as error:
+            self._connection.rollback()
+            raise StorageError(f"could not save time quota {quota.id}") from error
+
+    def reset_time_quota_usage(
+        self,
+        quota_id: str,
+        *,
+        counter_bytes: Optional[int] = None,
+        reset_at: Optional[int] = None,
+    ) -> bool:
+        """Reset one timed service quota while preserving its configuration."""
+
+        values = []
+        assignments = ["used_seconds = 0"]
+        if counter_bytes is not None:
+            assignments.append("counter_bytes = ?")
+            values.append(counter_bytes)
+        if reset_at is not None:
+            assignments.extend(("last_sample_at = ?", "last_reset_at = ?"))
+            values.extend((reset_at, reset_at))
+        values.append(quota_id)
+        cursor = self._connection.execute(
+            f"UPDATE time_quotas SET {', '.join(assignments)} WHERE id = ?",
+            tuple(values),
+        )
+        if cursor.rowcount:
+            self._connection.commit()
+            return True
+        return False
+
+    def start_time_quota(
+        self,
+        quota_id: str,
+        *,
+        started_at: int,
+        expires_at: int,
+        counter_bytes: Optional[int] = None,
+    ) -> Optional[TimeQuota]:
+        """Start a fresh timed quota window and clear its current usage."""
+
+        quota = self.get_time_quota(quota_id)
+        if quota is None:
+            return None
+        if (
+            not isinstance(started_at, int)
+            or not isinstance(expires_at, int)
+            or started_at < 1
+            or expires_at <= started_at
+            or expires_at - started_at > quota.window_duration_seconds
+        ):
+            raise StorageError("time quota timer is invalid")
+        self._connection.execute(
+            """
+            UPDATE time_quotas
+            SET used_seconds = 0,
+                counter_bytes = ?,
+                last_sample_at = ?,
+                last_reset_at = ?,
+                started_at = ?,
+                expires_at = ?
+            WHERE id = ?
+            """,
+            (
+                counter_bytes if counter_bytes is not None else quota.counter_bytes,
+                started_at,
+                started_at,
+                started_at,
+                expires_at,
+                quota_id,
+            ),
+        )
+        self._connection.commit()
+        return self.get_time_quota(quota_id)
+
+    def stop_time_quota(self, quota_id: str) -> bool:
+        """Stop one timed service quota window without deleting its usage."""
+
+        cursor = self._connection.execute(
+            "UPDATE time_quotas SET started_at = 0, expires_at = 0 WHERE id = ?",
+            (quota_id,),
+        )
+        if cursor.rowcount:
+            self._connection.commit()
+            return True
+        return False
+
+    def record_time_usage(
+        self,
+        quota_id: str,
+        counter_bytes: int,
+        sampled_at: int,
+        *,
+        active: bool,
+    ) -> Optional[TimeQuota]:
+        """Merge one traffic sample into a timed quota's active seconds."""
+
+        quota = self.get_time_quota(quota_id)
+        if quota is None:
+            return None
+        if (
+            not isinstance(counter_bytes, int)
+            or counter_bytes < 0
+            or not isinstance(sampled_at, int)
+            or sampled_at < 0
+        ):
+            raise StorageError("time quota traffic sample is invalid")
+        counter_reset = counter_bytes < quota.counter_bytes
+        traffic_seen = counter_bytes > quota.counter_bytes and not counter_reset
+        elapsed = max(0, sampled_at - quota.last_sample_at)
+        active_seconds = (
+            min(60, elapsed)
+            if active and traffic_seen and quota.last_sample_at > 0
+            else 0
+        )
+        updated_used = min(2**63 - 1, quota.used_seconds + active_seconds)
+        self._connection.execute(
+            """
+            UPDATE time_quotas
+            SET used_seconds = ?, counter_bytes = ?, last_sample_at = ?
+            WHERE id = ?
+            """,
+            (updated_used, counter_bytes, sampled_at, quota_id),
+        )
+        self._connection.commit()
+        return TimeQuota(
+            id=quota.id,
+            device_id=quota.device_id,
+            name=quota.name,
+            domains=quota.domains,
+            profile_id=quota.profile_id,
+            limit_seconds=quota.limit_seconds,
+            window_duration_seconds=quota.window_duration_seconds,
+            reset_mode=quota.reset_mode,
+            reset_interval_seconds=quota.reset_interval_seconds,
+            reset_times=quota.reset_times,
+            used_seconds=updated_used,
+            counter_bytes=counter_bytes,
+            last_sample_at=sampled_at,
+            last_reset_at=quota.last_reset_at,
+            started_at=quota.started_at,
+            expires_at=quota.expires_at,
+            enabled=quota.enabled,
+        )
+
     def get_mac_policy(self) -> MacPolicy:
         """Return the saved MAC filtering policy."""
 
@@ -1212,3 +1458,28 @@ class ConfigRepository:
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
             raise StorageError("stored service quota is malformed") from error
+
+    @staticmethod
+    def _time_quota_from_row(row: sqlite3.Row) -> TimeQuota:
+        try:
+            return TimeQuota(
+                id=row["id"],
+                device_id=row["device_id"],
+                name=row["name"],
+                domains=tuple(json.loads(row["domains_json"])),
+                profile_id=row["profile_id"],
+                limit_seconds=row["limit_seconds"],
+                window_duration_seconds=row["window_duration_seconds"],
+                reset_mode=row["reset_mode"],
+                reset_interval_seconds=row["reset_interval_seconds"],
+                reset_times=tuple(json.loads(row["reset_times_json"])),
+                used_seconds=row["used_seconds"],
+                counter_bytes=row["counter_bytes"],
+                last_sample_at=row["last_sample_at"],
+                last_reset_at=row["last_reset_at"],
+                started_at=row["started_at"],
+                expires_at=row["expires_at"],
+                enabled=bool(row["enabled"]),
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
+            raise StorageError("stored time quota is malformed") from error
