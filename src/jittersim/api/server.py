@@ -329,6 +329,23 @@ DASHBOARD_HTML = """<!doctype html>
     .progression-row button { margin-top: 0; white-space: nowrap; }
     .progression-meter { height: 0.45rem; overflow: hidden; border-radius: 999px; background: #1a2d46; }
     .progression-meter span { display: block; height: 100%; border-radius: inherit; background: #70b7ff; }
+    .quota-card { margin-top: 1rem; }
+    .quota-list { display: grid; gap: 0.65rem; margin-top: 1rem; }
+    .quota-row { display: grid; gap: 0.45rem; padding: 0.75rem; border: 1px solid #2b435f; border-radius: 0.55rem; background: #0d1b2d; }
+    .quota-row-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+    .quota-row strong { color: #edf5ff; }
+    .quota-row span { color: #91a8c1; font-size: 0.82rem; }
+    .quota-row.reached { border-color: #a9565d; }
+    .quota-row.reached .quota-status { color: #ffb0b0; }
+    .quota-meter { height: 0.45rem; overflow: hidden; border-radius: 999px; background: #1a2d46; }
+    .quota-meter span { display: block; height: 100%; border-radius: inherit; background: #70d7a9; }
+    .quota-row.reached .quota-meter span { background: #e97878; }
+    .quota-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+    .quota-actions button { margin-top: 0.2rem; }
+    .quota-domain-picker { min-height: 8rem; }
+    .quota-check { display: flex; align-items: center; gap: 0.5rem; }
+    .quota-check input { width: auto; }
+    .quota-reset-fields { display: contents; }
     .fields {
       display: grid;
       gap: 0.75rem;
@@ -368,6 +385,8 @@ DASHBOARD_HTML = """<!doctype html>
       .timer-row button { width: 100%; margin-top: 0.7rem; }
       .progression-row-heading { display: block; }
       .progression-row button { width: 100%; margin-top: 0.7rem; }
+      .quota-row-heading { display: block; }
+      .quota-actions button { flex: 1; }
     }
     @media (prefers-reduced-motion: reduce) {
       button { transition: none; }
@@ -791,6 +810,105 @@ DASHBOARD_HTML = """<!doctype html>
     </form>
     <div id="progression-list" class="progression-list" aria-live="polite">No active progressions.</div>
   </section>
+  <section class="card quota-card">
+    <div class="section-heading">
+      <div>
+        <h2>Device data limit</h2>
+        <p>Keep normal internet access until a device reaches its byte limit</p>
+      </div>
+      <span id="data-limit-count" class="count-badge">No limits</span>
+    </div>
+    <form id="data-limit-form">
+      <div class="fields">
+        <label>Device
+          <select id="data-limit-device" required></select>
+        </label>
+        <label>Fallback profile
+          <select id="data-limit-profile" required></select>
+        </label>
+        <label>Limit
+          <input id="data-limit-amount" type="number" min="1" step="1" value="1" required>
+        </label>
+        <label>Unit
+          <select id="data-limit-unit">
+            <option value="1048576">MB</option>
+            <option value="1073741824">GB</option>
+          </select>
+        </label>
+        <label>Reset
+          <select id="data-limit-reset-mode">
+            <option value="manual">Manual</option>
+            <option value="interval">After an interval</option>
+            <option value="daily">At fixed times each day</option>
+          </select>
+        </label>
+        <label id="data-limit-interval-field">Interval (minutes)
+          <input id="data-limit-interval" type="number" min="1" max="525600" value="60">
+        </label>
+        <label id="data-limit-times-field" hidden>Reset times (HH:MM, comma separated)
+          <input id="data-limit-times" placeholder="08:00, 20:00">
+        </label>
+        <label class="quota-check"><input id="data-limit-enabled" type="checkbox" checked> Enabled</label>
+      </div>
+      <p class="form-note">Editing a saved limit keeps its current usage. The fallback profile starts when the device total reaches the limit.</p>
+      <button class="primary" type="submit">Save device limit</button>
+    </form>
+    <div id="data-limit-list" class="quota-list" aria-live="polite">Enter the admin token to view limits.</div>
+  </section>
+  <section class="card quota-card">
+    <div class="section-heading">
+      <div>
+        <h2>Service data limit</h2>
+        <p>Limit a service made up of several observed DNS domains</p>
+      </div>
+      <span id="service-quota-count" class="count-badge">No service limits</span>
+    </div>
+    <form id="service-quota-form">
+      <div class="fields">
+        <label>Service ID
+          <input id="service-quota-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="alice-netflix">
+        </label>
+        <label>Service name
+          <input id="service-quota-name" required placeholder="Netflix">
+        </label>
+        <label>Device
+          <select id="service-quota-device" required></select>
+        </label>
+        <label>Fallback profile
+          <select id="service-quota-profile" required></select>
+        </label>
+        <label>Limit
+          <input id="service-quota-amount" type="number" min="1" step="1" value="1" required>
+        </label>
+        <label>Unit
+          <select id="service-quota-unit">
+            <option value="1048576">MB</option>
+            <option value="1073741824">GB</option>
+          </select>
+        </label>
+        <label>Reset
+          <select id="service-quota-reset-mode">
+            <option value="manual">Manual</option>
+            <option value="interval">After an interval</option>
+            <option value="daily">At fixed times each day</option>
+          </select>
+        </label>
+        <label id="service-quota-interval-field">Interval (minutes)
+          <input id="service-quota-interval" type="number" min="1" max="525600" value="60">
+        </label>
+        <label id="service-quota-times-field" hidden>Reset times (HH:MM, comma separated)
+          <input id="service-quota-times" placeholder="08:00, 20:00">
+        </label>
+        <label class="quota-check"><input id="service-quota-enabled" type="checkbox" checked> Enabled</label>
+      </div>
+      <label>Observed domains for this service
+        <select id="service-quota-domains" class="quota-domain-picker" multiple required></select>
+      </label>
+      <p class="form-note">Only domains observed from the selected device appear here. Select all names used by the service. Matching traffic is counted together at the service level.</p>
+      <button class="primary" type="submit">Save service limit</button>
+    </form>
+    <div id="service-quota-list" class="quota-list" aria-live="polite">Enter the admin token to view service limits.</div>
+  </section>
   <section class="card">
     <h2>Match the Pi test Wi-Fi manually</h2>
     <form id="access-point-form">
@@ -916,6 +1034,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     let helperConfigured = false;
     let profiles = [];
+    let observedDomainsByDevice = {};
     let connectedDevicesRequestInFlight = false;
     let observationRequestInFlight = false;
 
@@ -1103,6 +1222,7 @@ DASHBOARD_HTML = """<!doctype html>
     function renderObservations(data) {
       const container = element("observations");
       const count = element("observation-count");
+      observedDomainsByDevice = {};
       container.replaceChildren();
       if (!data.available) {
         count.textContent = "Unavailable";
@@ -1122,6 +1242,10 @@ DASHBOARD_HTML = """<!doctype html>
         return;
       }
       devices.forEach((device) => {
+        if (device.assigned_device_id) {
+          observedDomainsByDevice[device.assigned_device_id] = (device.domains || [])
+            .map((observation) => observation.domain);
+        }
         const card = document.createElement("div");
         card.className = "observation-device";
         const heading = document.createElement("div");
@@ -1214,6 +1338,215 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    function formatQuotaBytes(bytes) {
+      if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(2) + " GB";
+      if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + " MB";
+      if (bytes >= 1024) return (bytes / 1024).toFixed(1) + " KB";
+      return bytes + " bytes";
+    }
+
+    function quotaResetText(quota) {
+      if (quota.reset_mode === "interval") {
+        return "resets every " + Math.round(quota.reset_interval_seconds / 60) + " minutes";
+      }
+      if (quota.reset_mode === "daily") {
+        return "resets daily at " + (quota.reset_times || []).map((minute) =>
+          String(Math.floor(minute / 60)).padStart(2, "0") + ":" +
+          String(minute % 60).padStart(2, "0")
+        ).join(", ");
+      }
+      return "manual reset";
+    }
+
+    function quotaSchedulePayload(prefix) {
+      const mode = element(prefix + "-reset-mode").value;
+      let intervalSeconds = 0;
+      let resetTimes = [];
+      if (mode === "interval") {
+        intervalSeconds = Number(element(prefix + "-interval").value) * 60;
+      } else if (mode === "daily") {
+        resetTimes = element(prefix + "-times").value.split(",")
+          .map((value) => value.trim())
+          .filter(Boolean)
+          .map((value) => {
+            const match = /^(\\d{1,2}):(\\d{2})$/.exec(value);
+            if (!match || Number(match[1]) > 23 || Number(match[2]) > 59) {
+              throw new Error("Reset times must use HH:MM format.");
+            }
+            return Number(match[1]) * 60 + Number(match[2]);
+          });
+        if (!resetTimes.length) throw new Error("Add at least one daily reset time.");
+      }
+      return {
+        reset_mode: mode,
+        reset_interval_seconds: intervalSeconds,
+        reset_times: resetTimes
+      };
+    }
+
+    function syncQuotaReset(prefix) {
+      const mode = element(prefix + "-reset-mode").value;
+      element(prefix + "-interval-field").hidden = mode !== "interval";
+      element(prefix + "-times-field").hidden = mode !== "daily";
+    }
+
+    function setQuotaAmount(prefix, bytes) {
+      const unit = bytes >= 1073741824 && bytes % 1073741824 === 0
+        ? 1073741824
+        : 1048576;
+      element(prefix + "-unit").value = String(unit);
+      element(prefix + "-amount").value = Math.max(1, Math.round(bytes / unit));
+    }
+
+    function quotaRowProgress(quota) {
+      return Math.min(100, Math.round((quota.used_bytes / quota.limit_bytes) * 100));
+    }
+
+    function createQuotaRow({ quota, service }) {
+      const row = document.createElement("div");
+      row.className = "quota-row" + (quota.reached ? " reached" : "");
+      const heading = document.createElement("div");
+      heading.className = "quota-row-heading";
+      const title = document.createElement("strong");
+      title.textContent = service
+        ? quota.name + " · " + quota.device_name
+        : quota.device_name + " · " + quota.profile_name;
+      const status = document.createElement("span");
+      status.className = "quota-status";
+      status.textContent = quota.reached ? "Limit reached" : quotaResetText(quota);
+      heading.append(title, status);
+      const detail = document.createElement("span");
+      detail.textContent = formatQuotaBytes(quota.used_bytes) + " used of " +
+        formatQuotaBytes(quota.limit_bytes) + " · " + formatQuotaBytes(quota.remaining_bytes) + " left";
+      const meter = document.createElement("div");
+      meter.className = "quota-meter";
+      const meterValue = document.createElement("span");
+      meterValue.style.width = quotaRowProgress(quota) + "%";
+      meter.appendChild(meterValue);
+      const actions = document.createElement("div");
+      actions.className = "quota-actions";
+      const editButton = document.createElement("button");
+      editButton.type = "button";
+      editButton.textContent = "Edit";
+      editButton.addEventListener("click", () => service
+        ? editServiceQuota(quota)
+        : editDataLimit(quota));
+      const resetButton = document.createElement("button");
+      resetButton.type = "button";
+      resetButton.textContent = "Reset usage";
+      resetButton.addEventListener("click", () => resetQuota(quota, service, resetButton));
+      actions.append(editButton, resetButton);
+      if (service) {
+        const domains = document.createElement("span");
+        domains.textContent = "Domains: " + quota.domains.join(", ");
+        actions.append(domains);
+      }
+      row.append(heading, detail, meter, actions);
+      return row;
+    }
+
+    function renderDataLimits(data) {
+      const limits = data.data_limits || [];
+      const container = element("data-limit-list");
+      element("data-limit-count").textContent = limits.length + (limits.length === 1 ? " limit" : " limits");
+      container.replaceChildren();
+      if (!limits.length) {
+        container.textContent = data.error || "No device limits saved.";
+        return;
+      }
+      limits.forEach((quota) => container.appendChild(createQuotaRow({ quota, service: false })));
+    }
+
+    function renderServiceQuotas(data) {
+      const quotas = data.service_quotas || [];
+      const container = element("service-quota-list");
+      element("service-quota-count").textContent = quotas.length + (quotas.length === 1 ? " service limit" : " service limits");
+      container.replaceChildren();
+      if (!quotas.length) {
+        container.textContent = data.error || "No service limits saved.";
+        return;
+      }
+      quotas.forEach((quota) => container.appendChild(createQuotaRow({ quota, service: true })));
+    }
+
+    function populateServiceQuotaDomains(selectedDomains) {
+      const select = element("service-quota-domains");
+      const domains = observedDomainsByDevice[element("service-quota-device").value] || [];
+      select.replaceChildren();
+      if (!domains.length) {
+        const option = document.createElement("option");
+        option.textContent = "No observed domains for this device";
+        option.disabled = true;
+        select.appendChild(option);
+        return;
+      }
+      domains.forEach((domain) => {
+        const option = document.createElement("option");
+        option.value = domain;
+        option.textContent = domain;
+        option.selected = (selectedDomains || []).includes(domain);
+        select.appendChild(option);
+      });
+    }
+
+    function editDataLimit(quota) {
+      element("data-limit-device").value = quota.device_id;
+      element("data-limit-profile").value = quota.profile_id;
+      setQuotaAmount("data-limit", quota.limit_bytes);
+      element("data-limit-reset-mode").value = quota.reset_mode;
+      element("data-limit-interval").value = Math.max(1, Math.round(quota.reset_interval_seconds / 60));
+      element("data-limit-times").value = (quota.reset_times || []).map((minute) =>
+        String(Math.floor(minute / 60)).padStart(2, "0") + ":" + String(minute % 60).padStart(2, "0")
+      ).join(", ");
+      element("data-limit-enabled").checked = quota.enabled;
+      syncQuotaReset("data-limit");
+      element("data-limit-form").scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+
+    function editServiceQuota(quota) {
+      element("service-quota-id").value = quota.id;
+      element("service-quota-name").value = quota.name;
+      element("service-quota-device").value = quota.device_id;
+      element("service-quota-profile").value = quota.profile_id;
+      setQuotaAmount("service-quota", quota.limit_bytes);
+      element("service-quota-reset-mode").value = quota.reset_mode;
+      element("service-quota-interval").value = Math.max(1, Math.round(quota.reset_interval_seconds / 60));
+      element("service-quota-times").value = (quota.reset_times || []).map((minute) =>
+        String(Math.floor(minute / 60)).padStart(2, "0") + ":" + String(minute % 60).padStart(2, "0")
+      ).join(", ");
+      element("service-quota-enabled").checked = quota.enabled;
+      populateServiceQuotaDomains(quota.domains);
+      syncQuotaReset("service-quota");
+      element("service-quota-form").scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+
+    async function resetQuota(quota, service, button) {
+      button.disabled = true;
+      try {
+        await request(service ? "/api/service-quotas/reset" : "/api/data-limits/reset", "POST",
+          service ? { id: quota.id } : { device_id: quota.device_id });
+        await loadQuotas();
+        showMessage("Quota usage reset.", "success");
+      } catch (error) {
+        showMessage(error.message, "error");
+        button.disabled = false;
+      }
+    }
+
+    async function loadQuotas() {
+      try {
+        const [dataLimits, serviceQuotas] = await Promise.all([
+          request("/api/data-limits", "GET"),
+          request("/api/service-quotas", "GET")
+        ]);
+        renderDataLimits(dataLimits);
+        renderServiceQuotas(serviceQuotas);
+      } catch (error) {
+        renderDataLimits({ data_limits: [], error: "Enter the admin token to view device limits." });
+        renderServiceQuotas({ service_quotas: [], error: "Enter the admin token to view service limits." });
+      }
+    }
+
     async function scanObservations() {
       if (!helperConfigured || observationRequestInFlight) return;
       observationRequestInFlight = true;
@@ -1249,7 +1582,9 @@ DASHBOARD_HTML = """<!doctype html>
         "schedule-profile",
         "timer-profile",
         "progression-start-profile",
-        "progression-end-profile"
+        "progression-end-profile",
+        "data-limit-profile",
+        "service-quota-profile"
       ].forEach((selectId) => {
         const profileSelect = element(selectId);
         profileSelect.replaceChildren();
@@ -1264,16 +1599,23 @@ DASHBOARD_HTML = """<!doctype html>
 
     async function loadDevicesForSchedule() {
       const data = await request("/api/devices", "GET");
-      ["schedule-device", "timer-device", "progression-device"].forEach((selectId) => {
+      [
+        "schedule-device",
+        "timer-device",
+        "progression-device",
+        "data-limit-device",
+        "service-quota-device"
+      ].forEach((selectId) => {
         const deviceSelect = element(selectId);
         deviceSelect.replaceChildren();
-        data.devices.forEach((device) => {
+      data.devices.forEach((device) => {
           const option = document.createElement("option");
           option.value = device.id;
           option.textContent = device.name + " (" + device.ipv4_address + ")";
           deviceSelect.appendChild(option);
         });
       });
+      populateServiceQuotaDomains();
     }
 
     function renderSchedules(schedules) {
@@ -1453,7 +1795,8 @@ DASHBOARD_HTML = """<!doctype html>
     async function refresh() {
       await loadProfiles();
       await loadHealth();
-        await Promise.all([
+      await loadObservations();
+      await Promise.all([
         show("/api/devices", "devices", "devices"),
         show("/api/plan", "plan", "plan"),
         loadState(),
@@ -1464,7 +1807,7 @@ DASHBOARD_HTML = """<!doctype html>
         loadPolicies(),
         loadConnectedDevices(),
         loadUplink(),
-        loadObservations()
+        loadQuotas()
       ]);
     }
 
@@ -1652,6 +1995,59 @@ DASHBOARD_HTML = """<!doctype html>
       }
     });
 
+    element("data-limit-reset-mode").addEventListener("change", () => syncQuotaReset("data-limit"));
+    element("service-quota-reset-mode").addEventListener("change", () => syncQuotaReset("service-quota"));
+    element("service-quota-device").addEventListener("change", () => populateServiceQuotaDomains());
+    element("admin-token").addEventListener("change", loadQuotas);
+    syncQuotaReset("data-limit");
+    syncQuotaReset("service-quota");
+
+    element("data-limit-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const result = await request("/api/data-limits", "POST", {
+          device_id: element("data-limit-device").value,
+          profile_id: element("data-limit-profile").value,
+          limit_bytes: Number(element("data-limit-amount").value) * Number(element("data-limit-unit").value),
+          enabled: element("data-limit-enabled").checked,
+          ...quotaSchedulePayload("data-limit")
+        });
+        await refresh();
+        showMessage(
+          result.live_applied ? "Device limit saved and applied." : "Device limit saved.",
+          "success"
+        );
+      } catch (error) {
+        showMessage(error.message, "error");
+      }
+    });
+
+    element("service-quota-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const domains = Array.from(element("service-quota-domains").selectedOptions)
+          .map((option) => option.value);
+        if (!domains.length) throw new Error("Select at least one observed domain.");
+        const result = await request("/api/service-quotas", "POST", {
+          id: element("service-quota-id").value,
+          name: element("service-quota-name").value,
+          device_id: element("service-quota-device").value,
+          profile_id: element("service-quota-profile").value,
+          domains: domains,
+          limit_bytes: Number(element("service-quota-amount").value) * Number(element("service-quota-unit").value),
+          enabled: element("service-quota-enabled").checked,
+          ...quotaSchedulePayload("service-quota")
+        });
+        await refresh();
+        showMessage(
+          result.live_applied ? "Service limit saved and applied." : "Service limit saved.",
+          "success"
+        );
+      } catch (error) {
+        showMessage(error.message, "error");
+      }
+    });
+
     element("access-point-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
@@ -1669,6 +2065,7 @@ DASHBOARD_HTML = """<!doctype html>
     window.setInterval(loadConnectedDevices, 5000);
     window.setInterval(loadTimers, 5000);
     window.setInterval(loadProgressions, 5000);
+    window.setInterval(loadQuotas, 5000);
     window.setInterval(loadObservations, 15000);
 
     refresh().catch((error) => {
