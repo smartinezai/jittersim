@@ -16,7 +16,9 @@ from urllib.parse import urlsplit
 from jittersim.config.models import (
     DataLimit,
     Device,
+    DeviceGroup,
     DomainObservation,
+    GroupDataLimit,
     Impairment,
     MacPolicy,
     Profile,
@@ -46,6 +48,8 @@ WRITE_PATHS = frozenset(
     (
         "/api/profiles",
         "/api/devices",
+        "/api/groups",
+        "/api/groups/delete",
         "/api/schedules",
         "/api/timers",
         "/api/timers/cancel",
@@ -53,6 +57,8 @@ WRITE_PATHS = frozenset(
         "/api/progressions/stop",
         "/api/data-limits",
         "/api/data-limits/reset",
+        "/api/group-data-limits",
+        "/api/group-data-limits/reset",
         "/api/service-quotas",
         "/api/service-quotas/reset",
         "/api/time-quotas",
@@ -71,7 +77,12 @@ WRITE_PATHS = frozenset(
 )
 ACTION_PATHS = frozenset(("/api/apply", "/api/reset", "/api/observations/scan"))
 PROTECTED_READ_PATHS = frozenset(
-    ("/api/data-limits", "/api/service-quotas", "/api/time-quotas")
+    (
+        "/api/data-limits",
+        "/api/group-data-limits",
+        "/api/service-quotas",
+        "/api/time-quotas",
+    )
 )
 
 
@@ -2337,6 +2348,29 @@ def _device_payload(device: Device) -> Dict[str, Any]:
     }
 
 
+def _device_group_payload(
+    group: DeviceGroup,
+    *,
+    repository: ConfigRepository,
+) -> Dict[str, Any]:
+    """Build the dashboard representation of one device group."""
+
+    profile = repository.get_profile(group.profile_id) if group.profile_id else None
+    devices = [
+        _device_payload(device)
+        for device_id in group.device_ids
+        if (device := repository.get_device(device_id)) is not None
+    ]
+    return {
+        "id": group.id,
+        "name": group.name,
+        "device_ids": list(group.device_ids),
+        "devices": devices,
+        "profile_id": group.profile_id,
+        "profile_name": profile.name if profile is not None else None,
+    }
+
+
 def _schedule_payload(schedule: Schedule) -> Dict[str, Any]:
     return asdict(schedule)
 
@@ -2358,6 +2392,26 @@ def _data_limit_payload(
         **asdict(data_limit),
         "reset_times": list(data_limit.reset_times),
         "device_name": device.name if device is not None else data_limit.device_id,
+        "profile_name": profile.name if profile is not None else data_limit.profile_id,
+        "remaining_bytes": max(0, data_limit.limit_bytes - data_limit.used_bytes),
+        "reached": data_limit.used_bytes >= data_limit.limit_bytes,
+    }
+
+
+def _group_data_limit_payload(
+    data_limit: GroupDataLimit,
+    *,
+    repository: ConfigRepository,
+) -> Dict[str, Any]:
+    """Build the dashboard representation of one shared group quota."""
+
+    group = repository.get_device_group(data_limit.group_id)
+    profile = repository.get_profile(data_limit.profile_id)
+    return {
+        **asdict(data_limit),
+        "reset_times": list(data_limit.reset_times),
+        "group_name": group.name if group is not None else data_limit.group_id,
+        "device_ids": list(group.device_ids) if group is not None else [],
         "profile_name": profile.name if profile is not None else data_limit.profile_id,
         "remaining_bytes": max(0, data_limit.limit_bytes - data_limit.used_bytes),
         "reached": data_limit.used_bytes >= data_limit.limit_bytes,
@@ -2522,6 +2576,12 @@ class ControlServer(HTTPServer):
         if path == "/api/devices":
             devices = [_device_payload(device) for device in self.repository.list_devices()]
             return HTTPStatus.OK, "application/json", _json_bytes({"devices": devices})
+        if path == "/api/groups":
+            groups = [
+                _device_group_payload(group, repository=self.repository)
+                for group in self.repository.list_device_groups()
+            ]
+            return HTTPStatus.OK, "application/json", _json_bytes({"groups": groups})
         if path == "/api/schedules":
             schedules = [_schedule_payload(schedule) for schedule in self.repository.list_schedules()]
             return HTTPStatus.OK, "application/json", _json_bytes({"schedules": schedules})
@@ -2575,6 +2635,15 @@ class ControlServer(HTTPServer):
                     "data_limits": [
                         _data_limit_payload(data_limit, repository=self.repository)
                         for data_limit in self.repository.list_data_limits()
+                    ]
+                }
+            )
+        if path == "/api/group-data-limits":
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {
+                    "group_data_limits": [
+                        _group_data_limit_payload(data_limit, repository=self.repository)
+                        for data_limit in self.repository.list_group_data_limits()
                     ]
                 }
             )
@@ -2762,6 +2831,38 @@ class ControlServer(HTTPServer):
                 {"device": _device_payload(device)}
             )
 
+        if path == "/api/groups":
+            try:
+                group = _device_group_from_payload(payload)
+                for device_id in group.device_ids:
+                    if self.repository.get_device(device_id) is None:
+                        raise ValueError("device does not exist")
+                if group.profile_id is not None and self.repository.get_profile(group.profile_id) is None:
+                    raise ValueError("profile does not exist")
+                self.repository.save_device_group(group)
+            except (KeyError, TypeError, ValueError, StorageError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid device group configuration"}
+                )
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {"group": _device_group_payload(group, repository=self.repository)}
+            )
+
+        if path == "/api/groups/delete":
+            try:
+                group_id = payload["id"]
+                if not isinstance(group_id, str) or not group_id:
+                    raise ValueError("group id is invalid")
+                if not self.repository.delete_device_group(group_id):
+                    return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                        {"error": "device group does not exist"}
+                    )
+            except (KeyError, TypeError, ValueError, StorageError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid device group delete request"}
+                )
+            return self._apply_quota_change("group", {"id": group_id, "deleted": True})
+
         if path == "/api/schedules":
             try:
                 schedule = _schedule_from_payload(payload)
@@ -2922,6 +3023,51 @@ class ControlServer(HTTPServer):
             return self._apply_quota_change(
                 "data_limit",
                 _data_limit_payload(refreshed, repository=self.repository),
+            )
+
+        if path == "/api/group-data-limits":
+            try:
+                data_limit = _group_data_limit_from_payload(
+                    payload,
+                    repository=self.repository,
+                )
+                if self.repository.get_device_group(data_limit.group_id) is None:
+                    raise ValueError("device group does not exist")
+                if self.repository.get_profile(data_limit.profile_id) is None:
+                    raise ValueError("profile does not exist")
+                self.repository.save_group_data_limit(data_limit)
+            except (KeyError, TypeError, ValueError, StorageError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid group data limit configuration"}
+                )
+            return self._apply_quota_change(
+                "group_data_limit",
+                _group_data_limit_payload(data_limit, repository=self.repository),
+            )
+
+        if path == "/api/group-data-limits/reset":
+            try:
+                group_id = payload["group_id"]
+                if not isinstance(group_id, str) or not group_id:
+                    raise ValueError("group_id is invalid")
+                data_limit = self.repository.get_group_data_limit(group_id)
+                if data_limit is None:
+                    return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                        {"error": "group data limit does not exist"}
+                    )
+                self.repository.reset_group_data_limit_usage(
+                    group_id,
+                    counter_bytes=self._group_quota_counter(group_id),
+                    reset_at=int(time.time()),
+                )
+            except (KeyError, TypeError, ValueError, StorageError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid group data limit reset request"}
+                )
+            refreshed = self.repository.get_group_data_limit(group_id)
+            return self._apply_quota_change(
+                "group_data_limit",
+                _group_data_limit_payload(refreshed, repository=self.repository),
             )
 
         if path == "/api/service-quotas":
@@ -3229,6 +3375,26 @@ class ControlServer(HTTPServer):
         values = counters.get(kind, {})
         value = values.get(identifier) if isinstance(values, dict) else None
         return value if isinstance(value, int) and value >= 0 else None
+
+    def _group_quota_counter(self, group_id: str) -> Optional[int]:
+        """Return the current aggregate device counter for one group."""
+
+        if self.helper_client is None:
+            return None
+        group = self.repository.get_device_group(group_id)
+        if group is None:
+            return None
+        try:
+            counters = self.helper_client.traffic_counters().get("devices", {})
+        except HelperClientError:
+            LOGGER.warning("could not read group quota counter before reset", exc_info=True)
+            return None
+        if not isinstance(counters, dict) or any(
+            device_id not in counters for device_id in group.device_ids
+        ):
+            return None
+        values = [counters[device_id] for device_id in group.device_ids]
+        return sum(values) if all(isinstance(value, int) and value >= 0 for value in values) else None
 
     def _apply_quota_change(
         self,
@@ -3591,6 +3757,41 @@ def _data_limit_from_payload(
     reset_mode, reset_interval_seconds, reset_times = _quota_schedule_from_payload(payload)
     return DataLimit(
         device_id=device_id,
+        profile_id=payload["profile_id"],
+        limit_bytes=payload["limit_bytes"],
+        reset_mode=reset_mode,
+        reset_interval_seconds=reset_interval_seconds,
+        reset_times=reset_times,
+        used_bytes=existing.used_bytes if existing is not None else 0,
+        counter_bytes=existing.counter_bytes if existing is not None else 0,
+        last_reset_at=existing.last_reset_at if existing is not None else int(time.time()),
+        enabled=payload.get("enabled", True),
+    )
+
+
+def _device_group_from_payload(payload: Dict[str, Any]) -> DeviceGroup:
+    """Build a device group from selected device IDs."""
+
+    return DeviceGroup(
+        id=payload.get("id", f"group-{time.time_ns()}"),
+        name=payload["name"],
+        device_ids=tuple(payload["device_ids"]),
+        profile_id=payload.get("profile_id") or None,
+    )
+
+
+def _group_data_limit_from_payload(
+    payload: Dict[str, Any],
+    *,
+    repository: ConfigRepository,
+) -> GroupDataLimit:
+    """Build a shared group quota while retaining usage when it is edited."""
+
+    group_id = payload["group_id"]
+    existing = repository.get_group_data_limit(group_id)
+    reset_mode, reset_interval_seconds, reset_times = _quota_schedule_from_payload(payload)
+    return GroupDataLimit(
+        group_id=group_id,
         profile_id=payload["profile_id"],
         limit_bytes=payload["limit_bytes"],
         reset_mode=reset_mode,
