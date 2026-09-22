@@ -47,6 +47,8 @@ is a private lab tool, not a replacement for a home router.
   reached.
 - Per-service quotas that group several observed domains for one service such
   as a streaming platform.
+- Service quota weights from `0.1×` to `10×`, so a service can consume its
+  quota faster or slower than its actual byte count.
 - Manual, timed or daily quota resets.
 - Usage bars, current usage, reset actions and editable limits in the dashboard.
 - Quota changes that preserve the configured rule while resetting its counter.
@@ -62,7 +64,9 @@ is a private lab tool, not a replacement for a home router.
 Traffic discovery stores local summaries of DNS names and query counts. Select
 several observed names when creating a service quota because one service can
 use many domains. A service quota counts matching IPv4 traffic as one service
-group. It does not prove that someone opened a page.
+group then applies its weight. For example, `1.2×` charges 120 MB of quota
+usage for 100 MB of matching traffic while `0.8×` charges 80 MB. It does not
+prove that someone opened a page.
 
 Progression DNS mode uses DNS query counts as its signal. It does not count all
 packets or measure download bytes. Device-data mode counts IPv4 upload and
