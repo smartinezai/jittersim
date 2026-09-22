@@ -14,6 +14,7 @@ from jittersim.config.models import (
     Schedule,
     ServiceQuota,
     Timer,
+    TimeQuota,
     ValidationError,
     WebsitePolicy,
 )
@@ -266,6 +267,38 @@ class PolicyAndScheduleTests(unittest.TestCase):
         self.assertEqual(data_limit.reset_times, (0, 720))
         self.assertEqual(service_quota.domains, ("netflix.com", "nflxvideo.net"))
         self.assertEqual(service_quota.weight_percent, 120)
+
+    def test_accepts_a_timed_service_quota_window(self) -> None:
+        quota = TimeQuota(
+            id="alice-netflix-time",
+            device_id="alice",
+            name="Netflix time",
+            domains=("netflix.com",),
+            profile_id="slow",
+            limit_seconds=5 * 60 * 60,
+            window_duration_seconds=12 * 60 * 60,
+            reset_mode="daily",
+            reset_times=(600, 1_200),
+            started_at=100,
+            expires_at=43_300,
+        )
+
+        self.assertEqual(quota.limit_seconds, 18_000)
+        self.assertEqual(quota.reset_times, (600, 1_200))
+
+    def test_rejects_a_timed_quota_window_longer_than_configured(self) -> None:
+        with self.assertRaises(ValidationError):
+            TimeQuota(
+                id="alice-netflix-time",
+                device_id="alice",
+                name="Netflix time",
+                domains=("netflix.com",),
+                profile_id="slow",
+                limit_seconds=300,
+                window_duration_seconds=600,
+                started_at=100,
+                expires_at=701,
+            )
 
     def test_service_quota_weight_has_a_safe_range(self) -> None:
         with self.assertRaisesRegex(ValueError, "weight_percent must be between 10 and 1000"):

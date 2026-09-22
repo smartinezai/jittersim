@@ -486,6 +486,68 @@ class ServiceQuota:
 
 
 @dataclass(frozen=True)
+class TimeQuota:
+    """A service quota measured in active traffic time inside a timer window."""
+
+    id: str
+    device_id: str
+    name: str
+    domains: Tuple[str, ...]
+    profile_id: str
+    limit_seconds: int
+    window_duration_seconds: int = 43_200
+    reset_mode: str = "manual"
+    reset_interval_seconds: int = 0
+    reset_times: Tuple[int, ...] = ()
+    used_seconds: int = 0
+    counter_bytes: int = 0
+    last_sample_at: int = 0
+    last_reset_at: int = 0
+    started_at: int = 0
+    expires_at: int = 0
+    enabled: bool = True
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.id, "time quota id")
+        _validate_identifier(self.device_id, "device_id")
+        _validate_name(self.name, "time quota name")
+        _validate_identifier(self.profile_id, "profile_id")
+        object.__setattr__(self, "domains", _normalize_domain_list(self.domains, "domains"))
+        if not self.domains:
+            raise ValidationError("time quota requires at least one domain")
+        _validate_number(self.limit_seconds, "limit_seconds", 60, 31_536_000)
+        _validate_number(
+            self.window_duration_seconds,
+            "window_duration_seconds",
+            60,
+            604_800,
+        )
+        _validate_quota_usage(
+            limit_bytes=self.limit_seconds,
+            used_bytes=self.used_seconds,
+            counter_bytes=self.counter_bytes,
+            last_reset_at=self.last_reset_at,
+        )
+        _validate_number(self.last_sample_at, "last_sample_at", 0, 2**63 - 1)
+        _validate_number(self.started_at, "started_at", 0, 2**63 - 1)
+        _validate_number(self.expires_at, "expires_at", 0, 2**63 - 1)
+        if (self.started_at == 0) != (self.expires_at == 0):
+            raise ValidationError("time quota timer must have both start and expiry times")
+        if self.expires_at and self.expires_at <= self.started_at:
+            raise ValidationError("time quota expiry must be later than its start")
+        if self.expires_at and self.expires_at - self.started_at > self.window_duration_seconds:
+            raise ValidationError("time quota timer exceeds its configured window")
+        normalized_times = _validate_quota_schedule(
+            reset_mode=self.reset_mode,
+            reset_interval_seconds=self.reset_interval_seconds,
+            reset_times=self.reset_times,
+        )
+        object.__setattr__(self, "reset_times", normalized_times)
+        if not isinstance(self.enabled, bool):
+            raise ValidationError("enabled must be a boolean")
+
+
+@dataclass(frozen=True)
 class MacPolicy:
     """MAC filtering policy for clients arriving through the test access point."""
 
