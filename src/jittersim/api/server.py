@@ -67,6 +67,8 @@ WRITE_PATHS = frozenset(
         "/api/time-quotas/stop",
         "/api/policies",
         "/api/access-point",
+        "/api/router/sync-ap",
+        "/api/router/wifi",
         "/api/connected-devices/apply-profile",
         "/api/observations/scan",
         "/api/observations/add-to-profile",
@@ -252,6 +254,9 @@ DASHBOARD_HTML = """<!doctype html>
     .uplink-value span { display: block; margin-bottom: 0.2rem; color: #91a8c1; font-size: 0.76rem; }
     .button-link { display: inline-block; margin-top: 1rem; padding: 0.62rem 0.9rem; border: 1px solid #46627f; border-radius: 0.55rem; background: #1a2d46; color: #edf5ff; font-weight: 700; text-decoration: none; }
     .button-link:hover { filter: brightness(1.18); }
+    .router-controls { display: grid; gap: 0.75rem; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #2b435f; }
+    .router-controls .action-buttons { flex-wrap: wrap; }
+    .router-controls .action-buttons button { margin-top: 0; }
     .observations-card { margin-top: 1rem; }
     .observation-actions { display: flex; align-items: center; gap: 0.75rem; }
     .observation-actions button { margin-top: 0; white-space: nowrap; }
@@ -453,8 +458,19 @@ DASHBOARD_HTML = """<!doctype html>
       <span id="uplink-state" class="count-badge">Checking...</span>
     </div>
     <div id="uplink-details" class="uplink-grid" aria-live="polite">Loading...</div>
-    <p id="uplink-note" class="policy-note">Ethernet does not reveal the Vodafone Wi-Fi name or password. Copy those values manually from the router settings if you want the Pi test Wi-Fi to match.</p>
+    <p id="uplink-note" class="policy-note">The router controls use the TG3442DE local web interface. The router admin password is used for one request and is not saved.</p>
     <a id="router-settings-link" class="button-link" href="http://192.168.0.1" target="_blank" rel="noreferrer">Open router Wi-Fi settings</a>
+    <div class="router-controls">
+      <label>Router admin password
+        <input id="router-admin-password" type="password" autocomplete="off" placeholder="Password for 192.168.0.1">
+      </label>
+      <div class="action-buttons">
+        <button id="sync-router-ap" class="primary" type="button">Copy router Wi-Fi to Pi</button>
+        <button id="disable-router-wifi" class="danger" type="button">Turn off router Wi-Fi</button>
+        <button id="enable-router-wifi" type="button">Turn on router Wi-Fi</button>
+      </div>
+      <p id="router-action-message" class="policy-note" role="status" aria-live="polite">Keep the Pi connected to the router by Ethernet before changing the router Wi-Fi.</p>
+    </div>
   </section>
   <section class="card observations-card">
     <div class="section-heading">
@@ -1056,7 +1072,7 @@ DASHBOARD_HTML = """<!doctype html>
     <div id="time-quota-list" class="quota-list" aria-live="polite">Enter the admin token to view time limits.</div>
   </section>
   <section class="card">
-    <h2>Match the Pi test Wi-Fi manually</h2>
+    <h2>Manual Pi access-point fallback</h2>
     <form id="access-point-form">
       <div class="fields">
         <label>Test network name (SSID)
@@ -1066,7 +1082,7 @@ DASHBOARD_HTML = """<!doctype html>
           <input id="access-point-password" type="password" minlength="8" maxlength="63" autocomplete="new-password" required>
         </label>
       </div>
-      <p class="policy-note">Open the router settings above, copy the Vodafone Wi-Fi name and password into these fields then click this button. These values configure the Pi only. Turn off the router Wi-Fi in the router settings first if you want devices to use the Pi exclusively. The password is sent to the helper and is not saved in the dashboard database.</p>
+      <p class="policy-note">Use this if router import is unavailable. These values configure the Pi only. The password is sent to the helper and is not saved in the dashboard database.</p>
       <button type="submit">Use these values on the Pi</button>
     </form>
   </section>
@@ -1299,7 +1315,7 @@ DASHBOARD_HTML = """<!doctype html>
         empty.className = "device-empty";
         empty.textContent = data.message || "Upstream connection information is unavailable.";
         container.appendChild(empty);
-        note.textContent = "The Pi can only read this information in hardware mode. The Vodafone Wi-Fi name and password still need to be copied manually from the router settings.";
+        note.textContent = "The Pi can use the TG3442DE controls in hardware mode. Keep the Pi connected by Ethernet and enter the router password only when you use a router action.";
         return;
       }
       state.textContent = "Detected on " + (data.uplink.interface || "Ethernet");
@@ -1320,7 +1336,7 @@ DASHBOARD_HTML = """<!doctype html>
       if (data.router && data.router.settings_url) {
         routerLink.href = data.router.settings_url;
       }
-      note.textContent = "The Ethernet connection name is a Pi-side label, not the Vodafone Wi-Fi name. Ethernet does not provide the router Wi-Fi password, so copy both values manually from the router settings below.";
+      note.textContent = "The router controls below use the TG3442DE local interface. Keep Ethernet connected so the Pi remains reachable if router Wi-Fi is turned off.";
     }
 
     async function applyProfileToDevice(device, profileId, button) {
@@ -2550,6 +2566,40 @@ DASHBOARD_HTML = """<!doctype html>
       }
     });
 
+    async function routerAction(path, body, message) {
+      const password = element("router-admin-password").value;
+      const status = element("router-action-message");
+      if (!password) {
+        status.textContent = "Enter the router admin password first.";
+        return;
+      }
+      status.textContent = message;
+      try {
+        const response = await request(path, "POST", { admin_password: password, ...body });
+        const result = response.result || response;
+        status.textContent = result.ssid
+          ? "Copied " + result.ssid + " to the Pi. Reconnect test devices if needed."
+          : (result.enabled ? "Router Wi-Fi is on." : "Router Wi-Fi is off.");
+      } catch (error) {
+        status.textContent = error.message;
+      } finally {
+        element("router-admin-password").value = "";
+      }
+    }
+
+    element("sync-router-ap").addEventListener("click", () => {
+      routerAction("/api/router/sync-ap", {}, "Reading the router Wi-Fi settings...");
+    });
+
+    element("disable-router-wifi").addEventListener("click", () => {
+      if (!window.confirm("Turn off both primary router Wi-Fi radios? Keep the Pi connected by Ethernet.")) return;
+      routerAction("/api/router/wifi", { enabled: false, confirm_disable: true }, "Turning off router Wi-Fi...");
+    });
+
+    element("enable-router-wifi").addEventListener("click", () => {
+      routerAction("/api/router/wifi", { enabled: true }, "Turning on router Wi-Fi...");
+    });
+
     window.setInterval(loadConnectedDevices, 5000);
     window.setInterval(loadTimers, 5000);
     window.setInterval(loadProgressions, 5000);
@@ -2910,10 +2960,11 @@ class ControlServer(HTTPServer):
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {
                     "model": "Vodafone TG3442DE",
-                    "automatic_wifi_control": False,
+                    "automatic_wifi_control": True,
+                    "wifi_control": "tg3442de-local-web",
                     "message": (
-                        "The router Wi-Fi must be turned off manually in the router web interface. "
-                        "JitterSim can configure its own test access point but does not store or read router credentials."
+                        "Router admin credentials are used for one authenticated request and are not saved. "
+                        "Keep the Pi connected by Ethernet before changing router Wi-Fi."
                     ),
                 }
             )
@@ -2940,7 +2991,7 @@ class ControlServer(HTTPServer):
                     "router": {
                         "model": "Vodafone TG3442DE",
                         "settings_url": "http://192.168.0.1",
-                        "wifi_control": "manual",
+                        "wifi_control": "tg3442de-local-web",
                     },
                 }
             )
@@ -3474,6 +3525,58 @@ class ControlServer(HTTPServer):
                 LOGGER.exception("access point configuration failed")
                 return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
                     {"error": "access point configuration failed"}
+                )
+            return HTTPStatus.OK, "application/json", _json_bytes({"result": result})
+
+        if path == "/api/router/sync-ap":
+            if self.helper_client is None:
+                return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                    {"error": "network helper is not configured"}
+                )
+            admin_password = payload.get("admin_password")
+            if not isinstance(admin_password, str) or not admin_password:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "router admin password is required"}
+                )
+            try:
+                result = self.helper_client.sync_access_point_from_router(
+                    admin_password=admin_password
+                )
+            except HelperClientError:
+                LOGGER.exception("router Wi-Fi import failed")
+                return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
+                    {"error": "router Wi-Fi import failed"}
+                )
+            return HTTPStatus.OK, "application/json", _json_bytes({"result": result})
+
+        if path == "/api/router/wifi":
+            if self.helper_client is None:
+                return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                    {"error": "network helper is not configured"}
+                )
+            admin_password = payload.get("admin_password")
+            enabled = payload.get("enabled")
+            if not isinstance(admin_password, str) or not admin_password:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "router admin password is required"}
+                )
+            if not isinstance(enabled, bool):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "router Wi-Fi state is invalid"}
+                )
+            if not enabled and payload.get("confirm_disable") is not True:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "turning off router Wi-Fi requires confirmation"}
+                )
+            try:
+                result = self.helper_client.set_router_wifi(
+                    admin_password=admin_password,
+                    enabled=enabled,
+                )
+            except HelperClientError:
+                LOGGER.exception("router Wi-Fi change failed")
+                return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
+                    {"error": "router Wi-Fi change failed"}
                 )
             return HTTPStatus.OK, "application/json", _json_bytes({"result": result})
 

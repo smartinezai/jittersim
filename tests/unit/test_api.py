@@ -28,6 +28,18 @@ class FakeHelper:
     def configure_access_point(self, *, ssid, password):
         return {"ok": True, "action": "configure-ap", "commands_run": 3}
 
+    def sync_access_point_from_router(self, *, admin_password):
+        return {
+            "ok": True,
+            "action": "router-sync-ap",
+            "ssid": "Vodafone-Test",
+            "router_wifi_enabled": True,
+            "commands_run": 3,
+        }
+
+    def set_router_wifi(self, *, admin_password, enabled):
+        return {"ok": True, "action": "router-wifi", "enabled": enabled}
+
     def connected_devices(self):
         return [
             {
@@ -274,15 +286,16 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(devices[0]["ipv4_address"], "192.168.50.10")
 
-    def test_router_endpoint_describes_the_safe_manual_boundary(self) -> None:
+    def test_router_endpoint_describes_the_tg3442de_integration(self) -> None:
         status, _, body = self.server.response_for("/api/router")
 
         self.assertEqual(status, 200)
         router = json.loads(body)
         self.assertEqual(router["model"], "Vodafone TG3442DE")
-        self.assertFalse(router["automatic_wifi_control"])
+        self.assertTrue(router["automatic_wifi_control"])
+        self.assertEqual(router["wifi_control"], "tg3442de-local-web")
 
-    def test_uplink_endpoint_reports_the_pi_connection_and_manual_router_boundary(self) -> None:
+    def test_uplink_endpoint_reports_the_pi_connection_and_router_controls(self) -> None:
         self.server.helper_client = FakeHelper()
 
         status, content_type, body = self.server.response_for("/api/uplink")
@@ -296,7 +309,7 @@ class ControlServerTests(unittest.TestCase):
                 "router": {
                     "model": "Vodafone TG3442DE",
                     "settings_url": "http://192.168.0.1",
-                    "wifi_control": "manual",
+                    "wifi_control": "tg3442de-local-web",
                 },
                 "uplink": {
                     "connection_name": "netplan-eth0",
@@ -319,6 +332,46 @@ class ControlServerTests(unittest.TestCase):
                 "uplink": None,
             },
         )
+
+    def test_router_sync_endpoint_uses_the_helper(self) -> None:
+        self.server.helper_client = FakeHelper()
+
+        status, content_type, body = self.server.write_response_for(
+            "/api/router/sync-ap",
+            {"admin_password": "router-secret"},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, "application/json")
+        self.assertEqual(json.loads(body)["result"]["ssid"], "Vodafone-Test")
+
+    def test_router_wifi_endpoint_requires_confirmation_to_disable(self) -> None:
+        self.server.helper_client = FakeHelper()
+
+        status, _, body = self.server.write_response_for(
+            "/api/router/wifi",
+            {"admin_password": "router-secret", "enabled": False},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("requires confirmation", json.loads(body)["error"])
+
+        status, _, body = self.server.write_response_for(
+            "/api/router/wifi",
+            {
+                "admin_password": "router-secret",
+                "enabled": False,
+                "confirm_disable": True,
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertFalse(json.loads(body)["result"]["enabled"])
+
+        status, _, body = self.server.write_response_for(
+            "/api/router/wifi",
+            {"admin_password": "router-secret", "enabled": True},
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["result"]["enabled"])
 
     def test_connected_devices_endpoint_reports_unavailable_without_helper(self) -> None:
         status, content_type, body = self.server.response_for("/api/connected-devices")
@@ -431,7 +484,13 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("Upstream router connection", DASHBOARD_HTML)
         self.assertIn("/api/uplink", DASHBOARD_HTML)
         self.assertIn("Open router Wi-Fi settings", DASHBOARD_HTML)
-        self.assertIn("Match the Pi test Wi-Fi manually", DASHBOARD_HTML)
+        self.assertIn("Copy router Wi-Fi to Pi", DASHBOARD_HTML)
+        self.assertIn("Turn off router Wi-Fi", DASHBOARD_HTML)
+        self.assertIn("router-admin-password", DASHBOARD_HTML)
+        self.assertIn("/api/router/sync-ap", DASHBOARD_HTML)
+        self.assertIn("/api/router/wifi", DASHBOARD_HTML)
+        self.assertIn("response.result || response", DASHBOARD_HTML)
+        self.assertIn("Manual Pi access-point fallback", DASHBOARD_HTML)
         self.assertIn("Apply profile", DASHBOARD_HTML)
         self.assertIn("mode-badge", DASHBOARD_HTML)
         self.assertIn("action-message", DASHBOARD_HTML)
