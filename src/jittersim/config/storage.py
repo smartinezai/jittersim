@@ -9,8 +9,10 @@ from typing import Optional, Sequence, Union
 
 from .models import (
     Device,
+    DeviceGroup,
     DataLimit,
     DomainObservation,
+    GroupDataLimit,
     Impairment,
     MacPolicy,
     Profile,
@@ -128,6 +130,15 @@ class ConfigRepository:
                 profile_id TEXT NOT NULL REFERENCES profiles(id),
                 mac_address TEXT
             );
+            CREATE TABLE IF NOT EXISTS device_groups (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                profile_id TEXT REFERENCES profiles(id) ON DELETE SET NULL
+            );
+            CREATE TABLE IF NOT EXISTS device_group_members (
+                group_id TEXT NOT NULL REFERENCES device_groups(id) ON DELETE CASCADE,
+                device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS schedules (
                 id TEXT PRIMARY KEY,
                 device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
@@ -162,6 +173,18 @@ class ConfigRepository:
             );
             CREATE TABLE IF NOT EXISTS data_limits (
                 device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
+                profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                limit_bytes INTEGER NOT NULL,
+                reset_mode TEXT NOT NULL,
+                reset_interval_seconds INTEGER NOT NULL,
+                reset_times_json TEXT NOT NULL,
+                used_bytes INTEGER NOT NULL,
+                counter_bytes INTEGER NOT NULL,
+                last_reset_at INTEGER NOT NULL,
+                enabled INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS group_data_limits (
+                group_id TEXT PRIMARY KEY REFERENCES device_groups(id) ON DELETE CASCADE,
                 profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
                 limit_bytes INTEGER NOT NULL,
                 reset_mode TEXT NOT NULL,
@@ -442,6 +465,82 @@ class ConfigRepository:
             "SELECT id, name, ipv4_address, profile_id, mac_address FROM devices ORDER BY id"
         ).fetchall()
         return tuple(self._device_from_row(row) for row in rows)
+
+    def get_device_group(self, group_id: str) -> Optional[DeviceGroup]:
+        """Return one device group or `None` when it is not stored."""
+
+        row = self._connection.execute(
+            """
+            SELECT id, name, profile_id,
+                   COALESCE(
+                       (SELECT json_group_array(device_id)
+                        FROM device_group_members
+                        WHERE group_id = device_groups.id),
+                       '[]'
+                   ) AS device_ids_json
+            FROM device_groups WHERE id = ?
+            """,
+            (group_id,),
+        ).fetchone()
+        return None if row is None else self._device_group_from_row(row)
+
+    def list_device_groups(self) -> tuple:
+        """Return device groups in stable identifier order."""
+
+        rows = self._connection.execute(
+            """
+            SELECT id, name, profile_id,
+                   COALESCE(
+                       (SELECT json_group_array(device_id)
+                        FROM device_group_members
+                        WHERE group_id = device_groups.id),
+                       '[]'
+                   ) AS device_ids_json
+            FROM device_groups ORDER BY id
+            """
+        ).fetchall()
+        return tuple(self._device_group_from_row(row) for row in rows)
+
+    def save_device_group(self, group: DeviceGroup) -> None:
+        """Insert or update one group and its exclusive device membership."""
+
+        missing_devices = [device_id for device_id in group.device_ids if self.get_device(device_id) is None]
+        if missing_devices:
+            raise StorageError(f"device group references missing devices: {', '.join(missing_devices)}")
+        try:
+            self._connection.execute(
+                """
+                INSERT INTO device_groups (id, name, profile_id)
+                VALUES (?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    profile_id = excluded.profile_id
+                """,
+                (group.id, group.name, group.profile_id),
+            )
+            self._connection.execute(
+                "DELETE FROM device_group_members WHERE group_id = ?",
+                (group.id,),
+            )
+            self._connection.executemany(
+                "INSERT INTO device_group_members (group_id, device_id) VALUES (?, ?)",
+                ((group.id, device_id) for device_id in group.device_ids),
+            )
+            self._bump_configuration_version()
+            self._connection.commit()
+        except sqlite3.IntegrityError as error:
+            self._connection.rollback()
+            raise StorageError(f"could not save device group {group.id}") from error
+
+    def delete_device_group(self, group_id: str) -> bool:
+        """Delete one group and release its device members."""
+
+        cursor = self._connection.execute("DELETE FROM device_groups WHERE id = ?", (group_id,))
+        if cursor.rowcount:
+            self._bump_configuration_version()
+            self._connection.commit()
+            return True
+        return False
 
     def save_schedule(self, schedule: Schedule) -> None:
         """Insert or update one repeating schedule."""
@@ -796,6 +895,138 @@ class ConfigRepository:
         self._connection.commit()
         return DataLimit(
             device_id=data_limit.device_id,
+            profile_id=data_limit.profile_id,
+            limit_bytes=data_limit.limit_bytes,
+            reset_mode=data_limit.reset_mode,
+            reset_interval_seconds=data_limit.reset_interval_seconds,
+            reset_times=data_limit.reset_times,
+            used_bytes=updated_used,
+            counter_bytes=counter_bytes,
+            last_reset_at=data_limit.last_reset_at,
+            enabled=data_limit.enabled,
+        )
+
+    def get_group_data_limit(self, group_id: str) -> Optional[GroupDataLimit]:
+        """Return one shared group quota or `None` when it is not stored."""
+
+        row = self._connection.execute(
+            """
+            SELECT group_id, profile_id, limit_bytes, reset_mode,
+                   reset_interval_seconds, reset_times_json, used_bytes,
+                   counter_bytes, last_reset_at, enabled
+            FROM group_data_limits WHERE group_id = ?
+            """,
+            (group_id,),
+        ).fetchone()
+        return None if row is None else self._group_data_limit_from_row(row)
+
+    def list_group_data_limits(self) -> tuple:
+        """Return shared group quotas in stable group order."""
+
+        rows = self._connection.execute(
+            """
+            SELECT group_id, profile_id, limit_bytes, reset_mode,
+                   reset_interval_seconds, reset_times_json, used_bytes,
+                   counter_bytes, last_reset_at, enabled
+            FROM group_data_limits ORDER BY group_id
+            """
+        ).fetchall()
+        return tuple(self._group_data_limit_from_row(row) for row in rows)
+
+    def save_group_data_limit(self, data_limit: GroupDataLimit) -> None:
+        """Insert or update one shared group quota without discarding usage."""
+
+        try:
+            self._connection.execute(
+                """
+                INSERT INTO group_data_limits (
+                    group_id, profile_id, limit_bytes, reset_mode,
+                    reset_interval_seconds, reset_times_json, used_bytes,
+                    counter_bytes, last_reset_at, enabled
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(group_id) DO UPDATE SET
+                    profile_id = excluded.profile_id,
+                    limit_bytes = excluded.limit_bytes,
+                    reset_mode = excluded.reset_mode,
+                    reset_interval_seconds = excluded.reset_interval_seconds,
+                    reset_times_json = excluded.reset_times_json,
+                    used_bytes = excluded.used_bytes,
+                    counter_bytes = excluded.counter_bytes,
+                    last_reset_at = excluded.last_reset_at,
+                    enabled = excluded.enabled
+                """,
+                (
+                    data_limit.group_id,
+                    data_limit.profile_id,
+                    data_limit.limit_bytes,
+                    data_limit.reset_mode,
+                    data_limit.reset_interval_seconds,
+                    json.dumps(list(data_limit.reset_times)),
+                    data_limit.used_bytes,
+                    data_limit.counter_bytes,
+                    data_limit.last_reset_at,
+                    int(data_limit.enabled),
+                ),
+            )
+            self._bump_configuration_version()
+            self._connection.commit()
+        except sqlite3.IntegrityError as error:
+            self._connection.rollback()
+            raise StorageError(
+                f"could not save group data limit for {data_limit.group_id}"
+            ) from error
+
+    def reset_group_data_limit_usage(
+        self,
+        group_id: str,
+        *,
+        counter_bytes: Optional[int] = None,
+        reset_at: Optional[int] = None,
+    ) -> bool:
+        """Reset one shared group quota while preserving its configuration."""
+
+        values = []
+        assignments = ["used_bytes = 0"]
+        if counter_bytes is not None:
+            assignments.append("counter_bytes = ?")
+            values.append(counter_bytes)
+        if reset_at is not None:
+            assignments.append("last_reset_at = ?")
+            values.append(reset_at)
+        values.append(group_id)
+        cursor = self._connection.execute(
+            f"UPDATE group_data_limits SET {', '.join(assignments)} WHERE group_id = ?",
+            tuple(values),
+        )
+        if cursor.rowcount:
+            self._connection.commit()
+            return True
+        return False
+
+    def record_group_data_usage(
+        self,
+        group_id: str,
+        counter_bytes: int,
+    ) -> Optional[GroupDataLimit]:
+        """Merge one absolute aggregate counter into a shared group quota."""
+
+        data_limit = self.get_group_data_limit(group_id)
+        if data_limit is None:
+            return None
+        if not isinstance(counter_bytes, int) or counter_bytes < 0:
+            raise StorageError("group traffic counter is invalid")
+        delta = counter_bytes if counter_bytes < data_limit.counter_bytes else counter_bytes - data_limit.counter_bytes
+        updated_used = min(2**63 - 1, data_limit.used_bytes + delta)
+        self._connection.execute(
+            """
+            UPDATE group_data_limits SET used_bytes = ?, counter_bytes = ?
+            WHERE group_id = ?
+            """,
+            (updated_used, counter_bytes, group_id),
+        )
+        self._connection.commit()
+        return GroupDataLimit(
+            group_id=data_limit.group_id,
             profile_id=data_limit.profile_id,
             limit_bytes=data_limit.limit_bytes,
             reset_mode=data_limit.reset_mode,
@@ -1367,6 +1598,19 @@ class ConfigRepository:
             raise StorageError("stored device is malformed") from error
 
     @staticmethod
+    def _device_group_from_row(row: sqlite3.Row) -> DeviceGroup:
+        try:
+            device_ids = tuple(json.loads(row["device_ids_json"]))
+            return DeviceGroup(
+                id=row["id"],
+                name=row["name"],
+                device_ids=device_ids,
+                profile_id=row["profile_id"],
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
+            raise StorageError("stored device group is malformed") from error
+
+    @staticmethod
     def _schedule_from_row(row: sqlite3.Row) -> Schedule:
         try:
             days = json.loads(row["days_json"])
@@ -1436,6 +1680,24 @@ class ConfigRepository:
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
             raise StorageError("stored data limit is malformed") from error
+
+    @staticmethod
+    def _group_data_limit_from_row(row: sqlite3.Row) -> GroupDataLimit:
+        try:
+            return GroupDataLimit(
+                group_id=row["group_id"],
+                profile_id=row["profile_id"],
+                limit_bytes=row["limit_bytes"],
+                reset_mode=row["reset_mode"],
+                reset_interval_seconds=row["reset_interval_seconds"],
+                reset_times=tuple(json.loads(row["reset_times_json"])),
+                used_bytes=row["used_bytes"],
+                counter_bytes=row["counter_bytes"],
+                last_reset_at=row["last_reset_at"],
+                enabled=bool(row["enabled"]),
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
+            raise StorageError("stored group data limit is malformed") from error
 
     @staticmethod
     def _service_quota_from_row(row: sqlite3.Row) -> ServiceQuota:
