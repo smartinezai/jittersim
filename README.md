@@ -33,6 +33,7 @@ is a private lab tool, not a replacement for a home router.
 
 - Connected-device discovery with device names, IP addresses and MAC addresses.
 - Click-to-select devices and assign profiles from the dashboard.
+- Device groups that apply one profile override to several devices at once.
 - MAC address allowlists and denylists.
 - A global blocked-site list.
 - Profile-specific website lists that allow selected services while blocking
@@ -45,6 +46,8 @@ is a private lab tool, not a replacement for a home router.
 
 - Per-device byte quotas that switch to a fallback profile after the limit is
   reached.
+- Shared group byte quotas that add the traffic from all group members. A
+  per-device quota takes priority when both are configured.
 - Per-service quotas that group several observed domains for one service such
   as a streaming platform.
 - Service quota weights from `0.1×` to `10×`, so a service can consume its
@@ -56,6 +59,10 @@ is a private lab tool, not a replacement for a home router.
 - Manual, timed or daily quota resets.
 - Usage bars, current usage, reset actions and editable limits in the dashboard.
 - Quota changes that preserve the configured rule while resetting its counter.
+
+Groups are limited to one group per device. Service and timed service quotas
+remain device-specific, while shared group quotas measure combined device
+bytes.
 
 ### Pi and router controls
 
