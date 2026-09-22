@@ -13,6 +13,7 @@ from .models import (
     Impairment,
     MacPolicy,
     Profile,
+    Progression,
     Randomness,
     RuntimeState,
     Schedule,
@@ -139,6 +140,19 @@ class ConfigRepository:
                 profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
                 started_at INTEGER NOT NULL,
                 expires_at INTEGER NOT NULL,
+                enabled INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS progressions (
+                id TEXT PRIMARY KEY,
+                device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                start_profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                end_profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                started_at INTEGER NOT NULL,
+                duration_seconds INTEGER NOT NULL,
+                mode TEXT NOT NULL,
+                traffic_target_queries INTEGER NOT NULL,
+                traffic_baseline_queries INTEGER NOT NULL,
+                website_domains_json TEXT NOT NULL,
                 enabled INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS network_policies (
@@ -499,6 +513,112 @@ class ConfigRepository:
         ).fetchall()
         return tuple(self._timer_from_row(row) for row in rows)
 
+    def save_progression(self, progression: Progression) -> None:
+        """Persist one progression and replace other active overrides for its device."""
+
+        try:
+            self._connection.execute(
+                "UPDATE progressions SET enabled = 0 WHERE device_id = ? AND enabled = 1",
+                (progression.device_id,),
+            )
+            self._connection.execute(
+                "UPDATE timers SET enabled = 0 WHERE device_id = ? AND enabled = 1",
+                (progression.device_id,),
+            )
+            self._connection.execute(
+                """
+                INSERT INTO progressions (
+                    id, device_id, start_profile_id, end_profile_id, started_at,
+                    duration_seconds, mode, traffic_target_queries,
+                    traffic_baseline_queries, website_domains_json, enabled
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    device_id = excluded.device_id,
+                    start_profile_id = excluded.start_profile_id,
+                    end_profile_id = excluded.end_profile_id,
+                    started_at = excluded.started_at,
+                    duration_seconds = excluded.duration_seconds,
+                    mode = excluded.mode,
+                    traffic_target_queries = excluded.traffic_target_queries,
+                    traffic_baseline_queries = excluded.traffic_baseline_queries,
+                    website_domains_json = excluded.website_domains_json,
+                    enabled = excluded.enabled
+                """,
+                (
+                    progression.id,
+                    progression.device_id,
+                    progression.start_profile_id,
+                    progression.end_profile_id,
+                    progression.started_at,
+                    progression.duration_seconds,
+                    progression.mode,
+                    progression.traffic_target_queries,
+                    progression.traffic_baseline_queries,
+                    json.dumps(list(progression.website_domains)),
+                    int(progression.enabled),
+                ),
+            )
+            self._bump_configuration_version()
+            self._connection.commit()
+        except sqlite3.IntegrityError as error:
+            self._connection.rollback()
+            raise StorageError(f"could not save progression {progression.id}") from error
+
+    def delete_progression(self, progression_id: str) -> bool:
+        """Disable one progression when it is active."""
+
+        cursor = self._connection.execute(
+            "UPDATE progressions SET enabled = 0 WHERE id = ? AND enabled = 1",
+            (progression_id,),
+        )
+        if cursor.rowcount:
+            self._bump_configuration_version()
+            self._connection.commit()
+            return True
+        return False
+
+    def list_progressions(self) -> tuple:
+        """Return saved progressions in newest-first order."""
+
+        rows = self._connection.execute(
+            """
+            SELECT id, device_id, start_profile_id, end_profile_id, started_at,
+                   duration_seconds, mode, traffic_target_queries,
+                   traffic_baseline_queries, website_domains_json, enabled
+            FROM progressions ORDER BY started_at DESC, id DESC
+            """
+        ).fetchall()
+        return tuple(self._progression_from_row(row) for row in rows)
+
+    def list_active_progressions(self, *, now: int) -> tuple:
+        """Return enabled progressions that have not reached their time limit."""
+
+        rows = self._connection.execute(
+            """
+            SELECT id, device_id, start_profile_id, end_profile_id, started_at,
+                   duration_seconds, mode, traffic_target_queries,
+                   traffic_baseline_queries, website_domains_json, enabled
+            FROM progressions
+            WHERE enabled = 1 AND started_at <= ?
+              AND started_at + duration_seconds > ?
+            ORDER BY started_at DESC, id DESC
+            """,
+            (now, now),
+        ).fetchall()
+        return tuple(self._progression_from_row(row) for row in rows)
+
+    def total_domain_queries(self, ipv4_address: str) -> int:
+        """Return the bounded DNS query total for one observed client."""
+
+        row = self._connection.execute(
+            """
+            SELECT COALESCE(SUM(query_count), 0) AS total
+            FROM domain_observations WHERE ipv4_address = ?
+            """,
+            (ipv4_address,),
+        ).fetchone()
+        return int(row["total"] if row is not None else 0)
+
     def get_mac_policy(self) -> MacPolicy:
         """Return the saved MAC filtering policy."""
 
@@ -720,3 +840,22 @@ class ConfigRepository:
             )
         except (KeyError, TypeError, ValueError, ValidationError) as error:
             raise StorageError("stored timer is malformed") from error
+
+    @staticmethod
+    def _progression_from_row(row: sqlite3.Row) -> Progression:
+        try:
+            return Progression(
+                id=row["id"],
+                device_id=row["device_id"],
+                start_profile_id=row["start_profile_id"],
+                end_profile_id=row["end_profile_id"],
+                started_at=row["started_at"],
+                duration_seconds=row["duration_seconds"],
+                mode=row["mode"],
+                traffic_target_queries=row["traffic_target_queries"],
+                traffic_baseline_queries=row["traffic_baseline_queries"],
+                website_domains=tuple(json.loads(row["website_domains_json"])),
+                enabled=bool(row["enabled"]),
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
+            raise StorageError("stored progression is malformed") from error

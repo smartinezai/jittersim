@@ -298,6 +298,54 @@ class Timer:
 
 
 @dataclass(frozen=True)
+class Progression:
+    """A bounded session that moves one device between two profiles."""
+
+    id: str
+    device_id: str
+    start_profile_id: str
+    end_profile_id: str
+    started_at: int
+    duration_seconds: int
+    mode: str = "time"
+    traffic_target_queries: int = 0
+    traffic_baseline_queries: int = 0
+    website_domains: Tuple[str, ...] = ()
+    enabled: bool = True
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.id, "progression id")
+        _validate_identifier(self.device_id, "device_id")
+        _validate_identifier(self.start_profile_id, "start_profile_id")
+        _validate_identifier(self.end_profile_id, "end_profile_id")
+        _validate_number(self.started_at, "started_at", 0, 2**63 - 1)
+        _validate_number(self.duration_seconds, "duration_seconds", 60, 604_800)
+        if self.mode not in ("time", "traffic"):
+            raise ValidationError("progression mode is not supported")
+        _validate_number(
+            self.traffic_target_queries,
+            "traffic_target_queries",
+            0,
+            1_000_000_000,
+        )
+        _validate_number(
+            self.traffic_baseline_queries,
+            "traffic_baseline_queries",
+            0,
+            1_000_000_000_000,
+        )
+        if self.mode == "traffic" and self.traffic_target_queries < 1:
+            raise ValidationError("traffic mode requires a positive query target")
+        object.__setattr__(
+            self,
+            "website_domains",
+            _normalize_domain_list(self.website_domains, "website_domains"),
+        )
+        if not isinstance(self.enabled, bool):
+            raise ValidationError("enabled must be a boolean")
+
+
+@dataclass(frozen=True)
 class MacPolicy:
     """MAC filtering policy for clients arriving through the test access point."""
 

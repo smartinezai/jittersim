@@ -6,6 +6,7 @@ from jittersim.config.models import (
     Impairment,
     MacPolicy,
     Profile,
+    Progression,
     Randomness,
     Schedule,
     Timer,
@@ -107,6 +108,39 @@ class ConfigRepositoryTests(unittest.TestCase):
         self.assertTrue(self.repository.delete_timer(replacement.id))
         self.assertEqual(self.repository.list_active_timers(now=200), ())
         self.assertFalse(self.repository.delete_timer(replacement.id))
+
+    def test_round_trips_progressions_and_counts_observed_queries(self) -> None:
+        self.repository.save_profile(Profile(id="normal", name="Normal"))
+        self.repository.save_profile(Profile(id="slow", name="Slow"))
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        self.repository.save_domain_observations(
+            (
+                DomainObservation(
+                    ipv4_address="192.168.50.10",
+                    domain="example.com",
+                    query_count=7,
+                    first_seen=100,
+                    last_seen=100,
+                ),
+            ),
+            now=100,
+        )
+        progression = Progression(
+            id="degrade",
+            device_id="alice",
+            start_profile_id="normal",
+            end_profile_id="slow",
+            started_at=100,
+            duration_seconds=600,
+            website_domains=("youtube.com",),
+        )
+
+        self.repository.save_progression(progression)
+
+        self.assertEqual(self.repository.list_active_progressions(now=200), (progression,))
+        self.assertEqual(self.repository.total_domain_queries("192.168.50.10"), 7)
+        self.assertTrue(self.repository.delete_progression(progression.id))
+        self.assertEqual(self.repository.list_active_progressions(now=200), ())
 
     def test_lists_values_in_stable_identifier_order(self) -> None:
         self.repository.save_profile(Profile(id="z-profile", name="Z"))

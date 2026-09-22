@@ -7,6 +7,7 @@ from jittersim.config.models import (
     Impairment,
     MacPolicy,
     Profile,
+    Progression,
     Randomness,
     RuntimeState,
     Schedule,
@@ -214,6 +215,18 @@ class PolicyAndScheduleTests(unittest.TestCase):
                 profile_id="slow",
                 started_at=100,
                 expires_at=100,
+            )
+
+    def test_progression_requires_a_valid_mode_and_traffic_target(self) -> None:
+        with self.assertRaisesRegex(ValueError, "positive query target"):
+            Progression(
+                id="degrade",
+                device_id="alice",
+                start_profile_id="normal",
+                end_profile_id="slow",
+                started_at=100,
+                duration_seconds=600,
+                mode="traffic",
             )
 
 
