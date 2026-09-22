@@ -1,14 +1,21 @@
 """Background runtime for schedules, randomized rerolls and outages."""
 
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 from pathlib import Path
 import threading
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence, Union
 
-from jittersim.config.models import Device, DomainObservation, Profile, Progression
+from jittersim.config.models import (
+    DataLimit,
+    Device,
+    DomainObservation,
+    Profile,
+    Progression,
+    ServiceQuota,
+)
 from jittersim.config.storage import ConfigRepository, DatabasePath, StorageError
 from jittersim.networking.helper import HelperClient, HelperClientError
 
@@ -24,7 +31,8 @@ from .randomizer import (
     seeded_generator,
 )
 from .schedules import active_schedule
-from .website import build_website_filters
+from .plan import ServiceQuotaRule
+from .website import build_website_filters, resolve_domains
 
 
 LOGGER = logging.getLogger(__name__)
@@ -62,6 +70,7 @@ class RuntimeScheduler:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_traffic_sample_at = 0.0
+        self._last_quota_sample_at = 0.0
 
     def start(self) -> None:
         """Start the scheduler loop when hardware control is available."""
@@ -131,6 +140,7 @@ class RuntimeScheduler:
         active_repository = repository or ConfigRepository(self._database_path)
         try:
             self._sample_traffic_if_needed(repository=active_repository, now=current_time)
+            self._sample_quota_usage_if_needed(repository=active_repository, now=current_time)
             plan = self._build_plan(repository=active_repository, now=current_time)
             payload = plan_to_payload(plan)
             with self._lock:
@@ -177,6 +187,10 @@ class RuntimeScheduler:
         blocked_addresses = []
         blocked_domains_by_device = {}
         active_device_ids = set()
+        data_limits = {
+            data_limit.device_id: data_limit
+            for data_limit in repository.list_data_limits()
+        }
 
         for device in repository.list_devices():
             progression = active_progressions.get(device.id)
@@ -215,6 +229,15 @@ class RuntimeScheduler:
                 domain_count = int(len(progression.website_domains) * factor)
                 if domain_count:
                     blocked_domains_by_device[device.id] = progression.website_domains[:domain_count]
+            data_limit = data_limits.get(device.id)
+            if data_limit is not None and data_limit.enabled and data_limit.used_bytes >= data_limit.limit_bytes:
+                fallback_profile = profiles.get(data_limit.profile_id)
+                if fallback_profile is None:
+                    raise PlanError(
+                        f"data limit for device {device.id} references a missing profile"
+                    )
+                selected_profile = fallback_profile
+                source_key = f"data-limit:{device.id}"
             if selected_profile is None:
                 raise PlanError(f"device {device.id} references missing profile {source_profile_id}")
             active_device_ids.add(device.id)
@@ -297,6 +320,11 @@ class RuntimeScheduler:
             global_policy=repository.get_website_policy(),
             blocked_domains_by_device=blocked_domains_by_device,
         )
+        service_quota_rules = self._build_service_quota_rules(
+            repository=repository,
+            devices=runtime_devices,
+            profiles=profiles,
+        )
         return compile_plan(
             devices=runtime_devices,
             profiles=runtime_profiles,
@@ -304,7 +332,52 @@ class RuntimeScheduler:
             global_blocked_addresses=global_blocked,
             website_filters=website_filters,
             blocked_device_addresses=blocked_addresses,
+            service_quota_rules=service_quota_rules,
         )
+
+    def _build_service_quota_rules(
+        self,
+        *,
+        repository: ConfigRepository,
+        devices: Sequence[Device],
+        profiles: Dict[str, Profile],
+    ) -> tuple:
+        """Resolve enabled service quotas into destination-aware traffic rules."""
+
+        devices_by_id = {device.id: device for device in devices}
+        rules = []
+        for quota in repository.list_service_quotas():
+            if not quota.enabled:
+                continue
+            device = devices_by_id.get(quota.device_id)
+            fallback_profile = profiles.get(quota.profile_id)
+            if device is None:
+                LOGGER.warning("service quota %s references a missing device", quota.id)
+                continue
+            if fallback_profile is None:
+                raise PlanError(
+                    f"service quota {quota.id} references a missing profile"
+                )
+            destination_addresses = resolve_domains(domains=quota.domains)
+            if not destination_addresses:
+                LOGGER.warning(
+                    "service quota %s has no currently resolvable observed domains",
+                    quota.id,
+                )
+                continue
+            rules.append(
+                ServiceQuotaRule(
+                    quota_id=quota.id,
+                    device_id=device.id,
+                    device_ip=device.ipv4_address,
+                    destination_addresses=destination_addresses,
+                    mark=0,
+                    upload_impairment=fallback_profile.upload,
+                    download_impairment=fallback_profile.download,
+                    active=quota.used_bytes >= quota.limit_bytes,
+                )
+            )
+        return tuple(rules)
 
     def _sample_traffic_if_needed(self, *, repository: ConfigRepository, now: float) -> None:
         """Persist a bounded DNS sample when a traffic progression is active."""
@@ -336,6 +409,83 @@ class RuntimeScheduler:
             )
         except (KeyError, TypeError, ValueError, StorageError, HelperClientError):
             LOGGER.warning("traffic progression sample failed", exc_info=True)
+
+    def _sample_quota_usage_if_needed(
+        self,
+        *,
+        repository: ConfigRepository,
+        now: float,
+    ) -> None:
+        """Merge project-owned nft byte counters and perform due quota resets."""
+
+        if now - self._last_quota_sample_at < 5:
+            return
+        data_limits = tuple(
+            data_limit
+            for data_limit in repository.list_data_limits()
+            if data_limit.enabled
+        )
+        service_quotas = tuple(
+            quota for quota in repository.list_service_quotas() if quota.enabled
+        )
+        if not data_limits and not service_quotas:
+            return
+        get_traffic_counters = getattr(self._helper_client, "traffic_counters", None)
+        if get_traffic_counters is None:
+            return
+        self._last_quota_sample_at = now
+        try:
+            counters = get_traffic_counters()
+            device_counters = counters.get("devices", {})
+            service_counters = counters.get("services", {})
+            for data_limit in data_limits:
+                counter = device_counters.get(data_limit.device_id)
+                if counter is not None:
+                    repository.record_data_usage(data_limit.device_id, counter)
+            for quota in service_quotas:
+                counter = service_counters.get(quota.id)
+                if counter is not None:
+                    repository.record_service_usage(quota.id, counter)
+            for data_limit in data_limits:
+                refreshed = repository.get_data_limit(data_limit.device_id)
+                if refreshed is not None and self._quota_reset_is_due(refreshed, now):
+                    repository.reset_data_limit_usage(
+                        refreshed.device_id,
+                        counter_bytes=device_counters.get(refreshed.device_id),
+                        reset_at=int(now),
+                    )
+            for quota in service_quotas:
+                refreshed = repository.get_service_quota(quota.id)
+                if refreshed is not None and self._quota_reset_is_due(refreshed, now):
+                    repository.reset_service_quota_usage(
+                        refreshed.id,
+                        counter_bytes=service_counters.get(refreshed.id),
+                        reset_at=int(now),
+                    )
+        except (AttributeError, KeyError, TypeError, ValueError, StorageError, HelperClientError):
+            LOGGER.warning("quota traffic sample failed", exc_info=True)
+
+    @staticmethod
+    def _quota_reset_is_due(quota: Union[DataLimit, ServiceQuota], now: float) -> bool:
+        """Return whether a quota crossed its configured reset boundary."""
+
+        if quota.reset_mode == "interval":
+            return now - quota.last_reset_at >= quota.reset_interval_seconds
+        if quota.reset_mode != "daily":
+            return False
+        current = datetime.fromtimestamp(now)
+        for day_offset in (0, -1):
+            day = current + timedelta(days=day_offset)
+            for minute in quota.reset_times:
+                boundary = day.replace(
+                    hour=minute // 60,
+                    minute=minute % 60,
+                    second=0,
+                    microsecond=0,
+                ).timestamp()
+                if quota.last_reset_at < boundary <= now:
+                    return True
+        return False
 
     def _run(self) -> None:
         while not self._stop_event.wait(self._poll_seconds):

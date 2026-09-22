@@ -1,8 +1,10 @@
 import unittest
 from datetime import datetime
 from ipaddress import IPv4Address
+from unittest.mock import patch
 
 from jittersim.config.models import (
+    DataLimit,
     Device,
     DomainObservation,
     Impairment,
@@ -10,6 +12,7 @@ from jittersim.config.models import (
     Progression,
     Randomness,
     Schedule,
+    ServiceQuota,
     Timer,
 )
 from jittersim.config.storage import ConfigRepository
@@ -20,6 +23,7 @@ class RecordingHelper:
     def __init__(self) -> None:
         self.plans = []
         self.observations = []
+        self.counters = {"devices": {}, "services": {}}
 
     def apply(self, *, plan):
         self.plans.append(plan)
@@ -27,6 +31,9 @@ class RecordingHelper:
 
     def observe_dns_queries(self):
         return self.observations
+
+    def traffic_counters(self):
+        return self.counters
 
 
 class RuntimeSchedulerTests(unittest.TestCase):
@@ -221,6 +228,92 @@ class RuntimeSchedulerTests(unittest.TestCase):
 
         scheduler.tick(repository=self.repository, now=100)
         self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 1_000)
+
+    def test_device_quota_switches_to_its_fallback_profile(self) -> None:
+        normal = Profile(id="normal", name="Normal")
+        fallback = Profile(id="fallback", name="Fallback", download=Impairment(delay_ms=700))
+        self.repository.save_profile(normal)
+        self.repository.save_profile(fallback)
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        self.repository.save_data_limit(
+            DataLimit(
+                device_id="alice",
+                profile_id="fallback",
+                limit_bytes=100,
+                last_reset_at=100,
+            )
+        )
+        self.helper.counters = {"devices": {"alice": 150}, "services": {}}
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+
+        scheduler.tick(repository=self.repository, now=100)
+
+        self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 700)
+        self.assertEqual(self.repository.get_data_limit("alice").used_bytes, 150)
+
+    def test_service_quota_uses_all_selected_observed_domains(self) -> None:
+        normal = Profile(id="normal", name="Normal")
+        fallback = Profile(id="fallback", name="Fallback", download=Impairment(delay_ms=900))
+        self.repository.save_profile(normal)
+        self.repository.save_profile(fallback)
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        self.repository.save_service_quota(
+            ServiceQuota(
+                id="alice-video",
+                device_id="alice",
+                name="Video service",
+                domains=("netflix.com", "nflxvideo.net"),
+                profile_id="fallback",
+                limit_bytes=100,
+                last_reset_at=100,
+            )
+        )
+        self.helper.counters = {"devices": {}, "services": {"alice-video": 150}}
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+
+        with patch(
+            "jittersim.engine.runtime.resolve_domains",
+            return_value=(IPv4Address("203.0.113.10"), IPv4Address("203.0.113.11")),
+        ):
+            scheduler.tick(repository=self.repository, now=100)
+
+        rule = self.helper.plans[-1].service_quota_rules[0]
+        self.assertTrue(rule.active)
+        self.assertEqual(
+            rule.destination_addresses,
+            (IPv4Address("203.0.113.10"), IPv4Address("203.0.113.11")),
+        )
+
+    def test_interval_reset_clears_usage_and_preserves_the_counter_baseline(self) -> None:
+        normal = Profile(id="normal", name="Normal")
+        fallback = Profile(id="fallback", name="Fallback", download=Impairment(delay_ms=700))
+        self.repository.save_profile(normal)
+        self.repository.save_profile(fallback)
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        self.repository.save_data_limit(
+            DataLimit(
+                device_id="alice",
+                profile_id="fallback",
+                limit_bytes=100,
+                reset_mode="interval",
+                reset_interval_seconds=60,
+                used_bytes=100,
+                counter_bytes=10,
+                last_reset_at=100,
+            )
+        )
+        self.helper.counters = {"devices": {"alice": 20}, "services": {}}
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+
+        scheduler.tick(repository=self.repository, now=161)
+
+        data_limit = self.repository.get_data_limit("alice")
+        self.assertEqual(data_limit.used_bytes, 0)
+        self.assertEqual(data_limit.counter_bytes, 20)
+        self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 0)
 
     def test_random_outage_marks_a_device_as_disconnected(self) -> None:
         profile = Profile(
