@@ -142,6 +142,18 @@ class NetworkApplier:
         )
         return result.stdout
 
+    def traffic_counters(self) -> str:
+        """Read project-owned nftables byte counters as JSON."""
+
+        result = self._executor.run(
+            Command(
+                executable="nft",
+                arguments=("-j", "list", "chain", "inet", "jittersim", "forward"),
+                purpose="inspect JitterSim traffic counters",
+            )
+        )
+        return result.stdout
+
     def configure_access_point(self, *, ssid: str, password: str) -> int:
         """Set the local test AP credentials without touching the upstream router."""
 

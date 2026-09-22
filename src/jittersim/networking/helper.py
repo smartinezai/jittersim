@@ -30,6 +30,10 @@ _DNS_QUERY_PATTERN = re.compile(
     r"\d{1,3}(?:\.\d{1,3}){3}\.53:.*?\b"
     r"(?:A|AAAA|HTTPS|SVCB|MX|TXT)\?\s+(?P<domain>[A-Za-z0-9][A-Za-z0-9.-]*)"
 )
+_TRAFFIC_COUNTER_COMMENT_PATTERN = re.compile(
+    r"^usage-(?P<kind>device|service) (?P<identifier>[a-z0-9][a-z0-9_-]{0,63}) "
+    r"(?:upload|download)$"
+)
 _PRIVATE_NETWORKS = (
     IPv4Network("10.0.0.0/8"),
     IPv4Network("172.16.0.0/12"),
@@ -67,6 +71,8 @@ class HelperService:
             return self._handle_uplink_info()
         if action == "observe-dns":
             return self._handle_dns_observation()
+        if action == "traffic-counters":
+            return self._handle_traffic_counters()
         if action == "configure-ap":
             return self._handle_configure_ap(payload)
         if action == "apply":
@@ -104,6 +110,15 @@ class HelperService:
             "action": "observe-dns",
             "observations": _parse_dns_query_output(output, observed_at=int(time.time())),
         }
+
+    def _handle_traffic_counters(self) -> Dict[str, Any]:
+        try:
+            output = self._applier.traffic_counters()
+            counters = _parse_traffic_counter_output(output)
+        except (CommandExecutionError, ValueError):
+            LOGGER.exception("traffic counter inspection failed")
+            return {"ok": False, "error": "traffic counter inspection failed"}
+        return {"ok": True, "action": "traffic-counters", "counters": counters}
 
     def _handle_apply(self, payload: Any) -> Dict[str, Any]:
         try:
@@ -283,6 +298,32 @@ class HelperClient:
             raise HelperClientError("helper returned invalid DNS observations")
         return observations
 
+    def traffic_counters(self) -> Dict[str, Dict[str, int]]:
+        """Return byte counters grouped by device and service quota."""
+
+        response = self._request({"action": "traffic-counters"})
+        counters = response.get("counters")
+        if not isinstance(counters, dict):
+            raise HelperClientError("helper returned invalid traffic counters")
+        result: Dict[str, Dict[str, int]] = {}
+        for kind in ("devices", "services"):
+            values = counters.get(kind)
+            if not isinstance(values, dict):
+                raise HelperClientError("helper returned invalid traffic counters")
+            result[kind] = {}
+            for identifier, value in values.items():
+                if (
+                    not isinstance(identifier, str)
+                    or not re.fullmatch(r"^[a-z0-9][a-z0-9_-]{0,63}$", identifier)
+                    or isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value < 0
+                    or value > 2**63 - 1
+                ):
+                    raise HelperClientError("helper returned invalid traffic counters")
+                result[kind][identifier] = value
+        return result
+
     def _request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         encoded = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
         if len(encoded) > MAX_MESSAGE_BYTES:
@@ -415,6 +456,41 @@ def _parse_dns_query_output(output: str, *, observed_at: int) -> List[Dict[str, 
         }
         for (ipv4_address, domain), query_count in sorted(counts.items())
     ]
+
+
+def _parse_traffic_counter_output(output: str) -> Dict[str, Dict[str, int]]:
+    """Extract only project-owned byte counters from nftables JSON output."""
+
+    try:
+        payload = json.loads(output)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise ValueError("nftables counter output is not valid JSON") from error
+    if not isinstance(payload, dict) or not isinstance(payload.get("nftables"), list):
+        raise ValueError("nftables counter output has an invalid shape")
+
+    counters: Dict[str, Dict[str, int]] = {"devices": {}, "services": {}}
+    for item in payload["nftables"]:
+        if not isinstance(item, dict) or not isinstance(item.get("rule"), dict):
+            continue
+        rule = item["rule"]
+        comment = rule.get("comment")
+        match = _TRAFFIC_COUNTER_COMMENT_PATTERN.fullmatch(comment or "")
+        if match is None:
+            continue
+        byte_count = None
+        for expression in rule.get("expr", []):
+            if not isinstance(expression, dict) or not isinstance(expression.get("counter"), dict):
+                continue
+            candidate = expression["counter"].get("bytes")
+            if isinstance(candidate, int) and not isinstance(candidate, bool) and 0 <= candidate <= 2**63 - 1:
+                byte_count = candidate
+                break
+        if byte_count is None:
+            continue
+        kind = "devices" if match.group("kind") == "device" else "services"
+        identifier = match.group("identifier")
+        counters[kind][identifier] = counters[kind].get(identifier, 0) + byte_count
+    return counters
 
 
 if __name__ == "__main__":

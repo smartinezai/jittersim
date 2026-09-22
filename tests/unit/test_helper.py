@@ -14,6 +14,7 @@ from jittersim.networking.helper import (
     HelperService,
     UnixHelperServer,
     _parse_neighbor_output,
+    _parse_traffic_counter_output,
     run_helper,
 )
 from jittersim.networking.topology import Topology
@@ -229,6 +230,41 @@ class HelperServiceTests(unittest.TestCase):
         )
         self.assertEqual(executor.commands[0].timeout_seconds, 5.0)
         self.assertTrue(executor.commands[0].timeout_is_success)
+
+    def test_reads_device_and_service_traffic_counters(self) -> None:
+        executor = OutputExecutor(
+            '{"nftables":['
+            '{"rule":{"comment":"usage-device alice upload",'
+            '"expr":[{"counter":{"packets":3,"bytes":1200}}]}},'
+            '{"rule":{"comment":"usage-device alice download",'
+            '"expr":[{"counter":{"packets":4,"bytes":800}}]}},'
+            '{"rule":{"comment":"usage-service alice-video upload",'
+            '"expr":[{"counter":{"packets":1,"bytes":300}}]}},'
+            '{"rule":{"comment":"unrelated rule",'
+            '"expr":[{"counter":{"packets":1,"bytes":9000}}]}}]}'
+        )
+        service = HelperService(
+            NetworkApplier(
+                executor=executor,
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            )
+        )
+
+        response = service.handle_payload({"action": "traffic-counters"})
+
+        self.assertEqual(response["action"], "traffic-counters")
+        self.assertEqual(
+            response["counters"],
+            {"devices": {"alice": 2_000}, "services": {"alice-video": 300}},
+        )
+        self.assertEqual(
+            executor.commands[0].argv,
+            ("nft", "-j", "list", "chain", "inet", "jittersim", "forward"),
+        )
+
+    def test_rejects_invalid_traffic_counter_json(self) -> None:
+        with self.assertRaises(ValueError):
+            _parse_traffic_counter_output("not json")
 
     def test_neighbor_parser_ignores_malformed_lines(self) -> None:
         self.assertEqual(
