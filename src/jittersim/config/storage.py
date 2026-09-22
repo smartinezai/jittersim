@@ -9,6 +9,7 @@ from typing import Optional, Sequence, Union
 
 from .models import (
     Device,
+    DataLimit,
     DomainObservation,
     Impairment,
     MacPolicy,
@@ -17,6 +18,7 @@ from .models import (
     Randomness,
     RuntimeState,
     Schedule,
+    ServiceQuota,
     Timer,
     ValidationError,
     WebsitePolicy,
@@ -153,6 +155,33 @@ class ConfigRepository:
                 traffic_target_queries INTEGER NOT NULL,
                 traffic_baseline_queries INTEGER NOT NULL,
                 website_domains_json TEXT NOT NULL,
+                enabled INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS data_limits (
+                device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
+                profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                limit_bytes INTEGER NOT NULL,
+                reset_mode TEXT NOT NULL,
+                reset_interval_seconds INTEGER NOT NULL,
+                reset_times_json TEXT NOT NULL,
+                used_bytes INTEGER NOT NULL,
+                counter_bytes INTEGER NOT NULL,
+                last_reset_at INTEGER NOT NULL,
+                enabled INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS service_quotas (
+                id TEXT PRIMARY KEY,
+                device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                domains_json TEXT NOT NULL,
+                profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                limit_bytes INTEGER NOT NULL,
+                reset_mode TEXT NOT NULL,
+                reset_interval_seconds INTEGER NOT NULL,
+                reset_times_json TEXT NOT NULL,
+                used_bytes INTEGER NOT NULL,
+                counter_bytes INTEGER NOT NULL,
+                last_reset_at INTEGER NOT NULL,
                 enabled INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS network_policies (
@@ -619,6 +648,271 @@ class ConfigRepository:
         ).fetchone()
         return int(row["total"] if row is not None else 0)
 
+    def get_data_limit(self, device_id: str) -> Optional[DataLimit]:
+        """Return one device quota or `None` when it is not stored."""
+
+        row = self._connection.execute(
+            """
+            SELECT device_id, profile_id, limit_bytes, reset_mode,
+                   reset_interval_seconds, reset_times_json, used_bytes,
+                   counter_bytes, last_reset_at, enabled
+            FROM data_limits WHERE device_id = ?
+            """,
+            (device_id,),
+        ).fetchone()
+        return None if row is None else self._data_limit_from_row(row)
+
+    def list_data_limits(self) -> tuple:
+        """Return device quotas in stable device order."""
+
+        rows = self._connection.execute(
+            """
+            SELECT device_id, profile_id, limit_bytes, reset_mode,
+                   reset_interval_seconds, reset_times_json, used_bytes,
+                   counter_bytes, last_reset_at, enabled
+            FROM data_limits ORDER BY device_id
+            """
+        ).fetchall()
+        return tuple(self._data_limit_from_row(row) for row in rows)
+
+    def save_data_limit(self, data_limit: DataLimit) -> None:
+        """Insert or update one device quota without discarding its usage."""
+
+        try:
+            self._connection.execute(
+                """
+                INSERT INTO data_limits (
+                    device_id, profile_id, limit_bytes, reset_mode,
+                    reset_interval_seconds, reset_times_json, used_bytes,
+                    counter_bytes, last_reset_at, enabled
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(device_id) DO UPDATE SET
+                    profile_id = excluded.profile_id,
+                    limit_bytes = excluded.limit_bytes,
+                    reset_mode = excluded.reset_mode,
+                    reset_interval_seconds = excluded.reset_interval_seconds,
+                    reset_times_json = excluded.reset_times_json,
+                    used_bytes = excluded.used_bytes,
+                    counter_bytes = excluded.counter_bytes,
+                    last_reset_at = excluded.last_reset_at,
+                    enabled = excluded.enabled
+                """,
+                (
+                    data_limit.device_id,
+                    data_limit.profile_id,
+                    data_limit.limit_bytes,
+                    data_limit.reset_mode,
+                    data_limit.reset_interval_seconds,
+                    json.dumps(list(data_limit.reset_times)),
+                    data_limit.used_bytes,
+                    data_limit.counter_bytes,
+                    data_limit.last_reset_at,
+                    int(data_limit.enabled),
+                ),
+            )
+            self._bump_configuration_version()
+            self._connection.commit()
+        except sqlite3.IntegrityError as error:
+            self._connection.rollback()
+            raise StorageError(f"could not save data limit for {data_limit.device_id}") from error
+
+    def reset_data_limit_usage(
+        self,
+        device_id: str,
+        *,
+        counter_bytes: Optional[int] = None,
+        reset_at: Optional[int] = None,
+    ) -> bool:
+        """Reset one device quota while preserving its limit and fallback profile."""
+
+        values = []
+        assignments = ["used_bytes = 0"]
+        if counter_bytes is not None:
+            assignments.append("counter_bytes = ?")
+            values.append(counter_bytes)
+        if reset_at is not None:
+            assignments.append("last_reset_at = ?")
+            values.append(reset_at)
+        values.append(device_id)
+        cursor = self._connection.execute(
+            f"UPDATE data_limits SET {', '.join(assignments)} WHERE device_id = ?",
+            tuple(values),
+        )
+        if cursor.rowcount:
+            self._connection.commit()
+            return True
+        return False
+
+    def record_data_usage(self, device_id: str, counter_bytes: int) -> Optional[DataLimit]:
+        """Merge one absolute device counter into the persisted quota usage."""
+
+        data_limit = self.get_data_limit(device_id)
+        if data_limit is None:
+            return None
+        if not isinstance(counter_bytes, int) or counter_bytes < 0:
+            raise StorageError("device traffic counter is invalid")
+        delta = counter_bytes if counter_bytes < data_limit.counter_bytes else counter_bytes - data_limit.counter_bytes
+        updated_used = min(2**63 - 1, data_limit.used_bytes + delta)
+        self._connection.execute(
+            """
+            UPDATE data_limits SET used_bytes = ?, counter_bytes = ?
+            WHERE device_id = ?
+            """,
+            (updated_used, counter_bytes, device_id),
+        )
+        self._connection.commit()
+        return DataLimit(
+            device_id=data_limit.device_id,
+            profile_id=data_limit.profile_id,
+            limit_bytes=data_limit.limit_bytes,
+            reset_mode=data_limit.reset_mode,
+            reset_interval_seconds=data_limit.reset_interval_seconds,
+            reset_times=data_limit.reset_times,
+            used_bytes=updated_used,
+            counter_bytes=counter_bytes,
+            last_reset_at=data_limit.last_reset_at,
+            enabled=data_limit.enabled,
+        )
+
+    def get_service_quota(self, quota_id: str) -> Optional[ServiceQuota]:
+        """Return one service quota or `None` when it is not stored."""
+
+        row = self._connection.execute(
+            """
+            SELECT id, device_id, name, domains_json, profile_id, limit_bytes,
+                   reset_mode, reset_interval_seconds, reset_times_json,
+                   used_bytes, counter_bytes, last_reset_at, enabled
+            FROM service_quotas WHERE id = ?
+            """,
+            (quota_id,),
+        ).fetchone()
+        return None if row is None else self._service_quota_from_row(row)
+
+    def list_service_quotas(self) -> tuple:
+        """Return service quotas in stable identifier order."""
+
+        rows = self._connection.execute(
+            """
+            SELECT id, device_id, name, domains_json, profile_id, limit_bytes,
+                   reset_mode, reset_interval_seconds, reset_times_json,
+                   used_bytes, counter_bytes, last_reset_at, enabled
+            FROM service_quotas ORDER BY id
+            """
+        ).fetchall()
+        return tuple(self._service_quota_from_row(row) for row in rows)
+
+    def save_service_quota(self, quota: ServiceQuota) -> None:
+        """Insert or update one service quota without discarding its usage."""
+
+        try:
+            self._connection.execute(
+                """
+                INSERT INTO service_quotas (
+                    id, device_id, name, domains_json, profile_id, limit_bytes,
+                    reset_mode, reset_interval_seconds, reset_times_json,
+                    used_bytes, counter_bytes, last_reset_at, enabled
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    device_id = excluded.device_id,
+                    name = excluded.name,
+                    domains_json = excluded.domains_json,
+                    profile_id = excluded.profile_id,
+                    limit_bytes = excluded.limit_bytes,
+                    reset_mode = excluded.reset_mode,
+                    reset_interval_seconds = excluded.reset_interval_seconds,
+                    reset_times_json = excluded.reset_times_json,
+                    used_bytes = excluded.used_bytes,
+                    counter_bytes = excluded.counter_bytes,
+                    last_reset_at = excluded.last_reset_at,
+                    enabled = excluded.enabled
+                """,
+                (
+                    quota.id,
+                    quota.device_id,
+                    quota.name,
+                    json.dumps(list(quota.domains)),
+                    quota.profile_id,
+                    quota.limit_bytes,
+                    quota.reset_mode,
+                    quota.reset_interval_seconds,
+                    json.dumps(list(quota.reset_times)),
+                    quota.used_bytes,
+                    quota.counter_bytes,
+                    quota.last_reset_at,
+                    int(quota.enabled),
+                ),
+            )
+            self._bump_configuration_version()
+            self._connection.commit()
+        except sqlite3.IntegrityError as error:
+            self._connection.rollback()
+            raise StorageError(f"could not save service quota {quota.id}") from error
+
+    def reset_service_quota_usage(
+        self,
+        quota_id: str,
+        *,
+        counter_bytes: Optional[int] = None,
+        reset_at: Optional[int] = None,
+    ) -> bool:
+        """Reset one service quota while preserving its configuration."""
+
+        values = []
+        assignments = ["used_bytes = 0"]
+        if counter_bytes is not None:
+            assignments.append("counter_bytes = ?")
+            values.append(counter_bytes)
+        if reset_at is not None:
+            assignments.append("last_reset_at = ?")
+            values.append(reset_at)
+        values.append(quota_id)
+        cursor = self._connection.execute(
+            f"UPDATE service_quotas SET {', '.join(assignments)} WHERE id = ?",
+            tuple(values),
+        )
+        if cursor.rowcount:
+            self._connection.commit()
+            return True
+        return False
+
+    def record_service_usage(
+        self,
+        quota_id: str,
+        counter_bytes: int,
+    ) -> Optional[ServiceQuota]:
+        """Merge one absolute service counter into persisted quota usage."""
+
+        quota = self.get_service_quota(quota_id)
+        if quota is None:
+            return None
+        if not isinstance(counter_bytes, int) or counter_bytes < 0:
+            raise StorageError("service traffic counter is invalid")
+        delta = counter_bytes if counter_bytes < quota.counter_bytes else counter_bytes - quota.counter_bytes
+        updated_used = min(2**63 - 1, quota.used_bytes + delta)
+        self._connection.execute(
+            """
+            UPDATE service_quotas SET used_bytes = ?, counter_bytes = ?
+            WHERE id = ?
+            """,
+            (updated_used, counter_bytes, quota_id),
+        )
+        self._connection.commit()
+        return ServiceQuota(
+            id=quota.id,
+            device_id=quota.device_id,
+            name=quota.name,
+            domains=quota.domains,
+            profile_id=quota.profile_id,
+            limit_bytes=quota.limit_bytes,
+            reset_mode=quota.reset_mode,
+            reset_interval_seconds=quota.reset_interval_seconds,
+            reset_times=quota.reset_times,
+            used_bytes=updated_used,
+            counter_bytes=counter_bytes,
+            last_reset_at=quota.last_reset_at,
+            enabled=quota.enabled,
+        )
+
     def get_mac_policy(self) -> MacPolicy:
         """Return the saved MAC filtering policy."""
 
@@ -859,3 +1153,42 @@ class ConfigRepository:
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
             raise StorageError("stored progression is malformed") from error
+
+    @staticmethod
+    def _data_limit_from_row(row: sqlite3.Row) -> DataLimit:
+        try:
+            return DataLimit(
+                device_id=row["device_id"],
+                profile_id=row["profile_id"],
+                limit_bytes=row["limit_bytes"],
+                reset_mode=row["reset_mode"],
+                reset_interval_seconds=row["reset_interval_seconds"],
+                reset_times=tuple(json.loads(row["reset_times_json"])),
+                used_bytes=row["used_bytes"],
+                counter_bytes=row["counter_bytes"],
+                last_reset_at=row["last_reset_at"],
+                enabled=bool(row["enabled"]),
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
+            raise StorageError("stored data limit is malformed") from error
+
+    @staticmethod
+    def _service_quota_from_row(row: sqlite3.Row) -> ServiceQuota:
+        try:
+            return ServiceQuota(
+                id=row["id"],
+                device_id=row["device_id"],
+                name=row["name"],
+                domains=tuple(json.loads(row["domains_json"])),
+                profile_id=row["profile_id"],
+                limit_bytes=row["limit_bytes"],
+                reset_mode=row["reset_mode"],
+                reset_interval_seconds=row["reset_interval_seconds"],
+                reset_times=tuple(json.loads(row["reset_times_json"])),
+                used_bytes=row["used_bytes"],
+                counter_bytes=row["counter_bytes"],
+                last_reset_at=row["last_reset_at"],
+                enabled=bool(row["enabled"]),
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
+            raise StorageError("stored service quota is malformed") from error

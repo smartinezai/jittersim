@@ -345,6 +345,128 @@ class Progression:
             raise ValidationError("enabled must be a boolean")
 
 
+def _validate_quota_schedule(
+    *,
+    reset_mode: str,
+    reset_interval_seconds: int,
+    reset_times: Tuple[int, ...],
+) -> Tuple[int, ...]:
+    if reset_mode not in ("manual", "interval", "daily"):
+        raise ValidationError("reset_mode is not supported")
+    _validate_number(
+        reset_interval_seconds,
+        "reset_interval_seconds",
+        0,
+        31_536_000,
+    )
+    if reset_mode == "interval" and not 60 <= reset_interval_seconds <= 31_536_000:
+        raise ValidationError("interval resets must be between 60 seconds and 365 days")
+    if reset_mode != "interval" and reset_interval_seconds != 0:
+        raise ValidationError("reset_interval_seconds is only valid for interval resets")
+    if not isinstance(reset_times, (list, tuple)):
+        raise ValidationError("reset_times must be a list")
+    normalized_times = tuple(sorted(set(reset_times)))
+    if len(normalized_times) > 24:
+        raise ValidationError("reset_times must contain no more than 24 times")
+    for reset_time in normalized_times:
+        _validate_number(reset_time, "reset_time", 0, 1_439)
+    if reset_mode == "daily" and not normalized_times:
+        raise ValidationError("daily resets require at least one reset time")
+    if reset_mode != "daily" and normalized_times:
+        raise ValidationError("reset_times is only valid for daily resets")
+    return normalized_times
+
+
+def _validate_quota_usage(
+    *,
+    limit_bytes: int,
+    used_bytes: int,
+    counter_bytes: int,
+    last_reset_at: int,
+) -> None:
+    maximum = 2**63 - 1
+    _validate_number(limit_bytes, "limit_bytes", 1, maximum)
+    _validate_number(used_bytes, "used_bytes", 0, maximum)
+    _validate_number(counter_bytes, "counter_bytes", 0, maximum)
+    _validate_number(last_reset_at, "last_reset_at", 0, maximum)
+
+
+@dataclass(frozen=True)
+class DataLimit:
+    """A device byte quota that activates one fallback profile when reached."""
+
+    device_id: str
+    profile_id: str
+    limit_bytes: int
+    reset_mode: str = "manual"
+    reset_interval_seconds: int = 0
+    reset_times: Tuple[int, ...] = ()
+    used_bytes: int = 0
+    counter_bytes: int = 0
+    last_reset_at: int = 0
+    enabled: bool = True
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.device_id, "device_id")
+        _validate_identifier(self.profile_id, "profile_id")
+        _validate_quota_usage(
+            limit_bytes=self.limit_bytes,
+            used_bytes=self.used_bytes,
+            counter_bytes=self.counter_bytes,
+            last_reset_at=self.last_reset_at,
+        )
+        normalized_times = _validate_quota_schedule(
+            reset_mode=self.reset_mode,
+            reset_interval_seconds=self.reset_interval_seconds,
+            reset_times=self.reset_times,
+        )
+        object.__setattr__(self, "reset_times", normalized_times)
+        if not isinstance(self.enabled, bool):
+            raise ValidationError("enabled must be a boolean")
+
+
+@dataclass(frozen=True)
+class ServiceQuota:
+    """A byte quota for selected observed domains on one device."""
+
+    id: str
+    device_id: str
+    name: str
+    domains: Tuple[str, ...]
+    profile_id: str
+    limit_bytes: int
+    reset_mode: str = "manual"
+    reset_interval_seconds: int = 0
+    reset_times: Tuple[int, ...] = ()
+    used_bytes: int = 0
+    counter_bytes: int = 0
+    last_reset_at: int = 0
+    enabled: bool = True
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.id, "service quota id")
+        _validate_identifier(self.device_id, "device_id")
+        _validate_name(self.name, "service quota name")
+        _validate_identifier(self.profile_id, "profile_id")
+        object.__setattr__(self, "domains", _normalize_domain_list(self.domains, "domains"))
+        if not self.domains:
+            raise ValidationError("service quota requires at least one domain")
+        _validate_quota_usage(
+            limit_bytes=self.limit_bytes,
+            used_bytes=self.used_bytes,
+            counter_bytes=self.counter_bytes,
+            last_reset_at=self.last_reset_at,
+        )
+        normalized_times = _validate_quota_schedule(
+            reset_mode=self.reset_mode,
+            reset_interval_seconds=self.reset_interval_seconds,
+            reset_times=self.reset_times,
+        )
+        object.__setattr__(self, "reset_times", normalized_times)
+        if not isinstance(self.enabled, bool):
+            raise ValidationError("enabled must be a boolean")
+
+
 @dataclass(frozen=True)
 class MacPolicy:
     """MAC filtering policy for clients arriving through the test access point."""

@@ -3,6 +3,7 @@ from ipaddress import IPv4Address
 
 from jittersim.config.models import (
     Device,
+    DataLimit,
     DomainObservation,
     Impairment,
     MacPolicy,
@@ -11,6 +12,7 @@ from jittersim.config.models import (
     Randomness,
     RuntimeState,
     Schedule,
+    ServiceQuota,
     Timer,
     ValidationError,
     WebsitePolicy,
@@ -228,6 +230,28 @@ class PolicyAndScheduleTests(unittest.TestCase):
                 duration_seconds=600,
                 mode="traffic",
             )
+
+    def test_accepts_data_and_service_quota_reset_schedules(self) -> None:
+        data_limit = DataLimit(
+            device_id="alice",
+            profile_id="slow",
+            limit_bytes=5_000_000,
+            reset_mode="daily",
+            reset_times=(0, 720),
+        )
+        service_quota = ServiceQuota(
+            id="alice-video",
+            device_id="alice",
+            name="Video sites",
+            domains=("Netflix.com", "nflxvideo.net"),
+            profile_id="slow",
+            limit_bytes=1_000_000,
+            reset_mode="interval",
+            reset_interval_seconds=3_600,
+        )
+
+        self.assertEqual(data_limit.reset_times, (0, 720))
+        self.assertEqual(service_quota.domains, ("netflix.com", "nflxvideo.net"))
 
 
 class RuntimeStateTests(unittest.TestCase):

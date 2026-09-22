@@ -2,6 +2,7 @@ import unittest
 
 from jittersim.config.models import (
     Device,
+    DataLimit,
     DomainObservation,
     Impairment,
     MacPolicy,
@@ -9,6 +10,7 @@ from jittersim.config.models import (
     Progression,
     Randomness,
     Schedule,
+    ServiceQuota,
     Timer,
     WebsitePolicy,
 )
@@ -141,6 +143,43 @@ class ConfigRepositoryTests(unittest.TestCase):
         self.assertEqual(self.repository.total_domain_queries("192.168.50.10"), 7)
         self.assertTrue(self.repository.delete_progression(progression.id))
         self.assertEqual(self.repository.list_active_progressions(now=200), ())
+
+    def test_round_trips_quotas_tracks_usage_and_resets_it(self) -> None:
+        self.repository.save_profile(Profile(id="normal", name="Normal"))
+        self.repository.save_profile(Profile(id="slow", name="Slow"))
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        data_limit = DataLimit(
+            device_id="alice",
+            profile_id="slow",
+            limit_bytes=1_000,
+            last_reset_at=100,
+        )
+        service_quota = ServiceQuota(
+            id="alice-netflix",
+            device_id="alice",
+            name="Netflix",
+            domains=("netflix.com", "nflxvideo.net"),
+            profile_id="slow",
+            limit_bytes=500,
+            last_reset_at=100,
+        )
+
+        self.repository.save_data_limit(data_limit)
+        self.repository.save_service_quota(service_quota)
+        self.assertEqual(self.repository.get_data_limit("alice"), data_limit)
+        self.assertEqual(self.repository.get_service_quota(service_quota.id), service_quota)
+
+        updated = self.repository.record_data_usage("alice", 1_200)
+        self.assertEqual(updated.used_bytes, 1_200)
+        updated = self.repository.record_data_usage("alice", 1_400)
+        self.assertEqual(updated.used_bytes, 1_400)
+        self.assertTrue(self.repository.reset_data_limit_usage("alice", counter_bytes=1_400))
+        self.assertEqual(self.repository.get_data_limit("alice").used_bytes, 0)
+
+        updated = self.repository.record_service_usage(service_quota.id, 600)
+        self.assertEqual(updated.used_bytes, 600)
+        self.assertTrue(self.repository.reset_service_quota_usage(service_quota.id, counter_bytes=600))
+        self.assertEqual(self.repository.get_service_quota(service_quota.id).used_bytes, 0)
 
     def test_lists_values_in_stable_identifier_order(self) -> None:
         self.repository.save_profile(Profile(id="z-profile", name="Z"))
