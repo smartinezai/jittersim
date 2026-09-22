@@ -49,6 +49,10 @@ is a private lab tool, not a replacement for a home router.
   as a streaming platform.
 - Service quota weights from `0.1×` to `10×`, so a service can consume its
   quota faster or slower than its actual byte count.
+- Service time quotas that allow active traffic for a set number of minutes or
+  hours inside a timer window such as 5 hours in a 12-hour session.
+- Time quotas can start, stop and reset from the dashboard and can reset after
+  an interval or at several times each day.
 - Manual, timed or daily quota resets.
 - Usage bars, current usage, reset actions and editable limits in the dashboard.
 - Quota changes that preserve the configured rule while resetting its counter.
@@ -67,6 +71,11 @@ use many domains. A service quota counts matching IPv4 traffic as one service
 group then applies its weight. For example, `1.2×` charges 120 MB of quota
 usage for 100 MB of matching traffic while `0.8×` charges 80 MB. It does not
 prove that someone opened a page.
+
+Time quotas count active matching traffic between counter samples. A long
+Netflix stream can therefore use the time allowance even when there are no
+new clicks. They are an observed-traffic estimate, not a media player timer,
+and only work while the device uses the Pi as its gateway.
 
 Progression DNS mode uses DNS query counts as its signal. It does not count all
 packets or measure download bytes. Device-data mode counts IPv4 upload and
