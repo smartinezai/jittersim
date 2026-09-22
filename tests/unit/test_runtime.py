@@ -2,7 +2,16 @@ import unittest
 from datetime import datetime
 from ipaddress import IPv4Address
 
-from jittersim.config.models import Device, Impairment, Profile, Randomness, Schedule, Timer
+from jittersim.config.models import (
+    Device,
+    DomainObservation,
+    Impairment,
+    Profile,
+    Progression,
+    Randomness,
+    Schedule,
+    Timer,
+)
 from jittersim.config.storage import ConfigRepository
 from jittersim.engine.runtime import RuntimeScheduler
 
@@ -10,10 +19,14 @@ from jittersim.engine.runtime import RuntimeScheduler
 class RecordingHelper:
     def __init__(self) -> None:
         self.plans = []
+        self.observations = []
 
     def apply(self, *, plan):
         self.plans.append(plan)
         return {"commands_run": 1}
+
+    def observe_dns_queries(self):
+        return self.observations
 
 
 class RuntimeSchedulerTests(unittest.TestCase):
@@ -112,6 +125,102 @@ class RuntimeSchedulerTests(unittest.TestCase):
         self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 900)
         scheduler.tick(repository=self.repository, now=timer_start + 601)
         self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 500)
+
+    def test_time_progression_interpolates_values_then_recovers(self) -> None:
+        normal = Profile(id="normal", name="Normal")
+        degraded = Profile(
+            id="degraded",
+            name="Degraded",
+            download=Impairment(delay_ms=1_000, loss_percent=80),
+        )
+        self.repository.save_profile(normal)
+        self.repository.save_profile(degraded)
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        self.repository.save_progression(
+            Progression(
+                id="five-hours",
+                device_id="alice",
+                start_profile_id="normal",
+                end_profile_id="degraded",
+                started_at=100,
+                duration_seconds=1_000,
+            )
+        )
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+
+        scheduler.tick(repository=self.repository, now=600)
+        self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 500)
+        self.assertEqual(self.helper.plans[-1].queues[1].impairment.loss_percent, 40)
+        scheduler.tick(repository=self.repository, now=1_101)
+        self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 0)
+
+    def test_traffic_progression_uses_observed_dns_queries(self) -> None:
+        normal = Profile(id="normal", name="Normal")
+        degraded = Profile(id="degraded", name="Degraded", download=Impairment(delay_ms=1_000))
+        self.repository.save_profile(normal)
+        self.repository.save_profile(degraded)
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        self.repository.save_domain_observations(
+            (
+                DomainObservation(
+                    ipv4_address="192.168.50.10",
+                    domain="example.com",
+                    query_count=50,
+                    first_seen=100,
+                    last_seen=100,
+                ),
+            ),
+            now=100,
+        )
+        self.repository.save_progression(
+            Progression(
+                id="query-driven",
+                device_id="alice",
+                start_profile_id="normal",
+                end_profile_id="degraded",
+                started_at=100,
+                duration_seconds=1_000,
+                mode="traffic",
+                traffic_target_queries=100,
+            )
+        )
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+
+        scheduler.tick(repository=self.repository, now=200)
+        self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 500)
+
+    def test_traffic_progression_samples_dns_queries_while_running(self) -> None:
+        normal = Profile(id="normal", name="Normal")
+        degraded = Profile(id="degraded", name="Degraded", download=Impairment(delay_ms=1_000))
+        self.repository.save_profile(normal)
+        self.repository.save_profile(degraded)
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        self.repository.save_progression(
+            Progression(
+                id="query-driven",
+                device_id="alice",
+                start_profile_id="normal",
+                end_profile_id="degraded",
+                started_at=100,
+                duration_seconds=1_000,
+                mode="traffic",
+                traffic_target_queries=2,
+            )
+        )
+        self.helper.observations = [
+            {
+                "ipv4_address": "192.168.50.10",
+                "domain": "example.com",
+                "query_count": 2,
+            }
+        ]
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+
+        scheduler.tick(repository=self.repository, now=100)
+        self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 1_000)
 
     def test_random_outage_marks_a_device_as_disconnected(self) -> None:
         profile = Profile(

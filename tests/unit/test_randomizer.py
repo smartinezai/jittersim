@@ -1,7 +1,7 @@
 import random
 import unittest
 
-from jittersim.config.models import Impairment, Profile, Randomness, Schedule
+from jittersim.config.models import Impairment, Profile, Progression, Randomness, Schedule
 from jittersim.engine.randomizer import (
     outage_duration_seconds,
     outage_interval_seconds,
@@ -10,6 +10,11 @@ from jittersim.engine.randomizer import (
     reroll_interval_seconds,
     reroll_profile,
     seeded_generator,
+)
+from jittersim.engine.progression import (
+    interpolate_impairment,
+    interpolate_profile,
+    progression_factor,
 )
 from jittersim.engine.schedules import active_schedule, is_schedule_active
 from datetime import datetime
@@ -132,6 +137,54 @@ class ScheduleTests(unittest.TestCase):
         )
 
         self.assertEqual(selected.id, "overnight")
+
+
+class ProgressionTests(unittest.TestCase):
+    def test_time_factor_is_bounded_and_impairment_values_are_interpolated(self) -> None:
+        progression = Progression(
+            id="degrade",
+            device_id="alice",
+            start_profile_id="normal",
+            end_profile_id="slow",
+            started_at=100,
+            duration_seconds=600,
+        )
+        impairment = interpolate_impairment(
+            start=Impairment(delay_ms=0, loss_percent=0),
+            end=Impairment(delay_ms=1_000, loss_percent=80),
+            factor=progression_factor(progression=progression, now=400),
+        )
+
+        self.assertEqual(impairment.delay_ms, 500)
+        self.assertEqual(impairment.loss_percent, 40)
+        self.assertEqual(progression_factor(progression=progression, now=1_000), 1.0)
+
+    def test_progression_starts_with_the_start_profile_seed(self) -> None:
+        start = Profile(id="normal", name="Normal", random_seed=11)
+        end = Profile(id="slow", name="Slow", random_seed=22)
+
+        self.assertEqual(
+            interpolate_profile(start=start, end=end, factor=0).random_seed,
+            11,
+        )
+
+    def test_traffic_factor_uses_queries_after_the_saved_baseline(self) -> None:
+        progression = Progression(
+            id="degrade",
+            device_id="alice",
+            start_profile_id="normal",
+            end_profile_id="slow",
+            started_at=100,
+            duration_seconds=600,
+            mode="traffic",
+            traffic_target_queries=100,
+            traffic_baseline_queries=25,
+        )
+
+        self.assertEqual(
+            progression_factor(progression=progression, now=100, traffic_queries=75),
+            0.5,
+        )
 
 
 if __name__ == "__main__":

@@ -8,12 +8,13 @@ import threading
 import time
 from typing import Dict, Optional
 
-from jittersim.config.models import Device, Profile
+from jittersim.config.models import Device, DomainObservation, Profile, Progression
 from jittersim.config.storage import ConfigRepository, DatabasePath, StorageError
 from jittersim.networking.helper import HelperClient, HelperClientError
 
 from .codec import plan_to_payload
 from .compiler import PlanError, compile_plan
+from .progression import interpolate_profile, progression_factor
 from .randomizer import (
     outage_duration_seconds,
     outage_interval_seconds,
@@ -60,6 +61,7 @@ class RuntimeScheduler:
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._last_traffic_sample_at = 0.0
 
     def start(self) -> None:
         """Start the scheduler loop when hardware control is available."""
@@ -128,6 +130,7 @@ class RuntimeScheduler:
         owned_repository = repository is None
         active_repository = repository or ConfigRepository(self._database_path)
         try:
+            self._sample_traffic_if_needed(repository=active_repository, now=current_time)
             plan = self._build_plan(repository=active_repository, now=current_time)
             payload = plan_to_payload(plan)
             with self._lock:
@@ -162,6 +165,9 @@ class RuntimeScheduler:
     def _build_plan(self, *, repository: ConfigRepository, now: float):
         profiles = {profile.id: profile for profile in repository.list_profiles()}
         schedules = repository.list_schedules()
+        active_progressions = {}
+        for progression in repository.list_active_progressions(now=int(now)):
+            active_progressions.setdefault(progression.device_id, progression)
         active_timers = {}
         for timer in repository.list_active_timers(now=int(now)):
             active_timers.setdefault(timer.device_id, timer)
@@ -169,28 +175,53 @@ class RuntimeScheduler:
         runtime_devices = []
         runtime_profiles = {}
         blocked_addresses = []
+        blocked_domains_by_device = {}
         active_device_ids = set()
 
         for device in repository.list_devices():
-            timer = active_timers.get(device.id)
-            schedule = None if timer is not None else active_schedule(
+            progression = active_progressions.get(device.id)
+            timer = None if progression is not None else active_timers.get(device.id)
+            schedule = None if timer is not None or progression is not None else active_schedule(
                 schedules=schedules,
                 device_id=device.id,
                 moment=moment,
             )
-            selected_profile_id = (
-                timer.profile_id
-                if timer is not None
-                else device.profile_id if schedule is None else schedule.profile_id
-            )
-            selected_profile = profiles.get(selected_profile_id)
+            source_profile_id = device.profile_id if schedule is None else schedule.profile_id
+            selected_profile = profiles.get(source_profile_id)
+            source_key = source_profile_id
+            if timer is not None:
+                source_profile_id = timer.profile_id
+                selected_profile = profiles.get(source_profile_id)
+                source_key = f"timer:{timer.id}"
+            elif progression is not None:
+                start_profile = profiles.get(progression.start_profile_id)
+                end_profile = profiles.get(progression.end_profile_id)
+                if start_profile is None or end_profile is None:
+                    raise PlanError(
+                        f"progression {progression.id} references a missing profile"
+                    )
+                traffic_queries = repository.total_domain_queries(str(device.ipv4_address))
+                factor = progression_factor(
+                    progression=progression,
+                    now=now,
+                    traffic_queries=traffic_queries,
+                )
+                selected_profile = interpolate_profile(
+                    start=start_profile,
+                    end=end_profile,
+                    factor=factor,
+                )
+                source_key = f"progression:{progression.id}"
+                domain_count = int(len(progression.website_domains) * factor)
+                if domain_count:
+                    blocked_domains_by_device[device.id] = progression.website_domains[:domain_count]
             if selected_profile is None:
-                raise PlanError(f"device {device.id} references missing profile {selected_profile_id}")
+                raise PlanError(f"device {device.id} references missing profile {source_profile_id}")
             active_device_ids.add(device.id)
             roll = self._rolls.get(device.id)
-            if roll is None or roll.profile_id != selected_profile.id:
+            if roll is None or roll.profile_id != source_key:
                 roll = _DeviceRollState(
-                    profile_id=selected_profile.id,
+                    profile_id=source_key,
                     runtime_profile=selected_profile,
                     roll_number=0,
                     next_roll_at=now + max(1, selected_profile.reroll_interval_seconds),
@@ -203,6 +234,17 @@ class RuntimeScheduler:
                     outage_until=0,
                 )
                 self._rolls[device.id] = roll
+
+            if progression is not None:
+                generator = seeded_generator(
+                    profile=selected_profile,
+                    device_id=device.id,
+                    roll_number=roll.roll_number,
+                )
+                roll.runtime_profile = reroll_profile(
+                    profile=selected_profile,
+                    generator=generator,
+                )
 
             if selected_profile.reroll_interval_seconds and now >= roll.next_roll_at:
                 generator = seeded_generator(
@@ -253,6 +295,7 @@ class RuntimeScheduler:
             devices=runtime_devices,
             profiles=runtime_profiles,
             global_policy=repository.get_website_policy(),
+            blocked_domains_by_device=blocked_domains_by_device,
         )
         return compile_plan(
             devices=runtime_devices,
@@ -262,6 +305,37 @@ class RuntimeScheduler:
             website_filters=website_filters,
             blocked_device_addresses=blocked_addresses,
         )
+
+    def _sample_traffic_if_needed(self, *, repository: ConfigRepository, now: float) -> None:
+        """Persist a bounded DNS sample when a traffic progression is active."""
+
+        if now - self._last_traffic_sample_at < 5:
+            return
+        progressions = repository.list_active_progressions(now=int(now))
+        if not any(progression.mode == "traffic" for progression in progressions):
+            return
+        observe_dns_queries = getattr(self._helper_client, "observe_dns_queries", None)
+        if observe_dns_queries is None:
+            return
+        self._last_traffic_sample_at = now
+        try:
+            observations = observe_dns_queries()
+            observed_at = int(now)
+            repository.save_domain_observations(
+                tuple(
+                    DomainObservation(
+                        ipv4_address=observation["ipv4_address"],
+                        domain=observation["domain"],
+                        query_count=observation["query_count"],
+                        first_seen=observed_at,
+                        last_seen=observed_at,
+                    )
+                    for observation in observations
+                ),
+                now=observed_at,
+            )
+        except (KeyError, TypeError, ValueError, StorageError, HelperClientError):
+            LOGGER.warning("traffic progression sample failed", exc_info=True)
 
     def _run(self) -> None:
         while not self._stop_event.wait(self._poll_seconds):
