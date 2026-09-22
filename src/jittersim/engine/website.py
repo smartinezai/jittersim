@@ -2,7 +2,7 @@
 
 import socket
 from ipaddress import AddressValueError, IPv4Address
-from typing import Callable, Iterable, Optional, Sequence
+from typing import Callable, Iterable, Mapping, Optional, Sequence
 
 from jittersim.config.models import Device, Profile, WebsitePolicy
 
@@ -39,16 +39,24 @@ def build_website_filters(
     devices: Sequence[Device],
     profiles: dict,
     global_policy: WebsitePolicy,
+    blocked_domains_by_device: Optional[Mapping[str, Sequence[str]]] = None,
     resolver: Optional[AddressResolver] = None,
 ) -> tuple:
     """Resolve global and profile domain rules into per-device filters."""
 
     global_allowed = set(resolve_domains(domains=global_policy.allowed_domains, resolver=resolver))
     global_blocked = set(resolve_domains(domains=global_policy.blocked_domains, resolver=resolver))
+    device_blocked_domains = blocked_domains_by_device or {}
     filters = []
     for device in devices:
         profile = profiles[device.profile_id]
         profile_allowed = set(resolve_domains(domains=profile.website_domains, resolver=resolver))
+        profile_blocked = set(
+            resolve_domains(
+                domains=device_blocked_domains.get(device.id, ()),
+                resolver=resolver,
+            )
+        )
         allowed_addresses = None
         if global_policy.mode == "allow_only":
             allowed_addresses = global_allowed
@@ -56,11 +64,12 @@ def build_website_filters(
                 allowed_addresses = allowed_addresses.intersection(profile_allowed)
         elif profile.website_mode == "allow_only":
             allowed_addresses = profile_allowed
-        if allowed_addresses is not None:
+        if allowed_addresses is not None or profile_blocked:
             filters.append(
                 WebsiteFilter(
                     device_ip=device.ipv4_address,
-                    allowed_addresses=tuple(sorted(allowed_addresses, key=str)),
+                    allowed_addresses=tuple(sorted(allowed_addresses or (), key=str)),
+                    blocked_addresses=tuple(sorted(profile_blocked, key=str)),
                 )
             )
     return tuple(global_blocked), tuple(filters)

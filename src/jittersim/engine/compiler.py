@@ -88,6 +88,8 @@ def compile_plan(
                 f"duplicate website filter for device address {website_filter.device_ip}"
             )
         seen_filter_devices.add(website_filter.device_ip)
+        if any(address.version != 4 for address in website_filter.blocked_addresses):
+            raise PlanError("website filter contains a non-IPv4 blocked address")
 
     return NetworkPlan(
         mark_rules=tuple(mark_rules),

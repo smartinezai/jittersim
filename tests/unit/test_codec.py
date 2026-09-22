@@ -35,6 +35,7 @@ class PlanCodecTests(unittest.TestCase):
                 WebsiteFilter(
                     device_ip=IPv4Address("192.168.50.10"),
                     allowed_addresses=(IPv4Address("203.0.113.20"),),
+                    blocked_addresses=(IPv4Address("203.0.113.30"),),
                 ),
             ),
         )

@@ -36,10 +36,11 @@ class QueueSpec:
 
 @dataclass(frozen=True)
 class WebsiteFilter:
-    """Resolved destination addresses allowed for one test client."""
+    """Resolved destination addresses allowed or blocked for one test client."""
 
     device_ip: IPv4Address
     allowed_addresses: Tuple[IPv4Address, ...]
+    blocked_addresses: Tuple[IPv4Address, ...] = ()
 
 
 @dataclass(frozen=True)

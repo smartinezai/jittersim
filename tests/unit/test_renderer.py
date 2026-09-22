@@ -143,6 +143,7 @@ class RendererTests(unittest.TestCase):
                 WebsiteFilter(
                     device_ip=IPv4Address("192.168.50.10"),
                     allowed_addresses=(IPv4Address("203.0.113.20"),),
+                    blocked_addresses=(IPv4Address("203.0.113.30"),),
                 ),
             ),
         )
@@ -155,6 +156,7 @@ class RendererTests(unittest.TestCase):
         self.assertIn("ether saddr { aa:bb:cc:dd:ee:ff } drop", nft_script or "")
         self.assertIn("ip daddr { 203.0.113.10 } drop", nft_script or "")
         self.assertIn("ip daddr != { 203.0.113.20 } drop", nft_script or "")
+        self.assertIn("ip daddr { 203.0.113.30 } drop", nft_script or "")
 
 
 if __name__ == "__main__":

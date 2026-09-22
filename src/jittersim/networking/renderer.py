@@ -77,6 +77,13 @@ def _render_nft_script(plan: NetworkPlan) -> str:
                 f"ip saddr {website_filter.device_ip} drop "
                 "comment \"profile website allowlist has no resolved addresses\""
             )
+        if website_filter.blocked_addresses:
+            lines.append(
+                f"add rule inet {PROJECT_TABLE} forward iifname \"wlan0\" "
+                f"ip saddr {website_filter.device_ip} "
+                f"ip daddr {_render_set(website_filter.blocked_addresses)} drop "
+                "comment \"block progression website destinations\""
+            )
     if plan.blocked_device_addresses:
         lines.append(
             f"add rule inet {PROJECT_TABLE} forward iifname \"wlan0\" "

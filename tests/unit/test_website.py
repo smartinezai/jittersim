@@ -38,11 +38,13 @@ class WebsiteResolutionTests(unittest.TestCase):
             devices=(device,),
             profiles={"slow": profile},
             global_policy=WebsitePolicy(blocked_domains=("blocked.example",)),
+            blocked_domains_by_device={"alice": ("blocked.example",)},
             resolver=fake_resolver,
         )
 
         self.assertEqual(blocked, (IPv4Address("203.0.113.30"),))
         self.assertEqual(filters[0].allowed_addresses, (IPv4Address("203.0.113.20"),))
+        self.assertEqual(filters[0].blocked_addresses, (IPv4Address("203.0.113.30"),))
 
 
 if __name__ == "__main__":

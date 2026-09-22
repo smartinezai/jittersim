@@ -93,6 +93,9 @@ def plan_to_payload(plan: NetworkPlan) -> Dict[str, Any]:
                 "allowed_addresses": [
                     str(address) for address in website_filter.allowed_addresses
                 ],
+                "blocked_addresses": [
+                    str(address) for address in website_filter.blocked_addresses
+                ],
             }
             for website_filter in plan.website_filters
         ],
@@ -193,7 +196,7 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
             allowlist=tuple(mac_policy_data.get("allowlist", ())),
             denylist=tuple(mac_policy_data.get("denylist", ())),
         )
-        blocked_addresses = tuple(
+        global_blocked_addresses = tuple(
             IPv4Address(value)
             for value in _as_list(
                 plan_data.get("global_blocked_addresses", []),
@@ -216,6 +219,13 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
                     f"website_filters[{index}].allowed_addresses",
                 )
             )
+            blocked_filter_addresses = tuple(
+                IPv4Address(value)
+                for value in _as_list(
+                    filter_data.get("blocked_addresses", []),
+                    f"website_filters[{index}].blocked_addresses",
+                )
+            )
             if str(device_ip) not in addresses_by_device.values():
                 raise PlanCodecError(
                     f"website_filters[{index}] references an unknown device"
@@ -229,6 +239,7 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
                 WebsiteFilter(
                     device_ip=device_ip,
                     allowed_addresses=allowed_addresses,
+                    blocked_addresses=blocked_filter_addresses,
                 )
             )
         blocked_device_addresses = tuple(
@@ -247,7 +258,7 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
         mark_rules=tuple(mark_rules),
         queues=tuple(queues),
         mac_policy=mac_policy,
-        global_blocked_addresses=blocked_addresses,
+        global_blocked_addresses=global_blocked_addresses,
         website_filters=tuple(website_filters),
         blocked_device_addresses=blocked_device_addresses,
     )
