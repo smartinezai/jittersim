@@ -11,7 +11,7 @@ import socketserver
 import stat
 import time
 from ipaddress import IPv4Address, IPv4Network
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from jittersim.config.models import ValidationError, normalize_domain
 from jittersim.engine.codec import PlanCodecError, plan_from_payload, plan_to_payload
@@ -19,6 +19,7 @@ from jittersim.engine.plan import NetworkPlan
 
 from .applier import ApplyError, NetworkApplier
 from .executor import CommandExecutionError, SubprocessExecutor
+from .router import RouterError, TG3442DERouter
 from .topology import Topology
 
 
@@ -52,8 +53,15 @@ class HelperClientError(RuntimeError):
 class HelperService:
     """Dispatch validated plan and reset requests to one network applier."""
 
-    def __init__(self, applier: NetworkApplier) -> None:
+    def __init__(
+        self,
+        applier: NetworkApplier,
+        router_factory: Optional[Callable[[str, str], TG3442DERouter]] = None,
+    ) -> None:
         self._applier = applier
+        self._router_factory = router_factory or (
+            lambda address, password: TG3442DERouter(address=address, password=password)
+        )
 
     def handle_payload(self, payload: Any) -> Dict[str, Any]:
         """Handle one decoded request without exposing command execution details."""
@@ -75,6 +83,10 @@ class HelperService:
             return self._handle_traffic_counters()
         if action == "configure-ap":
             return self._handle_configure_ap(payload)
+        if action == "router-sync-ap":
+            return self._handle_router_sync_ap(payload)
+        if action == "router-wifi":
+            return self._handle_router_wifi(payload)
         if action == "apply":
             return self._handle_apply(payload.get("plan"))
         return {"ok": False, "error": "unknown action"}
@@ -148,6 +160,67 @@ class HelperService:
             LOGGER.exception("access point configuration failed")
             return {"ok": False, "error": "access point configuration failed"}
         return {"ok": True, "action": "configure-ap", "commands_run": commands_run}
+
+    def _handle_router_sync_ap(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        router = None
+        try:
+            admin_password = payload["admin_password"]
+            if not isinstance(admin_password, str) or not admin_password:
+                raise ValueError("router admin password is invalid")
+            gateway = self._applier.uplink_info().get("gateway")
+            if not gateway:
+                raise RouterError("the router gateway could not be determined")
+            router = self._router_factory(gateway, admin_password)
+            router.login()
+            settings = router.read_wifi_settings()
+            commands_run = self._applier.configure_access_point(
+                ssid=settings.ssid,
+                password=settings.password,
+            )
+        except (KeyError, TypeError, ValueError):
+            return {"ok": False, "error": "invalid router credentials"}
+        except (CommandExecutionError, RouterError):
+            LOGGER.exception("router Wi-Fi import failed")
+            return {"ok": False, "error": "router Wi-Fi import failed"}
+        finally:
+            if router is not None:
+                router.close()
+        return {
+            "ok": True,
+            "action": "router-sync-ap",
+            "ssid": settings.ssid,
+            "router_wifi_enabled": settings.enabled,
+            "commands_run": commands_run,
+        }
+
+    def _handle_router_wifi(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        router = None
+        try:
+            admin_password = payload["admin_password"]
+            enabled = payload["enabled"]
+            if not isinstance(admin_password, str) or not admin_password:
+                raise ValueError("router admin password is invalid")
+            if not isinstance(enabled, bool):
+                raise ValueError("router Wi-Fi state is invalid")
+            gateway = self._applier.uplink_info().get("gateway")
+            if not gateway:
+                raise RouterError("the router gateway could not be determined")
+            router = self._router_factory(gateway, admin_password)
+            router.login()
+            settings = router.set_wifi_enabled(enabled=enabled)
+        except (KeyError, TypeError, ValueError):
+            return {"ok": False, "error": "invalid router Wi-Fi request"}
+        except (CommandExecutionError, RouterError):
+            LOGGER.exception("router Wi-Fi change failed")
+            return {"ok": False, "error": "router Wi-Fi change failed"}
+        finally:
+            if router is not None:
+                router.close()
+        return {
+            "ok": True,
+            "action": "router-wifi",
+            "enabled": settings.enabled,
+        }
 
     def _handle_reset(self) -> Dict[str, Any]:
         try:
@@ -255,6 +328,24 @@ class HelperClient:
             {"action": "configure-ap", "ssid": ssid, "password": password}
         )
 
+    def sync_access_point_from_router(self, *, admin_password: str) -> Dict[str, Any]:
+        """Copy the router's primary Wi-Fi settings into the local test AP."""
+
+        return self._request(
+            {"action": "router-sync-ap", "admin_password": admin_password}
+        )
+
+    def set_router_wifi(self, *, admin_password: str, enabled: bool) -> Dict[str, Any]:
+        """Enable or disable the upstream router's primary Wi-Fi radios."""
+
+        return self._request(
+            {
+                "action": "router-wifi",
+                "admin_password": admin_password,
+                "enabled": enabled,
+            }
+        )
+
     def connected_devices(self) -> List[Dict[str, str]]:
         """Return IPv4 clients currently visible on the test interface."""
 
@@ -357,6 +448,7 @@ def run_helper(
     topology: Topology,
     timeout_seconds: float = 10.0,
     enable_hardware: bool = False,
+    router_factory: Optional[Callable[[str, str], TG3442DERouter]] = None,
 ) -> None:
     """Run the helper only after an explicit hardware-mode opt-in."""
 
@@ -366,7 +458,8 @@ def run_helper(
         NetworkApplier(
             executor=SubprocessExecutor(timeout_seconds=timeout_seconds),
             topology=topology,
-        )
+        ),
+        router_factory=router_factory,
     )
     with UnixHelperServer(socket_path, service) as server:
         try:

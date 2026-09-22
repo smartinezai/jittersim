@@ -17,6 +17,7 @@ from jittersim.networking.helper import (
     _parse_traffic_counter_output,
     run_helper,
 )
+from jittersim.networking.router import RouterWifiSettings
 from jittersim.networking.topology import Topology
 
 
@@ -52,6 +53,28 @@ class UplinkOutputExecutor(FakeExecutor):
             return_code=0,
             stdout="default via 192.168.0.1 dev eth0 proto dhcp src 192.168.0.17\n",
         )
+
+
+class FakeRouter:
+    def __init__(self, address, password) -> None:
+        self.address = address
+        self.password = password
+        self.logged_in = False
+        self.closed = False
+        self.enabled = True
+
+    def login(self) -> None:
+        self.logged_in = True
+
+    def read_wifi_settings(self) -> RouterWifiSettings:
+        return RouterWifiSettings("Vodafone-Test", "router-wifi-password", self.enabled)
+
+    def set_wifi_enabled(self, *, enabled: bool) -> RouterWifiSettings:
+        self.enabled = enabled
+        return RouterWifiSettings("", "", enabled)
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class HelperServiceTests(unittest.TestCase):
@@ -106,6 +129,64 @@ class HelperServiceTests(unittest.TestCase):
         self.assertEqual(response["commands_run"], 3)
         self.assertEqual(self.executor.commands[0].executable, "nmcli")
         self.assertEqual(self.executor.commands[0].arguments[2], "jittersim-ap")
+
+    def test_copies_router_wifi_to_the_local_access_point(self) -> None:
+        executor = UplinkOutputExecutor()
+        routers = []
+
+        def router_factory(address, password):
+            router = FakeRouter(address, password)
+            routers.append(router)
+            return router
+
+        service = HelperService(
+            NetworkApplier(
+                executor=executor,
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            ),
+            router_factory=router_factory,
+        )
+
+        response = service.handle_payload(
+            {"action": "router-sync-ap", "admin_password": "router-secret"}
+        )
+
+        self.assertEqual(response["action"], "router-sync-ap")
+        self.assertEqual(response["ssid"], "Vodafone-Test")
+        self.assertEqual(routers[0].address, "192.168.0.1")
+        self.assertEqual(routers[0].password, "router-secret")
+        self.assertTrue(routers[0].logged_in)
+        self.assertTrue(routers[0].closed)
+        self.assertEqual(executor.commands[2].arguments[2], "jittersim-ap")
+
+    def test_changes_router_wifi_through_the_helper(self) -> None:
+        executor = UplinkOutputExecutor()
+        routers = []
+
+        def router_factory(address, password):
+            router = FakeRouter(address, password)
+            routers.append(router)
+            return router
+
+        service = HelperService(
+            NetworkApplier(
+                executor=executor,
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            ),
+            router_factory=router_factory,
+        )
+
+        response = service.handle_payload(
+            {
+                "action": "router-wifi",
+                "admin_password": "router-secret",
+                "enabled": False,
+            }
+        )
+
+        self.assertEqual(response, {"ok": True, "action": "router-wifi", "enabled": False})
+        self.assertTrue(routers[0].logged_in)
+        self.assertTrue(routers[0].closed)
 
     def test_rejects_short_access_point_passwords(self) -> None:
         response = self.service.handle_payload(
