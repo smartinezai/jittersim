@@ -23,7 +23,8 @@ is a private lab tool, not a replacement for a home router.
 - Multiple daily time windows with click-to-select days and overnight ranges.
 - One-shot timers that activate a profile for a chosen duration.
 - Progression sessions that move from a starting profile to an ending profile
-  over time or after a DNS-query target, then recover automatically.
+  over time, after a DNS-query target or after a device-data target, then
+  recover automatically.
 - Random value variation such as `200 ± 30%`.
 - Random feature enablement, reroll timing and short connection outages.
 - Inline help in the dashboard for the variation settings.
@@ -63,8 +64,10 @@ several observed names when creating a service quota because one service can
 use many domains. A service quota counts matching IPv4 traffic as one service
 group. It does not prove that someone opened a page.
 
-Progression traffic mode uses DNS query counts as its signal. It does not count
-all packets or measure download bytes.
+Progression DNS mode uses DNS query counts as its signal. It does not count all
+packets or measure download bytes. Device-data mode counts IPv4 upload and
+download bytes for the selected device, so a long Netflix stream can advance a
+progression even when it creates few new DNS queries.
 
 ## Network layout
 
@@ -83,10 +86,10 @@ Test Wi-Fi clients can use the Pi for public internet access but cannot reach
 the dashboard or private upstream addresses such as the Vodafone router's
 `192.168.0.1`. Dashboard changes also require the administrator token.
 
-Website rules and service quotas are best-effort. VPNs, encrypted DNS, direct
-IP access, cached connections and services that use changing domains can hide
-traffic or reduce the accuracy of a rule. The device must use the Pi as its
-gateway for the rule to apply.
+Website rules, service quotas and device-data progression are best-effort. VPNs,
+encrypted DNS, direct IP access, cached connections, changing service addresses
+and IPv6 traffic can hide traffic or reduce the accuracy of a rule. The device
+must use the Pi as its gateway for the rule to apply.
 
 ## Dashboard modes
 
