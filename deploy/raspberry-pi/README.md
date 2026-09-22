@@ -78,15 +78,16 @@ redirect cannot safely intercept HTTPS or router traffic.
 
 ## Vodafone router note
 
-For a Vodafone TG3442DE, the router Wi-Fi must be turned off manually in the
-router web interface if the goal is to make the Pi test network the only Wi-Fi
-network in use. JitterSim does not log in to the router, copy its password or
-change its Wi-Fi settings.
+For a Vodafone TG3442DE, the dashboard can read the primary Wi-Fi settings and
+turn the primary Wi-Fi radios on or off. Enter the router admin password in the
+dashboard for one action at a time. The password is not saved. Keep the Pi
+connected by Ethernet before changing router Wi-Fi. If a router firmware update
+changes its local web interface, use the direct router link or the manual
+access-point form.
 
 The dashboard shows the Pi's Ethernet connection label and default gateway.
-That label is local to the Pi and is not the router's Wi-Fi name. Ethernet does
-not expose the router Wi-Fi name or password, so copy both values manually from
-the router settings before entering them in the Pi test Wi-Fi form.
+That label is local to the Pi and is not the router's Wi-Fi name. The router
+controls use the gateway to open the TG3442DE local web interface.
 
 The dashboard can change the Pi's own test SSID and password. This does not
 change the upstream router and the new test password is not stored in the

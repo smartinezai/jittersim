@@ -68,7 +68,11 @@ bytes.
 
 - The Pi's Ethernet network name and router gateway in the dashboard.
 - Rename the Pi test access point and change its password locally.
-- A direct link to the Vodafone router page.
+- Enter the Vodafone TG3442DE admin password for one action at a time.
+- Copy the router's primary Wi-Fi name and password to the Pi access point.
+- Turn the router's primary Wi-Fi on or off from the dashboard.
+- A direct link to the Vodafone router page for settings JitterSim cannot
+  change.
 - A visible status area for the current mode, connected devices, schedules,
   access rules and the last network action.
 
@@ -117,11 +121,12 @@ must use the Pi as its gateway for the rule to apply.
   traffic.
 - **Hardware mode** uses the Pi helper to apply the saved plan.
 
-The Vodafone TG3442DE Wi-Fi switch is still a manual router action. JitterSim
-can change its own test access point but Ethernet cannot read or copy the
-router Wi-Fi name or password. Copy those values manually from the router
-settings if you want the Pi access point to use them. See the
-[Pi deployment guide](deploy/raspberry-pi/README.md).
+For a Vodafone TG3442DE, the dashboard can read the primary Wi-Fi settings and
+turn the primary Wi-Fi radios on or off. The router password is used for one
+authenticated request and is not saved. Keep the Pi connected by Ethernet
+before changing router Wi-Fi. If a router firmware update changes its local
+web interface, use the direct router link or the manual Pi access-point form.
+See the [Pi deployment guide](deploy/raspberry-pi/README.md).
 
 ## Run locally
 
