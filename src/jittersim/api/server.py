@@ -685,6 +685,24 @@ DASHBOARD_HTML = """<!doctype html>
         <button type="submit">Save device</button>
       </form>
     </section>
+    <section class="card">
+      <h2>Group devices</h2>
+      <p class="form-note">Choose several assigned devices to give them one profile override or one shared data limit. A device can belong to one group.</p>
+      <form id="group-form">
+        <div class="fields">
+          <label>Group ID <input id="group-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="family"></label>
+          <label>Group name <input id="group-name" required placeholder="Family devices"></label>
+          <label>Profile override
+            <select id="group-profile"><option value="">Use each device profile</option></select>
+          </label>
+          <label>Devices
+            <select id="group-devices" multiple required size="5"></select>
+          </label>
+        </div>
+        <button type="submit">Save group</button>
+      </form>
+      <div id="group-list" class="quota-list" aria-live="polite">No groups saved.</div>
+    </section>
   </div>
   <div class="content-grid">
     <section class="card">
@@ -877,6 +895,51 @@ DASHBOARD_HTML = """<!doctype html>
       <button class="primary" type="submit">Save device limit</button>
     </form>
     <div id="data-limit-list" class="quota-list" aria-live="polite">Enter the admin token to view limits.</div>
+  </section>
+  <section class="card quota-card">
+    <div class="section-heading">
+      <div>
+        <h2>Shared group data limit</h2>
+        <p>Count the combined traffic of every device in a group</p>
+      </div>
+      <span id="group-data-limit-count" class="count-badge">No group limits</span>
+    </div>
+    <form id="group-data-limit-form">
+      <div class="fields">
+        <label>Group
+          <select id="group-data-limit-group" required></select>
+        </label>
+        <label>Fallback profile
+          <select id="group-data-limit-profile" required></select>
+        </label>
+        <label>Limit
+          <input id="group-data-limit-amount" type="number" min="1" step="1" value="1" required>
+        </label>
+        <label>Unit
+          <select id="group-data-limit-unit">
+            <option value="1048576">MB</option>
+            <option value="1073741824">GB</option>
+          </select>
+        </label>
+        <label>Reset
+          <select id="group-data-limit-reset-mode">
+            <option value="manual">Manual</option>
+            <option value="interval">After an interval</option>
+            <option value="daily">At fixed times each day</option>
+          </select>
+        </label>
+        <label id="group-data-limit-interval-field">Interval (minutes)
+          <input id="group-data-limit-interval" type="number" min="1" max="525600" value="60">
+        </label>
+        <label id="group-data-limit-times-field" hidden>Reset times (HH:MM, comma separated)
+          <input id="group-data-limit-times" placeholder="08:00, 20:00">
+        </label>
+        <label class="quota-check"><input id="group-data-limit-enabled" type="checkbox" checked> Enabled</label>
+      </div>
+      <p class="form-note">The shared limit adds the byte counters for all group members. A per-device limit takes priority if the same device has both.</p>
+      <button class="primary" type="submit">Save group limit</button>
+    </form>
+    <div id="group-data-limit-list" class="quota-list" aria-live="polite">Enter the admin token to view group limits.</div>
   </section>
   <section class="card quota-card">
     <div class="section-heading">
@@ -1117,6 +1180,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     let helperConfigured = false;
     let profiles = [];
+    let groups = [];
     let observedDomainsByDevice = {};
     let connectedDevicesRequestInFlight = false;
     let observationRequestInFlight = false;
@@ -1491,9 +1555,11 @@ DASHBOARD_HTML = """<!doctype html>
       const heading = document.createElement("div");
       heading.className = "quota-row-heading";
       const title = document.createElement("strong");
-      title.textContent = service
-        ? quota.name + " · " + quota.device_name
-        : quota.device_name + " · " + quota.profile_name;
+      title.textContent = service === "group"
+        ? quota.group_name + " · " + quota.profile_name
+        : service
+          ? quota.name + " · " + quota.device_name
+          : quota.device_name + " · " + quota.profile_name;
       const status = document.createElement("span");
       status.className = "quota-status";
       status.textContent = quota.reached ? "Limit reached" : quotaResetText(quota);
@@ -1512,9 +1578,11 @@ DASHBOARD_HTML = """<!doctype html>
       const editButton = document.createElement("button");
       editButton.type = "button";
       editButton.textContent = "Edit";
-      editButton.addEventListener("click", () => service
-        ? editServiceQuota(quota)
-        : editDataLimit(quota));
+      editButton.addEventListener("click", () => service === "group"
+        ? editGroupDataLimit(quota)
+        : service
+          ? editServiceQuota(quota)
+          : editDataLimit(quota));
       const resetButton = document.createElement("button");
       resetButton.type = "button";
       resetButton.textContent = "Reset usage";
@@ -1539,6 +1607,58 @@ DASHBOARD_HTML = """<!doctype html>
         return;
       }
       limits.forEach((quota) => container.appendChild(createQuotaRow({ quota, service: false })));
+    }
+
+    function renderGroups(data) {
+      groups = data.groups || [];
+      const container = element("group-list");
+      container.replaceChildren();
+      if (!groups.length) {
+        container.textContent = data.error || "No groups saved.";
+        return;
+      }
+      groups.forEach((group) => {
+        const row = document.createElement("div");
+        row.className = "quota-row";
+        const heading = document.createElement("div");
+        heading.className = "quota-row-heading";
+        const title = document.createElement("strong");
+        title.textContent = group.name + " · " + group.id;
+        const profile = document.createElement("span");
+        profile.className = "quota-status";
+        profile.textContent = group.profile_name
+          ? "Profile: " + group.profile_name
+          : "Each device keeps its profile";
+        heading.append(title, profile);
+        const members = document.createElement("span");
+        members.textContent = "Devices: " + group.devices.map((device) => device.name).join(", ");
+        const actions = document.createElement("div");
+        actions.className = "quota-actions";
+        const editButton = document.createElement("button");
+        editButton.type = "button";
+        editButton.textContent = "Edit";
+        editButton.addEventListener("click", () => editGroup(group));
+        const deleteButton = document.createElement("button");
+        deleteButton.type = "button";
+        deleteButton.textContent = "Delete";
+        deleteButton.addEventListener("click", () => deleteGroup(group, deleteButton));
+        actions.append(editButton, deleteButton);
+        row.append(heading, members, actions);
+        container.appendChild(row);
+      });
+    }
+
+    function renderGroupDataLimits(data) {
+      const limits = data.group_data_limits || [];
+      const container = element("group-data-limit-list");
+      element("group-data-limit-count").textContent = limits.length +
+        (limits.length === 1 ? " group limit" : " group limits");
+      container.replaceChildren();
+      if (!limits.length) {
+        container.textContent = data.error || "No shared group limits saved.";
+        return;
+      }
+      limits.forEach((quota) => container.appendChild(createQuotaRow({ quota, service: "group" })));
     }
 
     function renderServiceQuotas(data) {
@@ -1605,6 +1725,43 @@ DASHBOARD_HTML = """<!doctype html>
       element("data-limit-enabled").checked = quota.enabled;
       syncQuotaReset("data-limit");
       element("data-limit-form").scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+
+    function editGroup(group) {
+      element("group-id").value = group.id;
+      element("group-name").value = group.name;
+      element("group-profile").value = group.profile_id || "";
+      Array.from(element("group-devices").options).forEach((option) => {
+        option.selected = group.device_ids.includes(option.value);
+      });
+      element("group-form").scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+
+    async function deleteGroup(group, button) {
+      button.disabled = true;
+      try {
+        await request("/api/groups/delete", "POST", { id: group.id });
+        await refresh();
+        showMessage("Device group deleted.", "success");
+      } catch (error) {
+        button.disabled = false;
+        showMessage(error.message, "error");
+      }
+    }
+
+    function editGroupDataLimit(quota) {
+      element("group-data-limit-group").value = quota.group_id;
+      element("group-data-limit-profile").value = quota.profile_id;
+      setQuotaAmount("group-data-limit", quota.limit_bytes);
+      element("group-data-limit-reset-mode").value = quota.reset_mode;
+      element("group-data-limit-interval").value = Math.max(1, Math.round(quota.reset_interval_seconds / 60));
+      element("group-data-limit-times").value = (quota.reset_times || []).map((minute) =>
+        String(Math.floor(minute / 60)).padStart(2, "0") + ":" +
+        String(minute % 60).padStart(2, "0")
+      ).join(", ");
+      element("group-data-limit-enabled").checked = quota.enabled;
+      syncQuotaReset("group-data-limit");
+      element("group-data-limit-form").scrollIntoView({ behavior: "smooth", block: "center" });
     }
 
     function editServiceQuota(quota) {
@@ -1727,8 +1884,13 @@ DASHBOARD_HTML = """<!doctype html>
     async function resetQuota(quota, service, button) {
       button.disabled = true;
       try {
-        await request(service ? "/api/service-quotas/reset" : "/api/data-limits/reset", "POST",
-          service ? { id: quota.id } : { device_id: quota.device_id });
+        const path = service === "group"
+          ? "/api/group-data-limits/reset"
+          : service ? "/api/service-quotas/reset" : "/api/data-limits/reset";
+        const body = service === "group"
+          ? { group_id: quota.group_id }
+          : service ? { id: quota.id } : { device_id: quota.device_id };
+        await request(path, "POST", body);
         await loadQuotas();
         showMessage("Quota usage reset.", "success");
       } catch (error) {
@@ -1739,16 +1901,19 @@ DASHBOARD_HTML = """<!doctype html>
 
     async function loadQuotas() {
       try {
-        const [dataLimits, serviceQuotas, timeQuotas] = await Promise.all([
+        const [dataLimits, groupDataLimits, serviceQuotas, timeQuotas] = await Promise.all([
           request("/api/data-limits", "GET"),
+          request("/api/group-data-limits", "GET"),
           request("/api/service-quotas", "GET"),
           request("/api/time-quotas", "GET")
         ]);
         renderDataLimits(dataLimits);
+        renderGroupDataLimits(groupDataLimits);
         renderServiceQuotas(serviceQuotas);
         renderTimeQuotas(timeQuotas);
       } catch (error) {
         renderDataLimits({ data_limits: [], error: "Enter the admin token to view device limits." });
+        renderGroupDataLimits({ group_data_limits: [], error: "Enter the admin token to view group limits." });
         renderServiceQuotas({ service_quotas: [], error: "Enter the admin token to view service limits." });
         renderTimeQuotas({ time_quotas: [], error: "Enter the admin token to view time limits." });
       }
@@ -1792,10 +1957,18 @@ DASHBOARD_HTML = """<!doctype html>
         "progression-end-profile",
         "data-limit-profile",
         "service-quota-profile",
-        "time-quota-profile"
+        "time-quota-profile",
+        "group-profile",
+        "group-data-limit-profile"
       ].forEach((selectId) => {
         const profileSelect = element(selectId);
         profileSelect.replaceChildren();
+        if (selectId === "group-profile") {
+          const option = document.createElement("option");
+          option.value = "";
+          option.textContent = "Use each device profile";
+          profileSelect.appendChild(option);
+        }
         profiles.forEach((profile) => {
           const option = document.createElement("option");
           option.value = profile.id;
@@ -1813,7 +1986,8 @@ DASHBOARD_HTML = """<!doctype html>
         "progression-device",
         "data-limit-device",
         "service-quota-device",
-        "time-quota-device"
+        "time-quota-device",
+        "group-devices"
       ].forEach((selectId) => {
         const deviceSelect = element(selectId);
         deviceSelect.replaceChildren();
@@ -1826,6 +2000,26 @@ DASHBOARD_HTML = """<!doctype html>
       });
       populateServiceQuotaDomains();
       populateTimeQuotaDomains();
+    }
+
+    async function loadGroups() {
+      try {
+        const data = await request("/api/groups", "GET");
+        renderGroups(data);
+        const groupSelect = element("group-data-limit-group");
+        const selectedGroup = groupSelect.value;
+        groupSelect.replaceChildren();
+        groups.forEach((group) => {
+          const option = document.createElement("option");
+          option.value = group.id;
+          option.textContent = group.name + " (" + group.device_ids.length + " devices)";
+          option.selected = group.id === selectedGroup;
+          groupSelect.appendChild(option);
+        });
+      } catch (error) {
+        renderGroups({ groups: [], error: error.message });
+        element("group-data-limit-group").replaceChildren();
+      }
     }
 
     function renderSchedules(schedules) {
@@ -2019,6 +2213,7 @@ DASHBOARD_HTML = """<!doctype html>
         show("/api/plan", "plan", "plan"),
         loadState(),
         loadDevicesForSchedule(),
+        loadGroups(),
         loadSchedules(),
         loadTimers(),
         loadProgressions(),
@@ -2111,6 +2306,25 @@ DASHBOARD_HTML = """<!doctype html>
           mac_address: element("device-mac").value.trim() || null
         });
         showMessage("Device saved.", "success");
+        await refresh();
+      } catch (error) {
+        showMessage(error.message, "error");
+      }
+    });
+
+    element("group-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const deviceIds = Array.from(element("group-devices").selectedOptions)
+          .map((option) => option.value);
+        if (!deviceIds.length) throw new Error("Select at least one device for the group.");
+        await request("/api/groups", "POST", {
+          id: element("group-id").value,
+          name: element("group-name").value,
+          profile_id: element("group-profile").value || null,
+          device_ids: deviceIds
+        });
+        showMessage("Device group saved.", "success");
         await refresh();
       } catch (error) {
         showMessage(error.message, "error");
@@ -2217,12 +2431,14 @@ DASHBOARD_HTML = """<!doctype html>
     });
 
     element("data-limit-reset-mode").addEventListener("change", () => syncQuotaReset("data-limit"));
+    element("group-data-limit-reset-mode").addEventListener("change", () => syncQuotaReset("group-data-limit"));
     element("service-quota-reset-mode").addEventListener("change", () => syncQuotaReset("service-quota"));
     element("time-quota-reset-mode").addEventListener("change", () => syncQuotaReset("time-quota"));
     element("service-quota-device").addEventListener("change", () => populateServiceQuotaDomains());
     element("time-quota-device").addEventListener("change", () => populateTimeQuotaDomains());
     element("admin-token").addEventListener("change", loadQuotas);
     syncQuotaReset("data-limit");
+    syncQuotaReset("group-data-limit");
     syncQuotaReset("service-quota");
     syncQuotaReset("time-quota");
 
@@ -2239,6 +2455,26 @@ DASHBOARD_HTML = """<!doctype html>
         await refresh();
         showMessage(
           result.live_applied ? "Device limit saved and applied." : "Device limit saved.",
+          "success"
+        );
+      } catch (error) {
+        showMessage(error.message, "error");
+      }
+    });
+
+    element("group-data-limit-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const result = await request("/api/group-data-limits", "POST", {
+          group_id: element("group-data-limit-group").value,
+          profile_id: element("group-data-limit-profile").value,
+          limit_bytes: Number(element("group-data-limit-amount").value) * Number(element("group-data-limit-unit").value),
+          enabled: element("group-data-limit-enabled").checked,
+          ...quotaSchedulePayload("group-data-limit")
+        });
+        await refresh();
+        showMessage(
+          result.live_applied ? "Shared group limit saved and applied." : "Shared group limit saved.",
           "success"
         );
       } catch (error) {
