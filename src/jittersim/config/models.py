@@ -235,6 +235,32 @@ class Device:
 
 
 @dataclass(frozen=True)
+class DeviceGroup:
+    """A named set of devices that can share a profile and quota."""
+
+    id: str
+    name: str
+    device_ids: Tuple[str, ...]
+    profile_id: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.id, "group id")
+        _validate_name(self.name, "group name")
+        if not isinstance(self.device_ids, (list, tuple)) or not self.device_ids:
+            raise ValidationError("device_ids must contain at least one device")
+        if len(self.device_ids) > 15:
+            raise ValidationError("a group cannot contain more than 15 devices")
+        normalized_ids = tuple(dict.fromkeys(self.device_ids))
+        if len(normalized_ids) != len(self.device_ids):
+            raise ValidationError("device_ids must not contain duplicates")
+        for device_id in normalized_ids:
+            _validate_identifier(device_id, "device_id")
+        object.__setattr__(self, "device_ids", normalized_ids)
+        if self.profile_id is not None:
+            _validate_identifier(self.profile_id, "profile_id")
+
+
+@dataclass(frozen=True)
 class DomainObservation:
     """One bounded aggregate of a DNS name observed from a test client."""
 
@@ -432,6 +458,40 @@ class DataLimit:
 
     def __post_init__(self) -> None:
         _validate_identifier(self.device_id, "device_id")
+        _validate_identifier(self.profile_id, "profile_id")
+        _validate_quota_usage(
+            limit_bytes=self.limit_bytes,
+            used_bytes=self.used_bytes,
+            counter_bytes=self.counter_bytes,
+            last_reset_at=self.last_reset_at,
+        )
+        normalized_times = _validate_quota_schedule(
+            reset_mode=self.reset_mode,
+            reset_interval_seconds=self.reset_interval_seconds,
+            reset_times=self.reset_times,
+        )
+        object.__setattr__(self, "reset_times", normalized_times)
+        if not isinstance(self.enabled, bool):
+            raise ValidationError("enabled must be a boolean")
+
+
+@dataclass(frozen=True)
+class GroupDataLimit:
+    """A byte quota shared by all devices in one group."""
+
+    group_id: str
+    profile_id: str
+    limit_bytes: int
+    reset_mode: str = "manual"
+    reset_interval_seconds: int = 0
+    reset_times: Tuple[int, ...] = ()
+    used_bytes: int = 0
+    counter_bytes: int = 0
+    last_reset_at: int = 0
+    enabled: bool = True
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.group_id, "group_id")
         _validate_identifier(self.profile_id, "profile_id")
         _validate_quota_usage(
             limit_bytes=self.limit_bytes,
