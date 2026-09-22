@@ -12,7 +12,10 @@ license = { text = "TBD" }
 authors = [
   { name = "Samantha Martínez" },
 ]
-dependencies = []
+dependencies = [
+    "pycryptodome>=3.14,<4",
+    "requests>=2.25,<3",
+]
 
 [project.scripts]
 jittersim = "jittersim.cli:main"

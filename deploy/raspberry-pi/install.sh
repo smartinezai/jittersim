@@ -33,7 +33,7 @@ if [ "$SOURCE_DIR" != "$INSTALL_DIR" ]; then
 fi
 
 python3 -m venv "$INSTALL_DIR/.venv"
-"$INSTALL_DIR/.venv/bin/pip" install --no-deps "$INSTALL_DIR"
+"$INSTALL_DIR/.venv/bin/pip" install "$INSTALL_DIR"
 chown -R jittersim:jittersim "$INSTALL_DIR"
 
 if [ ! -s "$CONFIG_DIR/control.env" ]; then
