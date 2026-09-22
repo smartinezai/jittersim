@@ -3,6 +3,7 @@ from ipaddress import IPv4Address
 
 from jittersim.config.models import (
     Device,
+    DeviceGroup,
     DataLimit,
     DomainObservation,
     Impairment,
@@ -146,6 +147,27 @@ class DeviceTests(unittest.TestCase):
                 name="Test device",
                 ipv4_address="192.168.50.10",
                 profile_id="Not a valid identifier",
+            )
+
+
+class DeviceGroupTests(unittest.TestCase):
+    def test_normalizes_and_keeps_group_members(self) -> None:
+        group = DeviceGroup(
+            id="family",
+            name="Family devices",
+            device_ids=("alice", "bob"),
+            profile_id="slow",
+        )
+
+        self.assertEqual(group.device_ids, ("alice", "bob"))
+        self.assertEqual(group.profile_id, "slow")
+
+    def test_rejects_duplicate_group_members(self) -> None:
+        with self.assertRaisesRegex(ValueError, "duplicates"):
+            DeviceGroup(
+                id="family",
+                name="Family devices",
+                device_ids=("alice", "alice"),
             )
 
 

@@ -6,7 +6,9 @@ from unittest.mock import patch
 from jittersim.config.models import (
     DataLimit,
     Device,
+    DeviceGroup,
     DomainObservation,
+    GroupDataLimit,
     Impairment,
     Profile,
     Progression,
@@ -286,6 +288,48 @@ class RuntimeSchedulerTests(unittest.TestCase):
 
         self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 700)
         self.assertEqual(self.repository.get_data_limit("alice").used_bytes, 150)
+
+    def test_group_profile_and_shared_quota_apply_to_every_member(self) -> None:
+        normal = Profile(id="normal", name="Normal")
+        group_profile = Profile(
+            id="group-slow",
+            name="Group slow",
+            download=Impairment(delay_ms=400),
+        )
+        fallback = Profile(
+            id="group-fallback",
+            name="Group fallback",
+            download=Impairment(delay_ms=700),
+        )
+        for profile in (normal, group_profile, fallback):
+            self.repository.save_profile(profile)
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        self.repository.save_device(Device("bob", "Bob", "192.168.50.11", "normal"))
+        self.repository.save_device_group(
+            DeviceGroup(
+                id="family",
+                name="Family devices",
+                device_ids=("alice", "bob"),
+                profile_id="group-slow",
+            )
+        )
+        self.repository.save_group_data_limit(
+            GroupDataLimit(
+                group_id="family",
+                profile_id="group-fallback",
+                limit_bytes=100,
+                last_reset_at=100,
+            )
+        )
+        self.helper.counters = {"devices": {"alice": 60, "bob": 40}, "services": {}}
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+
+        scheduler.tick(repository=self.repository, now=100)
+
+        self.assertEqual(self.repository.get_group_data_limit("family").used_bytes, 100)
+        self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 700)
+        self.assertEqual(self.helper.plans[-1].queues[3].impairment.delay_ms, 700)
 
     def test_service_quota_uses_all_selected_observed_domains(self) -> None:
         normal = Profile(id="normal", name="Normal")

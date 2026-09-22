@@ -2,8 +2,10 @@ import unittest
 
 from jittersim.config.models import (
     Device,
+    DeviceGroup,
     DataLimit,
     DomainObservation,
+    GroupDataLimit,
     Impairment,
     MacPolicy,
     Profile,
@@ -202,6 +204,34 @@ class ConfigRepositoryTests(unittest.TestCase):
         self.assertEqual(updated.used_bytes, 720)
         self.assertTrue(self.repository.reset_service_quota_usage(service_quota.id, counter_bytes=600))
         self.assertEqual(self.repository.get_service_quota(service_quota.id).used_bytes, 0)
+
+    def test_round_trips_device_groups_and_shared_quota_usage(self) -> None:
+        self.repository.save_profile(Profile(id="normal", name="Normal"))
+        self.repository.save_profile(Profile(id="slow", name="Slow"))
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        self.repository.save_device(Device("bob", "Bob", "192.168.50.11", "normal"))
+        group = DeviceGroup(
+            id="family",
+            name="Family devices",
+            device_ids=("alice", "bob"),
+            profile_id="slow",
+        )
+        data_limit = GroupDataLimit(
+            group_id="family",
+            profile_id="slow",
+            limit_bytes=1_000,
+            last_reset_at=100,
+        )
+
+        self.repository.save_device_group(group)
+        self.repository.save_group_data_limit(data_limit)
+
+        self.assertEqual(self.repository.get_device_group("family"), group)
+        self.assertEqual(self.repository.get_group_data_limit("family"), data_limit)
+        updated = self.repository.record_group_data_usage("family", 1_200)
+        self.assertEqual(updated.used_bytes, 1_200)
+        self.assertTrue(self.repository.reset_group_data_limit_usage("family", counter_bytes=1_200))
+        self.assertEqual(self.repository.get_group_data_limit("family").used_bytes, 0)
 
     def test_tracks_active_time_and_starts_a_fresh_window(self) -> None:
         self.repository.save_profile(Profile(id="normal", name="Normal"))
