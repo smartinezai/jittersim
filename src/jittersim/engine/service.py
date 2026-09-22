@@ -17,7 +17,23 @@ def compile_stored_plan(*, repository: ConfigRepository) -> NetworkPlan:
     data_limits = {
         data_limit.device_id: data_limit for data_limit in repository.list_data_limits()
     }
+    groups_by_device = {
+        device_id: group
+        for group in repository.list_device_groups()
+        for device_id in group.device_ids
+    }
+    group_data_limits = {
+        data_limit.group_id: data_limit
+        for data_limit in repository.list_group_data_limits()
+    }
     for device in repository.list_devices():
+        group = groups_by_device.get(device.id)
+        if group is not None and group.profile_id is not None:
+            if group.profile_id not in profiles:
+                raise ValueError(
+                    f"device group {group.id} references a missing profile"
+                )
+            device = replace(device, profile_id=group.profile_id)
         data_limit = data_limits.get(device.id)
         if data_limit is not None and data_limit.enabled and data_limit.used_bytes >= data_limit.limit_bytes:
             if data_limit.profile_id not in profiles:
@@ -25,6 +41,18 @@ def compile_stored_plan(*, repository: ConfigRepository) -> NetworkPlan:
                     f"data limit for device {device.id} references a missing profile"
                 )
             device = replace(device, profile_id=data_limit.profile_id)
+        elif group is not None:
+            group_data_limit = group_data_limits.get(group.id)
+            if (
+                group_data_limit is not None
+                and group_data_limit.enabled
+                and group_data_limit.used_bytes >= group_data_limit.limit_bytes
+            ):
+                if group_data_limit.profile_id not in profiles:
+                    raise ValueError(
+                        f"group data limit for {group.id} references a missing profile"
+                    )
+                device = replace(device, profile_id=group_data_limit.profile_id)
         devices.append(device)
     global_blocked, website_filters = build_website_filters(
         devices=devices,

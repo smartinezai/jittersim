@@ -11,6 +11,7 @@ from typing import Dict, Optional, Sequence, Union
 from jittersim.config.models import (
     DataLimit,
     Device,
+    GroupDataLimit,
     DomainObservation,
     Profile,
     Progression,
@@ -205,8 +206,18 @@ class RuntimeScheduler:
             data_limit.device_id: data_limit
             for data_limit in repository.list_data_limits()
         }
+        groups_by_device = {
+            device_id: group
+            for group in repository.list_device_groups()
+            for device_id in group.device_ids
+        }
+        group_data_limits = {
+            data_limit.group_id: data_limit
+            for data_limit in repository.list_group_data_limits()
+        }
 
         for device in repository.list_devices():
+            group = groups_by_device.get(device.id)
             progression = active_progressions.get(device.id)
             timer = None if progression is not None else active_timers.get(device.id)
             schedule = None if timer is not None or progression is not None else active_schedule(
@@ -214,9 +225,18 @@ class RuntimeScheduler:
                 device_id=device.id,
                 moment=moment,
             )
-            source_profile_id = device.profile_id if schedule is None else schedule.profile_id
+            group_profile_id = group.profile_id if group is not None else None
+            source_profile_id = (
+                group_profile_id or device.profile_id
+                if schedule is None
+                else schedule.profile_id
+            )
             selected_profile = profiles.get(source_profile_id)
-            source_key = source_profile_id
+            source_key = (
+                f"group-profile:{group.id}"
+                if group is not None and group_profile_id is not None and schedule is None
+                else source_profile_id
+            )
             if timer is not None:
                 source_profile_id = timer.profile_id
                 selected_profile = profiles.get(source_profile_id)
@@ -253,6 +273,20 @@ class RuntimeScheduler:
                     )
                 selected_profile = fallback_profile
                 source_key = f"data-limit:{device.id}"
+            elif group is not None:
+                group_data_limit = group_data_limits.get(group.id)
+                if (
+                    group_data_limit is not None
+                    and group_data_limit.enabled
+                    and group_data_limit.used_bytes >= group_data_limit.limit_bytes
+                ):
+                    fallback_profile = profiles.get(group_data_limit.profile_id)
+                    if fallback_profile is None:
+                        raise PlanError(
+                            f"group data limit for {group.id} references a missing profile"
+                        )
+                    selected_profile = fallback_profile
+                    source_key = f"group-data-limit:{group.id}"
             if selected_profile is None:
                 raise PlanError(f"device {device.id} references missing profile {source_profile_id}")
             active_device_ids.add(device.id)
@@ -474,6 +508,12 @@ class RuntimeScheduler:
             for data_limit in repository.list_data_limits()
             if data_limit.enabled
         )
+        groups_by_id = {group.id: group for group in repository.list_device_groups()}
+        group_data_limits = tuple(
+            data_limit
+            for data_limit in repository.list_group_data_limits()
+            if data_limit.enabled
+        )
         service_quotas = tuple(
             quota for quota in repository.list_service_quotas() if quota.enabled
         )
@@ -482,7 +522,13 @@ class RuntimeScheduler:
         )
         progressions = repository.list_active_progressions(now=int(now))
         has_byte_progression = any(progression.mode == "bytes" for progression in progressions)
-        if not data_limits and not service_quotas and not time_quotas and not has_byte_progression:
+        if (
+            not data_limits
+            and not group_data_limits
+            and not service_quotas
+            and not time_quotas
+            and not has_byte_progression
+        ):
             return
         get_traffic_counters = getattr(self._helper_client, "traffic_counters", None)
         if get_traffic_counters is None:
@@ -505,6 +551,16 @@ class RuntimeScheduler:
                 counter = device_counters.get(data_limit.device_id)
                 if counter is not None:
                     repository.record_data_usage(data_limit.device_id, counter)
+            for data_limit in group_data_limits:
+                group = groups_by_id.get(data_limit.group_id)
+                if group is None or any(
+                    device_id not in device_counters for device_id in group.device_ids
+                ):
+                    continue
+                aggregate_counter = sum(
+                    device_counters[device_id] for device_id in group.device_ids
+                )
+                repository.record_group_data_usage(data_limit.group_id, aggregate_counter)
             for quota in service_quotas:
                 counter = service_counters.get(quota.id)
                 if counter is not None:
@@ -529,6 +585,22 @@ class RuntimeScheduler:
                         counter_bytes=device_counters.get(refreshed.device_id),
                         reset_at=int(now),
                     )
+            for data_limit in group_data_limits:
+                refreshed = repository.get_group_data_limit(data_limit.group_id)
+                group = groups_by_id.get(data_limit.group_id)
+                aggregate_counter = None
+                if group is not None and all(
+                    device_id in device_counters for device_id in group.device_ids
+                ):
+                    aggregate_counter = sum(
+                        device_counters[device_id] for device_id in group.device_ids
+                    )
+                if refreshed is not None and self._quota_reset_is_due(refreshed, now):
+                    repository.reset_group_data_limit_usage(
+                        refreshed.group_id,
+                        counter_bytes=aggregate_counter,
+                        reset_at=int(now),
+                    )
             for quota in service_quotas:
                 refreshed = repository.get_service_quota(quota.id)
                 if refreshed is not None and self._quota_reset_is_due(refreshed, now):
@@ -550,7 +622,7 @@ class RuntimeScheduler:
 
     @staticmethod
     def _quota_reset_is_due(
-        quota: Union[DataLimit, ServiceQuota, TimeQuota],
+        quota: Union[DataLimit, GroupDataLimit, ServiceQuota, TimeQuota],
         now: float,
     ) -> bool:
         """Return whether a quota crossed its configured reset boundary."""
