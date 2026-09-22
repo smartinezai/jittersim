@@ -15,6 +15,7 @@ from jittersim.config.models import (
     ServiceQuota,
     Timer,
     TimeQuota,
+    time_quota_counter_id,
     ValidationError,
     WebsitePolicy,
 )
@@ -299,6 +300,12 @@ class PolicyAndScheduleTests(unittest.TestCase):
                 started_at=100,
                 expires_at=701,
             )
+
+    def test_time_quota_counter_ids_are_bounded_and_stable(self) -> None:
+        first = time_quota_counter_id("a" * 64)
+
+        self.assertEqual(first, time_quota_counter_id("a" * 64))
+        self.assertLessEqual(len(first), 64)
 
     def test_service_quota_weight_has_a_safe_range(self) -> None:
         with self.assertRaisesRegex(ValueError, "weight_percent must be between 10 and 1000"):

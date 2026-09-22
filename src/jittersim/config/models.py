@@ -1,6 +1,7 @@
 """Validated domain objects used by the jittersim control plane."""
 
 from dataclasses import dataclass
+from hashlib import sha256
 from ipaddress import AddressValueError, IPv4Address, IPv4Network
 import re
 from typing import Optional, Tuple, Union
@@ -19,6 +20,13 @@ _RFC1918_NETWORKS = (
     IPv4Network("192.168.0.0/16"),
 )
 IPv4Input = Union[str, IPv4Address]
+
+
+def time_quota_counter_id(quota_id: str) -> str:
+    """Return a bounded internal counter name for one timed quota."""
+
+    _validate_identifier(quota_id, "time quota id")
+    return "tq-" + sha256(quota_id.encode("utf-8")).hexdigest()[:16]
 
 
 def _validate_identifier(value: str, field_name: str) -> str:

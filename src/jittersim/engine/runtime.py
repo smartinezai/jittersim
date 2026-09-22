@@ -15,6 +15,8 @@ from jittersim.config.models import (
     Profile,
     Progression,
     ServiceQuota,
+    TimeQuota,
+    time_quota_counter_id,
 )
 from jittersim.config.storage import ConfigRepository, DatabasePath, StorageError
 from jittersim.networking.helper import HelperClient, HelperClientError
@@ -337,6 +339,7 @@ class RuntimeScheduler:
             repository=repository,
             devices=runtime_devices,
             profiles=profiles,
+            now=now,
         )
         return compile_plan(
             devices=runtime_devices,
@@ -354,6 +357,7 @@ class RuntimeScheduler:
         repository: ConfigRepository,
         devices: Sequence[Device],
         profiles: Dict[str, Profile],
+        now: float,
     ) -> tuple:
         """Resolve enabled service quotas into destination-aware traffic rules."""
 
@@ -388,6 +392,38 @@ class RuntimeScheduler:
                     upload_impairment=fallback_profile.upload,
                     download_impairment=fallback_profile.download,
                     active=quota.used_bytes >= quota.limit_bytes,
+                )
+            )
+        for quota in repository.list_time_quotas():
+            if not quota.enabled:
+                continue
+            device = devices_by_id.get(quota.device_id)
+            fallback_profile = profiles.get(quota.profile_id)
+            if device is None:
+                LOGGER.warning("time quota %s references a missing device", quota.id)
+                continue
+            if fallback_profile is None:
+                raise PlanError(f"time quota {quota.id} references a missing profile")
+            destination_addresses = resolve_domains(domains=quota.domains)
+            if not destination_addresses:
+                LOGGER.warning(
+                    "time quota %s has no currently resolvable observed domains",
+                    quota.id,
+                )
+                continue
+            rules.append(
+                ServiceQuotaRule(
+                    quota_id=time_quota_counter_id(quota.id),
+                    device_id=device.id,
+                    device_ip=device.ipv4_address,
+                    destination_addresses=destination_addresses,
+                    mark=0,
+                    upload_impairment=fallback_profile.upload,
+                    download_impairment=fallback_profile.download,
+                    active=(
+                        self._time_quota_window_is_active(quota, now)
+                        and quota.used_seconds >= quota.limit_seconds
+                    ),
                 )
             )
         return tuple(rules)
@@ -441,9 +477,12 @@ class RuntimeScheduler:
         service_quotas = tuple(
             quota for quota in repository.list_service_quotas() if quota.enabled
         )
+        time_quotas = tuple(
+            quota for quota in repository.list_time_quotas() if quota.enabled
+        )
         progressions = repository.list_active_progressions(now=int(now))
         has_byte_progression = any(progression.mode == "bytes" for progression in progressions)
-        if not data_limits and not service_quotas and not has_byte_progression:
+        if not data_limits and not service_quotas and not time_quotas and not has_byte_progression:
             return
         get_traffic_counters = getattr(self._helper_client, "traffic_counters", None)
         if get_traffic_counters is None:
@@ -470,6 +509,18 @@ class RuntimeScheduler:
                 counter = service_counters.get(quota.id)
                 if counter is not None:
                     repository.record_service_usage(quota.id, counter)
+            for quota in time_quotas:
+                counter_id = time_quota_counter_id(quota.id)
+                counter = service_counters.get(counter_id)
+                if counter is not None:
+                    refreshed = repository.get_time_quota(quota.id)
+                    if refreshed is not None:
+                        repository.record_time_usage(
+                            quota.id,
+                            counter,
+                            int(now),
+                            active=self._time_quota_window_is_active(refreshed, now),
+                        )
             for data_limit in data_limits:
                 refreshed = repository.get_data_limit(data_limit.device_id)
                 if refreshed is not None and self._quota_reset_is_due(refreshed, now):
@@ -486,11 +537,22 @@ class RuntimeScheduler:
                         counter_bytes=service_counters.get(refreshed.id),
                         reset_at=int(now),
                     )
+            for quota in time_quotas:
+                refreshed = repository.get_time_quota(quota.id)
+                if refreshed is not None and self._quota_reset_is_due(refreshed, now):
+                    repository.reset_time_quota_usage(
+                        refreshed.id,
+                        counter_bytes=service_counters.get(time_quota_counter_id(refreshed.id)),
+                        reset_at=int(now),
+                    )
         except (AttributeError, KeyError, TypeError, ValueError, StorageError, HelperClientError):
             LOGGER.warning("quota traffic sample failed", exc_info=True)
 
     @staticmethod
-    def _quota_reset_is_due(quota: Union[DataLimit, ServiceQuota], now: float) -> bool:
+    def _quota_reset_is_due(
+        quota: Union[DataLimit, ServiceQuota, TimeQuota],
+        now: float,
+    ) -> bool:
         """Return whether a quota crossed its configured reset boundary."""
 
         if quota.reset_mode == "interval":
@@ -510,6 +572,12 @@ class RuntimeScheduler:
                 if quota.last_reset_at < boundary <= now:
                     return True
         return False
+
+    @staticmethod
+    def _time_quota_window_is_active(quota: TimeQuota, now: float) -> bool:
+        """Return whether a timed quota is inside its configured start window."""
+
+        return quota.started_at > 0 and quota.started_at <= now < quota.expires_at
 
     def _run(self) -> None:
         while not self._stop_event.wait(self._poll_seconds):

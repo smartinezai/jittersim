@@ -13,6 +13,8 @@ from jittersim.config.models import (
     Randomness,
     Schedule,
     ServiceQuota,
+    TimeQuota,
+    time_quota_counter_id,
     Timer,
 )
 from jittersim.config.storage import ConfigRepository
@@ -349,6 +351,61 @@ class RuntimeSchedulerTests(unittest.TestCase):
         self.assertEqual(data_limit.used_bytes, 0)
         self.assertEqual(data_limit.counter_bytes, 20)
         self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 0)
+
+    def test_time_quota_counts_active_traffic_inside_its_timer(self) -> None:
+        normal = Profile(id="normal", name="Normal")
+        fallback = Profile(id="fallback", name="Fallback", download=Impairment(delay_ms=700))
+        self.repository.save_profile(normal)
+        self.repository.save_profile(fallback)
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        self.repository.save_domain_observations(
+            (
+                DomainObservation(
+                    ipv4_address="192.168.50.10",
+                    domain="netflix.com",
+                    query_count=1,
+                    first_seen=100,
+                    last_seen=100,
+                ),
+            ),
+            now=100,
+        )
+        quota = TimeQuota(
+            id="alice-netflix-time",
+            device_id="alice",
+            name="Netflix time",
+            domains=("netflix.com",),
+            profile_id="fallback",
+            limit_seconds=60,
+            window_duration_seconds=3_600,
+            started_at=100,
+            expires_at=1_000,
+            last_sample_at=100,
+        )
+        self.repository.save_time_quota(quota)
+        counter_id = time_quota_counter_id(quota.id)
+        self.helper.counters = {"devices": {}, "services": {counter_id: 0}}
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+
+        with patch(
+            "jittersim.engine.runtime.resolve_domains",
+            return_value=(IPv4Address("203.0.113.10"),),
+        ):
+            scheduler.tick(repository=self.repository, now=100)
+            self.helper.counters["services"][counter_id] = 100
+            scheduler.tick(repository=self.repository, now=160)
+
+        self.assertEqual(self.repository.get_time_quota(quota.id).used_seconds, 60)
+        self.assertTrue(self.helper.plans[-1].service_quota_rules[0].active)
+
+        self.helper.counters["services"][counter_id] = 200
+        with patch(
+            "jittersim.engine.runtime.resolve_domains",
+            return_value=(IPv4Address("203.0.113.10"),),
+        ):
+            scheduler.tick(repository=self.repository, now=1_001)
+        self.assertFalse(self.helper.plans[-1].service_quota_rules[0].active)
 
     def test_random_outage_marks_a_device_as_disconnected(self) -> None:
         profile = Profile(
