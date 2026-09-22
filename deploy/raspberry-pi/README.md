@@ -42,10 +42,16 @@ systemd units and enables the management firewall. It preserves existing
 credential files so an update does not silently invalidate access.
 
 After an update, the dashboard supports schedules, one-shot profile timers,
-MAC rules, website rules, traffic observations and randomized profile changes.
+progression sessions, MAC rules, website rules, traffic observations and
+randomized profile changes. A progression can move a device from one profile
+to another over time or as its DNS query count grows. It can also block more of
+its selected domains as it advances.
 The helper applies these rules on the Pi and reset pauses scheduled changes
 before removing them. A timer temporarily takes priority for its device then
 returns to the normal schedule or profile when it expires.
+
+Progression traffic mode is a local DNS-query signal. It is useful for testing
+changing behavior but it does not measure every packet or download byte.
 
 Read the credentials only on the Pi:
 

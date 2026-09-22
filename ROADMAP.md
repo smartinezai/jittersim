@@ -138,6 +138,8 @@ Goal: create realistic changing conditions without making tests irreproducible.
 - [x] Add seeded random choices.
 - [x] Reroll values and feature enablement at separate intervals.
 - [x] Vary reroll timing and outage timing.
+- [x] Add time-based and DNS-query-based progression sessions.
+- [x] Stage per-device website blocking during progression sessions.
 - [ ] Add burst loss and correlated impairment presets.
 - [ ] Ensure only one scheduler owns transitions.
 - [x] Stop schedules cleanly during reset and shutdown.

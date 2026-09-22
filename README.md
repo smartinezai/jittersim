@@ -13,10 +13,13 @@ is a private lab tool, not a replacement for a home router.
 - Per-device profile assignment from the dashboard.
 - Multiple daily schedules with overnight time ranges.
 - One-shot profile timers that temporarily override a device then end automatically.
+- Progression sessions that move from one profile to another over time or after
+  a DNS-query target, then recover automatically.
 - Click-to-select schedule days with inline help for random settings.
 - Seeded randomness for values, feature enablement, rerolls and short outages.
 - MAC address allowlists and denylists.
 - Global blocked websites and profile-specific allow-only website lists.
+- Per-device website blocking that can grow as a progression session advances.
 - Connected-device discovery and short DNS traffic summaries.
 - Buttons that add observed domains to a profile or the global block list.
 - A protected helper service with Apply and Reset controls.
@@ -30,6 +33,9 @@ Traffic discovery stores local summaries of DNS names and query counts. It does
 not prove that someone opened a page. A VPN, encrypted DNS or direct IP access
 can hide or bypass these observations and website rules. Website rules cover
 IPv4 destinations only.
+
+Progression traffic mode uses DNS query counts as its signal. It does not count
+all packets or measure download bytes.
 
 ## Network layout
 
