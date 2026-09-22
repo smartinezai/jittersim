@@ -186,6 +186,24 @@ class ProgressionTests(unittest.TestCase):
             0.5,
         )
 
+    def test_bytes_factor_uses_device_bytes_after_the_saved_baseline(self) -> None:
+        progression = Progression(
+            id="degrade",
+            device_id="alice",
+            start_profile_id="normal",
+            end_profile_id="slow",
+            started_at=100,
+            duration_seconds=600,
+            mode="bytes",
+            traffic_target_bytes=1_000,
+            traffic_baseline_bytes=250,
+        )
+
+        self.assertEqual(
+            progression_factor(progression=progression, now=100, traffic_bytes=750),
+            0.5,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

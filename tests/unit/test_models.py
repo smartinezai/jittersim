@@ -231,6 +231,18 @@ class PolicyAndScheduleTests(unittest.TestCase):
                 mode="traffic",
             )
 
+    def test_bytes_progression_requires_a_positive_byte_target(self) -> None:
+        with self.assertRaisesRegex(ValueError, "positive byte target"):
+            Progression(
+                id="degrade",
+                device_id="alice",
+                start_profile_id="normal",
+                end_profile_id="slow",
+                started_at=100,
+                duration_seconds=600,
+                mode="bytes",
+            )
+
     def test_accepts_data_and_service_quota_reset_schedules(self) -> None:
         data_limit = DataLimit(
             device_id="alice",

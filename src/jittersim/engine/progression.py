@@ -11,12 +11,16 @@ def progression_factor(
     progression: Progression,
     now: float,
     traffic_queries: int = 0,
+    traffic_bytes: int = 0,
 ) -> float:
     """Return the bounded progress fraction for one active progression."""
 
     if progression.mode == "traffic":
         completed_queries = max(0, traffic_queries - progression.traffic_baseline_queries)
         return min(1.0, completed_queries / progression.traffic_target_queries)
+    if progression.mode == "bytes":
+        completed_bytes = max(0, traffic_bytes - progression.traffic_baseline_bytes)
+        return min(1.0, completed_bytes / progression.traffic_target_bytes)
     elapsed = max(0.0, now - progression.started_at)
     return min(1.0, elapsed / progression.duration_seconds)
 

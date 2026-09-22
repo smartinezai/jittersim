@@ -154,6 +154,8 @@ class ConfigRepository:
                 mode TEXT NOT NULL,
                 traffic_target_queries INTEGER NOT NULL,
                 traffic_baseline_queries INTEGER NOT NULL,
+                traffic_target_bytes INTEGER NOT NULL DEFAULT 0,
+                traffic_baseline_bytes INTEGER NOT NULL DEFAULT 0,
                 website_domains_json TEXT NOT NULL,
                 enabled INTEGER NOT NULL
             );
@@ -222,6 +224,8 @@ class ConfigRepository:
         )
         self._add_column_if_missing("profiles", "settings_json", "TEXT NOT NULL DEFAULT '{}'")
         self._add_column_if_missing("devices", "mac_address", "TEXT")
+        self._add_column_if_missing("progressions", "traffic_target_bytes", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_missing("progressions", "traffic_baseline_bytes", "INTEGER NOT NULL DEFAULT 0")
         self._connection.commit()
 
     def _add_column_if_missing(self, table_name: str, column_name: str, column_definition: str) -> None:
@@ -559,8 +563,9 @@ class ConfigRepository:
                 INSERT INTO progressions (
                     id, device_id, start_profile_id, end_profile_id, started_at,
                     duration_seconds, mode, traffic_target_queries,
-                    traffic_baseline_queries, website_domains_json, enabled
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    traffic_baseline_queries, traffic_target_bytes,
+                    traffic_baseline_bytes, website_domains_json, enabled
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     device_id = excluded.device_id,
                     start_profile_id = excluded.start_profile_id,
@@ -570,6 +575,8 @@ class ConfigRepository:
                     mode = excluded.mode,
                     traffic_target_queries = excluded.traffic_target_queries,
                     traffic_baseline_queries = excluded.traffic_baseline_queries,
+                    traffic_target_bytes = excluded.traffic_target_bytes,
+                    traffic_baseline_bytes = excluded.traffic_baseline_bytes,
                     website_domains_json = excluded.website_domains_json,
                     enabled = excluded.enabled
                 """,
@@ -583,6 +590,8 @@ class ConfigRepository:
                     progression.mode,
                     progression.traffic_target_queries,
                     progression.traffic_baseline_queries,
+                    progression.traffic_target_bytes,
+                    progression.traffic_baseline_bytes,
                     json.dumps(list(progression.website_domains)),
                     int(progression.enabled),
                 ),
@@ -613,7 +622,8 @@ class ConfigRepository:
             """
             SELECT id, device_id, start_profile_id, end_profile_id, started_at,
                    duration_seconds, mode, traffic_target_queries,
-                   traffic_baseline_queries, website_domains_json, enabled
+                   traffic_baseline_queries, traffic_target_bytes,
+                   traffic_baseline_bytes, website_domains_json, enabled
             FROM progressions ORDER BY started_at DESC, id DESC
             """
         ).fetchall()
@@ -626,7 +636,8 @@ class ConfigRepository:
             """
             SELECT id, device_id, start_profile_id, end_profile_id, started_at,
                    duration_seconds, mode, traffic_target_queries,
-                   traffic_baseline_queries, website_domains_json, enabled
+                   traffic_baseline_queries, traffic_target_bytes,
+                   traffic_baseline_bytes, website_domains_json, enabled
             FROM progressions
             WHERE enabled = 1 AND started_at <= ?
               AND started_at + duration_seconds > ?
@@ -1148,6 +1159,8 @@ class ConfigRepository:
                 mode=row["mode"],
                 traffic_target_queries=row["traffic_target_queries"],
                 traffic_baseline_queries=row["traffic_baseline_queries"],
+                traffic_target_bytes=row["traffic_target_bytes"],
+                traffic_baseline_bytes=row["traffic_baseline_bytes"],
                 website_domains=tuple(json.loads(row["website_domains_json"])),
                 enabled=bool(row["enabled"]),
             )

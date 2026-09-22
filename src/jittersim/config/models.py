@@ -310,6 +310,8 @@ class Progression:
     mode: str = "time"
     traffic_target_queries: int = 0
     traffic_baseline_queries: int = 0
+    traffic_target_bytes: int = 0
+    traffic_baseline_bytes: int = 0
     website_domains: Tuple[str, ...] = ()
     enabled: bool = True
 
@@ -320,7 +322,7 @@ class Progression:
         _validate_identifier(self.end_profile_id, "end_profile_id")
         _validate_number(self.started_at, "started_at", 0, 2**63 - 1)
         _validate_number(self.duration_seconds, "duration_seconds", 60, 604_800)
-        if self.mode not in ("time", "traffic"):
+        if self.mode not in ("time", "traffic", "bytes"):
             raise ValidationError("progression mode is not supported")
         _validate_number(
             self.traffic_target_queries,
@@ -336,6 +338,20 @@ class Progression:
         )
         if self.mode == "traffic" and self.traffic_target_queries < 1:
             raise ValidationError("traffic mode requires a positive query target")
+        _validate_number(
+            self.traffic_target_bytes,
+            "traffic_target_bytes",
+            0,
+            2**63 - 1,
+        )
+        _validate_number(
+            self.traffic_baseline_bytes,
+            "traffic_baseline_bytes",
+            0,
+            2**63 - 1,
+        )
+        if self.mode == "bytes" and self.traffic_target_bytes < 1:
+            raise ValidationError("bytes mode requires a positive byte target")
         object.__setattr__(
             self,
             "website_domains",

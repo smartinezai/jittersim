@@ -144,6 +144,26 @@ class ConfigRepositoryTests(unittest.TestCase):
         self.assertTrue(self.repository.delete_progression(progression.id))
         self.assertEqual(self.repository.list_active_progressions(now=200), ())
 
+    def test_round_trips_byte_progression_targets(self) -> None:
+        self.repository.save_profile(Profile(id="normal", name="Normal"))
+        self.repository.save_profile(Profile(id="slow", name="Slow"))
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        progression = Progression(
+            id="byte-driven",
+            device_id="alice",
+            start_profile_id="normal",
+            end_profile_id="slow",
+            started_at=100,
+            duration_seconds=600,
+            mode="bytes",
+            traffic_target_bytes=2_000,
+            traffic_baseline_bytes=125,
+        )
+
+        self.repository.save_progression(progression)
+
+        self.assertEqual(self.repository.list_active_progressions(now=200), (progression,))
+
     def test_round_trips_quotas_tracks_usage_and_resets_it(self) -> None:
         self.repository.save_profile(Profile(id="normal", name="Normal"))
         self.repository.save_profile(Profile(id="slow", name="Slow"))
