@@ -93,12 +93,39 @@ def _render_nft_script(plan: NetworkPlan) -> str:
     for rule in plan.mark_rules:
         lines.append(
             f"add rule inet {PROJECT_TABLE} forward "
-            f"ip saddr {rule.ipv4_address} meta mark set {rule.mark}"
+            f"ip saddr {rule.ipv4_address} meta mark set {rule.mark} counter "
+            f"comment \"usage-device {rule.device_id} upload\""
         )
         lines.append(
             f"add rule inet {PROJECT_TABLE} forward "
-            f"ip daddr {rule.ipv4_address} meta mark set {rule.mark}"
+            f"ip daddr {rule.ipv4_address} meta mark set {rule.mark} counter "
+            f"comment \"usage-device {rule.device_id} download\""
         )
+    for quota_rule in plan.service_quota_rules:
+        destinations = _render_set(quota_rule.destination_addresses)
+        lines.append(
+            f"add rule inet {PROJECT_TABLE} forward "
+            f"ip saddr {quota_rule.device_ip} ip daddr {destinations} counter "
+            f"comment \"usage-service {quota_rule.quota_id} upload\""
+        )
+        lines.append(
+            f"add rule inet {PROJECT_TABLE} forward "
+            f"ip daddr {quota_rule.device_ip} ip saddr {destinations} counter "
+            f"comment \"usage-service {quota_rule.quota_id} download\""
+        )
+        if quota_rule.active:
+            lines.append(
+                f"add rule inet {PROJECT_TABLE} forward "
+                f"ip saddr {quota_rule.device_ip} ip daddr {destinations} "
+                f"meta mark set {quota_rule.mark} "
+                f"comment \"apply-service-quota {quota_rule.quota_id} upload\""
+            )
+            lines.append(
+                f"add rule inet {PROJECT_TABLE} forward "
+                f"ip daddr {quota_rule.device_ip} ip saddr {destinations} "
+                f"meta mark set {quota_rule.mark} "
+                f"comment \"apply-service-quota {quota_rule.quota_id} download\""
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -220,14 +247,14 @@ def render_command_plan(*, plan: NetworkPlan, topology: Topology) -> Sequence[Co
         _render_tc_commands(
             queues=upload_queues,
             interface=topology.uplink_interface,
-            device_count=len(plan.mark_rules),
+            device_count=max((queue.mark for queue in upload_queues), default=0),
         )
     )
     commands.extend(
         _render_tc_commands(
             queues=download_queues,
             interface=topology.test_interface,
-            device_count=len(plan.mark_rules),
+            device_count=max((queue.mark for queue in download_queues), default=0),
         )
     )
     return tuple(commands)

@@ -3,7 +3,7 @@ from ipaddress import IPv4Address
 
 from jittersim.config.models import Device, Impairment, MacPolicy, Profile
 from jittersim.engine.compiler import compile_plan
-from jittersim.engine.plan import WebsiteFilter
+from jittersim.engine.plan import ServiceQuotaRule, WebsiteFilter
 from jittersim.networking.renderer import render_command_plan, render_reset_commands
 from jittersim.networking.topology import Topology, TopologyError
 
@@ -51,6 +51,18 @@ class RendererTests(unittest.TestCase):
                 make_device("bob", "192.168.50.11", "normal"),
             ),
             profiles=profiles,
+            service_quota_rules=(
+                ServiceQuotaRule(
+                    quota_id="alice-video",
+                    device_id="alice",
+                    device_ip=IPv4Address("192.168.50.10"),
+                    destination_addresses=(IPv4Address("203.0.113.10"),),
+                    mark=0,
+                    upload_impairment=Impairment(delay_ms=100),
+                    download_impairment=Impairment(delay_ms=200),
+                    active=True,
+                ),
+            ),
         )
 
         commands = render_command_plan(
@@ -63,6 +75,9 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(commands[1].argv, ("nft", "-f", "-"))
         self.assertIn("ip saddr 192.168.50.10 meta mark set 1", commands[1].stdin or "")
         self.assertIn("ip daddr 192.168.50.11 meta mark set 2", commands[1].stdin or "")
+        self.assertIn("usage-service alice-video upload", commands[1].stdin or "")
+        self.assertIn("apply-service-quota alice-video download", commands[1].stdin or "")
+        self.assertIn("meta mark set 3", commands[1].stdin or "")
 
         root_commands = [
             command for command in commands if "create project queue root" in command.purpose
@@ -92,6 +107,12 @@ class RendererTests(unittest.TestCase):
             if "remove stale impairment for device bob" in command.purpose
         ]
         self.assertEqual(len(bob_cleanup), 2)
+        quota_upload = [
+            command
+            for command in commands
+            if "upload impairment for device quota:alice-video" in command.purpose
+        ]
+        self.assertEqual(len(quota_upload), 1)
 
     def test_renders_jitter_even_without_a_base_delay(self) -> None:
         profile = Profile(

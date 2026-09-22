@@ -5,7 +5,14 @@ from typing import Mapping, Sequence
 
 from jittersim.config.models import Device, MacPolicy, Profile
 
-from .plan import Direction, MarkRule, NetworkPlan, QueueSpec, WebsiteFilter
+from .plan import (
+    Direction,
+    MarkRule,
+    NetworkPlan,
+    QueueSpec,
+    ServiceQuotaRule,
+    WebsiteFilter,
+)
 
 
 class PlanError(ValueError):
@@ -13,6 +20,7 @@ class PlanError(ValueError):
 
 
 MAX_DEVICES_PER_PLAN = 15
+MAX_SERVICE_QUOTAS_PER_PLAN = 15
 
 
 def compile_plan(
@@ -23,6 +31,7 @@ def compile_plan(
     global_blocked_addresses: Sequence[IPv4Address] = (),
     website_filters: Sequence[WebsiteFilter] = (),
     blocked_device_addresses: Sequence[IPv4Address] = (),
+    service_quota_rules: Sequence[ServiceQuotaRule] = (),
 ) -> NetworkPlan:
     """Compile device assignments into deterministic marks and directional queues."""
 
@@ -91,11 +100,75 @@ def compile_plan(
         if any(address.version != 4 for address in website_filter.blocked_addresses):
             raise PlanError("website filter contains a non-IPv4 blocked address")
 
+    if len(service_quota_rules) > MAX_SERVICE_QUOTAS_PER_PLAN:
+        raise PlanError(
+            f"a plan cannot contain more than {MAX_SERVICE_QUOTAS_PER_PLAN} service quotas"
+        )
+    quota_ids = set()
+    service_queues = []
+    for index, quota_rule in enumerate(
+        sorted(service_quota_rules, key=lambda rule: rule.quota_id),
+        start=len(mark_rules) + 1,
+    ):
+        if quota_rule.quota_id in quota_ids:
+            raise PlanError(f"duplicate service quota id: {quota_rule.quota_id}")
+        if quota_rule.device_id not in devices_by_id:
+            raise PlanError(
+                f"service quota {quota_rule.quota_id} references unknown device"
+            )
+        device = devices_by_id[quota_rule.device_id]
+        if quota_rule.device_ip != device.ipv4_address:
+            raise PlanError(
+                f"service quota {quota_rule.quota_id} has the wrong device address"
+            )
+        if not quota_rule.destination_addresses:
+            raise PlanError(
+                f"service quota {quota_rule.quota_id} has no destination addresses"
+            )
+        if any(address.version != 4 for address in quota_rule.destination_addresses):
+            raise PlanError("service quota contains a non-IPv4 destination")
+        if index > MAX_DEVICES_PER_PLAN + MAX_SERVICE_QUOTAS_PER_PLAN:
+            raise PlanError("service quota mark is outside the safe range")
+        quota_ids.add(quota_rule.quota_id)
+        service_queues.extend(
+            (
+                QueueSpec(
+                    device_id=f"quota:{quota_rule.quota_id}",
+                    direction=Direction.UPLOAD,
+                    mark=index,
+                    impairment=quota_rule.upload_impairment,
+                ),
+                QueueSpec(
+                    device_id=f"quota:{quota_rule.quota_id}",
+                    direction=Direction.DOWNLOAD,
+                    mark=index,
+                    impairment=quota_rule.download_impairment,
+                ),
+            )
+        )
+    normalized_service_rules = tuple(
+        ServiceQuotaRule(
+            quota_id=rule.quota_id,
+            device_id=rule.device_id,
+            device_ip=rule.device_ip,
+            destination_addresses=tuple(sorted(set(rule.destination_addresses), key=str)),
+            mark=mark,
+            upload_impairment=rule.upload_impairment,
+            download_impairment=rule.download_impairment,
+            active=rule.active,
+        )
+        for rule, mark in zip(
+            sorted(service_quota_rules, key=lambda rule: rule.quota_id),
+            range(len(mark_rules) + 1, len(mark_rules) + 1 + len(service_quota_rules)),
+        )
+    )
+
     return NetworkPlan(
         mark_rules=tuple(mark_rules),
-        queues=tuple(queues),
+        queues=tuple(queues) + tuple(service_queues),
         mac_policy=mac_policy,
         global_blocked_addresses=tuple(sorted(set(global_blocked_addresses), key=str)),
         website_filters=tuple(website_filters),
         blocked_device_addresses=tuple(sorted(set(blocked_device_addresses), key=str)),
+        service_quota_rules=normalized_service_rules,
     )

@@ -4,7 +4,7 @@ from ipaddress import IPv4Address
 from jittersim.config.models import Device, Impairment, MacPolicy, Profile
 from jittersim.engine.codec import PlanCodecError, plan_from_payload, plan_to_payload
 from jittersim.engine.compiler import compile_plan
-from jittersim.engine.plan import WebsiteFilter
+from jittersim.engine.plan import ServiceQuotaRule, WebsiteFilter
 
 
 class PlanCodecTests(unittest.TestCase):
@@ -41,6 +41,44 @@ class PlanCodecTests(unittest.TestCase):
         )
 
         self.assertEqual(plan_from_payload(plan_to_payload(plan)), plan)
+
+    def test_round_trips_service_quota_rules(self) -> None:
+        plan = compile_plan(
+            devices=(Device("alice", "Alice", "192.168.50.10", "slow"),),
+            profiles={"slow": Profile(id="slow", name="Slow")},
+            service_quota_rules=(
+                ServiceQuotaRule(
+                    quota_id="alice-video",
+                    device_id="alice",
+                    device_ip=IPv4Address("192.168.50.10"),
+                    destination_addresses=(IPv4Address("203.0.113.10"),),
+                    mark=0,
+                    upload_impairment=Impairment(delay_ms=200),
+                    download_impairment=Impairment(loss_percent=5),
+                    active=True,
+                ),
+            ),
+        )
+
+        self.assertEqual(plan_from_payload(plan_to_payload(plan)), plan)
+
+    def test_rejects_an_unsafe_service_quota_id(self) -> None:
+        payload = plan_to_payload(self.plan)
+        payload["service_quota_rules"] = [
+            {
+                "quota_id": "bad\"; drop table inet jittersim; #",
+                "device_id": "alice",
+                "device_ip": "192.168.50.10",
+                "destination_addresses": ["203.0.113.10"],
+                "mark": 2,
+                "upload_impairment": {"delay_ms": 1},
+                "download_impairment": {"delay_ms": 1},
+                "active": True,
+            }
+        ]
+
+        with self.assertRaisesRegex(PlanCodecError, "quota_id is invalid"):
+            plan_from_payload(payload)
 
     def test_rejects_a_non_private_mark_address(self) -> None:
         payload = plan_to_payload(self.plan)

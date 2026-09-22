@@ -44,6 +44,20 @@ class WebsiteFilter:
 
 
 @dataclass(frozen=True)
+class ServiceQuotaRule:
+    """Destination match and fallback queue for one service quota."""
+
+    quota_id: str
+    device_id: str
+    device_ip: IPv4Address
+    destination_addresses: Tuple[IPv4Address, ...]
+    mark: int
+    upload_impairment: Impairment
+    download_impairment: Impairment
+    active: bool = False
+
+
+@dataclass(frozen=True)
 class NetworkPlan:
     """The complete device-specific plan without executable commands."""
 
@@ -53,3 +67,4 @@ class NetworkPlan:
     global_blocked_addresses: Tuple[IPv4Address, ...] = ()
     website_filters: Tuple[WebsiteFilter, ...] = ()
     blocked_device_addresses: Tuple[IPv4Address, ...] = ()
+    service_quota_rules: Tuple[ServiceQuotaRule, ...] = ()
