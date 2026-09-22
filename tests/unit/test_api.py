@@ -156,6 +156,7 @@ class ControlServerTests(unittest.TestCase):
                 "domains": ["netflix.com", "nflxvideo.net"],
                 "profile_id": "slow",
                 "limit_bytes": 2_000,
+                "weight_percent": 120,
                 "reset_mode": "daily",
                 "reset_times": [120, 720],
                 "reset_interval_seconds": 0,
@@ -166,6 +167,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         payload = json.loads(body)["service_quota"]
         self.assertEqual(payload["domains"], ["netflix.com", "nflxvideo.net"])
+        self.assertEqual(payload["weight_percent"], 120)
         _, _, body = self.server.response_for("/api/service-quotas")
         self.assertEqual(json.loads(body)["service_quotas"][0]["name"], "Video service")
 
@@ -380,6 +382,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("Scan now", DASHBOARD_HTML)
         self.assertIn("Device data limit", DASHBOARD_HTML)
         self.assertIn("Service data limit", DASHBOARD_HTML)
+        self.assertIn("Quota weight", DASHBOARD_HTML)
         self.assertIn("service-quota-domains", DASHBOARD_HTML)
         self.assertIn("/api/data-limits", DASHBOARD_HTML)
         self.assertIn("/api/service-quotas", DASHBOARD_HTML)

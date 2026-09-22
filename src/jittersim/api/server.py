@@ -890,6 +890,9 @@ DASHBOARD_HTML = """<!doctype html>
             <option value="1073741824">GB</option>
           </select>
         </label>
+        <label><span class="field-label">Quota weight (×)<span class="help-icon" tabindex="0" role="img" aria-label="Quota weight help" data-help="A weight of 1.2 makes each matching byte count as 1.2 bytes. A weight of 0.8 makes it count as 0.8 bytes. The allowed range is 0.1× to 10×.">?</span></span>
+          <input id="service-quota-weight" type="number" min="0.1" max="10" step="0.1" value="1" required>
+        </label>
         <label>Reset
           <select id="service-quota-reset-mode">
             <option value="manual">Manual</option>
@@ -908,7 +911,7 @@ DASHBOARD_HTML = """<!doctype html>
       <label>Observed domains for this service
         <select id="service-quota-domains" class="quota-domain-picker" multiple required></select>
       </label>
-      <p class="form-note">Only domains observed from the selected device appear here. Select all names used by the service. Matching traffic is counted together at the service level.</p>
+      <p class="form-note">Only domains observed from the selected device appear here. Select all names used by the service. Matching traffic is counted together at the service level then multiplied by the quota weight.</p>
       <button class="primary" type="submit">Save service limit</button>
     </form>
     <div id="service-quota-list" class="quota-list" aria-live="polite">Enter the admin token to view service limits.</div>
@@ -1421,7 +1424,8 @@ DASHBOARD_HTML = """<!doctype html>
       heading.append(title, status);
       const detail = document.createElement("span");
       detail.textContent = formatQuotaBytes(quota.used_bytes) + " used of " +
-        formatQuotaBytes(quota.limit_bytes) + " · " + formatQuotaBytes(quota.remaining_bytes) + " left";
+        formatQuotaBytes(quota.limit_bytes) + " · " + formatQuotaBytes(quota.remaining_bytes) + " left" +
+        (service ? " · weight " + (quota.weight_percent / 100).toFixed(1) + "×" : "");
       const meter = document.createElement("div");
       meter.className = "quota-meter";
       const meterValue = document.createElement("span");
@@ -1513,6 +1517,7 @@ DASHBOARD_HTML = """<!doctype html>
       element("service-quota-device").value = quota.device_id;
       element("service-quota-profile").value = quota.profile_id;
       setQuotaAmount("service-quota", quota.limit_bytes);
+      element("service-quota-weight").value = (quota.weight_percent / 100).toFixed(1);
       element("service-quota-reset-mode").value = quota.reset_mode;
       element("service-quota-interval").value = Math.max(1, Math.round(quota.reset_interval_seconds / 60));
       element("service-quota-times").value = (quota.reset_times || []).map((minute) =>
@@ -2050,6 +2055,7 @@ DASHBOARD_HTML = """<!doctype html>
           profile_id: element("service-quota-profile").value,
           domains: domains,
           limit_bytes: Number(element("service-quota-amount").value) * Number(element("service-quota-unit").value),
+          weight_percent: Math.round(Number(element("service-quota-weight").value) * 100),
           enabled: element("service-quota-enabled").checked,
           ...quotaSchedulePayload("service-quota")
         });
@@ -3275,6 +3281,10 @@ def _service_quota_from_payload(
         domains=normalized_domains,
         profile_id=payload["profile_id"],
         limit_bytes=payload["limit_bytes"],
+        weight_percent=payload.get(
+            "weight_percent",
+            existing.weight_percent if existing is not None else 100,
+        ),
         reset_mode=reset_mode,
         reset_interval_seconds=reset_interval_seconds,
         reset_times=reset_times,
