@@ -19,6 +19,7 @@ from jittersim.config.models import (
     Impairment,
     MacPolicy,
     Profile,
+    Progression,
     Randomness,
     RuntimeState,
     Schedule,
@@ -31,6 +32,7 @@ from jittersim.engine.compiler import PlanError
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.service import compile_stored_plan
 from jittersim.engine.runtime import RuntimeScheduler
+from jittersim.engine.progression import progression_factor
 from jittersim.networking.helper import HelperClient, HelperClientError
 
 
@@ -43,6 +45,8 @@ WRITE_PATHS = frozenset(
         "/api/schedules",
         "/api/timers",
         "/api/timers/cancel",
+        "/api/progressions",
+        "/api/progressions/stop",
         "/api/policies",
         "/api/access-point",
         "/api/connected-devices/apply-profile",
@@ -310,6 +314,14 @@ DASHBOARD_HTML = """<!doctype html>
     .timer-details strong { color: #edf5ff; }
     .timer-details span { color: #91a8c1; }
     .timer-row button { margin-top: 0; white-space: nowrap; }
+    .progression-card { margin-top: 1rem; }
+    .progression-list { display: grid; gap: 0.65rem; margin-top: 1rem; }
+    .progression-row { display: grid; gap: 0.45rem; padding: 0.7rem; border-radius: 0.45rem; background: #0d1b2d; color: #c7d7eb; font-size: 0.82rem; }
+    .progression-row-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+    .progression-row strong { color: #edf5ff; }
+    .progression-row button { margin-top: 0; white-space: nowrap; }
+    .progression-meter { height: 0.45rem; overflow: hidden; border-radius: 999px; background: #1a2d46; }
+    .progression-meter span { display: block; height: 100%; border-radius: inherit; background: #70b7ff; }
     .fields {
       display: grid;
       gap: 0.75rem;
@@ -347,6 +359,8 @@ DASHBOARD_HTML = """<!doctype html>
       .randomness-inputs { grid-template-columns: 1fr; }
       .timer-row { display: block; }
       .timer-row button { width: 100%; margin-top: 0.7rem; }
+      .progression-row-heading { display: block; }
+      .progression-row button { width: 100%; margin-top: 0.7rem; }
     }
     @media (prefers-reduced-motion: reduce) {
       button { transition: none; }
@@ -729,6 +743,46 @@ DASHBOARD_HTML = """<!doctype html>
       <button class="primary" type="submit">Start timer</button>
     </form>
     <div id="timer-list" class="timer-list" aria-live="polite">No active timers.</div>
+  </section>
+  <section class="card progression-card">
+    <div class="section-heading">
+      <div>
+        <h2>Progression mode</h2>
+        <p>Move gradually from one profile to another</p>
+      </div>
+      <span id="progression-count" class="count-badge">No active progressions</span>
+    </div>
+    <form id="progression-form">
+      <div class="fields">
+        <label>Device
+          <select id="progression-device" required></select>
+        </label>
+        <label>Start profile
+          <select id="progression-start-profile" required></select>
+        </label>
+        <label>End profile
+          <select id="progression-end-profile" required></select>
+        </label>
+        <label>Mode
+          <select id="progression-mode">
+            <option value="time">Over time</option>
+            <option value="traffic">After DNS queries</option>
+          </select>
+        </label>
+        <label>Duration limit (minutes)
+          <input id="progression-duration" type="number" min="1" max="10080" value="300" required>
+        </label>
+        <label id="progression-traffic-field" hidden>DNS queries to reach the end
+          <input id="progression-traffic-target" type="number" min="1" max="1000000000" value="1000">
+        </label>
+      </div>
+      <label>Domains to block gradually (optional, comma separated)
+        <textarea id="progression-domains" placeholder="youtube.com, example.com"></textarea>
+      </label>
+      <p class="form-note">The start and end profiles are interpolated gradually. Existing randomness and outage settings continue to run. Traffic mode uses DNS query counts as a local signal, not exact page visits. The device returns to its normal schedule or profile when the duration ends.</p>
+      <button class="primary" type="submit">Start progression</button>
+    </form>
+    <div id="progression-list" class="progression-list" aria-live="polite">No active progressions.</div>
   </section>
   <section class="card">
     <h2>Match the Pi test Wi-Fi manually</h2>
@@ -1184,7 +1238,12 @@ DASHBOARD_HTML = """<!doctype html>
       const data = await request("/api/profiles", "GET");
       profiles = data.profiles;
       element("profiles").textContent = JSON.stringify(profiles, null, 2);
-      ["schedule-profile", "timer-profile"].forEach((selectId) => {
+      [
+        "schedule-profile",
+        "timer-profile",
+        "progression-start-profile",
+        "progression-end-profile"
+      ].forEach((selectId) => {
         const profileSelect = element(selectId);
         profileSelect.replaceChildren();
         profiles.forEach((profile) => {
@@ -1198,7 +1257,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     async function loadDevicesForSchedule() {
       const data = await request("/api/devices", "GET");
-      ["schedule-device", "timer-device"].forEach((selectId) => {
+      ["schedule-device", "timer-device", "progression-device"].forEach((selectId) => {
         const deviceSelect = element(selectId);
         deviceSelect.replaceChildren();
         data.devices.forEach((device) => {
@@ -1298,6 +1357,75 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    function renderProgressions(data) {
+      const container = element("progression-list");
+      const count = element("progression-count");
+      const progressions = data.progressions || [];
+      container.replaceChildren();
+      count.textContent = progressions.length + (
+        progressions.length === 1 ? " active progression" : " active progressions"
+      );
+      if (progressions.length === 0) {
+        container.textContent = "No active progressions.";
+        return;
+      }
+      progressions.forEach((progression) => {
+        const row = document.createElement("div");
+        row.className = "progression-row";
+        const heading = document.createElement("div");
+        heading.className = "progression-row-heading";
+        const title = document.createElement("strong");
+        title.textContent = progression.device_name + " · " +
+          progression.start_profile_name + " → " + progression.end_profile_name;
+        const status = document.createElement("span");
+        status.textContent = progression.progress_percent + "% · " +
+          formatTimerRemaining(progression.remaining_seconds) + " left";
+        heading.append(title, status);
+        const meter = document.createElement("div");
+        meter.className = "progression-meter";
+        const meterValue = document.createElement("span");
+        meterValue.style.width = progression.progress_percent + "%";
+        meter.appendChild(meterValue);
+        const stopButton = document.createElement("button");
+        stopButton.type = "button";
+        stopButton.textContent = "Stop and recover";
+        stopButton.addEventListener("click", () => stopProgression(progression.id, stopButton));
+        row.append(heading, meter, stopButton);
+        container.appendChild(row);
+      });
+    }
+
+    async function loadProgressions() {
+      try {
+        renderProgressions(await request("/api/progressions", "GET"));
+      } catch (error) {
+        renderProgressions({ progressions: [] });
+      }
+    }
+
+    async function stopProgression(progressionId, button) {
+      button.disabled = true;
+      try {
+        const result = await request("/api/progressions/stop", "POST", { id: progressionId });
+        await refresh();
+        showMessage(
+          result.live_applied
+            ? "Progression stopped and the normal profile is active."
+            : "Progression stopped.",
+          "success"
+        );
+      } catch (error) {
+        button.disabled = false;
+        showMessage(error.message, "error");
+      }
+    }
+
+    function syncProgressionMode() {
+      const trafficMode = element("progression-mode").value === "traffic";
+      element("progression-traffic-field").hidden = !trafficMode;
+      element("progression-traffic-target").required = trafficMode;
+    }
+
     async function loadPolicies() {
       const data = await request("/api/policies", "GET");
       element("policies").textContent = JSON.stringify(data, null, 2);
@@ -1325,6 +1453,7 @@ DASHBOARD_HTML = """<!doctype html>
         loadDevicesForSchedule(),
         loadSchedules(),
         loadTimers(),
+        loadProgressions(),
         loadPolicies(),
         loadConnectedDevices(),
         loadUplink(),
@@ -1486,6 +1615,36 @@ DASHBOARD_HTML = """<!doctype html>
       }
     });
 
+    element("progression-mode").addEventListener("change", syncProgressionMode);
+    syncProgressionMode();
+
+    element("progression-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const mode = element("progression-mode").value;
+        const result = await request("/api/progressions", "POST", {
+          device_id: element("progression-device").value,
+          start_profile_id: element("progression-start-profile").value,
+          end_profile_id: element("progression-end-profile").value,
+          mode: mode,
+          duration_minutes: Number(element("progression-duration").value),
+          traffic_target_queries: mode === "traffic"
+            ? Number(element("progression-traffic-target").value)
+            : 0,
+          website_domains: commaList("progression-domains")
+        });
+        await refresh();
+        showMessage(
+          result.live_applied
+            ? "Progression started and is active now."
+            : "Progression saved. Apply the configuration in hardware mode to start it.",
+          "success"
+        );
+      } catch (error) {
+        showMessage(error.message, "error");
+      }
+    });
+
     element("access-point-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
@@ -1502,6 +1661,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     window.setInterval(loadConnectedDevices, 5000);
     window.setInterval(loadTimers, 5000);
+    window.setInterval(loadProgressions, 5000);
     window.setInterval(loadObservations, 15000);
 
     refresh().catch((error) => {
@@ -1538,6 +1698,41 @@ def _schedule_payload(schedule: Schedule) -> Dict[str, Any]:
 
 def _timer_payload(timer: Timer) -> Dict[str, Any]:
     return asdict(timer)
+
+
+def _progression_payload(
+    progression: Progression,
+    *,
+    repository: ConfigRepository,
+    now: int,
+) -> Dict[str, Any]:
+    device = repository.get_device(progression.device_id)
+    start_profile = repository.get_profile(progression.start_profile_id)
+    end_profile = repository.get_profile(progression.end_profile_id)
+    total_queries = repository.total_domain_queries(str(device.ipv4_address)) if device else 0
+    factor = progression_factor(
+        progression=progression,
+        now=now,
+        traffic_queries=total_queries,
+    )
+    return {
+        **asdict(progression),
+        "device_name": device.name if device is not None else progression.device_id,
+        "start_profile_name": (
+            start_profile.name
+            if start_profile is not None
+            else progression.start_profile_id
+        ),
+        "end_profile_name": (
+            end_profile.name if end_profile is not None else progression.end_profile_id
+        ),
+        "progress_percent": round(factor * 100),
+        "remaining_seconds": max(
+            0,
+            progression.started_at + progression.duration_seconds - now,
+        ),
+        "traffic_queries": max(0, total_queries - progression.traffic_baseline_queries),
+    }
 
 
 def _policies_payload(repository: ConfigRepository) -> Dict[str, Any]:
@@ -1630,6 +1825,15 @@ class ControlServer(HTTPServer):
                     }
                 )
             return HTTPStatus.OK, "application/json", _json_bytes({"timers": timers})
+        if path == "/api/progressions":
+            now = int(time.time())
+            progressions = [
+                _progression_payload(progression, repository=self.repository, now=now)
+                for progression in self.repository.list_active_progressions(now=now)
+            ]
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {"progressions": progressions}
+            )
         if path == "/api/policies":
             return HTTPStatus.OK, "application/json", _json_bytes(
                 _policies_payload(self.repository)
@@ -1754,8 +1958,13 @@ class ControlServer(HTTPServer):
                 }
             )
         if path == "/api/plan":
+            plan = (
+                self.scheduler.build_plan(repository=self.repository)
+                if self.scheduler is not None
+                else compile_stored_plan(repository=self.repository)
+            )
             return HTTPStatus.OK, "application/json", _json_bytes(
-                {"plan": plan_to_payload(compile_stored_plan(repository=self.repository))}
+                {"plan": plan_to_payload(plan)}
             )
         if path == "/api/state":
             return HTTPStatus.OK, "application/json", _json_bytes(
@@ -1848,6 +2057,65 @@ class ControlServer(HTTPServer):
             status, content_type, body = self._apply_configuration()
             response = json.loads(body.decode("utf-8"))
             response["timer_id"] = timer_id
+            response["live_applied"] = status == HTTPStatus.OK
+            return status, content_type, _json_bytes(response)
+
+        if path == "/api/progressions":
+            try:
+                progression = _progression_from_payload(payload, repository=self.repository)
+                if self.repository.get_device(progression.device_id) is None:
+                    raise ValueError("device does not exist")
+                if self.repository.get_profile(progression.start_profile_id) is None:
+                    raise ValueError("start profile does not exist")
+                if self.repository.get_profile(progression.end_profile_id) is None:
+                    raise ValueError("end profile does not exist")
+                self.repository.save_progression(progression)
+            except (KeyError, TypeError, ValueError, StorageError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid progression configuration"}
+                )
+            if self.helper_client is None:
+                return HTTPStatus.OK, "application/json", _json_bytes(
+                    {
+                        "progression": _progression_payload(
+                            progression,
+                            repository=self.repository,
+                            now=int(time.time()),
+                        ),
+                        "live_applied": False,
+                        "message": "progression saved; apply the configuration in hardware mode to start it",
+                    }
+                )
+            status, content_type, body = self._apply_configuration()
+            response = json.loads(body.decode("utf-8"))
+            response["progression"] = _progression_payload(
+                progression,
+                repository=self.repository,
+                now=int(time.time()),
+            )
+            response["live_applied"] = status == HTTPStatus.OK
+            return status, content_type, _json_bytes(response)
+
+        if path == "/api/progressions/stop":
+            try:
+                progression_id = payload["id"]
+                if not isinstance(progression_id, str) or not progression_id:
+                    raise ValueError("progression id is invalid")
+                if not self.repository.delete_progression(progression_id):
+                    return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                        {"error": "progression does not exist or is already inactive"}
+                    )
+            except (KeyError, TypeError, ValueError, StorageError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid progression stop request"}
+                )
+            if self.helper_client is None:
+                return HTTPStatus.OK, "application/json", _json_bytes(
+                    {"progression_id": progression_id, "live_applied": False}
+                )
+            status, content_type, body = self._apply_configuration()
+            response = json.loads(body.decode("utf-8"))
+            response["progression_id"] = progression_id
             response["live_applied"] = status == HTTPStatus.OK
             return status, content_type, _json_bytes(response)
 
@@ -2303,6 +2571,35 @@ def _timer_from_payload(payload: Dict[str, Any]) -> Timer:
         profile_id=payload["profile_id"],
         started_at=started_at,
         expires_at=started_at + duration_minutes * 60,
+    )
+
+
+def _progression_from_payload(
+    payload: Dict[str, Any],
+    *,
+    repository: ConfigRepository,
+) -> Progression:
+    duration_minutes = payload["duration_minutes"]
+    if isinstance(duration_minutes, bool) or not isinstance(duration_minutes, int):
+        raise ValueError("duration_minutes must be an integer")
+    if duration_minutes < 1 or duration_minutes > 10_080:
+        raise ValueError("duration_minutes must be between 1 and 10080")
+    mode = payload.get("mode", "time")
+    traffic_target_queries = payload.get("traffic_target_queries", 0)
+    device = repository.get_device(payload["device_id"])
+    if device is None:
+        raise ValueError("device does not exist")
+    return Progression(
+        id=payload.get("id", f"progression-{time.time_ns()}"),
+        device_id=payload["device_id"],
+        start_profile_id=payload["start_profile_id"],
+        end_profile_id=payload["end_profile_id"],
+        started_at=int(time.time()),
+        duration_seconds=duration_minutes * 60,
+        mode=mode,
+        traffic_target_queries=traffic_target_queries,
+        traffic_baseline_queries=repository.total_domain_queries(str(device.ipv4_address)),
+        website_domains=tuple(payload.get("website_domains", ())),
     )
 
 

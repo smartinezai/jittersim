@@ -285,6 +285,8 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("Run a profile timer", DASHBOARD_HTML)
         self.assertIn("Duration (minutes)", DASHBOARD_HTML)
         self.assertIn("/api/timers", DASHBOARD_HTML)
+        self.assertIn("Progression mode", DASHBOARD_HTML)
+        self.assertIn("/api/progressions", DASHBOARD_HTML)
         self.assertIn("/api/observations", DASHBOARD_HTML)
         self.assertIn("Scan now", DASHBOARD_HTML)
         self.assertIn('data-day="0"', DASHBOARD_HTML)
@@ -417,6 +419,57 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(status, 400)
         self.assertEqual(json.loads(body), {"error": "invalid timer configuration"})
+
+    def test_starts_and_stops_a_profile_progression(self) -> None:
+        status, _, body = self.server.write_response_for(
+            "/api/progressions",
+            {
+                "id": "five-hours",
+                "device_id": "alice",
+                "start_profile_id": "slow",
+                "end_profile_id": "slow",
+                "mode": "time",
+                "duration_minutes": 300,
+                "website_domains": ["youtube.com"],
+            },
+        )
+
+        self.assertEqual(status, 200)
+        progression = json.loads(body)["progression"]
+        self.assertEqual(progression["id"], "five-hours")
+        self.assertEqual(progression["duration_seconds"], 18_000)
+        self.assertEqual(progression["website_domains"], ["youtube.com"])
+        self.assertFalse(json.loads(body)["live_applied"])
+
+        status, _, body = self.server.response_for("/api/progressions")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["progressions"][0]["progress_percent"], 0)
+
+        status, _, body = self.server.write_response_for(
+            "/api/progressions/stop", {"id": "five-hours"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["progression_id"], "five-hours")
+        self.assertEqual(
+            json.loads(self.server.response_for("/api/progressions")[2]),
+            {"progressions": []},
+        )
+
+    def test_rejects_traffic_progression_without_a_query_target(self) -> None:
+        status, _, body = self.server.write_response_for(
+            "/api/progressions",
+            {
+                "device_id": "alice",
+                "start_profile_id": "slow",
+                "end_profile_id": "slow",
+                "mode": "traffic",
+                "duration_minutes": 30,
+                "traffic_target_queries": 0,
+            },
+        )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body), {"error": "invalid progression configuration"})
 
     def test_updates_the_local_test_access_point_without_returning_password(self) -> None:
         self.server.helper_client = FakeHelper()
