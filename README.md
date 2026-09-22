@@ -1,7 +1,7 @@
 # JitterSim
 
 JitterSim is a Raspberry Pi tool for testing apps on an unreliable internet
-connection. The Pi connects to your Vodafone router by Ethernet then creates a
+connection. The Pi connects to your Vodafone router (because that's what I have so no idea if it works with other routers) by Ethernet then creates a
 separate Wi-Fi network for test devices.
 
 Use it only on equipment and networks that you own or are allowed to test. It
