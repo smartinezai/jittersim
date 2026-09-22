@@ -793,6 +793,7 @@ DASHBOARD_HTML = """<!doctype html>
           <select id="progression-mode">
             <option value="time">Over time</option>
             <option value="traffic">After DNS queries</option>
+            <option value="bytes">After device data</option>
           </select>
         </label>
         <label>Duration limit (minutes)
@@ -801,11 +802,14 @@ DASHBOARD_HTML = """<!doctype html>
         <label id="progression-traffic-field" hidden>DNS queries to reach the end
           <input id="progression-traffic-target" type="number" min="1" max="1000000000" value="1000">
         </label>
+        <label id="progression-bytes-field" hidden>Device data to reach the end (MB)
+          <input id="progression-bytes-target" type="number" min="1" max="10000000" value="1000">
+        </label>
       </div>
       <label>Domains to block gradually (optional, comma separated)
         <textarea id="progression-domains" placeholder="youtube.com, example.com"></textarea>
       </label>
-      <p class="form-note">The start and end profiles are interpolated gradually. Existing randomness and outage settings continue to run. Traffic mode uses DNS query counts as a local signal, not exact page visits. The device returns to its normal schedule or profile when the duration ends.</p>
+      <p class="form-note">The start and end profiles are interpolated gradually. Existing randomness and outage settings continue to run. DNS mode counts observed queries. Device-data mode counts IPv4 upload and download bytes, so a long stream can advance it even when there are few new DNS queries. The device returns to its normal schedule or profile when the duration ends.</p>
       <button class="primary" type="submit">Start progression</button>
     </form>
     <div id="progression-list" class="progression-list" aria-live="polite">No active progressions.</div>
@@ -1727,7 +1731,12 @@ DASHBOARD_HTML = """<!doctype html>
         title.textContent = progression.device_name + " · " +
           progression.start_profile_name + " → " + progression.end_profile_name;
         const status = document.createElement("span");
-        status.textContent = progression.progress_percent + "% · " +
+        const signal = progression.mode === "bytes"
+          ? formatQuotaBytes(progression.traffic_bytes) + " / " + formatQuotaBytes(progression.traffic_target_bytes)
+          : progression.mode === "traffic"
+            ? progression.traffic_queries + " DNS queries"
+            : "time based";
+        status.textContent = progression.progress_percent + "% · " + signal + " · " +
           formatTimerRemaining(progression.remaining_seconds) + " left";
         heading.append(title, status);
         const meter = document.createElement("div");
@@ -1771,8 +1780,11 @@ DASHBOARD_HTML = """<!doctype html>
 
     function syncProgressionMode() {
       const trafficMode = element("progression-mode").value === "traffic";
+      const bytesMode = element("progression-mode").value === "bytes";
       element("progression-traffic-field").hidden = !trafficMode;
+      element("progression-bytes-field").hidden = !bytesMode;
       element("progression-traffic-target").required = trafficMode;
+      element("progression-bytes-target").required = bytesMode;
     }
 
     async function loadPolicies() {
@@ -1981,6 +1993,9 @@ DASHBOARD_HTML = """<!doctype html>
           traffic_target_queries: mode === "traffic"
             ? Number(element("progression-traffic-target").value)
             : 0,
+          traffic_target_bytes: mode === "bytes"
+            ? Number(element("progression-bytes-target").value) * 1048576
+            : 0,
           website_domains: commaList("progression-domains")
         });
         await refresh();
@@ -2148,6 +2163,7 @@ def _progression_payload(
     *,
     repository: ConfigRepository,
     now: int,
+    traffic_bytes: int = 0,
 ) -> Dict[str, Any]:
     device = repository.get_device(progression.device_id)
     start_profile = repository.get_profile(progression.start_profile_id)
@@ -2157,6 +2173,7 @@ def _progression_payload(
         progression=progression,
         now=now,
         traffic_queries=total_queries,
+        traffic_bytes=traffic_bytes,
     )
     return {
         **asdict(progression),
@@ -2175,6 +2192,7 @@ def _progression_payload(
             progression.started_at + progression.duration_seconds - now,
         ),
         "traffic_queries": max(0, total_queries - progression.traffic_baseline_queries),
+        "traffic_bytes": max(0, traffic_bytes - progression.traffic_baseline_bytes),
     }
 
 
@@ -2270,8 +2288,28 @@ class ControlServer(HTTPServer):
             return HTTPStatus.OK, "application/json", _json_bytes({"timers": timers})
         if path == "/api/progressions":
             now = int(time.time())
+            device_counters = {}
+            scheduler_counters = {}
+            if self.scheduler is not None:
+                scheduler_counters = {
+                    device.id: self.scheduler.device_traffic_bytes(device_id=device.id)
+                    for device in self.repository.list_devices()
+                }
+            elif self.helper_client is not None:
+                try:
+                    device_counters = self.helper_client.traffic_counters().get("devices", {})
+                except (HelperClientError, AttributeError, TypeError):
+                    LOGGER.warning("could not read progression traffic counters")
             progressions = [
-                _progression_payload(progression, repository=self.repository, now=now)
+                _progression_payload(
+                    progression,
+                    repository=self.repository,
+                    now=now,
+                    traffic_bytes=scheduler_counters.get(
+                        progression.device_id,
+                        device_counters.get(progression.device_id, 0),
+                    ),
+                )
                 for progression in self.repository.list_active_progressions(now=now)
             ]
             return HTTPStatus.OK, "application/json", _json_bytes(
@@ -3259,6 +3297,7 @@ def _progression_from_payload(
         raise ValueError("duration_minutes must be between 1 and 10080")
     mode = payload.get("mode", "time")
     traffic_target_queries = payload.get("traffic_target_queries", 0)
+    traffic_target_bytes = payload.get("traffic_target_bytes", 0)
     device = repository.get_device(payload["device_id"])
     if device is None:
         raise ValueError("device does not exist")
@@ -3272,6 +3311,7 @@ def _progression_from_payload(
         mode=mode,
         traffic_target_queries=traffic_target_queries,
         traffic_baseline_queries=repository.total_domain_queries(str(device.ipv4_address)),
+        traffic_target_bytes=traffic_target_bytes,
         website_domains=tuple(payload.get("website_domains", ())),
     )
 

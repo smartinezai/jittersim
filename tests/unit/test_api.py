@@ -374,6 +374,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("Duration (minutes)", DASHBOARD_HTML)
         self.assertIn("/api/timers", DASHBOARD_HTML)
         self.assertIn("Progression mode", DASHBOARD_HTML)
+        self.assertIn("After device data", DASHBOARD_HTML)
         self.assertIn("/api/progressions", DASHBOARD_HTML)
         self.assertIn("/api/observations", DASHBOARD_HTML)
         self.assertIn("Scan now", DASHBOARD_HTML)
@@ -564,6 +565,24 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(status, 400)
         self.assertEqual(json.loads(body), {"error": "invalid progression configuration"})
+
+    def test_starts_a_byte_progression(self) -> None:
+        status, _, body = self.server.write_response_for(
+            "/api/progressions",
+            {
+                "device_id": "alice",
+                "start_profile_id": "slow",
+                "end_profile_id": "slow",
+                "mode": "bytes",
+                "duration_minutes": 30,
+                "traffic_target_bytes": 10_000_000,
+            },
+        )
+
+        self.assertEqual(status, 200)
+        progression = json.loads(body)["progression"]
+        self.assertEqual(progression["mode"], "bytes")
+        self.assertEqual(progression["traffic_target_bytes"], 10_000_000)
 
     def test_updates_the_local_test_access_point_without_returning_password(self) -> None:
         self.server.helper_client = FakeHelper()
