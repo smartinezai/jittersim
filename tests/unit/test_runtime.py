@@ -299,6 +299,7 @@ class RuntimeSchedulerTests(unittest.TestCase):
                 domains=("netflix.com", "nflxvideo.net"),
                 profile_id="fallback",
                 limit_bytes=100,
+                weight_percent=120,
                 last_reset_at=100,
             )
         )
@@ -314,6 +315,7 @@ class RuntimeSchedulerTests(unittest.TestCase):
 
         rule = self.helper.plans[-1].service_quota_rules[0]
         self.assertTrue(rule.active)
+        self.assertEqual(self.repository.get_service_quota("alice-video").used_bytes, 180)
         self.assertEqual(
             rule.destination_addresses,
             (IPv4Address("203.0.113.10"), IPv4Address("203.0.113.11")),
