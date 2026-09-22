@@ -924,6 +924,63 @@ DASHBOARD_HTML = """<!doctype html>
     </form>
     <div id="service-quota-list" class="quota-list" aria-live="polite">Enter the admin token to view service limits.</div>
   </section>
+  <section class="card quota-card">
+    <div class="section-heading">
+      <div>
+        <h2>Service time limit</h2>
+        <p>Allow a service a set amount of active traffic time inside a timer window</p>
+      </div>
+      <span id="time-quota-count" class="count-badge">No time limits</span>
+    </div>
+    <form id="time-quota-form">
+      <div class="fields">
+        <label>Service ID
+          <input id="time-quota-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="alice-netflix-time">
+        </label>
+        <label>Service name
+          <input id="time-quota-name" required placeholder="Netflix time">
+        </label>
+        <label>Device
+          <select id="time-quota-device" required></select>
+        </label>
+        <label>Fallback profile
+          <select id="time-quota-profile" required></select>
+        </label>
+        <label>Allowed active time
+          <input id="time-quota-amount" type="number" min="1" step="1" value="5" required>
+        </label>
+        <label>Time unit
+          <select id="time-quota-unit">
+            <option value="3600">Hours</option>
+            <option value="60">Minutes</option>
+          </select>
+        </label>
+        <label><span class="field-label">Timer window (minutes)<span class="help-icon" tabindex="0" role="img" aria-label="Timer window help" data-help="The quota can count service activity only while this timer is running. Starting the timer clears this quota's current usage and starts a fresh window.">?</span></span>
+          <input id="time-quota-window" type="number" min="1" max="10080" step="1" value="720" required>
+        </label>
+        <label>Reset
+          <select id="time-quota-reset-mode">
+            <option value="manual">Manual</option>
+            <option value="interval">After an interval</option>
+            <option value="daily">At fixed times each day</option>
+          </select>
+        </label>
+        <label id="time-quota-interval-field">Interval (minutes)
+          <input id="time-quota-interval" type="number" min="1" max="525600" value="60">
+        </label>
+        <label id="time-quota-times-field" hidden>Reset times (HH:MM, comma separated)
+          <input id="time-quota-times" placeholder="08:00, 20:00">
+        </label>
+        <label class="quota-check"><input id="time-quota-enabled" type="checkbox" checked> Enabled</label>
+      </div>
+      <label>Observed domains for this service
+        <select id="time-quota-domains" class="quota-domain-picker" multiple required></select>
+      </label>
+      <p class="form-note">Active time is counted when matching traffic is seen. A long video stream therefore keeps using the allowance even when there are no new clicks. Save the limit then start its timer from the saved row.</p>
+      <button class="primary" type="submit">Save time limit</button>
+    </form>
+    <div id="time-quota-list" class="quota-list" aria-live="polite">Enter the admin token to view time limits.</div>
+  </section>
   <section class="card">
     <h2>Match the Pi test Wi-Fi manually</h2>
     <form id="access-point-form">
@@ -1485,9 +1542,21 @@ DASHBOARD_HTML = """<!doctype html>
       quotas.forEach((quota) => container.appendChild(createQuotaRow({ quota, service: true })));
     }
 
-    function populateServiceQuotaDomains(selectedDomains) {
-      const select = element("service-quota-domains");
-      const domains = observedDomainsByDevice[element("service-quota-device").value] || [];
+    function renderTimeQuotas(data) {
+      const quotas = data.time_quotas || [];
+      const container = element("time-quota-list");
+      element("time-quota-count").textContent = quotas.length + (quotas.length === 1 ? " time limit" : " time limits");
+      container.replaceChildren();
+      if (!quotas.length) {
+        container.textContent = data.error || "No time limits saved.";
+        return;
+      }
+      quotas.forEach((quota) => container.appendChild(createTimeQuotaRow(quota)));
+    }
+
+    function populateQuotaDomains(prefix, selectedDomains) {
+      const select = element(prefix + "-domains");
+      const domains = observedDomainsByDevice[element(prefix + "-device").value] || [];
       select.replaceChildren();
       if (!domains.length) {
         const option = document.createElement("option");
@@ -1503,6 +1572,14 @@ DASHBOARD_HTML = """<!doctype html>
         option.selected = (selectedDomains || []).includes(domain);
         select.appendChild(option);
       });
+    }
+
+    function populateServiceQuotaDomains(selectedDomains) {
+      populateQuotaDomains("service-quota", selectedDomains);
+    }
+
+    function populateTimeQuotaDomains(selectedDomains) {
+      populateQuotaDomains("time-quota", selectedDomains);
     }
 
     function editDataLimit(quota) {
@@ -1537,6 +1614,105 @@ DASHBOARD_HTML = """<!doctype html>
       element("service-quota-form").scrollIntoView({ behavior: "smooth", block: "center" });
     }
 
+    function formatQuotaDuration(seconds) {
+      if (seconds >= 3600 && seconds % 3600 === 0) return Math.floor(seconds / 3600) + " hours";
+      if (seconds >= 60 && seconds % 60 === 0) return Math.floor(seconds / 60) + " minutes";
+      return seconds + " seconds";
+    }
+
+    function editTimeQuota(quota) {
+      element("time-quota-id").value = quota.id;
+      element("time-quota-name").value = quota.name;
+      element("time-quota-device").value = quota.device_id;
+      element("time-quota-profile").value = quota.profile_id;
+      const unit = quota.limit_seconds >= 3600 && quota.limit_seconds % 3600 === 0 ? 3600 : 60;
+      element("time-quota-unit").value = String(unit);
+      element("time-quota-amount").value = Math.max(1, Math.round(quota.limit_seconds / unit));
+      element("time-quota-window").value = Math.max(1, Math.round(quota.window_duration_seconds / 60));
+      element("time-quota-reset-mode").value = quota.reset_mode;
+      element("time-quota-interval").value = Math.max(1, Math.round(quota.reset_interval_seconds / 60));
+      element("time-quota-times").value = (quota.reset_times || []).map((minute) =>
+        String(Math.floor(minute / 60)).padStart(2, "0") + ":" +
+        String(minute % 60).padStart(2, "0")
+      ).join(", ");
+      element("time-quota-enabled").checked = quota.enabled;
+      populateTimeQuotaDomains(quota.domains);
+      syncQuotaReset("time-quota");
+      element("time-quota-form").scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+
+    async function timeQuotaAction(quota, action, button) {
+      button.disabled = true;
+      try {
+        const result = await request("/api/time-quotas/" + action, "POST", { id: quota.id });
+        await refresh();
+        showMessage(
+          result.live_applied
+            ? (action === "start" ? "Time quota timer started and applied." : "Time quota updated and applied.")
+            : (action === "start" ? "Time quota timer started." : "Time quota updated."),
+          "success"
+        );
+      } catch (error) {
+        button.disabled = false;
+        showMessage(error.message, "error");
+      }
+    }
+
+    async function resetTimeQuota(quota, button) {
+      button.disabled = true;
+      try {
+        await request("/api/time-quotas/reset", "POST", { id: quota.id });
+        await loadQuotas();
+        showMessage("Time quota usage reset.", "success");
+      } catch (error) {
+        button.disabled = false;
+        showMessage(error.message, "error");
+      }
+    }
+
+    function createTimeQuotaRow(quota) {
+      const row = document.createElement("div");
+      row.className = "quota-row" + (quota.reached ? " reached" : "");
+      const heading = document.createElement("div");
+      heading.className = "quota-row-heading";
+      const title = document.createElement("strong");
+      title.textContent = quota.name + " · " + quota.device_name;
+      const status = document.createElement("span");
+      status.className = "quota-status";
+      status.textContent = quota.reached
+        ? "Limit reached"
+        : (quota.running ? formatQuotaDuration(quota.window_remaining_seconds) + " left in timer" : "Timer stopped");
+      heading.append(title, status);
+      const detail = document.createElement("span");
+      detail.textContent = formatQuotaDuration(quota.used_seconds) + " used of " +
+        formatQuotaDuration(quota.limit_seconds) + " · timer window " +
+        formatQuotaDuration(quota.window_duration_seconds) + " · " + quotaResetText(quota);
+      const meter = document.createElement("div");
+      meter.className = "quota-meter";
+      const meterValue = document.createElement("span");
+      meterValue.style.width = Math.min(100, Math.round((quota.used_seconds / quota.limit_seconds) * 100)) + "%";
+      meter.appendChild(meterValue);
+      const actions = document.createElement("div");
+      actions.className = "quota-actions";
+      const editButton = document.createElement("button");
+      editButton.type = "button";
+      editButton.textContent = "Edit";
+      editButton.addEventListener("click", () => editTimeQuota(quota));
+      const timerButton = document.createElement("button");
+      timerButton.type = "button";
+      timerButton.textContent = quota.running ? "Stop timer" : "Start timer";
+      timerButton.addEventListener("click", () => timeQuotaAction(quota, quota.running ? "stop" : "start", timerButton));
+      const resetButton = document.createElement("button");
+      resetButton.type = "button";
+      resetButton.textContent = "Reset usage";
+      resetButton.addEventListener("click", () => resetTimeQuota(quota, resetButton));
+      const domains = document.createElement("span");
+      domains.textContent = "Domains: " + quota.domains.join(", ");
+      actions.append(editButton, timerButton, resetButton, domains);
+      row.append(heading, detail, meter, actions);
+      return row;
+    }
+
     async function resetQuota(quota, service, button) {
       button.disabled = true;
       try {
@@ -1552,15 +1728,18 @@ DASHBOARD_HTML = """<!doctype html>
 
     async function loadQuotas() {
       try {
-        const [dataLimits, serviceQuotas] = await Promise.all([
+        const [dataLimits, serviceQuotas, timeQuotas] = await Promise.all([
           request("/api/data-limits", "GET"),
-          request("/api/service-quotas", "GET")
+          request("/api/service-quotas", "GET"),
+          request("/api/time-quotas", "GET")
         ]);
         renderDataLimits(dataLimits);
         renderServiceQuotas(serviceQuotas);
+        renderTimeQuotas(timeQuotas);
       } catch (error) {
         renderDataLimits({ data_limits: [], error: "Enter the admin token to view device limits." });
         renderServiceQuotas({ service_quotas: [], error: "Enter the admin token to view service limits." });
+        renderTimeQuotas({ time_quotas: [], error: "Enter the admin token to view time limits." });
       }
     }
 
@@ -1601,7 +1780,8 @@ DASHBOARD_HTML = """<!doctype html>
         "progression-start-profile",
         "progression-end-profile",
         "data-limit-profile",
-        "service-quota-profile"
+        "service-quota-profile",
+        "time-quota-profile"
       ].forEach((selectId) => {
         const profileSelect = element(selectId);
         profileSelect.replaceChildren();
@@ -1621,7 +1801,8 @@ DASHBOARD_HTML = """<!doctype html>
         "timer-device",
         "progression-device",
         "data-limit-device",
-        "service-quota-device"
+        "service-quota-device",
+        "time-quota-device"
       ].forEach((selectId) => {
         const deviceSelect = element(selectId);
         deviceSelect.replaceChildren();
@@ -1633,6 +1814,7 @@ DASHBOARD_HTML = """<!doctype html>
         });
       });
       populateServiceQuotaDomains();
+      populateTimeQuotaDomains();
     }
 
     function renderSchedules(schedules) {
@@ -2025,10 +2207,13 @@ DASHBOARD_HTML = """<!doctype html>
 
     element("data-limit-reset-mode").addEventListener("change", () => syncQuotaReset("data-limit"));
     element("service-quota-reset-mode").addEventListener("change", () => syncQuotaReset("service-quota"));
+    element("time-quota-reset-mode").addEventListener("change", () => syncQuotaReset("time-quota"));
     element("service-quota-device").addEventListener("change", () => populateServiceQuotaDomains());
+    element("time-quota-device").addEventListener("change", () => populateTimeQuotaDomains());
     element("admin-token").addEventListener("change", loadQuotas);
     syncQuotaReset("data-limit");
     syncQuotaReset("service-quota");
+    syncQuotaReset("time-quota");
 
     element("data-limit-form").addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -2070,6 +2255,33 @@ DASHBOARD_HTML = """<!doctype html>
         await refresh();
         showMessage(
           result.live_applied ? "Service limit saved and applied." : "Service limit saved.",
+          "success"
+        );
+      } catch (error) {
+        showMessage(error.message, "error");
+      }
+    });
+
+    element("time-quota-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const domains = Array.from(element("time-quota-domains").selectedOptions)
+          .map((option) => option.value);
+        if (!domains.length) throw new Error("Select at least one observed domain.");
+        const result = await request("/api/time-quotas", "POST", {
+          id: element("time-quota-id").value,
+          name: element("time-quota-name").value,
+          device_id: element("time-quota-device").value,
+          profile_id: element("time-quota-profile").value,
+          domains: domains,
+          limit_seconds: Number(element("time-quota-amount").value) * Number(element("time-quota-unit").value),
+          window_duration_seconds: Number(element("time-quota-window").value) * 60,
+          enabled: element("time-quota-enabled").checked,
+          ...quotaSchedulePayload("time-quota")
+        });
+        await refresh();
+        showMessage(
+          result.live_applied ? "Time limit saved and applied." : "Time limit saved. Start its timer from the saved row.",
           "success"
         );
       } catch (error) {
