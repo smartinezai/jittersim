@@ -7,36 +7,61 @@ separate Wi-Fi network for test devices.
 Use it only on equipment and networks that you own or are allowed to test. It
 is a private lab tool, not a replacement for a home router.
 
-## What works
+## Features
 
-- Profiles for delay, jitter, packet loss, speed limits and packet changes.
+### Profiles and network effects
+
+- Delay, jitter, packet loss, bandwidth limits, packet reordering, duplication
+  and corruption.
+- Separate upload and download controls where the network supports them.
 - Per-device profile assignment from the dashboard.
-- Multiple daily schedules with overnight time ranges.
-- One-shot profile timers that temporarily override a device then end automatically.
-- Progression sessions that move from one profile to another over time or after
-  a DNS-query target, then recover automatically.
-- Click-to-select schedule days with inline help for random settings.
-- Seeded randomness for values, feature enablement, rerolls and short outages.
-- MAC address allowlists and denylists.
-- Global blocked websites and profile-specific allow-only website lists.
-- Per-device website blocking that can grow as a progression session advances.
-- Connected-device discovery and short DNS traffic summaries.
-- Buttons that add observed domains to a profile or the global block list.
-- Device data limits that switch to a fallback profile after a byte quota is reached.
-- Service data limits that group several observed DNS domains such as a streaming service.
-- Manual, timed or daily quota resets without losing the configured limit.
-- A protected helper service with Apply and Reset controls.
-- Local Pi test Wi-Fi name and password changes from the dashboard.
-- The Pi's Ethernet connection name and router gateway in the dashboard.
+- A safe configuration-only mode for building plans without changing traffic.
+- Hardware mode with a protected Pi helper that applies and resets plans.
 
-The dashboard shows the current mode, connected devices, schedules, access
-rules and the last network action near the top of the page.
+### Schedules, timers and randomness
+
+- Multiple daily time windows with click-to-select days and overnight ranges.
+- One-shot timers that activate a profile for a chosen duration.
+- Progression sessions that move from a starting profile to an ending profile
+  over time or after a DNS-query target, then recover automatically.
+- Random value variation such as `200 ± 30%`.
+- Random feature enablement, reroll timing and short connection outages.
+- Inline help in the dashboard for the variation settings.
+
+### Devices and website rules
+
+- Connected-device discovery with device names, IP addresses and MAC addresses.
+- Click-to-select devices and assign profiles from the dashboard.
+- MAC address allowlists and denylists.
+- A global blocked-site list.
+- Profile-specific website lists that allow selected services while blocking
+  the rest.
+- Per-device website rules that can change as a progression session advances.
+- Local DNS observations with query counts and buttons to add observed domains
+  to a profile or the global block list.
+
+### Data quotas
+
+- Per-device byte quotas that switch to a fallback profile after the limit is
+  reached.
+- Per-service quotas that group several observed domains for one service such
+  as a streaming platform.
+- Manual, timed or daily quota resets.
+- Usage bars, current usage, reset actions and editable limits in the dashboard.
+- Quota changes that preserve the configured rule while resetting its counter.
+
+### Pi and router controls
+
+- The Pi's Ethernet network name and router gateway in the dashboard.
+- Rename the Pi test access point and change its password locally.
+- A direct link to the Vodafone router page.
+- A visible status area for the current mode, connected devices, schedules,
+  access rules and the last network action.
 
 Traffic discovery stores local summaries of DNS names and query counts. Select
 several observed names when creating a service quota because one service can
-use many domains. The quota counts matching IPv4 traffic as one service group.
-It does not prove that someone opened a page. A VPN, encrypted DNS or direct IP
-access can hide or bypass these observations and website rules.
+use many domains. A service quota counts matching IPv4 traffic as one service
+group. It does not prove that someone opened a page.
 
 Progression traffic mode uses DNS query counts as its signal. It does not count
 all packets or measure download bytes.
@@ -51,12 +76,17 @@ Vodafone router ── Ethernet ──> Raspberry Pi
 ```
 
 Only devices on the JitterSim test Wi-Fi are affected. Devices that stay on the
-router Wi-Fi bypass JitterSim. The first version uses IPv4. IPv6 traffic is not
-handled.
+router Wi-Fi bypass JitterSim. The current network rules use IPv4. IPv6 traffic
+is not handled.
 
 Test Wi-Fi clients can use the Pi for public internet access but cannot reach
 the dashboard or private upstream addresses such as the Vodafone router's
 `192.168.0.1`. Dashboard changes also require the administrator token.
+
+Website rules and service quotas are best-effort. VPNs, encrypted DNS, direct
+IP access, cached connections and services that use changing domains can hide
+traffic or reduce the accuracy of a rule. The device must use the Pi as its
+gateway for the rule to apply.
 
 ## Dashboard modes
 
@@ -65,9 +95,10 @@ the dashboard or private upstream addresses such as the Vodafone router's
 - **Hardware mode** uses the Pi helper to apply the saved plan.
 
 The Vodafone TG3442DE Wi-Fi switch is still a manual router action. JitterSim
-can change its own test access point but Ethernet cannot provide the router
-Wi-Fi name or password. Copy those values manually from the router settings.
-See the [Pi deployment guide](deploy/raspberry-pi/README.md).
+can change its own test access point but Ethernet cannot read or copy the
+router Wi-Fi name or password. Copy those values manually from the router
+settings if you want the Pi access point to use them. See the
+[Pi deployment guide](deploy/raspberry-pi/README.md).
 
 ## Run locally
 
