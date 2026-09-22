@@ -58,6 +58,9 @@ class FakeHelper:
             }
         ]
 
+    def traffic_counters(self):
+        return {"devices": {"alice": 0}, "services": {}}
+
 
 class ControlServerTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -96,6 +99,56 @@ class ControlServerTests(unittest.TestCase):
                 "status": "ok",
             },
         )
+
+    def test_data_limit_endpoint_preserves_usage_and_can_reset_it(self) -> None:
+        status, _, body = self.server.write_response_for(
+            "/api/data-limits",
+            {
+                "device_id": "alice",
+                "profile_id": "slow",
+                "limit_bytes": 1_000,
+                "reset_mode": "manual",
+                "reset_interval_seconds": 0,
+                "reset_times": [],
+                "enabled": True,
+            },
+        )
+
+        self.assertEqual(status, 200)
+        self.repository.record_data_usage("alice", 1_100)
+        _, _, body = self.server.response_for("/api/data-limits")
+        self.assertTrue(json.loads(body)["data_limits"][0]["reached"])
+
+        status, _, body = self.server.write_response_for(
+            "/api/data-limits/reset",
+            {"device_id": "alice"},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["data_limit"]["used_bytes"], 0)
+
+    def test_service_quota_endpoint_stores_selected_observed_domains(self) -> None:
+        status, _, body = self.server.write_response_for(
+            "/api/service-quotas",
+            {
+                "id": "alice-video",
+                "device_id": "alice",
+                "name": "Video service",
+                "domains": ["netflix.com", "nflxvideo.net"],
+                "profile_id": "slow",
+                "limit_bytes": 2_000,
+                "reset_mode": "daily",
+                "reset_times": [120, 720],
+                "reset_interval_seconds": 0,
+                "enabled": True,
+            },
+        )
+
+        self.assertEqual(status, 200)
+        payload = json.loads(body)["service_quota"]
+        self.assertEqual(payload["domains"], ["netflix.com", "nflxvideo.net"])
+        _, _, body = self.server.response_for("/api/service-quotas")
+        self.assertEqual(json.loads(body)["service_quotas"][0]["name"], "Video service")
 
     def test_health_response_identifies_hardware_mode_when_helper_is_configured(self) -> None:
         self.server.helper_client = FakeHelper()

@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
 
 from jittersim.config.models import (
+    DataLimit,
     Device,
     DomainObservation,
     Impairment,
@@ -23,6 +24,7 @@ from jittersim.config.models import (
     Randomness,
     RuntimeState,
     Schedule,
+    ServiceQuota,
     Timer,
     WebsitePolicy,
     normalize_domain,
@@ -47,6 +49,10 @@ WRITE_PATHS = frozenset(
         "/api/timers/cancel",
         "/api/progressions",
         "/api/progressions/stop",
+        "/api/data-limits",
+        "/api/data-limits/reset",
+        "/api/service-quotas",
+        "/api/service-quotas/reset",
         "/api/policies",
         "/api/access-point",
         "/api/connected-devices/apply-profile",
@@ -58,6 +64,7 @@ WRITE_PATHS = frozenset(
     )
 )
 ACTION_PATHS = frozenset(("/api/apply", "/api/reset", "/api/observations/scan"))
+PROTECTED_READ_PATHS = frozenset(("/api/data-limits", "/api/service-quotas"))
 
 
 DASHBOARD_HTML = """<!doctype html>
@@ -1700,6 +1707,45 @@ def _timer_payload(timer: Timer) -> Dict[str, Any]:
     return asdict(timer)
 
 
+def _data_limit_payload(
+    data_limit: DataLimit,
+    *,
+    repository: ConfigRepository,
+) -> Dict[str, Any]:
+    """Build the dashboard representation of one device quota."""
+
+    device = repository.get_device(data_limit.device_id)
+    profile = repository.get_profile(data_limit.profile_id)
+    return {
+        **asdict(data_limit),
+        "reset_times": list(data_limit.reset_times),
+        "device_name": device.name if device is not None else data_limit.device_id,
+        "profile_name": profile.name if profile is not None else data_limit.profile_id,
+        "remaining_bytes": max(0, data_limit.limit_bytes - data_limit.used_bytes),
+        "reached": data_limit.used_bytes >= data_limit.limit_bytes,
+    }
+
+
+def _service_quota_payload(
+    quota: ServiceQuota,
+    *,
+    repository: ConfigRepository,
+) -> Dict[str, Any]:
+    """Build the dashboard representation of one service quota."""
+
+    device = repository.get_device(quota.device_id)
+    profile = repository.get_profile(quota.profile_id)
+    return {
+        **asdict(quota),
+        "domains": list(quota.domains),
+        "reset_times": list(quota.reset_times),
+        "device_name": device.name if device is not None else quota.device_id,
+        "profile_name": profile.name if profile is not None else quota.profile_id,
+        "remaining_bytes": max(0, quota.limit_bytes - quota.used_bytes),
+        "reached": quota.used_bytes >= quota.limit_bytes,
+    }
+
+
 def _progression_payload(
     progression: Progression,
     *,
@@ -1833,6 +1879,24 @@ class ControlServer(HTTPServer):
             ]
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {"progressions": progressions}
+            )
+        if path == "/api/data-limits":
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {
+                    "data_limits": [
+                        _data_limit_payload(data_limit, repository=self.repository)
+                        for data_limit in self.repository.list_data_limits()
+                    ]
+                }
+            )
+        if path == "/api/service-quotas":
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {
+                    "service_quotas": [
+                        _service_quota_payload(quota, repository=self.repository)
+                        for quota in self.repository.list_service_quotas()
+                    ]
+                }
             )
         if path == "/api/policies":
             return HTTPStatus.OK, "application/json", _json_bytes(
@@ -2119,6 +2183,90 @@ class ControlServer(HTTPServer):
             response["live_applied"] = status == HTTPStatus.OK
             return status, content_type, _json_bytes(response)
 
+        if path == "/api/data-limits":
+            try:
+                data_limit = _data_limit_from_payload(payload, repository=self.repository)
+                if self.repository.get_device(data_limit.device_id) is None:
+                    raise ValueError("device does not exist")
+                if self.repository.get_profile(data_limit.profile_id) is None:
+                    raise ValueError("profile does not exist")
+                self.repository.save_data_limit(data_limit)
+            except (KeyError, TypeError, ValueError, StorageError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid data limit configuration"}
+                )
+            return self._apply_quota_change(
+                "data_limit",
+                _data_limit_payload(data_limit, repository=self.repository),
+            )
+
+        if path == "/api/data-limits/reset":
+            try:
+                device_id = payload["device_id"]
+                if not isinstance(device_id, str) or not device_id:
+                    raise ValueError("device_id is invalid")
+                data_limit = self.repository.get_data_limit(device_id)
+                if data_limit is None:
+                    return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                        {"error": "data limit does not exist"}
+                    )
+                self.repository.reset_data_limit_usage(
+                    device_id,
+                    counter_bytes=self._quota_counter("devices", device_id),
+                    reset_at=int(time.time()),
+                )
+            except (KeyError, TypeError, ValueError, StorageError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid data limit reset request"}
+                )
+            refreshed = self.repository.get_data_limit(device_id)
+            return self._apply_quota_change(
+                "data_limit",
+                _data_limit_payload(refreshed, repository=self.repository),
+            )
+
+        if path == "/api/service-quotas":
+            try:
+                quota = _service_quota_from_payload(payload, repository=self.repository)
+                if self.repository.get_device(quota.device_id) is None:
+                    raise ValueError("device does not exist")
+                if self.repository.get_profile(quota.profile_id) is None:
+                    raise ValueError("profile does not exist")
+                self.repository.save_service_quota(quota)
+            except (KeyError, TypeError, ValueError, StorageError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid service quota configuration"}
+                )
+            return self._apply_quota_change(
+                "service_quota",
+                _service_quota_payload(quota, repository=self.repository),
+            )
+
+        if path == "/api/service-quotas/reset":
+            try:
+                quota_id = payload["id"]
+                if not isinstance(quota_id, str) or not quota_id:
+                    raise ValueError("quota id is invalid")
+                quota = self.repository.get_service_quota(quota_id)
+                if quota is None:
+                    return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                        {"error": "service quota does not exist"}
+                    )
+                self.repository.reset_service_quota_usage(
+                    quota_id,
+                    counter_bytes=self._quota_counter("services", quota_id),
+                    reset_at=int(time.time()),
+                )
+            except (KeyError, TypeError, ValueError, StorageError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid service quota reset request"}
+                )
+            refreshed = self.repository.get_service_quota(quota_id)
+            return self._apply_quota_change(
+                "service_quota",
+                _service_quota_payload(refreshed, repository=self.repository),
+            )
+
         if path == "/api/policies":
             try:
                 mac_policy, website_policy = _policies_from_payload(payload)
@@ -2271,6 +2419,44 @@ class ControlServer(HTTPServer):
         response["device"] = _device_payload(device)
         return status, content_type, _json_bytes(response)
 
+    def _quota_counter(self, kind: str, identifier: str) -> Optional[int]:
+        """Read one current helper counter for a manual quota reset."""
+
+        if self.helper_client is None:
+            return None
+        traffic_counters = getattr(self.helper_client, "traffic_counters", None)
+        if traffic_counters is None:
+            return None
+        try:
+            counters = traffic_counters()
+        except HelperClientError:
+            LOGGER.warning("could not read quota counter before reset", exc_info=True)
+            return None
+        values = counters.get(kind, {})
+        value = values.get(identifier) if isinstance(values, dict) else None
+        return value if isinstance(value, int) and value >= 0 else None
+
+    def _apply_quota_change(
+        self,
+        key: str,
+        value: Dict[str, Any],
+    ) -> Tuple[int, str, bytes]:
+        """Return a saved quota and apply it immediately when hardware is available."""
+
+        if self.helper_client is None:
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {
+                    key: value,
+                    "live_applied": False,
+                    "message": "quota saved; apply the configuration in hardware mode to start it",
+                }
+            )
+        status, content_type, body = self._apply_configuration()
+        response = json.loads(body.decode("utf-8"))
+        response[key] = value
+        response["live_applied"] = status == HTTPStatus.OK
+        return status, content_type, _json_bytes(response)
+
     def _apply_configuration(self) -> Tuple[int, str, bytes]:
         if self.helper_client is None:
             return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
@@ -2369,6 +2555,22 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = urlsplit(self.path).path
+        if path in PROTECTED_READ_PATHS:
+            if self.server.admin_token is None:
+                self._send_response(
+                    status=HTTPStatus.SERVICE_UNAVAILABLE,
+                    content_type="application/json",
+                    body=_json_bytes({"error": "protected reads are disabled"}),
+                )
+                return
+            if not self.server.is_authorized(self.headers.get("Authorization")):
+                self._send_response(
+                    status=HTTPStatus.UNAUTHORIZED,
+                    content_type="application/json",
+                    body=_json_bytes({"error": "valid bearer authentication is required"}),
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+                return
         try:
             status, content_type, body = self.server.response_for(path)
         except (PlanError, StorageError):
@@ -2571,6 +2773,66 @@ def _timer_from_payload(payload: Dict[str, Any]) -> Timer:
         profile_id=payload["profile_id"],
         started_at=started_at,
         expires_at=started_at + duration_minutes * 60,
+    )
+
+
+def _quota_schedule_from_payload(payload: Dict[str, Any]) -> Tuple[str, int, Tuple[int, ...]]:
+    """Read the shared manual, interval or daily reset settings."""
+
+    reset_mode = payload.get("reset_mode", "manual")
+    reset_interval_seconds = payload.get("reset_interval_seconds", 0)
+    reset_times = tuple(payload.get("reset_times", ()))
+    return reset_mode, reset_interval_seconds, reset_times
+
+
+def _data_limit_from_payload(
+    payload: Dict[str, Any],
+    *,
+    repository: ConfigRepository,
+) -> DataLimit:
+    """Build a device quota while retaining usage when it is edited."""
+
+    device_id = payload["device_id"]
+    existing = repository.get_data_limit(device_id)
+    reset_mode, reset_interval_seconds, reset_times = _quota_schedule_from_payload(payload)
+    return DataLimit(
+        device_id=device_id,
+        profile_id=payload["profile_id"],
+        limit_bytes=payload["limit_bytes"],
+        reset_mode=reset_mode,
+        reset_interval_seconds=reset_interval_seconds,
+        reset_times=reset_times,
+        used_bytes=existing.used_bytes if existing is not None else 0,
+        counter_bytes=existing.counter_bytes if existing is not None else 0,
+        last_reset_at=existing.last_reset_at if existing is not None else int(time.time()),
+        enabled=payload.get("enabled", True),
+    )
+
+
+def _service_quota_from_payload(
+    payload: Dict[str, Any],
+    *,
+    repository: ConfigRepository,
+) -> ServiceQuota:
+    """Build a service quota from selected observed DNS domains."""
+
+    quota_id = payload.get("id", f"service-{time.time_ns()}")
+    existing = repository.get_service_quota(quota_id)
+    reset_mode, reset_interval_seconds, reset_times = _quota_schedule_from_payload(payload)
+    return ServiceQuota(
+        id=quota_id,
+        device_id=payload["device_id"],
+        name=payload["name"],
+        domains=tuple(payload["domains"]),
+        profile_id=payload["profile_id"],
+        limit_bytes=payload["limit_bytes"],
+        reset_mode=reset_mode,
+        reset_interval_seconds=reset_interval_seconds,
+        reset_times=reset_times,
+        used_bytes=existing.used_bytes if existing is not None else 0,
+        counter_bytes=existing.counter_bytes if existing is not None else 0,
+        last_reset_at=existing.last_reset_at if existing is not None else int(time.time()),
+        enabled=payload.get("enabled", True),
     )
 
 
