@@ -443,7 +443,7 @@ class DataLimit:
 
 @dataclass(frozen=True)
 class ServiceQuota:
-    """A byte quota for selected observed domains on one device."""
+    """A weighted byte quota for selected observed domains on one device."""
 
     id: str
     device_id: str
@@ -451,6 +451,7 @@ class ServiceQuota:
     domains: Tuple[str, ...]
     profile_id: str
     limit_bytes: int
+    weight_percent: int = 100
     reset_mode: str = "manual"
     reset_interval_seconds: int = 0
     reset_times: Tuple[int, ...] = ()
@@ -467,6 +468,7 @@ class ServiceQuota:
         object.__setattr__(self, "domains", _normalize_domain_list(self.domains, "domains"))
         if not self.domains:
             raise ValidationError("service quota requires at least one domain")
+        _validate_number(self.weight_percent, "weight_percent", 10, 1_000)
         _validate_quota_usage(
             limit_bytes=self.limit_bytes,
             used_bytes=self.used_bytes,

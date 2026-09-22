@@ -258,12 +258,26 @@ class PolicyAndScheduleTests(unittest.TestCase):
             domains=("Netflix.com", "nflxvideo.net"),
             profile_id="slow",
             limit_bytes=1_000_000,
+            weight_percent=120,
             reset_mode="interval",
             reset_interval_seconds=3_600,
         )
 
         self.assertEqual(data_limit.reset_times, (0, 720))
         self.assertEqual(service_quota.domains, ("netflix.com", "nflxvideo.net"))
+        self.assertEqual(service_quota.weight_percent, 120)
+
+    def test_service_quota_weight_has_a_safe_range(self) -> None:
+        with self.assertRaisesRegex(ValueError, "weight_percent must be between 10 and 1000"):
+            ServiceQuota(
+                id="alice-video",
+                device_id="alice",
+                name="Video sites",
+                domains=("netflix.com",),
+                profile_id="slow",
+                limit_bytes=1_000,
+                weight_percent=1_001,
+            )
 
 
 class RuntimeStateTests(unittest.TestCase):

@@ -178,6 +178,7 @@ class ConfigRepository:
                 domains_json TEXT NOT NULL,
                 profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
                 limit_bytes INTEGER NOT NULL,
+                weight_percent INTEGER NOT NULL DEFAULT 100,
                 reset_mode TEXT NOT NULL,
                 reset_interval_seconds INTEGER NOT NULL,
                 reset_times_json TEXT NOT NULL,
@@ -226,6 +227,7 @@ class ConfigRepository:
         self._add_column_if_missing("devices", "mac_address", "TEXT")
         self._add_column_if_missing("progressions", "traffic_target_bytes", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing("progressions", "traffic_baseline_bytes", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_missing("service_quotas", "weight_percent", "INTEGER NOT NULL DEFAULT 100")
         self._connection.commit()
 
     def _add_column_if_missing(self, table_name: str, column_name: str, column_definition: str) -> None:
@@ -791,7 +793,7 @@ class ConfigRepository:
         row = self._connection.execute(
             """
             SELECT id, device_id, name, domains_json, profile_id, limit_bytes,
-                   reset_mode, reset_interval_seconds, reset_times_json,
+                   weight_percent, reset_mode, reset_interval_seconds, reset_times_json,
                    used_bytes, counter_bytes, last_reset_at, enabled
             FROM service_quotas WHERE id = ?
             """,
@@ -805,7 +807,7 @@ class ConfigRepository:
         rows = self._connection.execute(
             """
             SELECT id, device_id, name, domains_json, profile_id, limit_bytes,
-                   reset_mode, reset_interval_seconds, reset_times_json,
+                   weight_percent, reset_mode, reset_interval_seconds, reset_times_json,
                    used_bytes, counter_bytes, last_reset_at, enabled
             FROM service_quotas ORDER BY id
             """
@@ -820,15 +822,16 @@ class ConfigRepository:
                 """
                 INSERT INTO service_quotas (
                     id, device_id, name, domains_json, profile_id, limit_bytes,
-                    reset_mode, reset_interval_seconds, reset_times_json,
+                    weight_percent, reset_mode, reset_interval_seconds, reset_times_json,
                     used_bytes, counter_bytes, last_reset_at, enabled
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     device_id = excluded.device_id,
                     name = excluded.name,
                     domains_json = excluded.domains_json,
                     profile_id = excluded.profile_id,
                     limit_bytes = excluded.limit_bytes,
+                    weight_percent = excluded.weight_percent,
                     reset_mode = excluded.reset_mode,
                     reset_interval_seconds = excluded.reset_interval_seconds,
                     reset_times_json = excluded.reset_times_json,
@@ -844,6 +847,7 @@ class ConfigRepository:
                     json.dumps(list(quota.domains)),
                     quota.profile_id,
                     quota.limit_bytes,
+                    quota.weight_percent,
                     quota.reset_mode,
                     quota.reset_interval_seconds,
                     json.dumps(list(quota.reset_times)),
@@ -899,7 +903,8 @@ class ConfigRepository:
         if not isinstance(counter_bytes, int) or counter_bytes < 0:
             raise StorageError("service traffic counter is invalid")
         delta = counter_bytes if counter_bytes < quota.counter_bytes else counter_bytes - quota.counter_bytes
-        updated_used = min(2**63 - 1, quota.used_bytes + delta)
+        weighted_delta = (delta * quota.weight_percent + 50) // 100
+        updated_used = min(2**63 - 1, quota.used_bytes + weighted_delta)
         self._connection.execute(
             """
             UPDATE service_quotas SET used_bytes = ?, counter_bytes = ?
@@ -915,6 +920,7 @@ class ConfigRepository:
             domains=quota.domains,
             profile_id=quota.profile_id,
             limit_bytes=quota.limit_bytes,
+            weight_percent=quota.weight_percent,
             reset_mode=quota.reset_mode,
             reset_interval_seconds=quota.reset_interval_seconds,
             reset_times=quota.reset_times,
@@ -1195,6 +1201,7 @@ class ConfigRepository:
                 domains=tuple(json.loads(row["domains_json"])),
                 profile_id=row["profile_id"],
                 limit_bytes=row["limit_bytes"],
+                weight_percent=row["weight_percent"],
                 reset_mode=row["reset_mode"],
                 reset_interval_seconds=row["reset_interval_seconds"],
                 reset_times=tuple(json.loads(row["reset_times_json"])),

@@ -181,6 +181,7 @@ class ConfigRepositoryTests(unittest.TestCase):
             domains=("netflix.com", "nflxvideo.net"),
             profile_id="slow",
             limit_bytes=500,
+            weight_percent=120,
             last_reset_at=100,
         )
 
@@ -197,7 +198,7 @@ class ConfigRepositoryTests(unittest.TestCase):
         self.assertEqual(self.repository.get_data_limit("alice").used_bytes, 0)
 
         updated = self.repository.record_service_usage(service_quota.id, 600)
-        self.assertEqual(updated.used_bytes, 600)
+        self.assertEqual(updated.used_bytes, 720)
         self.assertTrue(self.repository.reset_service_quota_usage(service_quota.id, counter_bytes=600))
         self.assertEqual(self.repository.get_service_quota(service_quota.id).used_bytes, 0)
 
