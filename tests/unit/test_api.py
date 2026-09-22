@@ -187,6 +187,66 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(json.loads(body), {"error": "invalid service quota configuration"})
 
+    def test_time_quota_can_be_saved_started_stopped_and_reset(self) -> None:
+        self.repository.save_domain_observations(
+            (
+                DomainObservation(
+                    ipv4_address="192.168.50.10",
+                    domain="netflix.com",
+                    query_count=1,
+                    first_seen=10,
+                    last_seen=10,
+                ),
+            ),
+            now=10,
+        )
+        status, _, body = self.server.write_response_for(
+            "/api/time-quotas",
+            {
+                "id": "alice-netflix-time",
+                "device_id": "alice",
+                "name": "Netflix time",
+                "domains": ["netflix.com"],
+                "profile_id": "slow",
+                "limit_seconds": 5 * 60 * 60,
+                "window_duration_seconds": 12 * 60 * 60,
+                "reset_mode": "daily",
+                "reset_times": [600, 1_200],
+                "reset_interval_seconds": 0,
+                "enabled": True,
+            },
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["time_quota"]["limit_seconds"], 18_000)
+
+        status, _, body = self.server.write_response_for(
+            "/api/time-quotas/start",
+            {"id": "alice-netflix-time"},
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["time_quota"]["running"])
+
+        status, _, body = self.server.write_response_for(
+            "/api/time-quotas/stop",
+            {"id": "alice-netflix-time"},
+        )
+        self.assertEqual(status, 200)
+        self.assertFalse(json.loads(body)["time_quota"]["running"])
+
+        self.repository.record_time_usage(
+            "alice-netflix-time",
+            100,
+            10,
+            active=False,
+        )
+        status, _, body = self.server.write_response_for(
+            "/api/time-quotas/reset",
+            {"id": "alice-netflix-time"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["time_quota"]["used_seconds"], 0)
+
     def test_health_response_identifies_hardware_mode_when_helper_is_configured(self) -> None:
         self.server.helper_client = FakeHelper()
 

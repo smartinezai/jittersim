@@ -26,8 +26,10 @@ from jittersim.config.models import (
     Schedule,
     ServiceQuota,
     Timer,
+    TimeQuota,
     WebsitePolicy,
     normalize_domain,
+    time_quota_counter_id,
 )
 from jittersim.config.storage import ConfigRepository, DatabasePath, StorageError
 from jittersim.engine.compiler import PlanError
@@ -53,6 +55,10 @@ WRITE_PATHS = frozenset(
         "/api/data-limits/reset",
         "/api/service-quotas",
         "/api/service-quotas/reset",
+        "/api/time-quotas",
+        "/api/time-quotas/reset",
+        "/api/time-quotas/start",
+        "/api/time-quotas/stop",
         "/api/policies",
         "/api/access-point",
         "/api/connected-devices/apply-profile",
@@ -64,7 +70,9 @@ WRITE_PATHS = frozenset(
     )
 )
 ACTION_PATHS = frozenset(("/api/apply", "/api/reset", "/api/observations/scan"))
-PROTECTED_READ_PATHS = frozenset(("/api/data-limits", "/api/service-quotas"))
+PROTECTED_READ_PATHS = frozenset(
+    ("/api/data-limits", "/api/service-quotas", "/api/time-quotas")
+)
 
 
 DASHBOARD_HTML = """<!doctype html>
@@ -2164,6 +2172,34 @@ def _service_quota_payload(
     }
 
 
+def _time_quota_payload(
+    quota: TimeQuota,
+    *,
+    repository: ConfigRepository,
+    now: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Build the dashboard representation of one timed service quota."""
+
+    current_time = int(time.time()) if now is None else now
+    device = repository.get_device(quota.device_id)
+    profile = repository.get_profile(quota.profile_id)
+    window_active = quota.started_at <= current_time < quota.expires_at
+    return {
+        **asdict(quota),
+        "domains": list(quota.domains),
+        "reset_times": list(quota.reset_times),
+        "device_name": device.name if device is not None else quota.device_id,
+        "profile_name": profile.name if profile is not None else quota.profile_id,
+        "remaining_seconds": max(0, quota.limit_seconds - quota.used_seconds),
+        "window_remaining_seconds": (
+            max(0, quota.expires_at - current_time) if quota.expires_at else 0
+        ),
+        "window_active": window_active,
+        "running": quota.started_at > 0 and window_active,
+        "reached": window_active and quota.used_seconds >= quota.limit_seconds,
+    }
+
+
 def _progression_payload(
     progression: Progression,
     *,
@@ -2336,6 +2372,16 @@ class ControlServer(HTTPServer):
                     "service_quotas": [
                         _service_quota_payload(quota, repository=self.repository)
                         for quota in self.repository.list_service_quotas()
+                    ]
+                }
+            )
+        if path == "/api/time-quotas":
+            now = int(time.time())
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {
+                    "time_quotas": [
+                        _time_quota_payload(quota, repository=self.repository, now=now)
+                        for quota in self.repository.list_time_quotas()
                     ]
                 }
             )
@@ -2706,6 +2752,101 @@ class ControlServer(HTTPServer):
             return self._apply_quota_change(
                 "service_quota",
                 _service_quota_payload(refreshed, repository=self.repository),
+            )
+
+        if path == "/api/time-quotas":
+            try:
+                quota = _time_quota_from_payload(payload, repository=self.repository)
+                if self.repository.get_device(quota.device_id) is None:
+                    raise ValueError("device does not exist")
+                if self.repository.get_profile(quota.profile_id) is None:
+                    raise ValueError("profile does not exist")
+                self.repository.save_time_quota(quota)
+            except (KeyError, TypeError, ValueError, StorageError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid time quota configuration"}
+                )
+            return self._apply_quota_change(
+                "time_quota",
+                _time_quota_payload(quota, repository=self.repository),
+            )
+
+        if path == "/api/time-quotas/start":
+            try:
+                quota_id = payload["id"]
+                if not isinstance(quota_id, str) or not quota_id:
+                    raise ValueError("quota id is invalid")
+                quota = self.repository.get_time_quota(quota_id)
+                if quota is None:
+                    return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                        {"error": "time quota does not exist"}
+                    )
+                started_at = int(time.time())
+                refreshed = self.repository.start_time_quota(
+                    quota_id,
+                    started_at=started_at,
+                    expires_at=started_at + quota.window_duration_seconds,
+                    counter_bytes=self._quota_counter(
+                        "services", time_quota_counter_id(quota_id)
+                    ),
+                )
+                if refreshed is None:
+                    return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                        {"error": "time quota does not exist"}
+                    )
+            except (KeyError, TypeError, ValueError, StorageError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid time quota start request"}
+                )
+            return self._apply_quota_change(
+                "time_quota",
+                _time_quota_payload(refreshed, repository=self.repository),
+            )
+
+        if path == "/api/time-quotas/stop":
+            try:
+                quota_id = payload["id"]
+                if not isinstance(quota_id, str) or not quota_id:
+                    raise ValueError("quota id is invalid")
+                if not self.repository.stop_time_quota(quota_id):
+                    return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                        {"error": "time quota does not exist"}
+                    )
+            except (KeyError, TypeError, ValueError, StorageError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid time quota stop request"}
+                )
+            refreshed = self.repository.get_time_quota(quota_id)
+            return self._apply_quota_change(
+                "time_quota",
+                _time_quota_payload(refreshed, repository=self.repository),
+            )
+
+        if path == "/api/time-quotas/reset":
+            try:
+                quota_id = payload["id"]
+                if not isinstance(quota_id, str) or not quota_id:
+                    raise ValueError("quota id is invalid")
+                quota = self.repository.get_time_quota(quota_id)
+                if quota is None:
+                    return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                        {"error": "time quota does not exist"}
+                    )
+                self.repository.reset_time_quota_usage(
+                    quota_id,
+                    counter_bytes=self._quota_counter(
+                        "services", time_quota_counter_id(quota_id)
+                    ),
+                    reset_at=int(time.time()),
+                )
+            except (KeyError, TypeError, ValueError, StorageError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid time quota reset request"}
+                )
+            refreshed = self.repository.get_time_quota(quota_id)
+            return self._apply_quota_change(
+                "time_quota",
+                _time_quota_payload(refreshed, repository=self.repository),
             )
 
         if path == "/api/policies":
@@ -3291,6 +3432,56 @@ def _service_quota_from_payload(
         used_bytes=existing.used_bytes if existing is not None else 0,
         counter_bytes=existing.counter_bytes if existing is not None else 0,
         last_reset_at=existing.last_reset_at if existing is not None else int(time.time()),
+        enabled=payload.get("enabled", True),
+    )
+
+
+def _time_quota_from_payload(
+    payload: Dict[str, Any],
+    *,
+    repository: ConfigRepository,
+) -> TimeQuota:
+    """Build a timed service quota from selected observed DNS domains."""
+
+    quota_id = payload.get("id", f"time-{time.time_ns()}")
+    existing = repository.get_time_quota(quota_id)
+    normalized_domains = tuple(normalize_domain(domain) for domain in payload["domains"])
+    device = repository.get_device(payload["device_id"])
+    if device is not None:
+        observed_domains = {
+            observation.domain
+            for observation in repository.list_domain_observations()
+            if str(observation.ipv4_address) == str(device.ipv4_address)
+        }
+        previous_domains = set(existing.domains) if existing is not None else set()
+        if any(
+            domain not in observed_domains and domain not in previous_domains
+            for domain in normalized_domains
+        ):
+            raise ValueError("time quota domains must come from DNS observations")
+    reset_mode, reset_interval_seconds, reset_times = _quota_schedule_from_payload(payload)
+    window_duration_seconds = payload["window_duration_seconds"]
+    started_at = existing.started_at if existing is not None else 0
+    expires_at = existing.expires_at if existing is not None else 0
+    if started_at and expires_at - started_at > window_duration_seconds:
+        raise ValueError("stop the timer before shortening its window")
+    return TimeQuota(
+        id=quota_id,
+        device_id=payload["device_id"],
+        name=payload["name"],
+        domains=normalized_domains,
+        profile_id=payload["profile_id"],
+        limit_seconds=payload["limit_seconds"],
+        window_duration_seconds=window_duration_seconds,
+        reset_mode=reset_mode,
+        reset_interval_seconds=reset_interval_seconds,
+        reset_times=reset_times,
+        used_seconds=existing.used_seconds if existing is not None else 0,
+        counter_bytes=existing.counter_bytes if existing is not None else 0,
+        last_sample_at=existing.last_sample_at if existing is not None else 0,
+        last_reset_at=existing.last_reset_at if existing is not None else int(time.time()),
+        started_at=started_at,
+        expires_at=expires_at,
         enabled=payload.get("enabled", True),
     )
 
