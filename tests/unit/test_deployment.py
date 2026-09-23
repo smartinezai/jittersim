@@ -29,6 +29,7 @@ class DeploymentFirewallTests(unittest.TestCase):
         self.assertIn('chown root:jittersim "$CONFIG_DIR/dashboard.key"', installer)
         self.assertIn('chmod 0640 "$CONFIG_DIR/dashboard.key"', installer)
         self.assertIn("subjectAltName=DNS:jittersim.local,IP:$dashboard_ip", installer)
+        self.assertIn('openssl x509 -in "$CONFIG_DIR/dashboard.crt" -noout -text', installer)
 
 
 if __name__ == "__main__":

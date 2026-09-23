@@ -71,7 +71,7 @@ if [ -z "$dashboard_ip" ]; then
 fi
 dashboard_cert_matches_ip=false
 if [ -s "$CONFIG_DIR/dashboard.crt" ] && [ -s "$CONFIG_DIR/dashboard.key" ] \
-    && openssl x509 -in "$CONFIG_DIR/dashboard.crt" -noout -ext subjectAltName 2>/dev/null \
+    && openssl x509 -in "$CONFIG_DIR/dashboard.crt" -noout -text 2>/dev/null \
         | grep -Fq "IP Address:$dashboard_ip"; then
     dashboard_cert_matches_ip=true
 fi
