@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from jittersim.api.server import ControlServer, DASHBOARD_HTML
+from jittersim.api.server import DASHBOARD_HTML, ControlServer
 from jittersim.config.models import Device, DomainObservation, Impairment, Profile
 from jittersim.config.storage import ConfigRepository
 from jittersim.networking.helper import HelperClientError
@@ -97,6 +97,61 @@ class ControlServerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.server.server_close()
         self.repository.close()
+
+    def test_startup_recovery_reapplies_the_last_applied_configuration(self) -> None:
+        helper = FakeHelper()
+        self.server.helper_client = helper
+        self.repository.update_runtime_state(
+            observed_state="applied",
+            last_action="apply",
+            last_result="success",
+            last_error=None,
+        )
+
+        self.server.recover_saved_network_state()
+
+        self.assertIsNotNone(helper.applied_plan)
+        self.assertEqual(self.repository.get_runtime_state().observed_state, "applied")
+
+    def test_startup_recovery_keeps_an_explicit_reset(self) -> None:
+        helper = FakeHelper()
+        self.server.helper_client = helper
+        self.repository.update_runtime_state(
+            observed_state="reset",
+            last_action="reset",
+            last_result="success",
+            last_error=None,
+        )
+
+        self.server.recover_saved_network_state()
+
+        self.assertTrue(helper.reset_called)
+        self.assertIsNone(helper.applied_plan)
+        self.assertEqual(self.repository.get_runtime_state().observed_state, "reset")
+
+    def test_startup_recovery_does_not_apply_on_a_new_installation(self) -> None:
+        helper = FakeHelper()
+        self.server.helper_client = helper
+
+        self.server.recover_saved_network_state()
+
+        self.assertFalse(helper.reset_called)
+        self.assertIsNone(helper.applied_plan)
+
+    def test_startup_recovery_reports_a_helper_failure(self) -> None:
+        self.server.helper_client = FakeHelper(fail_action="apply")
+        self.repository.update_runtime_state(
+            observed_state="applied",
+            last_action="apply",
+            last_result="success",
+            last_error=None,
+        )
+
+        self.server.recover_saved_network_state()
+
+        state = self.repository.get_runtime_state()
+        self.assertEqual(state.observed_state, "error")
+        self.assertEqual(state.last_result, "failure")
 
     def test_health_response_identifies_configuration_only_mode(self) -> None:
         status, content_type, body = self.server.response_for("/api/health")

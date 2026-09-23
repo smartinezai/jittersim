@@ -1,15 +1,15 @@
 """Small HTTP server for the jittersim control plane."""
 
 import argparse
-from dataclasses import asdict, replace
-import json
 import hmac
+import json
 import logging
+import os
+import time
+from dataclasses import asdict, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
-import os
 from pathlib import Path
-import time
 from typing import Any, Dict, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
 
@@ -27,20 +27,19 @@ from jittersim.config.models import (
     RuntimeState,
     Schedule,
     ServiceQuota,
-    Timer,
     TimeQuota,
+    Timer,
     WebsitePolicy,
     normalize_domain,
     time_quota_counter_id,
 )
 from jittersim.config.storage import ConfigRepository, DatabasePath, StorageError
-from jittersim.engine.compiler import PlanError
 from jittersim.engine.codec import plan_to_payload
-from jittersim.engine.service import compile_stored_plan
-from jittersim.engine.runtime import RuntimeScheduler
+from jittersim.engine.compiler import PlanError
 from jittersim.engine.progression import progression_factor
+from jittersim.engine.runtime import RuntimeScheduler
+from jittersim.engine.service import compile_stored_plan
 from jittersim.networking.helper import HelperClient, HelperClientError
-
 
 LOGGER = logging.getLogger(__name__)
 MAX_JSON_BODY_BYTES = 64 * 1024
@@ -3846,6 +3845,21 @@ class ControlServer(HTTPServer):
             authorization_header=authorization_header,
         )
 
+    def recover_saved_network_state(self) -> None:
+        """Restore the last explicit apply or reset after the service restarts."""
+
+        if self.helper_client is None:
+            return
+        state = self.repository.get_runtime_state()
+        if state.last_action == "reset":
+            status, _, _ = self._reset_network()
+        elif state.last_action in {"apply", "schedule"}:
+            status, _, _ = self._apply_configuration()
+        else:
+            return
+        if status != HTTPStatus.OK:
+            LOGGER.error("network state recovery did not complete successfully")
+
 
 class ControlRequestHandler(BaseHTTPRequestHandler):
     """Handle the control-plane routes."""
@@ -4374,6 +4388,7 @@ def run_server(
         ) as server:
             LOGGER.info("jittersim dashboard listening on %s:%s", host, port)
             try:
+                server.recover_saved_network_state()
                 server.serve_forever()
             except KeyboardInterrupt:
                 pass
