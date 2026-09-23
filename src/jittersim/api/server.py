@@ -2251,7 +2251,10 @@ DASHBOARD_HTML = """<!doctype html>
       }
       try {
         const data = await request("/api/action-history", "GET");
-        element("action-history").textContent = JSON.stringify(data.actions, null, 2);
+        element("action-history").textContent = data.actions.length
+          ? data.actions.map((action) => new Date(action.happened_at * 1000).toLocaleString() +
+              " — " + action.action + " — " + action.status_code).join("\n")
+          : "No admin actions have been recorded.";
       } catch (error) {
         element("action-history").textContent = error.message;
       }
@@ -2515,7 +2518,7 @@ DASHBOARD_HTML = """<!doctype html>
         link.href = url;
         link.download = "jittersim-backup.db";
         link.click();
-        URL.revokeObjectURL(url);
+        window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
       } catch (error) {
         element("action-history").textContent = error.message;
       }
