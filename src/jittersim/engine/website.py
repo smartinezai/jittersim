@@ -1,16 +1,15 @@
 """Best-effort IPv4 resolution for website destination rules."""
 
 import socket
-from collections import OrderedDict
-from ipaddress import AddressValueError, IPv4Address
 import threading
 import time
+from collections import OrderedDict
+from ipaddress import AddressValueError, IPv4Address
 from typing import Callable, Iterable, Mapping, Optional, Sequence
 
-from jittersim.config.models import Device, Profile, WebsitePolicy
+from jittersim.config.models import Device, WebsitePolicy
 
 from .plan import WebsiteFilter
-
 
 AddressResolver = Callable[..., Sequence[tuple]]
 _RESOLUTION_CACHE_SECONDS = 60.0

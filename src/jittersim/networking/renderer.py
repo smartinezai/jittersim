@@ -8,7 +8,6 @@ from jittersim.engine.plan import Direction, NetworkPlan, QueueSpec
 from .commands import Command
 from .topology import Topology
 
-
 PROJECT_TABLE = "jittersim"
 ROOT_HANDLE = "10:"
 
