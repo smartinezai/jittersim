@@ -1,7 +1,9 @@
 import json
 import unittest
+from email.message import Message
+from io import BytesIO
 
-from jittersim.api.server import DASHBOARD_HTML, ControlServer
+from jittersim.api.server import DASHBOARD_HTML, ControlRequestHandler, ControlServer
 from jittersim.config.models import Device, DomainObservation, Impairment, Profile
 from jittersim.config.storage import ConfigRepository
 from jittersim.networking.helper import HelperClientError
@@ -166,6 +168,61 @@ class ControlServerTests(unittest.TestCase):
                 "status": "ok",
             },
         )
+
+    def test_diagnostics_and_history_show_bounded_admin_information(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.repository.record_action(action="/api/apply", status_code=200)
+
+        status, _, body = self.server.response_for("/api/diagnostics")
+        diagnostics = json.loads(body)
+        history_status, _, history_body = self.server.response_for("/api/action-history")
+        history = json.loads(history_body)
+        backup_status, content_type, backup = self.server.response_for("/api/backup")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(diagnostics["connected_clients"], 1)
+        self.assertEqual(diagnostics["traffic_counters"]["devices"], {"alice": 0})
+        self.assertEqual(history_status, 200)
+        self.assertEqual(history["actions"][0]["action"], "/api/apply")
+        self.assertEqual(backup_status, 200)
+        self.assertEqual(content_type, "application/vnd.sqlite3")
+        self.assertTrue(backup.startswith(b"SQLite format 3\x00"))
+
+    def test_write_history_records_only_authorized_route_and_result(self) -> None:
+        self.server.admin_token = "admin-token"
+        self.server.helper_client = FakeHelper()
+
+        def handle_write(*, authorization, body):
+            handler = object.__new__(ControlRequestHandler)
+            handler.server = self.server
+            handler.path = "/api/apply"
+            handler.headers = Message()
+            handler.headers["Authorization"] = authorization
+            handler.headers["Content-Length"] = str(len(body))
+            handler.rfile = BytesIO(body)
+            response = {}
+            handler._send_response = lambda **values: response.update(values)
+            handler._handle_write()
+            return response
+
+        secret_marker = b"not-for-history"
+        result = handle_write(
+            authorization="Bearer admin-token",
+            body=b'{"note":"' + secret_marker + b'"}',
+        )
+        history = self.repository.list_recent_actions()
+        count_after_authorized_request = len(history)
+        unauthorized = handle_write(
+            authorization="Bearer incorrect",
+            body=b"{}",
+        )
+
+        self.assertEqual(result["status"], 200)
+        self.assertEqual(history[0]["action"], "/api/apply")
+        self.assertEqual(history[0]["status_code"], 200)
+        self.assertNotIn("note", history[0])
+        self.assertEqual(len(self.repository.list_recent_actions()), count_after_authorized_request)
+        self.assertEqual(unauthorized["status"], 401)
 
     def test_data_limit_endpoint_preserves_usage_and_can_reset_it(self) -> None:
         status, _, body = self.server.write_response_for(

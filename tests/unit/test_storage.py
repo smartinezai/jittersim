@@ -1,9 +1,11 @@
+import sqlite3
+import tempfile
 import unittest
 
 from jittersim.config.models import (
+    DataLimit,
     Device,
     DeviceGroup,
-    DataLimit,
     DomainObservation,
     GroupDataLimit,
     Impairment,
@@ -13,8 +15,8 @@ from jittersim.config.models import (
     Randomness,
     Schedule,
     ServiceQuota,
-    Timer,
     TimeQuota,
+    Timer,
     WebsitePolicy,
 )
 from jittersim.config.storage import ConfigRepository, StorageError
@@ -381,6 +383,34 @@ class ConfigRepositoryTests(unittest.TestCase):
             [(observation.domain, observation.query_count) for observation in observations],
             [("amazon.com", 5), ("chat.openai.com", 1)],
         )
+
+    def test_action_history_is_newest_first_and_keeps_only_500_entries(self) -> None:
+        for index in range(501):
+            action = "/api/apply" if index < 500 else "/api/reset"
+            self.repository.record_action(action=action, status_code=200)
+
+        history = self.repository.list_recent_actions(limit=100)
+        stored_count = self.repository._connection.execute(
+            "SELECT COUNT(*) FROM action_history"
+        ).fetchone()[0]
+
+        self.assertEqual(stored_count, 500)
+        self.assertEqual(history[0]["action"], "/api/reset")
+        self.assertEqual(set(history[0]), {"happened_at", "action", "status_code"})
+
+    def test_backup_is_a_readable_snapshot_of_saved_configuration(self) -> None:
+        self.repository.save_profile(Profile(id="normal", name="Normal"))
+        backup = self.repository.backup_bytes()
+
+        with tempfile.NamedTemporaryFile(suffix=".db") as temporary:
+            temporary.write(backup)
+            temporary.flush()
+            with sqlite3.connect(temporary.name) as snapshot:
+                profile = snapshot.execute(
+                    "SELECT name FROM profiles WHERE id = 'normal'"
+                ).fetchone()
+
+        self.assertEqual(profile, ("Normal",))
 
 
 if __name__ == "__main__":

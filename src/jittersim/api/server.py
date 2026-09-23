@@ -61,6 +61,9 @@ WRITE_PATHS = frozenset(
         "/api/service-quotas",
         "/api/service-quotas/reset",
         "/api/time-quotas",
+        "/api/action-history",
+        "/api/diagnostics",
+        "/api/backup",
         "/api/time-quotas/reset",
         "/api/time-quotas/start",
         "/api/time-quotas/stop",
@@ -1105,6 +1108,20 @@ DASHBOARD_HTML = """<!doctype html>
     <section class="card">
       <div class="section-heading"><h2>Access rules</h2><p>Saved MAC and website policy</p></div>
       <pre id="policies">Loading...</pre>
+    </section>
+    <section class="card">
+      <div class="section-heading">
+        <div><h2>Diagnostics</h2><p>Runtime state and available traffic counters</p></div>
+        <button id="refresh-diagnostics" type="button">Refresh</button>
+      </div>
+      <pre id="diagnostics">Enter the admin token to inspect diagnostics.</pre>
+    </section>
+    <section class="card">
+      <div class="section-heading">
+        <div><h2>Backup and action history</h2><p>Recent admin actions without request contents</p></div>
+        <button id="download-backup" type="button">Download backup</button>
+      </div>
+      <pre id="action-history">Enter the admin token to view recent actions.</pre>
     </section>
   </div>
   <script>
@@ -2219,6 +2236,26 @@ DASHBOARD_HTML = """<!doctype html>
       renderRuntimeSummary(data.state);
     }
 
+    async function loadAdminTools() {
+      if (!element("admin-token").value.trim()) {
+        element("diagnostics").textContent = "Enter the admin token to inspect diagnostics.";
+        element("action-history").textContent = "Enter the admin token to view recent actions.";
+        return;
+      }
+      try {
+        const data = await request("/api/diagnostics", "GET");
+        element("diagnostics").textContent = JSON.stringify(data, null, 2);
+      } catch (error) {
+        element("diagnostics").textContent = error.message;
+      }
+      try {
+        const data = await request("/api/action-history", "GET");
+        element("action-history").textContent = JSON.stringify(data.actions, null, 2);
+      } catch (error) {
+        element("action-history").textContent = error.message;
+      }
+    }
+
     async function refresh() {
       await loadProfiles();
       await loadHealth();
@@ -2235,7 +2272,8 @@ DASHBOARD_HTML = """<!doctype html>
         loadPolicies(),
         loadConnectedDevices(),
         loadUplink(),
-        loadQuotas()
+        loadQuotas(),
+        loadAdminTools()
       ]);
     }
 
@@ -2451,7 +2489,36 @@ DASHBOARD_HTML = """<!doctype html>
     element("time-quota-reset-mode").addEventListener("change", () => syncQuotaReset("time-quota"));
     element("service-quota-device").addEventListener("change", () => populateServiceQuotaDomains());
     element("time-quota-device").addEventListener("change", () => populateTimeQuotaDomains());
-    element("admin-token").addEventListener("change", loadQuotas);
+    element("admin-token").addEventListener("change", () => {
+      loadQuotas();
+      loadAdminTools();
+    });
+    element("refresh-diagnostics").addEventListener("click", loadAdminTools);
+    element("download-backup").addEventListener("click", async () => {
+      const token = element("admin-token").value.trim();
+      if (!token) {
+        element("action-history").textContent = "Enter the admin token before downloading a backup.";
+        return;
+      }
+      try {
+        const response = await fetch("/api/backup", {
+          headers: { Authorization: "Bearer " + token },
+          cache: "no-store"
+        });
+        if (!response.ok) {
+          const data = await response.json();
+          throw new Error(data.error || response.statusText);
+        }
+        const url = URL.createObjectURL(await response.blob());
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "jittersim-backup.db";
+        link.click();
+        URL.revokeObjectURL(url);
+      } catch (error) {
+        element("action-history").textContent = error.message;
+      }
+    });
     syncQuotaReset("data-limit");
     syncQuotaReset("group-data-limit");
     syncQuotaReset("service-quota");
@@ -3088,6 +3155,33 @@ class ControlServer(HTTPServer):
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {"state": _runtime_state_payload(self.repository.get_runtime_state())}
             )
+        if path == "/api/action-history":
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {"actions": list(self.repository.list_recent_actions())}
+            )
+        if path == "/api/backup":
+            return HTTPStatus.OK, "application/vnd.sqlite3", self.repository.backup_bytes()
+        if path == "/api/diagnostics":
+            diagnostics = {
+                "checked_at": int(time.time()),
+                "runtime": _runtime_state_payload(self.repository.get_runtime_state()),
+                "helper_available": self.helper_client is not None,
+                "connected_clients": None,
+                "traffic_counters": None,
+                "warnings": [],
+            }
+            if self.helper_client is not None:
+                try:
+                    diagnostics["connected_clients"] = len(
+                        self.helper_client.connected_devices()
+                    )
+                except (HelperClientError, AttributeError, TypeError):
+                    diagnostics["warnings"].append("connected-client scan failed")
+                try:
+                    diagnostics["traffic_counters"] = self.helper_client.traffic_counters()
+                except (HelperClientError, AttributeError, TypeError):
+                    diagnostics["warnings"].append("traffic counters are unavailable")
+            return HTTPStatus.OK, "application/json", _json_bytes(diagnostics)
         return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
 
     def write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
@@ -3891,7 +3985,12 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             status = HTTPStatus.INTERNAL_SERVER_ERROR
             content_type = "application/json"
             body = _json_bytes({"error": "stored configuration could not be read"})
-        self._send_response(status=status, content_type=content_type, body=body)
+        headers = (
+            {"Content-Disposition": 'attachment; filename="jittersim-backup.db"'}
+            if path == "/api/backup"
+            else None
+        )
+        self._send_response(status=status, content_type=content_type, body=body, headers=headers)
 
     def do_POST(self) -> None:
         self._handle_write()
@@ -3946,6 +4045,10 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             status = HTTPStatus.CONFLICT
             content_type = "application/json"
             body = _json_bytes({"error": "configuration could not be saved"})
+        try:
+            self.server.repository.record_action(action=path, status_code=int(status))
+        except StorageError:
+            LOGGER.exception("could not record action history for %s", path)
         self._send_response(status=status, content_type=content_type, body=body)
 
     def _read_json_body(self, *, required: bool = True) -> Dict[str, Any]:

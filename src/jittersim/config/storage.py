@@ -1,16 +1,17 @@
 """SQLite persistence for validated jittersim configuration."""
 
-from dataclasses import asdict
 import json
-from pathlib import Path
 import sqlite3
+import tempfile
 import time
+from dataclasses import asdict
+from pathlib import Path
 from typing import Optional, Sequence, Union
 
 from .models import (
+    DataLimit,
     Device,
     DeviceGroup,
-    DataLimit,
     DomainObservation,
     GroupDataLimit,
     Impairment,
@@ -21,8 +22,8 @@ from .models import (
     RuntimeState,
     Schedule,
     ServiceQuota,
-    Timer,
     TimeQuota,
+    Timer,
     ValidationError,
     WebsitePolicy,
 )
@@ -247,6 +248,12 @@ class ConfigRepository:
                 last_result TEXT,
                 last_error TEXT
             );
+            CREATE TABLE IF NOT EXISTS action_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                happened_at INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                status_code INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS domain_observations (
                 ipv4_address TEXT NOT NULL,
                 domain TEXT NOT NULL,
@@ -398,6 +405,75 @@ class ConfigRepository:
         )
         self._connection.commit()
         return updated
+
+    def record_action(self, *, action: str, status_code: int) -> None:
+        """Store a bounded action name and outcome without request contents."""
+
+        if (
+            not isinstance(action, str)
+            or not action.startswith("/api/")
+            or len(action) > 100
+        ):
+            raise StorageError("action name is invalid")
+        if isinstance(status_code, bool) or not isinstance(status_code, int):
+            raise StorageError("action status is invalid")
+        if status_code < 100 or status_code > 599:
+            raise StorageError("action status is invalid")
+        try:
+            self._connection.execute(
+                "INSERT INTO action_history (happened_at, action, status_code) VALUES (?, ?, ?)",
+                (int(time.time()), action, status_code),
+            )
+            self._connection.execute(
+                "DELETE FROM action_history WHERE id NOT IN "
+                "(SELECT id FROM action_history ORDER BY id DESC LIMIT 500)"
+            )
+            self._connection.commit()
+        except sqlite3.Error as error:
+            self._connection.rollback()
+            raise StorageError("could not record action history") from error
+
+    def list_recent_actions(self, *, limit: int = 50) -> tuple:
+        """Return the newest bounded action records without sensitive request data."""
+
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 100
+        ):
+            raise StorageError("action history limit must be between 1 and 100")
+        try:
+            rows = self._connection.execute(
+                "SELECT happened_at, action, status_code FROM action_history "
+                "ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return tuple(dict(row) for row in rows)
+        except sqlite3.Error as error:
+            raise StorageError("could not read action history") from error
+
+    def backup_bytes(self) -> bytes:
+        """Create a consistent SQLite snapshot for an administrator download."""
+
+        temporary_path = None
+        target = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                prefix="jittersim-backup-", suffix=".db", delete=False
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+            target = sqlite3.connect(str(temporary_path))
+            self._connection.backup(target)
+            target.close()
+            target = None
+            return temporary_path.read_bytes()
+        except (OSError, sqlite3.Error) as error:
+            raise StorageError("could not create configuration backup") from error
+        finally:
+            if target is not None:
+                target.close()
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
 
     def _bump_configuration_version(self) -> None:
         self._connection.execute(
