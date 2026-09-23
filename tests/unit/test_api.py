@@ -668,6 +668,23 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("/api/group-data-limits", DASHBOARD_HTML)
         self.assertIn("Apply current configuration", DASHBOARD_HTML)
         self.assertIn("Reset network", DASHBOARD_HTML)
+        self.assertIn('id="check-admin-token"', DASHBOARD_HTML)
+        self.assertIn("Check token", DASHBOARD_HTML)
+        self.assertIn("Checking the admin token...", DASHBOARD_HTML)
+        self.assertIn("setButtonBusy(event.submitter, true)", DASHBOARD_HTML)
+        self.assertIn("if (submitButton) setButtonBusy(submitButton, false);", DASHBOARD_HTML)
+        self.assertIn("Dashboard refresh failed:", DASHBOARD_HTML)
+        self.assertNotIn('element("admin-token").addEventListener("change"', DASHBOARD_HTML)
+        self.assertIn(
+            'element("check-admin-token").addEventListener("click", checkAdminToken)',
+            DASHBOARD_HTML,
+        )
+        self.assertIn('id="toast" class="toast" role="status"', DASHBOARD_HTML)
+        self.assertIn(
+            'element("toast-dismiss").addEventListener("click", dismissToast)',
+            DASHBOARD_HTML,
+        )
+        self.assertIn('document.addEventListener("submit"', DASHBOARD_HTML)
         self.assertIn("Connected clients", DASHBOARD_HTML)
         self.assertIn("connected-devices", DASHBOARD_HTML)
         self.assertIn("Upstream router connection", DASHBOARD_HTML)

@@ -438,6 +438,12 @@ DASHBOARD_HTML = """<!doctype html>
     }
     .token-card { margin-top: 1rem; }
     .token-card label { max-width: 34rem; }
+    .token-controls { display: flex; align-items: end; gap: 0.75rem; }
+    .token-controls label { flex: 1; }
+    .token-controls button { margin-top: 0; white-space: nowrap; }
+    .token-check-status { min-height: 1.25rem; margin: 0.65rem 0 0; color: #91a8c1; }
+    .token-check-status.success { color: #8de2bc; }
+    .token-check-status.error { color: #ffb0b0; }
     .data-grid { margin-top: 1rem; }
     @media (max-width: 700px) {
       body { padding-top: 1rem; }
@@ -545,9 +551,13 @@ DASHBOARD_HTML = """<!doctype html>
   </section>
   <section class="card token-card">
     <h2>Control token</h2>
-    <label>Bearer token (kept in this page only)
-      <input id="admin-token" type="password" autocomplete="off">
-    </label>
+    <div class="token-controls">
+      <label>Admin token (kept in this page only)
+        <input id="admin-token" type="password" autocomplete="off">
+      </label>
+      <button id="check-admin-token" type="button">Check token</button>
+    </div>
+    <p id="token-check-status" class="token-check-status" role="status" aria-live="polite">Enter the token and choose Check token to load diagnostics.</p>
   </section>
   <div class="content-grid">
     <section class="card">
@@ -2362,13 +2372,15 @@ DASHBOARD_HTML = """<!doctype html>
       if (!element("admin-token").value.trim()) {
         element("diagnostics").textContent = "Enter the admin token to inspect diagnostics.";
         element("action-history").textContent = "Enter the admin token to view recent actions.";
-        return;
+        return { ok: false, message: "Enter the admin token first." };
       }
       try {
         const data = await request("/api/diagnostics", "GET");
         element("diagnostics").textContent = JSON.stringify(data, null, 2);
       } catch (error) {
         element("diagnostics").textContent = error.message;
+        element("action-history").textContent = error.message;
+        return { ok: false, message: error.message };
       }
       try {
         const data = await request("/api/action-history", "GET");
@@ -2378,6 +2390,39 @@ DASHBOARD_HTML = """<!doctype html>
           : "No admin actions have been recorded.";
       } catch (error) {
         element("action-history").textContent = error.message;
+        return { ok: true, message: "Token accepted. Diagnostics loaded, but action history could not be loaded." };
+      }
+      return { ok: true, message: "Token accepted. Diagnostics loaded." };
+    }
+
+    async function checkAdminToken() {
+      const button = element("check-admin-token");
+      const status = element("token-check-status");
+      if (!element("admin-token").value.trim()) {
+        status.textContent = "Enter the admin token first.";
+        showMessage("Enter the admin token first.", "error");
+        element("admin-token").focus();
+        return;
+      }
+      button.disabled = true;
+      button.setAttribute("aria-busy", "true");
+      button.textContent = "Checking...";
+      status.textContent = "Checking the token and loading diagnostics...";
+      showMessage("Checking the admin token...", "working");
+      try {
+        const result = await loadAdminTools();
+        status.textContent = result.ok ? result.message : "Token check failed: " + result.message;
+        status.className = "token-check-status " + (result.ok ? "success" : "error");
+        showMessage(status.textContent, result.ok ? "success" : "error");
+        if (result.ok) loadQuotas();
+      } catch (error) {
+        status.textContent = "Token check failed: " + error.message;
+        status.className = "token-check-status error";
+        showMessage(status.textContent, "error");
+      } finally {
+        button.disabled = false;
+        button.removeAttribute("aria-busy");
+        button.textContent = "Check token";
       }
     }
 
@@ -2614,17 +2659,40 @@ DASHBOARD_HTML = """<!doctype html>
     element("time-quota-reset-mode").addEventListener("change", () => syncQuotaReset("time-quota"));
     element("service-quota-device").addEventListener("change", () => populateServiceQuotaDomains());
     element("time-quota-device").addEventListener("change", () => populateTimeQuotaDomains());
-    element("admin-token").addEventListener("change", () => {
-      loadQuotas();
-      loadAdminTools();
+    element("check-admin-token").addEventListener("click", checkAdminToken);
+    element("toast-dismiss").addEventListener("click", dismissToast);
+    element("refresh-diagnostics").addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      button.setAttribute("aria-busy", "true");
+      button.textContent = "Refreshing...";
+      showMessage("Refreshing diagnostics...", "working");
+      try {
+        const result = await loadAdminTools();
+        element("token-check-status").textContent = result.message;
+        element("token-check-status").className = "token-check-status " + (result.ok ? "success" : "error");
+        showMessage(result.message, result.ok ? "success" : "error");
+      } catch (error) {
+        element("token-check-status").textContent = error.message;
+        element("token-check-status").className = "token-check-status error";
+        showMessage(error.message, "error");
+      } finally {
+        button.disabled = false;
+        button.removeAttribute("aria-busy");
+        button.textContent = "Refresh";
+      }
     });
-    element("refresh-diagnostics").addEventListener("click", loadAdminTools);
-    element("download-backup").addEventListener("click", async () => {
+    element("download-backup").addEventListener("click", async (event) => {
+      const button = event.currentTarget;
       const token = element("admin-token").value.trim();
       if (!token) {
         element("action-history").textContent = "Enter the admin token before downloading a backup.";
+        showMessage("Enter the admin token before downloading a backup.", "error");
         return;
       }
+      setButtonBusy(button, true);
+      button.textContent = "Preparing backup...";
+      showMessage("Preparing the configuration backup...", "working");
       try {
         const response = await fetch("/api/backup", {
           headers: { Authorization: "Bearer " + token },
