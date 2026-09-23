@@ -1493,7 +1493,7 @@ DASHBOARD_HTML = """<!doctype html>
         return;
       }
       setActionBusy(true, "/api/apply");
-      button.disabled = true;
+      setButtonBusy(button, true);
       showMessage("Applying " + profileId + " to " + device.ipv4_address + "...", "working");
       try {
         await request("/api/connected-devices/apply-profile", "POST", {
@@ -1501,11 +1501,11 @@ DASHBOARD_HTML = """<!doctype html>
           mac_address: device.mac_address,
           profile_id: profileId
         });
-        await refresh();
-        showMessage("Applied " + profileId + " to " + device.ipv4_address + ".", "success");
+        refreshAfterSuccess("Applied " + profileId + " to " + device.ipv4_address + ".");
       } catch (error) {
         showMessage(error.message, "error");
       } finally {
+        setButtonBusy(button, false);
         setActionBusy(false, "/api/apply");
       }
     }
@@ -1615,29 +1615,31 @@ DASHBOARD_HTML = """<!doctype html>
 
     async function addDomainToProfile(domain, profileId, button) {
       if (!profileId) return;
-      button.disabled = true;
+      setButtonBusy(button, true);
+      showMessage("Adding " + domain + " to the profile...", "working");
       try {
         await request("/api/observations/add-to-profile", "POST", {
           domain: domain,
           profile_id: profileId
         });
-        await refresh();
-        showMessage("Added " + domain + " to the profile.", "success");
+        refreshAfterSuccess("Added " + domain + " to the profile.");
       } catch (error) {
         showMessage(error.message, "error");
-        button.disabled = false;
+      } finally {
+        setButtonBusy(button, false);
       }
     }
 
     async function addGlobalBlock(domain, button) {
-      button.disabled = true;
+      setButtonBusy(button, true);
+      showMessage("Adding " + domain + " to the global block list...", "working");
       try {
         await request("/api/observations/add-global-block", "POST", { domain: domain });
-        await refresh();
-        showMessage("Added " + domain + " to the global block list.", "success");
+        refreshAfterSuccess("Added " + domain + " to the global block list.");
       } catch (error) {
         showMessage(error.message, "error");
-        button.disabled = false;
+      } finally {
+        setButtonBusy(button, false);
       }
     }
 
@@ -1902,14 +1904,15 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     async function deleteGroup(group, button) {
-      button.disabled = true;
+      setButtonBusy(button, true);
+      showMessage("Deleting the device group...", "working");
       try {
         await request("/api/groups/delete", "POST", { id: group.id });
-        await refresh();
-        showMessage("Device group deleted.", "success");
+        refreshAfterSuccess("Device group deleted.");
       } catch (error) {
-        button.disabled = false;
         showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
       }
     }
 
@@ -1974,31 +1977,33 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     async function timeQuotaAction(quota, action, button) {
-      button.disabled = true;
+      setButtonBusy(button, true);
+      showMessage(action === "start" ? "Starting the time limit..." : "Stopping the time limit...", "working");
       try {
         const result = await request("/api/time-quotas/" + action, "POST", { id: quota.id });
-        await refresh();
-        showMessage(
+        refreshAfterSuccess(
           result.live_applied
             ? (action === "start" ? "Time quota timer started and applied." : "Time quota updated and applied.")
-            : (action === "start" ? "Time quota timer started." : "Time quota updated."),
-          "success"
+            : (action === "start" ? "Time quota timer started." : "Time quota updated.")
         );
       } catch (error) {
-        button.disabled = false;
         showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
       }
     }
 
     async function resetTimeQuota(quota, button) {
-      button.disabled = true;
+      setButtonBusy(button, true);
+      showMessage("Resetting time limit usage...", "working");
       try {
         await request("/api/time-quotas/reset", "POST", { id: quota.id });
-        await loadQuotas();
         showMessage("Time quota usage reset.", "success");
+        loadQuotas();
       } catch (error) {
-        button.disabled = false;
         showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
       }
     }
 
@@ -2046,7 +2051,8 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     async function resetQuota(quota, service, button) {
-      button.disabled = true;
+      setButtonBusy(button, true);
+      showMessage("Resetting quota usage...", "working");
       try {
         const path = service === "group"
           ? "/api/group-data-limits/reset"
@@ -2055,11 +2061,12 @@ DASHBOARD_HTML = """<!doctype html>
           ? { group_id: quota.group_id }
           : service ? { id: quota.id } : { device_id: quota.device_id };
         await request(path, "POST", body);
-        await loadQuotas();
         showMessage("Quota usage reset.", "success");
+        loadQuotas();
       } catch (error) {
         showMessage(error.message, "error");
-        button.disabled = false;
+      } finally {
+        setButtonBusy(button, false);
       }
     }
 
@@ -2087,21 +2094,22 @@ DASHBOARD_HTML = """<!doctype html>
       if (!helperConfigured || observationRequestInFlight) return;
       observationRequestInFlight = true;
       const scanButton = element("scan-observations");
-      scanButton.disabled = true;
+      setButtonBusy(scanButton, true);
       scanButton.textContent = "Scanning...";
       showMessage("Sampling DNS queries from the test network...", "working");
       try {
         const result = await request("/api/observations/scan", "POST", {});
-        await loadObservations();
         showMessage(
           "Traffic scan complete: " + result.captured_observations + " domain observations captured.",
           "success"
         );
+        loadObservations();
       } catch (error) {
         showMessage(error.message, "error");
       } finally {
         observationRequestInFlight = false;
         scanButton.disabled = !helperConfigured;
+        scanButton.removeAttribute("aria-busy");
         scanButton.textContent = "Scan now";
       }
     }
@@ -2260,17 +2268,17 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     async function cancelTimer(timerId, button) {
-      button.disabled = true;
+      setButtonBusy(button, true);
+      showMessage("Cancelling the timer...", "working");
       try {
         const result = await request("/api/timers/cancel", "POST", { id: timerId });
-        await refresh();
-        showMessage(
+        refreshAfterSuccess(
           result.live_applied ? "Timer cancelled and the normal profile is active." : "Timer cancelled.",
-          "success"
         );
       } catch (error) {
-        button.disabled = false;
         showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
       }
     }
 
@@ -2326,19 +2334,19 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     async function stopProgression(progressionId, button) {
-      button.disabled = true;
+      setButtonBusy(button, true);
+      showMessage("Stopping the progression and restoring the normal profile...", "working");
       try {
         const result = await request("/api/progressions/stop", "POST", { id: progressionId });
-        await refresh();
-        showMessage(
+        refreshAfterSuccess(
           result.live_applied
             ? "Progression stopped and the normal profile is active."
-            : "Progression stopped.",
-          "success"
+            : "Progression stopped."
         );
       } catch (error) {
-        button.disabled = false;
         showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
       }
     }
 
@@ -2452,6 +2460,8 @@ DASHBOARD_HTML = """<!doctype html>
       const resetButton = element("reset-button");
       applyButton.disabled = busy || !helperConfigured;
       resetButton.disabled = busy || !helperConfigured;
+      applyButton.setAttribute("aria-busy", String(busy && path === "/api/apply"));
+      resetButton.setAttribute("aria-busy", String(busy && path === "/api/reset"));
       applyButton.textContent = busy && path === "/api/apply" ? "Applying..." : "Apply current configuration";
       resetButton.textContent = busy && path === "/api/reset" ? "Resetting..." : "Reset network";
     }
@@ -2466,8 +2476,7 @@ DASHBOARD_HTML = """<!doctype html>
       try {
         const data = await request(path, "POST", {});
         if (data.state) renderRuntimeSummary(data.state);
-        await refresh();
-        showMessage(successMessage, "success");
+        refreshAfterSuccess(successMessage);
       } catch (error) {
         showMessage(error.message, "error");
       } finally {
@@ -2511,8 +2520,7 @@ DASHBOARD_HTML = """<!doctype html>
             enabled_probability: Number(element("profile-website-enabled").value)
           }
         });
-        showMessage("Profile saved.", "success");
-        await refresh();
+        refreshAfterSuccess("Profile saved.");
       } catch (error) {
         showMessage(error.message, "error");
       }
@@ -2528,8 +2536,7 @@ DASHBOARD_HTML = """<!doctype html>
           profile_id: element("device-profile").value,
           mac_address: element("device-mac").value.trim() || null
         });
-        showMessage("Device saved.", "success");
-        await refresh();
+        refreshAfterSuccess("Device saved.");
       } catch (error) {
         showMessage(error.message, "error");
       }
@@ -2547,8 +2554,7 @@ DASHBOARD_HTML = """<!doctype html>
           profile_id: element("group-profile").value || null,
           device_ids: deviceIds
         });
-        showMessage("Device group saved.", "success");
-        await refresh();
+        refreshAfterSuccess("Device group saved.");
       } catch (error) {
         showMessage(error.message, "error");
       }
@@ -2569,8 +2575,7 @@ DASHBOARD_HTML = """<!doctype html>
             blocked_domains: commaList("website-blocklist")
           }
         });
-        showMessage("Access rules saved. Apply the configuration to enforce them.", "success");
-        await refresh();
+        refreshAfterSuccess("Access rules saved. Apply the configuration to enforce them.");
       } catch (error) {
         showMessage(error.message, "error");
       }
@@ -2593,8 +2598,7 @@ DASHBOARD_HTML = """<!doctype html>
           end_minute: timeToMinute("schedule-end"),
           enabled: true
         });
-        showMessage("Schedule saved. Apply the configuration to start it.", "success");
-        await refresh();
+        refreshAfterSuccess("Schedule saved. Apply the configuration to start it.");
       } catch (error) {
         showMessage(error.message, "error");
       }
@@ -2608,12 +2612,10 @@ DASHBOARD_HTML = """<!doctype html>
           profile_id: element("timer-profile").value,
           duration_minutes: Number(element("timer-duration").value)
         });
-        await refresh();
-        showMessage(
+        refreshAfterSuccess(
           result.live_applied
             ? "Timer started and the profile is active now."
             : "Timer saved. Apply the configuration in hardware mode to start it.",
-          "success"
         );
       } catch (error) {
         showMessage(error.message, "error");
@@ -2641,12 +2643,10 @@ DASHBOARD_HTML = """<!doctype html>
             : 0,
           website_domains: commaList("progression-domains")
         });
-        await refresh();
-        showMessage(
+        refreshAfterSuccess(
           result.live_applied
             ? "Progression started and is active now."
             : "Progression saved. Apply the configuration in hardware mode to start it.",
-          "success"
         );
       } catch (error) {
         showMessage(error.message, "error");
@@ -2708,8 +2708,13 @@ DASHBOARD_HTML = """<!doctype html>
         link.download = "jittersim-backup.db";
         link.click();
         window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+        showMessage("Backup downloaded.", "success");
       } catch (error) {
         element("action-history").textContent = error.message;
+        showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
+        button.textContent = "Download backup";
       }
     });
     syncQuotaReset("data-limit");
@@ -2727,10 +2732,8 @@ DASHBOARD_HTML = """<!doctype html>
           enabled: element("data-limit-enabled").checked,
           ...quotaSchedulePayload("data-limit")
         });
-        await refresh();
-        showMessage(
+        refreshAfterSuccess(
           result.live_applied ? "Device limit saved and applied." : "Device limit saved.",
-          "success"
         );
       } catch (error) {
         showMessage(error.message, "error");
@@ -2747,10 +2750,8 @@ DASHBOARD_HTML = """<!doctype html>
           enabled: element("group-data-limit-enabled").checked,
           ...quotaSchedulePayload("group-data-limit")
         });
-        await refresh();
-        showMessage(
+        refreshAfterSuccess(
           result.live_applied ? "Shared group limit saved and applied." : "Shared group limit saved.",
-          "success"
         );
       } catch (error) {
         showMessage(error.message, "error");
@@ -2774,10 +2775,8 @@ DASHBOARD_HTML = """<!doctype html>
           enabled: element("service-quota-enabled").checked,
           ...quotaSchedulePayload("service-quota")
         });
-        await refresh();
-        showMessage(
+        refreshAfterSuccess(
           result.live_applied ? "Service limit saved and applied." : "Service limit saved.",
-          "success"
         );
       } catch (error) {
         showMessage(error.message, "error");
@@ -2801,10 +2800,8 @@ DASHBOARD_HTML = """<!doctype html>
           enabled: element("time-quota-enabled").checked,
           ...quotaSchedulePayload("time-quota")
         });
-        await refresh();
-        showMessage(
+        refreshAfterSuccess(
           result.live_applied ? "Time limit saved and applied." : "Time limit saved. Start its timer from the saved row.",
-          "success"
         );
       } catch (error) {
         showMessage(error.message, "error");
@@ -2825,38 +2822,49 @@ DASHBOARD_HTML = """<!doctype html>
       }
     });
 
-    async function routerAction(path, body, message) {
+    async function routerAction(path, body, message, button) {
       const password = element("router-admin-password").value;
       const status = element("router-action-message");
       if (!password) {
         status.textContent = "Enter the router admin password first.";
+        showMessage(status.textContent, "error");
         return;
       }
+      setButtonBusy(button, true);
       status.textContent = message;
+      showMessage(message, "working");
       try {
         const response = await request(path, "POST", { admin_password: password, ...body });
         const result = response.result || response;
         status.textContent = result.ssid
           ? "Copied " + result.ssid + " to the Pi. Reconnect test devices if needed."
           : (result.enabled ? "Router Wi-Fi is on." : "Router Wi-Fi is off.");
+        showMessage(status.textContent, "success");
       } catch (error) {
         status.textContent = error.message;
+        showMessage(error.message, "error");
       } finally {
         element("router-admin-password").value = "";
+        setButtonBusy(button, false);
       }
     }
 
-    element("sync-router-ap").addEventListener("click", () => {
-      routerAction("/api/router/sync-ap", {}, "Reading the router Wi-Fi settings...");
+    element("sync-router-ap").addEventListener("click", (event) => {
+      routerAction("/api/router/sync-ap", {}, "Reading the router Wi-Fi settings...", event.currentTarget);
     });
 
-    element("disable-router-wifi").addEventListener("click", () => {
+    element("disable-router-wifi").addEventListener("click", (event) => {
       if (!window.confirm("Turn off both primary router Wi-Fi radios? Keep the Pi connected by Ethernet.")) return;
-      routerAction("/api/router/wifi", { enabled: false, confirm_disable: true }, "Turning off router Wi-Fi...");
+      routerAction(
+        "/api/router/wifi",
+        { enabled: false, confirm_disable: true },
+        "Turning off router Wi-Fi...",
+        event.currentTarget
+      );
     });
 
-    element("enable-router-wifi").addEventListener("click", () => {
-      routerAction("/api/router/wifi", { enabled: true }, "Turning on router Wi-Fi...");
+    element("enable-router-wifi").addEventListener("click", (event) => {
+      routerAction("/api/router/wifi", { enabled: true }, "Turning on router Wi-Fi...", event.currentTarget);
     });
 
     window.setInterval(loadConnectedDevices, 5000);
