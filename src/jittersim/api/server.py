@@ -218,6 +218,53 @@ DASHBOARD_HTML = """<!doctype html>
     .action-message.success { background: #123b31; color: #8de2bc; }
     .action-message.error { background: #45222c; color: #ffb0b0; }
     .action-message.working { background: #3b2d15; color: #f5ca78; }
+    .toast {
+      position: fixed;
+      top: 1rem;
+      right: 1rem;
+      z-index: 100;
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 0.75rem;
+      width: min(34rem, calc(100vw - 2rem));
+      padding: 0.85rem 1rem;
+      border: 1px solid #46627f;
+      border-left: 0.3rem solid #70b7ff;
+      border-radius: 0.7rem;
+      background: #102238;
+      color: #dcecff;
+      box-shadow: 0 0.9rem 2rem rgba(0, 0, 0, 0.4);
+    }
+    .toast[hidden] { display: none; }
+    .toast.success { border-color: #2c9d73; border-left-color: #70d7a9; background: #123b31; }
+    .toast.error { border-color: #a9565d; border-left-color: #ff8585; background: #45222c; }
+    .toast.working { border-left-color: #f5ca78; }
+    .toast-icon { display: grid; place-items: center; width: 1.2rem; font-weight: 800; }
+    .toast.working .toast-icon {
+      width: 0.9rem;
+      height: 0.9rem;
+      border: 2px solid #6a5a37;
+      border-top-color: #f5ca78;
+      border-radius: 50%;
+      animation: toast-spin 0.8s linear infinite;
+    }
+    .toast button { margin: 0; padding: 0.25rem 0.45rem; }
+    button:active:not(:disabled) { transform: translateY(1px) scale(0.98); }
+    button[aria-busy="true"] { position: relative; }
+    button[aria-busy="true"]::after {
+      display: inline-block;
+      width: 0.72rem;
+      height: 0.72rem;
+      margin-left: 0.55rem;
+      border: 2px solid currentColor;
+      border-right-color: transparent;
+      border-radius: 50%;
+      content: "";
+      vertical-align: -0.08rem;
+      animation: toast-spin 0.8s linear infinite;
+    }
+    @keyframes toast-spin { to { transform: rotate(360deg); } }
     .content-grid, .data-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
     .content-grid .card, .data-grid .card { margin: 0; }
     .section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
@@ -414,13 +461,20 @@ DASHBOARD_HTML = """<!doctype html>
       .progression-row button { width: 100%; margin-top: 0.7rem; }
       .quota-row-heading { display: block; }
       .quota-actions button { flex: 1; }
+      .token-controls { align-items: stretch; flex-direction: column; }
     }
     @media (prefers-reduced-motion: reduce) {
       button { transition: none; }
+      .toast.working .toast-icon, button[aria-busy="true"]::after { animation: none; }
     }
   </style>
 </head>
 <body>
+  <div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true" hidden>
+    <span id="toast-icon" class="toast-icon" aria-hidden="true"></span>
+    <span id="toast-message"></span>
+    <button id="toast-dismiss" type="button" aria-label="Dismiss message">Dismiss</button>
+  </div>
   <header class="page-header">
     <div>
       <p class="eyebrow">NETWORK TEST LAB</p>
@@ -1127,6 +1181,7 @@ DASHBOARD_HTML = """<!doctype html>
   </div>
   <script>
     const element = (id) => document.getElementById(id);
+    let pendingFormSubmitButton = null;
 
     function optionalNumber(id) {
       const value = element(id).value.trim();
@@ -1195,15 +1250,21 @@ DASHBOARD_HTML = """<!doctype html>
       const token = element("admin-token").value.trim();
       if (token) headers.Authorization = "Bearer " + token;
       if (body !== undefined) headers["Content-Type"] = "application/json";
-      const response = await fetch(path, {
-        method: method,
-        headers: headers,
-        body: body === undefined ? undefined : JSON.stringify(body),
-        cache: "no-store"
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || response.statusText);
-      return data;
+      const submitButton = pendingFormSubmitButton;
+      pendingFormSubmitButton = null;
+      try {
+        const response = await fetch(path, {
+          method: method,
+          headers: headers,
+          body: body === undefined ? undefined : JSON.stringify(body),
+          cache: "no-store"
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || response.statusText);
+        return data;
+      } finally {
+        if (submitButton) setButtonBusy(submitButton, false);
+      }
     }
 
     async function show(endpoint, elementId, key) {
@@ -1222,7 +1283,67 @@ DASHBOARD_HTML = """<!doctype html>
       const messageElement = element("message");
       messageElement.textContent = message;
       messageElement.className = "action-message " + (kind || "");
+      if (kind !== "working" && pendingFormSubmitButton) {
+        setButtonBusy(pendingFormSubmitButton, false);
+        pendingFormSubmitButton = null;
+      }
+      if (kind) showToast(message, kind);
     }
+
+    function refreshAfterSuccess(message) {
+      showMessage(message, "success");
+      refresh().catch((error) => {
+        showMessage(message + " Dashboard refresh failed: " + error.message, "error");
+      });
+    }
+
+    function setButtonBusy(button, busy) {
+      button.disabled = busy;
+      if (busy) button.setAttribute("aria-busy", "true");
+      else button.removeAttribute("aria-busy");
+    }
+
+    let toastTimer = null;
+
+    function showToast(message, kind) {
+      const toast = element("toast");
+      const icon = element("toast-icon");
+      if (toastTimer !== null) {
+        window.clearTimeout(toastTimer);
+        toastTimer = null;
+      }
+      element("toast-message").textContent = message;
+      toast.className = "toast " + (kind || "working");
+      toast.setAttribute("aria-live", kind === "error" ? "assertive" : "polite");
+      icon.textContent = kind === "success" ? "✓" : kind === "error" ? "!" : "";
+      toast.hidden = false;
+      if (kind === "success") {
+        toastTimer = window.setTimeout(() => {
+          toast.hidden = true;
+          toastTimer = null;
+        }, 6000);
+      }
+    }
+
+    function dismissToast() {
+      if (toastTimer !== null) {
+        window.clearTimeout(toastTimer);
+        toastTimer = null;
+      }
+      element("toast").hidden = true;
+    }
+
+    document.addEventListener("submit", (event) => {
+      const label = event.submitter ? event.submitter.textContent.trim() : "Save";
+      const saving = label.toLowerCase().startsWith("save ")
+        ? "Saving " + label.slice(5) + "..."
+        : label + " in progress...";
+      if (event.submitter) {
+        pendingFormSubmitButton = event.submitter;
+        setButtonBusy(event.submitter, true);
+      }
+      showMessage(saving, "working");
+    }, true);
 
     function renderMode(data) {
       helperConfigured = data.helper_configured;
