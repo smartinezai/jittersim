@@ -11,13 +11,14 @@ The Pi has two network roles:
 - `eth0` is the management and router-facing interface.
 - `wlan0` is the isolated test-network interface.
 
-The dashboard still listens on the Pi so the operator can reach it from the
-management network. The nftables service blocks SSH and dashboard traffic
-arriving from `wlan0`, so a person who receives the test Wi-Fi password cannot
-use the Pi as an administration endpoint. It also blocks IPv4 private-network
-destinations forwarded from `wlan0` to `eth0`, including the Vodafone router's
-web interface. Public internet forwarding remains available. State-changing
-API requests also require the generated bearer token.
+The dashboard listens over HTTPS on the management network. The nftables
+service blocks SSH and dashboard traffic arriving from `wlan0`, so a person who
+receives the test Wi-Fi password cannot use the Pi as an administration
+endpoint. It also blocks private IPv4 destinations and local IPv6 addresses
+forwarded from `wlan0` to `eth0`, including the Vodafone router's web interface.
+An applied network plan blocks all IPv6 forwarding from the test Wi-Fi because
+per-device IPv6 rules are not yet available. Public IPv4 forwarding remains
+available. Dashboard requests require the generated bearer token.
 
 Do not expose port 8080 or SSH to the public internet. Keep the Pi's router
 connection on `eth0` and use the dashboard from the management network.
@@ -39,7 +40,15 @@ sudo /path/to/jittersim/deploy/raspberry-pi/install.sh /path/to/jittersim
 
 The installer creates a virtual environment, installs the package, writes the
 systemd units and enables the management firewall. It preserves existing
-credential files so an update does not silently invalidate access.
+credential files so an update does not silently invalidate access. It also
+creates a local HTTPS certificate. Its private key is readable only by root
+and the JitterSim service. The installer prints the certificate fingerprint.
+
+Open the dashboard at `https://jittersim.local:8080` or use the Pi's Ethernet
+address. Before trusting the local certificate in a browser, compare its
+SHA-256 fingerprint with the value printed by the installer. The certificate
+includes the Pi's current Ethernet address. If that address changes, run the
+installer again and verify and trust the newly printed certificate.
 
 After an update, the dashboard supports schedules, one-shot profile timers,
 progression sessions, MAC rules, website rules, traffic observations and
@@ -49,6 +58,9 @@ its selected domains as it advances.
 The helper applies these rules on the Pi and reset pauses scheduled changes
 before removing them. A timer temporarily takes priority for its device then
 returns to the normal schedule or profile when it expires.
+After a service restart, JitterSim restores the last applied plan or completes
+the last reset. A fresh installation with no prior action leaves the network
+unchanged.
 
 Progression traffic mode is a local DNS-query signal. It is useful for testing
 changing behavior but it does not measure every packet or download byte.
@@ -67,7 +79,7 @@ Never commit those files or paste their contents into a chat or ticket.
 From the management network, the dashboard should be reachable at:
 
 ```text
-http://jittersim.local:8080
+https://jittersim.local:8080
 ```
 
 From a device connected to `JitterSim-Test`, the dashboard and SSH ports must
@@ -83,7 +95,8 @@ turn the primary Wi-Fi radios on or off. Enter the router admin password in the
 dashboard for one action at a time. The password is not saved. Keep the Pi
 connected by Ethernet before changing router Wi-Fi. If a router firmware update
 changes its local web interface, use the direct router link or the manual
-access-point form.
+access-point form. HTTPS protects the browser-to-Pi connection. The router's
+local web interface still uses HTTP between the Pi and the router.
 
 The dashboard shows the Pi's Ethernet connection label and default gateway.
 That label is local to the Pi and is not the router's Wi-Fi name. The router

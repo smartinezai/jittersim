@@ -88,8 +88,9 @@ Goal: persist configuration without requiring a cloud service.
 - [x] Store devices, profiles and assignments.
 - [x] Store schedules, MAC rules and website rules.
 - [x] Store optional device MAC addresses.
-- [ ] Store desired state separately from observed state.
-- [ ] Add configuration versioning.
+- [x] Store desired state separately from observed state.
+- [x] Add configuration versioning.
+- [x] Download a protected SQLite backup of settings and local observations.
 - [ ] Add import and export of non-secret JSON configuration.
 - [ ] Reject malformed imported configuration before persistence.
 
@@ -115,7 +116,8 @@ Goal: control the emulator from a Mac without a screen or keyboard attached to t
 - [x] Edit schedules, MAC rules and website rules from the dashboard.
 - [x] Add observed domains to a profile or the global block list.
 - [x] Keep Apply and Reset feedback in a sticky action area.
-- [ ] Add an event log.
+- [x] Add a bounded history of admin actions without request contents.
+- [x] Protect the deployed dashboard with HTTPS.
 - [ ] Keep the dashboard exempt from impairment.
 
 Suggested commits:
@@ -161,7 +163,7 @@ Goal: run the system headlessly on the Pi while preserving a reliable recovery p
 - [x] Add systemd units for the dashboard and helper.
 - [x] Add a configuration file for management and test interfaces.
 - [x] Add interface safety checks at startup.
-- [ ] Add a boot-time cleanup or reconciliation step.
+- [x] Restore the last applied plan or finish a reset after restart.
 - [ ] Document DHCP, NAT and the test Wi-Fi network.
 - [ ] Add an SSH reset procedure.
 
@@ -183,7 +185,7 @@ Goal: produce evidence that the selected profile changes observed network behavi
 - [ ] Add a small scripted test client.
 - [ ] Compare normal and impaired runs.
 - [ ] Capture screenshots or tables for the class report.
-- [ ] Document limitations such as packet-level loss and IPv4-only support.
+- [x] Document packet-level limits and IPv4 profile matching.
 - [ ] Test that the reset path works after a failed apply.
 
 Suggested commits:
@@ -223,9 +225,11 @@ These should remain outside the first class-project scope:
 - Unbounded traffic logging
 - Modifying networks that are not explicitly configured as the test network
 
-The Vodafone TG3442DE Wi-Fi switch remains a manual action because the project
-does not have a supported router control API. JitterSim also does not inspect
-HTTPS pages or promise complete website blocking.
+The dashboard can control primary Wi-Fi on a Vodafone TG3442DE through its
+local web interface. Other router models still need manual control. JitterSim
+does not inspect HTTPS pages or promise complete website blocking. IPv6 is
+blocked from the test network while a plan is applied rather than shaped per
+device.
 
 ## Definition of done for the class project
 

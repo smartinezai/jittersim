@@ -60,8 +60,9 @@ verification is required after deployment.
 ## Deployment and recovery
 
 The installer must preserve existing credentials and configuration. The new
-certificate is generated only when missing. A failed helper apply follows the
-existing owned-state cleanup path and records the failure without deleting
+certificate is generated when missing or when the Pi's Ethernet address
+changes. A failed helper apply follows the existing owned-state cleanup path
+and records the failure without deleting
 saved profiles or quotas. If the HTTPS service cannot start, the installer
 must report the certificate or service error rather than silently fall back to
 plain HTTP. Confirm dashboard access over HTTPS, the IPv6 policy, restart

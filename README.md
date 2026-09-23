@@ -74,14 +74,17 @@ bytes.
 - A direct link to the Vodafone router page for settings JitterSim cannot
   change.
 - A visible status area for the current mode, connected devices, schedules,
-  access rules and the last network action.
+  access rules, diagnostics and a short history of admin actions.
+- Download a point-in-time backup of settings and local DNS observations.
+- Restore the last applied or reset state when the dashboard service restarts.
 
 Traffic discovery stores local summaries of DNS names and query counts. Select
 several observed names when creating a service quota because one service can
-use many domains. A service quota counts matching IPv4 traffic as one service
-group then applies its weight. For example, `1.2×` charges 120 MB of quota
-usage for 100 MB of matching traffic while `0.8×` charges 80 MB. It does not
-prove that someone opened a page.
+use many domains. Resolved addresses refresh at most once a minute. A service
+quota counts matching IPv4 traffic as one service group then applies its
+weight. For example, `1.2×` charges 120 MB of quota usage for 100 MB of
+matching traffic while `0.8×` charges 80 MB. It does not prove that someone
+opened a page.
 
 Time quotas count active matching traffic between counter samples. A long
 Netflix stream can therefore use the time allowance even when there are no
@@ -103,17 +106,18 @@ Vodafone router ── Ethernet ──> Raspberry Pi
 ```
 
 Only devices on the JitterSim test Wi-Fi are affected. Devices that stay on the
-router Wi-Fi bypass JitterSim. The current network rules use IPv4. IPv6 traffic
-is not handled.
+router Wi-Fi bypass JitterSim. Device rules and quotas currently match IPv4.
+While a network plan is applied, IPv6 forwarding from the test Wi-Fi is blocked
+so it cannot bypass those rules. Resetting the network removes that block.
 
 Test Wi-Fi clients can use the Pi for public internet access but cannot reach
 the dashboard or private upstream addresses such as the Vodafone router's
 `192.168.0.1`. Dashboard changes also require the administrator token.
 
 Website rules, service quotas and device-data progression are best-effort. VPNs,
-encrypted DNS, direct IP access, cached connections, changing service addresses
-and IPv6 traffic can hide traffic or reduce the accuracy of a rule. The device
-must use the Pi as its gateway for the rule to apply.
+encrypted DNS, direct IP access, cached connections and shared hosting can hide
+traffic or reduce accuracy. The device must use the Pi as its gateway. Backups
+include device details and observed domain names, so keep them private.
 
 ## Dashboard modes
 
@@ -128,6 +132,13 @@ before changing router Wi-Fi. If a router firmware update changes its local
 web interface, use the direct router link or the manual Pi access-point form.
 See the [Pi deployment guide](deploy/raspberry-pi/README.md).
 
+On the Pi, open the dashboard over HTTPS at `https://jittersim.local:8080` or
+the Pi's Ethernet address. The installer creates a local certificate and prints
+its SHA-256 fingerprint. Verify that fingerprint before trusting the
+certificate in your browser. A DHCP address change may require a new
+certificate. HTTPS protects the browser-to-Pi connection, but the TG3442DE's
+own local web interface still uses HTTP between the Pi and router.
+
 ## Run locally
 
 Local mode is safe for development:
@@ -137,7 +148,8 @@ export JITTERSIM_ADMIN_TOKEN='use-a-long-local-token'
 PYTHONPATH=src python3 -m jittersim.api --database ./jittersim.db
 ```
 
-Open <http://127.0.0.1:8080/>. Run the tests with:
+Open <http://127.0.0.1:8080/>. Local development uses loopback HTTP; the Pi
+service uses HTTPS. Run the tests with:
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -p 'test*.py'
