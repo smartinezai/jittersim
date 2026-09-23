@@ -1,7 +1,10 @@
 """Best-effort IPv4 resolution for website destination rules."""
 
 import socket
+from collections import OrderedDict
 from ipaddress import AddressValueError, IPv4Address
+import threading
+import time
 from typing import Callable, Iterable, Mapping, Optional, Sequence
 
 from jittersim.config.models import Device, Profile, WebsitePolicy
@@ -10,6 +13,42 @@ from .plan import WebsiteFilter
 
 
 AddressResolver = Callable[..., Sequence[tuple]]
+_RESOLUTION_CACHE_SECONDS = 60.0
+_MAX_CACHED_DOMAINS = 512
+_resolution_cache = OrderedDict()
+_resolution_cache_lock = threading.Lock()
+
+
+def _cached_addresses(*, domain: str) -> tuple:
+    """Return a short-lived IPv4 DNS result without repeating each plan lookup."""
+
+    now = time.monotonic()
+    with _resolution_cache_lock:
+        cached = _resolution_cache.get(domain)
+        if cached is not None:
+            expires_at, addresses = cached
+            if expires_at > now:
+                _resolution_cache.move_to_end(domain)
+                return addresses
+            del _resolution_cache[domain]
+
+    addresses = set()
+    try:
+        results = socket.getaddrinfo(domain, 443, socket.AF_INET, socket.SOCK_STREAM)
+    except (OSError, ValueError):
+        results = ()
+    for result in results:
+        try:
+            addresses.add(IPv4Address(result[4][0]))
+        except (IndexError, KeyError, AddressValueError, ValueError):
+            continue
+    result_addresses = tuple(sorted(addresses, key=str))
+    with _resolution_cache_lock:
+        _resolution_cache[domain] = (now + _RESOLUTION_CACHE_SECONDS, result_addresses)
+        _resolution_cache.move_to_end(domain)
+        while len(_resolution_cache) > _MAX_CACHED_DOMAINS:
+            _resolution_cache.popitem(last=False)
+    return result_addresses
 
 
 def resolve_domains(
@@ -19,11 +58,13 @@ def resolve_domains(
 ) -> tuple:
     """Resolve a bounded set of domain names to unique IPv4 addresses."""
 
-    resolve = socket.getaddrinfo if resolver is None else resolver
     addresses = set()
     for domain in domains:
+        if resolver is None:
+            addresses.update(_cached_addresses(domain=domain))
+            continue
         try:
-            results = resolve(domain, 443, socket.AF_INET, socket.SOCK_STREAM)
+            results = resolver(domain, 443, socket.AF_INET, socket.SOCK_STREAM)
         except (OSError, ValueError):
             continue
         for result in results:

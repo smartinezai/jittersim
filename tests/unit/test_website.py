@@ -1,7 +1,9 @@
 import unittest
 from ipaddress import IPv4Address
+from unittest.mock import patch
 
 from jittersim.config.models import Device, Profile, WebsitePolicy
+from jittersim.engine import website
 from jittersim.engine.website import build_website_filters, resolve_domains
 
 
@@ -17,6 +19,14 @@ def fake_resolver(domain, _port, _family, _kind):
 
 
 class WebsiteResolutionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        with website._resolution_cache_lock:
+            website._resolution_cache.clear()
+
+    def tearDown(self) -> None:
+        with website._resolution_cache_lock:
+            website._resolution_cache.clear()
+
     def test_skips_unresolvable_domains_and_deduplicates_addresses(self) -> None:
         addresses = resolve_domains(
             domains=("example.com", "example.com", "missing.example"),
@@ -45,6 +55,27 @@ class WebsiteResolutionTests(unittest.TestCase):
         self.assertEqual(blocked, (IPv4Address("203.0.113.30"),))
         self.assertEqual(filters[0].allowed_addresses, (IPv4Address("203.0.113.20"),))
         self.assertEqual(filters[0].blocked_addresses, (IPv4Address("203.0.113.30"),))
+
+    def test_default_resolution_is_cached_until_the_short_ttl_expires(self) -> None:
+        result = ((None, None, None, None, ("203.0.113.10", 0)),)
+        with patch("jittersim.engine.website.socket.getaddrinfo", return_value=result) as lookup:
+            with patch("jittersim.engine.website.time.monotonic", return_value=10.0):
+                resolve_domains(domains=("example.com",))
+                resolve_domains(domains=("example.com",))
+            self.assertEqual(lookup.call_count, 1)
+
+            with patch("jittersim.engine.website.time.monotonic", return_value=71.0):
+                resolve_domains(domains=("example.com",))
+            self.assertEqual(lookup.call_count, 2)
+
+    def test_default_resolution_cache_has_a_fixed_size(self) -> None:
+        result = ((None, None, None, None, ("203.0.113.10", 0)),)
+        with patch("jittersim.engine.website.socket.getaddrinfo", return_value=result):
+            with patch("jittersim.engine.website.time.monotonic", return_value=10.0):
+                for index in range(website._MAX_CACHED_DOMAINS + 1):
+                    resolve_domains(domains=(f"host{index}.example",))
+
+        self.assertEqual(len(website._resolution_cache), website._MAX_CACHED_DOMAINS)
 
 
 if __name__ == "__main__":
