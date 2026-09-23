@@ -44,6 +44,11 @@ def _render_nft_script(plan: NetworkPlan) -> str:
             f"add chain inet {PROJECT_TABLE} forward "
             "{ type filter hook forward priority -150; policy accept; }"
         ),
+        (
+            f"add rule inet {PROJECT_TABLE} forward iifname \"wlan0\" "
+            "oifname \"eth0\" meta nfproto ipv6 drop "
+            'comment "disable IPv6 bypass while profiles are active"'
+        ),
     ]
     if plan.mac_policy.denylist:
         lines.append(

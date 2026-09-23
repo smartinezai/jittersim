@@ -16,6 +16,8 @@ class DeploymentFirewallTests(unittest.TestCase):
         self.assertIn("172.16.0.0/12", firewall)
         self.assertIn("192.168.0.0/16", firewall)
         self.assertIn('comment "deny test Wi-Fi access to private upstream networks"', firewall)
+        self.assertIn("fc00::/7", firewall)
+        self.assertIn("fe80::/10", firewall)
 
 
 if __name__ == "__main__":

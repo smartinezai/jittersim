@@ -175,6 +175,10 @@ class RendererTests(unittest.TestCase):
         )[1].stdin
 
         self.assertIn("ether saddr { aa:bb:cc:dd:ee:ff } drop", nft_script or "")
+        self.assertIn(
+            'iifname "wlan0" oifname "eth0" meta nfproto ipv6 drop',
+            nft_script or "",
+        )
         self.assertIn("ip daddr { 203.0.113.10 } drop", nft_script or "")
         self.assertIn("ip daddr != { 203.0.113.20 } drop", nft_script or "")
         self.assertIn("ip daddr { 203.0.113.30 } drop", nft_script or "")

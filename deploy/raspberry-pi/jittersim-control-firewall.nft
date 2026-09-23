@@ -18,5 +18,9 @@ table inet jittersim_control {
             172.16.0.0/12,
             192.168.0.0/16
         } counter drop comment "deny test Wi-Fi access to private upstream networks"
+        iifname "wlan0" oifname "eth0" ip6 daddr {
+            fc00::/7,
+            fe80::/10
+        } counter drop comment "deny test Wi-Fi access to private IPv6 upstream networks"
     }
 }
