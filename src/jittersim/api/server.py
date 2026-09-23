@@ -87,6 +87,7 @@ PROTECTED_READ_PATHS = frozenset(
         "/api/group-data-limits",
         "/api/service-quotas",
         "/api/time-quotas",
+        "/api/traffic",
     )
 )
 
@@ -3377,6 +3378,35 @@ class ControlServer(HTTPServer):
             )
         if path == "/api/backup":
             return HTTPStatus.OK, "application/vnd.sqlite3", self.repository.backup_bytes()
+        if path == "/api/traffic":
+            if self.helper_client is None:
+                return HTTPStatus.OK, "application/json", _json_bytes(
+                    {
+                        "available": False,
+                        "message": "Live traffic needs hardware mode.",
+                        "devices": {},
+                    }
+                )
+            try:
+                counters = self.helper_client.traffic_counters()
+            except HelperClientError:
+                LOGGER.exception("could not read live traffic counters")
+                return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
+                    {"error": "live traffic counters are unavailable"}
+                )
+            directions = counters.get("directions")
+            device_counters = directions.get("devices") if isinstance(directions, dict) else None
+            if not isinstance(device_counters, dict):
+                return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
+                    {"error": "live traffic directions are unavailable"}
+                )
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {
+                    "available": True,
+                    "sampled_at": time.time(),
+                    "devices": device_counters,
+                }
+            )
         if path == "/api/diagnostics":
             diagnostics = {
                 "checked_at": int(time.time()),

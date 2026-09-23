@@ -80,7 +80,21 @@ class FakeHelper:
         ]
 
     def traffic_counters(self):
-        return {"devices": {"alice": 0}, "services": {}}
+        return {
+            "devices": {"alice": 0},
+            "services": {},
+            "directions": {
+                "devices": {
+                    "alice": {
+                        "upload_bytes": 120,
+                        "download_bytes": 80,
+                        "upload_packets": 2,
+                        "download_packets": 1,
+                    }
+                },
+                "services": {},
+            },
+        }
 
 
 class ControlServerTests(unittest.TestCase):
@@ -194,6 +208,40 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(backup_status, 200)
         self.assertEqual(content_type, "application/vnd.sqlite3")
         self.assertTrue(backup.startswith(b"SQLite format 3\x00"))
+
+    def test_live_traffic_requires_admin_token_and_returns_directional_counters(self) -> None:
+        self.server.admin_token = "admin-token"
+        self.server.helper_client = FakeHelper()
+
+        def get_traffic(authorization):
+            handler = object.__new__(ControlRequestHandler)
+            handler.server = self.server
+            handler.path = "/api/traffic"
+            handler.headers = Message()
+            if authorization:
+                handler.headers["Authorization"] = authorization
+            response = {}
+            handler._send_response = lambda **values: response.update(values)
+            handler.do_GET()
+            return response
+
+        unauthorized = get_traffic(None)
+        incorrect = get_traffic("Bearer wrong-token")
+        authorized = get_traffic("Bearer admin-token")
+
+        self.assertEqual(unauthorized["status"], 401)
+        self.assertEqual(incorrect["status"], 401)
+        self.assertEqual(authorized["status"], 200)
+        self.assertTrue(json.loads(authorized["body"])["available"])
+        self.assertEqual(
+            json.loads(authorized["body"])["devices"]["alice"],
+            {
+                "upload_bytes": 120,
+                "download_bytes": 80,
+                "upload_packets": 2,
+                "download_packets": 1,
+            },
+        )
 
     def test_write_history_records_only_authorized_route_and_result(self) -> None:
         self.server.admin_token = "admin-token"
