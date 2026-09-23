@@ -1319,7 +1319,11 @@ DASHBOARD_HTML = """<!doctype html>
           cache: "no-store"
         });
         const data = await response.json();
-        if (!response.ok) throw new Error(data.error || response.statusText);
+        if (!response.ok) {
+          const error = new Error(data.error || response.statusText);
+          error.status = response.status;
+          throw error;
+        }
         return data;
       } finally {
         if (submitButton) setButtonBusy(submitButton, false);
@@ -1337,6 +1341,14 @@ DASHBOARD_HTML = """<!doctype html>
     let observedDomainsByDevice = {};
     let connectedDevicesRequestInFlight = false;
     let observationRequestInFlight = false;
+    const TRAFFIC_POLL_INTERVAL_MS = 2000;
+    const TRAFFIC_MAX_POINTS = 30;
+    const TRAFFIC_WINDOW_MS = 60000;
+    let trafficPollTimer = null;
+    let trafficRequestInFlight = false;
+    let trafficSamplingAllowed = false;
+    let previousTrafficSample = null;
+    let trafficSamples = [];
 
     function showMessage(message, kind) {
       const messageElement = element("message");
@@ -1347,6 +1359,217 @@ DASHBOARD_HTML = """<!doctype html>
         pendingFormSubmitButton = null;
       }
       if (kind) showToast(message, kind);
+    }
+
+    function resetTrafficHistory() {
+      previousTrafficSample = null;
+      trafficSamples = [];
+      ["traffic-upload-rate", "traffic-download-rate", "traffic-upload-packets", "traffic-download-packets"]
+        .forEach((id) => { element(id).textContent = "—"; });
+      drawTrafficChart();
+    }
+
+    function stopTrafficSampling(message) {
+      trafficSamplingAllowed = false;
+      if (trafficPollTimer !== null) {
+        window.clearInterval(trafficPollTimer);
+        trafficPollTimer = null;
+      }
+      resetTrafficHistory();
+      element("traffic-status").textContent = message;
+    }
+
+    function formatTrafficRate(megabitsPerSecond) {
+      if (megabitsPerSecond < 1) {
+        return (megabitsPerSecond * 1000).toFixed(1) + " kbit/s";
+      }
+      return megabitsPerSecond.toFixed(2) + " Mbit/s";
+    }
+
+    function formatPacketRate(packetsPerSecond) {
+      return new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(packetsPerSecond) + " pkt/s";
+    }
+
+    function selectedTrafficTotals(deviceCounters) {
+      const selectedDevice = element("traffic-device").value;
+      const counters = selectedDevice === "all"
+        ? Object.values(deviceCounters)
+        : deviceCounters[selectedDevice] ? [deviceCounters[selectedDevice]] : [];
+      if (!counters.length) return null;
+      return counters.reduce((totals, current) => {
+        ["upload_bytes", "download_bytes", "upload_packets", "download_packets"].forEach((field) => {
+          totals[field] += current[field];
+        });
+        return totals;
+      }, { upload_bytes: 0, download_bytes: 0, upload_packets: 0, download_packets: 0 });
+    }
+
+    function updateTrafficDeviceOptions(devices) {
+      const select = element("traffic-device");
+      const selected = select.value;
+      select.replaceChildren();
+      const allOption = document.createElement("option");
+      allOption.value = "all";
+      allOption.textContent = "All assigned devices";
+      select.appendChild(allOption);
+      devices.forEach((device) => {
+        const option = document.createElement("option");
+        option.value = device.id;
+        option.textContent = device.name + " (" + device.ipv4_address + ")";
+        select.appendChild(option);
+      });
+      select.value = Array.from(select.options).some((option) => option.value === selected)
+        ? selected
+        : "all";
+    }
+
+    function drawTrafficChart() {
+      const canvas = element("traffic-chart");
+      const bounds = canvas.getBoundingClientRect();
+      if (!bounds.width || !bounds.height) return;
+      const pixelRatio = window.devicePixelRatio || 1;
+      const width = Math.round(bounds.width * pixelRatio);
+      const height = Math.round(bounds.height * pixelRatio);
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+      const context = canvas.getContext("2d");
+      if (!context) return;
+      context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+      context.clearRect(0, 0, bounds.width, bounds.height);
+      const plot = { left: 62, right: bounds.width - 14, top: 16, bottom: bounds.height - 34 };
+      const plotWidth = plot.right - plot.left;
+      const plotHeight = plot.bottom - plot.top;
+      const now = performance.now();
+      const visibleSamples = trafficSamples.filter((sample) => now - sample.time <= TRAFFIC_WINDOW_MS);
+      const maxRate = Math.max(0.1, ...visibleSamples.map((sample) => Math.max(sample.upload, sample.download)));
+      const scaleMax = Math.pow(10, Math.ceil(Math.log10(maxRate)));
+      context.font = "12px system-ui, sans-serif";
+      context.textBaseline = "middle";
+      for (let tick = 0; tick <= 4; tick += 1) {
+        const y = plot.bottom - plotHeight * tick / 4;
+        context.strokeStyle = "#263c56";
+        context.lineWidth = 1;
+        context.beginPath();
+        context.moveTo(plot.left, y);
+        context.lineTo(plot.right, y);
+        context.stroke();
+        context.fillStyle = "#91a8c1";
+        context.textAlign = "right";
+        context.fillText(formatTrafficRate(scaleMax * tick / 4), plot.left - 8, y);
+      }
+      [0, 0.5, 1].forEach((fraction) => {
+        const x = plot.left + plotWidth * fraction;
+        context.fillStyle = "#91a8c1";
+        context.textAlign = fraction === 0 ? "left" : fraction === 1 ? "right" : "center";
+        context.textBaseline = "alphabetic";
+        context.fillText(fraction === 1 ? "now" : "−" + Math.round((1 - fraction) * TRAFFIC_WINDOW_MS / 1000) + "s", x, bounds.height - 8);
+      });
+      [
+        { field: "upload", color: "#70b7ff" },
+        { field: "download", color: "#70d7a9" }
+      ].forEach((series) => {
+        context.strokeStyle = series.color;
+        context.lineWidth = 2.5;
+        context.lineJoin = "round";
+        context.lineCap = "round";
+        context.beginPath();
+        let started = false;
+        visibleSamples.forEach((sample) => {
+          const age = now - sample.time;
+          const x = plot.right - plotWidth * age / TRAFFIC_WINDOW_MS;
+          const y = plot.bottom - plotHeight * sample[series.field] / scaleMax;
+          if (!started) {
+            context.moveTo(x, y);
+            started = true;
+          } else {
+            context.lineTo(x, y);
+          }
+        });
+        if (started) context.stroke();
+      });
+      if (!visibleSamples.length) {
+        context.fillStyle = "#91a8c1";
+        context.textAlign = "center";
+        context.textBaseline = "middle";
+        context.fillText("Waiting for traffic samples...", plot.left + plotWidth / 2, plot.top + plotHeight / 2);
+      }
+    }
+
+    async function pollTraffic() {
+      if (trafficRequestInFlight || !trafficSamplingAllowed || document.hidden) return;
+      trafficRequestInFlight = true;
+      try {
+        const data = await request("/api/traffic", "GET");
+        if (!trafficSamplingAllowed) return;
+        if (!data.available) {
+          stopTrafficSampling(data.message || "Live traffic counters are unavailable in this mode.");
+          return;
+        }
+        const totals = selectedTrafficTotals(data.devices || {});
+        if (!totals) {
+          resetTrafficHistory();
+          element("traffic-status").textContent = "No counters yet. Assign a profile and apply the configuration.";
+          return;
+        }
+        const sampledAt = performance.now();
+        if (previousTrafficSample) {
+          const elapsedSeconds = (sampledAt - previousTrafficSample.time) / 1000;
+          const fields = Object.keys(totals);
+          const countersReset = fields.some((field) => totals[field] < previousTrafficSample.totals[field]);
+          if (countersReset || elapsedSeconds <= 0) {
+            resetTrafficHistory();
+            element("traffic-status").textContent = "Counters changed. Starting a fresh graph...";
+          } else {
+            const upload = Math.max(0, totals.upload_bytes - previousTrafficSample.totals.upload_bytes) * 8 / elapsedSeconds / 1000000;
+            const download = Math.max(0, totals.download_bytes - previousTrafficSample.totals.download_bytes) * 8 / elapsedSeconds / 1000000;
+            const uploadPackets = Math.max(0, totals.upload_packets - previousTrafficSample.totals.upload_packets) / elapsedSeconds;
+            const downloadPackets = Math.max(0, totals.download_packets - previousTrafficSample.totals.download_packets) / elapsedSeconds;
+            trafficSamples.push({ time: sampledAt, upload: upload, download: download });
+            trafficSamples = trafficSamples
+              .filter((sample) => sampledAt - sample.time <= TRAFFIC_WINDOW_MS)
+              .slice(-TRAFFIC_MAX_POINTS);
+            element("traffic-upload-rate").textContent = formatTrafficRate(upload);
+            element("traffic-download-rate").textContent = formatTrafficRate(download);
+            element("traffic-upload-packets").textContent = formatPacketRate(uploadPackets);
+            element("traffic-download-packets").textContent = formatPacketRate(downloadPackets);
+            element("traffic-status").textContent = "Sampling live traffic every 2 seconds.";
+          }
+        } else {
+          element("traffic-status").textContent = "Collecting the first sample...";
+        }
+        previousTrafficSample = { time: sampledAt, totals: totals };
+        drawTrafficChart();
+      } catch (error) {
+        if (!trafficSamplingAllowed) return;
+        resetTrafficHistory();
+        if (error.status === 401) {
+          stopTrafficSampling("The admin token was rejected. Check it again to restart live traffic sampling.");
+        } else {
+          element("traffic-status").textContent =
+            "Live traffic update failed: " + error.message + ". Retrying in 2 seconds.";
+        }
+      } finally {
+        trafficRequestInFlight = false;
+      }
+    }
+
+    async function startTrafficSampling() {
+      trafficSamplingAllowed = true;
+      if (trafficPollTimer !== null) {
+        window.clearInterval(trafficPollTimer);
+        trafficPollTimer = null;
+      }
+      resetTrafficHistory();
+      if (document.hidden) {
+        element("traffic-status").textContent = "Sampling will start when this tab is visible.";
+        return;
+      }
+      await pollTraffic();
+      if (trafficSamplingAllowed && trafficPollTimer === null) {
+        trafficPollTimer = window.setInterval(pollTraffic, TRAFFIC_POLL_INTERVAL_MS);
+      }
     }
 
     function refreshAfterSuccess(message) {
@@ -2219,6 +2442,7 @@ DASHBOARD_HTML = """<!doctype html>
           deviceSelect.appendChild(option);
         });
       });
+      updateTrafficDeviceOptions(data.devices);
       populateServiceQuotaDomains();
       populateTimeQuotaDomains();
     }
@@ -2468,6 +2692,7 @@ DASHBOARD_HTML = """<!doctype html>
       showMessage("Checking the admin token...", "working");
       try {
         const result = await loadAdminTools();
+        if (result.ok) await startTrafficSampling();
         status.textContent = result.ok ? result.message : "Token check failed: " + result.message;
         status.className = "token-check-status " + (result.ok ? "success" : "error");
         showMessage(status.textContent, result.ok ? "success" : "error");
@@ -2709,6 +2934,38 @@ DASHBOARD_HTML = """<!doctype html>
     element("service-quota-device").addEventListener("change", () => populateServiceQuotaDomains());
     element("time-quota-device").addEventListener("change", () => populateTimeQuotaDomains());
     element("check-admin-token").addEventListener("click", checkAdminToken);
+    element("admin-token").addEventListener("input", () => {
+      stopTrafficSampling("Token changed. Choose Check token to restart live traffic sampling.");
+      element("token-check-status").textContent = "Token changed. Choose Check token to load diagnostics.";
+      element("token-check-status").className = "token-check-status";
+    });
+    element("traffic-device").addEventListener("change", () => {
+      if (!trafficSamplingAllowed) return;
+      resetTrafficHistory();
+      element("traffic-status").textContent = "Changing the device view...";
+      pollTraffic();
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        if (trafficPollTimer !== null) {
+          window.clearInterval(trafficPollTimer);
+          trafficPollTimer = null;
+        }
+        resetTrafficHistory();
+        if (trafficSamplingAllowed) element("traffic-status").textContent = "Sampling paused while this tab is hidden.";
+        return;
+      }
+      if (trafficSamplingAllowed) {
+        element("traffic-status").textContent = "Resuming live traffic sampling...";
+        pollTraffic().then(() => {
+          if (trafficSamplingAllowed && trafficPollTimer === null) {
+            trafficPollTimer = window.setInterval(pollTraffic, TRAFFIC_POLL_INTERVAL_MS);
+          }
+        });
+      }
+      drawTrafficChart();
+    });
+    window.addEventListener("resize", drawTrafficChart);
     element("toast-dismiss").addEventListener("click", dismissToast);
     element("refresh-diagnostics").addEventListener("click", async (event) => {
       const button = event.currentTarget;
@@ -2718,6 +2975,7 @@ DASHBOARD_HTML = """<!doctype html>
       showMessage("Refreshing diagnostics...", "working");
       try {
         const result = await loadAdminTools();
+        if (result.ok) await startTrafficSampling();
         element("token-check-status").textContent = result.message;
         element("token-check-status").className = "token-check-status " + (result.ok ? "success" : "error");
         showMessage(result.message, result.ok ? "success" : "error");
