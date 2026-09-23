@@ -181,6 +181,7 @@ Suggested commits:
 Goal: produce evidence that the selected profile changes observed network behavior.
 
 - [ ] Add counters for packets, bytes, drops and active state.
+- [x] Show per-device upload and download rates in a live dashboard graph.
 - [ ] Add a latency measurement page.
 - [ ] Add a small scripted test client.
 - [ ] Compare normal and impaired runs.

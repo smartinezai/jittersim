@@ -34,6 +34,7 @@ is a private lab tool, not a replacement for a home router.
 - Connected-device discovery with device names, IP addresses and MAC addresses.
 - Click-to-select devices and assign profiles from the dashboard.
 - Device groups that apply one profile override to several devices at once.
+- A live upload and download graph with packet rates for assigned devices.
 - MAC address allowlists and denylists.
 - A global blocked-site list.
 - Profile-specific website lists that allow selected services while blocking
@@ -118,6 +119,11 @@ Website rules, service quotas and device-data progression are best-effort. VPNs,
 encrypted DNS, direct IP access, cached connections and shared hosting can hide
 traffic or reduce accuracy. The device must use the Pi as its gateway. Backups
 include device details and observed domain names, so keep them private.
+
+The live graph samples the Pi's device counters every two seconds and shows the
+latest minute. It counts traffic before JitterSim adds delay or drops packets,
+so it shows what reaches JitterSim, not the speed a device successfully
+receives. Use a test on the connected device to check its experience.
 
 ## Dashboard modes
 

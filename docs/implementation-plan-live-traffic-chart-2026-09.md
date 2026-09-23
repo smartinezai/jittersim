@@ -23,6 +23,9 @@ traffic seen by JitterSim, not a separate measurement of internet speed.
 - Firewall counters count traffic handled by JitterSim. They are useful for
   comparing activity before and after a profile, but they are not an end-device
   speed test or a direct measure of experienced latency or packet loss.
+- The device counters are recorded before JitterSim's traffic-control queues.
+  The graph therefore shows traffic reaching JitterSim, not the final speed a
+  test device receives after delay or packet loss.
 - No database migration or stored samples are needed. The installer and helper
   protocol change together and will require a Pi redeployment.
 
