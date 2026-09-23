@@ -1,10 +1,14 @@
 import json
+import shutil
+import socket
 import ssl
+import subprocess
+import tempfile
+import threading
 import unittest
 from email.message import Message
 from io import BytesIO
 from pathlib import Path
-from unittest.mock import patch
 
 from jittersim.api.server import DASHBOARD_HTML, ControlRequestHandler, ControlServer
 from jittersim.config.models import Device, DomainObservation, Impairment, Profile
@@ -237,30 +241,65 @@ class ControlServerTests(unittest.TestCase):
                 tls_certfile=Path("dashboard.crt"),
             )
 
-        class FakeTlsContext:
-            minimum_version = None
-
-            def load_cert_chain(self, _certificate, _key):
-                return None
-
-            def wrap_socket(self, sock, *, server_side):
-                self.server_side = server_side
-                return sock
-
-        tls_context = FakeTlsContext()
-        with patch("jittersim.api.server.ssl.SSLContext", return_value=tls_context):
+        openssl = shutil.which("openssl")
+        if openssl is None:
+            self.skipTest("OpenSSL is required to create a test certificate")
+        with tempfile.TemporaryDirectory(prefix="jittersim-tls-test-") as directory:
+            certificate = Path(directory) / "dashboard.crt"
+            key = Path(directory) / "dashboard.key"
+            subprocess.run(
+                [
+                    openssl,
+                    "req",
+                    "-x509",
+                    "-newkey",
+                    "rsa:2048",
+                    "-sha256",
+                    "-nodes",
+                    "-days",
+                    "1",
+                    "-keyout",
+                    str(key),
+                    "-out",
+                    str(certificate),
+                    "-subj",
+                    "/CN=127.0.0.1",
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
             secure_server = ControlServer(
                 ("127.0.0.1", 0),
                 self.repository,
-                tls_certfile=Path("dashboard.crt"),
-                tls_keyfile=Path("dashboard.key"),
+                tls_certfile=certificate,
+                tls_keyfile=key,
             )
-        try:
-            self.assertTrue(secure_server.secure_transport)
-            self.assertEqual(tls_context.minimum_version, ssl.TLSVersion.TLSv1_2)
-            self.assertTrue(tls_context.server_side)
-        finally:
-            secure_server.server_close()
+            response: list[bytes] = []
+
+            def send_health_request() -> None:
+                context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+                context.maximum_version = ssl.TLSVersion.TLSv1_2
+                with socket.create_connection(secure_server.server_address) as connection:
+                    with context.wrap_socket(connection, server_hostname="127.0.0.1") as client:
+                        client.sendall(
+                            b"GET /api/health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n"
+                        )
+                        response.append(client.recv(4096))
+
+            client_thread = threading.Thread(target=send_health_request)
+            client_thread.start()
+            try:
+                secure_server.handle_request()
+                client_thread.join(timeout=2)
+            finally:
+                secure_server.server_close()
+
+        self.assertTrue(secure_server.secure_transport)
+        self.assertEqual(len(response), 1)
+        self.assertTrue(response[0].startswith(b"HTTP/1.0 200 OK"))
 
     def test_data_limit_endpoint_preserves_usage_and_can_reset_it(self) -> None:
         status, _, body = self.server.write_response_for(
