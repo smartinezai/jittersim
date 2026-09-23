@@ -125,6 +125,10 @@ include device details and observed domain names, so keep them private.
   traffic.
 - **Hardware mode** uses the Pi helper to apply the saved plan.
 
+Enter the admin token in the **Control token** box and click **Check token** to
+load diagnostics. Dashboard actions show when they start and whether they
+worked, without requiring you to scroll to the status area.
+
 For a Vodafone TG3442DE, the dashboard can read the primary Wi-Fi settings and
 turn the primary Wi-Fi radios on or off. The router password is used for one
 authenticated request and is not saved. Keep the Pi connected by Ethernet
