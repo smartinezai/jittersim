@@ -1,7 +1,7 @@
-from pathlib import Path
 import tempfile
 import threading
 import unittest
+from pathlib import Path
 
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.engine.compiler import compile_plan
@@ -336,7 +336,28 @@ class HelperServiceTests(unittest.TestCase):
         self.assertEqual(response["action"], "traffic-counters")
         self.assertEqual(
             response["counters"],
-            {"devices": {"alice": 2_000}, "services": {"alice-video": 300}},
+            {
+                "devices": {"alice": 2_000},
+                "services": {"alice-video": 300},
+                "directions": {
+                    "devices": {
+                        "alice": {
+                            "upload_bytes": 1_200,
+                            "download_bytes": 800,
+                            "upload_packets": 3,
+                            "download_packets": 4,
+                        }
+                    },
+                    "services": {
+                        "alice-video": {
+                            "upload_bytes": 300,
+                            "download_bytes": 0,
+                            "upload_packets": 1,
+                            "download_packets": 0,
+                        }
+                    },
+                },
+            },
         )
         self.assertEqual(
             executor.commands[0].argv,
@@ -396,6 +417,39 @@ class UnixHelperServerTests(unittest.TestCase):
         self.assertEqual(
             client.uplink_info(),
             {"interface": "eth0", "connection_name": None, "gateway": None},
+        )
+
+    def test_client_reads_directional_traffic_counters_over_the_socket(self) -> None:
+        output = (
+            '{"nftables":[{"rule":{"comment":"usage-device alice upload",'
+            '"expr":[{"counter":{"packets":3,"bytes":1200}}]}}]}'
+        )
+        traffic_socket = Path(self.temp_dir.name) / "traffic.sock"
+        traffic_service = HelperService(
+            NetworkApplier(
+                executor=OutputExecutor(output),
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            )
+        )
+        traffic_server = UnixHelperServer(traffic_socket, traffic_service)
+        traffic_thread = threading.Thread(target=traffic_server.serve_forever)
+        traffic_thread.start()
+        try:
+            counters = HelperClient(socket_path=traffic_socket).traffic_counters()
+        finally:
+            traffic_server.shutdown()
+            traffic_server.server_close()
+            traffic_thread.join(timeout=2)
+
+        self.assertEqual(counters["devices"], {"alice": 1_200})
+        self.assertEqual(
+            counters["directions"]["devices"]["alice"],
+            {
+                "upload_bytes": 1_200,
+                "download_bytes": 0,
+                "upload_packets": 3,
+                "download_packets": 0,
+            },
         )
 
     def test_existing_regular_file_is_never_replaced_by_a_socket(self) -> None:

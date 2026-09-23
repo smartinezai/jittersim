@@ -4,13 +4,13 @@ import argparse
 import json
 import logging
 import os
-from pathlib import Path
 import re
 import socket
 import socketserver
 import stat
 import time
 from ipaddress import IPv4Address, IPv4Network
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from jittersim.config.models import ValidationError, normalize_domain
@@ -22,7 +22,6 @@ from .executor import CommandExecutionError, SubprocessExecutor
 from .router import RouterError, TG3442DERouter
 from .topology import Topology
 
-
 LOGGER = logging.getLogger(__name__)
 MAX_MESSAGE_BYTES = 256 * 1024
 _MAC_ADDRESS_PATTERN = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
@@ -33,7 +32,7 @@ _DNS_QUERY_PATTERN = re.compile(
 )
 _TRAFFIC_COUNTER_COMMENT_PATTERN = re.compile(
     r"^usage-(?P<kind>device|service) (?P<identifier>[a-z0-9][a-z0-9_-]{0,63}) "
-    r"(?:upload|download)$"
+    r"(?P<direction>upload|download)$"
 )
 _PRIVATE_NETWORKS = (
     IPv4Network("10.0.0.0/8"),
@@ -389,14 +388,14 @@ class HelperClient:
             raise HelperClientError("helper returned invalid DNS observations")
         return observations
 
-    def traffic_counters(self) -> Dict[str, Dict[str, int]]:
-        """Return byte counters grouped by device and service quota."""
+    def traffic_counters(self) -> Dict[str, Any]:
+        """Return total and per-direction traffic counters."""
 
         response = self._request({"action": "traffic-counters"})
         counters = response.get("counters")
         if not isinstance(counters, dict):
             raise HelperClientError("helper returned invalid traffic counters")
-        result: Dict[str, Dict[str, int]] = {}
+        result: Dict[str, Any] = {}
         for kind in ("devices", "services"):
             values = counters.get(kind)
             if not isinstance(values, dict):
@@ -413,6 +412,39 @@ class HelperClient:
                 ):
                     raise HelperClientError("helper returned invalid traffic counters")
                 result[kind][identifier] = value
+        raw_directions = counters.get("directions")
+        if not isinstance(raw_directions, dict):
+            raise HelperClientError("helper returned invalid traffic directions")
+        directions: Dict[str, Dict[str, Dict[str, int]]] = {}
+        for kind in ("devices", "services"):
+            values = raw_directions.get(kind)
+            if not isinstance(values, dict):
+                raise HelperClientError("helper returned invalid traffic directions")
+            directions[kind] = {}
+            for identifier, counts in values.items():
+                if (
+                    not isinstance(identifier, str)
+                    or not re.fullmatch(r"^[a-z0-9][a-z0-9_-]{0,63}$", identifier)
+                    or not isinstance(counts, dict)
+                ):
+                    raise HelperClientError("helper returned invalid traffic directions")
+                directions[kind][identifier] = {}
+                for field in (
+                    "upload_bytes",
+                    "download_bytes",
+                    "upload_packets",
+                    "download_packets",
+                ):
+                    value = counts.get(field)
+                    if (
+                        isinstance(value, bool)
+                        or not isinstance(value, int)
+                        or value < 0
+                        or value > 2**63 - 1
+                    ):
+                        raise HelperClientError("helper returned invalid traffic directions")
+                    directions[kind][identifier][field] = value
+        result["directions"] = directions
         return result
 
     def _request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -551,8 +583,8 @@ def _parse_dns_query_output(output: str, *, observed_at: int) -> List[Dict[str, 
     ]
 
 
-def _parse_traffic_counter_output(output: str) -> Dict[str, Dict[str, int]]:
-    """Extract only project-owned byte counters from nftables JSON output."""
+def _parse_traffic_counter_output(output: str) -> Dict[str, Any]:
+    """Extract project-owned byte and packet counters from nftables JSON."""
 
     try:
         payload = json.loads(output)
@@ -561,7 +593,11 @@ def _parse_traffic_counter_output(output: str) -> Dict[str, Dict[str, int]]:
     if not isinstance(payload, dict) or not isinstance(payload.get("nftables"), list):
         raise ValueError("nftables counter output has an invalid shape")
 
-    counters: Dict[str, Dict[str, int]] = {"devices": {}, "services": {}}
+    counters: Dict[str, Any] = {
+        "devices": {},
+        "services": {},
+        "directions": {"devices": {}, "services": {}},
+    }
     for item in payload["nftables"]:
         if not isinstance(item, dict) or not isinstance(item.get("rule"), dict):
             continue
@@ -571,18 +607,44 @@ def _parse_traffic_counter_output(output: str) -> Dict[str, Dict[str, int]]:
         if match is None:
             continue
         byte_count = None
+        packet_count = None
         for expression in rule.get("expr", []):
             if not isinstance(expression, dict) or not isinstance(expression.get("counter"), dict):
                 continue
-            candidate = expression["counter"].get("bytes")
-            if isinstance(candidate, int) and not isinstance(candidate, bool) and 0 <= candidate <= 2**63 - 1:
-                byte_count = candidate
+            counter = expression["counter"]
+            candidate_bytes = counter.get("bytes")
+            candidate_packets = counter.get("packets")
+            if (
+                isinstance(candidate_bytes, int)
+                and not isinstance(candidate_bytes, bool)
+                and 0 <= candidate_bytes <= 2**63 - 1
+            ):
+                byte_count = candidate_bytes
+                packet_count = (
+                    candidate_packets
+                    if isinstance(candidate_packets, int)
+                    and not isinstance(candidate_packets, bool)
+                    and 0 <= candidate_packets <= 2**63 - 1
+                    else 0
+                )
                 break
-        if byte_count is None:
+        if byte_count is None or packet_count is None:
             continue
         kind = "devices" if match.group("kind") == "device" else "services"
         identifier = match.group("identifier")
+        direction = match.group("direction")
         counters[kind][identifier] = counters[kind].get(identifier, 0) + byte_count
+        directional = counters["directions"][kind].setdefault(
+            identifier,
+            {
+                "upload_bytes": 0,
+                "download_bytes": 0,
+                "upload_packets": 0,
+                "download_packets": 0,
+            },
+        )
+        directional[f"{direction}_bytes"] += byte_count
+        directional[f"{direction}_packets"] += packet_count
     return counters
 
 
