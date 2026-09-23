@@ -299,6 +299,21 @@ DASHBOARD_HTML = """<!doctype html>
     }
     .device-empty { margin: 0; color: #91a8c1; }
     .connected-card { margin-top: 1rem; }
+    .traffic-card { margin-top: 1rem; }
+    .traffic-controls { display: grid; grid-template-columns: minmax(14rem, 0.75fr) minmax(0, 1.5fr); align-items: end; gap: 1rem; margin-top: 1rem; }
+    .traffic-controls label { max-width: 24rem; }
+    .traffic-status { margin: 0; color: #91a8c1; font-size: 0.82rem; }
+    .traffic-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.75rem; margin-top: 1rem; }
+    .traffic-metric { min-width: 0; padding: 0.75rem; border: 1px solid #2b435f; border-radius: 0.6rem; background: #0d1b2d; }
+    .traffic-metric span { display: block; color: #91a8c1; font-size: 0.76rem; }
+    .traffic-metric strong { display: block; margin-top: 0.25rem; color: #edf5ff; font-size: 1.05rem; overflow-wrap: anywhere; }
+    .traffic-chart-wrap { margin-top: 1rem; padding: 0.65rem; border: 1px solid #2b435f; border-radius: 0.65rem; background: #0b1727; }
+    #traffic-chart { display: block; width: 100%; height: 16rem; }
+    .traffic-legend { display: flex; flex-wrap: wrap; gap: 1rem; margin-top: 0.65rem; color: #91a8c1; font-size: 0.78rem; }
+    .traffic-legend span { display: inline-flex; align-items: center; gap: 0.4rem; }
+    .traffic-key { width: 0.75rem; height: 0.2rem; border-radius: 1rem; background: #70b7ff; }
+    .traffic-key.download { background: #70d7a9; }
+    .traffic-note { margin: 0.75rem 0 0; color: #91a8c1; font-size: 0.8rem; }
     .uplink-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.75rem; margin-top: 1rem; }
     .uplink-value { padding: 0.75rem; border: 1px solid #2b435f; border-radius: 0.6rem; background: #0d1b2d; }
     .uplink-value strong { display: block; color: #edf5ff; font-size: 0.95rem; overflow-wrap: anywhere; }
@@ -469,6 +484,8 @@ DASHBOARD_HTML = """<!doctype html>
       .quota-row-heading { display: block; }
       .quota-actions button { flex: 1; }
       .token-controls { align-items: stretch; flex-direction: column; }
+      .traffic-controls { grid-template-columns: 1fr; }
+      .traffic-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
     @media (prefers-reduced-motion: reduce) {
       button { transition: none; }
@@ -512,6 +529,37 @@ DASHBOARD_HTML = """<!doctype html>
       <span id="connected-count" class="count-badge">Checking...</span>
     </div>
     <div id="connected-devices" class="connected-list" aria-live="polite">Loading...</div>
+  </section>
+  <section class="card traffic-card" aria-labelledby="traffic-title">
+    <div class="section-heading">
+      <div>
+        <h2 id="traffic-title">Live traffic</h2>
+        <p>Recent traffic rates for assigned test devices</p>
+      </div>
+      <span id="traffic-window" class="count-badge">Last 60 seconds</span>
+    </div>
+    <div class="traffic-controls">
+      <label>Device
+        <select id="traffic-device">
+          <option value="all">All assigned devices</option>
+        </select>
+      </label>
+      <p id="traffic-status" class="traffic-status" role="status" aria-live="polite">Check the admin token to start live traffic sampling.</p>
+    </div>
+    <div class="traffic-metrics">
+      <div class="traffic-metric"><span>Upload rate</span><strong id="traffic-upload-rate">—</strong></div>
+      <div class="traffic-metric"><span>Download rate</span><strong id="traffic-download-rate">—</strong></div>
+      <div class="traffic-metric"><span>Upload packet rate</span><strong id="traffic-upload-packets">—</strong></div>
+      <div class="traffic-metric"><span>Download packet rate</span><strong id="traffic-download-packets">—</strong></div>
+    </div>
+    <div class="traffic-chart-wrap">
+      <canvas id="traffic-chart" width="900" height="320" role="img" aria-label="Live upload and download traffic rates over the last 60 seconds">Live traffic chart. Check the admin token to begin sampling.</canvas>
+      <div class="traffic-legend" aria-hidden="true">
+        <span><i class="traffic-key"></i>Upload</span>
+        <span><i class="traffic-key download"></i>Download</span>
+      </div>
+    </div>
+    <p class="traffic-note">These rates count traffic before JitterSim adds delay or drops packets. They show what reaches JitterSim, not the speed a device successfully receives. Only assigned devices are included. Check the admin token to start; sampling pauses when this tab is hidden.</p>
   </section>
   <section class="card uplink-card">
     <div class="section-heading">
