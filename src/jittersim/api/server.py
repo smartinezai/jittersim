@@ -5,6 +5,7 @@ import hmac
 import json
 import logging
 import os
+import ssl
 import time
 from dataclasses import asdict, replace
 from http import HTTPStatus
@@ -2900,14 +2901,29 @@ class ControlServer(HTTPServer):
         admin_token: Optional[str] = None,
         helper_client: Optional[HelperClient] = None,
         scheduler: Optional[RuntimeScheduler] = None,
+        tls_certfile: Optional[Path] = None,
+        tls_keyfile: Optional[Path] = None,
     ) -> None:
         if admin_token == "":
             raise ValueError("admin_token must not be empty")
+        if (tls_certfile is None) != (tls_keyfile is None):
+            raise ValueError("TLS certificate and key must be provided together")
+        tls_context = None
+        if tls_certfile is not None and tls_keyfile is not None:
+            tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            tls_context.minimum_version = ssl.TLSVersion.TLSv1_2
+            tls_context.load_cert_chain(str(tls_certfile), str(tls_keyfile))
+        bind_host = server_address[0]
+        if tls_context is None and bind_host not in {"127.0.0.1", "::1", "localhost"}:
+            raise ValueError("TLS is required when the dashboard listens beyond this device")
         self.repository = repository
         self.admin_token = admin_token
         self.helper_client = helper_client
         self.scheduler = scheduler
+        self.secure_transport = tls_context is not None
         super().__init__(server_address, ControlRequestHandler)
+        if tls_context is not None:
+            self.socket = tls_context.wrap_socket(self.socket, server_side=True)
 
     def response_for(self, path: str) -> Tuple[int, str, bytes]:
         """Build the response body for a supported GET path."""
@@ -4466,6 +4482,8 @@ def run_server(
     admin_token: Optional[str] = None,
     helper_socket_path: Optional[Path] = None,
     helper_timeout_seconds: float = 8.0,
+    tls_certfile: Optional[Path] = None,
+    tls_keyfile: Optional[Path] = None,
 ) -> None:
     """Run the dashboard until the process receives Ctrl-C."""
 
@@ -4488,6 +4506,8 @@ def run_server(
             admin_token=admin_token,
             helper_client=helper_client,
             scheduler=scheduler,
+            tls_certfile=tls_certfile,
+            tls_keyfile=tls_keyfile,
         ) as server:
             LOGGER.info("jittersim dashboard listening on %s:%s", host, port)
             try:
@@ -4506,6 +4526,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--helper-socket", type=Path)
     parser.add_argument("--helper-timeout-seconds", type=float, default=8.0)
+    parser.add_argument("--tls-cert", type=Path)
+    parser.add_argument("--tls-key", type=Path)
     return parser
 
 
@@ -4520,5 +4542,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         admin_token=os.environ.get("JITTERSIM_ADMIN_TOKEN"),
         helper_socket_path=arguments.helper_socket,
         helper_timeout_seconds=arguments.helper_timeout_seconds,
+        tls_certfile=arguments.tls_cert,
+        tls_keyfile=arguments.tls_key,
     )
     return 0

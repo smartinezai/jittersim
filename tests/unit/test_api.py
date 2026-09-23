@@ -1,7 +1,10 @@
 import json
+import ssl
 import unittest
 from email.message import Message
 from io import BytesIO
+from pathlib import Path
+from unittest.mock import patch
 
 from jittersim.api.server import DASHBOARD_HTML, ControlRequestHandler, ControlServer
 from jittersim.config.models import Device, DomainObservation, Impairment, Profile
@@ -223,6 +226,41 @@ class ControlServerTests(unittest.TestCase):
         self.assertNotIn("note", history[0])
         self.assertEqual(len(self.repository.list_recent_actions()), count_after_authorized_request)
         self.assertEqual(unauthorized["status"], 401)
+
+    def test_tls_requires_both_files_and_wraps_the_dashboard_socket(self) -> None:
+        with self.assertRaisesRegex(ValueError, "TLS is required"):
+            ControlServer(("0.0.0.0", 0), self.repository)
+        with self.assertRaisesRegex(ValueError, "provided together"):
+            ControlServer(
+                ("127.0.0.1", 0),
+                self.repository,
+                tls_certfile=Path("dashboard.crt"),
+            )
+
+        class FakeTlsContext:
+            minimum_version = None
+
+            def load_cert_chain(self, _certificate, _key):
+                return None
+
+            def wrap_socket(self, sock, *, server_side):
+                self.server_side = server_side
+                return sock
+
+        tls_context = FakeTlsContext()
+        with patch("jittersim.api.server.ssl.SSLContext", return_value=tls_context):
+            secure_server = ControlServer(
+                ("127.0.0.1", 0),
+                self.repository,
+                tls_certfile=Path("dashboard.crt"),
+                tls_keyfile=Path("dashboard.key"),
+            )
+        try:
+            self.assertTrue(secure_server.secure_transport)
+            self.assertEqual(tls_context.minimum_version, ssl.TLSVersion.TLSv1_2)
+            self.assertTrue(tls_context.server_side)
+        finally:
+            secure_server.server_close()
 
     def test_data_limit_endpoint_preserves_usage_and_can_reset_it(self) -> None:
         status, _, body = self.server.write_response_for(
