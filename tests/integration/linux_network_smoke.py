@@ -65,7 +65,19 @@ def main() -> None:
         ),
     )
     try:
-        applier.apply(plan=plan)
+        try:
+            applier.apply(plan=plan)
+        except ApplyError as error:
+            raise AssertionError(f"first apply failed: {error.cause.stderr}") from error
+        for interface in ("eth0", "jittersim0"):
+            queues = json.loads(
+                subprocess.check_output(["tc", "-j", "qdisc", "show", "dev", interface])
+            )
+            if not any(
+                queue.get("parent") == "10:1" and queue.get("kind") == "fq_codel"
+                for queue in queues
+            ):
+                raise AssertionError("ordinary traffic lost its fair queue")
         counters = json.loads(applier.traffic_counters())["nftables"]
         if not any(
             item.get("rule", {}).get("comment") == "usage-device alice upload"
@@ -73,11 +85,21 @@ def main() -> None:
         ):
             raise AssertionError("Linux did not return the device traffic counters")
         applier.apply(plan=plan)
-        applier.apply(plan=normal_plan)
+        try:
+            applier.apply(plan=normal_plan)
+        except ApplyError as error:
+            raise AssertionError(
+                f"normal profile transition failed: {error.cause.stderr}"
+            ) from error
         for interface in ("eth0", "jittersim0"):
-            output = subprocess.check_output(["tc", "-j", "qdisc", "show", "dev", interface])
-            if b'"handle":"12:"' in output:
-                raise AssertionError("stale service impairment remained after profile removal")
+            queues = json.loads(
+                subprocess.check_output(["tc", "-j", "qdisc", "show", "dev", interface])
+            )
+            if not any(
+                queue.get("handle") == "12:" and queue.get("kind") == "fq_codel"
+                for queue in queues
+            ):
+                raise AssertionError("ordinary service traffic did not regain a fair queue")
         applier.apply(plan=plan)
         applier.reset()
         applier.reset()

@@ -190,11 +190,43 @@ def _render_tc_commands(
                 *("0" for _ in range(16)),
             ),
             purpose=f"create project queue root on {interface}",
-        )
+        ),
+        Command(
+            executable="tc",
+            arguments=(
+                "qdisc",
+                "replace",
+                "dev",
+                interface,
+                "parent",
+                f"{ROOT_HANDLE}1",
+                "handle",
+                "100:",
+                "fq_codel",
+            ),
+            purpose=f"preserve fair queuing for ordinary traffic on {interface}",
+        ),
     ]
     for queue in queues:
         band = str(queue.mark + 1)
         child_handle = f"{queue.mark + 10}:"
+        commands.append(
+            Command(
+                executable="tc",
+                arguments=(
+                    "qdisc",
+                    "del",
+                    "dev",
+                    interface,
+                    "parent",
+                    f"{ROOT_HANDLE}{band}",
+                    "handle",
+                    child_handle,
+                ),
+                purpose=f"clear the previous queue for device {queue.device_id} on {interface}",
+                ignore_failure=True,
+            )
+        )
         if queue.impairment != Impairment():
             commands.append(
                 Command(
@@ -222,19 +254,19 @@ def _render_tc_commands(
                     executable="tc",
                     arguments=(
                         "qdisc",
-                        "del",
+                        "replace",
                         "dev",
                         interface,
                         "parent",
                         f"{ROOT_HANDLE}{band}",
                         "handle",
                         child_handle,
+                        "fq_codel",
                     ),
                     purpose=(
-                        f"remove stale impairment for device {queue.device_id} "
+                        f"preserve fair queuing for device {queue.device_id} "
                         f"on {interface}"
                     ),
-                    ignore_failure=True,
                 )
             )
         for protocol in ("ip", "ipv6"):

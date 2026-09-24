@@ -97,6 +97,11 @@ class RendererTests(unittest.TestCase):
         for command in root_commands:
             priomap_start = command.argv.index("priomap") + 1
         self.assertEqual(command.argv[priomap_start:], ("0",) * 16)
+        ordinary_queues = [
+            command for command in commands if "fair queuing for ordinary traffic" in command.purpose
+        ]
+        self.assertEqual([command.argv[-1] for command in ordinary_queues], ["fq_codel"] * 2)
+        self.assertEqual([command.argv[-4] for command in ordinary_queues], ["10:1"] * 2)
         first_device_filter = next(
             command for command in commands if command.purpose == "route ip mark 1 on eth0"
         )
@@ -118,12 +123,13 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(len(bob_filters), 2)
         ipv6_filters = [command for command in commands if "route ipv6 mark 2" in command.purpose]
         self.assertEqual(len(ipv6_filters), 2)
-        bob_cleanup = [
+        bob_queues = [
             command
             for command in commands
-            if "remove stale impairment for device bob" in command.purpose
+            if "fair queuing for device bob" in command.purpose
         ]
-        self.assertEqual(len(bob_cleanup), 2)
+        self.assertEqual(len(bob_queues), 2)
+        self.assertTrue(all(command.argv[-1] == "fq_codel" for command in bob_queues))
         quota_upload = [
             command
             for command in commands
