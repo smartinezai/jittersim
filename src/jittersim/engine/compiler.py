@@ -3,13 +3,14 @@
 from ipaddress import IPv4Address
 from typing import Mapping, Sequence
 
-from jittersim.config.models import Device, MacPolicy, Profile
+from jittersim.config.models import Device, MacPolicy, Profile, normalize_service_hostname
 
 from .plan import (
     Direction,
     MarkRule,
     NetworkPlan,
     QueueSpec,
+    ServiceAssignmentRule,
     ServiceQuotaRule,
     WebsiteFilter,
 )
@@ -21,6 +22,8 @@ class PlanError(ValueError):
 
 MAX_DEVICES_PER_PLAN = 15
 MAX_SERVICE_QUOTAS_PER_PLAN = 15
+MAX_SHAPED_MARKS_PER_PLAN = 15
+MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN = 200
 
 
 def compile_plan(
@@ -32,6 +35,7 @@ def compile_plan(
     website_filters: Sequence[WebsiteFilter] = (),
     blocked_device_addresses: Sequence[IPv4Address] = (),
     service_quota_rules: Sequence[ServiceQuotaRule] = (),
+    service_assignment_rules: Sequence[ServiceAssignmentRule] = (),
 ) -> NetworkPlan:
     """Compile device assignments into deterministic marks and directional queues."""
 
@@ -104,6 +108,15 @@ def compile_plan(
         raise PlanError(
             f"a plan cannot contain more than {MAX_SERVICE_QUOTAS_PER_PLAN} service quotas"
         )
+    if (
+        len(mark_rules) + len(service_quota_rules) + len(service_assignment_rules)
+        > MAX_SHAPED_MARKS_PER_PLAN
+    ):
+        raise PlanError(
+            "a plan cannot contain more than 15 combined devices and service rules"
+        )
+    if sum(len(rule.domains) for rule in service_assignment_rules) > MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN:
+        raise PlanError("a plan cannot contain more than 200 browser service domains")
     quota_ids = set()
     service_queues = []
     for index, quota_rule in enumerate(
@@ -127,7 +140,7 @@ def compile_plan(
             )
         if any(address.version != 4 for address in quota_rule.destination_addresses):
             raise PlanError("service quota contains a non-IPv4 destination")
-        if index > MAX_DEVICES_PER_PLAN + MAX_SERVICE_QUOTAS_PER_PLAN:
+        if index > MAX_SHAPED_MARKS_PER_PLAN:
             raise PlanError("service quota mark is outside the safe range")
         quota_ids.add(quota_rule.quota_id)
         service_queues.extend(
@@ -163,12 +176,71 @@ def compile_plan(
         )
     )
 
+    assignment_ids = set()
+    domains_by_device = {}
+    assignment_queues = []
+    normalized_assignments = []
+    for index, rule in enumerate(
+        sorted(service_assignment_rules, key=lambda assignment: assignment.assignment_id),
+        start=len(mark_rules) + len(service_quota_rules) + 1,
+    ):
+        if rule.assignment_id in assignment_ids:
+            raise PlanError(f"duplicate service assignment id: {rule.assignment_id}")
+        device = devices_by_id.get(rule.device_id)
+        if device is None or rule.device_ip != device.ipv4_address:
+            raise PlanError(f"service assignment {rule.assignment_id} references an unknown device")
+        if not rule.domains:
+            raise PlanError(f"service assignment {rule.assignment_id} has no domains")
+        try:
+            normalized_domains = tuple(
+                dict.fromkeys(normalize_service_hostname(domain) for domain in rule.domains)
+            )
+        except ValueError as error:
+            raise PlanError("service assignment must contain only DNS hostnames") from error
+        prior_domains = domains_by_device.setdefault(rule.device_id, [])
+        for domain in normalized_domains:
+            if any(
+                domain == prior or domain.endswith("." + prior) or prior.endswith("." + domain)
+                for prior in prior_domains
+            ):
+                raise PlanError(f"service assignment domains overlap on device {rule.device_id}")
+            prior_domains.append(domain)
+        assignment_ids.add(rule.assignment_id)
+        normalized_assignments.append(
+            ServiceAssignmentRule(
+                assignment_id=rule.assignment_id,
+                device_id=rule.device_id,
+                device_ip=device.ipv4_address,
+                domains=normalized_domains,
+                mark=index,
+                upload_impairment=rule.upload_impairment,
+                download_impairment=rule.download_impairment,
+            )
+        )
+        assignment_queues.extend(
+            (
+                QueueSpec(
+                    device_id=f"assignment:{rule.assignment_id}",
+                    direction=Direction.UPLOAD,
+                    mark=index,
+                    impairment=rule.upload_impairment,
+                ),
+                QueueSpec(
+                    device_id=f"assignment:{rule.assignment_id}",
+                    direction=Direction.DOWNLOAD,
+                    mark=index,
+                    impairment=rule.download_impairment,
+                ),
+            )
+        )
+
     return NetworkPlan(
         mark_rules=tuple(mark_rules),
-        queues=tuple(queues) + tuple(service_queues),
+        queues=tuple(queues) + tuple(service_queues) + tuple(assignment_queues),
         mac_policy=mac_policy,
         global_blocked_addresses=tuple(sorted(set(global_blocked_addresses), key=str)),
         website_filters=tuple(website_filters),
         blocked_device_addresses=tuple(sorted(set(blocked_device_addresses), key=str)),
         service_quota_rules=normalized_service_rules,
+        service_assignment_rules=tuple(normalized_assignments),
     )

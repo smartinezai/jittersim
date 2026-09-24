@@ -56,8 +56,10 @@ class HelperService:
         self,
         applier: NetworkApplier,
         router_factory: Optional[Callable[[str, str], TG3442DERouter]] = None,
+        active_plan_path: Optional[Path] = None,
     ) -> None:
         self._applier = applier
+        self._active_plan_path = active_plan_path
         self._router_factory = router_factory or (
             lambda address, password: TG3442DERouter(address=address, password=password)
         )
@@ -139,13 +141,49 @@ class HelperService:
         try:
             report = self._applier.apply(plan=plan)
         except ApplyError as error:
+            state_cleanup_failed = False
+            if error.cleanup_attempted and error.reset_error is None and self._active_plan_path is not None:
+                try:
+                    self._active_plan_path.unlink(missing_ok=True)
+                except OSError:
+                    state_cleanup_failed = True
+                    LOGGER.exception("could not clear the active plan after apply failure")
             LOGGER.exception("network plan apply failed")
             return {
                 "ok": False,
                 "error": "network plan apply failed",
-                "cleanup_failed": error.reset_error is not None,
+                "cleanup_failed": error.reset_error is not None or state_cleanup_failed,
             }
+        if self._active_plan_path is not None:
+            try:
+                self._write_active_plan(plan)
+            except OSError:
+                LOGGER.exception("could not publish the active network plan")
+                try:
+                    self._applier.reset()
+                    self._active_plan_path.unlink(missing_ok=True)
+                except (CommandExecutionError, OSError):
+                    LOGGER.exception("network cleanup failed after plan publication error")
+                return {"ok": False, "error": "network plan state could not be published"}
         return {"ok": True, "action": "apply", "commands_run": report.commands_run}
+
+    def _write_active_plan(self, plan: NetworkPlan) -> None:
+        path = self._active_plan_path
+        if path is None:
+            raise RuntimeError("active plan path is not configured")
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}")
+        try:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+                json.dump(plan_to_payload(plan), output, sort_keys=True)
+                output.write("\n")
+            os.chmod(temporary, 0o640)
+            os.replace(temporary, path)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
     def _handle_configure_ap(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         try:
@@ -224,7 +262,9 @@ class HelperService:
     def _handle_reset(self) -> Dict[str, Any]:
         try:
             commands_run = self._applier.reset()
-        except CommandExecutionError:
+            if self._active_plan_path is not None:
+                self._active_plan_path.unlink(missing_ok=True)
+        except (CommandExecutionError, OSError):
             LOGGER.exception("network reset failed")
             return {"ok": False, "error": "network reset failed"}
         return {"ok": True, "action": "reset", "commands_run": commands_run}
@@ -486,12 +526,14 @@ def run_helper(
 
     if not enable_hardware:
         raise HelperError("hardware mode requires --enable-hardware")
+    active_plan_path = socket_path.parent / "active-plan.json"
     service = HelperService(
         NetworkApplier(
             executor=SubprocessExecutor(timeout_seconds=timeout_seconds),
             topology=topology,
         ),
         router_factory=router_factory,
+        active_plan_path=active_plan_path,
     )
     with UnixHelperServer(socket_path, service) as server:
         try:

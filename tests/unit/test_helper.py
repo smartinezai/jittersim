@@ -4,8 +4,10 @@ import unittest
 from pathlib import Path
 
 from jittersim.config.models import Device, Impairment, Profile
+from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import compile_plan
 from jittersim.networking.applier import NetworkApplier
+from jittersim.networking.browser_proxy import load_active_plan
 from jittersim.networking.commands import CommandResult
 from jittersim.networking.executor import FakeExecutor
 from jittersim.networking.helper import (
@@ -114,7 +116,25 @@ class HelperServiceTests(unittest.TestCase):
         response = self.service.handle_payload({"action": "reset"})
 
         self.assertEqual(response["action"], "reset")
-        self.assertEqual(response["commands_run"], 3)
+        self.assertEqual(response["commands_run"], 1)
+
+    def test_publishes_and_clears_the_proxy_plan_with_network_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            plan_path = Path(directory) / "active-plan.json"
+            service = HelperService(
+                NetworkApplier(
+                    executor=FakeExecutor(),
+                    topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+                ),
+                active_plan_path=plan_path,
+            )
+            response = service.handle_payload(
+                {"action": "apply", "plan": plan_to_payload(make_plan())}
+            )
+            self.assertTrue(response["ok"])
+            self.assertEqual(load_active_plan(plan_path), make_plan())
+            self.assertTrue(service.handle_payload({"action": "reset"})["ok"])
+            self.assertFalse(plan_path.exists())
 
     def test_configures_the_local_access_point_without_router_commands(self) -> None:
         response = self.service.handle_payload(
@@ -319,6 +339,8 @@ class HelperServiceTests(unittest.TestCase):
             '"expr":[{"counter":{"packets":3,"bytes":1200}}]}},'
             '{"rule":{"comment":"usage-device alice download",'
             '"expr":[{"counter":{"packets":4,"bytes":800}}]}},'
+            '{"rule":{"comment":"usage-device alice upload",'
+            '"expr":[{"counter":{"packets":1,"bytes":100}}]}},'
             '{"rule":{"comment":"usage-service alice-video upload",'
             '"expr":[{"counter":{"packets":1,"bytes":300}}]}},'
             '{"rule":{"comment":"unrelated rule",'
@@ -337,14 +359,14 @@ class HelperServiceTests(unittest.TestCase):
         self.assertEqual(
             response["counters"],
             {
-                "devices": {"alice": 2_000},
+                "devices": {"alice": 2_100},
                 "services": {"alice-video": 300},
                 "directions": {
                     "devices": {
                         "alice": {
-                            "upload_bytes": 1_200,
+                            "upload_bytes": 1_300,
                             "download_bytes": 800,
-                            "upload_packets": 3,
+                            "upload_packets": 4,
                             "download_packets": 4,
                         }
                     },
@@ -361,7 +383,7 @@ class HelperServiceTests(unittest.TestCase):
         )
         self.assertEqual(
             executor.commands[0].argv,
-            ("nft", "-j", "list", "chain", "inet", "jittersim", "forward"),
+            ("nft", "-j", "list", "table", "inet", "jittersim"),
         )
 
     def test_rejects_invalid_traffic_counter_json(self) -> None:

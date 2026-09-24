@@ -1,8 +1,10 @@
+import json
 import unittest
 
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.engine.compiler import compile_plan
 from jittersim.networking.applier import ApplyError, NetworkApplier
+from jittersim.networking.commands import CommandResult
 from jittersim.networking.executor import CommandExecutionError, FakeExecutor
 from jittersim.networking.topology import Topology
 
@@ -28,6 +30,22 @@ class FailingResetExecutor(FakeExecutor):
         return super().run(command)
 
 
+class RootQueueExecutor(FakeExecutor):
+    def __init__(self, *, handle="10:", kind="prio", fail_on_index=None):
+        super().__init__(fail_on_index=fail_on_index)
+        self.handle = handle
+        self.kind = kind
+
+    def run(self, command):
+        if command.arguments[:3] == ("-j", "qdisc", "show"):
+            self.commands.append(command)
+            return CommandResult(
+                return_code=0,
+                stdout=json.dumps([{"handle": self.handle, "kind": self.kind}]),
+            )
+        return super().run(command)
+
+
 class NetworkApplierTests(unittest.TestCase):
     def setUp(self) -> None:
         self.topology = Topology(uplink_interface="eth0", test_interface="wlan0")
@@ -36,19 +54,32 @@ class NetworkApplierTests(unittest.TestCase):
         executor = FakeExecutor()
         report = NetworkApplier(executor=executor, topology=self.topology).apply(plan=make_plan())
 
-        self.assertEqual(report.commands_run, len(executor.commands))
+        self.assertEqual(report.commands_run, len(executor.commands) - 2)
         self.assertGreater(report.commands_run, 0)
 
     def test_reset_runs_project_cleanup_commands(self) -> None:
-        executor = FakeExecutor()
+        executor = RootQueueExecutor()
         commands_run = NetworkApplier(executor=executor, topology=self.topology).reset()
 
         self.assertEqual(commands_run, 3)
-        self.assertEqual(executor.commands[0].executable, "nft")
-        self.assertEqual([command.executable for command in executor.commands[1:]], ["tc", "tc"])
+        self.assertEqual(executor.commands[2].executable, "nft")
+        self.assertEqual([command.executable for command in executor.commands[3:]], ["tc", "tc"])
+
+    def test_reset_leaves_a_foreign_root_queue_alone(self) -> None:
+        executor = RootQueueExecutor(handle="20:", kind="htb")
+        commands_run = NetworkApplier(executor=executor, topology=self.topology).reset()
+
+        self.assertEqual(commands_run, 1)
+        self.assertFalse(any(command.arguments[:2] == ("qdisc", "del") for command in executor.commands))
+
+    def test_apply_rejects_a_foreign_root_queue_before_mutation(self) -> None:
+        executor = RootQueueExecutor(handle="20:", kind="htb")
+        with self.assertRaisesRegex(ApplyError, "could not safely change"):
+            NetworkApplier(executor=executor, topology=self.topology).apply(plan=make_plan())
+        self.assertFalse(any(command.executable == "nft" for command in executor.commands))
 
     def test_failed_apply_attempts_cleanup(self) -> None:
-        executor = FakeExecutor(fail_on_index=2)
+        executor = FakeExecutor(fail_on_index=4)
         applier = NetworkApplier(executor=executor, topology=self.topology)
 
         with self.assertRaisesRegex(ApplyError, "cleanup completed") as context:
@@ -56,10 +87,10 @@ class NetworkApplierTests(unittest.TestCase):
 
         self.assertEqual(context.exception.failed_command_index, 2)
         self.assertIsNone(context.exception.reset_error)
-        self.assertEqual(executor.commands[-3].purpose, "remove the project-owned nftables table")
+        self.assertEqual(executor.commands[-1].purpose, "remove the project-owned nftables table")
 
     def test_reports_when_cleanup_also_fails(self) -> None:
-        executor = FailingResetExecutor(fail_on_index=2)
+        executor = FailingResetExecutor(fail_on_index=4)
         applier = NetworkApplier(executor=executor, topology=self.topology)
 
         with self.assertRaisesRegex(ApplyError, "cleanup also failed") as context:

@@ -1,8 +1,8 @@
 """Encode and validate network plans for the control-plane wire format."""
 
+import re
 from dataclasses import asdict
 from ipaddress import AddressValueError, IPv4Address
-import re
 from typing import Any, Dict, List, Mapping, Set
 
 from jittersim.config.models import (
@@ -11,14 +11,21 @@ from jittersim.config.models import (
     MacPolicy,
     Randomness,
     ValidationError,
+    normalize_service_hostname,
 )
 
-from .compiler import MAX_DEVICES_PER_PLAN, MAX_SERVICE_QUOTAS_PER_PLAN
+from .compiler import (
+    MAX_DEVICES_PER_PLAN,
+    MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN,
+    MAX_SERVICE_QUOTAS_PER_PLAN,
+    MAX_SHAPED_MARKS_PER_PLAN,
+)
 from .plan import (
     Direction,
     MarkRule,
     NetworkPlan,
     QueueSpec,
+    ServiceAssignmentRule,
     ServiceQuotaRule,
     WebsiteFilter,
 )
@@ -128,6 +135,18 @@ def plan_to_payload(plan: NetworkPlan) -> Dict[str, Any]:
             }
             for rule in plan.service_quota_rules
         ],
+        "service_assignment_rules": [
+            {
+                "assignment_id": rule.assignment_id,
+                "device_id": rule.device_id,
+                "device_ip": str(rule.device_ip),
+                "domains": list(rule.domains),
+                "mark": rule.mark,
+                "upload_impairment": asdict(rule.upload_impairment),
+                "download_impairment": asdict(rule.download_impairment),
+            }
+            for rule in plan.service_assignment_rules
+        ],
     }
 
 
@@ -218,7 +237,7 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
             raise PlanCodecError(f"service_quota_rules[{index}].active is invalid")
         if (
             mark <= len(mark_data)
-            or mark > MAX_DEVICES_PER_PLAN + MAX_SERVICE_QUOTAS_PER_PLAN
+            or mark > MAX_SHAPED_MARKS_PER_PLAN
         ):
             raise PlanCodecError(f"service_quota_rules[{index}].mark is outside the safe range")
         service_key = f"quota:{quota_id}"
@@ -242,7 +261,66 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
             )
         )
 
-    if len(queue_data) != (len(mark_data) + len(service_quota_rules)) * 2:
+    assignment_data = _as_list(
+        plan_data.get("service_assignment_rules", []), "service_assignment_rules"
+    )
+    if len(mark_data) + len(service_quota_rules) + len(assignment_data) > MAX_SHAPED_MARKS_PER_PLAN:
+        raise PlanCodecError("a plan has too many shaped traffic classes")
+    if sum(
+        len(_as_list(_as_mapping(rule, "service assignment").get("domains"), "domains"))
+        for rule in assignment_data
+    ) > MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN:
+        raise PlanCodecError("a plan has too many browser service domains")
+    service_assignment_rules: List[ServiceAssignmentRule] = []
+    domains_by_device: Dict[str, List[str]] = {}
+    for index, raw_rule in enumerate(assignment_data):
+        rule_data = _as_mapping(raw_rule, f"service_assignment_rules[{index}]")
+        try:
+            assignment_id = rule_data["assignment_id"]
+            device_id = rule_data["device_id"]
+            device_ip = IPv4Address(rule_data["device_ip"])
+            domains = tuple(
+                normalize_service_hostname(domain)
+                for domain in _as_list(rule_data["domains"], "domains")
+            )
+            mark = _as_integer(rule_data["mark"], "service assignment mark")
+            upload_impairment = _impairment_from_payload(rule_data["upload_impairment"])
+            download_impairment = _impairment_from_payload(rule_data["download_impairment"])
+        except (AddressValueError, KeyError, TypeError, ValueError) as error:
+            raise PlanCodecError(f"service_assignment_rules[{index}] is invalid") from error
+        if not isinstance(assignment_id, str) or not _SAFE_QUOTA_ID_PATTERN.fullmatch(assignment_id):
+            raise PlanCodecError(f"service_assignment_rules[{index}].assignment_id is invalid")
+        if device_id not in marks_by_device or str(device_ip) != addresses_by_device[device_id]:
+            raise PlanCodecError(f"service_assignment_rules[{index}] references an unknown device")
+        if not domains or len(domains) > 100 or len(set(domains)) != len(domains):
+            raise PlanCodecError(f"service_assignment_rules[{index}].domains is invalid")
+        if mark <= len(mark_data) + len(service_quota_rules) or mark > MAX_SHAPED_MARKS_PER_PLAN:
+            raise PlanCodecError(f"service_assignment_rules[{index}].mark is outside the safe range")
+        key = f"assignment:{assignment_id}"
+        if key in service_marks or mark in service_marks.values():
+            raise PlanCodecError(f"duplicate service assignment mark {mark}")
+        prior_domains = domains_by_device.setdefault(device_id, [])
+        for domain in domains:
+            if any(
+                domain == prior or domain.endswith("." + prior) or prior.endswith("." + domain)
+                for prior in prior_domains
+            ):
+                raise PlanCodecError(f"overlapping service assignment domains on {device_id}")
+            prior_domains.append(domain)
+        service_marks[key] = mark
+        service_assignment_rules.append(
+            ServiceAssignmentRule(
+                assignment_id=assignment_id,
+                device_id=device_id,
+                device_ip=device_ip,
+                domains=domains,
+                mark=mark,
+                upload_impairment=upload_impairment,
+                download_impairment=download_impairment,
+            )
+        )
+
+    if len(queue_data) != (len(mark_data) + len(service_marks)) * 2:
         raise PlanCodecError("a plan must contain two queues per device or service")
 
     queues: List[QueueSpec] = []
@@ -279,8 +357,31 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
         for directions in directions_by_device.values()
     ):
         raise PlanCodecError("each device or service must have upload and download queues")
-    if len(directions_by_device) != len(marks_by_device) + len(service_quota_rules):
+    if len(directions_by_device) != len(marks_by_device) + len(service_marks):
         raise PlanCodecError("each device or service must have upload and download queues")
+    queue_impairments = {
+        (queue.device_id, queue.direction): queue.impairment for queue in queues
+    }
+    for key, upload, download in (
+        (
+            f"quota:{rule.quota_id}",
+            rule.upload_impairment,
+            rule.download_impairment,
+        )
+        for rule in service_quota_rules
+    ):
+        if (
+            queue_impairments[(key, Direction.UPLOAD)] != upload
+            or queue_impairments[(key, Direction.DOWNLOAD)] != download
+        ):
+            raise PlanCodecError("service queue impairment does not match its rule")
+    for rule in service_assignment_rules:
+        key = f"assignment:{rule.assignment_id}"
+        if (
+            queue_impairments[(key, Direction.UPLOAD)] != rule.upload_impairment
+            or queue_impairments[(key, Direction.DOWNLOAD)] != rule.download_impairment
+        ):
+            raise PlanCodecError("browser service queue impairment does not match its rule")
 
     try:
         mac_policy_data = _as_mapping(plan_data.get("mac_policy", {}), "mac_policy")
@@ -355,4 +456,5 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
         website_filters=tuple(website_filters),
         blocked_device_addresses=blocked_device_addresses,
         service_quota_rules=tuple(service_quota_rules),
+        service_assignment_rules=tuple(service_assignment_rules),
     )

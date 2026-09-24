@@ -1,8 +1,9 @@
 import unittest
+from ipaddress import IPv4Address
 
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.engine.compiler import PlanError, compile_plan
-from jittersim.engine.plan import Direction
+from jittersim.engine.plan import Direction, ServiceQuotaRule
 
 
 def make_device(device_id: str, address: str, profile_id: str = "normal") -> Device:
@@ -91,6 +92,28 @@ class CompilePlanTests(unittest.TestCase):
             compile_plan(
                 devices=devices,
                 profiles={"normal": Profile(id="normal", name="Normal")},
+            )
+
+    def test_rejects_a_combined_device_and_service_queue_overflow(self) -> None:
+        devices = tuple(
+            make_device(f"device-{index}", f"192.168.50.{index + 10}")
+            for index in range(15)
+        )
+        quota = ServiceQuotaRule(
+            quota_id="video",
+            device_id="device-0",
+            device_ip=IPv4Address("192.168.50.10"),
+            destination_addresses=(IPv4Address("203.0.113.10"),),
+            mark=0,
+            upload_impairment=Impairment(delay_ms=100),
+            download_impairment=Impairment(),
+        )
+
+        with self.assertRaisesRegex(PlanError, "combined devices and service rules"):
+            compile_plan(
+                devices=devices,
+                profiles={"normal": Profile(id="normal", name="Normal")},
+                service_quota_rules=(quota,),
             )
 
 
