@@ -21,6 +21,7 @@ from .models import (
     Randomness,
     RuntimeState,
     Schedule,
+    ServiceAssignment,
     ServiceQuota,
     TimeQuota,
     Timer,
@@ -210,6 +211,14 @@ class ConfigRepository:
                 used_bytes INTEGER NOT NULL,
                 counter_bytes INTEGER NOT NULL,
                 last_reset_at INTEGER NOT NULL,
+                enabled INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS service_assignments (
+                id TEXT PRIMARY KEY,
+                device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                domains_json TEXT NOT NULL,
+                profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
                 enabled INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS time_quotas (
@@ -1190,6 +1199,60 @@ class ConfigRepository:
             self._connection.rollback()
             raise StorageError(f"could not save service quota {quota.id}") from error
 
+    def list_service_assignments(self) -> tuple:
+        """Return immediate service assignments in stable identifier order."""
+
+        rows = self._connection.execute(
+            """
+            SELECT id, device_id, name, domains_json, profile_id, enabled
+            FROM service_assignments ORDER BY id
+            """
+        ).fetchall()
+        return tuple(self._service_assignment_from_row(row) for row in rows)
+
+    def save_service_assignment(self, assignment: ServiceAssignment) -> None:
+        """Insert or update an immediate service assignment."""
+
+        try:
+            self._connection.execute(
+                """
+                INSERT INTO service_assignments (
+                    id, device_id, name, domains_json, profile_id, enabled
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    device_id = excluded.device_id,
+                    name = excluded.name,
+                    domains_json = excluded.domains_json,
+                    profile_id = excluded.profile_id,
+                    enabled = excluded.enabled
+                """,
+                (
+                    assignment.id,
+                    assignment.device_id,
+                    assignment.name,
+                    json.dumps(list(assignment.domains)),
+                    assignment.profile_id,
+                    int(assignment.enabled),
+                ),
+            )
+            self._bump_configuration_version()
+            self._connection.commit()
+        except sqlite3.IntegrityError as error:
+            self._connection.rollback()
+            raise StorageError(f"could not save service assignment {assignment.id}") from error
+
+    def delete_service_assignment(self, assignment_id: str) -> bool:
+        """Remove one assignment and its matching rules on the next apply."""
+
+        cursor = self._connection.execute(
+            "DELETE FROM service_assignments WHERE id = ?", (assignment_id,)
+        )
+        if not cursor.rowcount:
+            return False
+        self._bump_configuration_version()
+        self._connection.commit()
+        return True
+
     def reset_service_quota_usage(
         self,
         quota_id: str,
@@ -1774,6 +1837,20 @@ class ConfigRepository:
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
             raise StorageError("stored group data limit is malformed") from error
+
+    @staticmethod
+    def _service_assignment_from_row(row: sqlite3.Row) -> ServiceAssignment:
+        try:
+            return ServiceAssignment(
+                id=row["id"],
+                device_id=row["device_id"],
+                name=row["name"],
+                domains=tuple(json.loads(row["domains_json"])),
+                profile_id=row["profile_id"],
+                enabled=bool(row["enabled"]),
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
+            raise StorageError("stored service assignment is malformed") from error
 
     @staticmethod
     def _service_quota_from_row(row: sqlite3.Row) -> ServiceQuota:

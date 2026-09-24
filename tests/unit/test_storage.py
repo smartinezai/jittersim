@@ -14,6 +14,7 @@ from jittersim.config.models import (
     Progression,
     Randomness,
     Schedule,
+    ServiceAssignment,
     ServiceQuota,
     TimeQuota,
     Timer,
@@ -54,6 +55,31 @@ class ConfigRepositoryTests(unittest.TestCase):
 
         self.assertEqual(self.repository.get_profile(profile.id), profile)
         self.assertEqual(self.repository.get_device(device.id), device)
+
+    def test_browser_service_assignment_survives_reopen_and_can_be_removed(self) -> None:
+        assignment = ServiceAssignment(
+            id="video",
+            device_id="alice",
+            name="Video",
+            domains=("youtube.com", "netflix.com"),
+            profile_id="slow",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            database = f"{directory}/settings.db"
+            first = ConfigRepository(database)
+            try:
+                first.save_profile(Profile(id="slow", name="Slow"))
+                first.save_device(Device("alice", "Alice", "192.168.50.10", "slow"))
+                first.save_service_assignment(assignment)
+            finally:
+                first.close()
+            reopened = ConfigRepository(database)
+            try:
+                self.assertEqual(reopened.list_service_assignments(), (assignment,))
+                self.assertTrue(reopened.delete_service_assignment("video"))
+                self.assertEqual(reopened.list_service_assignments(), ())
+            finally:
+                reopened.close()
 
     def test_round_trips_schedules_and_network_policies(self) -> None:
         self.repository.save_profile(Profile(id="slow", name="Slow"))

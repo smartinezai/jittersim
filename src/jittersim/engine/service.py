@@ -5,7 +5,7 @@ from dataclasses import replace
 from jittersim.config.storage import ConfigRepository
 
 from .compiler import compile_plan
-from .plan import NetworkPlan, ServiceQuotaRule
+from .plan import NetworkPlan, ServiceAssignmentRule, ServiceQuotaRule
 from .website import build_website_filters, resolve_domains
 
 
@@ -84,6 +84,25 @@ def compile_stored_plan(*, repository: ConfigRepository) -> NetworkPlan:
                     active=quota.used_bytes >= quota.limit_bytes,
                 )
             )
+    service_assignment_rules = []
+    for assignment in repository.list_service_assignments():
+        if not assignment.enabled:
+            continue
+        device = devices_by_id.get(assignment.device_id)
+        profile = profiles.get(assignment.profile_id)
+        if device is None or profile is None:
+            raise ValueError(f"service assignment {assignment.id} has a missing reference")
+        service_assignment_rules.append(
+            ServiceAssignmentRule(
+                assignment_id=assignment.id,
+                device_id=device.id,
+                device_ip=device.ipv4_address,
+                domains=assignment.domains,
+                mark=0,
+                upload_impairment=profile.upload,
+                download_impairment=profile.download,
+            )
+        )
     return compile_plan(
         devices=devices,
         profiles=profiles,
@@ -91,4 +110,5 @@ def compile_stored_plan(*, repository: ConfigRepository) -> NetworkPlan:
         global_blocked_addresses=global_blocked,
         website_filters=website_filters,
         service_quota_rules=service_quota_rules,
+        service_assignment_rules=service_assignment_rules,
     )

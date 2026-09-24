@@ -1,4 +1,5 @@
 import json
+import re
 import shutil
 import socket
 import ssl
@@ -33,6 +34,11 @@ class FakeHelper:
             raise HelperClientError("simulated helper failure")
         self.reset_called = True
         return {"ok": True, "action": "reset", "commands_run": 3}
+
+    def ping(self):
+        if self.fail_action == "ping":
+            raise HelperClientError("simulated helper failure")
+        return {"ok": True, "action": "ping"}
 
     def configure_access_point(self, *, ssid, password):
         return {"ok": True, "action": "configure-ap", "commands_run": 3}
@@ -185,10 +191,22 @@ class ControlServerTests(unittest.TestCase):
             json.loads(body),
             {
                 "helper_configured": False,
+                "helper_reachable": False,
                 "mode": "configuration-only",
                 "status": "ok",
             },
         )
+
+    def test_served_dashboard_script_parses(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is required to parse the served dashboard script")
+        script = re.search(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL)
+        self.assertIsNotNone(script)
+        result = subprocess.run(
+            [node, "--check"], input=script.group(1), text=True, capture_output=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_diagnostics_and_history_show_bounded_admin_information(self) -> None:
         self.server.helper_client = FakeHelper()
@@ -242,6 +260,28 @@ class ControlServerTests(unittest.TestCase):
                 "download_packets": 1,
             },
         )
+
+    def test_private_read_routes_require_token_including_backup(self) -> None:
+        self.server.admin_token = "admin-token"
+        for path in ("/api/backup", "/api/observations", "/api/devices", "/api/plan", "/api/service-assignments"):
+            with self.subTest(path=path):
+                handler = object.__new__(ControlRequestHandler)
+                handler.server = self.server
+                handler.path = path
+                handler.headers = Message()
+                response = {}
+                handler._send_response = lambda **values: response.update(values)
+                handler.do_GET()
+                self.assertEqual(response["status"], 401)
+                handler.headers["Authorization"] = "Bearer admin-token"
+                handler.do_GET()
+                self.assertEqual(response["status"], 200)
+
+    def test_health_reports_an_unreachable_helper(self) -> None:
+        self.server.helper_client = FakeHelper(fail_action="ping")
+        _, _, body = self.server.response_for("/api/health")
+        self.assertEqual(json.loads(body)["status"], "degraded")
+        self.assertFalse(json.loads(body)["helper_reachable"])
 
     def test_write_history_records_only_authorized_route_and_result(self) -> None:
         self.server.admin_token = "admin-token"
@@ -420,6 +460,40 @@ class ControlServerTests(unittest.TestCase):
         _, _, body = self.server.response_for("/api/service-quotas")
         self.assertEqual(json.loads(body)["service_quotas"][0]["name"], "Video service")
 
+    def test_browser_service_profile_accepts_direct_domains_and_rejects_overlap(self) -> None:
+        self.server.helper_client = FakeHelper()
+        profile = {
+            "id": "alice-video",
+            "device_id": "alice",
+            "name": "Video",
+            "domains": ["youtube.com", "netflix.com"],
+            "profile_id": "slow",
+            "enabled": True,
+        }
+        status, _, body = self.server.write_response_for("/api/service-assignments", profile)
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["live_applied"])
+        self.assertEqual(self.server.helper_client.applied_plan.service_assignment_rules[0].mark, 2)
+
+        status, _, _ = self.server.write_response_for(
+            "/api/service-assignments",
+            {**profile, "id": "alice-more", "domains": ["www.youtube.com"]},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(len(self.repository.list_service_assignments()), 1)
+
+        status, _, _ = self.server.write_response_for(
+            "/api/service-assignments",
+            {**profile, "id": "alice-address", "domains": ["203.0.113.10"]},
+        )
+        self.assertEqual(status, 400)
+
+        status, _, _ = self.server.write_response_for(
+            "/api/service-assignments/delete", {"id": "alice-video"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(self.repository.list_service_assignments(), ())
+
     def test_service_quota_rejects_a_domain_not_observed_for_the_device(self) -> None:
         status, _, body = self.server.write_response_for(
             "/api/service-quotas",
@@ -507,6 +581,7 @@ class ControlServerTests(unittest.TestCase):
             json.loads(body),
             {
                 "helper_configured": True,
+                "helper_reachable": True,
                 "mode": "hardware",
                 "status": "ok",
             },

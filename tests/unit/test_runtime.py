@@ -1,3 +1,5 @@
+import tempfile
+import threading
 import unittest
 from datetime import datetime
 from ipaddress import IPv4Address
@@ -16,8 +18,8 @@ from jittersim.config.models import (
     Schedule,
     ServiceQuota,
     TimeQuota,
-    time_quota_counter_id,
     Timer,
+    time_quota_counter_id,
 )
 from jittersim.config.storage import ConfigRepository
 from jittersim.engine.runtime import RuntimeScheduler
@@ -53,6 +55,56 @@ class RuntimeSchedulerTests(unittest.TestCase):
         self.repository.save_device(
             Device("alice", "Alice", "192.168.50.10", profile.id)
         )
+
+    def test_pause_waits_for_an_inflight_apply(self) -> None:
+        class BlockingHelper(RecordingHelper):
+            def __init__(self) -> None:
+                super().__init__()
+                self.entered = threading.Event()
+                self.release = threading.Event()
+                self.actions = []
+
+            def apply(self, *, plan):
+                self.entered.set()
+                if not self.release.wait(3):
+                    raise AssertionError("apply was not released")
+                self.actions.append("apply")
+
+            def reset(self):
+                self.actions.append("reset")
+
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = f"{directory}/jittersim.db"
+            with ConfigRepository(database_path) as repository:
+                repository.save_profile(Profile(id="normal", name="Normal"))
+                repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+            helper = BlockingHelper()
+            scheduler = RuntimeScheduler(database_path=database_path, helper_client=helper)
+            scheduler._paused = False
+            scheduler._current_payload = {}
+            apply_thread = threading.Thread(target=scheduler.tick)
+            reset_started = threading.Event()
+            reset_finished = threading.Event()
+
+            def reset_after_pause():
+                reset_started.set()
+                scheduler.pause()
+                helper.reset()
+                reset_finished.set()
+
+            reset_thread = threading.Thread(target=reset_after_pause)
+            apply_thread.start()
+            self.assertTrue(helper.entered.wait(3))
+            reset_thread.start()
+            self.assertTrue(reset_started.wait(3))
+            self.assertFalse(reset_finished.wait(0.1))
+            helper.release.set()
+            apply_thread.join(3)
+            reset_thread.join(3)
+            self.assertFalse(apply_thread.is_alive())
+            self.assertFalse(reset_thread.is_alive())
+            self.assertEqual(helper.actions, ["apply", "reset"])
+            self.assertFalse(scheduler.tick())
 
     def test_applies_only_when_the_runtime_plan_changes(self) -> None:
         profile = Profile(

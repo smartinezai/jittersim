@@ -7,9 +7,11 @@ import logging
 import os
 import ssl
 import time
+from contextlib import nullcontext
 from dataclasses import asdict, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from ipaddress import IPv4Network
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
@@ -27,6 +29,7 @@ from jittersim.config.models import (
     Randomness,
     RuntimeState,
     Schedule,
+    ServiceAssignment,
     ServiceQuota,
     TimeQuota,
     Timer,
@@ -36,7 +39,7 @@ from jittersim.config.models import (
 )
 from jittersim.config.storage import ConfigRepository, DatabasePath, StorageError
 from jittersim.engine.codec import plan_to_payload
-from jittersim.engine.compiler import PlanError
+from jittersim.engine.compiler import MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN, PlanError
 from jittersim.engine.progression import progression_factor
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.service import compile_stored_plan
@@ -61,6 +64,8 @@ WRITE_PATHS = frozenset(
         "/api/group-data-limits/reset",
         "/api/service-quotas",
         "/api/service-quotas/reset",
+        "/api/service-assignments",
+        "/api/service-assignments/delete",
         "/api/time-quotas",
         "/api/action-history",
         "/api/diagnostics",
@@ -81,15 +86,7 @@ WRITE_PATHS = frozenset(
     )
 )
 ACTION_PATHS = frozenset(("/api/apply", "/api/reset", "/api/observations/scan"))
-PROTECTED_READ_PATHS = frozenset(
-    (
-        "/api/data-limits",
-        "/api/group-data-limits",
-        "/api/service-quotas",
-        "/api/time-quotas",
-        "/api/traffic",
-    )
-)
+PUBLIC_READ_PATHS = frozenset(("/", "/api/health"))
 
 
 DASHBOARD_HTML = """<!doctype html>
@@ -1076,6 +1073,38 @@ DASHBOARD_HTML = """<!doctype html>
   <section class="card quota-card">
     <div class="section-heading">
       <div>
+        <h2>Browser service profile</h2>
+        <p>Apply a profile to named HTTPS sites on one managed test browser</p>
+      </div>
+      <span id="service-assignment-count" class="count-badge">No service profiles</span>
+    </div>
+    <form id="service-assignment-form">
+      <div class="fields">
+        <label>Service ID
+          <input id="service-assignment-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="alice-video">
+        </label>
+        <label>Service name
+          <input id="service-assignment-name" required placeholder="Video sites">
+        </label>
+        <label>Test device
+          <select id="service-assignment-device" required></select>
+        </label>
+        <label>Profile for these sites
+          <select id="service-assignment-profile" required></select>
+        </label>
+        <label class="quota-check"><input id="service-assignment-enabled" type="checkbox" checked> Enabled</label>
+      </div>
+      <label>HTTPS hostnames, one per line
+        <textarea id="service-assignment-domains" rows="4" required placeholder="netflix.com&#10;google.com&#10;youtube.com"></textarea>
+      </label>
+      <p class="form-note">Includes subdomains of each name. Configure the Mac browser's HTTPS proxy as 192.168.50.1:3128 while connected to the test Wi-Fi. Other proxied sites keep the device profile. Apps and connections that bypass the proxy are outside this control.</p>
+      <button class="primary" type="submit">Save browser service profile</button>
+    </form>
+    <div id="service-assignment-list" class="quota-list" aria-live="polite">Enter the admin token to view service profiles.</div>
+  </section>
+  <section class="card quota-card">
+    <div class="section-heading">
+      <div>
         <h2>Service data limit</h2>
         <p>Limit a service made up of several observed DNS domains</p>
       </div>
@@ -1125,7 +1154,7 @@ DASHBOARD_HTML = """<!doctype html>
       <label>Observed domains for this service
         <select id="service-quota-domains" class="quota-domain-picker" multiple required></select>
       </label>
-      <p class="form-note">Only domains observed from the selected device appear here. Select all names used by the service. Matching traffic is counted together at the service level then multiplied by the quota weight.</p>
+      <p class="form-note">Only domains observed from the selected device appear here. Select all names used by the service. Matching direct traffic is counted together then multiplied by the quota weight. Browser proxy tunnels are outside this limit.</p>
       <button class="primary" type="submit">Save service limit</button>
     </form>
     <div id="service-quota-list" class="quota-list" aria-live="polite">Enter the admin token to view service limits.</div>
@@ -1336,6 +1365,7 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     let helperConfigured = false;
+    let adminTokenVerified = false;
     let profiles = [];
     let groups = [];
     let observedDomainsByDevice = {};
@@ -2111,6 +2141,65 @@ DASHBOARD_HTML = """<!doctype html>
       quotas.forEach((quota) => container.appendChild(createQuotaRow({ quota, service: true })));
     }
 
+    function renderServiceAssignments(data) {
+      const assignments = data.service_assignments || [];
+      const container = element("service-assignment-list");
+      element("service-assignment-count").textContent = assignments.length +
+        (assignments.length === 1 ? " service profile" : " service profiles");
+      container.replaceChildren();
+      if (!assignments.length) {
+        container.textContent = data.error || "No browser service profiles saved.";
+        return;
+      }
+      assignments.forEach((assignment) => {
+        const row = document.createElement("div");
+        row.className = "quota-row";
+        const heading = document.createElement("div");
+        heading.className = "quota-heading";
+        const title = document.createElement("strong");
+        title.textContent = assignment.name + " (" + assignment.id + ")";
+        const detail = document.createElement("span");
+        detail.textContent = assignment.device_name + " → " + assignment.profile_name +
+          (assignment.enabled ? "" : " · disabled");
+        heading.append(title, detail);
+        const domains = document.createElement("span");
+        domains.textContent = assignment.domains.join(", ");
+        const actions = document.createElement("div");
+        actions.className = "quota-actions";
+        const editButton = document.createElement("button");
+        editButton.type = "button";
+        editButton.textContent = "Edit";
+        editButton.addEventListener("click", () => editServiceAssignment(assignment));
+        const deleteButton = document.createElement("button");
+        deleteButton.type = "button";
+        deleteButton.textContent = "Delete";
+        deleteButton.addEventListener("click", async () => {
+          setButtonBusy(deleteButton, true);
+          try {
+            await request("/api/service-assignments/delete", "POST", { id: assignment.id });
+            refreshAfterSuccess("Browser service profile deleted.");
+          } catch (error) {
+            showMessage(error.message, "error");
+          } finally {
+            setButtonBusy(deleteButton, false);
+          }
+        });
+        actions.append(editButton, deleteButton);
+        row.append(heading, domains, actions);
+        container.appendChild(row);
+      });
+    }
+
+    function editServiceAssignment(assignment) {
+      element("service-assignment-id").value = assignment.id;
+      element("service-assignment-name").value = assignment.name;
+      element("service-assignment-device").value = assignment.device_id;
+      element("service-assignment-profile").value = assignment.profile_id;
+      element("service-assignment-domains").value = assignment.domains.join("\\n");
+      element("service-assignment-enabled").checked = assignment.enabled;
+      element("service-assignment-form").scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+
     function renderTimeQuotas(data) {
       const quotas = data.time_quotas || [];
       const container = element("time-quota-list");
@@ -2362,6 +2451,14 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    async function loadServiceAssignments() {
+      try {
+        renderServiceAssignments(await request("/api/service-assignments", "GET"));
+      } catch (error) {
+        renderServiceAssignments({ service_assignments: [], error: error.message });
+      }
+    }
+
     async function scanObservations() {
       if (!helperConfigured || observationRequestInFlight) return;
       observationRequestInFlight = true;
@@ -2401,6 +2498,7 @@ DASHBOARD_HTML = """<!doctype html>
         "progression-end-profile",
         "data-limit-profile",
         "service-quota-profile",
+        "service-assignment-profile",
         "time-quota-profile",
         "group-profile",
         "group-data-limit-profile"
@@ -2430,6 +2528,7 @@ DASHBOARD_HTML = """<!doctype html>
         "progression-device",
         "data-limit-device",
         "service-quota-device",
+        "service-assignment-device",
         "time-quota-device",
         "group-devices"
       ].forEach((selectId) => {
@@ -2667,7 +2766,7 @@ DASHBOARD_HTML = """<!doctype html>
         const data = await request("/api/action-history", "GET");
         element("action-history").textContent = data.actions.length
           ? data.actions.map((action) => new Date(action.happened_at * 1000).toLocaleString() +
-              " — " + action.action + " — " + action.status_code).join("\n")
+              " — " + action.action + " — " + action.status_code).join("\\n")
           : "No admin actions have been recorded.";
       } catch (error) {
         element("action-history").textContent = error.message;
@@ -2692,12 +2791,18 @@ DASHBOARD_HTML = """<!doctype html>
       showMessage("Checking the admin token...", "working");
       try {
         const result = await loadAdminTools();
-        if (result.ok) await startTrafficSampling();
+        if (result.ok) {
+          adminTokenVerified = true;
+          await refresh();
+          await startTrafficSampling();
+        } else {
+          adminTokenVerified = false;
+        }
         status.textContent = result.ok ? result.message : "Token check failed: " + result.message;
         status.className = "token-check-status " + (result.ok ? "success" : "error");
         showMessage(status.textContent, result.ok ? "success" : "error");
-        if (result.ok) loadQuotas();
       } catch (error) {
+        adminTokenVerified = false;
         status.textContent = "Token check failed: " + error.message;
         status.className = "token-check-status error";
         showMessage(status.textContent, "error");
@@ -2725,6 +2830,7 @@ DASHBOARD_HTML = """<!doctype html>
         loadConnectedDevices(),
         loadUplink(),
         loadQuotas(),
+        loadServiceAssignments(),
         loadAdminTools()
       ]);
     }
@@ -3065,6 +3171,27 @@ DASHBOARD_HTML = """<!doctype html>
       }
     });
 
+    element("service-assignment-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const domains = element("service-assignment-domains").value.split(/[\\s,]+/).filter(Boolean);
+        if (!domains.length) throw new Error("Enter at least one HTTPS hostname.");
+        const result = await request("/api/service-assignments", "POST", {
+          id: element("service-assignment-id").value,
+          name: element("service-assignment-name").value,
+          device_id: element("service-assignment-device").value,
+          profile_id: element("service-assignment-profile").value,
+          domains: domains,
+          enabled: element("service-assignment-enabled").checked
+        });
+        refreshAfterSuccess(
+          result.live_applied ? "Browser service profile saved and applied." : "Browser service profile saved."
+        );
+      } catch (error) {
+        showMessage(error.message, "error");
+      }
+    });
+
     element("service-quota-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
@@ -3174,15 +3301,14 @@ DASHBOARD_HTML = """<!doctype html>
       routerAction("/api/router/wifi", { enabled: true }, "Turning on router Wi-Fi...", event.currentTarget);
     });
 
-    window.setInterval(loadConnectedDevices, 5000);
-    window.setInterval(loadTimers, 5000);
-    window.setInterval(loadProgressions, 5000);
-    window.setInterval(loadQuotas, 5000);
-    window.setInterval(loadObservations, 15000);
+    window.setInterval(() => { if (adminTokenVerified) loadConnectedDevices(); }, 5000);
+    window.setInterval(() => { if (adminTokenVerified) loadTimers(); }, 5000);
+    window.setInterval(() => { if (adminTokenVerified) loadProgressions(); }, 5000);
+    window.setInterval(() => { if (adminTokenVerified) loadQuotas(); }, 5000);
+    window.setInterval(() => { if (adminTokenVerified) loadObservations(); }, 15000);
 
-    refresh().catch((error) => {
+    loadHealth().catch((error) => {
       showMessage(error.message, "error");
-      element("plan").textContent = error.message;
     });
   </script>
 </body>
@@ -3295,6 +3421,19 @@ def _service_quota_payload(
         "profile_name": profile.name if profile is not None else quota.profile_id,
         "remaining_bytes": max(0, quota.limit_bytes - quota.used_bytes),
         "reached": quota.used_bytes >= quota.limit_bytes,
+    }
+
+
+def _service_assignment_payload(
+    assignment: ServiceAssignment, *, repository: ConfigRepository
+) -> Dict[str, Any]:
+    device = repository.get_device(assignment.device_id)
+    profile = repository.get_profile(assignment.profile_id)
+    return {
+        **asdict(assignment),
+        "domains": list(assignment.domains),
+        "device_name": device.name if device is not None else assignment.device_id,
+        "profile_name": profile.name if profile is not None else assignment.profile_id,
     }
 
 
@@ -3438,11 +3577,18 @@ class ControlServer(HTTPServer):
         if path == "/":
             return HTTPStatus.OK, "text/html; charset=utf-8", DASHBOARD_HTML.encode("utf-8")
         if path == "/api/health":
+            helper_reachable = False
+            if self.helper_client is not None:
+                try:
+                    helper_reachable = self.helper_client.ping().get("ok") is True
+                except HelperClientError:
+                    LOGGER.warning("network helper health check failed")
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {
-                    "status": "ok",
+                    "status": "ok" if self.helper_client is None or helper_reachable else "degraded",
                     "mode": "hardware" if self.helper_client is not None else "configuration-only",
                     "helper_configured": self.helper_client is not None,
+                    "helper_reachable": helper_reachable,
                 }
             )
         if path == "/api/profiles":
@@ -3528,6 +3674,15 @@ class ControlServer(HTTPServer):
                     "service_quotas": [
                         _service_quota_payload(quota, repository=self.repository)
                         for quota in self.repository.list_service_quotas()
+                    ]
+                }
+            )
+        if path == "/api/service-assignments":
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {
+                    "service_assignments": [
+                        _service_assignment_payload(assignment, repository=self.repository)
+                        for assignment in self.repository.list_service_assignments()
                     ]
                 }
             )
@@ -4019,6 +4174,75 @@ class ControlServer(HTTPServer):
                 _service_quota_payload(quota, repository=self.repository),
             )
 
+        if path == "/api/service-assignments":
+            try:
+                assignment = ServiceAssignment(
+                    id=payload["id"],
+                    device_id=payload["device_id"],
+                    name=payload["name"],
+                    domains=payload["domains"],
+                    profile_id=payload["profile_id"],
+                    enabled=payload.get("enabled", True),
+                )
+                device = self.repository.get_device(assignment.device_id)
+                if device is None or device.ipv4_address not in IPv4Network("192.168.50.0/24"):
+                    raise ValueError("device must be on the test Wi-Fi")
+                if self.repository.get_profile(assignment.profile_id) is None:
+                    raise ValueError("profile does not exist")
+                if assignment.enabled:
+                    other_assignments = tuple(
+                        current for current in self.repository.list_service_assignments()
+                        if current.enabled and current.id != assignment.id
+                    )
+                    if (
+                        len(assignment.domains)
+                        + sum(len(current.domains) for current in other_assignments)
+                        > MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN
+                    ):
+                        raise ValueError("too many browser service domains")
+                    enabled_assignments = len(other_assignments)
+                    configured_rules = (
+                        len(self.repository.list_devices())
+                        + sum(quota.enabled for quota in self.repository.list_service_quotas())
+                        + sum(quota.enabled for quota in self.repository.list_time_quotas())
+                        + enabled_assignments + 1
+                    )
+                    if configured_rules > 15:
+                        raise ValueError("too many combined device and service rules")
+                    existing = (
+                        current for current in other_assignments
+                        if current.device_id == assignment.device_id
+                    )
+                    if any(
+                        domain == previous or domain.endswith("." + previous)
+                        or previous.endswith("." + domain)
+                        for current in existing
+                        for domain in assignment.domains
+                        for previous in current.domains
+                    ):
+                        raise ValueError("service assignment domains overlap")
+                self.repository.save_service_assignment(assignment)
+            except (KeyError, TypeError, ValueError, StorageError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid service assignment configuration"}
+                )
+            return self._apply_quota_change(
+                "service_assignment",
+                _service_assignment_payload(assignment, repository=self.repository),
+            )
+
+        if path == "/api/service-assignments/delete":
+            assignment_id = payload.get("id")
+            if not isinstance(assignment_id, str):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid service assignment id"}
+                )
+            if not self.repository.delete_service_assignment(assignment_id):
+                return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                    {"error": "service assignment does not exist"}
+                )
+            return self._apply_quota_change("deleted_id", assignment_id)
+
         if path == "/api/service-quotas/reset":
             try:
                 quota_id = payload["id"]
@@ -4383,16 +4607,16 @@ class ControlServer(HTTPServer):
     def _apply_quota_change(
         self,
         key: str,
-        value: Dict[str, Any],
+        value: Any,
     ) -> Tuple[int, str, bytes]:
-        """Return a saved quota and apply it immediately when hardware is available."""
+        """Return saved settings and apply them when hardware is available."""
 
         if self.helper_client is None:
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {
                     key: value,
                     "live_applied": False,
-                    "message": "quota saved; apply the configuration in hardware mode to start it",
+                    "message": "settings saved; apply the configuration in hardware mode to start them",
                 }
             )
         status, content_type, body = self._apply_configuration()
@@ -4402,6 +4626,11 @@ class ControlServer(HTTPServer):
         return status, content_type, _json_bytes(response)
 
     def _apply_configuration(self) -> Tuple[int, str, bytes]:
+        operation = self.scheduler.control_operation() if self.scheduler is not None else nullcontext()
+        with operation:
+            return self._apply_configuration_locked()
+
+    def _apply_configuration_locked(self) -> Tuple[int, str, bytes]:
         if self.helper_client is None:
             return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
                 {"error": "network helper is not configured"}
@@ -4448,6 +4677,11 @@ class ControlServer(HTTPServer):
         )
 
     def _reset_network(self) -> Tuple[int, str, bytes]:
+        operation = self.scheduler.control_operation() if self.scheduler is not None else nullcontext()
+        with operation:
+            return self._reset_network_locked()
+
+    def _reset_network_locked(self) -> Tuple[int, str, bytes]:
         if self.helper_client is None:
             return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
                 {"error": "network helper is not configured"}
@@ -4514,7 +4748,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = urlsplit(self.path).path
-        if path in PROTECTED_READ_PATHS:
+        if path.startswith("/api/") and path not in PUBLIC_READ_PATHS:
             if self.server.admin_token is None:
                 self._send_response(
                     status=HTTPStatus.SERVICE_UNAVAILABLE,
