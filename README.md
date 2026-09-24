@@ -147,6 +147,22 @@ router Wi-Fi bypass JitterSim. The test Wi-Fi uses IPv4 sharing. Device rules
 and quotas match IPv4, while the browser proxy can connect to public IPv4 or
 IPv6 hosts for managed HTTPS traffic.
 
+Any household device can join the JitterSim Wi-Fi without a JitterSim device
+record. The DHCP service and ordinary internet forwarding run in
+NetworkManager, independently of the dashboard and network helper. A network
+plan only marks devices you add in the dashboard. Other clients use a normal
+fair queue when a profile is active. They do not inherit a selected device's
+delay, loss or bandwidth limit.
+
+**Do not switch the whole house to this AP yet.** The current setup is a
+separate IPv4 network behind NAT. Its firewall intentionally blocks access to
+the router's private network, which can break wired printers, TVs, NAS and
+other local services. It does not offer client IPv6 or normal discovery across
+the router boundary. The Pi's Wi-Fi coverage, sustained throughput and client
+capacity have not been measured in your house. A Pi outage would disconnect
+every device using its Wi-Fi. Keep the router's Wi-Fi available while following
+the [household trial](deploy/raspberry-pi/README.md#household-wi-fi-trial).
+
 Test Wi-Fi clients can use the Pi for public internet access but cannot reach
 the dashboard or private upstream addresses such as the Vodafone router's
 `192.168.0.1`. Dashboard changes also require the administrator token.

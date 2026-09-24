@@ -43,15 +43,19 @@ The installer creates the `jittersim-ap` Wi-Fi connection with DHCP, IPv4
 sharing and address `192.168.50.1/24`. DHCP gives out
 `192.168.50.100`–`192.168.50.199` so managed clients can use stable manual
 addresses outside that range. This requires NetworkManager 1.50 or newer.
-The installer stops with an explanation if the Pi has an older version. It
-installs a virtual environment,
-writes the systemd units, enables the management firewall and starts the
-browser proxy. Installed code is root-owned. It preserves existing credential
-files and an existing access-point password so an update does not silently
-invalidate access. The values in `ap.env` are the initial credentials. Later
-dashboard changes are stored in the network connection. The installer also
-creates a local HTTPS certificate. Its private key is readable only by root
-and the JitterSim service. The installer prints the certificate fingerprint.
+Before installing packages or changing services, the installer checks the
+NetworkManager version, Ethernet route, AP interface and subnet overlap. It
+does not replace an active Wi-Fi connection used for another purpose. It then
+installs a virtual environment, writes the systemd units, enables the
+management firewall and starts the browser proxy. Installed code is root-owned.
+An update does not restart an already active `jittersim-ap`. If saved AP
+settings changed, restart it during a planned maintenance window. The
+installer preserves existing credential files and an existing access-point
+password so an update does not silently invalidate access. The values in
+`ap.env` are the initial credentials. Later dashboard changes are stored in the
+network connection. The installer also creates a local HTTPS certificate. Its
+private key is readable only by root and the JitterSim service. The installer
+prints the certificate fingerprint.
 
 Open the dashboard at `https://jittersim.local:8080` or use the Pi's Ethernet
 address. Before trusting the local certificate in a browser, compare its
@@ -73,6 +77,49 @@ unchanged.
 
 Progression traffic mode is a local DNS-query signal. It is useful for testing
 changing behavior but it does not measure every packet or download byte.
+
+## Household Wi-Fi trial
+
+The AP can accept clients that have no dashboard device record. They get a
+DHCP address and ordinary internet access. Only devices with a record and an
+active profile get device-specific traffic marks. A plan keeps unconfigured
+clients on a fair queue even when one test client has delay or loss. The AP,
+DHCP and ordinary forwarding belong to NetworkManager, so they do not depend
+on the dashboard or helper process staying up. Leave global website blocks and
+MAC allowlists off during this trial because those controls can affect clients
+without a device record.
+
+This remains a routed, isolated test network. Wi-Fi clients cannot reach
+private addresses behind the Ethernet router. Wired clients cannot normally
+start connections to Wi-Fi clients through the Pi's NAT. Cross-network
+discovery, some casting and local equipment may fail. Client IPv6 is disabled.
+The Pi dashboard is blocked from this Wi-Fi, so use the management Ethernet
+network or the private Tailscale address for control.
+There is no automatic fallback if the Pi, its power supply, its radio or its
+Ethernet link fails. The built-in radio's coverage and load capacity need
+measurement on the actual Pi. Keep the router Wi-Fi on during the trial.
+
+1. Install while connected to the Pi over Ethernet. Confirm the installer
+   preflight passes and keep the router's Wi-Fi name available for recovery.
+2. Join an unconfigured laptop and another household device to the JitterSim
+   AP. Check automatic IP and DNS, web browsing, video and the local services
+   you use. Record anything that fails before moving more devices.
+3. Add just one test device with a delay profile. Repeatedly apply, change and
+   reset its profile while the unconfigured laptop runs a long download and
+   video call. Verify it remains connected and its traffic stays normal.
+4. Restart the dashboard and helper then reboot the Pi. Check that both clients
+   reconnect and ordinary traffic works. Watch `journalctl -u NetworkManager`
+   for AP or DHCP errors. Repeat under normal evening household load.
+5. Test every printer, TV, speaker, console, home automation device and remote
+   work connection you rely on. A device working on the router Wi-Fi does not
+   prove it will work through this separate subnet. If any service needs the
+   router LAN, leave it on the router Wi-Fi while a suitable household network
+   design is chosen.
+
+Do not turn off the router Wi-Fi until the trial succeeds on the actual Pi for
+the number of devices and physical coverage you need. Keep a wired admin path
+and the router Wi-Fi recovery route. The [implementation plan](../../docs/implementation-plan-household-access-point-2026-09.md)
+records the remaining network-design decision.
 
 ## Browser service profiles on a Mac
 

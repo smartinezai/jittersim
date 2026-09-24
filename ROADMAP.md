@@ -237,6 +237,28 @@ Native apps and browser paths that bypass it keep the ordinary device profile.
 The test Wi-Fi provides IPv4 client access. Service quotas still use their
 separate address-based matching.
 
+## Milestone 11: household access point readiness
+
+Goal: let the household join one JitterSim Wi-Fi while only chosen devices
+receive network effects. Do not turn off the router Wi-Fi until this has been
+verified on the target Pi under normal household load.
+
+- [x] Keep unconfigured clients out of device-specific profile rules.
+- [x] Give ordinary traffic a fair queue while selected devices are shaped.
+- [x] Check Ethernet routing, AP interface and subnet compatibility before
+  changing services during installation.
+- [x] Avoid restarting an active AP during a routine software update.
+- [ ] Decide whether Wi-Fi devices need the router's wired printers, TVs, NAS
+  and other private services. The current isolated subnet blocks them.
+- [ ] Choose and implement a household network design if normal wired-network
+  access and discovery are required.
+- [ ] Measure Wi-Fi coverage, client count, throughput and reconnection on the
+  actual Pi before migrating every device.
+- [ ] Verify an unconfigured device remains online through repeated profile
+  changes, helper restarts, dashboard restarts and a Pi reboot.
+
+See the [household plan](docs/implementation-plan-household-access-point-2026-09.md).
+
 ## Deliberate non-goals
 
 These should remain outside the first class-project scope:
