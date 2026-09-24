@@ -164,8 +164,8 @@ Goal: run the system headlessly on the Pi while preserving a reliable recovery p
 - [x] Add a configuration file for management and test interfaces.
 - [x] Add interface safety checks at startup.
 - [x] Restore the last applied plan or finish a reset after restart.
-- [ ] Document DHCP, NAT and the test Wi-Fi network.
-- [ ] Add an SSH reset procedure.
+- [x] Document DHCP, NAT and the test Wi-Fi network.
+- [x] Add an SSH reset procedure.
 
 Suggested commits:
 
@@ -214,6 +214,29 @@ Quota matching uses observed domain names resolved to IPv4 addresses. Services
 can use changing domains or shared delivery addresses. VPNs, encrypted DNS,
 direct IP access and IPv6 can therefore reduce accuracy.
 
+## Milestone 10: selective browser profiles and private control
+
+Goal: shape named HTTPS sites in a managed Mac browser and control the Pi from
+another location without exposing the dashboard publicly.
+
+- [x] Add editable browser service assignments with direct hostname entry.
+- [x] Keep other proxied sites on the device's ordinary queue even when a
+  selected site shares its server address.
+- [x] Bind the browser proxy to the isolated test network and reject private
+  destinations.
+- [x] Protect private dashboard reads and check helper health.
+- [x] Serialize apply and reset, enforce the Linux queue limit and preserve
+  foreign root queues.
+- [x] Provision the test AP and document Mac browser setup.
+- [x] Document opt-in Tailscale Serve, access rules and removal.
+- [ ] Verify network queues, Mac browser isolation, the AP and remote control
+  on the actual Pi from another location.
+
+The first browser release covers HTTPS CONNECT traffic sent through the proxy.
+Native apps and browser paths that bypass it keep the ordinary device profile.
+The test Wi-Fi provides IPv4 client access. Service quotas still use their
+separate address-based matching.
+
 ## Deliberate non-goals
 
 These should remain outside the first class-project scope:
@@ -228,9 +251,8 @@ These should remain outside the first class-project scope:
 
 The dashboard can control primary Wi-Fi on a Vodafone TG3442DE through its
 local web interface. Other router models still need manual control. JitterSim
-does not inspect HTTPS pages or promise complete website blocking. IPv6 is
-blocked from the test network while a plan is applied rather than shaped per
-device.
+does not inspect HTTPS pages or promise complete website blocking. The test AP
+does not offer client IPv6 while device rules remain IPv4 based.
 
 ## Definition of done for the class project
 

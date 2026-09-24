@@ -21,7 +21,7 @@ if ! getent passwd jittersim >/dev/null; then
     exit 1
 fi
 
-apt-get install -y nftables openssl python3-venv tcpdump
+apt-get install -y dnsmasq-base network-manager nftables openssl python3-venv tcpdump
 
 install -d -m 0750 -o root -g jittersim "$CONFIG_DIR"
 install -d -m 0750 -o jittersim -g jittersim "$DATA_DIR"
@@ -29,12 +29,13 @@ chown -R jittersim:jittersim "$DATA_DIR"
 install -d -m 0755 -o root -g root "$INSTALL_DIR"
 
 if [ "$SOURCE_DIR" != "$INSTALL_DIR" ]; then
-    cp -a "$SOURCE_DIR"/. "$INSTALL_DIR"/
+    cp -R "$SOURCE_DIR/pyproject.toml" "$SOURCE_DIR/README.md" \
+        "$SOURCE_DIR/src" "$SOURCE_DIR/deploy" "$INSTALL_DIR/"
 fi
 
 python3 -m venv "$INSTALL_DIR/.venv"
 "$INSTALL_DIR/.venv/bin/pip" install "$INSTALL_DIR"
-chown -R jittersim:jittersim "$INSTALL_DIR"
+chown -R root:root "$INSTALL_DIR"
 
 if [ ! -s "$CONFIG_DIR/control.env" ]; then
     admin_token=$(openssl rand -hex 32)
@@ -65,6 +66,44 @@ fi
 chown root:root "$CONFIG_DIR/runtime.env"
 chmod 0600 "$CONFIG_DIR/runtime.env"
 
+. "$CONFIG_DIR/runtime.env"
+for interface in "$JITTERSIM_UPLINK" "$JITTERSIM_TEST_INTERFACE"; do
+    if ! printf '%s\n' "$interface" | grep -Eq '^[A-Za-z0-9_.:-]{1,15}$' \
+        || [ "$interface" = lo ]; then
+        echo "runtime.env contains an unsafe interface name" >&2
+        exit 1
+    fi
+    if ! ip link show dev "$interface" >/dev/null 2>&1; then
+        echo "configured interface does not exist: $interface" >&2
+        exit 1
+    fi
+done
+if [ "$JITTERSIM_UPLINK" = "$JITTERSIM_TEST_INTERFACE" ]; then
+    echo "uplink and test interfaces must be different" >&2
+    exit 1
+fi
+
+. "$CONFIG_DIR/ap.env"
+if ! nmcli connection show jittersim-ap >/dev/null 2>&1; then
+    nmcli connection add type wifi ifname "$JITTERSIM_TEST_INTERFACE" \
+        con-name jittersim-ap ssid "$JITTERSIM_AP_SSID"
+    nmcli connection modify jittersim-ap \
+        802-11-wireless-security.key-mgmt wpa-psk \
+        802-11-wireless-security.psk "$JITTERSIM_AP_PASSWORD"
+fi
+if ! nmcli -g ipv4.shared-dhcp-range connection show jittersim-ap >/dev/null 2>&1; then
+    echo "NetworkManager 1.50 or newer is required for an isolated DHCP range" >&2
+    exit 1
+fi
+nmcli connection modify jittersim-ap \
+    connection.interface-name "$JITTERSIM_TEST_INTERFACE" \
+    connection.autoconnect yes \
+    802-11-wireless.mode ap \
+    ipv4.method shared \
+    ipv4.addresses 192.168.50.1/24 \
+    ipv4.shared-dhcp-range 192.168.50.100,192.168.50.199 \
+    ipv6.method disabled
+
 dashboard_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (p = 1; p <= NF; p++) if ($p == "src") {print $(p + 1); exit}}' || true)
 if [ -z "$dashboard_ip" ]; then
     dashboard_ip=127.0.0.1
@@ -89,9 +128,13 @@ chmod 0640 "$CONFIG_DIR/dashboard.key"
 chown root:root "$CONFIG_DIR/dashboard.crt"
 chmod 0644 "$CONFIG_DIR/dashboard.crt"
 
-install -m 0644 -o root -g root \
+sed \
+    -e "s/@UPLINK_INTERFACE@/$JITTERSIM_UPLINK/g" \
+    -e "s/@TEST_INTERFACE@/$JITTERSIM_TEST_INTERFACE/g" \
     "$SOURCE_DIR/deploy/raspberry-pi/jittersim-control-firewall.nft" \
-    "$CONFIG_DIR/jittersim-control-firewall.nft"
+    > "$CONFIG_DIR/jittersim-control-firewall.nft"
+chown root:root "$CONFIG_DIR/jittersim-control-firewall.nft"
+chmod 0644 "$CONFIG_DIR/jittersim-control-firewall.nft"
 install -m 0644 -o root -g root \
     "$SOURCE_DIR/deploy/raspberry-pi/jittersim-control-firewall.service" \
     /etc/systemd/system/jittersim-control-firewall.service
@@ -101,12 +144,17 @@ install -m 0644 -o root -g root \
 install -m 0644 -o root -g root \
     "$SOURCE_DIR/deploy/raspberry-pi/jittersim-dashboard.service" \
     /etc/systemd/system/jittersim-dashboard.service
+install -m 0644 -o root -g root \
+    "$SOURCE_DIR/deploy/raspberry-pi/jittersim-browser-proxy.service" \
+    /etc/systemd/system/jittersim-browser-proxy.service
 
 systemctl daemon-reload
 systemctl enable --now jittersim-control-firewall.service
-systemctl enable jittersim-helper.service jittersim-dashboard.service
+systemctl enable jittersim-helper.service jittersim-dashboard.service jittersim-browser-proxy.service
 systemctl restart jittersim-helper.service
 systemctl restart jittersim-dashboard.service
+nmcli connection up jittersim-ap
+systemctl restart jittersim-browser-proxy.service
 
 echo "JitterSim installed. Read the generated credentials locally from:" >&2
 echo "  $CONFIG_DIR/control.env" >&2

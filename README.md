@@ -1,8 +1,9 @@
 # JitterSim
 
 JitterSim is a Raspberry Pi tool for testing apps on an unreliable internet
-connection. The Pi connects to your Vodafone router (because that's what I have so no idea if it works with other routers) by Ethernet then creates a
-separate Wi-Fi network for test devices.
+connection. The Pi connects to a router by Ethernet then creates a separate
+Wi-Fi network for test devices. The optional router controls currently support
+the Vodafone TG3442DE.
 
 Use it only on equipment and networks that you own or are allowed to test. It
 is a private lab tool, not a replacement for a home router.
@@ -17,6 +18,8 @@ is a private lab tool, not a replacement for a home router.
 - Per-device profile assignment from the dashboard.
 - A safe configuration-only mode for building plans without changing traffic.
 - Hardware mode with a protected Pi helper that applies and resets plans.
+- Browser service profiles that shape selected HTTPS hostnames on a managed Mac
+  browser while other proxied sites keep the device's ordinary profile.
 
 ### Schedules, timers and randomness
 
@@ -78,6 +81,39 @@ bytes.
   access rules, diagnostics and a short history of admin actions.
 - Download a point-in-time backup of settings and local DNS observations.
 - Restore the last applied or reset state when the dashboard service restarts.
+- Optional private remote dashboard access through Tailscale Serve.
+
+### Browser service profiles
+
+Save a **Browser service profile** with a test device, a profile and one or
+more HTTPS hostnames. For example, one assignment can list `linkedin.com`,
+`netflix.com`, `google.com`, `microsoft.com` and `youtube.com`. A hostname also
+matches its subdomains. Separate assignments can give each service a different
+profile. These names are starting points. Add other hostnames actually used by
+each service, such as media or sign-in hosts, when you need them covered.
+
+On a Mac connected to the JitterSim test Wi-Fi, set the browser's **HTTPS
+proxy** to `192.168.50.1` port `3128`. The proxy uses the requested hostname
+for each HTTPS tunnel. Two sites on the same server address can receive
+different profiles. Other HTTPS tunnels use that device's ordinary profile.
+Traffic from devices outside the test Wi-Fi stays outside JitterSim. Existing
+proxy tunnels close when a new network plan is applied so the browser can open
+them with the current profile.
+
+This strict hostname selection covers HTTPS connections that the managed
+browser sends through the proxy. Native apps, browser traffic that bypasses the
+proxy, VPN traffic, plain HTTP, QUIC and connections without a hostname are not
+classified by the browser service profile. They can still receive the ordinary
+device profile. The test Wi-Fi is IPv4 only. A service may need several
+hostnames, so verify the actual requests for your test case. Device traffic
+counters include browser proxy tunnels. Existing service byte and time quotas
+use observed DNS and address matching for direct traffic and do not count
+browser proxy tunnels. See the [Pi guide](deploy/raspberry-pi/README.md)
+for Mac setup and a repeatable isolation check.
+
+One applied plan supports at most 15 combined devices and service rules and
+200 browser service hostnames. The dashboard rejects overlapping service
+domains on the same device and rejects server IP addresses as service names.
 
 Traffic discovery stores local summaries of DNS names and query counts. Select
 several observed names when creating a service quota because one service can
@@ -107,9 +143,9 @@ Vodafone router ── Ethernet ──> Raspberry Pi
 ```
 
 Only devices on the JitterSim test Wi-Fi are affected. Devices that stay on the
-router Wi-Fi bypass JitterSim. Device rules and quotas currently match IPv4.
-While a network plan is applied, IPv6 forwarding from the test Wi-Fi is blocked
-so it cannot bypass those rules. Resetting the network removes that block.
+router Wi-Fi bypass JitterSim. The test Wi-Fi uses IPv4 sharing. Device rules
+and quotas match IPv4, while the browser proxy can connect to public IPv4 or
+IPv6 hosts for managed HTTPS traffic.
 
 Test Wi-Fi clients can use the Pi for public internet access but cannot reach
 the dashboard or private upstream addresses such as the Vodafone router's
@@ -142,6 +178,13 @@ before changing router Wi-Fi. If a router firmware update changes its local
 web interface, use the direct router link or the manual Pi access-point form.
 See the [Pi deployment guide](deploy/raspberry-pi/README.md).
 
+For control from another location, join the Pi and laptop to your Tailscale
+network and privately serve the dashboard over the Pi's Tailscale name. Keep
+the admin token. This does not route the laptop's general internet traffic
+through the Pi. The [Pi guide](deploy/raspberry-pi/README.md#remote-control-with-tailscale)
+has setup, access rules, checks and removal steps. Tailscale's Personal plan
+is [free for eligible home use](https://tailscale.com/pricing).
+
 On the Pi, open the dashboard over HTTPS at `https://jittersim.local:8080` or
 the Pi's Ethernet address. The installer creates a local certificate and prints
 its SHA-256 fingerprint. Verify that fingerprint before trusting the
@@ -154,15 +197,26 @@ own local web interface still uses HTTP between the Pi and router.
 Local mode is safe for development:
 
 ```bash
+python3 -m venv .venv
+.venv/bin/pip install '.[dev]'
 export JITTERSIM_ADMIN_TOKEN='use-a-long-local-token'
-PYTHONPATH=src python3 -m jittersim.api --database ./jittersim.db
+PYTHONPATH=src .venv/bin/python -m jittersim.api --database ./jittersim.db
 ```
 
 Open <http://127.0.0.1:8080/>. Local development uses loopback HTTP; the Pi
 service uses HTTPS. Run the tests with:
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests -p 'test*.py'
+PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -p 'test*.py'
+```
+
+To check real Linux `tc`, `nft` and socket marking inside a disposable Docker
+network namespace:
+
+```bash
+docker run --rm --cap-add NET_ADMIN --cap-add NET_RAW \
+  -v "$PWD":/code:ro -w /code debian:bookworm-slim sh -c \
+  'apt-get update -qq && apt-get install -y -qq iproute2 nftables python3 >/dev/null && PYTHONPATH=src python3 tests/integration/linux_network_smoke.py'
 ```
 
 ## Project layout

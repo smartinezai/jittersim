@@ -1,0 +1,24 @@
+[Unit]
+Description=JitterSim managed browser proxy
+Requires=jittersim-helper.service jittersim-control-firewall.service
+After=NetworkManager.service jittersim-helper.service jittersim-control-firewall.service
+
+[Service]
+Type=simple
+User=jittersim
+Group=jittersim
+ExecStart=/opt/jittersim/.venv/bin/jittersim-browser-proxy --host 192.168.50.1 --port 3128 --plan /run/jittersim/active-plan.json
+Restart=on-failure
+RestartSec=2s
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
