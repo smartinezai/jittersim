@@ -21,7 +21,16 @@ if ! getent passwd jittersim >/dev/null; then
     exit 1
 fi
 
-apt-get install -y dnsmasq-base network-manager nftables openssl python3-venv tcpdump
+if [ -s "$CONFIG_DIR/runtime.env" ]; then
+    . "$CONFIG_DIR/runtime.env"
+else
+    JITTERSIM_UPLINK=eth0
+    JITTERSIM_TEST_INTERFACE=wlan0
+fi
+python3 "$SOURCE_DIR/deploy/raspberry-pi/preflight.py" \
+    --uplink "$JITTERSIM_UPLINK" --test-interface "$JITTERSIM_TEST_INTERFACE"
+
+apt-get install -y dnsmasq-base nftables openssl python3-venv tcpdump
 
 install -d -m 0750 -o root -g jittersim "$CONFIG_DIR"
 install -d -m 0750 -o jittersim -g jittersim "$DATA_DIR"
@@ -66,30 +75,19 @@ fi
 chown root:root "$CONFIG_DIR/runtime.env"
 chmod 0600 "$CONFIG_DIR/runtime.env"
 
-. "$CONFIG_DIR/runtime.env"
-for interface in "$JITTERSIM_UPLINK" "$JITTERSIM_TEST_INTERFACE"; do
-    if ! printf '%s\n' "$interface" | grep -Eq '^[A-Za-z0-9_.:-]{1,15}$' \
-        || [ "$interface" = lo ]; then
-        echo "runtime.env contains an unsafe interface name" >&2
-        exit 1
-    fi
-    if ! ip link show dev "$interface" >/dev/null 2>&1; then
-        echo "configured interface does not exist: $interface" >&2
-        exit 1
-    fi
-done
-if [ "$JITTERSIM_UPLINK" = "$JITTERSIM_TEST_INTERFACE" ]; then
-    echo "uplink and test interfaces must be different" >&2
-    exit 1
-fi
-
 . "$CONFIG_DIR/ap.env"
+ap_active_connection=$(nmcli -g GENERAL.CONNECTION device show "$JITTERSIM_TEST_INTERFACE")
+ap_settings_before=
 if ! nmcli connection show jittersim-ap >/dev/null 2>&1; then
     nmcli connection add type wifi ifname "$JITTERSIM_TEST_INTERFACE" \
-        con-name jittersim-ap ssid "$JITTERSIM_AP_SSID"
+        con-name jittersim-ap ssid "$JITTERSIM_AP_SSID" autoconnect no
     nmcli connection modify jittersim-ap \
         802-11-wireless-security.key-mgmt wpa-psk \
         802-11-wireless-security.psk "$JITTERSIM_AP_PASSWORD"
+else
+    ap_settings_before=$(nmcli -g \
+        connection.interface-name,connection.autoconnect,802-11-wireless.mode,ipv4.method,ipv4.addresses,ipv4.shared-dhcp-range,ipv6.method \
+        connection show jittersim-ap)
 fi
 if ! nmcli -g ipv4.shared-dhcp-range connection show jittersim-ap >/dev/null 2>&1; then
     echo "NetworkManager 1.50 or newer is required for an isolated DHCP range" >&2
@@ -103,6 +101,9 @@ nmcli connection modify jittersim-ap \
     ipv4.addresses 192.168.50.1/24 \
     ipv4.shared-dhcp-range 192.168.50.100,192.168.50.199 \
     ipv6.method disabled
+ap_settings_after=$(nmcli -g \
+    connection.interface-name,connection.autoconnect,802-11-wireless.mode,ipv4.method,ipv4.addresses,ipv4.shared-dhcp-range,ipv6.method \
+    connection show jittersim-ap)
 
 dashboard_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (p = 1; p <= NF; p++) if ($p == "src") {print $(p + 1); exit}}' || true)
 if [ -z "$dashboard_ip" ]; then
@@ -153,7 +154,14 @@ systemctl enable --now jittersim-control-firewall.service
 systemctl enable jittersim-helper.service jittersim-dashboard.service jittersim-browser-proxy.service
 systemctl restart jittersim-helper.service
 systemctl restart jittersim-dashboard.service
-nmcli connection up jittersim-ap
+if [ "$ap_active_connection" = jittersim-ap ]; then
+    if [ "$ap_settings_before" != "$ap_settings_after" ]; then
+        echo "AP settings were saved but the active Wi-Fi was not restarted." >&2
+        echo "Restart jittersim-ap during a planned maintenance window." >&2
+    fi
+else
+    nmcli connection up jittersim-ap
+fi
 systemctl restart jittersim-browser-proxy.service
 
 echo "JitterSim installed. Read the generated credentials locally from:" >&2
