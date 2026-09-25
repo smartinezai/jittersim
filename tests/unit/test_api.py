@@ -1780,7 +1780,10 @@ class ControlServerTests(unittest.TestCase):
         )
         for path, payload in (
             ("/api/groups", {"id": "family", "name": "Family", "device_ids": ["alice"]}),
-            ("/api/data-limits", {"device_id": "alice", "profile_id": "slow", "limit_bytes": 10**9}),
+            (
+                "/api/data-limits",
+                {"device_id": "alice", "profile_id": "slow", "limit_bytes": 10**9},
+            ),
             (
                 "/api/group-data-limits",
                 {"group_id": "family", "profile_id": "slow", "limit_bytes": 10**9},
