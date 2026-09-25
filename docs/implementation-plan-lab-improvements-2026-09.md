@@ -5,9 +5,8 @@
 Close the everyday gaps found in the September review. The dashboard cannot
 delete anything and shows profiles and devices as raw JSON, so it gains delete
 actions, readable tables and editing. An SSH-friendly `jittersim reset` gives a
-recovery path that does not depend on the dashboard. Profiles gain presets,
-bursty loss and a jitter distribution, and jitter no longer reorders packets
-by accident. Settings can be exported and imported as validated JSON so a class
+recovery path that does not depend on the dashboard. Profiles gain presets
+and bursty loss, and jitter no longer reorders packets by accident. Settings can be exported and imported as validated JSON so a class
 demonstration can be repeated. The live traffic panel shows what JitterSim
 itself dropped. Kernel tests move into the repository and the installer creates
 the test Wi-Fi network the helper expects.
@@ -41,12 +40,13 @@ the test Wi-Fi network the helper expects.
 - Presets fill the profile form and are only saved when the user saves. Their
   values are approximations, not measurements of real networks.
 - Bursty loss uses netem's Gilbert-Elliott model with the burst length in
-  packets. The configured loss percentage stays the average. The jitter
-  distribution uses the tables shipped with iproute2. When jitter is set without
-  a bandwidth limit, the queue gets a rate far above any link so netem keeps
-  packets in order. The Reorder setting still reorders deliberately. Existing
-  profiles keep their values; the new fields default to the current behavior
-  except for ordering.
+  packets. The configured loss percentage stays the average. When jitter is set
+  without a bandwidth limit, the queue gets a rate far above any link so netem
+  keeps packets in order. The Reorder setting still reorders deliberately.
+  Existing profiles keep their values; the new field defaults to the current
+  behavior. A jitter distribution was dropped: netem keeps a distribution table
+  until its queue is recreated, and there is no way to return to uniform jitter
+  in place, so switching would drop queued packets on every reroll.
 - Export contains settings only: profiles, devices, groups, schedules, access
   rules and limits. It excludes usage, DNS history, timers and progressions.
   Import validates every item and every reference first, then replaces the
@@ -68,8 +68,7 @@ the test Wi-Fi network the helper expects.
 3. The `reset` and `status` commands, external-reset handling in the
    scheduler and the installer's command link.
 4. Security headers and logging.
-5. Presets, bursty loss, jitter distribution and packet ordering, checked on a
-   Linux kernel.
+5. Presets, bursty loss and packet ordering, checked on a Linux kernel.
 6. Settings export and import.
 7. Drop and backlog counters in the helper, traffic API and live traffic panel.
 8. Kernel tests and the Docker runner.
