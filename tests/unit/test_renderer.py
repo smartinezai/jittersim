@@ -232,6 +232,36 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(flowids, expected)
         self.assertEqual(expected[-1], "10:10")
 
+    def test_blocked_sites_without_an_allowlist_keep_other_traffic(self) -> None:
+        plan = compile_plan(
+            devices=(
+                make_device("alice", "192.168.50.10", "normal"),
+                make_device("bob", "192.168.50.11", "normal"),
+            ),
+            profiles={"normal": Profile(id="normal", name="Normal")},
+            website_filters=(
+                WebsiteFilter(
+                    device_ip=IPv4Address("192.168.50.10"),
+                    allowed_addresses=None,
+                    blocked_addresses=(IPv4Address("203.0.113.30"),),
+                ),
+                WebsiteFilter(
+                    device_ip=IPv4Address("192.168.50.11"),
+                    allowed_addresses=(),
+                ),
+            ),
+        )
+
+        nft_script = render_command_plan(
+            plan=plan,
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+        )[1].stdin or ""
+
+        self.assertIn("ip saddr 192.168.50.10 ip daddr { 203.0.113.30 } drop", nft_script)
+        self.assertNotIn("ip saddr 192.168.50.10 drop", nft_script)
+        # An allow-only rule with no resolved addresses still blocks everything.
+        self.assertIn("ip saddr 192.168.50.11 drop", nft_script)
+
     def test_renders_jitter_even_without_a_base_delay(self) -> None:
         profile = Profile(
             id="jitter-only",

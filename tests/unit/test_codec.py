@@ -42,6 +42,24 @@ class PlanCodecTests(unittest.TestCase):
 
         self.assertEqual(plan_from_payload(plan_to_payload(plan)), plan)
 
+    def test_round_trips_a_website_filter_without_an_allowlist(self) -> None:
+        plan = compile_plan(
+            devices=(Device("alice", "Alice", "192.168.50.10", "slow"),),
+            profiles={"slow": Profile(id="slow", name="Slow")},
+            website_filters=(
+                WebsiteFilter(
+                    device_ip=IPv4Address("192.168.50.10"),
+                    allowed_addresses=None,
+                    blocked_addresses=(IPv4Address("203.0.113.30"),),
+                ),
+            ),
+        )
+
+        decoded = plan_from_payload(plan_to_payload(plan))
+
+        self.assertEqual(decoded, plan)
+        self.assertIsNone(decoded.website_filters[0].allowed_addresses)
+
     def test_round_trips_service_quota_rules(self) -> None:
         plan = compile_plan(
             devices=(Device("alice", "Alice", "192.168.50.10", "slow"),),

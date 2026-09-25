@@ -81,14 +81,14 @@ def _render_nft_script(plan: NetworkPlan) -> str:
             "comment \"block global website destinations\""
         )
     for website_filter in plan.website_filters:
-        allowed = _render_set(website_filter.allowed_addresses)
         if website_filter.allowed_addresses:
+            allowed = _render_set(website_filter.allowed_addresses)
             lines.append(
                 f"add rule inet {PROJECT_TABLE} forward iifname \"wlan0\" "
                 f"ip saddr {website_filter.device_ip} ip daddr != {allowed} drop "
                 "comment \"enforce profile website allowlist\""
             )
-        else:
+        elif website_filter.allowed_addresses is not None:
             lines.append(
                 f"add rule inet {PROJECT_TABLE} forward iifname \"wlan0\" "
                 f"ip saddr {website_filter.device_ip} drop "

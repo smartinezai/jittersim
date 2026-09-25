@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from enum import Enum
 from ipaddress import IPv4Address
-from typing import Tuple
+from typing import Optional, Tuple
 
 from jittersim.config.models import Impairment, MacPolicy
 
@@ -39,7 +39,8 @@ class WebsiteFilter:
     """Resolved destination addresses allowed or blocked for one test client."""
 
     device_ip: IPv4Address
-    allowed_addresses: Tuple[IPv4Address, ...]
+    # None means no allowlist. An empty tuple allows nothing.
+    allowed_addresses: Optional[Tuple[IPv4Address, ...]]
     blocked_addresses: Tuple[IPv4Address, ...] = ()
 
 
