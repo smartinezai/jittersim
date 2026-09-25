@@ -2215,7 +2215,10 @@ class ControlServerTests(unittest.TestCase):
             # A saved device keeps its own profile even when its address is listed.
             "  connectedTreatment({unaffected: true, assigned_profile_id: 'slow'}),\n"
             "];\n"
-            "everyoneElse = {profile_id: '3g', unaffected_devices: []};\n"
+            "everyoneElse = {profile_id: '3g', active_profile_id: '3g'};\n"
+            "labels.push(connectedTreatment({unaffected: false, assigned_profile_id: null}));\n"
+            # A schedule can give everyone else a profile for now.
+            "everyoneElse = {profile_id: null, active_profile_id: 'slow'};\n"
             "labels.push(connectedTreatment({unaffected: false, assigned_profile_id: null}));\n"
             "console.log(JSON.stringify(labels));\n",
         )
@@ -2228,8 +2231,80 @@ class ControlServerTests(unittest.TestCase):
                 "Normal connection",
                 "Saved device: Slow (also on the unaffected list)",
                 "Everyone else: 3G",
+                "Everyone else: Slow",
             ],
         )
+
+    def test_schedules_can_target_devices_groups_and_everyone_else(self) -> None:
+        targets = (
+            "[{device_id: 'alice', group_id: null, everyone_else: false},\n"
+            " {device_id: null, group_id: 'family', everyone_else: false},\n"
+            " {device_id: null, group_id: null, everyone_else: true},\n"
+            " {device_id: null, group_id: 'gone', everyone_else: false}]"
+        )
+        result = self._run_dashboard_functions(
+            [
+                "deviceName", "scheduleTargetFields", "scheduleTargetValue",
+                "scheduleTargetName", "scheduleTargetOptions",
+            ],
+            "const devices = [{id: 'alice', name: 'Alice', ipv4_address: '192.168.50.10'}];\n"
+            "let groups = [{id: 'family', name: 'Family', device_ids: ['alice']}];\n",
+            f"const targets = {targets};\n"
+            "const fields = ['device:alice', 'group:family', 'everyone-else'].map(\n"
+            "  (value) => scheduleTargetFields(value));\n"
+            "const options = scheduleTargetOptions();\n"
+            "const names = targets.map(scheduleTargetName);\n"
+            "groups = [];\n"
+            "console.log(JSON.stringify({\n"
+            "  fields: fields,\n"
+            "  values: targets.map(scheduleTargetValue),\n"
+            "  names: names,\n"
+            "  options: options,\n"
+            "  withoutGroups: scheduleTargetOptions().map((option) => option.value),\n"
+            "}));\n",
+        )
+
+        self.assertEqual(
+            result["fields"],
+            [
+                {"device_id": "alice", "group_id": None, "everyone_else": False},
+                {"device_id": None, "group_id": "family", "everyone_else": False},
+                {"device_id": None, "group_id": None, "everyone_else": True},
+            ],
+        )
+        self.assertEqual(
+            result["values"], ["device:alice", "group:family", "everyone-else", "group:gone"]
+        )
+        self.assertEqual(
+            result["names"], ["Alice", "Group Family", "Everyone else", "Group gone"]
+        )
+        self.assertEqual(
+            result["options"],
+            [
+                {"group": "Devices", "value": "device:alice", "label": "Alice (192.168.50.10)"},
+                {"group": "Groups", "value": "group:family", "label": "Family"},
+                {"group": None, "value": "everyone-else", "label": "Everyone else"},
+            ],
+        )
+        self.assertEqual(result["withoutGroups"], ["device:alice", "everyone-else"])
+
+    def test_an_everyone_else_schedule_counts_as_giving_it_a_profile(self) -> None:
+        result = self._run_dashboard_functions(
+            ["everyoneElseAssigned"],
+            "let everyoneElse = {profile_id: null};\n"
+            "let savedSchedules = [{everyone_else: false, enabled: true}];\n",
+            "const answers = [everyoneElseAssigned()];\n"
+            "savedSchedules.push({everyone_else: true, enabled: false});\n"
+            "answers.push(everyoneElseAssigned());\n"
+            "savedSchedules.push({everyone_else: true, enabled: true});\n"
+            "answers.push(everyoneElseAssigned());\n"
+            "savedSchedules = [];\n"
+            "everyoneElse = {profile_id: 'slow'};\n"
+            "answers.push(everyoneElseAssigned());\n"
+            "console.log(JSON.stringify(answers));\n",
+        )
+
+        self.assertEqual(result, [False, False, True, True])
 
     def test_dashboard_messages_say_when_a_change_takes_effect(self) -> None:
         messages = self._run_dashboard_functions(
@@ -2613,7 +2688,8 @@ class ControlServerTests(unittest.TestCase):
 
     def test_getting_started_waits_for_the_dashboard_and_keeps_focus(self) -> None:
         result = self._run_dashboard_functions(
-            ["gettingStartedSteps", "renderGettingStarted"],
+            ["gettingStartedSteps", "renderGettingStarted", "everyoneElseAssigned"],
+            "let savedSchedules = [];\n"
             "let dashboardLoaded = false;\n"
             "let gettingStartedKey = '';\n"
             "let helperConfigured = true;\n"

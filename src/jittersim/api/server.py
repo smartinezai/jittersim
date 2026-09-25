@@ -1173,8 +1173,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       <form id="schedule-form">
         <div class="fields">
           <label>Schedule ID <input id="schedule-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}"></label>
-          <label>Device
-            <select id="schedule-device" required></select>
+          <label>Applies to
+            <select id="schedule-target" required></select>
           </label>
           <label>Profile
             <select id="schedule-profile" required></select>
@@ -1196,6 +1196,8 @@ DASHBOARD_HTML = r"""<!doctype html>
           <label>Start <input id="schedule-start" type="time" value="09:00" required></label>
           <label>End <input id="schedule-end" type="time" value="17:00" required></label>
         </div>
+        <p class="form-note">A device's own schedule wins over its group's. Timers and
+          progressions win over schedules.</p>
         <button type="submit">Save schedule</button>
       </form>
       <div id="schedule-list" class="schedule-list" aria-live="polite">No schedules yet.</div>
@@ -1892,6 +1894,72 @@ DASHBOARD_HTML = r"""<!doctype html>
       return device ? device.name : deviceId;
     }
 
+    function scheduleTargetFields(value) {
+      if (value === "everyone-else") {
+        return { device_id: null, group_id: null, everyone_else: true };
+      }
+      const separator = value.indexOf(":");
+      const kind = value.slice(0, separator);
+      const id = value.slice(separator + 1);
+      return {
+        device_id: kind === "device" ? id : null,
+        group_id: kind === "group" ? id : null,
+        everyone_else: false
+      };
+    }
+
+    function scheduleTargetValue(target) {
+      if (target.everyone_else) return "everyone-else";
+      return target.group_id ? "group:" + target.group_id : "device:" + target.device_id;
+    }
+
+    function scheduleTargetName(target) {
+      if (target.everyone_else) return "Everyone else";
+      if (target.group_id) {
+        const group = groups.find((candidate) => candidate.id === target.group_id);
+        return "Group " + (group ? group.name : target.group_id);
+      }
+      return deviceName(target.device_id);
+    }
+
+    function scheduleTargetOptions() {
+      return devices.map((device) => ({
+        group: "Devices",
+        value: "device:" + device.id,
+        label: device.name + " (" + device.ipv4_address + ")"
+      })).concat(
+        groups.map((group) => ({ group: "Groups", value: "group:" + group.id, label: group.name })),
+        [{ group: null, value: "everyone-else", label: "Everyone else" }]
+      );
+    }
+
+    function renderScheduleTargets() {
+      const select = element("schedule-target");
+      const selected = select.value;
+      const optionGroups = {};
+      select.replaceChildren();
+      scheduleTargetOptions().forEach((choice) => {
+        const option = document.createElement("option");
+        option.value = choice.value;
+        option.textContent = choice.label;
+        if (choice.group && !optionGroups[choice.group]) {
+          optionGroups[choice.group] = document.createElement("optgroup");
+          optionGroups[choice.group].label = choice.group;
+          select.appendChild(optionGroups[choice.group]);
+        }
+        (choice.group ? optionGroups[choice.group] : select).appendChild(option);
+      });
+      // Rebuilding the menu must not change a choice being edited.
+      if (Array.from(select.options).some((option) => option.value === selected)) {
+        select.value = selected;
+      }
+    }
+
+    function everyoneElseAssigned() {
+      return Boolean(everyoneElse.profile_id) ||
+        savedSchedules.some((schedule) => schedule.everyone_else && schedule.enabled);
+    }
+
     function renderProfileTable() {
       renderTable(
         "profile-table",
@@ -2196,7 +2264,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     function editSchedule(schedule) {
       element("schedule-id").value = schedule.id;
-      element("schedule-device").value = schedule.device_id;
+      element("schedule-target").value = scheduleTargetValue(schedule);
       element("schedule-profile").value = schedule.profile_id;
       document.querySelectorAll(".day-toggle").forEach((button) => {
         const selected = schedule.days_of_week.includes(Number(button.dataset.day));
@@ -2279,6 +2347,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     let deviceConditions = { applied: false, devices: {} };
     let everyoneElse = { profile_id: null, unaffected_devices: [] };
     let lastRuntimeState = null;
+    let savedSchedules = [];
     let dashboardLoaded = false;
     let gettingStartedKey = "";
     // Device IDs can't start with an underscore, so this value is free.
@@ -3341,7 +3410,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         profiles: profiles.length,
         devices: devices.length,
         connected: connected,
-        everyoneElseProfile: everyoneElse.profile_id,
+        everyoneElseProfile: everyoneElseAssigned(),
         lastAction: lastRuntimeState ? lastRuntimeState.last_action : null,
         canApply: helperConfigured
       });
@@ -3473,7 +3542,10 @@ DASHBOARD_HTML = r"""<!doctype html>
         return device.unaffected ? saved + " (also on the unaffected list)" : saved;
       }
       if (device.unaffected) return "Unaffected";
-      if (everyoneElse.profile_id) return "Everyone else: " + profileName(everyoneElse.profile_id);
+      // The profile everyone else gets this minute, which a schedule can set.
+      if (everyoneElse.active_profile_id) {
+        return "Everyone else: " + profileName(everyoneElse.active_profile_id);
+      }
       return "Normal connection";
     }
 
@@ -4325,7 +4397,6 @@ DASHBOARD_HTML = r"""<!doctype html>
       devices = data.devices;
       renderDeviceTable();
       [
-        "schedule-device",
         "timer-device",
         "progression-device",
         "data-limit-device",
@@ -4343,6 +4414,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           deviceSelect.appendChild(option);
         });
       });
+      renderScheduleTargets();
       updateTrafficDeviceOptions(data.devices);
       populateServiceQuotaDomains();
       populateTimeQuotaDomains();
@@ -4352,6 +4424,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       try {
         const data = await request("/api/groups", "GET");
         renderGroups(data);
+        renderScheduleTargets();
         const groupSelect = element("group-data-limit-group");
         const selectedGroup = groupSelect.value;
         groupSelect.replaceChildren();
@@ -4381,7 +4454,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         const text = document.createElement("div");
         const name = document.createElement("span");
         name.textContent =
-          deviceName(schedule.device_id) + " → " + profileName(schedule.profile_id);
+          scheduleTargetName(schedule) + " → " + profileName(schedule.profile_id);
         const time = document.createElement("small");
         time.textContent = formatDays(schedule.days_of_week) + " · " +
           formatMinute(schedule.start_minute) + "–" + formatMinute(schedule.end_minute) +
@@ -4407,6 +4480,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     async function loadSchedules() {
       const data = await request("/api/schedules", "GET");
+      savedSchedules = data.schedules;
       renderSchedules(data.schedules);
     }
 
@@ -4808,7 +4882,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       try {
         await request("/api/schedules", "POST", {
           id: element("schedule-id").value,
-          device_id: element("schedule-device").value,
+          ...scheduleTargetFields(element("schedule-target").value),
           profile_id: element("schedule-profile").value,
           days_of_week: days,
           start_minute: timeToMinute("schedule-start"),
