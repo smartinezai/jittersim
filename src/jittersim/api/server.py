@@ -595,6 +595,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     .getting-started-steps li.done .step-mark { color: #8de2bc; }
     .connected-picker { display: flex; gap: 0.5rem; align-items: end; }
     .connected-picker label { flex: 1; min-width: 0; }
+    /* A long device name must not push the menu past the card. */
+    .connected-picker select { width: 100%; min-width: 0; text-overflow: ellipsis; }
     .picker-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: end; }
     .raw-details summary { margin-bottom: 0.6rem; color: #a8c7e8; cursor: pointer; }
     .raw-details pre { max-height: 32rem; overflow: auto; }
