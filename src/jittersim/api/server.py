@@ -61,6 +61,7 @@ from jittersim.config.transfer import (
     settings_to_payload,
 )
 from jittersim.engine.codec import plan_to_payload
+from jittersim.engine.conditions import device_conditions
 from jittersim.engine.compiler import (
     MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN,
     MAX_SHAPED_MARKS_PER_PLAN,
@@ -1401,6 +1402,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     </section>
     <section class="card wide">
       <div class="section-heading"><h2>Devices</h2><p>Assigned test clients</p></div>
+      <p id="device-conditions-note" class="policy-note">Conditions load with the token.</p>
       <div id="device-table" class="table-wrap">Loading...</div>
     </section>
     <section class="card">
@@ -1667,16 +1669,25 @@ DASHBOARD_HTML = r"""<!doctype html>
       );
     }
 
+    const CONDITION_LABELS = { normal: "Normal", degraded: "Degraded", offline: "Offline" };
+
+    function deviceConditionCell(deviceId) {
+      const state = deviceConditions.devices[deviceId];
+      if (!state) return "—";
+      return [CONDITION_LABELS[state.condition], state.reasons.join("; ") || "No network effects"];
+    }
+
     function renderDeviceTable() {
       renderTable(
         "device-table",
         "No devices assigned yet.",
-        ["Device", "Address", "Profile"],
+        ["Device", "Address", "Profile", "Condition"],
         devices.map((device) => ({
           cells: [
             [device.name, device.id],
             [device.ipv4_address, device.mac_address || "No MAC address"],
-            profileName(device.profile_id)
+            profileName(device.profile_id),
+            deviceConditionCell(device.id)
           ],
           actions: [
             ["Edit", () => fillDeviceForm(device)],
@@ -1994,6 +2005,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     let adminTokenVerified = false;
     let profiles = [];
     let devices = [];
+    let deviceConditions = { applied: false, devices: {} };
     let groups = [];
     let observedDomainsByDevice = {};
     let connectedDevicesRequestInFlight = false;
@@ -3845,6 +3857,19 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
     }
 
+    async function loadConditions() {
+      try {
+        deviceConditions = await request("/api/conditions", "GET");
+        element("device-conditions-note").textContent = deviceConditions.applied
+          ? "Conditions show what the network applies now."
+          : "Conditions show the saved settings. The network does not apply them yet.";
+      } catch (error) {
+        deviceConditions = { applied: false, devices: {} };
+        element("device-conditions-note").textContent = error.message;
+      }
+      renderDeviceTable();
+    }
+
     async function refresh() {
       await loadProfiles();
       await loadHealth();
@@ -3863,6 +3888,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         loadUplink(),
         loadQuotas(),
         loadServiceAssignments(),
+        loadConditions(),
         loadAdminTools()
       ]);
     }
@@ -4426,6 +4452,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     window.setInterval(() => { if (adminTokenVerified) loadTimers(); }, 5000);
     window.setInterval(() => { if (adminTokenVerified) loadProgressions(); }, 5000);
     window.setInterval(() => { if (adminTokenVerified) loadQuotas(); }, 5000);
+    window.setInterval(() => { if (adminTokenVerified) loadConditions(); }, 5000);
     window.setInterval(() => { if (adminTokenVerified) loadObservations(); }, 15000);
 
     loadHealth().catch((error) => {
@@ -5034,6 +5061,25 @@ class ControlServer(HTTPServer):
             )
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {"plan": plan_to_payload(plan)}
+            )
+        if path == "/api/conditions":
+            plan = self.scheduler.applied_plan() if self.scheduler is not None else None
+            applied = plan is not None
+            if plan is None:
+                # Nothing runs on the network, so describe the saved plan.
+                plan = (
+                    self.scheduler.build_plan(repository=self.repository)
+                    if self.scheduler is not None
+                    else compile_stored_plan(repository=self.repository)
+                )
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {
+                    "applied": applied,
+                    "devices": {
+                        device_id: {"condition": state.condition, "reasons": list(state.reasons)}
+                        for device_id, state in device_conditions(plan).items()
+                    },
+                }
             )
         if path == "/api/state":
             return HTTPStatus.OK, "application/json", _json_bytes(

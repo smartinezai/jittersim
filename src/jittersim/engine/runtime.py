@@ -21,9 +21,9 @@ from jittersim.config.models import (
 from jittersim.config.storage import ConfigRepository, DatabasePath, StorageError
 from jittersim.networking.helper import HelperClient, HelperClientError
 
-from .codec import plan_to_payload
+from .codec import PlanCodecError, plan_from_payload, plan_to_payload
 from .compiler import PlanError, compile_plan
-from .plan import ServiceAssignmentRule, ServiceQuotaRule
+from .plan import NetworkPlan, ServiceAssignmentRule, ServiceQuotaRule
 from .progression import interpolate_profile, progression_factor
 from .randomizer import (
     outage_duration_seconds,
@@ -160,6 +160,19 @@ class RuntimeScheduler:
 
         with self._lock:
             return self._device_traffic_bytes.get(device_id, 0)
+
+    def applied_plan(self) -> Optional[NetworkPlan]:
+        """Return the plan this scheduler last applied, if the network runs one."""
+
+        with self._lock:
+            payload = self._current_payload
+        if payload is None:
+            return None
+        try:
+            return plan_from_payload(payload)
+        except PlanCodecError:
+            LOGGER.warning("the applied plan could not be read back", exc_info=True)
+            return None
 
     def applied_queue_bandwidth_limits(
         self,

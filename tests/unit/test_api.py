@@ -1838,6 +1838,17 @@ class ControlServerTests(unittest.TestCase):
                 self.assertIn(fragment, submit)
         self.assertIn('element("profile-form").addEventListener("reset"', DASHBOARD_HTML)
 
+    def test_dashboard_shows_each_device_condition(self) -> None:
+        table = DASHBOARD_HTML.split("function renderDeviceTable() {", 1)[1]
+        table = table.split("\n    }\n", 1)[0]
+
+        self.assertIn('["Device", "Address", "Profile", "Condition"]', table)
+        self.assertIn("deviceConditionCell(device.id)", table)
+        self.assertIn('request("/api/conditions", "GET")', DASHBOARD_HTML)
+        self.assertIn('id="device-conditions-note"', DASHBOARD_HTML)
+        refresh = DASHBOARD_HTML.split("async function refresh() {", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("loadConditions()", refresh)
+
     def test_dashboard_offers_presets_and_burst_loss(self) -> None:
         for fragment in (
             'id="profile-preset"',
@@ -2314,6 +2325,32 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(self.repository.get_data_limit("alice").used_bytes, 0)
         self.assertEqual(self.repository.get_group_data_limit("family").used_bytes, 0)
         self.assertEqual(self.repository.get_service_quota("video").used_bytes, 0)
+
+    def test_conditions_describe_the_saved_plan_until_one_is_applied(self) -> None:
+        status, _, body = self.server.response_for("/api/conditions")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            json.loads(body),
+            {
+                "applied": False,
+                "devices": {
+                    "alice": {"condition": "degraded", "reasons": ["upload: delay 3000 ms"]}
+                },
+            },
+        )
+
+    def test_conditions_describe_the_applied_plan(self) -> None:
+        helper = self._serve_live(CountingHelper(devices={"alice": 0}))
+        self.assertEqual(self.server.write_response_for("/api/apply", {})[0], 200)
+        self.repository.save_profile(Profile(id="slow", name="Slow"))
+
+        conditions = json.loads(self.server.response_for("/api/conditions")[2])
+
+        # The saved profile changed, but the network still runs the applied plan.
+        self.assertIsNotNone(helper.applied_plan)
+        self.assertTrue(conditions["applied"])
+        self.assertEqual(conditions["devices"]["alice"]["condition"], "degraded")
 
     def test_live_changes_apply_while_the_network_is_applied(self) -> None:
         helper = FakeHelper()
