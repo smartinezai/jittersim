@@ -48,10 +48,14 @@ def parse_ping_output(output: str) -> List[Tuple[int, float]]:
 def ping_command(
     target: str, *, count: int, interval: float, platform: str = sys.platform
 ) -> List[str]:
-    """Build a ping command; macOS takes the reply wait in milliseconds."""
+    """Build a ping command that reports every reply, however slow."""
 
-    wait = "2000" if platform == "darwin" else "2"
-    return ["ping", "-n", "-c", str(count), "-i", f"{interval:g}", "-W", wait, target]
+    command = ["ping", "-n", "-c", str(count), "-i", f"{interval:g}"]
+    # On Linux, -W only shortens the wait when nothing answers. macOS leaves a
+    # reply slower than -W out of its output, so it gets no -W.
+    if platform != "darwin":
+        command += ["-W", "2"]
+    return command + [target]
 
 
 def _rounded(value: Optional[float]) -> Optional[float]:

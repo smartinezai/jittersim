@@ -96,14 +96,16 @@ class MeasurementTests(unittest.TestCase):
         self.assertIsNone(summary["rtt_avg_ms"])
         self.assertIsNone(summary["jitter_ms"])
 
-    def test_ping_waits_in_seconds_on_linux_and_milliseconds_on_macos(self) -> None:
+    def test_ping_keeps_slow_replies(self) -> None:
+        # Linux's -W only shortens the wait when nothing answers.
         self.assertEqual(
             ping_command("1.1.1.1", count=20, interval=0.2, platform="linux"),
             ["ping", "-n", "-c", "20", "-i", "0.2", "-W", "2", "1.1.1.1"],
         )
+        # macOS leaves a reply slower than -W out of its output, so it has none.
         self.assertEqual(
-            ping_command("1.1.1.1", count=20, interval=0.5, platform="darwin")[-3:],
-            ["-W", "2000", "1.1.1.1"],
+            ping_command("1.1.1.1", count=20, interval=0.5, platform="darwin"),
+            ["ping", "-n", "-c", "20", "-i", "0.5", "1.1.1.1"],
         )
 
     def test_a_measurement_records_samples_and_a_summary(self) -> None:
