@@ -986,6 +986,8 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("if (submitButton) setButtonBusy(submitButton, false);", DASHBOARD_HTML)
         self.assertIn("Dashboard refresh failed:", DASHBOARD_HTML)
         self.assertIn("Settings changed since the last network action", DASHBOARD_HTML)
+        # Protected panels wait for a token instead of polling into 401 responses.
+        self.assertEqual(DASHBOARD_HTML.count("if (!hasAdminToken())"), 2)
         self.assertNotIn('element("admin-token").addEventListener("change"', DASHBOARD_HTML)
         self.assertIn(
             'element("check-admin-token").addEventListener("click", checkAdminToken)',

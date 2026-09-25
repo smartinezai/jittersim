@@ -1920,13 +1920,20 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
     }
 
+    function hasAdminToken() {
+      return Boolean(element("admin-token").value.trim());
+    }
+
     async function loadObservations() {
+      const tokenMessage = "Enter the admin token to view observed domains.";
+      if (!hasAdminToken()) {
+        renderObservations({ available: false, devices: [], message: tokenMessage });
+        return;
+      }
       try {
         renderObservations(await request("/api/observations", "GET"));
       } catch (error) {
-        const message = error.status === 401
-          ? "Enter the admin token to view observed domains."
-          : error.message;
+        const message = error.status === 401 ? tokenMessage : error.message;
         renderObservations({ available: false, devices: [], message: message });
       }
     }
@@ -2352,6 +2359,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     async function loadQuotas() {
       try {
+        if (!hasAdminToken()) throw new Error("admin token required");
         const [dataLimits, groupDataLimits, serviceQuotas, timeQuotas] = await Promise.all([
           request("/api/data-limits", "GET"),
           request("/api/group-data-limits", "GET"),
