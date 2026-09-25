@@ -209,6 +209,34 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(content_type, "application/vnd.sqlite3")
         self.assertTrue(backup.startswith(b"SQLite format 3\x00"))
 
+    def test_admin_reads_require_admin_token(self) -> None:
+        self.server.admin_token = "admin-token"
+        self.server.helper_client = FakeHelper()
+
+        def get(path, authorization=None):
+            handler = object.__new__(ControlRequestHandler)
+            handler.server = self.server
+            handler.path = path
+            handler.headers = Message()
+            if authorization:
+                handler.headers["Authorization"] = authorization
+            response = {}
+            handler._send_response = lambda **values: response.update(values)
+            handler.do_GET()
+            return response
+
+        for path in (
+            "/api/backup",
+            "/api/diagnostics",
+            "/api/action-history",
+            "/api/observations",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(get(path)["status"], 401)
+                self.assertEqual(get(path, "Bearer wrong-token")["status"], 401)
+                self.assertEqual(get(path, "Bearer admin-token")["status"], 200)
+        self.assertEqual(get("/api/profiles")["status"], 200)
+
     def test_live_traffic_requires_admin_token_and_returns_directional_counters(self) -> None:
         self.server.admin_token = "admin-token"
         self.server.helper_client = FakeHelper()

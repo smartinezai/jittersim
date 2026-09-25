@@ -62,9 +62,6 @@ WRITE_PATHS = frozenset(
         "/api/service-quotas",
         "/api/service-quotas/reset",
         "/api/time-quotas",
-        "/api/action-history",
-        "/api/diagnostics",
-        "/api/backup",
         "/api/time-quotas/reset",
         "/api/time-quotas/start",
         "/api/time-quotas/stop",
@@ -83,8 +80,12 @@ WRITE_PATHS = frozenset(
 ACTION_PATHS = frozenset(("/api/apply", "/api/reset", "/api/observations/scan"))
 PROTECTED_READ_PATHS = frozenset(
     (
+        "/api/action-history",
+        "/api/backup",
         "/api/data-limits",
+        "/api/diagnostics",
         "/api/group-data-limits",
+        "/api/observations",
         "/api/service-quotas",
         "/api/time-quotas",
         "/api/traffic",
@@ -1920,7 +1921,10 @@ DASHBOARD_HTML = r"""<!doctype html>
       try {
         renderObservations(await request("/api/observations", "GET"));
       } catch (error) {
-        renderObservations({ available: false, devices: [], message: error.message });
+        const message = error.status === 401
+          ? "Enter the admin token to view observed domains."
+          : error.message;
+        renderObservations({ available: false, devices: [], message: message });
       }
     }
 
@@ -2697,7 +2701,10 @@ DASHBOARD_HTML = r"""<!doctype html>
         status.textContent = result.ok ? result.message : "Token check failed: " + result.message;
         status.className = "token-check-status " + (result.ok ? "success" : "error");
         showMessage(status.textContent, result.ok ? "success" : "error");
-        if (result.ok) loadQuotas();
+        if (result.ok) {
+          loadQuotas();
+          loadObservations();
+        }
       } catch (error) {
         status.textContent = "Token check failed: " + error.message;
         status.className = "token-check-status error";
