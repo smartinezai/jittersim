@@ -2272,6 +2272,74 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn(".action-description { display: none; }", small)
         self.assertIn(".action-buttons button { flex: 1;", small)
 
+    TABS = ("overview", "devices", "profiles", "rules", "measurements", "setup", "diagnostics")
+
+    def _panel(self, name: str) -> str:
+        start = DASHBOARD_HTML.index(f'<div class="tab-panel" id="tab-{name}"')
+        following = DASHBOARD_HTML.find('<div class="tab-panel" id="tab-', start + 1)
+        end = DASHBOARD_HTML.index("<script>") if following == -1 else following
+        return DASHBOARD_HTML[start:end]
+
+    def test_dashboard_sections_live_in_tabs(self) -> None:
+        nav = DASHBOARD_HTML.split('<nav class="tabs"', 1)[1].split("</nav>", 1)[0]
+        for name in self.TABS:
+            with self.subTest(tab=name):
+                self.assertIn(f'href="#{name}"', nav)
+                self.assertIn(f'id="tab-{name}"', DASHBOARD_HTML)
+        expected = {
+            "overview": ['action="/sign-out"', 'id="connected-devices"', 'id="traffic-chart"'],
+            "devices": [
+                'id="device-table"', "<h2>Assign a device</h2>", "<h2>Group devices</h2>",
+                "<h2>Everyone else</h2>",
+            ],
+            "profiles": ['id="profile-table"', "<h2>Save profile</h2>"],
+            "rules": [
+                "<h2>Network access rules</h2>", "<h2>Schedule a profile</h2>",
+                "Run a profile timer", "Device data limit", "Service time limit",
+                "Traffic discovery",
+            ],
+            "measurements": ['id="measurement-files"'],
+            "setup": ["Upstream router connection", "Manual Pi access-point fallback"],
+            "diagnostics": ['id="plan"', 'id="state"', 'id="diagnostics"', 'id="action-history"'],
+        }
+        for name, fragments in expected.items():
+            panel = self._panel(name)
+            positions = []
+            for fragment in fragments:
+                with self.subTest(tab=name, fragment=fragment):
+                    self.assertIn(fragment, panel)
+                    positions.append(panel.index(fragment))
+            # Lists come before the forms that edit them.
+            self.assertEqual(positions, sorted(positions), name)
+
+    def test_dashboard_tabs_follow_the_address(self) -> None:
+        result = self._run_dashboard_functions(
+            ["tabFromHash", "showTab"],
+            "const DASHBOARD_TABS = " + json.dumps(list(self.TABS)) + ";\n"
+            "const panels = {};\n"
+            "const element = (id) => (panels[id] = panels[id] || {hidden: false});\n"
+            "const links = DASHBOARD_TABS.map((tab) => ({\n"
+            "  href: '#' + tab, current: null,\n"
+            "  getAttribute(name) { return this.href; },\n"
+            "  setAttribute(name, value) { this.current = value; },\n"
+            "  removeAttribute() { this.current = null; },\n"
+            "}));\n"
+            "const document = {querySelectorAll: () => links};\n"
+            "const drawn = [];\n"
+            "function drawTrafficChart() { drawn.push('traffic'); }\n"
+            "function drawMeasurementChart() { drawn.push('measurements'); }\n",
+            "showTab('devices');\n"
+            "console.log(JSON.stringify({\n"
+            "  hidden: DASHBOARD_TABS.filter((tab) => panels['tab-' + tab].hidden),\n"
+            "  current: links.filter((link) => link.current).map((link) => link.href),\n"
+            "  fallback: [tabFromHash('#nope'), tabFromHash(''), tabFromHash('#rules')],\n"
+            "}));\n",
+        )
+
+        self.assertEqual(result["hidden"], [tab for tab in self.TABS if tab != "devices"])
+        self.assertEqual(result["current"], ["#devices"])
+        self.assertEqual(result["fallback"], ["overview", "overview", "rules"])
+
     def test_dashboard_offers_sign_out_near_the_top(self) -> None:
         self.assertLess(
             DASHBOARD_HTML.index('action="/sign-out"'),

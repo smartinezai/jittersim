@@ -586,6 +586,17 @@ DASHBOARD_HTML = r"""<!doctype html>
     .schedule-row div:first-child { display: grid; gap: 0.15rem; }
     .transfer-actions { justify-content: flex-start; margin-top: 1rem; }
     .schedule-row small { color: #91a8c1; }
+    .tabs {
+      display: flex; gap: 0.35rem; margin: 1rem 0; padding: 0.35rem; overflow-x: auto;
+      border: 1px solid #263b55; border-radius: 0.9rem; background: rgba(18, 31, 49, 0.9);
+    }
+    .tabs a {
+      flex: 0 0 auto; padding: 0.45rem 0.85rem; border-radius: 0.6rem;
+      color: #c4d5e8; font-weight: 600; text-decoration: none; white-space: nowrap;
+    }
+    .tabs a:hover { background: rgba(60, 102, 144, 0.35); }
+    .tabs a[aria-current="page"] { background: #1f4f86; color: #ffffff; }
+    .tabs a:focus-visible { outline: 2px solid #8cc4ff; outline-offset: 2px; }
     @media (max-width: 700px) {
       body { padding-top: 1rem; }
       .page-header { display: block; }
@@ -663,6 +674,16 @@ DASHBOARD_HTML = r"""<!doctype html>
     </div>
     <p id="message" class="action-message" role="status" aria-live="polite">Ready.</p>
   </section>
+  <nav class="tabs" aria-label="Dashboard sections">
+    <a href="#overview">Overview</a>
+    <a href="#devices">Devices</a>
+    <a href="#profiles">Profiles</a>
+    <a href="#rules">Rules &amp; limits</a>
+    <a href="#measurements">Measurements</a>
+    <a href="#setup">Setup</a>
+    <a href="#diagnostics">Diagnostics</a>
+  </nav>
+  <div class="tab-panel" id="tab-overview">
   <section class="card token-card">
     <h2>Signed in</h2>
     <form class="token-controls" method="post" action="/sign-out">
@@ -736,66 +757,97 @@ DASHBOARD_HTML = r"""<!doctype html>
       delaying, in both directions.</p>
     <p class="traffic-note">Traffic lines count bytes at JitterSim before its queues. They do not show the speed a device receives. Dashed lines show configured limits. The ISP plan line is shared with household traffic and is not a live measurement of spare capacity. Service-specific queues may use different limits. Only assigned devices are included. Sampling pauses when this tab is hidden.</p>
   </section>
-  <section class="card wide" aria-labelledby="measurement-title">
-    <div class="section-heading">
-      <div>
-        <h2 id="measurement-title">Measurements</h2>
-        <p>Compare the delay, jitter and loss a test device measured</p>
-      </div>
-    </div>
-    <div class="measurement-actions">
-      <label>Result files
-        <input id="measurement-files" type="file" accept=".json,application/json" multiple>
-      </label>
-      <button id="copy-measurements" type="button" disabled>Copy table as Markdown</button>
-      <button id="clear-measurements" type="button" disabled>Clear</button>
-    </div>
-    <div id="measurement-table" class="table-wrap">Add result files to compare runs.</div>
-    <canvas id="measurement-chart" width="900" height="240" role="img"
-      aria-label="Round-trip time of every reply in each run">
-      Round-trip chart of the added runs.</canvas>
-    <p class="traffic-note">On a device connected to the test Wi-Fi, run
-      <code>jittersim measure --label normal</code>, change the device's profile here, run it again
-      with another label, then add both files. The files stay in this browser.</p>
-  </section>
-  <section class="card uplink-card">
-    <div class="section-heading">
-      <div>
-        <h2>Upstream router connection</h2>
-        <p>What the Pi can see through Ethernet</p>
-      </div>
-      <span id="uplink-state" class="count-badge">Checking...</span>
-    </div>
-    <div id="uplink-details" class="uplink-grid" aria-live="polite">Loading...</div>
-    <p id="uplink-note" class="policy-note">The router controls use the TG3442DE local web interface. The router admin password is used for one request and is not saved.</p>
-    <a id="router-settings-link" class="button-link" href="http://192.168.0.1" target="_blank" rel="noreferrer">Open router Wi-Fi settings</a>
-    <div class="router-controls">
-      <label>Router admin password
-        <input id="router-admin-password" type="password" autocomplete="off" placeholder="Password for 192.168.0.1">
-      </label>
-      <div class="action-buttons">
-        <button id="sync-router-ap" class="primary" type="button">Copy router Wi-Fi to Pi</button>
-        <button id="disable-router-wifi" class="danger" type="button">Turn off router Wi-Fi</button>
-        <button id="enable-router-wifi" type="button">Turn on router Wi-Fi</button>
-      </div>
-      <p id="router-action-message" class="policy-note" role="status" aria-live="polite">Keep the Pi connected to the router by Ethernet before changing the router Wi-Fi.</p>
-    </div>
-  </section>
-  <section class="card observations-card">
-    <div class="section-heading">
-      <div>
-        <h2>Traffic discovery</h2>
-        <p>Review DNS names observed from devices on the test network</p>
-      </div>
-      <div class="observation-actions">
-        <span id="observation-count" class="count-badge">No scan yet</span>
-        <button id="scan-observations" class="primary" type="button">Scan now</button>
-      </div>
-    </div>
-    <p id="observation-note" class="observation-note">Scanning is on demand. Results are local aggregates, not exact page visits.</p>
-    <div id="observations" class="observation-list" aria-live="polite">No observations yet.</div>
-  </section>
+  </div>
+  <div class="tab-panel" id="tab-devices" hidden>
+  <div class="data-grid">
+    <section class="card wide">
+      <div class="section-heading"><h2>Devices</h2><p>Assigned test clients</p></div>
+      <p id="device-conditions-note" class="policy-note">Conditions load with the token.</p>
+      <div id="device-table" class="table-wrap">Loading...</div>
+    </section>
+  </div>
   <div class="content-grid">
+    <section class="card">
+      <h2>Assign a device</h2>
+      <form id="device-form">
+        <div id="device-edit-bar" class="edit-bar" hidden>
+          <p id="device-edit-status" role="status"></p>
+          <button id="device-cancel-edit" type="button">Cancel editing</button>
+        </div>
+        <div class="fields">
+          <label>Device ID <input id="device-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}"></label>
+          <label>Name <input id="device-name" required></label>
+          <label>Reserved IPv4 address
+            <input id="device-ip" required placeholder="192.168.50.10">
+          </label>
+          <label>Profile
+            <select id="device-profile" required></select>
+          </label>
+          <label>MAC address (optional)
+            <input id="device-mac" placeholder="aa:bb:cc:dd:ee:ff">
+          </label>
+        </div>
+        <button type="submit">Save device</button>
+      </form>
+    </section>
+    <section class="card">
+      <h2>Group devices</h2>
+      <p class="form-note">Choose several assigned devices to give them one profile override or one shared data limit. A device can belong to one group.</p>
+      <form id="group-form">
+        <div class="fields">
+          <label>Group ID <input id="group-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}" placeholder="family"></label>
+          <label>Group name <input id="group-name" required placeholder="Family devices"></label>
+          <label>Profile override
+            <select id="group-profile"><option value="">Use each device profile</option></select>
+          </label>
+          <label>Devices
+            <select id="group-devices" multiple required size="5"></select>
+          </label>
+        </div>
+        <button type="submit">Save group</button>
+      </form>
+      <div id="group-list" class="quota-list" aria-live="polite">No groups saved.</div>
+    </section>
+    <section class="card">
+      <h2>Everyone else</h2>
+      <p class="form-note">Choose a profile for every test Wi-Fi client that isn't a saved
+        device or on the unaffected list. They share one connection, so a speed limit in
+        this profile is shared by all of them.</p>
+      <form id="everyone-else-form">
+        <div class="fields">
+          <label>Profile for everyone else
+            <select id="everyone-else-profile">
+              <option value="">None: normal connection</option>
+            </select>
+          </label>
+        </div>
+        <button type="submit">Save everyone-else profile</button>
+      </form>
+      <h3>Unaffected devices</h3>
+      <p class="form-note">These keep a normal connection while everyone else has a profile.
+        Use the MAC address shown in Connected clients. A phone can use a private address
+        that changes, so keep its private address fixed for the JitterSim network, for
+        example Private Wi-Fi Address set to Fixed on an iPhone.</p>
+      <form id="unaffected-form">
+        <div class="fields">
+          <label>MAC address
+            <input id="unaffected-mac" required placeholder="aa:bb:cc:dd:ee:ff">
+          </label>
+          <label>Name (optional) <input id="unaffected-name" placeholder="My phone"></label>
+        </div>
+        <button type="submit">Add to unaffected</button>
+      </form>
+      <div id="unaffected-table" class="table-wrap">No unaffected devices.</div>
+    </section>
+  </div>
+  </div>
+  <div class="tab-panel" id="tab-profiles" hidden>
+  <div class="data-grid">
+    <section class="card wide">
+      <div class="section-heading"><h2>Profiles</h2><p>Saved network behavior</p></div>
+      <div id="profile-table" class="table-wrap">Loading...</div>
+    </section>
+  </div>
     <section class="card">
       <h2>Save profile</h2>
       <form id="profile-form">
@@ -1014,79 +1066,8 @@ DASHBOARD_HTML = r"""<!doctype html>
         <button type="submit">Save profile</button>
       </form>
     </section>
-    <section class="card">
-      <h2>Assign a device</h2>
-      <form id="device-form">
-        <div id="device-edit-bar" class="edit-bar" hidden>
-          <p id="device-edit-status" role="status"></p>
-          <button id="device-cancel-edit" type="button">Cancel editing</button>
-        </div>
-        <div class="fields">
-          <label>Device ID <input id="device-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}"></label>
-          <label>Name <input id="device-name" required></label>
-          <label>Reserved IPv4 address
-            <input id="device-ip" required placeholder="192.168.50.10">
-          </label>
-          <label>Profile
-            <select id="device-profile" required></select>
-          </label>
-          <label>MAC address (optional)
-            <input id="device-mac" placeholder="aa:bb:cc:dd:ee:ff">
-          </label>
-        </div>
-        <button type="submit">Save device</button>
-      </form>
-    </section>
-    <section class="card">
-      <h2>Group devices</h2>
-      <p class="form-note">Choose several assigned devices to give them one profile override or one shared data limit. A device can belong to one group.</p>
-      <form id="group-form">
-        <div class="fields">
-          <label>Group ID <input id="group-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}" placeholder="family"></label>
-          <label>Group name <input id="group-name" required placeholder="Family devices"></label>
-          <label>Profile override
-            <select id="group-profile"><option value="">Use each device profile</option></select>
-          </label>
-          <label>Devices
-            <select id="group-devices" multiple required size="5"></select>
-          </label>
-        </div>
-        <button type="submit">Save group</button>
-      </form>
-      <div id="group-list" class="quota-list" aria-live="polite">No groups saved.</div>
-    </section>
-    <section class="card">
-      <h2>Everyone else</h2>
-      <p class="form-note">Choose a profile for every test Wi-Fi client that isn't a saved
-        device or on the unaffected list. They share one connection, so a speed limit in
-        this profile is shared by all of them.</p>
-      <form id="everyone-else-form">
-        <div class="fields">
-          <label>Profile for everyone else
-            <select id="everyone-else-profile">
-              <option value="">None: normal connection</option>
-            </select>
-          </label>
-        </div>
-        <button type="submit">Save everyone-else profile</button>
-      </form>
-      <h3>Unaffected devices</h3>
-      <p class="form-note">These keep a normal connection while everyone else has a profile.
-        Use the MAC address shown in Connected clients. A phone can use a private address
-        that changes, so keep its private address fixed for the JitterSim network, for
-        example Private Wi-Fi Address set to Fixed on an iPhone.</p>
-      <form id="unaffected-form">
-        <div class="fields">
-          <label>MAC address
-            <input id="unaffected-mac" required placeholder="aa:bb:cc:dd:ee:ff">
-          </label>
-          <label>Name (optional) <input id="unaffected-name" placeholder="My phone"></label>
-        </div>
-        <button type="submit">Add to unaffected</button>
-      </form>
-      <div id="unaffected-table" class="table-wrap">No unaffected devices.</div>
-    </section>
   </div>
+  <div class="tab-panel" id="tab-rules" hidden>
   <div class="content-grid">
     <section class="card">
       <h2>Network access rules</h2>
@@ -1470,6 +1451,69 @@ DASHBOARD_HTML = r"""<!doctype html>
     </form>
     <div id="time-quota-list" class="quota-list" aria-live="polite">Loading...</div>
   </section>
+  <section class="card observations-card">
+    <div class="section-heading">
+      <div>
+        <h2>Traffic discovery</h2>
+        <p>Review DNS names observed from devices on the test network</p>
+      </div>
+      <div class="observation-actions">
+        <span id="observation-count" class="count-badge">No scan yet</span>
+        <button id="scan-observations" class="primary" type="button">Scan now</button>
+      </div>
+    </div>
+    <p id="observation-note" class="observation-note">Scanning is on demand. Results are local aggregates, not exact page visits.</p>
+    <div id="observations" class="observation-list" aria-live="polite">No observations yet.</div>
+  </section>
+  </div>
+  <div class="tab-panel" id="tab-measurements" hidden>
+  <section class="card wide" aria-labelledby="measurement-title">
+    <div class="section-heading">
+      <div>
+        <h2 id="measurement-title">Measurements</h2>
+        <p>Compare the delay, jitter and loss a test device measured</p>
+      </div>
+    </div>
+    <div class="measurement-actions">
+      <label>Result files
+        <input id="measurement-files" type="file" accept=".json,application/json" multiple>
+      </label>
+      <button id="copy-measurements" type="button" disabled>Copy table as Markdown</button>
+      <button id="clear-measurements" type="button" disabled>Clear</button>
+    </div>
+    <div id="measurement-table" class="table-wrap">Add result files to compare runs.</div>
+    <canvas id="measurement-chart" width="900" height="240" role="img"
+      aria-label="Round-trip time of every reply in each run">
+      Round-trip chart of the added runs.</canvas>
+    <p class="traffic-note">On a device connected to the test Wi-Fi, run
+      <code>jittersim measure --label normal</code>, change the device's profile here, run it again
+      with another label, then add both files. The files stay in this browser.</p>
+  </section>
+  </div>
+  <div class="tab-panel" id="tab-setup" hidden>
+  <section class="card uplink-card">
+    <div class="section-heading">
+      <div>
+        <h2>Upstream router connection</h2>
+        <p>What the Pi can see through Ethernet</p>
+      </div>
+      <span id="uplink-state" class="count-badge">Checking...</span>
+    </div>
+    <div id="uplink-details" class="uplink-grid" aria-live="polite">Loading...</div>
+    <p id="uplink-note" class="policy-note">The router controls use the TG3442DE local web interface. The router admin password is used for one request and is not saved.</p>
+    <a id="router-settings-link" class="button-link" href="http://192.168.0.1" target="_blank" rel="noreferrer">Open router Wi-Fi settings</a>
+    <div class="router-controls">
+      <label>Router admin password
+        <input id="router-admin-password" type="password" autocomplete="off" placeholder="Password for 192.168.0.1">
+      </label>
+      <div class="action-buttons">
+        <button id="sync-router-ap" class="primary" type="button">Copy router Wi-Fi to Pi</button>
+        <button id="disable-router-wifi" class="danger" type="button">Turn off router Wi-Fi</button>
+        <button id="enable-router-wifi" type="button">Turn on router Wi-Fi</button>
+      </div>
+      <p id="router-action-message" class="policy-note" role="status" aria-live="polite">Keep the Pi connected to the router by Ethernet before changing the router Wi-Fi.</p>
+    </div>
+  </section>
   <section class="card">
     <h2>Manual Pi access-point fallback</h2>
     <form id="access-point-form">
@@ -1485,16 +1529,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       <button type="submit">Use these values on the Pi</button>
     </form>
   </section>
+  </div>
+  <div class="tab-panel" id="tab-diagnostics" hidden>
   <div class="data-grid">
-    <section class="card wide">
-      <div class="section-heading"><h2>Profiles</h2><p>Saved network behavior</p></div>
-      <div id="profile-table" class="table-wrap">Loading...</div>
-    </section>
-    <section class="card wide">
-      <div class="section-heading"><h2>Devices</h2><p>Assigned test clients</p></div>
-      <p id="device-conditions-note" class="policy-note">Conditions load with the token.</p>
-      <div id="device-table" class="table-wrap">Loading...</div>
-    </section>
     <section class="card">
       <div class="section-heading"><h2>Compiled plan</h2><p>Current traffic rules</p></div>
       <pre id="plan">Loading...</pre>
@@ -1530,9 +1567,31 @@ DASHBOARD_HTML = r"""<!doctype html>
         of them.</p>
     </section>
   </div>
+  </div>
   <script>
     const element = (id) => document.getElementById(id);
     let pendingFormSubmitButton = null;
+    const DASHBOARD_TABS = [
+      "overview", "devices", "profiles", "rules", "measurements", "setup", "diagnostics"
+    ];
+
+    function tabFromHash(hash) {
+      const name = String(hash || "").replace(/^#/, "");
+      return DASHBOARD_TABS.includes(name) ? name : "overview";
+    }
+
+    function showTab(name) {
+      DASHBOARD_TABS.forEach((tab) => {
+        element("tab-" + tab).hidden = tab !== name;
+      });
+      document.querySelectorAll(".tabs a").forEach((link) => {
+        if (link.getAttribute("href") === "#" + name) link.setAttribute("aria-current", "page");
+        else link.removeAttribute("aria-current");
+      });
+      // A chart drawn while its tab was hidden has no size, so draw it again.
+      if (name === "overview") drawTrafficChart();
+      if (name === "measurements") drawMeasurementChart();
+    }
 
     function optionalNumber(id) {
       const value = element(id).value.trim();
@@ -4887,6 +4946,18 @@ DASHBOARD_HTML = r"""<!doctype html>
     window.setInterval(() => loadQuotas(), 5000);
     window.setInterval(() => loadConditions(), 5000);
     window.setInterval(() => loadObservations(), 15000);
+
+    document.querySelectorAll(".tabs a").forEach((link) => {
+      link.addEventListener("click", (event) => {
+        event.preventDefault();
+        const name = tabFromHash(link.getAttribute("href"));
+        // pushState keeps Back working without jumping to an element with that ID.
+        if (window.location.hash !== "#" + name) window.history.pushState(null, "", "#" + name);
+        showTab(name);
+      });
+    });
+    window.addEventListener("popstate", () => showTab(tabFromHash(window.location.hash)));
+    showTab(tabFromHash(window.location.hash));
 
     startDashboard();
   </script>
