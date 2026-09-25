@@ -16,6 +16,7 @@ from jittersim.config.models import (
     Profile,
     ServiceQuota,
     TimeQuota,
+    ValidationError,
     time_quota_counter_id,
 )
 from jittersim.config.storage import ConfigRepository, DatabasePath, StorageError
@@ -63,6 +64,9 @@ class _DeviceRollState:
 class RuntimeScheduler:
     """Apply only changed scheduled plans while the dashboard is running."""
 
+    # How often saved devices are matched to the addresses their MAC addresses use.
+    address_check_seconds = 30.0
+
     def __init__(
         self,
         *,
@@ -83,6 +87,7 @@ class RuntimeScheduler:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_traffic_sample_at = 0.0
+        self._last_address_check_at = 0.0
         self._last_quota_sample_at = 0.0
         self._last_device_counters: Dict[str, int] = {}
         self._device_traffic_bytes: Dict[str, int] = {}
@@ -245,6 +250,7 @@ class RuntimeScheduler:
             if active_repository.get_runtime_state().last_action == "reset":
                 self._honor_external_reset()
                 return False
+            self._follow_device_addresses(repository=active_repository, now=current_time)
             self._sample_traffic_if_needed(repository=active_repository, now=current_time)
             self._sample_quota_usage_if_needed(repository=active_repository, now=current_time)
             plan = self._build_plan(repository=active_repository, now=current_time)
@@ -275,6 +281,57 @@ class RuntimeScheduler:
         finally:
             if owned_repository:
                 active_repository.close()
+
+    def _follow_device_addresses(self, *, repository: ConfigRepository, now: float) -> None:
+        """Move saved devices to the addresses their MAC addresses use now.
+
+        DHCP can hand a device a new address, and a saved device is matched by
+        its address, so its profile would silently stop applying.
+        """
+
+        if now - self._last_address_check_at < self.address_check_seconds:
+            return
+        self._last_address_check_at = now
+        read_clients = getattr(self._helper_client, "connected_device_snapshot", None)
+        if read_clients is None:
+            return
+        try:
+            snapshot = read_clients()
+        except HelperClientError:
+            LOGGER.warning("could not check which addresses saved devices use", exc_info=True)
+            return
+        if not snapshot.get("association_status_available"):
+            return
+        current = {
+            client["mac_address"]: client["ipv4_address"]
+            for client in snapshot.get("devices", [])
+            if client.get("association_verified")
+            and client.get("mac_address")
+            and client.get("ipv4_address")
+        }
+        devices = repository.list_devices()
+        holders = {str(device.ipv4_address): device.id for device in devices}
+        for device in devices:
+            address = current.get(device.mac_address) if device.mac_address else None
+            if address is None or address == str(device.ipv4_address):
+                continue
+            holder = holders.get(address)
+            if holder is not None:
+                LOGGER.warning(
+                    "device %s now uses %s, which saved device %s holds; not moving it",
+                    device.id,
+                    address,
+                    holder,
+                )
+                continue
+            try:
+                moved = replace(device, ipv4_address=address)
+            except ValidationError:
+                continue
+            repository.save_device(moved)
+            holders.pop(str(device.ipv4_address), None)
+            holders[address] = device.id
+            LOGGER.info("device %s moved from %s to %s", device.id, device.ipv4_address, address)
 
     def _honor_external_reset(self) -> None:
         # Someone reset the network outside the dashboard, for example with

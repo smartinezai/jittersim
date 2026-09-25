@@ -51,6 +51,19 @@ class RecordingHelper:
         return self.counters
 
 
+class ClientListingHelper(RecordingHelper):
+    """Like the real helper, it lists the clients on the test Wi-Fi."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.clients = []
+        self.snapshots = 0
+
+    def connected_device_snapshot(self):
+        self.snapshots += 1
+        return {"devices": self.clients, "association_status_available": True}
+
+
 class CounterResettingHelper(RecordingHelper):
     """Like the real helper, each apply recreates the nftables counters at zero."""
 
@@ -1036,6 +1049,64 @@ class EveryoneElseSchedulingTests(unittest.TestCase):
         plan = self.scheduler.build_plan(repository=self.repository, now=1_012)
 
         self.assertFalse(plan.everyone_else.blocked)
+
+class DeviceAddressTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.repository = ConfigRepository(":memory:")
+        self.addCleanup(self.repository.close)
+        self.repository.save_profile(Profile(id="slow", name="Slow"))
+        self.repository.save_device(
+            Device("phone", "Phone", "192.168.50.10", "slow", "aa:aa:aa:aa:aa:01")
+        )
+        self.helper = ClientListingHelper()
+        self.scheduler = RuntimeScheduler(
+            database_path=":memory:", helper_client=self.helper, poll_seconds=3_600
+        )
+        self.addCleanup(self.scheduler.stop)
+        self.scheduler.activate(applied_payload={})
+
+    def connect(self, *clients) -> None:
+        self.helper.clients = [
+            {"mac_address": mac, "ipv4_address": address, "association_verified": verified}
+            for mac, address, verified in clients
+        ]
+
+    def address(self, device_id: str) -> str:
+        return str(self.repository.get_device(device_id).ipv4_address)
+
+    def test_a_saved_device_follows_its_mac_address(self) -> None:
+        self.connect(("aa:aa:aa:aa:aa:01", "192.168.50.23", True))
+
+        self.scheduler.tick(repository=self.repository, now=100)
+
+        self.assertEqual(self.address("phone"), "192.168.50.23")
+        # The plan applied in the same tick already uses the new address.
+        self.assertEqual(str(self.helper.plans[-1].mark_rules[0].ipv4_address), "192.168.50.23")
+
+    def test_an_address_another_saved_device_holds_is_left_alone(self) -> None:
+        self.repository.save_device(Device("tablet", "Tablet", "192.168.50.23", "slow"))
+        self.connect(("aa:aa:aa:aa:aa:01", "192.168.50.23", True))
+
+        self.scheduler.tick(repository=self.repository, now=100)
+
+        self.assertEqual(self.address("phone"), "192.168.50.10")
+
+    def test_unverified_clients_and_devices_without_a_mac_stay(self) -> None:
+        self.repository.save_device(Device("laptop", "Laptop", "192.168.50.11", "slow"))
+        self.connect(("aa:aa:aa:aa:aa:01", "192.168.50.23", False))
+
+        self.scheduler.tick(repository=self.repository, now=100)
+
+        self.assertEqual(self.address("phone"), "192.168.50.10")
+        self.assertEqual(self.address("laptop"), "192.168.50.11")
+
+    def test_addresses_are_checked_every_thirty_seconds(self) -> None:
+        self.connect()
+
+        for now in (100, 110, 131):
+            self.scheduler.tick(repository=self.repository, now=now)
+
+        self.assertEqual(self.helper.snapshots, 2)
 
 if __name__ == "__main__":
     unittest.main()
