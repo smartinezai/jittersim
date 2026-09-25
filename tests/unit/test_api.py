@@ -6,7 +6,6 @@ import ssl
 import subprocess
 import tempfile
 import threading
-import time
 import unittest
 from email.message import Message
 from io import BytesIO
