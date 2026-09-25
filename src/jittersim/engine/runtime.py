@@ -6,7 +6,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from typing import Dict, Iterator, Optional, Sequence, Union
+from typing import Dict, Iterator, Mapping, Optional, Sequence, Tuple, Union
 
 from jittersim.config.models import (
     DataLimit,
@@ -44,6 +44,53 @@ from .schedules import active_schedule
 from .website import build_website_filters, resolve_domains
 
 LOGGER = logging.getLogger(__name__)
+
+
+def plan_address_moves(
+    devices: Sequence[Device], seen: Mapping[str, str]
+) -> Tuple[Dict[str, Tuple[str, str]], Dict[str, Tuple[str, str]]]:
+    """Choose which saved devices move to the address their MAC address uses now.
+
+    `seen` maps MAC addresses to confirmed client addresses. Returns the moves
+    as device ID to (old, new) address, and the blocked moves as device ID to
+    (address, the device that keeps it). A device moves only when no saved
+    device keeps that address, so devices that swap or pass addresses on move
+    together.
+    """
+
+    current = {device.id: str(device.ipv4_address) for device in devices}
+    wanted = {}
+    for device in devices:
+        address = seen.get(device.mac_address) if device.mac_address else None
+        if address is None or address == current[device.id]:
+            continue
+        try:
+            replace(device, ipv4_address=address)
+        except ValidationError:
+            # For example a link-local address, which a saved device can't use.
+            continue
+        wanted[device.id] = address
+    blocked = {}
+    while True:
+        claims: Dict[str, list] = {}
+        for device_id, address in current.items():
+            claims.setdefault(wanted.get(device_id, address), []).append(device_id)
+        stopped = False
+        for address, claimants in claims.items():
+            if len(claimants) < 2:
+                continue
+            keepers = [device_id for device_id in claimants if device_id not in wanted]
+            for device_id in claimants:
+                if device_id in wanted:
+                    others = keepers or [other for other in claimants if other != device_id]
+                    blocked[device_id] = (address, others[0])
+                    del wanted[device_id]
+                    stopped = True
+        # A stopped device keeps its old address, which another move may want.
+        if not stopped:
+            break
+    moves = {device_id: (current[device_id], address) for device_id, address in wanted.items()}
+    return moves, blocked
 
 
 @dataclass
@@ -88,6 +135,8 @@ class RuntimeScheduler:
         self._thread: Optional[threading.Thread] = None
         self._last_traffic_sample_at = 0.0
         self._last_address_check_at = 0.0
+        # Blocked moves already logged, so each is logged once.
+        self._blocked_moves: Dict[str, Tuple[str, str]] = {}
         self._last_quota_sample_at = 0.0
         self._last_device_counters: Dict[str, int] = {}
         self._device_traffic_bytes: Dict[str, int] = {}
@@ -159,6 +208,7 @@ class RuntimeScheduler:
             self._last_device_counters.clear()
             self._device_traffic_bytes.clear()
             self._group_members.clear()
+            self._blocked_moves.clear()
 
     def sample_usage(self, *, repository: ConfigRepository) -> None:
         """Record quota and device traffic before the helper counters restart."""
@@ -302,36 +352,34 @@ class RuntimeScheduler:
             return
         if not snapshot.get("association_status_available"):
             return
-        current = {
+        # Only a reachable neighbour entry confirms an address. Otherwise the
+        # helper falls back to a DHCP lease or an old neighbour entry, which
+        # can be stale and would move a device back and forth.
+        seen = {
             client["mac_address"]: client["ipv4_address"]
             for client in snapshot.get("devices", [])
             if client.get("association_verified")
+            and client.get("neighbor_state") == "reachable"
             and client.get("mac_address")
             and client.get("ipv4_address")
         }
-        devices = repository.list_devices()
-        holders = {str(device.ipv4_address): device.id for device in devices}
-        for device in devices:
-            address = current.get(device.mac_address) if device.mac_address else None
-            if address is None or address == str(device.ipv4_address):
-                continue
-            holder = holders.get(address)
-            if holder is not None:
+        moves, blocked = plan_address_moves(repository.list_devices(), seen)
+        for device_id, (address, holder) in blocked.items():
+            if self._blocked_moves.get(device_id) != (address, holder):
                 LOGGER.warning(
-                    "device %s now uses %s, which saved device %s holds; not moving it",
-                    device.id,
+                    "device %s now uses %s, which saved device %s keeps; not moving it",
+                    device_id,
                     address,
                     holder,
                 )
-                continue
-            try:
-                moved = replace(device, ipv4_address=address)
-            except ValidationError:
-                continue
-            repository.save_device(moved)
-            holders.pop(str(device.ipv4_address), None)
-            holders[address] = device.id
-            LOGGER.info("device %s moved from %s to %s", device.id, device.ipv4_address, address)
+        self._blocked_moves = blocked
+        if not moves:
+            return
+        if not repository.move_device_addresses(moves):
+            LOGGER.warning("saved devices changed during the address check; checking again later")
+            return
+        for device_id, (old_address, new_address) in moves.items():
+            LOGGER.info("device %s moved from %s to %s", device_id, old_address, new_address)
 
     def _honor_external_reset(self) -> None:
         # Someone reset the network outside the dashboard, for example with

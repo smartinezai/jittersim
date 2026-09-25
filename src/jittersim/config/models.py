@@ -413,10 +413,12 @@ class Progression:
             0,
             1_000_000_000,
         )
+        # Below zero after a device moves to an address with fewer recorded
+        # queries, so the progress made so far still counts.
         _validate_number(
             self.traffic_baseline_queries,
             "traffic_baseline_queries",
-            0,
+            -1_000_000_000_000,
             1_000_000_000_000,
         )
         if self.mode == "traffic" and self.traffic_target_queries < 1:

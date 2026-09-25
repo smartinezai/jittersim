@@ -58,10 +58,11 @@ class ClientListingHelper(RecordingHelper):
         super().__init__()
         self.clients = []
         self.snapshots = 0
+        self.status_available = True
 
     def connected_device_snapshot(self):
         self.snapshots += 1
-        return {"devices": self.clients, "association_status_available": True}
+        return {"devices": self.clients, "association_status_available": self.status_available}
 
 
 class CounterResettingHelper(RecordingHelper):
@@ -1157,40 +1158,171 @@ class DeviceAddressTests(unittest.TestCase):
         self.addCleanup(self.scheduler.stop)
         self.scheduler.activate(applied_payload={})
 
-    def connect(self, *clients) -> None:
+    def connect(self, *clients, neighbor_state: str = "reachable") -> None:
+        # The real client refuses a snapshot whose clients disagree with the
+        # association status.
+        verified = self.helper.status_available
         self.helper.clients = [
-            {"mac_address": mac, "ipv4_address": address, "association_verified": verified}
-            for mac, address, verified in clients
+            {
+                "mac_address": mac,
+                "ipv4_address": address,
+                "state": "connected" if verified else "unknown",
+                "association_verified": verified,
+                "neighbor_state": neighbor_state,
+            }
+            for mac, address in clients
         ]
 
     def address(self, device_id: str) -> str:
         return str(self.repository.get_device(device_id).ipv4_address)
 
-    def test_a_saved_device_follows_its_mac_address(self) -> None:
-        self.connect(("aa:aa:aa:aa:aa:01", "192.168.50.23", True))
+    def check(self, now: float = 100) -> None:
+        self.scheduler.tick(repository=self.repository, now=now)
 
-        self.scheduler.tick(repository=self.repository, now=100)
+    def test_a_saved_device_follows_its_mac_address(self) -> None:
+        self.connect(("aa:aa:aa:aa:aa:01", "192.168.50.23"))
+
+        self.check()
 
         self.assertEqual(self.address("phone"), "192.168.50.23")
         # The plan applied in the same tick already uses the new address.
         self.assertEqual(str(self.helper.plans[-1].mark_rules[0].ipv4_address), "192.168.50.23")
 
-    def test_an_address_another_saved_device_holds_is_left_alone(self) -> None:
-        self.repository.save_device(Device("tablet", "Tablet", "192.168.50.23", "slow"))
-        self.connect(("aa:aa:aa:aa:aa:01", "192.168.50.23", True))
+    def test_only_a_confirmed_address_moves_a_device(self) -> None:
+        # Without a reachable neighbour entry the helper guesses from the DHCP
+        # lease or an old entry, which would move a device back and forth.
+        self.connect(("aa:aa:aa:aa:aa:01", "192.168.50.23"), neighbor_state="stale")
+        self.check(100)
+        stayed = self.address("phone")
+        self.connect(("aa:aa:aa:aa:aa:01", "192.168.50.23"))
+        self.check(131)
 
-        self.scheduler.tick(repository=self.repository, now=100)
+        self.assertEqual((stayed, self.address("phone")), ("192.168.50.10", "192.168.50.23"))
+
+    def test_an_address_another_saved_device_keeps_is_left_alone(self) -> None:
+        self.repository.save_device(Device("tablet", "Tablet", "192.168.50.23", "slow"))
+        self.connect(("aa:aa:aa:aa:aa:01", "192.168.50.23"))
+
+        with self.assertLogs("jittersim.engine.runtime", "WARNING") as logs:
+            self.check(100)
+            self.check(131)
 
         self.assertEqual(self.address("phone"), "192.168.50.10")
+        self.assertEqual(self.address("tablet"), "192.168.50.23")
+        # The tick still applied its plan, and the blocked move was logged once.
+        self.assertEqual(len(self.helper.plans), 1)
+        self.assertEqual(len([line for line in logs.output if "not moving" in line]), 1)
 
-    def test_unverified_clients_and_devices_without_a_mac_stay(self) -> None:
+    def test_devices_that_swap_addresses_both_move(self) -> None:
+        self.repository.save_device(
+            Device("tablet", "Tablet", "192.168.50.23", "slow", "aa:aa:aa:aa:aa:02")
+        )
+        self.connect(
+            ("aa:aa:aa:aa:aa:01", "192.168.50.23"), ("aa:aa:aa:aa:aa:02", "192.168.50.10")
+        )
+
+        self.check()
+
+        self.assertEqual((self.address("phone"), self.address("tablet")),
+                         ("192.168.50.23", "192.168.50.10"))
+
+    def test_a_chain_of_moves_completes_in_one_check(self) -> None:
+        # The tablet takes the address the phone leaves, whatever their order.
+        self.repository.save_device(
+            Device("a-tablet", "Tablet", "192.168.50.11", "slow", "aa:aa:aa:aa:aa:02")
+        )
+        self.connect(
+            ("aa:aa:aa:aa:aa:01", "192.168.50.30"), ("aa:aa:aa:aa:aa:02", "192.168.50.10")
+        )
+
+        self.check()
+
+        self.assertEqual((self.address("phone"), self.address("a-tablet")),
+                         ("192.168.50.30", "192.168.50.10"))
+
+    def test_two_devices_claiming_one_address_both_stay(self) -> None:
+        self.repository.save_device(
+            Device("tablet", "Tablet", "192.168.50.11", "slow", "aa:aa:aa:aa:aa:02")
+        )
+        self.connect(
+            ("aa:aa:aa:aa:aa:01", "192.168.50.30"), ("aa:aa:aa:aa:aa:02", "192.168.50.30")
+        )
+
+        with self.assertLogs("jittersim.engine.runtime", "WARNING"):
+            self.check()
+
+        self.assertEqual((self.address("phone"), self.address("tablet")),
+                         ("192.168.50.10", "192.168.50.11"))
+
+    def test_a_blocked_move_blocks_the_move_into_the_address_it_keeps(self) -> None:
+        self.repository.save_device(Device("tablet", "Tablet", "192.168.50.23", "slow"))
+        self.repository.save_device(
+            Device("watch", "Watch", "192.168.50.12", "slow", "aa:aa:aa:aa:aa:03")
+        )
+        # The phone can't have .23, so it keeps .10, which the watch wanted.
+        self.connect(
+            ("aa:aa:aa:aa:aa:01", "192.168.50.23"), ("aa:aa:aa:aa:aa:03", "192.168.50.10")
+        )
+
+        with self.assertLogs("jittersim.engine.runtime", "WARNING"):
+            self.check()
+
+        self.assertEqual((self.address("phone"), self.address("watch")),
+                         ("192.168.50.10", "192.168.50.12"))
+        self.assertEqual(len(self.helper.plans), 1)
+
+    def test_a_client_on_an_address_a_device_cannot_use_is_ignored(self) -> None:
+        self.connect(("aa:aa:aa:aa:aa:01", "169.254.10.20"))
+
+        self.check()
+
+        self.assertEqual(self.address("phone"), "192.168.50.10")
+        self.assertEqual(len(self.helper.plans), 1)
+
+    def test_nothing_moves_without_association_status(self) -> None:
         self.repository.save_device(Device("laptop", "Laptop", "192.168.50.11", "slow"))
-        self.connect(("aa:aa:aa:aa:aa:01", "192.168.50.23", False))
+        self.helper.status_available = False
+        self.connect(("aa:aa:aa:aa:aa:01", "192.168.50.23"))
 
-        self.scheduler.tick(repository=self.repository, now=100)
+        self.check()
 
         self.assertEqual(self.address("phone"), "192.168.50.10")
         self.assertEqual(self.address("laptop"), "192.168.50.11")
+
+    def test_nothing_moves_while_the_network_is_reset(self) -> None:
+        self.connect(("aa:aa:aa:aa:aa:01", "192.168.50.23"))
+        self.scheduler.pause()
+
+        self.check()
+
+        self.assertEqual(self.address("phone"), "192.168.50.10")
+        self.assertEqual(self.helper.snapshots, 0)
+
+    def test_a_move_keeps_a_traffic_progression_going(self) -> None:
+        self.repository.save_profile(Profile(id="fast", name="Fast"))
+        self.repository.save_domain_observations(
+            (
+                DomainObservation(
+                    ipv4_address="192.168.50.10", domain="example.com", query_count=500,
+                    first_seen=90, last_seen=90,
+                ),
+            ),
+            now=90,
+        )
+        self.repository.save_progression(
+            Progression(
+                id="degrade", device_id="phone", start_profile_id="fast",
+                end_profile_id="slow", started_at=90, duration_seconds=600, mode="traffic",
+                traffic_target_queries=200, traffic_baseline_queries=400,
+            )
+        )
+        self.connect(("aa:aa:aa:aa:aa:01", "192.168.50.23"))
+
+        self.check()
+
+        progression = self.repository.list_active_progressions(now=100)[0]
+        self.assertEqual(self.address("phone"), "192.168.50.23")
+        self.assertEqual(progression.traffic_baseline_queries, -100)
 
     def test_addresses_are_checked_every_thirty_seconds(self) -> None:
         self.connect()
@@ -1199,6 +1331,7 @@ class DeviceAddressTests(unittest.TestCase):
             self.scheduler.tick(repository=self.repository, now=now)
 
         self.assertEqual(self.helper.snapshots, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2504,9 +2504,10 @@ DASHBOARD_HTML = r"""<!doctype html>
         option.textContent = "Everyone else";
         select.appendChild(option);
       }
-      select.value = Array.from(select.options).some((option) => option.value === selected)
-        ? selected
-        : "all";
+      const kept = Array.from(select.options).some((option) => option.value === selected);
+      select.value = kept ? selected : "all";
+      // The last sample belongs to the choice that went, so start a fresh graph.
+      if (!kept && selected) resetTrafficHistory();
     }
 
     function drawTrafficChart() {
@@ -2891,6 +2892,15 @@ DASHBOARD_HTML = r"""<!doctype html>
       };
     }
 
+    function mergedTrafficCounters(data) {
+      // Everyone else is one more choice in the menu, under a reserved key.
+      const devices = Object.assign({}, data.devices || {});
+      const queues = Object.assign({}, data.queues || {});
+      if (data.everyone_else) devices[EVERYONE_ELSE_TRAFFIC] = data.everyone_else;
+      if (data.everyone_else_queue) queues[EVERYONE_ELSE_TRAFFIC] = data.everyone_else_queue;
+      return { devices: devices, queues: queues };
+    }
+
     async function pollTraffic() {
       if (trafficRequestInFlight || !trafficSamplingAllowed || document.hidden) return;
       trafficRequestInFlight = true;
@@ -2902,14 +2912,9 @@ DASHBOARD_HTML = r"""<!doctype html>
           return;
         }
         latestTrafficReferences = trafficReferencesFromResponse(data);
-        const deviceCounters = Object.assign({}, data.devices || {});
-        const queueFigures = Object.assign({}, data.queues || {});
-        if (data.everyone_else) deviceCounters[EVERYONE_ELSE_TRAFFIC] = data.everyone_else;
-        if (data.everyone_else_queue) {
-          queueFigures[EVERYONE_ELSE_TRAFFIC] = data.everyone_else_queue;
-        }
-        const totals = selectedTrafficTotals(deviceCounters);
-        const queueTotals = selectedQueueTotals(queueFigures);
+        const counters = mergedTrafficCounters(data);
+        const totals = selectedTrafficTotals(counters.devices);
+        const queueTotals = selectedQueueTotals(counters.queues);
         if (!totals) {
           resetTrafficHistory();
           element("traffic-status").textContent = "No counters yet. Assign a profile and apply the configuration.";
