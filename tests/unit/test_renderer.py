@@ -208,6 +208,30 @@ class RendererTests(unittest.TestCase):
         )
         self.assertTrue(all(command.ignore_failure for command in tc))
 
+    def test_class_ids_are_hexadecimal(self) -> None:
+        slow = Profile(id="slow", name="Slow", upload=Impairment(delay_ms=20))
+        plan = compile_plan(
+            devices=tuple(
+                make_device(f"device-{index:02d}", f"192.168.50.{index + 10}", "slow")
+                for index in range(1, 16)
+            ),
+            profiles={"slow": slow},
+        )
+
+        commands = render_command_plan(
+            plan=plan,
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+        )
+
+        eth0 = [command.argv for command in commands if "eth0" in command.argv]
+        parents = [argv[argv.index("parent") + 1] for argv in eth0 if "netem" in argv]
+        flowids = [argv[argv.index("flowid") + 1] for argv in eth0 if argv[1] == "filter"]
+        # tc reads the minor number as hex: mark 9 is band 9, class 10:a.
+        expected = [f"10:{mark + 1:x}" for mark in range(1, 16)]
+        self.assertEqual(parents, expected)
+        self.assertEqual(flowids, expected)
+        self.assertEqual(expected[-1], "10:10")
+
     def test_renders_jitter_even_without_a_base_delay(self) -> None:
         profile = Profile(
             id="jitter-only",

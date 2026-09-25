@@ -12,7 +12,7 @@ PROJECT_TABLE = "jittersim"
 ROOT_HANDLE = "10:"
 # prio class minors start at 1, so band 0 is class 10:1. Band 0 carries unmarked
 # traffic (the Pi itself, ARP, DHCP and unassigned clients) without impairment,
-# and mark N uses band N, which is class 10:N+1.
+# and mark N uses band N, which is class 10:N+1. tc reads the minor as hex.
 DEFAULT_CLASS = f"{ROOT_HANDLE}1"
 # Without a fixed priority, every "tc filter replace" allocates a new one, so
 # each apply would add another copy of every mark filter.
@@ -20,7 +20,7 @@ FILTER_PREF = "1"
 
 
 def _band_class(mark: int) -> str:
-    return f"{ROOT_HANDLE}{mark + 1}"
+    return f"{ROOT_HANDLE}{mark + 1:x}"
 
 
 def _render_set(values: Sequence[object]) -> str:
