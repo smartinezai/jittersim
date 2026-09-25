@@ -1315,6 +1315,17 @@ class ControlServerTests(unittest.TestCase):
         self.assertNotIn('<pre id="profiles">', DASHBOARD_HTML)
         self.assertNotIn('<pre id="devices">', DASHBOARD_HTML)
 
+    def test_dashboard_keeps_the_id_when_renaming_a_saved_item(self) -> None:
+        for function, prefix in (
+            ("editGroup(group)", "group"),
+            ("editServiceQuota(quota)", "service-quota"),
+            ("editTimeQuota(quota)", "time-quota"),
+        ):
+            with self.subTest(function=function):
+                body = DASHBOARD_HTML.split(f"function {function} {{", 1)[1]
+                body = body.split("\n    }\n", 1)[0]
+                self.assertIn(f'element("{prefix}-id").dataset.typed = "true";', body)
+
     def test_dashboard_offers_presets_and_burst_loss(self) -> None:
         for fragment in (
             'id="profile-preset"',

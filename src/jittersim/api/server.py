@@ -2765,6 +2765,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     function editGroup(group) {
       element("group-id").value = group.id;
+      element("group-id").dataset.typed = "true";
       element("group-name").value = group.name;
       element("group-profile").value = group.profile_id || "";
       Array.from(element("group-devices").options).forEach((option) => {
@@ -2794,6 +2795,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     function editServiceQuota(quota) {
       element("service-quota-id").value = quota.id;
+      element("service-quota-id").dataset.typed = "true";
       element("service-quota-name").value = quota.name;
       element("service-quota-device").value = quota.device_id;
       element("service-quota-profile").value = quota.profile_id;
@@ -2818,6 +2820,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     function editTimeQuota(quota) {
       element("time-quota-id").value = quota.id;
+      element("time-quota-id").dataset.typed = "true";
       element("time-quota-name").value = quota.name;
       element("time-quota-device").value = quota.device_id;
       element("time-quota-profile").value = quota.profile_id;
