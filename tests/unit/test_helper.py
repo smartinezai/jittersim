@@ -625,6 +625,44 @@ class HelperServiceTests(unittest.TestCase):
             ],
         )
 
+    def test_queue_figures_include_browser_service_profile_queues(self) -> None:
+        # The output chain counts proxied traffic by the service profile's mark.
+        nft = (
+            '{"nftables":['
+            '{"rule":{"comment":"usage-device alice upload","expr":['
+            '{"mangle":{"key":{"meta":{"key":"mark"}},"value":1}},'
+            '{"counter":{"packets":40,"bytes":3360}}]}},'
+            '{"rule":{"comment":"usage-device alice upload","expr":['
+            '{"match":{"op":"==","left":{"meta":{"key":"oifname"}},"right":"eth0"}},'
+            '{"match":{"op":"==","left":{"meta":{"key":"mark"}},"right":2}},'
+            '{"counter":{"packets":5,"bytes":3000}}]}}]}'
+        )
+        upload = (
+            '[{"kind":"netem","handle":"41:","parent":"10:2","drops":24,"qlen":0},'
+            '{"kind":"netem","handle":"42:","parent":"10:3","drops":500,"qlen":7}]'
+        )
+
+        class Executor(FakeExecutor):
+            def run(self, command):
+                self.commands.append(command)
+                if command.executable == "nft":
+                    return CommandResult(return_code=0, stdout=nft)
+                return CommandResult(
+                    return_code=0, stdout=upload if command.argv[-1] == "eth0" else "[]"
+                )
+
+        service = HelperService(
+            NetworkApplier(
+                executor=Executor(),
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            )
+        )
+
+        queues = service.handle_payload({"action": "traffic-counters"})["counters"]["queues"]
+
+        self.assertEqual(queues["devices"]["alice"]["upload_dropped"], 524)
+        self.assertEqual(queues["devices"]["alice"]["upload_queued"], 7)
+
     def test_queue_statistics_follow_the_rendered_queue_layout(self) -> None:
         plan = compile_plan(
             devices=(
@@ -656,7 +694,7 @@ class HelperServiceTests(unittest.TestCase):
 
         statistics = _parse_queue_statistics(
             {direction: json.dumps(values) for direction, values in qdiscs.items()},
-            marks={rule.device_id: rule.mark for rule in plan.mark_rules},
+            marks={rule.device_id: {rule.mark} for rule in plan.mark_rules},
         )
 
         figures = {

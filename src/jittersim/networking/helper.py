@@ -11,7 +11,7 @@ import stat
 import time
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
 from jittersim.config.models import ValidationError, normalize_domain
 from jittersim.engine.codec import PlanCodecError, plan_from_payload, plan_to_payload
@@ -902,17 +902,28 @@ def _parse_dns_query_output(output: str, *, observed_at: int) -> List[Dict[str, 
     ]
 
 
-def _rule_mark(rule: Dict[str, Any]) -> Optional[int]:
-    """Return the packet mark an nftables rule sets, if any."""
+def _rule_marks(rule: Dict[str, Any]) -> Set[int]:
+    """Return the packet marks an nftables rule sets or matches."""
 
+    marks = set()
     for expression in rule.get("expr", []):
-        mangle = expression.get("mangle") if isinstance(expression, dict) else None
-        if not isinstance(mangle, dict) or mangle.get("key") != {"meta": {"key": "mark"}}:
+        if not isinstance(expression, dict):
             continue
-        value = mangle.get("value")
+        mangle = expression.get("mangle")
+        match = expression.get("match")
+        if isinstance(mangle, dict) and mangle.get("key") == {"meta": {"key": "mark"}}:
+            value = mangle.get("value")
+        elif (
+            isinstance(match, dict)
+            and match.get("op") == "=="
+            and match.get("left") == {"meta": {"key": "mark"}}
+        ):
+            value = match.get("right")
+        else:
+            continue
         if isinstance(value, int) and not isinstance(value, bool) and 0 < value < 2**32:
-            return value
-    return None
+            marks.add(value)
+    return marks
 
 
 def _queue_counter(value: Any) -> int:
@@ -921,10 +932,17 @@ def _queue_counter(value: Any) -> int:
     return 0
 
 
-def _parse_queue_statistics(outputs: Dict[str, str], *, marks: Dict[str, int]) -> Dict[str, Any]:
-    """Report what each device's queue dropped or holds, by direction."""
+def _parse_queue_statistics(
+    outputs: Dict[str, str], *, marks: Dict[str, Set[int]]
+) -> Dict[str, Any]:
+    """Report what each device's queues dropped or hold, by direction."""
 
-    devices_by_class = {band_class(mark): device_id for device_id, mark in marks.items()}
+    # A device's traffic can use its own band and its browser service profiles' bands.
+    devices_by_class = {
+        band_class(mark): device_id
+        for device_id, device_marks in marks.items()
+        for mark in device_marks
+    }
     devices: Dict[str, Dict[str, int]] = {}
     for direction, output in outputs.items():
         try:
@@ -949,8 +967,8 @@ def _parse_queue_statistics(outputs: Dict[str, str], *, marks: Dict[str, int]) -
                     "download_queued": 0,
                 },
             )
-            statistics[f"{direction}_dropped"] = _queue_counter(qdisc.get("drops"))
-            statistics[f"{direction}_queued"] = _queue_counter(qdisc.get("qlen"))
+            statistics[f"{direction}_dropped"] += _queue_counter(qdisc.get("drops"))
+            statistics[f"{direction}_queued"] += _queue_counter(qdisc.get("qlen"))
     return {"devices": devices}
 
 
@@ -1006,9 +1024,7 @@ def _parse_traffic_counter_output(output: str) -> Dict[str, Any]:
         identifier = match.group("identifier")
         direction = match.group("direction")
         if kind == "devices":
-            mark = _rule_mark(rule)
-            if mark is not None:
-                counters["marks"][identifier] = mark
+            counters["marks"].setdefault(identifier, set()).update(_rule_marks(rule))
         counters[kind][identifier] = counters[kind].get(identifier, 0) + byte_count
         directional = counters["directions"][kind].setdefault(
             identifier,

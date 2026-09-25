@@ -17,6 +17,7 @@ from dataclasses import replace
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import compile_plan
+from jittersim.engine.plan import ServiceAssignmentRule
 from jittersim.networking.applier import ApplyError, NetworkApplier
 from jittersim.networking.executor import CommandExecutionError, SubprocessExecutor
 from jittersim.networking.helper import HelperService
@@ -279,6 +280,42 @@ class LinuxDatapathTests(unittest.TestCase):
         dropped = counters["queues"]["devices"]["a-phone"]["upload_dropped"]
         self.assertTrue(60 <= dropped <= 140, f"{dropped} of 200 dropped")
         self.assertEqual(counters["directions"]["devices"]["a-phone"]["upload_packets"], 200)
+
+    def test_helper_counts_what_a_browser_service_profile_dropped(self) -> None:
+        service = HelperService(self.applier)
+        phone = device("a-phone", 10, "normal")
+        plan = compile_plan(
+            devices=[phone],
+            profiles={"normal": NORMAL},
+            service_assignment_rules=(
+                ServiceAssignmentRule(
+                    assignment_id="video",
+                    device_id=phone.id,
+                    device_ip=phone.ipv4_address,
+                    domains=("youtube.com",),
+                    mark=0,
+                    upload_impairment=Impairment(loss_percent=50),
+                    download_impairment=Impairment(),
+                ),
+            ),
+        )
+        self.assertTrue(
+            service.handle_payload({"action": "apply", "plan": plan_to_payload(plan)})["ok"]
+        )
+        mark = plan.service_assignment_rules[0].mark
+
+        # The browser proxy marks its upstream sockets the same way.
+        _in(PI, "python3", "-c", (
+            "import socket\n"
+            "s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+            f"s.setsockopt(socket.SOL_SOCKET, getattr(socket, 'SO_MARK', 36), {mark})\n"
+            "for _ in range(200):\n"
+            "    s.sendto(b'x' * 100, ('192.168.0.1', 9))\n"
+        ))
+        counters = service.handle_payload({"action": "traffic-counters"})["counters"]
+
+        dropped = counters["queues"]["devices"]["a-phone"]["upload_dropped"]
+        self.assertTrue(60 <= dropped <= 140, f"{dropped} of 200 dropped")
 
 
 if __name__ == "__main__":
