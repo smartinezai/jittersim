@@ -2340,6 +2340,16 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(result["current"], ["#devices"])
         self.assertEqual(result["fallback"], ["overview", "overview", "rules"])
 
+    def test_dashboard_folds_raw_json_away(self) -> None:
+        # The compiled plan alone used to be about 9,000 pixels tall.
+        for element_id in ("plan", "state", "policies"):
+            with self.subTest(element_id=element_id):
+                self.assertRegex(
+                    DASHBOARD_HTML,
+                    r'<details class="raw-details">\s*<summary>Show details</summary>\s*'
+                    f'<pre id="{element_id}">',
+                )
+
     def test_dashboard_offers_sign_out_near_the_top(self) -> None:
         self.assertLess(
             DASHBOARD_HTML.index('action="/sign-out"'),

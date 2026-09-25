@@ -586,6 +586,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     .schedule-row div:first-child { display: grid; gap: 0.15rem; }
     .transfer-actions { justify-content: flex-start; margin-top: 1rem; }
     .schedule-row small { color: #91a8c1; }
+    .raw-details summary { margin-bottom: 0.6rem; color: #a8c7e8; cursor: pointer; }
+    .raw-details pre { max-height: 32rem; overflow: auto; }
     .tabs {
       display: flex; gap: 0.35rem; margin: 1rem 0; padding: 0.35rem; overflow-x: auto;
       border: 1px solid #263b55; border-radius: 0.9rem; background: rgba(18, 31, 49, 0.9);
@@ -1534,15 +1536,24 @@ DASHBOARD_HTML = r"""<!doctype html>
   <div class="data-grid">
     <section class="card">
       <div class="section-heading"><h2>Compiled plan</h2><p>Current traffic rules</p></div>
-      <pre id="plan">Loading...</pre>
+      <details class="raw-details">
+        <summary>Show details</summary>
+        <pre id="plan">Loading...</pre>
+      </details>
     </section>
     <section class="card">
       <div class="section-heading"><h2>Runtime state</h2><p>Last helper result</p></div>
-      <pre id="state">Loading...</pre>
+      <details class="raw-details">
+        <summary>Show details</summary>
+        <pre id="state">Loading...</pre>
+      </details>
     </section>
     <section class="card">
       <div class="section-heading"><h2>Access rules</h2><p>Saved MAC and website policy</p></div>
-      <pre id="policies">Loading...</pre>
+      <details class="raw-details">
+        <summary>Show details</summary>
+        <pre id="policies">Loading...</pre>
+      </details>
     </section>
     <section class="card">
       <div class="section-heading">
