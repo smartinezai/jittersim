@@ -1013,6 +1013,52 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(json.loads(body)["timer_id"], "ten-minutes")
         self.assertEqual(json.loads(self.server.response_for("/api/timers")[2]), {"timers": []})
 
+    def test_live_changes_do_not_undo_an_explicit_reset(self) -> None:
+        helper = FakeHelper()
+        self.server.helper_client = helper
+        self.repository.update_runtime_state(
+            observed_state="reset",
+            last_action="reset",
+            last_result="success",
+            last_error=None,
+        )
+        self.server.write_response_for(
+            "/api/data-limits",
+            {"device_id": "alice", "profile_id": "slow", "limit_bytes": 1_000},
+        )
+
+        requests = (
+            ("/api/data-limits/reset", {"device_id": "alice"}),
+            ("/api/timers", {"id": "t", "device_id": "alice", "profile_id": "slow", "duration_minutes": 5}),
+            ("/api/timers/cancel", {"id": "t"}),
+        )
+        for path, payload in requests:
+            with self.subTest(path=path):
+                status, _, body = self.server.write_response_for(path, payload)
+                self.assertEqual(status, 200)
+                self.assertFalse(json.loads(body)["live_applied"])
+        self.assertIsNone(helper.applied_plan)
+        self.assertEqual(self.repository.get_runtime_state().last_action, "reset")
+
+    def test_live_changes_apply_while_the_network_is_applied(self) -> None:
+        helper = FakeHelper()
+        self.server.helper_client = helper
+        self.repository.update_runtime_state(
+            observed_state="applied",
+            last_action="apply",
+            last_result="success",
+            last_error=None,
+        )
+
+        status, _, body = self.server.write_response_for(
+            "/api/timers",
+            {"id": "t", "device_id": "alice", "profile_id": "slow", "duration_minutes": 5},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["live_applied"])
+        self.assertIsNotNone(helper.applied_plan)
+
     def test_rejects_timer_duration_outside_the_supported_range(self) -> None:
         status, _, body = self.server.write_response_for(
             "/api/timers",

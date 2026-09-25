@@ -2899,7 +2899,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         refreshAfterSuccess(
           result.live_applied
             ? "Timer started and the profile is active now."
-            : "Timer saved. Apply the configuration in hardware mode to start it.",
+            : "Timer saved. Apply the configuration to start it.",
         );
       } catch (error) {
         showMessage(error.message, "error");
@@ -2930,7 +2930,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         refreshAfterSuccess(
           result.live_applied
             ? "Progression started and is active now."
-            : "Progression saved. Apply the configuration in hardware mode to start it.",
+            : "Progression saved. Apply the configuration to start it.",
         );
       } catch (error) {
         showMessage(error.message, "error");
@@ -3837,10 +3837,10 @@ class ControlServer(HTTPServer):
                         "message": "timer saved; apply the configuration in hardware mode to start it",
                     }
                 )
-            status, content_type, body = self._apply_configuration()
+            status, content_type, body = self._apply_after_change()
             response = json.loads(body.decode("utf-8"))
             response["timer"] = _timer_payload(timer)
-            response["live_applied"] = status == HTTPStatus.OK
+            response.setdefault("live_applied", status == HTTPStatus.OK)
             return status, content_type, _json_bytes(response)
 
         if path == "/api/timers/cancel":
@@ -3860,10 +3860,10 @@ class ControlServer(HTTPServer):
                 return HTTPStatus.OK, "application/json", _json_bytes(
                     {"timer_id": timer_id, "live_applied": False}
                 )
-            status, content_type, body = self._apply_configuration()
+            status, content_type, body = self._apply_after_change()
             response = json.loads(body.decode("utf-8"))
             response["timer_id"] = timer_id
-            response["live_applied"] = status == HTTPStatus.OK
+            response.setdefault("live_applied", status == HTTPStatus.OK)
             return status, content_type, _json_bytes(response)
 
         if path == "/api/progressions":
@@ -3892,14 +3892,14 @@ class ControlServer(HTTPServer):
                         "message": "progression saved; apply the configuration in hardware mode to start it",
                     }
                 )
-            status, content_type, body = self._apply_configuration()
+            status, content_type, body = self._apply_after_change()
             response = json.loads(body.decode("utf-8"))
             response["progression"] = _progression_payload(
                 progression,
                 repository=self.repository,
                 now=int(time.time()),
             )
-            response["live_applied"] = status == HTTPStatus.OK
+            response.setdefault("live_applied", status == HTTPStatus.OK)
             return status, content_type, _json_bytes(response)
 
         if path == "/api/progressions/stop":
@@ -3919,10 +3919,10 @@ class ControlServer(HTTPServer):
                 return HTTPStatus.OK, "application/json", _json_bytes(
                     {"progression_id": progression_id, "live_applied": False}
                 )
-            status, content_type, body = self._apply_configuration()
+            status, content_type, body = self._apply_after_change()
             response = json.loads(body.decode("utf-8"))
             response["progression_id"] = progression_id
-            response["live_applied"] = status == HTTPStatus.OK
+            response.setdefault("live_applied", status == HTTPStatus.OK)
             return status, content_type, _json_bytes(response)
 
         if path == "/api/data-limits":
@@ -4405,11 +4405,24 @@ class ControlServer(HTTPServer):
                     "message": "quota saved; apply the configuration in hardware mode to start it",
                 }
             )
-        status, content_type, body = self._apply_configuration()
+        status, content_type, body = self._apply_after_change()
         response = json.loads(body.decode("utf-8"))
         response[key] = value
-        response["live_applied"] = status == HTTPStatus.OK
+        response.setdefault("live_applied", status == HTTPStatus.OK)
         return status, content_type, _json_bytes(response)
+
+    def _apply_after_change(self) -> Tuple[int, str, bytes]:
+        """Re-apply the plan for a saved change unless the network was reset."""
+
+        if self.repository.get_runtime_state().last_action == "reset":
+            # Only an explicit Apply may undo a Reset.
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {
+                    "live_applied": False,
+                    "message": "saved; the network is reset, so apply the configuration to use it",
+                }
+            )
+        return self._apply_configuration()
 
     def _apply_configuration(self) -> Tuple[int, str, bytes]:
         if self.helper_client is None:
