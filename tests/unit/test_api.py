@@ -1696,6 +1696,55 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_traffic_chart_labels_fit_on_the_canvas(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is required to draw the chart")
+        script = DASHBOARD_HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+
+        def function(name):
+            body = script.split(f"    function {name}(", 1)[1].split("\n    }\n", 1)[0]
+            return f"function {name}({body}\n}}\n"
+
+        harness = (
+            "const TRAFFIC_WINDOW_MS = 60000;\n"
+            "const trafficSamples = [];\n"
+            # An ISP plan of 100 Mbit/s sets the scale to 100 Mbit/s.
+            "const latestTrafficReferences = {isp_download: 100};\n"
+            "const drawn = [];\n"
+            "const context = {\n"
+            "  setTransform() {}, clearRect() {}, beginPath() {}, moveTo() {},\n"
+            "  lineTo() {}, stroke() {}, setLineDash() {},\n"
+            "  measureText(text) { return {width: 7 * text.length}; },\n"
+            "  fillText(text, x) { drawn.push({text, x, align: this.textAlign}); },\n"
+            "};\n"
+            "const elements = {\n"
+            "  'traffic-chart': {getBoundingClientRect: () => ({width: 600, height: 320}),\n"
+            "                    getContext: () => context},\n"
+            "  'traffic-device': {value: 'all'},\n"
+            "  'traffic-profile-upload-legend': {},\n"
+            "  'traffic-profile-download-legend': {},\n"
+            "};\n"
+            "const element = (id) => elements[id];\n"
+            "const window = {devicePixelRatio: 1};\n"
+            + function("formatTrafficRate")
+            + function("drawTrafficChart")
+            + "drawTrafficChart();\n"
+            "const clipped = drawn.filter(({text, x, align}) => {\n"
+            "  const width = context.measureText(text).width;\n"
+            "  return (align === 'right' ? x - width : align === 'center' ? x - width / 2 : x) < 0;\n"
+            "});\n"
+            "if (!drawn.length || clipped.length) {\n"
+            "  console.error(JSON.stringify(clipped));\n"
+            "  process.exit(1);\n"
+            "}\n"
+        )
+        result = subprocess.run(
+            [node, "-e", harness], capture_output=True, text=True, check=False
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_dashboard_script_is_valid_javascript(self) -> None:
         node = shutil.which("node")
         if node is None:

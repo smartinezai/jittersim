@@ -2155,9 +2155,6 @@ DASHBOARD_HTML = r"""<!doctype html>
       if (!context) return;
       context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
       context.clearRect(0, 0, bounds.width, bounds.height);
-      const plot = { left: 62, right: bounds.width - 14, top: 16, bottom: bounds.height - 34 };
-      const plotWidth = plot.right - plot.left;
-      const plotHeight = plot.bottom - plot.top;
       const now = performance.now();
       const visibleSamples = trafficSamples.filter((sample) => now - sample.time <= TRAFFIC_WINDOW_MS);
       const selectedDevice = element("traffic-device").value;
@@ -2174,6 +2171,17 @@ DASHBOARD_HTML = r"""<!doctype html>
       const maxRate = Math.max(0.1, ...graphValues);
       const scaleMax = Math.pow(10, Math.ceil(Math.log10(maxRate)));
       context.font = "12px system-ui, sans-serif";
+      const tickLabels = [0, 1, 2, 3, 4].map((tick) => formatTrafficRate(scaleMax * tick / 4));
+      // Leave room for the widest axis label, such as "100.00 Mbit/s".
+      const labelWidth = Math.max(...tickLabels.map((label) => context.measureText(label).width));
+      const plot = {
+        left: Math.max(62, Math.ceil(labelWidth) + 16),
+        right: bounds.width - 14,
+        top: 16,
+        bottom: bounds.height - 34
+      };
+      const plotWidth = plot.right - plot.left;
+      const plotHeight = plot.bottom - plot.top;
       context.textBaseline = "middle";
       for (let tick = 0; tick <= 4; tick += 1) {
         const y = plot.bottom - plotHeight * tick / 4;
@@ -2185,7 +2193,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         context.stroke();
         context.fillStyle = "#91a8c1";
         context.textAlign = "right";
-        context.fillText(formatTrafficRate(scaleMax * tick / 4), plot.left - 8, y);
+        context.fillText(tickLabels[tick], plot.left - 8, y);
       }
       [0, 0.5, 1].forEach((fraction) => {
         const x = plot.left + plotWidth * fraction;
