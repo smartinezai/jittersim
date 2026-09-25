@@ -317,6 +317,41 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(limited[limited.index("corrupt") + 1], "5%")
         self.assertEqual(limited[limited.index("rate") + 1], "1000kbit")
 
+    def _upload_netem(self, impairment: Impairment):
+        plan = compile_plan(
+            devices=(make_device("alice", "192.168.50.10", "chosen"),),
+            profiles={"chosen": Profile(id="chosen", name="Chosen", upload=impairment)},
+        )
+        commands = render_command_plan(
+            plan=plan,
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+        )
+        command = next(c for c in commands if "upload impairment for device alice" in c.purpose)
+        return command.argv[command.argv.index("netem") :]
+
+    def test_bursty_loss_uses_the_gilbert_model_with_the_same_average(self) -> None:
+        bursty = self._upload_netem(Impairment(loss_percent=10, loss_burst_packets=4))
+        independent = self._upload_netem(Impairment(loss_percent=10, loss_burst_packets=1))
+        total = self._upload_netem(Impairment(loss_percent=100, loss_burst_packets=4))
+
+        # Leaving the losing state with r = 1/4 gives bursts of 4 on average, and
+        # p = 0.1 * r / 0.9 keeps the average loss at 10%.
+        self.assertEqual(bursty[bursty.index("loss") : bursty.index("loss") + 4],
+                         ("loss", "gemodel", "2.7778%", "25.0000%"))
+        self.assertEqual(independent[independent.index("loss") + 1], "random")
+        self.assertEqual(total[total.index("loss") : total.index("loss") + 3],
+                         ("loss", "random", "100%"))
+
+    def test_jitter_keeps_packets_in_order(self) -> None:
+        jitter = self._upload_netem(Impairment(delay_ms=100, jitter_ms=30))
+        limited = self._upload_netem(Impairment(delay_ms=100, jitter_ms=30, bandwidth_kbit=500))
+        steady = self._upload_netem(Impairment(delay_ms=100))
+
+        # netem only keeps packets in order when a rate serializes them.
+        self.assertEqual(jitter[jitter.index("rate") + 1], "10gbit")
+        self.assertEqual(limited[limited.index("rate") + 1], "500kbit")
+        self.assertEqual(steady[steady.index("rate") + 1], "0bit")
+
     def test_renders_jitter_even_without_a_base_delay(self) -> None:
         profile = Profile(
             id="jitter-only",

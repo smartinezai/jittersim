@@ -666,6 +666,13 @@ DASHBOARD_HTML = r"""<!doctype html>
           <p id="profile-edit-status" role="status"></p>
           <button id="profile-cancel-edit" type="button">Cancel editing</button>
         </div>
+        <label>Start from a preset
+          <select id="profile-preset">
+            <option value="">Choose a preset...</option>
+          </select>
+        </label>
+        <p class="form-note">Presets fill the form with rough approximations of real networks.
+          Nothing is saved until you choose Save profile.</p>
         <div class="fields">
           <label>Profile ID
             <input id="profile-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}">
@@ -681,6 +688,14 @@ DASHBOARD_HTML = r"""<!doctype html>
           <label>Loss (%)
             <input id="upload-loss" type="number" min="0" max="100" value="0" required>
           </label>
+          <label>
+            <span class="field-label">Loss bursts (packets)<span
+              class="help-icon" tabindex="0" role="img" aria-label="Loss burst help"
+              data-help="0 loses packets independently. 4 makes losses arrive in runs of
+                about 4 packets, like a fading signal. The loss percentage stays the average."
+              >?</span></span>
+            <input id="upload-loss-burst" type="number" min="0" max="100" value="0">
+          </label>
           <label>Bandwidth (kbit/s, optional)
             <input id="upload-bandwidth" type="number" min="1">
           </label>
@@ -695,6 +710,14 @@ DASHBOARD_HTML = r"""<!doctype html>
           </label>
           <label>Loss (%)
             <input id="download-loss" type="number" min="0" max="100" value="0" required>
+          </label>
+          <label>
+            <span class="field-label">Loss bursts (packets)<span
+              class="help-icon" tabindex="0" role="img" aria-label="Loss burst help"
+              data-help="0 loses packets independently. 4 makes losses arrive in runs of
+                about 4 packets, like a fading signal. The loss percentage stays the average."
+              >?</span></span>
+            <input id="download-loss-burst" type="number" min="0" max="100" value="0">
           </label>
           <label>Bandwidth (kbit/s, optional)
             <input id="download-bandwidth" type="number" min="1">
@@ -1325,6 +1348,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         delay_ms: Number(element(prefix + "-delay").value),
         jitter_ms: Number(element(prefix + "-jitter").value),
         loss_percent: Number(element(prefix + "-loss").value),
+        loss_burst_packets: Number(element(prefix + "-loss-burst").value),
         bandwidth_kbit: optionalNumber(prefix + "-bandwidth"),
         reorder_percent: Number(element(prefix + "-reorder").value),
         duplicate_percent: Number(element(prefix + "-duplicate").value),
@@ -1398,7 +1422,12 @@ DASHBOARD_HTML = r"""<!doctype html>
         const jitter = values.jitter_ms ? " ± " + values.jitter_ms + " ms" : "";
         parts.push(values.delay_ms + " ms" + jitter);
       }
-      if (values.loss_percent) parts.push(values.loss_percent + "% loss");
+      if (values.loss_percent) {
+        const bursts = values.loss_burst_packets > 1
+          ? " in bursts of " + values.loss_burst_packets
+          : "";
+        parts.push(values.loss_percent + "% loss" + bursts);
+      }
       if (values.bandwidth_kbit !== null) parts.push(formatBandwidth(values.bandwidth_kbit));
       if (values.reorder_percent) parts.push(values.reorder_percent + "% reorder");
       if (values.duplicate_percent) parts.push(values.duplicate_percent + "% duplicate");
@@ -1544,6 +1573,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       element(prefix + "-delay").value = values.delay_ms;
       element(prefix + "-jitter").value = values.jitter_ms;
       element(prefix + "-loss").value = values.loss_percent;
+      element(prefix + "-loss-burst").value = values.loss_burst_packets || 0;
       element(prefix + "-bandwidth").value =
         values.bandwidth_kbit === null ? "" : values.bandwidth_kbit;
       element(prefix + "-reorder").value = values.reorder_percent;
@@ -1560,6 +1590,11 @@ DASHBOARD_HTML = r"""<!doctype html>
       stopEditing("profile");
       element("profile-id").value = profile.id;
       element("profile-name").value = profile.name;
+      fillProfileValues(profile);
+      startEditing("profile", profile.name);
+    }
+
+    function fillProfileValues(profile) {
       fillImpairment("upload", profile.upload);
       fillImpairment("download", profile.download);
       element("profile-seed").value = profile.random_seed === null ? "" : profile.random_seed;
@@ -1573,8 +1608,127 @@ DASHBOARD_HTML = r"""<!doctype html>
       element("profile-website-domains").value = profile.website_domains.join(", ");
       element("profile-website-enabled").value = profile.website_randomness.enabled_probability;
       element("profile-form").querySelector("details").open = hasAdvancedSettings(profile);
-      startEditing("profile", profile.name);
     }
+
+    // Rough approximations of real networks, not measurements.
+    const PROFILE_PRESETS = [
+      {
+        name: "Good 4G",
+        upload: { delay_ms: 25, jitter_ms: 5, bandwidth_kbit: 10000 },
+        download: { delay_ms: 25, jitter_ms: 5, bandwidth_kbit: 30000 }
+      },
+      {
+        name: "Congested 4G",
+        upload: { delay_ms: 70, jitter_ms: 40, loss_percent: 1, bandwidth_kbit: 1000 },
+        download: { delay_ms: 70, jitter_ms: 40, loss_percent: 1, bandwidth_kbit: 3000 }
+      },
+      {
+        name: "3G",
+        upload: { delay_ms: 100, jitter_ms: 20, bandwidth_kbit: 330 },
+        download: { delay_ms: 100, jitter_ms: 20, bandwidth_kbit: 780 }
+      },
+      {
+        name: "EDGE (2G)",
+        upload: { delay_ms: 440, jitter_ms: 60, loss_percent: 1, bandwidth_kbit: 200 },
+        download: { delay_ms: 400, jitter_ms: 60, loss_percent: 1, bandwidth_kbit: 240 }
+      },
+      {
+        name: "Satellite",
+        upload: {
+          delay_ms: 300, jitter_ms: 20, loss_percent: 1, loss_burst_packets: 3,
+          bandwidth_kbit: 2000
+        },
+        download: {
+          delay_ms: 300, jitter_ms: 20, loss_percent: 1, loss_burst_packets: 3,
+          bandwidth_kbit: 10000
+        }
+      },
+      {
+        name: "Lossy Wi-Fi",
+        upload: { delay_ms: 5, jitter_ms: 15, loss_percent: 5, loss_burst_packets: 3 },
+        download: { delay_ms: 5, jitter_ms: 15, loss_percent: 5, loss_burst_packets: 3 }
+      },
+      {
+        name: "Train tunnel",
+        upload: {
+          delay_ms: 200, jitter_ms: 80, loss_percent: 3, loss_burst_packets: 5, bandwidth_kbit: 500
+        },
+        download: {
+          delay_ms: 200, jitter_ms: 80, loss_percent: 3, loss_burst_packets: 5, bandwidth_kbit: 1000
+        },
+        outage_probability: 30,
+        outage_duration_seconds: 10,
+        outage_interval_seconds: 60
+      },
+      {
+        name: "Very bad network",
+        upload: {
+          delay_ms: 500, jitter_ms: 100, loss_percent: 10, loss_burst_packets: 2,
+          bandwidth_kbit: 1000
+        },
+        download: {
+          delay_ms: 500, jitter_ms: 100, loss_percent: 10, loss_burst_packets: 2,
+          bandwidth_kbit: 1000
+        }
+      },
+      {
+        name: "Offline",
+        upload: { loss_percent: 100 },
+        download: { loss_percent: 100 }
+      }
+    ];
+
+    function presetImpairment(values) {
+      const impairment = Object.assign({
+        delay_ms: 0,
+        jitter_ms: 0,
+        loss_percent: 0,
+        loss_burst_packets: 0,
+        bandwidth_kbit: null,
+        reorder_percent: 0,
+        duplicate_percent: 0,
+        corrupt_percent: 0
+      }, values);
+      IMPAIRMENT_FEATURES.forEach((feature) => {
+        impairment[feature + "_randomness"] = { variation_percent: 0, enabled_probability: 100 };
+      });
+      return impairment;
+    }
+
+    function applyPreset(preset) {
+      const unchanged = { variation_percent: 0, enabled_probability: 100 };
+      fillProfileValues({
+        upload: presetImpairment(preset.upload),
+        download: presetImpairment(preset.download),
+        random_seed: null,
+        reroll_interval_seconds: 0,
+        reroll_interval_randomness: unchanged,
+        outage_probability: preset.outage_probability || 0,
+        outage_duration_seconds: preset.outage_duration_seconds || 0,
+        outage_interval_seconds: preset.outage_interval_seconds || 0,
+        website_mode: "unrestricted",
+        website_domains: [],
+        website_randomness: unchanged
+      });
+      // Keep the name of a profile that is being edited.
+      if (!element("profile-id").readOnly) {
+        element("profile-name").value = preset.name;
+        element("profile-name").dispatchEvent(new Event("input"));
+      }
+      showMessage(preset.name + " loaded. Adjust it if needed, then save the profile.", "success");
+    }
+
+    PROFILE_PRESETS.forEach((preset, index) => {
+      const option = document.createElement("option");
+      option.value = String(index);
+      option.textContent = preset.name;
+      element("profile-preset").appendChild(option);
+    });
+    element("profile-preset").addEventListener("change", (event) => {
+      const preset = PROFILE_PRESETS[Number(event.target.value)];
+      event.target.value = "";
+      if (preset) applyPreset(preset);
+    });
 
     function fillDeviceForm(device) {
       stopEditing("device");

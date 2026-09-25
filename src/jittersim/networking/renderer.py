@@ -27,6 +27,23 @@ def _render_set(values: Sequence[object]) -> str:
     return "{ " + ", ".join(str(value) for value in values) + " }"
 
 
+# A rate far above any real link. netem only keeps packets in order when a
+# rate serializes them, so jitter alone would reorder packets.
+ORDERING_RATE = "10gbit"
+
+
+def _loss_arguments(loss_percent: int, burst_packets: int) -> List[str]:
+    if burst_packets < 2 or loss_percent >= 100:
+        return ["loss", "random", f"{loss_percent}%"]
+    # Gilbert model: the bad state loses every packet and the good state none.
+    # Leaving the bad state with probability r gives bursts of 1/r packets, and
+    # entering it with p = L * r / (1 - L) keeps the average loss at L.
+    loss = loss_percent / 100
+    exit_bad = 1 / burst_packets
+    enter_bad = loss * exit_bad / (1 - loss)
+    return ["loss", "gemodel", f"{enter_bad * 100:.4f}%", f"{exit_bad * 100:.4f}%"]
+
+
 def _format_impairment_arguments(queue: QueueSpec) -> List[str]:
     impairment = queue.impairment
     arguments = ["netem"]
@@ -35,7 +52,7 @@ def _format_impairment_arguments(queue: QueueSpec) -> List[str]:
         if impairment.jitter_ms:
             arguments.append(f"{impairment.jitter_ms}ms")
     if impairment.loss_percent:
-        arguments.extend(["loss", "random", f"{impairment.loss_percent}%"])
+        arguments.extend(_loss_arguments(impairment.loss_percent, impairment.loss_burst_packets))
     # netem reorders by sending some packets without the configured delay, so tc
     # rejects reordering without one. Randomness can also switch the delay off.
     if impairment.reorder_percent and impairment.delay_ms:
@@ -45,7 +62,12 @@ def _format_impairment_arguments(queue: QueueSpec) -> List[str]:
     # "tc qdisc replace" changes an existing netem in place and keeps any
     # corrupt or rate setting it is not given, so always state both.
     arguments.extend(["corrupt", f"{impairment.corrupt_percent}%"])
-    rate = "0bit" if impairment.bandwidth_kbit is None else f"{impairment.bandwidth_kbit}kbit"
+    if impairment.bandwidth_kbit is not None:
+        rate = f"{impairment.bandwidth_kbit}kbit"
+    elif impairment.jitter_ms:
+        rate = ORDERING_RATE
+    else:
+        rate = "0bit"
     arguments.extend(["rate", rate])
     return arguments
 

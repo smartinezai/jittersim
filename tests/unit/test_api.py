@@ -1211,6 +1211,32 @@ class ControlServerTests(unittest.TestCase):
         self.assertNotIn('<pre id="profiles">', DASHBOARD_HTML)
         self.assertNotIn('<pre id="devices">', DASHBOARD_HTML)
 
+    def test_dashboard_offers_presets_and_burst_loss(self) -> None:
+        for fragment in (
+            'id="profile-preset"',
+            "const PROFILE_PRESETS = [",
+            'name: "Offline"',
+            'id="upload-loss-burst"',
+            'id="download-loss-burst"',
+            'loss_burst_packets: Number(element(prefix + "-loss-burst").value)',
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, DASHBOARD_HTML)
+
+    def test_profiles_accept_burst_loss(self) -> None:
+        status, _, body = self.server.write_response_for(
+            "/api/profiles",
+            {
+                "id": "bursty",
+                "name": "Bursty",
+                "upload": {"loss_percent": 10, "loss_burst_packets": 4},
+            },
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["profile"]["upload"]["loss_burst_packets"], 4)
+        self.assertEqual(self.repository.get_profile("bursty").upload.loss_burst_packets, 4)
+
     def test_dashboard_asks_for_the_token_first(self) -> None:
         self.assertLess(
             DASHBOARD_HTML.index('id="admin-token"'),

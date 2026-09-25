@@ -323,6 +323,25 @@ class ConfigRepositoryTests(unittest.TestCase):
             [profile.id for profile in self.repository.list_profiles()], ["normal"]
         )
 
+    def test_round_trips_burst_loss_and_loads_older_profiles(self) -> None:
+        profile = Profile(
+            id="bursty",
+            name="Bursty",
+            upload=Impairment(loss_percent=10, loss_burst_packets=4),
+        )
+        self.repository.save_profile(profile)
+        # A profile saved before burst loss existed has no such key.
+        self.repository._connection.execute(
+            "UPDATE profiles SET download_json = ? WHERE id = ?",
+            ('{"delay_ms": 20}', "bursty"),
+        )
+        self.repository._connection.commit()
+
+        stored = self.repository.get_profile("bursty")
+
+        self.assertEqual(stored.upload.loss_burst_packets, 4)
+        self.assertEqual(stored.download, Impairment(delay_ms=20))
+
     def test_round_trips_byte_progression_targets(self) -> None:
         self.repository.save_profile(Profile(id="normal", name="Normal"))
         self.repository.save_profile(Profile(id="slow", name="Slow"))
