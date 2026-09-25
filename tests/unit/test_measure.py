@@ -3,8 +3,9 @@ import json
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -144,7 +145,10 @@ class MeasurementTests(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever)
         thread.start()
         try:
-            result = measure_download(f"http://127.0.0.1:{server.server_port}/file")
+            url = f"http://127.0.0.1:{server.server_port}/file"
+            result = measure_download(url)
+            # A file exactly as large as the byte cap is still complete.
+            capped = measure_download(url, max_bytes=250_000)
         finally:
             server.shutdown()
             server.server_close()
@@ -152,6 +156,60 @@ class MeasurementTests(unittest.TestCase):
 
         self.assertEqual(result["bytes"], 250_000)
         self.assertGreater(result["mbit_per_s"], 0)
+        self.assertTrue(result["complete"])
+        self.assertTrue(capped["complete"])
+
+    def test_a_download_stops_after_its_time_limit(self) -> None:
+        class Trickle(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", "10000000")
+                self.end_headers()
+                try:
+                    for _ in range(200):
+                        self.wfile.write(b"x" * 1_000)
+                        self.wfile.flush()
+                        time.sleep(0.05)
+                except OSError:
+                    pass
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Trickle)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        started = time.monotonic()
+        try:
+            result = measure_download(
+                f"http://127.0.0.1:{server.server_port}/file", max_seconds=0.5
+            )
+        finally:
+            elapsed = time.monotonic() - started
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+        self.assertLess(elapsed, 3)
+        self.assertFalse(result["complete"])
+        self.assertGreater(result["bytes"], 0)
+
+    def test_checks_the_download_and_output_before_pinging(self) -> None:
+        cases = (
+            ["--download", "example.com/file"],
+            ["--output", "/no/such/folder/run.json"],
+        )
+        for arguments in cases:
+            with self.subTest(arguments=arguments):
+                ping = FakePing(MACOS_PING)
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    main(["measure", *arguments], runner=ping)
+                self.assertEqual(ping.commands, [])
+
+    def test_windows_is_refused_clearly(self) -> None:
+        with self.assertRaisesRegex(MeasurementError, "macOS or Linux"):
+            measure("1.1.1.1", count=3, interval=0.2, label="x", runner=FakePing(""),
+                    now=1, platform="win32")
 
     def test_compares_runs_in_a_markdown_table(self) -> None:
         normal = measure("1.1.1.1", count=3, interval=0.2, label="normal",

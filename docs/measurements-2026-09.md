@@ -68,10 +68,12 @@ grow by 75 to 95 ms and the loss must stay between 10% and 30%.
 1. Connect a laptop to the JitterSim test Wi-Fi and assign it a profile with
    a normal connection.
 2. On the laptop, run `jittersim measure --label normal`. Add
-   `--download URL` with a large public file to include a download speed.
-   If JitterSim is not installed there, copy `src/jittersim/measure.py` and
-   run `python3 measure.py measure --label normal`; it needs only Python and
-   `ping`.
+   `--download URL` with a large public file to include a download speed;
+   it downloads for at most 20 seconds. Some servers refuse scripted
+   downloads, so try another file if it fails with an HTTP error. If
+   JitterSim is not installed there, copy `src/jittersim/measure.py` and
+   run `python3 measure.py measure --label normal`. It needs only
+   Python 3.9 and `ping` on macOS or Linux; Windows ping is not supported.
 3. Give the laptop an impaired profile in the dashboard, then run
    `jittersim measure --label 3g`.
 4. Run `jittersim compare jittersim-normal.json jittersim-3g.json` for a

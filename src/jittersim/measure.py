@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -97,19 +98,31 @@ def summarize(replies: Sequence[Tuple[int, float]], *, sent: int) -> Dict[str, A
     }
 
 
-def measure_download(url: str, *, timeout: float = 30.0, max_bytes: int = 100 * 2**20) -> Dict:
-    """Download a file and report the throughput a device experienced."""
+def measure_download(
+    url: str,
+    *,
+    timeout: float = 30.0,
+    max_bytes: int = 100 * 2**20,
+    max_seconds: float = 20.0,
+) -> Dict:
+    """Download a file for at most max_seconds and report the throughput."""
 
     received = 0
+    complete = False
     started = time.monotonic()
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
-            while received < max_bytes:
-                chunk = response.read(min(65_536, max_bytes - received))
+            # A slow profile would take minutes for a large file, so stop early.
+            while received < max_bytes and time.monotonic() - started < max_seconds:
+                # read1 returns what has arrived, so the time limit holds on slow links.
+                chunk = response.read1(min(65_536, max_bytes - received))
                 if not chunk:
+                    complete = True
                     break
                 received += len(chunk)
-    except (OSError, urllib.error.URLError) as error:
+            # With a Content-Length, the whole file may have arrived at the cap.
+            complete = complete or getattr(response, "length", None) == 0
+    except (OSError, ValueError, urllib.error.URLError) as error:
         raise MeasurementError(f"download failed: {error}") from error
     seconds = max(time.monotonic() - started, 1e-6)
     return {
@@ -117,6 +130,7 @@ def measure_download(url: str, *, timeout: float = 30.0, max_bytes: int = 100 * 
         "bytes": received,
         "seconds": round(seconds, 3),
         "mbit_per_s": round(received * 8 / seconds / 1_000_000, 2),
+        "complete": complete,
     }
 
 
@@ -133,6 +147,8 @@ def measure(
 ) -> Dict[str, Any]:
     """Ping a target from this device and describe what came back."""
 
+    if platform == "win32":
+        raise MeasurementError("measuring needs macOS or Linux; Windows ping works differently")
     started_at = int(time.time()) if now is None else now
     command = ping_command(target, count=count, interval=interval, platform=platform)
     try:
@@ -263,6 +279,10 @@ def comparison_table(runs: Sequence[Dict[str, Any]], *, table_format: str = "mar
     return "\n".join(lines) + "\n"
 
 
+def _safe_label(label: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "-", label).strip("-") or "run"
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="jittersim",
@@ -276,7 +296,9 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--interval", type=float, default=0.2, help="seconds between pings (0.01 to 10)"
     )
-    run.add_argument("--download", metavar="URL", help="also time the download of this file")
+    run.add_argument(
+        "--download", metavar="URL", help="also download this file, for at most 20 seconds"
+    )
     run.add_argument("--output", type=Path, help="where to save the result as JSON")
     compare = commands.add_parser("compare", help="compare saved runs in a table")
     compare.add_argument("files", nargs="+", type=Path)
@@ -302,6 +324,15 @@ def main(
             parser.error("--count must be between 1 and 1000")
         if not 0.01 <= arguments.interval <= 10:
             parser.error("--interval must be between 0.01 and 10 seconds")
+        # Check what comes after the pings before spending time on them.
+        if arguments.download and urllib.parse.urlsplit(arguments.download).scheme not in (
+            "http",
+            "https",
+        ):
+            parser.error("--download needs an http:// or https:// URL")
+        output = arguments.output or Path(f"jittersim-{_safe_label(arguments.label)}.json")
+        if not output.parent.is_dir():
+            parser.error(f"the folder for {output} does not exist")
         run = measure(
             arguments.target,
             count=arguments.count,
@@ -313,9 +344,11 @@ def main(
     except MeasurementError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
-    safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "-", arguments.label).strip("-") or "run"
-    output = arguments.output or Path(f"jittersim-{safe_label}.json")
-    output.write_text(json.dumps(run, indent=2) + "\n", encoding="utf-8")
+    try:
+        output.write_text(json.dumps(run, indent=2) + "\n", encoding="utf-8")
+    except OSError as error:
+        print(f"error: could not save {output}: {error}", file=sys.stderr)
+        return 1
     summary = run["summary"]
     print(
         f"{arguments.label}: {summary['sent']} sent, {summary['loss_percent']:.1f}% loss, "
