@@ -105,7 +105,7 @@ def _render_nft_script(plan: NetworkPlan, topology: Topology) -> str:
             "{ type filter hook output priority -150; policy accept; }"
         ),
     ]
-    if plan.mac_policy.denylist:
+    if plan.mac_policy.mode == "denylist" and plan.mac_policy.denylist:
         lines.append(
             f"add rule inet {PROJECT_TABLE} input iifname \"{test_interface}\" "
             f"ether saddr {_render_set(plan.mac_policy.denylist)} drop "

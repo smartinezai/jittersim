@@ -25,6 +25,7 @@ from jittersim.networking.helper import HelperService
 
 from .lab import (
     CLIENT,
+    CLIENT_MAC,
     PI,
     ROUTER_ADDRESS,
     TOPOLOGY,
@@ -336,6 +337,14 @@ class LinuxDatapathTests(unittest.TestCase):
             self.assertNotIn("prio", _in(PI, "tc", "qdisc", "show", "dev", interface).stdout)
         rules = _in(PI, "nft", "list", "table", "inet", "jittersim").stdout
         self.assertIn("deny listed test client", rules)
+
+    def test_disabled_mac_filtering_lets_a_block_listed_client_through(self) -> None:
+        for mode, reachable in (("disabled", True), ("denylist", False)):
+            with self.subTest(mode=mode):
+                policy = MacPolicy(mode=mode, denylist=(CLIENT_MAC,))
+                self.applier.apply(plan=compile_plan(devices=(), profiles={}, mac_policy=policy))
+
+                self.assertEqual(self.ping("192.168.50.12")[0], reachable)
 
 
 if __name__ == "__main__":

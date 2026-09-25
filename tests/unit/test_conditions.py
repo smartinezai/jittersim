@@ -75,6 +75,18 @@ class DeviceConditionTests(unittest.TestCase):
 
                 self.assertEqual(condition, DeviceCondition("offline", (reason,)))
 
+    def test_mac_filtering_uses_only_the_list_its_mode_names(self) -> None:
+        mac = "aa:bb:cc:dd:ee:ff"
+        for mode in ("disabled", "allowlist"):
+            with self.subTest(mode=mode):
+                policy = MacPolicy(mode=mode, allowlist=(mac,), denylist=(mac,))
+
+                condition = device_conditions(
+                    plan_with(mac_policy=policy), mac_addresses={"alice": mac}
+                )["alice"]
+
+                self.assertEqual(condition, DeviceCondition("normal"))
+
     def test_service_rules_with_effects_degrade_part_of_a_device(self) -> None:
         def quota(quota_id, *, active, download):
             return ServiceQuotaRule(

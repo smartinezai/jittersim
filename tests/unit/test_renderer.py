@@ -506,6 +506,26 @@ class RendererTests(unittest.TestCase):
         self.assertIn("ip daddr != { 203.0.113.20 } drop", nft_script or "")
         self.assertIn("ip daddr { 203.0.113.30 } drop", nft_script or "")
 
+    def test_mac_filtering_uses_only_the_list_its_mode_names(self) -> None:
+        allowed, denied = "11:22:33:44:55:66", "aa:bb:cc:dd:ee:ff"
+        expected = {
+            "disabled": [],
+            "allowlist": [f"ether saddr != {{ {allowed} }} drop"],
+            "denylist": [f"ether saddr {{ {denied} }} drop"],
+        }
+        for mode, fragments in expected.items():
+            with self.subTest(mode=mode):
+                policy = MacPolicy(mode=mode, allowlist=(allowed,), denylist=(denied,))
+                script = render_command_plan(
+                    plan=compile_plan(devices=(), profiles={}, mac_policy=policy),
+                    topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+                )[0].stdin
+                drops = [line for line in script.splitlines() if "ether saddr" in line]
+                # One rule in the input chain and one in the forward chain.
+                self.assertEqual(len(drops), 2 * len(fragments))
+                for fragment in fragments:
+                    self.assertIn(fragment, script)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -72,9 +72,10 @@ def device_conditions(
         if rule.ipv4_address in closed:
             offline.append("no allowed site resolved")
         mac = (mac_addresses or {}).get(rule.device_id)
-        if mac and mac in plan.mac_policy.denylist:
+        policy = plan.mac_policy
+        if mac and policy.mode == "denylist" and mac in policy.denylist:
             offline.append("MAC address denied")
-        elif mac and plan.mac_policy.mode == "allowlist" and mac not in plan.mac_policy.allowlist:
+        elif mac and policy.mode == "allowlist" and mac not in policy.allowlist:
             offline.append("MAC address not allowed")
         for direction in (Direction.UPLOAD, Direction.DOWNLOAD):
             impairment = impairments.get((rule.device_id, direction), Impairment())

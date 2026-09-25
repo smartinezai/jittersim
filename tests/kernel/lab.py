@@ -15,6 +15,7 @@ PI, ROUTER, CLIENT = (f"jt{os.getpid()}-{role}" for role in ("pi", "router", "cl
 TOPOLOGY = Topology(uplink_interface="eth0", test_interface="wlan0")
 # The test client's first address, which it uses by default.
 CLIENT_ADDRESS = "192.168.50.10"
+CLIENT_MAC = "02:00:00:00:50:0a"
 ROUTER_ADDRESS = "192.168.0.1"
 
 
@@ -59,6 +60,7 @@ def create_lab() -> None:
     run("ip", "-n", PI, "link", "add", "pi-wl", "type", "veth", "peer", "name", "c0",
         "netns", CLIENT)
     run("ip", "-n", PI, "link", "set", "pi-wl", "name", "wlan0")
+    run("ip", "-n", CLIENT, "link", "set", "c0", "address", CLIENT_MAC)
     run("ip", "-n", ROUTER, "addr", "add", f"{ROUTER_ADDRESS}/24", "dev", "up0")
     run("ip", "-n", PI, "addr", "add", "192.168.0.2/24", "dev", "eth0")
     run("ip", "-n", PI, "addr", "add", "192.168.50.1/24", "dev", "wlan0")
