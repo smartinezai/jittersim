@@ -601,6 +601,31 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("error", json.loads(list_id["body"]))
         self.assertEqual(self.repository.list_recent_actions()[0]["action"], "/api/data-limits")
 
+    def test_browser_service_profile_rejections_say_why(self) -> None:
+        video = {
+            "id": "video",
+            "device_id": "alice",
+            "name": "Video",
+            "domains": ["youtube.com"],
+            "profile_id": "slow",
+        }
+        cases = (
+            ({"profile_id": "ghost"}, "profile does not exist"),
+            ({"domains": ["youtube.com", "m.youtube.com"]}, "service assignment domains overlap"),
+            ({"device_id": "ghost"}, "device must be on the test Wi-Fi"),
+        )
+        for change, reason in cases:
+            with self.subTest(reason=reason):
+                status, _, body = self.server.write_response_for(
+                    "/api/service-assignments", {**video, **change}
+                )
+
+                self.assertEqual(status, 400)
+                self.assertEqual(
+                    json.loads(body)["error"],
+                    f"invalid service assignment configuration: {reason}",
+                )
+
     def test_rejected_requests_explain_what_was_wrong(self) -> None:
         cases = (
             (
