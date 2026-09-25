@@ -34,9 +34,6 @@ class FakeHelper:
         self.applied_plan = None
         self.reset_called = False
 
-    def ping(self):
-        return {"ok": True, "action": "ping"}
-
     def apply(self, *, plan):
         if self.fail_action == "apply":
             raise HelperClientError("simulated helper failure")
@@ -48,6 +45,11 @@ class FakeHelper:
             raise HelperClientError("simulated helper failure")
         self.reset_called = True
         return {"ok": True, "action": "reset", "commands_run": 3}
+
+    def ping(self):
+        if self.fail_action == "ping":
+            raise HelperClientError("simulated helper failure")
+        return {"ok": True, "action": "ping"}
 
     def configure_access_point(self, *, ssid, password):
         return {"ok": True, "action": "configure-ap", "commands_run": 3}
@@ -69,12 +71,20 @@ class FakeHelper:
             {
                 "ipv4_address": "192.168.50.178",
                 "mac_address": "dc:1e:d5:3e:97:4c",
-                "state": "reachable",
-                "assigned_device_id": None,
-                "assigned_device_name": None,
-                "assigned_profile_id": None,
+                "state": "connected",
+                "association_verified": True,
+                "neighbor_state": "reachable",
+                "hostname": "MacBook-Pro",
+                "signal_dbm": -47,
+                "connected_seconds": 95,
             }
         ]
+
+    def connected_device_snapshot(self):
+        return {
+            "devices": self.connected_devices(),
+            "association_status_available": True,
+        }
 
     def uplink_info(self):
         return {
@@ -110,6 +120,15 @@ class FakeHelper:
                 "services": {},
             },
         }
+
+
+VIDEO_ASSIGNMENT = {
+    "id": "video",
+    "device_id": "alice",
+    "name": "Video",
+    "domains": ["youtube.com"],
+    "profile_id": "slow",
+}
 
 
 class CountingHelper(FakeHelper):
@@ -322,10 +341,22 @@ class ControlServerTests(unittest.TestCase):
             json.loads(body),
             {
                 "helper_configured": False,
+                "helper_reachable": False,
                 "mode": "configuration-only",
                 "status": "ok",
             },
         )
+
+    def test_served_dashboard_script_parses(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is required to parse the served dashboard script")
+        script = re.search(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL)
+        self.assertIsNotNone(script)
+        result = subprocess.run(
+            [node, "--check"], input=script.group(1), text=True, capture_output=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_diagnostics_and_history_show_bounded_admin_information(self) -> None:
         self.server.helper_client = FakeHelper()
@@ -373,7 +404,9 @@ class ControlServerTests(unittest.TestCase):
                 self.assertEqual(get(path)["status"], 401)
                 self.assertEqual(get(path, "Bearer wrong-token")["status"], 401)
                 self.assertEqual(get(path, "Bearer admin-token")["status"], 200)
-        self.assertEqual(get("/api/profiles")["status"], 200)
+        # Only the dashboard page and the health check are public.
+        self.assertEqual(get("/api/profiles")["status"], 401)
+        self.assertEqual(get("/api/health")["status"], 200)
 
     def test_live_traffic_requires_admin_token_and_returns_directional_counters(self) -> None:
         self.server.admin_token = "admin-token"
@@ -408,6 +441,111 @@ class ControlServerTests(unittest.TestCase):
                 "download_packets": 1,
             },
         )
+        traffic = json.loads(authorized["body"])
+        self.assertEqual(
+            traffic["isp_limits"],
+            {"upload_kbit": None, "download_kbit": 100_000},
+        )
+        self.assertFalse(traffic["profile_limits_available"])
+        self.assertEqual(traffic["profile_limits"], {})
+
+    def test_traffic_settings_write_is_protected_and_does_not_apply_traffic(self) -> None:
+        self.server.admin_token = "admin-token"
+        helper = FakeHelper()
+        self.server.helper_client = helper
+
+        def save_rates(*, authorization, body):
+            handler = object.__new__(ControlRequestHandler)
+            handler.server = self.server
+            handler.path = "/api/traffic-settings"
+            handler.headers = Message()
+            if authorization:
+                handler.headers["Authorization"] = authorization
+            handler.headers["Content-Length"] = str(len(body))
+            handler.rfile = BytesIO(body)
+            response = {}
+            handler._send_response = lambda **values: response.update(values)
+            handler.do_POST()
+            return response
+
+        body = json.dumps(
+            {"upload_kbit": None, "download_kbit": 150_000}
+        ).encode()
+        unauthorized = save_rates(authorization=None, body=body)
+        incorrect = save_rates(authorization="Bearer wrong-token", body=body)
+        authorized = save_rates(authorization="Bearer admin-token", body=body)
+        invalid = save_rates(
+            authorization="Bearer admin-token",
+            body=b'{"upload_kbit":null,"download_kbit":101}',
+        )
+
+        self.assertEqual(unauthorized["status"], 401)
+        self.assertEqual(incorrect["status"], 401)
+        self.assertEqual(authorized["status"], 200)
+        self.assertEqual(invalid["status"], 400)
+        self.assertEqual(
+            json.loads(authorized["body"]),
+            {"upload_kbit": None, "download_kbit": 150_000},
+        )
+        self.assertEqual(
+            self.repository.get_traffic_rate_settings(),
+            {"upload_kbit": None, "download_kbit": 150_000},
+        )
+        self.assertIsNone(helper.applied_plan)
+
+    def test_traffic_endpoint_includes_applied_default_queue_limits(self) -> None:
+        class SnapshotScheduler:
+            def applied_queue_bandwidth_limits(self):
+                return {
+                    "alice": {
+                        "upload_kbit": None,
+                        "download_kbit": 20_000,
+                    }
+                }
+
+        self.server.helper_client = FakeHelper()
+        self.server.scheduler = SnapshotScheduler()
+
+        status, _, body = self.server.response_for("/api/traffic")
+        response = json.loads(body)
+
+        self.assertEqual(status, 200)
+        self.assertTrue(response["profile_limits_available"])
+        self.assertEqual(
+            response["profile_limits"]["alice"],
+            {"upload_kbit": None, "download_kbit": 20_000},
+        )
+
+    def test_private_read_routes_require_token_including_backup(self) -> None:
+        self.server.admin_token = "admin-token"
+        for path in (
+            "/api/backup",
+            "/api/observations",
+            "/api/devices",
+            "/api/plan",
+            "/api/service-assignments",
+            "/api/connected-devices",
+            "/api/connected-device-labels",
+            "/api/traffic-settings",
+        ):
+            with self.subTest(path=path):
+                handler = object.__new__(ControlRequestHandler)
+                handler.server = self.server
+                handler.path = path
+                handler.headers = Message()
+                response = {}
+                handler._send_response = lambda **values: response.update(values)
+                handler.do_GET()
+                self.assertEqual(response["status"], 401)
+                handler.headers["Authorization"] = "Bearer admin-token"
+                handler.do_GET()
+                self.assertEqual(response["status"], 200)
+
+    def test_health_reports_an_unreachable_helper(self) -> None:
+        self.server.helper_client = FakeHelper(fail_action="ping")
+        _, _, body = self.server.response_for("/api/health")
+        self.assertEqual(json.loads(body)["status"], "degraded")
+        self.assertFalse(json.loads(body)["helper_reachable"])
 
     def test_live_traffic_includes_what_jittersim_dropped_and_holds(self) -> None:
         class QueueHelper(FakeHelper):
@@ -438,10 +576,10 @@ class ControlServerTests(unittest.TestCase):
         self.server.admin_token = "admin-token"
         self.server.helper_client = FakeHelper()
 
-        def handle_write(*, authorization, body):
+        def handle_write(*, authorization, body, path="/api/apply"):
             handler = object.__new__(ControlRequestHandler)
             handler.server = self.server
-            handler.path = "/api/apply"
+            handler.path = path
             handler.headers = Message()
             handler.headers["Authorization"] = authorization
             handler.headers["Content-Length"] = str(len(body))
@@ -642,7 +780,7 @@ class ControlServerTests(unittest.TestCase):
         )
 
         self.assertEqual(status, 409)
-        self.assertIn("at most 15 devices and service limits", json.loads(body)["error"])
+        self.assertIn("at most 15 devices and service rules", json.loads(body)["error"])
         self.assertIsNone(self.repository.get_device("extra"))
         self.assertEqual(update_status, 200)
 
@@ -679,8 +817,78 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(disabled_status, 200)
         self.assertEqual(enabled_status, 409)
-        self.assertIn("at most 15 devices and service limits", json.loads(body)["error"])
+        self.assertIn("at most 15 devices and service rules", json.loads(body)["error"])
         self.assertFalse(self.repository.get_time_quota("alice-netflix-time").enabled)
+
+    def test_browser_service_profiles_count_against_the_same_capacity(self) -> None:
+        for index in range(13):
+            self.repository.save_device(
+                Device(
+                    id=f"device-{index:02d}",
+                    name=f"Device {index}",
+                    ipv4_address=f"192.168.50.{index + 100}",
+                    profile_id="slow",
+                )
+            )
+        saved, _, _ = self.server.write_response_for("/api/service-assignments", VIDEO_ASSIGNMENT)
+
+        status, _, body = self.server.write_response_for(
+            "/api/devices",
+            {
+                "id": "carol",
+                "name": "Carol",
+                "ipv4_address": "192.168.50.30",
+                "profile_id": "slow",
+            },
+        )
+
+        self.assertEqual(saved, 200)
+        self.assertEqual(status, 409)
+        self.assertIn("at most 15 devices and service rules", json.loads(body)["error"])
+        self.assertIsNone(self.repository.get_device("carol"))
+
+    def test_a_profile_used_by_a_browser_service_profile_cannot_be_deleted(self) -> None:
+        self.repository.save_profile(Profile(id="video", name="Video"))
+        self.server.write_response_for(
+            "/api/service-assignments", {**VIDEO_ASSIGNMENT, "profile_id": "video"}
+        )
+
+        status, _, body = self.server.write_response_for("/api/profiles/delete", {"id": "video"})
+
+        self.assertEqual(status, 409)
+        self.assertEqual(json.loads(body)["references"], ["browser service profile Video"])
+        self.assertEqual(
+            [assignment.id for assignment in self.repository.list_service_assignments()],
+            ["video"],
+        )
+
+    def test_deleting_a_device_removes_its_browser_service_profiles(self) -> None:
+        self.server.write_response_for("/api/service-assignments", VIDEO_ASSIGNMENT)
+
+        status, _, _ = self.server.write_response_for("/api/devices/delete", {"id": "alice"})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self.repository.list_service_assignments(), ())
+        # A leftover assignment would stop every plan from building.
+        self.assertEqual(compile_stored_plan(repository=self.repository).queues, ())
+
+    def test_imports_keep_browser_service_profiles(self) -> None:
+        self.server.write_response_for("/api/service-assignments", VIDEO_ASSIGNMENT)
+        exported = self._export(self.server)
+
+        status, _, _ = self.server.write_response_for("/api/import", exported)
+        with ConfigRepository(":memory:") as other_repository:
+            other = ControlServer(("127.0.0.1", 0), other_repository)
+            try:
+                other_status, _, _ = other.write_response_for("/api/import", exported)
+                copied = other_repository.list_service_assignments()
+            finally:
+                other.server_close()
+
+        self.assertEqual(exported["service_assignments"][0]["domains"], ["youtube.com"])
+        self.assertEqual((status, other_status), (200, 200))
+        self.assertEqual(self.repository.list_service_assignments(), copied)
+        self.assertEqual([assignment.id for assignment in copied], ["video"])
 
     def _export(self, server):
         status, _, body = server.response_for("/api/export")
@@ -781,6 +989,61 @@ class ControlServerTests(unittest.TestCase):
                 status, _, _ = self.server.write_response_for(path, payload)
                 self.assertEqual(status, 400)
         self.assertEqual(self.repository.get_website_policy().blocked_domains, ())
+    def test_connected_label_auth_and_profile_isolation(self) -> None:
+        self.server.admin_token = "admin-token"
+        handler = object.__new__(ControlRequestHandler)
+        handler.server = self.server
+        handler.path = "/api/connected-device-labels"
+        handler.headers = Message()
+        body = json.dumps(
+            {
+                "mac_address": "DC:1E:D5:3E:97:4C",
+                "display_name": "Family MacBook",
+                "device_type": "laptop",
+            }
+        ).encode()
+        handler.headers["Content-Length"] = str(len(body))
+        handler.rfile = BytesIO(body)
+        response = {}
+        handler._send_response = lambda **values: response.update(values)
+
+        handler.do_POST()
+        self.assertEqual(response["status"], 401)
+
+        handler.headers["Authorization"] = "Bearer admin-token"
+        handler.do_POST()
+        saved = self.repository.list_connected_device_labels()
+
+        self.assertEqual(response["status"], 200)
+        self.assertEqual(
+            saved["dc:1e:d5:3e:97:4c"],
+            {"display_name": "Family MacBook", "device_type": "laptop"},
+        )
+        self.assertEqual(self.repository.get_device("alice").profile_id, "slow")
+        _, _, labels_body = self.server.response_for("/api/connected-device-labels")
+        self.assertEqual(
+            json.loads(labels_body)["labels"],
+            [
+                {
+                    "mac_address": "dc:1e:d5:3e:97:4c",
+                    "display_name": "Family MacBook",
+                    "device_type": "laptop",
+                }
+            ],
+        )
+        self.server.helper_client = FakeHelper()
+        _, _, connected_body = self.server.response_for("/api/connected-devices")
+        connected_device = json.loads(connected_body)["devices"][0]
+        self.assertEqual(connected_device["display_name"], "Family MacBook")
+        self.assertEqual(connected_device["device_type_source"], "saved")
+
+        status, _, body = self.server.write_response_for(
+            "/api/connected-device-labels/delete",
+            {"mac_address": "dc:1e:d5:3e:97:4c"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"deleted": True})
+        self.assertEqual(self.repository.list_connected_device_labels(), {})
 
     def test_tls_requires_both_files_and_wraps_the_dashboard_socket(self) -> None:
         with self.assertRaisesRegex(ValueError, "TLS is required"):
@@ -1004,6 +1267,40 @@ class ControlServerTests(unittest.TestCase):
         _, _, body = self.server.response_for("/api/service-quotas")
         self.assertEqual(json.loads(body)["service_quotas"][0]["name"], "Video service")
 
+    def test_browser_service_profile_accepts_direct_domains_and_rejects_overlap(self) -> None:
+        self.server.helper_client = FakeHelper()
+        profile = {
+            "id": "alice-video",
+            "device_id": "alice",
+            "name": "Video",
+            "domains": ["youtube.com", "netflix.com"],
+            "profile_id": "slow",
+            "enabled": True,
+        }
+        status, _, body = self.server.write_response_for("/api/service-assignments", profile)
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["live_applied"])
+        self.assertEqual(self.server.helper_client.applied_plan.service_assignment_rules[0].mark, 2)
+
+        status, _, _ = self.server.write_response_for(
+            "/api/service-assignments",
+            {**profile, "id": "alice-more", "domains": ["www.youtube.com"]},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(len(self.repository.list_service_assignments()), 1)
+
+        status, _, _ = self.server.write_response_for(
+            "/api/service-assignments",
+            {**profile, "id": "alice-address", "domains": ["203.0.113.10"]},
+        )
+        self.assertEqual(status, 400)
+
+        status, _, _ = self.server.write_response_for(
+            "/api/service-assignments/delete", {"id": "alice-video"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(self.repository.list_service_assignments(), ())
+
     def test_service_quota_rejects_a_domain_not_observed_for_the_device(self) -> None:
         status, _, body = self.server.write_response_for(
             "/api/service-quotas",
@@ -1095,6 +1392,7 @@ class ControlServerTests(unittest.TestCase):
             json.loads(body),
             {
                 "helper_configured": True,
+                "helper_reachable": True,
                 "mode": "hardware",
                 "status": "ok",
             },
@@ -1223,11 +1521,23 @@ class ControlServerTests(unittest.TestCase):
             json.loads(body),
             {
                 "available": True,
+                "association_status_available": True,
                 "devices": [
                     {
                         "ipv4_address": "192.168.50.178",
                         "mac_address": "dc:1e:d5:3e:97:4c",
-                        "state": "reachable",
+                        "state": "connected",
+                        "association_verified": True,
+                        "neighbor_state": "reachable",
+                        "hostname": "MacBook-Pro",
+                        "signal_dbm": -47,
+                        "connected_seconds": 95,
+                        "display_name": "MacBook-Pro",
+                        "saved_display_name": "",
+                        "saved_device_type": "",
+                        "has_saved_label": False,
+                        "device_type": "laptop",
+                        "device_type_source": "hostname suggestion",
                         "assigned_device_id": None,
                         "assigned_device_name": None,
                         "assigned_profile_id": None,
@@ -1261,6 +1571,28 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(self.server.helper_client.applied_plan.mark_rules[0].device_id, "alice")
         self.assertEqual(len(self.server.helper_client.applied_plan.mark_rules), 2)
 
+    def test_profile_assignment_rejects_a_neighbor_without_verified_association(self) -> None:
+        class UnverifiedHelper(FakeHelper):
+            def connected_device_snapshot(self):
+                device = self.connected_devices()[0]
+                device["state"] = "unknown"
+                device["association_verified"] = False
+                return {"devices": [device], "association_status_available": False}
+
+        self.server.helper_client = UnverifiedHelper()
+        status, _, body = self.server.write_response_for(
+            "/api/connected-devices/apply-profile",
+            {
+                "ipv4_address": "192.168.50.178",
+                "mac_address": "dc:1e:d5:3e:97:4c",
+                "profile_id": "slow",
+            },
+        )
+
+        self.assertEqual(status, 409)
+        self.assertIn("no longer verified", json.loads(body)["error"])
+        self.assertIsNone(self.repository.get_device_by_ipv4_address("192.168.50.178"))
+
     def test_observation_scan_persists_and_lists_domains(self) -> None:
         self.server.helper_client = FakeHelper()
 
@@ -1291,6 +1623,30 @@ class ControlServerTests(unittest.TestCase):
     def test_dashboard_keeps_javascript_escapes_intact(self) -> None:
         self.assertIn('.join("\\n")', DASHBOARD_HTML)
         self.assertIn("/^(\\d{1,2}):(\\d{2})$/", DASHBOARD_HTML)
+        # The HTML is a raw string, so an escape written for a regular Python
+        # string would reach the browser doubled.
+        self.assertNotIn("\\\\", DASHBOARD_HTML)
+
+    def test_dashboard_input_patterns_are_valid(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is required to compile the input patterns")
+        patterns = re.findall(r' pattern="([^"]*)"', DASHBOARD_HTML)
+        self.assertTrue(patterns)
+        # Browsers compile pattern attributes with the "v" flag and skip
+        # validation for any pattern it rejects.
+        script = (
+            "for (const pattern of JSON.parse(process.argv[1])) "
+            "new RegExp('^(?:' + pattern + ')$', 'v');"
+        )
+        result = subprocess.run(
+            [node, "-e", script, json.dumps(patterns)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_dashboard_script_is_valid_javascript(self) -> None:
         node = shutil.which("node")
@@ -1446,6 +1802,14 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn('document.addEventListener("submit"', DASHBOARD_HTML)
         self.assertIn("Connected clients", DASHBOARD_HTML)
         self.assertIn("connected-devices", DASHBOARD_HTML)
+        self.assertIn('id="traffic-rate-form"', DASHBOARD_HTML)
+        self.assertIn('id="traffic-isp-download"', DASHBOARD_HTML)
+        self.assertIn('id="traffic-isp-upload"', DASHBOARD_HTML)
+        self.assertIn('request("/api/traffic-settings", "POST"', DASHBOARD_HTML)
+        self.assertIn("Default queue download limit", DASHBOARD_HTML)
+        self.assertIn("Edit name and type", DASHBOARD_HTML)
+        self.assertIn("/api/connected-device-labels", DASHBOARD_HTML)
+        self.assertIn("Saved labels for devices not listed above", DASHBOARD_HTML)
         self.assertIn('id="traffic-chart"', DASHBOARD_HTML)
         self.assertIn('id="traffic-device"', DASHBOARD_HTML)
         self.assertIn("Last 60 seconds", DASHBOARD_HTML)
@@ -1453,7 +1817,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("TRAFFIC_MAX_POINTS = 30", DASHBOARD_HTML)
         self.assertIn('document.addEventListener("visibilitychange"', DASHBOARD_HTML)
         self.assertIn('request("/api/traffic", "GET")', DASHBOARD_HTML)
-        self.assertIn("before JitterSim adds delay or drops packets", DASHBOARD_HTML)
+        self.assertIn("before its queues", DASHBOARD_HTML)
         self.assertIn("Upstream router connection", DASHBOARD_HTML)
         self.assertIn("/api/uplink", DASHBOARD_HTML)
         self.assertIn("Open router Wi-Fi settings", DASHBOARD_HTML)
@@ -2016,6 +2380,7 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(status, 502)
         self.assertEqual(json.loads(body)["error"], "network helper apply failed")
+        self.assertIn("journalctl -u jittersim-helper.service", json.loads(body)["hint"])
         state = self.repository.get_runtime_state()
         self.assertEqual(state.observed_state, "error")
         self.assertEqual(state.last_error, "network helper apply failed")

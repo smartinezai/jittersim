@@ -173,6 +173,25 @@ class LinuxDatapathTests(unittest.TestCase):
         self.assertNotIn("rate", line)
         self.assertNotIn("corrupt", line)
 
+    def test_new_settings_keep_the_packets_a_queue_holds(self) -> None:
+        def slow(delay_ms):
+            return Profile(id="slow", name="Slow", upload=Impairment(delay_ms=delay_ms))
+
+        self.apply([device("a-phone", 10, "slow")], slow(300))
+        # About 15 pings wait in the 300 ms queue while the settings change.
+        pinging = subprocess.Popen(
+            ["ip", "netns", "exec", CLIENT, "ping", "-n", "-c", "100", "-i", "0.02",
+             "-W", "2", "-I", "192.168.50.10", "192.168.0.1"],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        subprocess.run(["sleep", "1"], check=True)
+        self.apply([device("a-phone", 10, "slow")], slow(250))
+        output, _ = pinging.communicate(timeout=30)
+
+        replies = set(re.findall(r"icmp_seq=(\d+)", output))
+        self.assertEqual(len(replies), 100, f"{100 - len(replies)} of 100 pings lost")
+
     def test_fifteen_devices_each_get_their_own_queue(self) -> None:
         blocked = Profile(id="blocked", name="Blocked", upload=Impairment(loss_percent=100))
         slow = Profile(id="slow", name="Slow", upload=Impairment(delay_ms=10))

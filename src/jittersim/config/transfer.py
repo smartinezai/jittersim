@@ -104,6 +104,9 @@ def settings_to_payload(settings: SavedSettings, *, exported_at: int) -> Dict[st
             }
             for quota in settings.time_quotas
         ],
+        "service_assignments": [
+            _json_values(asdict(assignment)) for assignment in settings.service_assignments
+        ],
     }
 
 
@@ -113,7 +116,9 @@ def _require_unique(kind: str, identifiers: Iterable[str]) -> None:
             raise ValueError(f"{kind} {identifier} appears twice")
 
 
-def check_settings(settings: SavedSettings, *, max_traffic_classes: int) -> None:
+def check_settings(
+    settings: SavedSettings, *, max_traffic_classes: int, max_service_domains: int
+) -> None:
     """Raise ValueError when imported settings do not fit together."""
 
     _require_unique("profile", (profile.id for profile in settings.profiles))
@@ -127,6 +132,10 @@ def check_settings(settings: SavedSettings, *, max_traffic_classes: int) -> None
     )
     _require_unique("service limit", (quota.id for quota in settings.service_quotas))
     _require_unique("time limit", (quota.id for quota in settings.time_quotas))
+    _require_unique(
+        "browser service profile",
+        (assignment.id for assignment in settings.service_assignments),
+    )
 
     profile_ids = {profile.id for profile in settings.profiles}
     device_ids = {device.id for device in settings.devices}
@@ -169,13 +178,38 @@ def check_settings(settings: SavedSettings, *, max_traffic_classes: int) -> None
             require_device(f"{kind} {quota.id}", quota.device_id)
             require_profile(f"{kind} {quota.id}", quota.profile_id)
 
+    for assignment in settings.service_assignments:
+        require_device(f"browser service profile {assignment.id}", assignment.device_id)
+        require_profile(f"browser service profile {assignment.id}", assignment.profile_id)
+    # Only enabled browser service profiles reach the plan.
+    assignments = tuple(
+        assignment for assignment in settings.service_assignments if assignment.enabled
+    )
+    domains_by_device: Dict[str, list] = {}
+    for assignment in assignments:
+        previous = domains_by_device.setdefault(assignment.device_id, [])
+        for domain in assignment.domains:
+            if any(
+                domain == other or domain.endswith("." + other) or other.endswith("." + domain)
+                for other in previous
+            ):
+                raise ValueError(
+                    f"browser service profiles overlap on device {assignment.device_id}"
+                )
+        previous.extend(assignment.domains)
+    if sum(len(assignment.domains) for assignment in assignments) > max_service_domains:
+        raise ValueError(
+            f"browser service profiles can list at most {max_service_domains} domains"
+        )
+
     traffic_classes = (
         len(settings.devices)
         + sum(quota.enabled for quota in settings.service_quotas)
         + sum(quota.enabled for quota in settings.time_quotas)
+        + len(assignments)
     )
     if traffic_classes > max_traffic_classes:
         raise ValueError(
-            f"JitterSim can shape at most {max_traffic_classes} devices and service limits "
+            f"JitterSim can shape at most {max_traffic_classes} devices and service rules "
             "together"
         )

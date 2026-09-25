@@ -10,17 +10,24 @@ from .topology import Topology
 
 PROJECT_TABLE = "jittersim"
 ROOT_HANDLE = "10:"
-# prio class minors start at 1, so band 0 is class 10:1. Band 0 carries unmarked
-# traffic (the Pi itself, ARP, DHCP and unassigned clients) without impairment,
-# and mark N uses band N, which is class 10:N+1. tc reads the minor as hex.
+# prio class minors start at 1, so band 0 is class 10:1. Band 0 keeps unmarked
+# traffic (the Pi itself, ARP, DHCP and unassigned clients) on a fair queue, and
+# mark N uses band N, which is class 10:N+1. tc reads minors and handles as hex.
 DEFAULT_CLASS = f"{ROOT_HANDLE}1"
-# Without a fixed priority, every "tc filter replace" allocates a new one, so
-# each apply would add another copy of every mark filter.
-FILTER_PREF = "1"
+# Each child kind has its own handles. "tc qdisc replace" then changes a child
+# of the same kind in place, keeping the packets it holds, and swaps in a new
+# child when a band changes kind; tc cannot change a netem into an fq_codel.
+CHILD_HANDLE_BASES = {"netem": 0x40, "fq_codel": 0x60}
 
 
-def _band_class(mark: int) -> str:
+def band_class(mark: int) -> str:
+    """Return the prio class that carries traffic with this mark."""
+
     return f"{ROOT_HANDLE}{mark + 1:x}"
+
+
+def _child_handle(kind: str, mark: int) -> str:
+    return f"{CHILD_HANDLE_BASES[kind] + mark:x}:"
 
 
 def _render_set(values: Sequence[object]) -> str:
@@ -77,7 +84,8 @@ def _format_impairment_arguments(queue: QueueSpec) -> List[str]:
     return arguments
 
 
-def _render_nft_script(plan: NetworkPlan) -> str:
+def _render_nft_script(plan: NetworkPlan, topology: Topology) -> str:
+    test_interface = topology.test_interface
     lines = [
         # nft applies the script as one transaction: declaring, deleting and
         # rebuilding the table replaces it without a moment with no rules.
@@ -89,26 +97,39 @@ def _render_nft_script(plan: NetworkPlan) -> str:
             "{ type filter hook forward priority -150; policy accept; }"
         ),
         (
-            f"add rule inet {PROJECT_TABLE} forward iifname \"wlan0\" "
-            "oifname \"eth0\" meta nfproto ipv6 drop "
-            'comment "disable IPv6 bypass while profiles are active"'
+            f"add chain inet {PROJECT_TABLE} input "
+            "{ type filter hook input priority -150; policy accept; }"
+        ),
+        (
+            f"add chain inet {PROJECT_TABLE} output "
+            "{ type filter hook output priority -150; policy accept; }"
         ),
     ]
     if plan.mac_policy.denylist:
         lines.append(
-            f"add rule inet {PROJECT_TABLE} forward iifname \"wlan0\" "
+            f"add rule inet {PROJECT_TABLE} input iifname \"{test_interface}\" "
+            f"ether saddr {_render_set(plan.mac_policy.denylist)} drop "
+            "comment \"deny listed test client\""
+        )
+        lines.append(
+            f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
             f"ether saddr {_render_set(plan.mac_policy.denylist)} drop "
             "comment \"deny listed test client\""
         )
     if plan.mac_policy.mode == "allowlist":
         lines.append(
-            f"add rule inet {PROJECT_TABLE} forward iifname \"wlan0\" "
+            f"add rule inet {PROJECT_TABLE} input iifname \"{test_interface}\" "
+            f"ether saddr != {_render_set(plan.mac_policy.allowlist)} drop "
+            "comment \"allow only listed test clients\""
+        )
+        lines.append(
+            f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
             f"ether saddr != {_render_set(plan.mac_policy.allowlist)} drop "
             "comment \"allow only listed test clients\""
         )
     if plan.global_blocked_addresses:
         lines.append(
-            f"add rule inet {PROJECT_TABLE} forward iifname \"wlan0\" "
+            f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
             f"ip daddr {_render_set(plan.global_blocked_addresses)} drop "
             "comment \"block global website destinations\""
         )
@@ -116,26 +137,31 @@ def _render_nft_script(plan: NetworkPlan) -> str:
         if website_filter.allowed_addresses:
             allowed = _render_set(website_filter.allowed_addresses)
             lines.append(
-                f"add rule inet {PROJECT_TABLE} forward iifname \"wlan0\" "
+                f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
                 f"ip saddr {website_filter.device_ip} ip daddr != {allowed} drop "
                 "comment \"enforce profile website allowlist\""
             )
         elif website_filter.allowed_addresses is not None:
             lines.append(
-                f"add rule inet {PROJECT_TABLE} forward iifname \"wlan0\" "
+                f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
                 f"ip saddr {website_filter.device_ip} drop "
                 "comment \"profile website allowlist has no resolved addresses\""
             )
         if website_filter.blocked_addresses:
             lines.append(
-                f"add rule inet {PROJECT_TABLE} forward iifname \"wlan0\" "
+                f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
                 f"ip saddr {website_filter.device_ip} "
                 f"ip daddr {_render_set(website_filter.blocked_addresses)} drop "
                 "comment \"block progression website destinations\""
             )
     if plan.blocked_device_addresses:
         lines.append(
-            f"add rule inet {PROJECT_TABLE} forward iifname \"wlan0\" "
+            f"add rule inet {PROJECT_TABLE} input iifname \"{test_interface}\" "
+            f"ip saddr {_render_set(plan.blocked_device_addresses)} drop "
+            "comment \"temporarily disconnect randomized clients\""
+        )
+        lines.append(
+            f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
             f"ip saddr {_render_set(plan.blocked_device_addresses)} drop "
             "comment \"temporarily disconnect randomized clients\""
         )
@@ -149,6 +175,20 @@ def _render_nft_script(plan: NetworkPlan) -> str:
             f"add rule inet {PROJECT_TABLE} forward "
             f"ip daddr {rule.ipv4_address} meta mark set {rule.mark} counter "
             f"comment \"usage-device {rule.device_id} download\""
+        )
+    for mark, device_id in (
+        [(rule.mark, rule.device_id) for rule in plan.mark_rules]
+        + [(rule.mark, rule.device_id) for rule in plan.service_assignment_rules]
+    ):
+        lines.append(
+            f"add rule inet {PROJECT_TABLE} output "
+            f"oifname \"{topology.uplink_interface}\" meta mark {mark} counter "
+            f"comment \"usage-device {device_id} upload\""
+        )
+        lines.append(
+            f"add rule inet {PROJECT_TABLE} output "
+            f"oifname \"{test_interface}\" meta mark {mark} counter "
+            f"comment \"usage-device {device_id} download\""
         )
     for quota_rule in plan.service_quota_rules:
         destinations = _render_set(quota_rule.destination_addresses)
@@ -178,23 +218,7 @@ def _render_nft_script(plan: NetworkPlan) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _remove_root_command(interface: str) -> Command:
-    return Command(
-        executable="tc",
-        arguments=("qdisc", "del", "dev", interface, "root", "handle", ROOT_HANDLE),
-        purpose=f"remove the project-owned root queue from {interface}",
-        ignore_failure=True,
-    )
-
-
-def _render_tc_commands(
-    *,
-    queues: Sequence[QueueSpec],
-    interface: str,
-) -> List[Command]:
-    if not queues:
-        # prio needs at least two bands, and there is nothing to shape here.
-        return [_remove_root_command(interface)]
+def _render_tc_commands(*, queues: Sequence[QueueSpec], interface: str) -> List[Command]:
     commands = [
         Command(
             executable="tc",
@@ -216,79 +240,62 @@ def _render_tc_commands(
         ),
         Command(
             executable="tc",
-            arguments=("qdisc", "del", "dev", interface, "parent", DEFAULT_CLASS),
-            purpose=f"keep unmarked traffic on {interface} unimpaired",
-            ignore_failure=True,
+            arguments=(
+                "qdisc",
+                "replace",
+                "dev",
+                interface,
+                "parent",
+                DEFAULT_CLASS,
+                "handle",
+                "100:",
+                "fq_codel",
+            ),
+            purpose=f"preserve fair queuing for ordinary traffic on {interface}",
         ),
     ]
     for queue in queues:
-        band_class = _band_class(queue.mark)
-        child_handle = f"{queue.mark + 10}:"
+        band = band_class(queue.mark)
         if queue.impairment != Impairment():
-            commands.append(
-                Command(
-                    executable="tc",
-                    arguments=(
-                        "qdisc",
-                        "replace",
-                        "dev",
-                        interface,
-                        "parent",
-                        band_class,
-                        "handle",
-                        child_handle,
-                        *_format_impairment_arguments(queue),
-                    ),
-                    purpose=(
-                        f"apply {queue.direction.value} impairment for "
-                        f"device {queue.device_id} on {interface}"
-                    ),
-                )
+            child = (_child_handle("netem", queue.mark), *_format_impairment_arguments(queue))
+            purpose = (
+                f"apply {queue.direction.value} impairment for "
+                f"device {queue.device_id} on {interface}"
             )
         else:
-            commands.append(
-                Command(
-                    executable="tc",
-                    arguments=(
-                        "qdisc",
-                        "del",
-                        "dev",
-                        interface,
-                        "parent",
-                        band_class,
-                        "handle",
-                        child_handle,
-                    ),
-                    purpose=(
-                        f"remove stale impairment for device {queue.device_id} "
-                        f"on {interface}"
-                    ),
-                    ignore_failure=True,
-                )
-            )
+            child = (_child_handle("fq_codel", queue.mark), "fq_codel")
+            purpose = f"preserve fair queuing for device {queue.device_id} on {interface}"
         commands.append(
             Command(
                 executable="tc",
-                arguments=(
-                    "filter",
-                    "replace",
-                    "dev",
-                    interface,
-                    "protocol",
-                    "ip",
-                    "parent",
-                    ROOT_HANDLE,
-                    "pref",
-                    FILTER_PREF,
-                    "handle",
-                    str(queue.mark),
-                    "fw",
-                    "flowid",
-                    band_class,
-                ),
-                purpose=f"route mark {queue.mark} on {interface}",
+                arguments=("qdisc", "replace", "dev", interface, "parent", band, "handle", *child),
+                purpose=purpose,
             )
         )
+        for protocol in ("ip", "ipv6"):
+            commands.append(
+                Command(
+                    executable="tc",
+                    arguments=(
+                        "filter",
+                        "replace",
+                        "dev",
+                        interface,
+                        "protocol",
+                        protocol,
+                        "parent",
+                        ROOT_HANDLE,
+                        "pref",
+                        str(queue.mark if protocol == "ip" else queue.mark + 100),
+                        "handle",
+                        str(queue.mark),
+                        "fw",
+                        "flowid",
+                        band,
+                    ),
+                    purpose=f"route {protocol} mark {queue.mark} on {interface}",
+                )
+            )
     return commands
 
 
@@ -300,17 +307,20 @@ def render_command_plan(*, plan: NetworkPlan, topology: Topology) -> Sequence[Co
             executable="nft",
             arguments=("-f", "-"),
             purpose="replace the project-owned nftables rules",
-            stdin=_render_nft_script(plan),
+            stdin=_render_nft_script(plan, topology),
         ),
     ]
     upload_queues = tuple(queue for queue in plan.queues if queue.direction == Direction.UPLOAD)
     download_queues = tuple(queue for queue in plan.queues if queue.direction == Direction.DOWNLOAD)
-    commands.extend(
-        _render_tc_commands(queues=upload_queues, interface=topology.uplink_interface)
-    )
-    commands.extend(
-        _render_tc_commands(queues=download_queues, interface=topology.test_interface)
-    )
+    # A plan without queues is applied after a reset, which removes the roots.
+    if upload_queues:
+        commands.extend(
+            _render_tc_commands(queues=upload_queues, interface=topology.uplink_interface)
+        )
+    if download_queues:
+        commands.extend(
+            _render_tc_commands(queues=download_queues, interface=topology.test_interface)
+        )
     return tuple(commands)
 
 
@@ -326,5 +336,12 @@ def render_reset_commands(*, topology: Topology) -> Sequence[Command]:
         )
     ]
     for interface in (topology.uplink_interface, topology.test_interface):
-        commands.append(_remove_root_command(interface))
+        commands.append(
+            Command(
+                executable="tc",
+                arguments=("qdisc", "del", "dev", interface, "root", "handle", ROOT_HANDLE),
+                purpose=f"remove the project-owned root queue from {interface}",
+                ignore_failure=True,
+            )
+        )
     return tuple(commands)

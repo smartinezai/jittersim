@@ -150,6 +150,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     return _simulate(raw_arguments)
 
 
+def reset_main(argv: Optional[Sequence[str]] = None) -> int:
+    """Run `jittersim reset` under its older name, `jittersim-reset`."""
+
+    return main(["reset", *(sys.argv[1:] if argv is None else argv)])
+
+
 def _simulate(argv: Sequence[str]) -> int:
     """Render a deliberately inconvenient demo profile without applying it."""
 

@@ -12,7 +12,7 @@ class DeploymentFirewallTests(unittest.TestCase):
             REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "jittersim-control-firewall.nft"
         ).read_text()
 
-        self.assertIn('iifname "wlan0" oifname "eth0"', firewall)
+        self.assertIn('iifname "@TEST_INTERFACE@" oifname "@UPLINK_INTERFACE@"', firewall)
         self.assertIn("10.0.0.0/8", firewall)
         self.assertIn("172.16.0.0/12", firewall)
         self.assertIn("192.168.0.0/16", firewall)
@@ -61,13 +61,15 @@ class InstallerTests(unittest.TestCase):
             self.installer,
         )
 
-    def test_installer_creates_the_test_wifi_only_when_it_is_safe(self) -> None:
+    def test_installer_checks_the_pi_before_creating_the_test_wifi(self) -> None:
         # The helper manages a NetworkManager connection with this name.
         self.assertIn("con-name jittersim-ap", self.installer)
         self.assertIn("ipv4.method shared", self.installer)
-        self.assertIn("grep -qx jittersim-ap", self.installer)
-        # Never turn the interface carrying the SSH session into an access point.
-        self.assertIn('[ "$default_interface" = "$JITTERSIM_TEST_INTERFACE" ]', self.installer)
+        # The preflight refuses to take over a Wi-Fi connection in use, such as
+        # one carrying this SSH session, before anything changes.
+        preflight = self.installer.index("preflight.py")
+        self.assertLess(preflight, self.installer.index("apt-get update"))
+        self.assertLess(preflight, self.installer.index("nmcli connection add"))
 
     def test_installer_refreshes_packages_and_reloads_the_firewall(self) -> None:
         self.assertLess(

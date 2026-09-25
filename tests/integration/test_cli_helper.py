@@ -5,7 +5,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-from jittersim.cli import main
+from jittersim.cli import main, reset_main
 from jittersim.config.storage import ConfigRepository
 from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.executor import FakeExecutor
@@ -73,11 +73,25 @@ class CliHelperTests(unittest.TestCase):
         state = self._state()
         self.assertEqual(code, 0)
         self.assertIn("Network reset", output)
-        self.assertIn("remove the project-owned nftables table", self.executor.commands[0].purpose)
+        self.assertIn(
+            "remove the project-owned nftables table",
+            [command.purpose for command in self.executor.commands],
+        )
         self.assertEqual(
             (state.observed_state, state.last_action, state.last_result),
             ("reset", "reset", "success"),
         )
+
+    def test_jittersim_reset_is_the_same_command(self) -> None:
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = reset_main(
+                ["--database", str(self.database), "--helper-socket", str(self.socket_path)]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertIn("Network reset", output.getvalue())
+        self.assertEqual(self._state().last_action, "reset")
 
     def test_reset_still_clears_the_network_without_the_database(self) -> None:
         missing = Path(self.temp_dir.name) / "missing.db"
