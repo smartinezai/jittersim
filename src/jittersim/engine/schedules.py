@@ -26,16 +26,20 @@ def is_schedule_active(*, schedule: Schedule, moment: datetime) -> bool:
 def active_schedule(
     *,
     schedules: Iterable[Schedule],
-    device_id: str,
     moment: datetime,
+    device_id: Optional[str] = None,
+    group_id: Optional[str] = None,
+    everyone_else: bool = False,
 ) -> Optional[Schedule]:
-    """Choose the first active schedule in stable identifier order."""
+    """Choose one target's first active schedule in stable identifier order."""
 
     active = [
         schedule
         for schedule in schedules
         if schedule.enabled
         and schedule.device_id == device_id
+        and schedule.group_id == group_id
+        and schedule.everyone_else == everyone_else
         and is_schedule_active(schedule=schedule, moment=moment)
     ]
     return min(active, key=lambda schedule: schedule.id, default=None)

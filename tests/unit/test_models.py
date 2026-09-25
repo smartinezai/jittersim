@@ -245,6 +245,35 @@ class PolicyAndScheduleTests(unittest.TestCase):
         self.assertEqual(website_policy.blocked_domains, ("ads.example.com",))
         self.assertEqual(schedule.days_of_week, (0, 2))
 
+    def test_schedule_targets_a_device_a_group_or_everyone_else(self) -> None:
+        window = {"profile_id": "slow", "days_of_week": (0,), "start_minute": 60, "end_minute": 120}
+
+        device = Schedule(id="device", device_id="alice", **window)
+        group = Schedule(id="group", device_id=None, group_id="family", **window)
+        everyone = Schedule(id="everyone", device_id=None, everyone_else=True, **window)
+
+        self.assertEqual(
+            (device.device_id, device.group_id, device.everyone_else), ("alice", None, False)
+        )
+        self.assertEqual((group.device_id, group.group_id), (None, "family"))
+        self.assertTrue(everyone.everyone_else)
+
+    def test_schedule_needs_exactly_one_target(self) -> None:
+        window = {"profile_id": "slow", "days_of_week": (0,), "start_minute": 60, "end_minute": 120}
+        for targets in (
+            {"device_id": None},
+            {"device_id": "alice", "group_id": "family"},
+            {"device_id": "alice", "everyone_else": True},
+            {"device_id": None, "group_id": "family", "everyone_else": True},
+        ):
+            with self.subTest(targets=targets):
+                with self.assertRaisesRegex(ValidationError, "exactly one of a device"):
+                    Schedule(id="bad", **targets, **window)
+        with self.assertRaisesRegex(ValidationError, "everyone_else must be a boolean"):
+            Schedule(id="bad", device_id=None, everyone_else=1, **window)
+        with self.assertRaises(ValidationError):
+            Schedule(id="bad", device_id=None, group_id="Not An ID", **window)
+
     def test_timer_requires_a_positive_window(self) -> None:
         with self.assertRaisesRegex(ValueError, "expires_at must be later"):
             Timer(
