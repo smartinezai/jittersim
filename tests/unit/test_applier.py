@@ -48,18 +48,18 @@ class NetworkApplierTests(unittest.TestCase):
         self.assertEqual([command.executable for command in executor.commands[1:]], ["tc", "tc"])
 
     def test_failed_apply_attempts_cleanup(self) -> None:
-        executor = FakeExecutor(fail_on_index=2)
+        executor = FakeExecutor(fail_on_index=1)
         applier = NetworkApplier(executor=executor, topology=self.topology)
 
         with self.assertRaisesRegex(ApplyError, "cleanup completed") as context:
             applier.apply(plan=make_plan())
 
-        self.assertEqual(context.exception.failed_command_index, 2)
+        self.assertEqual(context.exception.failed_command_index, 1)
         self.assertIsNone(context.exception.reset_error)
         self.assertEqual(executor.commands[-3].purpose, "remove the project-owned nftables table")
 
     def test_reports_when_cleanup_also_fails(self) -> None:
-        executor = FailingResetExecutor(fail_on_index=2)
+        executor = FailingResetExecutor(fail_on_index=1)
         applier = NetworkApplier(executor=executor, topology=self.topology)
 
         with self.assertRaisesRegex(ApplyError, "cleanup also failed") as context:

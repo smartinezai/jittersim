@@ -51,6 +51,10 @@ def _format_impairment_arguments(queue: QueueSpec) -> List[str]:
 
 def _render_nft_script(plan: NetworkPlan) -> str:
     lines = [
+        # nft applies the script as one transaction: declaring, deleting and
+        # rebuilding the table replaces it without a moment with no rules.
+        f"add table inet {PROJECT_TABLE}",
+        f"delete table inet {PROJECT_TABLE}",
         f"add table inet {PROJECT_TABLE}",
         (
             f"add chain inet {PROJECT_TABLE} forward "
@@ -266,14 +270,8 @@ def render_command_plan(*, plan: NetworkPlan, topology: Topology) -> Sequence[Co
     commands = [
         Command(
             executable="nft",
-            arguments=("delete", "table", "inet", PROJECT_TABLE),
-            purpose="remove the previous project-owned nftables table",
-            ignore_failure=True,
-        ),
-        Command(
-            executable="nft",
             arguments=("-f", "-"),
-            purpose="install project-owned device mark rules",
+            purpose="replace the project-owned nftables rules",
             stdin=_render_nft_script(plan),
         ),
     ]

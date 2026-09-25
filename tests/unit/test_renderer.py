@@ -70,14 +70,12 @@ class RendererTests(unittest.TestCase):
             topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
         )
 
-        self.assertTrue(commands[0].ignore_failure)
-        self.assertEqual(commands[0].argv, ("nft", "delete", "table", "inet", "jittersim"))
-        self.assertEqual(commands[1].argv, ("nft", "-f", "-"))
-        self.assertIn("ip saddr 192.168.50.10 meta mark set 1", commands[1].stdin or "")
-        self.assertIn("ip daddr 192.168.50.11 meta mark set 2", commands[1].stdin or "")
-        self.assertIn("usage-service alice-video upload", commands[1].stdin or "")
-        self.assertIn("apply-service-quota alice-video download", commands[1].stdin or "")
-        self.assertIn("meta mark set 3", commands[1].stdin or "")
+        self.assertEqual(commands[0].argv, ("nft", "-f", "-"))
+        self.assertIn("ip saddr 192.168.50.10 meta mark set 1", commands[0].stdin or "")
+        self.assertIn("ip daddr 192.168.50.11 meta mark set 2", commands[0].stdin or "")
+        self.assertIn("usage-service alice-video upload", commands[0].stdin or "")
+        self.assertIn("apply-service-quota alice-video download", commands[0].stdin or "")
+        self.assertIn("meta mark set 3", commands[0].stdin or "")
 
         root_commands = [
             command for command in commands if "create project queue root" in command.purpose
@@ -208,6 +206,27 @@ class RendererTests(unittest.TestCase):
         )
         self.assertTrue(all(command.ignore_failure for command in tc))
 
+    def test_nftables_rules_are_replaced_in_one_transaction(self) -> None:
+        plan = compile_plan(
+            devices=(make_device("alice", "192.168.50.10", "normal"),),
+            profiles={"normal": Profile(id="normal", name="Normal")},
+        )
+
+        commands = render_command_plan(
+            plan=plan,
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+        )
+
+        nft = [command for command in commands if command.executable == "nft"]
+        self.assertEqual([command.argv for command in nft], [("nft", "-f", "-")])
+        self.assertTrue(
+            (nft[0].stdin or "").startswith(
+                "add table inet jittersim\n"
+                "delete table inet jittersim\n"
+                "add table inet jittersim\n"
+            )
+        )
+
     def test_class_ids_are_hexadecimal(self) -> None:
         slow = Profile(id="slow", name="Slow", upload=Impairment(delay_ms=20))
         plan = compile_plan(
@@ -255,7 +274,7 @@ class RendererTests(unittest.TestCase):
         nft_script = render_command_plan(
             plan=plan,
             topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
-        )[1].stdin or ""
+        )[0].stdin or ""
 
         self.assertIn("ip saddr 192.168.50.10 ip daddr { 203.0.113.30 } drop", nft_script)
         self.assertNotIn("ip saddr 192.168.50.10 drop", nft_script)
@@ -320,7 +339,7 @@ class RendererTests(unittest.TestCase):
         nft_script = render_command_plan(
             plan=plan,
             topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
-        )[1].stdin
+        )[0].stdin
 
         self.assertIn("ether saddr { aa:bb:cc:dd:ee:ff } drop", nft_script or "")
         self.assertIn(
