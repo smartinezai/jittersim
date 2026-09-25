@@ -1032,6 +1032,37 @@ DASHBOARD_HTML = r"""<!doctype html>
       </form>
       <div id="group-list" class="quota-list" aria-live="polite">No groups saved.</div>
     </section>
+    <section class="card">
+      <h2>Everyone else</h2>
+      <p class="form-note">Choose a profile for every test Wi-Fi client that isn't a saved
+        device or on the unaffected list. They share one connection, so a speed limit in
+        this profile is shared by all of them.</p>
+      <form id="everyone-else-form">
+        <div class="fields">
+          <label>Profile for everyone else
+            <select id="everyone-else-profile">
+              <option value="">None: normal connection</option>
+            </select>
+          </label>
+        </div>
+        <button type="submit">Save everyone-else profile</button>
+      </form>
+      <h3>Unaffected devices</h3>
+      <p class="form-note">These keep a normal connection while everyone else has a profile.
+        Use the MAC address shown in Connected clients. A phone can use a private address
+        that changes, so keep its private address fixed for the JitterSim network, for
+        example Private Wi-Fi Address set to Fixed on an iPhone.</p>
+      <form id="unaffected-form">
+        <div class="fields">
+          <label>MAC address
+            <input id="unaffected-mac" required placeholder="aa:bb:cc:dd:ee:ff">
+          </label>
+          <label>Name (optional) <input id="unaffected-name" placeholder="My phone"></label>
+        </div>
+        <button type="submit">Add to unaffected</button>
+      </form>
+      <div id="unaffected-table" class="table-wrap">No unaffected devices.</div>
+    </section>
   </div>
   <div class="content-grid">
     <section class="card">
@@ -1707,33 +1738,53 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     const CONDITION_LABELS = { normal: "Normal", degraded: "Degraded", offline: "Offline" };
 
-    function deviceConditionCell(deviceId) {
-      // Own keys only: a device may be called "constructor".
-      const known = Object.prototype.hasOwnProperty.call(deviceConditions.devices, deviceId);
-      if (!known) return "—";
-      const state = deviceConditions.devices[deviceId];
+    function conditionCell(state) {
+      if (!state) return "—";
       const reasons = Array.isArray(state.reasons) ? state.reasons : [];
       const label = CONDITION_LABELS[state.condition] || "—";
       return [label, reasons.join("; ") || "No network effects"];
     }
 
+    function deviceConditionCell(deviceId) {
+      // Own keys only: a device may be called "constructor".
+      const known = Object.prototype.hasOwnProperty.call(deviceConditions.devices, deviceId);
+      return conditionCell(known ? deviceConditions.devices[deviceId] : null);
+    }
+
+    function everyoneElseRow() {
+      const condition = deviceConditions.everyone_else || null;
+      if (!everyoneElse.profile_id && !condition) return null;
+      return {
+        cells: [
+          ["Everyone else", "Test Wi-Fi clients that aren't saved or unaffected"],
+          ["Any address", everyoneElse.unaffected_devices.length + " unaffected"],
+          everyoneElse.profile_id ? profileName(everyoneElse.profile_id) : "None",
+          conditionCell(condition)
+        ],
+        actions: []
+      };
+    }
+
     function renderDeviceTable() {
+      const rows = devices.map((device) => ({
+        cells: [
+          [device.name, device.id],
+          [device.ipv4_address, device.mac_address || "No MAC address"],
+          profileName(device.profile_id),
+          deviceConditionCell(device.id)
+        ],
+        actions: [
+          ["Edit", () => fillDeviceForm(device)],
+          ["Delete", (button) => deleteDevice(device, button)]
+        ]
+      }));
+      const others = everyoneElseRow();
+      if (others) rows.push(others);
       renderTable(
         "device-table",
         "No devices assigned yet.",
         ["Device", "Address", "Profile", "Condition"],
-        devices.map((device) => ({
-          cells: [
-            [device.name, device.id],
-            [device.ipv4_address, device.mac_address || "No MAC address"],
-            profileName(device.profile_id),
-            deviceConditionCell(device.id)
-          ],
-          actions: [
-            ["Edit", () => fillDeviceForm(device)],
-            ["Delete", (button) => deleteDevice(device, button)]
-          ]
-        }))
+        rows
       );
     }
 
@@ -2046,6 +2097,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     let profiles = [];
     let devices = [];
     let deviceConditions = { applied: false, devices: {} };
+    let everyoneElse = { profile_id: null, unaffected_devices: [] };
     let groups = [];
     let observedDomainsByDevice = {};
     let connectedDevicesRequestInFlight = false;
@@ -2809,6 +2861,10 @@ DASHBOARD_HTML = r"""<!doctype html>
           device.device_type_source === "hostname suggestion" ? " (suggested)" : ""
         );
         details.append(address, metadata, deviceType);
+        const treatment = document.createElement("p");
+        treatment.className = "connected-meta";
+        treatment.textContent = connectedTreatment(device);
+        details.appendChild(treatment);
         if (device.hostname) {
           const hostname = document.createElement("p");
           hostname.className = "connected-meta";
@@ -2898,6 +2954,29 @@ DASHBOARD_HTML = r"""<!doctype html>
           applyProfileToDevice(device, profileSelect.value, applyButton);
         });
         controls.append(profileSelect, applyButton);
+        if (device.unaffected) {
+          // An unaffected client can't get a profile until it leaves the list.
+          const removeButton = document.createElement("button");
+          removeButton.type = "button";
+          removeButton.textContent = "Remove from unaffected";
+          removeButton.addEventListener("click", () => {
+            removeUnaffected(device.mac_address, removeButton);
+          });
+          controls.replaceChildren(removeButton);
+        } else if (!device.assigned_device_id) {
+          const keepButton = document.createElement("button");
+          keepButton.type = "button";
+          keepButton.textContent = "Keep unaffected";
+          keepButton.disabled = !device.mac_address;
+          keepButton.addEventListener("click", () => {
+            keepUnaffected(
+              device.mac_address,
+              device.saved_display_name || device.hostname || "",
+              keepButton
+            );
+          });
+          controls.appendChild(keepButton);
+        }
         row.append(dot, details, state, controls);
         container.appendChild(row);
       });
@@ -3014,6 +3093,65 @@ DASHBOARD_HTML = r"""<!doctype html>
         routerLink.href = data.router.settings_url;
       }
       note.textContent = "The router controls below use the TG3442DE local interface. Keep Ethernet connected so the Pi remains reachable if router Wi-Fi is turned off.";
+    }
+
+    function connectedTreatment(device) {
+      if (device.unaffected) return "Unaffected";
+      if (device.assigned_profile_id) {
+        return "Saved device: " + profileName(device.assigned_profile_id);
+      }
+      if (everyoneElse.profile_id) return "Everyone else: " + profileName(everyoneElse.profile_id);
+      return "Normal connection";
+    }
+
+    function savedChangeMessage(message, result) {
+      return result.live_applied === false
+        ? message + " Apply the configuration to use it."
+        : message;
+    }
+
+    async function keepUnaffected(macAddress, name, button) {
+      if (button) setButtonBusy(button, true);
+      showMessage("Adding " + macAddress + " to the unaffected list...", "working");
+      try {
+        const result = await request("/api/unaffected-devices", "POST", {
+          mac_address: macAddress,
+          name: name
+        });
+        refreshAfterSuccess(savedChangeMessage(
+          "Added " + result.unaffected_device.name + " to the unaffected list.", result
+        ));
+        return true;
+      } catch (error) {
+        showMessage(error.message, "error");
+        return false;
+      } finally {
+        if (button) setButtonBusy(button, false);
+      }
+    }
+
+    function removeUnaffected(macAddress, button) {
+      deleteItem(
+        "/api/unaffected-devices/delete",
+        { mac_address: macAddress },
+        "Removed from the unaffected list.",
+        button
+      );
+    }
+
+    async function loadEveryoneElse() {
+      everyoneElse = await request("/api/everyone-else", "GET");
+      element("everyone-else-profile").value = everyoneElse.profile_id || "";
+      renderTable(
+        "unaffected-table",
+        "No unaffected devices.",
+        ["Unaffected device"],
+        everyoneElse.unaffected_devices.map((device) => ({
+          cells: [[device.name, device.mac_address]],
+          actions: [["Remove", (button) => removeUnaffected(device.mac_address, button)]]
+        }))
+      );
+      renderDeviceTable();
     }
 
     async function applyProfileToDevice(device, profileId, button) {
@@ -3782,14 +3920,19 @@ DASHBOARD_HTML = r"""<!doctype html>
         "service-assignment-profile",
         "time-quota-profile",
         "group-profile",
-        "group-data-limit-profile"
+        "group-data-limit-profile",
+        "everyone-else-profile"
       ].forEach((selectId) => {
         const profileSelect = element(selectId);
         profileSelect.replaceChildren();
-        if (selectId === "group-profile") {
+        const emptyLabels = {
+          "group-profile": "Use each device profile",
+          "everyone-else-profile": "None: normal connection"
+        };
+        if (emptyLabels[selectId]) {
           const option = document.createElement("option");
           option.value = "";
-          option.textContent = "Use each device profile";
+          option.textContent = emptyLabels[selectId];
           profileSelect.appendChild(option);
         }
         profiles.forEach((profile) => {
@@ -4143,6 +4286,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         loadQuotas(),
         loadServiceAssignments(),
         loadConditions(),
+        loadEveryoneElse(),
         loadAdminTools()
       ]);
     }
@@ -4253,6 +4397,32 @@ DASHBOARD_HTML = r"""<!doctype html>
       } catch (error) {
         showMessage(error.message, "error");
       }
+    });
+
+    element("everyone-else-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const profileId = element("everyone-else-profile").value || null;
+      try {
+        const result = await request("/api/everyone-else", "POST", { profile_id: profileId });
+        refreshAfterSuccess(savedChangeMessage(
+          profileId
+            ? "Everyone else now gets " + profileName(profileId) + "."
+            : "Everyone else now gets a normal connection.",
+          result
+        ));
+      } catch (error) {
+        showMessage(error.message, "error");
+      }
+    });
+
+    element("unaffected-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const added = await keepUnaffected(
+        element("unaffected-mac").value.trim(),
+        element("unaffected-name").value.trim(),
+        event.submitter || null
+      );
+      if (added) element("unaffected-form").reset();
     });
 
     element("policy-form").addEventListener("submit", async (event) => {

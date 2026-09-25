@@ -2039,12 +2039,16 @@ class ControlServerTests(unittest.TestCase):
             self.skipTest("Node.js is required to run the lookup")
         script = DASHBOARD_HTML.split("<script>", 1)[1].split("</script>", 1)[0]
         labels = re.search(r"const CONDITION_LABELS = \{.*?\};", script, re.S).group(0)
-        body = script.split("    function deviceConditionCell(", 1)[1].split("\n    }\n", 1)[0]
+        def function(name):
+            body = script.split(f"    function {name}(", 1)[1].split("\n    }\n", 1)[0]
+            return f"function {name}({body}\n}}\n"
+
         harness = (
             labels
             + "\nconst deviceConditions = "
             + "{applied: true, devices: {alice: {condition: 'normal'}}};\n"
-            + f"function deviceConditionCell({body}\n}}\n"
+            + function("conditionCell")
+            + function("deviceConditionCell")
             # A device may be called "constructor", like a built-in property.
             + "console.log(JSON.stringify([deviceConditionCell('constructor'),"
             + " deviceConditionCell('alice')]));\n"
@@ -2053,6 +2057,83 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), ["—", ["Normal", "No network effects"]])
+
+    def test_dashboard_has_the_everyone_else_controls(self) -> None:
+        for fragment in (
+            'id="everyone-else-form"',
+            'id="everyone-else-profile"',
+            'id="unaffected-form"',
+            'id="unaffected-table"',
+            'request("/api/everyone-else", "GET")',
+            '"/api/unaffected-devices/delete"',
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, DASHBOARD_HTML)
+        refresh = DASHBOARD_HTML.split("async function refresh() {", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("loadEveryoneElse()", refresh)
+
+    def _run_dashboard_functions(self, names, setup, calls):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is required to run the dashboard functions")
+        script = DASHBOARD_HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+
+        def function(name):
+            body = script.split(f"    function {name}(", 1)[1].split("\n    }\n", 1)[0]
+            return f"function {name}({body}\n}}\n"
+
+        harness = setup + "".join(function(name) for name in names) + calls
+        result = subprocess.run([node, "-e", harness], capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_dashboard_labels_what_each_connected_client_gets(self) -> None:
+        labels = self._run_dashboard_functions(
+            ["profileName", "connectedTreatment"],
+            "const profiles = [{id: 'slow', name: 'Slow'}, {id: '3g', name: '3G'}];\n"
+            "let everyoneElse = {profile_id: null, unaffected_devices: []};\n",
+            "const labels = [\n"
+            "  connectedTreatment({unaffected: true, assigned_profile_id: null}),\n"
+            "  connectedTreatment({unaffected: false, assigned_profile_id: 'slow'}),\n"
+            "  connectedTreatment({unaffected: false, assigned_profile_id: null}),\n"
+            "];\n"
+            "everyoneElse = {profile_id: '3g', unaffected_devices: []};\n"
+            "labels.push(connectedTreatment({unaffected: false, assigned_profile_id: null}));\n"
+            "console.log(JSON.stringify(labels));\n",
+        )
+
+        self.assertEqual(
+            labels,
+            ["Unaffected", "Saved device: Slow", "Normal connection", "Everyone else: 3G"],
+        )
+
+    def test_dashboard_lists_everyone_else_with_the_devices(self) -> None:
+        rows = self._run_dashboard_functions(
+            ["profileName", "conditionCell", "everyoneElseRow"],
+            "const CONDITION_LABELS = {normal: 'Normal', degraded: 'Degraded'};\n"
+            "const profiles = [{id: '3g', name: '3G'}];\n"
+            "let everyoneElse = {profile_id: null, unaffected_devices: []};\n"
+            "let deviceConditions = {applied: false, devices: {}, everyone_else: null};\n",
+            "const rows = [everyoneElseRow()];\n"
+            "everyoneElse = {profile_id: '3g', unaffected_devices: [{mac_address: 'x'}]};\n"
+            "deviceConditions.everyone_else = "
+            "{condition: 'degraded', reasons: ['upload: delay 100 ms']};\n"
+            "rows.push(everyoneElseRow().cells);\n"
+            "console.log(JSON.stringify(rows));\n",
+        )
+
+        self.assertEqual(
+            rows,
+            [
+                None,
+                [
+                    ["Everyone else", "Test Wi-Fi clients that aren't saved or unaffected"],
+                    ["Any address", "1 unaffected"],
+                    "3G",
+                    ["Degraded", "upload: delay 100 ms"],
+                ],
+            ],
+        )
 
     def test_dashboard_offers_presets_and_burst_loss(self) -> None:
         for fragment in (
