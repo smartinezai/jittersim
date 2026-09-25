@@ -300,6 +300,25 @@ class ConfigRepositoryTests(unittest.TestCase):
         self.assertEqual(self.repository.get_device_group("family").device_ids, ("bob",))
         self.assertFalse(self.repository.delete_device("alice"))
 
+    def test_deleting_a_groups_last_device_removes_the_group(self) -> None:
+        self._save_lab()
+        self.repository.save_device(Device("carol", "Carol", "192.168.50.12", "normal"))
+        self.repository.save_device_group(
+            DeviceGroup(id="solo", name="Solo", device_ids=("carol",))
+        )
+        self.repository.save_group_data_limit(
+            GroupDataLimit(group_id="solo", profile_id="slow", limit_bytes=500, last_reset_at=100)
+        )
+
+        self.repository.delete_device("carol")
+
+        # A group cannot be empty, so reading it back would fail.
+        self.assertEqual(
+            [group.id for group in self.repository.list_device_groups()], ["family"]
+        )
+        self.assertIsNone(self.repository.get_group_data_limit("solo"))
+        self.assertIsNotNone(self.repository.get_group_data_limit("family"))
+
     def test_deletes_report_whether_something_was_removed(self) -> None:
         self._save_lab()
 

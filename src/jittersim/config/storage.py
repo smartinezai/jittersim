@@ -615,9 +615,21 @@ class ConfigRepository:
             raise StorageError(f"profile {profile_id} is still in use") from error
 
     def delete_device(self, device_id: str) -> bool:
-        """Delete one device with its schedules, timers, progressions and limits."""
+        """Delete one device with its schedules, timers, progressions and limits.
 
-        return self._delete_row("devices", "id", device_id)
+        A group left without devices is deleted too, with its shared limit,
+        because a group must contain at least one device.
+        """
+
+        cursor = self._connection.execute("DELETE FROM devices WHERE id = ?", (device_id,))
+        if not cursor.rowcount:
+            return False
+        self._connection.execute(
+            "DELETE FROM device_groups WHERE id NOT IN (SELECT group_id FROM device_group_members)"
+        )
+        self._bump_configuration_version()
+        self._commit()
+        return True
 
     def _commit(self) -> None:
         # replace_settings defers the commits of the save methods it calls so

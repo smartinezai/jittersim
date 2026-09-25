@@ -1787,8 +1787,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function deleteDevice(device, button) {
-      const question = "Delete " + device.name +
-        "? Its schedules, timers, progressions and limits are deleted too.";
+      const question = "Delete " + device.name + "? Its schedules, timers, progressions " +
+        "and limits are deleted too, and so is a group it is the only member of.";
       if (!window.confirm(question)) return;
       deleteItem("/api/devices/delete", { id: device.id }, "Device deleted.", button);
     }
