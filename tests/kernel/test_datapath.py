@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from ipaddress import IPv4Address
 
@@ -18,12 +19,14 @@ from jittersim.config.models import Device, Impairment, MacPolicy, Profile
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import compile_plan
 from jittersim.engine.plan import ServiceAssignmentRule, ServiceQuotaRule
+from jittersim.measure import load_run
 from jittersim.networking.applier import ApplyError, NetworkApplier
 from jittersim.networking.helper import HelperService
 
 from .lab import (
     CLIENT,
     PI,
+    ROUTER_ADDRESS,
     TOPOLOGY,
     NamespaceExecutor,
     create_lab,
@@ -143,6 +146,32 @@ class LinuxDatapathTests(unittest.TestCase):
 
         replies = set(re.findall(r"icmp_seq=(\d+)", output))
         self.assertEqual(len(replies), 100, f"{100 - len(replies)} of 100 pings lost")
+
+    def test_measurements_show_what_a_profile_does(self) -> None:
+        def measured(profile):
+            self.apply([device("a-phone", 10, profile.id)], profile)
+            with tempfile.TemporaryDirectory() as directory:
+                output = os.path.join(directory, "run.json")
+                # The test client measures through its queues, like a real device.
+                _in(CLIENT, sys.executable, "-m", "jittersim.measure", "measure",
+                    "--label", profile.name, "--target", ROUTER_ADDRESS,
+                    "--count", "200", "--interval", "0.01", "--output", output)
+                return load_run(output)["summary"]
+
+        normal = measured(NORMAL)
+        impaired = measured(
+            Profile(
+                id="slow",
+                name="Slow",
+                upload=Impairment(delay_ms=40, loss_percent=20),
+                download=Impairment(delay_ms=40),
+            )
+        )
+
+        added = impaired["rtt_avg_ms"] - normal["rtt_avg_ms"]
+        self.assertEqual(normal["loss_percent"], 0.0)
+        self.assertTrue(75 <= added <= 95, f"round trips grew by {added:.1f} ms")
+        self.assertTrue(10 <= impaired["loss_percent"] <= 30, f"{impaired['loss_percent']}% lost")
 
     def test_fifteen_devices_each_get_their_own_queue(self) -> None:
         blocked = Profile(id="blocked", name="Blocked", upload=Impairment(loss_percent=100))
