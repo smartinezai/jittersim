@@ -1,6 +1,6 @@
 import unittest
 
-from jittersim.config.models import Device, Impairment, Profile
+from jittersim.config.models import Device, Impairment, Profile, UnaffectedDevice
 from jittersim.config.storage import ConfigRepository
 from jittersim.engine.service import compile_stored_plan
 
@@ -42,6 +42,18 @@ class StoredPlanServiceTests(unittest.TestCase):
         self.assertEqual(plan.mark_rules, ())
         self.assertEqual(plan.queues, ())
 
+
+    def test_the_stored_plan_includes_everyone_else(self) -> None:
+        self.repository.save_profile(
+            Profile(id="slow", name="Slow", download=Impairment(delay_ms=100))
+        )
+        self.repository.save_everyone_else_profile_id("slow")
+        self.repository.save_unaffected_device(UnaffectedDevice("aa:aa:aa:aa:aa:aa"))
+
+        plan = compile_stored_plan(repository=self.repository)
+
+        self.assertEqual(plan.everyone_else.download_impairment, Impairment(delay_ms=100))
+        self.assertEqual(plan.everyone_else.unaffected_macs, ("aa:aa:aa:aa:aa:aa",))
 
 if __name__ == "__main__":
     unittest.main()
