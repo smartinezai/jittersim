@@ -223,6 +223,9 @@ class RuntimeScheduler:
         owned_repository = repository is None
         active_repository = repository or ConfigRepository(self._database_path)
         try:
+            if active_repository.get_runtime_state().last_action == "reset":
+                self._honor_external_reset()
+                return False
             self._sample_traffic_if_needed(repository=active_repository, now=current_time)
             self._sample_quota_usage_if_needed(repository=active_repository, now=current_time)
             plan = self._build_plan(repository=active_repository, now=current_time)
@@ -238,28 +241,31 @@ class RuntimeScheduler:
             with self._lock:
                 self._current_payload = payload
                 self._last_device_counters = dict.fromkeys(self._last_device_counters, 0)
-            active_repository.update_runtime_state(
-                observed_state="applied",
-                last_action="schedule",
-                last_result="success",
-                last_error=None,
-            )
+            if not active_repository.record_schedule_result(success=True):
+                # A reset was recorded while this plan was being applied.
+                self._honor_external_reset()
+                return False
             return True
         except (HelperClientError, PlanError, StorageError, OSError):
             LOGGER.exception("scheduled network plan failed")
             try:
-                active_repository.update_runtime_state(
-                    observed_state="error",
-                    last_action="schedule",
-                    last_result="failure",
-                    last_error="scheduled network plan failed",
-                )
+                active_repository.record_schedule_result(success=False)
             except StorageError:
                 LOGGER.exception("could not record scheduled network failure")
             return False
         finally:
             if owned_repository:
                 active_repository.close()
+
+    def _honor_external_reset(self) -> None:
+        # Someone reset the network outside the dashboard, for example with
+        # `jittersim reset`. Stop applying, and reset once more in case a
+        # scheduled apply raced that reset.
+        self.pause()
+        try:
+            self._helper_client.reset()
+        except HelperClientError:
+            LOGGER.warning("could not repeat an external network reset", exc_info=True)
 
     def _build_plan(self, *, repository: ConfigRepository, now: float):
         profiles = {profile.id: profile for profile in repository.list_profiles()}

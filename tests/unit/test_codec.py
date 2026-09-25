@@ -60,6 +60,23 @@ class PlanCodecTests(unittest.TestCase):
         self.assertEqual(decoded, plan)
         self.assertIsNone(decoded.website_filters[0].allowed_addresses)
 
+    def test_round_trips_burst_loss(self) -> None:
+        plan = compile_plan(
+            devices=(Device("alice", "Alice", "192.168.50.10", "bursty"),),
+            profiles={
+                "bursty": Profile(
+                    id="bursty",
+                    name="Bursty",
+                    upload=Impairment(loss_percent=10, loss_burst_packets=4),
+                )
+            },
+        )
+
+        decoded = plan_from_payload(plan_to_payload(plan))
+
+        self.assertEqual(decoded, plan)
+        self.assertEqual(decoded.queues[0].impairment.loss_burst_packets, 4)
+
     def test_round_trips_service_quota_rules(self) -> None:
         plan = compile_plan(
             devices=(Device("alice", "Alice", "192.168.50.10", "slow"),),

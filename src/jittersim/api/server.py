@@ -1,6 +1,8 @@
 """Small HTTP server for the jittersim control plane."""
 
 import argparse
+import base64
+import hashlib
 import hmac
 import json
 import logging
@@ -36,6 +38,7 @@ from jittersim.config.models import (
     Progression,
     Randomness,
     RuntimeState,
+    SavedSettings,
     Schedule,
     ServiceAssignment,
     ServiceQuota,
@@ -51,8 +54,18 @@ from jittersim.config.storage import (
     StorageError,
     TrafficRateSettingsError,
 )
+from jittersim.config.transfer import (
+    SETTINGS_FORMAT,
+    SETTINGS_VERSION,
+    check_settings,
+    settings_to_payload,
+)
 from jittersim.engine.codec import plan_to_payload
-from jittersim.engine.compiler import MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN, PlanError
+from jittersim.engine.compiler import (
+    MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN,
+    MAX_SHAPED_MARKS_PER_PLAN,
+    PlanError,
+)
 from jittersim.engine.progression import progression_factor
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.service import compile_stored_plan
@@ -60,26 +73,35 @@ from jittersim.networking.helper import HelperClient, HelperClientError
 
 LOGGER = logging.getLogger(__name__)
 MAX_JSON_BODY_BYTES = 64 * 1024
+# A settings export with many profiles is larger than ordinary requests.
+MAX_IMPORT_BODY_BYTES = 1024 * 1024
 WRITE_PATHS = frozenset(
     (
         "/api/profiles",
+        "/api/profiles/delete",
         "/api/devices",
+        "/api/devices/delete",
         "/api/groups",
         "/api/groups/delete",
         "/api/schedules",
+        "/api/schedules/delete",
         "/api/timers",
         "/api/timers/cancel",
         "/api/progressions",
         "/api/progressions/stop",
         "/api/data-limits",
+        "/api/data-limits/delete",
         "/api/data-limits/reset",
         "/api/group-data-limits",
+        "/api/group-data-limits/delete",
         "/api/group-data-limits/reset",
         "/api/service-quotas",
+        "/api/service-quotas/delete",
         "/api/service-quotas/reset",
         "/api/service-assignments",
         "/api/service-assignments/delete",
         "/api/time-quotas",
+        "/api/time-quotas/delete",
         "/api/time-quotas/reset",
         "/api/time-quotas/start",
         "/api/time-quotas/stop",
@@ -94,6 +116,7 @@ WRITE_PATHS = frozenset(
         "/api/observations/scan",
         "/api/observations/add-to-profile",
         "/api/observations/add-global-block",
+        "/api/import",
         "/api/apply",
         "/api/reset",
     )
@@ -339,7 +362,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     .traffic-rate-form button { margin: 0; }
     .traffic-rate-help, .traffic-profile-status { margin: 0; color: #91a8c1; font-size: 0.78rem; }
     .traffic-rate-help { flex-basis: 100%; }
-    .traffic-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.75rem; margin-top: 1rem; }
+    .traffic-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.75rem; margin-top: 1rem; }
     .traffic-metric { min-width: 0; padding: 0.75rem; border: 1px solid #2b435f; border-radius: 0.6rem; background: #0d1b2d; }
     .traffic-metric span { display: block; color: #91a8c1; font-size: 0.76rem; }
     .traffic-metric strong { display: block; margin-top: 0.25rem; color: #edf5ff; font-size: 1.05rem; overflow-wrap: anywhere; }
@@ -501,6 +524,45 @@ DASHBOARD_HTML = r"""<!doctype html>
     .token-check-status.success { color: #8de2bc; }
     .token-check-status.error { color: #ffb0b0; }
     .data-grid { margin-top: 1rem; }
+    .data-grid .card.wide { grid-column: 1 / -1; }
+    .table-wrap { overflow-x: auto; }
+    .data-table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+    .data-table th {
+      padding: 0.45rem 0.6rem;
+      border-bottom: 1px solid #2b435f;
+      color: #91a8c1;
+      font-size: 0.72rem;
+      letter-spacing: 0.06em;
+      text-align: left;
+      text-transform: uppercase;
+    }
+    .data-table td {
+      padding: 0.55rem 0.6rem;
+      border-bottom: 1px solid #1d2f45;
+      color: #c7d7eb;
+      vertical-align: top;
+    }
+    .data-table td strong { color: #edf5ff; }
+    .data-table td small { display: block; color: #91a8c1; font-size: 0.76rem; }
+    .row-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.4rem; }
+    .row-actions button { margin-top: 0; padding: 0.35rem 0.6rem; }
+    .edit-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      margin-bottom: 0.75rem;
+      padding: 0.55rem 0.75rem;
+      border: 1px solid #a77b31;
+      border-radius: 0.5rem;
+      background: #3b2a12;
+    }
+    .edit-bar[hidden] { display: none; }
+    .edit-bar p { margin: 0; color: #f5ca78; }
+    .edit-bar button { margin-top: 0; }
+    .schedule-row div:first-child { display: grid; gap: 0.15rem; }
+    .transfer-actions { justify-content: flex-start; margin-top: 1rem; }
+    .schedule-row small { color: #91a8c1; }
     @media (max-width: 700px) {
       body { padding-top: 1rem; }
       .page-header, .action-bar { display: block; }
@@ -561,6 +623,16 @@ DASHBOARD_HTML = r"""<!doctype html>
     </div>
     <p id="message" class="action-message" role="status" aria-live="polite">Ready.</p>
   </section>
+  <section class="card token-card">
+    <h2>Control token</h2>
+    <div class="token-controls">
+      <label>Admin token (kept in this page only)
+        <input id="admin-token" type="password" autocomplete="off">
+      </label>
+      <button id="check-admin-token" type="button">Check token</button>
+    </div>
+    <p id="token-check-status" class="token-check-status" role="status" aria-live="polite">Enter the token and choose Check token to load diagnostics.</p>
+  </section>
   <section class="card connected-card">
     <div class="section-heading">
       <div>
@@ -603,6 +675,12 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div class="traffic-metric"><span>Download rate</span><strong id="traffic-download-rate">—</strong></div>
       <div class="traffic-metric"><span>Upload packet rate</span><strong id="traffic-upload-packets">—</strong></div>
       <div class="traffic-metric"><span>Download packet rate</span><strong id="traffic-download-packets">—</strong></div>
+      <div class="traffic-metric">
+        <span>Dropped by JitterSim</span><strong id="traffic-drop-rate">—</strong>
+      </div>
+      <div class="traffic-metric">
+        <span>Waiting in JitterSim</span><strong id="traffic-queued">—</strong>
+      </div>
     </div>
     <div class="traffic-chart-wrap">
       <canvas id="traffic-chart" width="900" height="320" role="img" aria-label="Live upload and download rates at JitterSim with configured ISP and device queue limits over the last 60 seconds">Live traffic chart. Check the admin token to begin sampling.</canvas>
@@ -616,6 +694,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       </div>
     </div>
     <p id="traffic-profile-status" class="traffic-profile-status" role="status" aria-live="polite">Select one device to show its applied default queue limits.</p>
+    <p class="traffic-note">Dropped and waiting show packets JitterSim itself discarded or is still
+      delaying, in both directions.</p>
     <p class="traffic-note">Traffic lines count bytes at JitterSim before its queues. They do not show the speed a device receives. Dashed lines show configured limits. The ISP plan line is shared with household traffic and is not a live measurement of spare capacity. Service-specific queues may use different limits. Only assigned devices are included. Check the admin token to start; sampling pauses when this tab is hidden.</p>
   </section>
   <section class="card uplink-card">
@@ -655,20 +735,21 @@ DASHBOARD_HTML = r"""<!doctype html>
     <p id="observation-note" class="observation-note">Scanning is on demand. Results are local aggregates, not exact page visits.</p>
     <div id="observations" class="observation-list" aria-live="polite">No observations yet.</div>
   </section>
-  <section class="card token-card">
-    <h2>Control token</h2>
-    <div class="token-controls">
-      <label>Admin token (kept in this page only)
-        <input id="admin-token" type="password" autocomplete="off">
-      </label>
-      <button id="check-admin-token" type="button">Check token</button>
-    </div>
-    <p id="token-check-status" class="token-check-status" role="status" aria-live="polite">Enter the token and choose Check token to load diagnostics.</p>
-  </section>
   <div class="content-grid">
     <section class="card">
       <h2>Save profile</h2>
       <form id="profile-form">
+        <div id="profile-edit-bar" class="edit-bar" hidden>
+          <p id="profile-edit-status" role="status"></p>
+          <button id="profile-cancel-edit" type="button">Cancel editing</button>
+        </div>
+        <label>Start from a preset
+          <select id="profile-preset">
+            <option value="">Choose a preset...</option>
+          </select>
+        </label>
+        <p class="form-note">Presets fill the form with rough approximations of real networks.
+          Nothing is saved until you choose Save profile.</p>
         <div class="fields">
           <label>Profile ID
             <input id="profile-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}">
@@ -684,6 +765,14 @@ DASHBOARD_HTML = r"""<!doctype html>
           <label>Loss (%)
             <input id="upload-loss" type="number" min="0" max="100" value="0" required>
           </label>
+          <label>
+            <span class="field-label">Loss bursts (packets)<span
+              class="help-icon" tabindex="0" role="img" aria-label="Loss burst help"
+              data-help="0 loses packets independently. 4 makes losses arrive in runs of
+                about 4 packets, like a fading signal. The loss percentage stays the average."
+              >?</span></span>
+            <input id="upload-loss-burst" type="number" min="0" max="100" value="0">
+          </label>
           <label>Bandwidth (kbit/s, optional)
             <input id="upload-bandwidth" type="number" min="1">
           </label>
@@ -698,6 +787,14 @@ DASHBOARD_HTML = r"""<!doctype html>
           </label>
           <label>Loss (%)
             <input id="download-loss" type="number" min="0" max="100" value="0" required>
+          </label>
+          <label>
+            <span class="field-label">Loss bursts (packets)<span
+              class="help-icon" tabindex="0" role="img" aria-label="Loss burst help"
+              data-help="0 loses packets independently. 4 makes losses arrive in runs of
+                about 4 packets, like a fading signal. The loss percentage stays the average."
+              >?</span></span>
+            <input id="download-loss-burst" type="number" min="0" max="100" value="0">
           </label>
           <label>Bandwidth (kbit/s, optional)
             <input id="download-bandwidth" type="number" min="1">
@@ -860,13 +957,19 @@ DASHBOARD_HTML = r"""<!doctype html>
     <section class="card">
       <h2>Assign a device</h2>
       <form id="device-form">
+        <div id="device-edit-bar" class="edit-bar" hidden>
+          <p id="device-edit-status" role="status"></p>
+          <button id="device-cancel-edit" type="button">Cancel editing</button>
+        </div>
         <div class="fields">
           <label>Device ID <input id="device-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}"></label>
           <label>Name <input id="device-name" required></label>
           <label>Reserved IPv4 address
             <input id="device-ip" required placeholder="192.168.50.10">
           </label>
-          <label>Profile ID <input id="device-profile" required></label>
+          <label>Profile
+            <select id="device-profile" required></select>
+          </label>
           <label>MAC address (optional)
             <input id="device-mac" placeholder="aa:bb:cc:dd:ee:ff">
           </label>
@@ -1292,13 +1395,13 @@ DASHBOARD_HTML = r"""<!doctype html>
     </form>
   </section>
   <div class="data-grid">
-    <section class="card">
+    <section class="card wide">
       <div class="section-heading"><h2>Profiles</h2><p>Saved network behavior</p></div>
-      <pre id="profiles">Loading...</pre>
+      <div id="profile-table" class="table-wrap">Loading...</div>
     </section>
-    <section class="card">
+    <section class="card wide">
       <div class="section-heading"><h2>Devices</h2><p>Assigned test clients</p></div>
-      <pre id="devices">Loading...</pre>
+      <div id="device-table" class="table-wrap">Loading...</div>
     </section>
     <section class="card">
       <div class="section-heading"><h2>Compiled plan</h2><p>Current traffic rules</p></div>
@@ -1325,6 +1428,14 @@ DASHBOARD_HTML = r"""<!doctype html>
         <button id="download-backup" type="button">Download backup</button>
       </div>
       <pre id="action-history">Enter the admin token to view recent actions.</pre>
+      <div class="row-actions transfer-actions">
+        <button id="export-settings" type="button">Export settings</button>
+        <button id="import-settings-button" type="button">Import settings...</button>
+        <input id="import-settings" type="file" accept=".json,application/json" hidden>
+      </div>
+      <p class="form-note">A settings export holds profiles, devices, groups, schedules,
+        access rules and limits, without usage or DNS history. Importing one replaces all
+        of them.</p>
     </section>
   </div>
   <script>
@@ -1354,6 +1465,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         delay_ms: Number(element(prefix + "-delay").value),
         jitter_ms: Number(element(prefix + "-jitter").value),
         loss_percent: Number(element(prefix + "-loss").value),
+        loss_burst_packets: Number(element(prefix + "-loss-burst").value),
         bandwidth_kbit: optionalNumber(prefix + "-bandwidth"),
         reorder_percent: Number(element(prefix + "-reorder").value),
         duplicate_percent: Number(element(prefix + "-duplicate").value),
@@ -1366,6 +1478,456 @@ DASHBOARD_HTML = r"""<!doctype html>
         duplicate_randomness: featureRandomness(prefix, "duplicate"),
         corrupt_randomness: featureRandomness(prefix, "corrupt")
       };
+    }
+
+    function slugify(value) {
+      return value.toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+/, "")
+        .slice(0, 64)
+        .replace(/-+$/, "");
+    }
+
+    // Fill an ID from its name until someone types the ID by hand.
+    function bindAutoId(nameId, idId) {
+      const nameInput = element(nameId);
+      const idInput = element(idId);
+      idInput.addEventListener("input", () => {
+        idInput.dataset.typed = idInput.value ? "true" : "";
+      });
+      nameInput.addEventListener("input", () => {
+        if (idInput.readOnly || idInput.dataset.typed === "true") return;
+        idInput.value = slugify(nameInput.value);
+      });
+    }
+
+    [
+      ["profile-name", "profile-id"],
+      ["device-name", "device-id"],
+      ["group-name", "group-id"],
+      ["service-quota-name", "service-quota-id"],
+      ["time-quota-name", "time-quota-id"]
+    ].forEach(([nameId, idId]) => bindAutoId(nameId, idId));
+
+    function startEditing(prefix, label) {
+      element(prefix + "-id").readOnly = true;
+      element(prefix + "-edit-status").textContent = "Editing " + label + ". Save to update it.";
+      element(prefix + "-edit-bar").hidden = false;
+      element(prefix + "-form").scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+
+    function stopEditing(prefix) {
+      element(prefix + "-form").reset();
+      element(prefix + "-id").readOnly = false;
+      element(prefix + "-id").dataset.typed = "";
+      element(prefix + "-edit-bar").hidden = true;
+    }
+
+    const IMPAIRMENT_FEATURES = [
+      "delay", "jitter", "loss", "bandwidth", "reorder", "duplicate", "corrupt"
+    ];
+    const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+    function formatBandwidth(kbit) {
+      if (kbit < 1000) return kbit + " kbit/s";
+      return (kbit / 1000).toFixed(kbit % 1000 ? 1 : 0) + " Mbit/s";
+    }
+
+    function describeImpairment(values) {
+      const parts = [];
+      if (values.delay_ms || values.jitter_ms) {
+        const jitter = values.jitter_ms ? " ± " + values.jitter_ms + " ms" : "";
+        parts.push(values.delay_ms + " ms" + jitter);
+      }
+      if (values.loss_percent) {
+        const bursts = values.loss_burst_packets > 1
+          ? " in bursts of " + values.loss_burst_packets
+          : "";
+        parts.push(values.loss_percent + "% loss" + bursts);
+      }
+      if (values.bandwidth_kbit !== null) parts.push(formatBandwidth(values.bandwidth_kbit));
+      if (values.reorder_percent) parts.push(values.reorder_percent + "% reorder");
+      if (values.duplicate_percent) parts.push(values.duplicate_percent + "% duplicate");
+      if (values.corrupt_percent) parts.push(values.corrupt_percent + "% corrupt");
+      return parts.length ? parts.join(" · ") : "Unchanged";
+    }
+
+    function describeExtras(profile) {
+      const parts = [];
+      if (profile.reroll_interval_seconds) {
+        parts.push("rerolls every " + profile.reroll_interval_seconds + " s");
+      }
+      if (profile.outage_probability) {
+        parts.push(
+          profile.outage_probability + "% outage chance, " +
+          profile.outage_duration_seconds + " s long"
+        );
+      }
+      if (profile.website_mode === "allow_only") parts.push("allows only listed sites");
+      return parts.length ? parts.join(" · ") : "—";
+    }
+
+    function hasAdvancedSettings(profile) {
+      const advancedImpairment = (values) => Boolean(
+        values.reorder_percent || values.duplicate_percent || values.corrupt_percent ||
+        IMPAIRMENT_FEATURES.some((feature) => {
+          const randomness = values[feature + "_randomness"];
+          return randomness.variation_percent !== 0 || randomness.enabled_probability !== 100;
+        })
+      );
+      return Boolean(
+        profile.reroll_interval_seconds || profile.outage_probability ||
+        profile.random_seed !== null || profile.website_mode !== "unrestricted" ||
+        profile.website_domains.length ||
+        advancedImpairment(profile.upload) || advancedImpairment(profile.download)
+      );
+    }
+
+    function tableCell(value) {
+      const cell = document.createElement("td");
+      if (Array.isArray(value)) {
+        const primary = document.createElement("strong");
+        primary.textContent = value[0];
+        const secondary = document.createElement("small");
+        secondary.textContent = value[1];
+        cell.append(primary, secondary);
+      } else {
+        cell.textContent = value;
+      }
+      return cell;
+    }
+
+    function renderTable(containerId, emptyText, headings, rows) {
+      const container = element(containerId);
+      container.replaceChildren();
+      if (!rows.length) {
+        container.textContent = emptyText;
+        return;
+      }
+      const table = document.createElement("table");
+      table.className = "data-table";
+      const headRow = document.createElement("tr");
+      headings.concat([""]).forEach((heading) => {
+        const cell = document.createElement("th");
+        cell.scope = "col";
+        cell.textContent = heading;
+        headRow.appendChild(cell);
+      });
+      const head = document.createElement("thead");
+      head.appendChild(headRow);
+      const body = document.createElement("tbody");
+      rows.forEach(({ cells, actions }) => {
+        const row = document.createElement("tr");
+        cells.forEach((value) => row.appendChild(tableCell(value)));
+        const actionCell = document.createElement("td");
+        const actionGroup = document.createElement("div");
+        actionGroup.className = "row-actions";
+        actions.forEach(([label, onClick]) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = label;
+          button.addEventListener("click", () => onClick(button));
+          actionGroup.appendChild(button);
+        });
+        actionCell.appendChild(actionGroup);
+        row.appendChild(actionCell);
+        body.appendChild(row);
+      });
+      table.append(head, body);
+      container.appendChild(table);
+    }
+
+    function profileName(profileId) {
+      const profile = profiles.find((candidate) => candidate.id === profileId);
+      return profile ? profile.name : profileId;
+    }
+
+    function deviceName(deviceId) {
+      const device = devices.find((candidate) => candidate.id === deviceId);
+      return device ? device.name : deviceId;
+    }
+
+    function renderProfileTable() {
+      renderTable(
+        "profile-table",
+        "No profiles saved yet.",
+        ["Profile", "Upload", "Download", "Extras"],
+        profiles.map((profile) => ({
+          cells: [
+            [profile.name, profile.id],
+            describeImpairment(profile.upload),
+            describeImpairment(profile.download),
+            describeExtras(profile)
+          ],
+          actions: [
+            ["Edit", () => fillProfileForm(profile)],
+            ["Delete", (button) => deleteProfile(profile, button)]
+          ]
+        }))
+      );
+    }
+
+    function renderDeviceTable() {
+      renderTable(
+        "device-table",
+        "No devices assigned yet.",
+        ["Device", "Address", "Profile"],
+        devices.map((device) => ({
+          cells: [
+            [device.name, device.id],
+            [device.ipv4_address, device.mac_address || "No MAC address"],
+            profileName(device.profile_id)
+          ],
+          actions: [
+            ["Edit", () => fillDeviceForm(device)],
+            ["Delete", (button) => deleteDevice(device, button)]
+          ]
+        }))
+      );
+    }
+
+    function fillImpairment(prefix, values) {
+      element(prefix + "-delay").value = values.delay_ms;
+      element(prefix + "-jitter").value = values.jitter_ms;
+      element(prefix + "-loss").value = values.loss_percent;
+      element(prefix + "-loss-burst").value = values.loss_burst_packets || 0;
+      element(prefix + "-bandwidth").value =
+        values.bandwidth_kbit === null ? "" : values.bandwidth_kbit;
+      element(prefix + "-reorder").value = values.reorder_percent;
+      element(prefix + "-duplicate").value = values.duplicate_percent;
+      element(prefix + "-corrupt").value = values.corrupt_percent;
+      IMPAIRMENT_FEATURES.forEach((feature) => {
+        const randomness = values[feature + "_randomness"];
+        element(prefix + "-" + feature + "-random-variation").value = randomness.variation_percent;
+        element(prefix + "-" + feature + "-random-enabled").value = randomness.enabled_probability;
+      });
+    }
+
+    // Randomness the form shows only in part. Saving keeps the rest as loaded.
+    const DEFAULT_PROFILE_RANDOMNESS = {
+      reroll_interval_randomness: { variation_percent: 0, enabled_probability: 100 },
+      outage_duration_randomness: { variation_percent: 0, enabled_probability: 100 },
+      outage_interval_randomness: { variation_percent: 0, enabled_probability: 100 },
+      website_randomness: { variation_percent: 0, enabled_probability: 100 }
+    };
+    let savedProfileRandomness = DEFAULT_PROFILE_RANDOMNESS;
+
+    function fillProfileForm(profile) {
+      stopEditing("profile");
+      element("profile-id").value = profile.id;
+      element("profile-name").value = profile.name;
+      fillProfileValues(profile);
+      startEditing("profile", profile.name);
+    }
+
+    function fillProfileValues(profile) {
+      savedProfileRandomness = {
+        reroll_interval_randomness: profile.reroll_interval_randomness,
+        outage_duration_randomness: profile.outage_duration_randomness,
+        outage_interval_randomness: profile.outage_interval_randomness,
+        website_randomness: profile.website_randomness
+      };
+      fillImpairment("upload", profile.upload);
+      fillImpairment("download", profile.download);
+      element("profile-seed").value = profile.random_seed === null ? "" : profile.random_seed;
+      element("profile-reroll").value = profile.reroll_interval_seconds;
+      element("profile-reroll-variation").value =
+        profile.reroll_interval_randomness.variation_percent;
+      element("profile-outage-probability").value = profile.outage_probability;
+      element("profile-outage-duration").value = profile.outage_duration_seconds;
+      element("profile-outage-interval").value = profile.outage_interval_seconds;
+      element("profile-website-mode").value = profile.website_mode;
+      element("profile-website-domains").value = profile.website_domains.join(", ");
+      element("profile-website-enabled").value = profile.website_randomness.enabled_probability;
+      element("profile-form").querySelector("details").open = hasAdvancedSettings(profile);
+    }
+
+    // Rough approximations of real networks, not measurements.
+    const PROFILE_PRESETS = [
+      {
+        name: "Good 4G",
+        upload: { delay_ms: 25, jitter_ms: 5, bandwidth_kbit: 10000 },
+        download: { delay_ms: 25, jitter_ms: 5, bandwidth_kbit: 30000 }
+      },
+      {
+        name: "Congested 4G",
+        upload: { delay_ms: 70, jitter_ms: 40, loss_percent: 1, bandwidth_kbit: 1000 },
+        download: { delay_ms: 70, jitter_ms: 40, loss_percent: 1, bandwidth_kbit: 3000 }
+      },
+      {
+        name: "3G",
+        upload: { delay_ms: 100, jitter_ms: 20, bandwidth_kbit: 330 },
+        download: { delay_ms: 100, jitter_ms: 20, bandwidth_kbit: 780 }
+      },
+      {
+        name: "EDGE (2G)",
+        upload: { delay_ms: 440, jitter_ms: 60, loss_percent: 1, bandwidth_kbit: 200 },
+        download: { delay_ms: 400, jitter_ms: 60, loss_percent: 1, bandwidth_kbit: 240 }
+      },
+      {
+        name: "Satellite",
+        upload: {
+          delay_ms: 300, jitter_ms: 20, loss_percent: 1, loss_burst_packets: 3,
+          bandwidth_kbit: 2000
+        },
+        download: {
+          delay_ms: 300, jitter_ms: 20, loss_percent: 1, loss_burst_packets: 3,
+          bandwidth_kbit: 10000
+        }
+      },
+      {
+        name: "Lossy Wi-Fi",
+        upload: { delay_ms: 5, jitter_ms: 15, loss_percent: 5, loss_burst_packets: 3 },
+        download: { delay_ms: 5, jitter_ms: 15, loss_percent: 5, loss_burst_packets: 3 }
+      },
+      {
+        name: "Train tunnel",
+        upload: {
+          delay_ms: 200, jitter_ms: 80, loss_percent: 3, loss_burst_packets: 5, bandwidth_kbit: 500
+        },
+        download: {
+          delay_ms: 200, jitter_ms: 80, loss_percent: 3, loss_burst_packets: 5, bandwidth_kbit: 1000
+        },
+        outage_probability: 30,
+        outage_duration_seconds: 10,
+        outage_interval_seconds: 60
+      },
+      {
+        name: "Very bad network",
+        upload: {
+          delay_ms: 500, jitter_ms: 100, loss_percent: 10, loss_burst_packets: 2,
+          bandwidth_kbit: 1000
+        },
+        download: {
+          delay_ms: 500, jitter_ms: 100, loss_percent: 10, loss_burst_packets: 2,
+          bandwidth_kbit: 1000
+        }
+      },
+      {
+        name: "Offline",
+        upload: { loss_percent: 100 },
+        download: { loss_percent: 100 }
+      }
+    ];
+
+    function presetImpairment(values) {
+      const impairment = Object.assign({
+        delay_ms: 0,
+        jitter_ms: 0,
+        loss_percent: 0,
+        loss_burst_packets: 0,
+        bandwidth_kbit: null,
+        reorder_percent: 0,
+        duplicate_percent: 0,
+        corrupt_percent: 0
+      }, values);
+      IMPAIRMENT_FEATURES.forEach((feature) => {
+        impairment[feature + "_randomness"] = { variation_percent: 0, enabled_probability: 100 };
+      });
+      return impairment;
+    }
+
+    function applyPreset(preset) {
+      fillProfileValues({
+        ...DEFAULT_PROFILE_RANDOMNESS,
+        upload: presetImpairment(preset.upload),
+        download: presetImpairment(preset.download),
+        random_seed: null,
+        reroll_interval_seconds: 0,
+        outage_probability: preset.outage_probability || 0,
+        outage_duration_seconds: preset.outage_duration_seconds || 0,
+        outage_interval_seconds: preset.outage_interval_seconds || 0,
+        website_mode: "unrestricted",
+        website_domains: []
+      });
+      // Keep the name of a profile that is being edited.
+      if (!element("profile-id").readOnly) {
+        element("profile-name").value = preset.name;
+        element("profile-name").dispatchEvent(new Event("input"));
+      }
+      showMessage(preset.name + " loaded. Adjust it if needed, then save the profile.", "success");
+    }
+
+    PROFILE_PRESETS.forEach((preset, index) => {
+      const option = document.createElement("option");
+      option.value = String(index);
+      option.textContent = preset.name;
+      element("profile-preset").appendChild(option);
+    });
+    element("profile-preset").addEventListener("change", (event) => {
+      const preset = PROFILE_PRESETS[Number(event.target.value)];
+      event.target.value = "";
+      if (preset) applyPreset(preset);
+    });
+
+    function fillDeviceForm(device) {
+      stopEditing("device");
+      element("device-id").value = device.id;
+      element("device-name").value = device.name;
+      element("device-ip").value = device.ipv4_address;
+      element("device-profile").value = device.profile_id;
+      element("device-mac").value = device.mac_address || "";
+      startEditing("device", device.name);
+    }
+
+    async function deleteItem(path, body, successMessage, button) {
+      setButtonBusy(button, true);
+      showMessage("Deleting...", "working");
+      try {
+        await request(path, "POST", body);
+        refreshAfterSuccess(successMessage);
+      } catch (error) {
+        showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
+      }
+    }
+
+    function deleteProfile(profile, button) {
+      if (!window.confirm("Delete the profile " + profile.name + "?")) return;
+      deleteItem("/api/profiles/delete", { id: profile.id }, "Profile deleted.", button);
+    }
+
+    function deleteDevice(device, button) {
+      const question = "Delete " + device.name + "? Its schedules, timers, progressions, " +
+        "limits and browser service profiles are deleted too, and so is a group it is the " +
+        "only member of.";
+      if (!window.confirm(question)) return;
+      deleteItem("/api/devices/delete", { id: device.id }, "Device deleted.", button);
+    }
+
+    function formatMinute(minute) {
+      const hours = String(Math.floor(minute / 60)).padStart(2, "0");
+      return hours + ":" + String(minute % 60).padStart(2, "0");
+    }
+
+    function formatDays(days) {
+      const sorted = [...days].sort((first, second) => first - second);
+      if (sorted.length === 7) return "Every day";
+      const ranges = [];
+      sorted.forEach((day) => {
+        const last = ranges[ranges.length - 1];
+        if (last && day === last[1] + 1) last[1] = day;
+        else ranges.push([day, day]);
+      });
+      return ranges.map(([start, end]) => {
+        if (start === end) return DAY_NAMES[start];
+        return DAY_NAMES[start] + (end === start + 1 ? ", " : "–") + DAY_NAMES[end];
+      }).join(", ");
+    }
+
+    function editSchedule(schedule) {
+      element("schedule-id").value = schedule.id;
+      element("schedule-device").value = schedule.device_id;
+      element("schedule-profile").value = schedule.profile_id;
+      document.querySelectorAll(".day-toggle").forEach((button) => {
+        const selected = schedule.days_of_week.includes(Number(button.dataset.day));
+        button.setAttribute("aria-pressed", String(selected));
+      });
+      syncScheduleDays();
+      element("schedule-start").value = formatMinute(schedule.start_minute);
+      element("schedule-end").value = formatMinute(schedule.end_minute);
+      element("schedule-form").scrollIntoView({ behavior: "smooth", block: "center" });
     }
 
     function timeToMinute(id) {
@@ -1431,6 +1993,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     let helperConfigured = false;
     let adminTokenVerified = false;
     let profiles = [];
+    let devices = [];
     let groups = [];
     let observedDomainsByDevice = {};
     let connectedDevicesRequestInFlight = false;
@@ -1465,8 +2028,14 @@ DASHBOARD_HTML = r"""<!doctype html>
     function resetTrafficHistory() {
       previousTrafficSample = null;
       trafficSamples = [];
-      ["traffic-upload-rate", "traffic-download-rate", "traffic-upload-packets", "traffic-download-packets"]
-        .forEach((id) => { element(id).textContent = "—"; });
+      [
+        "traffic-upload-rate",
+        "traffic-download-rate",
+        "traffic-upload-packets",
+        "traffic-download-packets",
+        "traffic-drop-rate",
+        "traffic-queued"
+      ].forEach((id) => { element(id).textContent = "—"; });
       drawTrafficChart();
     }
 
@@ -1539,6 +2108,17 @@ DASHBOARD_HTML = r"""<!doctype html>
         });
         return totals;
       }, { upload_bytes: 0, download_bytes: 0, upload_packets: 0, download_packets: 0 });
+    }
+
+    function selectedQueueTotals(queues) {
+      const selectedDevice = element("traffic-device").value;
+      const figures = selectedDevice === "all"
+        ? Object.values(queues)
+        : queues[selectedDevice] ? [queues[selectedDevice]] : [];
+      return figures.reduce((totals, current) => ({
+        dropped: totals.dropped + current.upload_dropped + current.download_dropped,
+        queued: totals.queued + current.upload_queued + current.download_queued
+      }), { dropped: 0, queued: 0 });
     }
 
     function updateTrafficDeviceOptions(devices) {
@@ -1729,6 +2309,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         }
         latestTrafficReferences = trafficReferencesFromResponse(data);
         const totals = selectedTrafficTotals(data.devices || {});
+        const queueTotals = selectedQueueTotals(data.queues || {});
         if (!totals) {
           resetTrafficHistory();
           element("traffic-status").textContent = "No counters yet. Assign a profile and apply the configuration.";
@@ -1760,12 +2341,16 @@ DASHBOARD_HTML = r"""<!doctype html>
             element("traffic-download-rate").textContent = formatTrafficRate(download);
             element("traffic-upload-packets").textContent = formatPacketRate(uploadPackets);
             element("traffic-download-packets").textContent = formatPacketRate(downloadPackets);
+            // Drops restart from zero when a plan is applied.
+            const dropped = Math.max(0, queueTotals.dropped - previousTrafficSample.queues.dropped);
+            element("traffic-drop-rate").textContent = formatPacketRate(dropped / elapsedSeconds);
+            element("traffic-queued").textContent = queueTotals.queued + " packets";
             element("traffic-status").textContent = "Sampling live traffic every 2 seconds.";
           }
         } else {
           element("traffic-status").textContent = "Collecting the first sample...";
         }
-        previousTrafficSample = { time: sampledAt, totals: totals };
+        previousTrafficSample = { time: sampledAt, totals: totals, queues: queueTotals };
         drawTrafficChart();
       } catch (error) {
         if (!trafficSamplingAllowed) return;
@@ -2455,7 +3040,22 @@ DASHBOARD_HTML = r"""<!doctype html>
       resetButton.type = "button";
       resetButton.textContent = "Reset usage";
       resetButton.addEventListener("click", () => resetQuota(quota, service, resetButton));
-      actions.append(editButton, resetButton);
+      const deleteButton = document.createElement("button");
+      deleteButton.type = "button";
+      deleteButton.textContent = "Delete";
+      deleteButton.addEventListener("click", () => {
+        if (service === "group") {
+          deleteItem("/api/group-data-limits/delete", { group_id: quota.group_id },
+            "Shared limit deleted.", deleteButton);
+        } else if (service) {
+          deleteItem("/api/service-quotas/delete", { id: quota.id },
+            "Service limit deleted.", deleteButton);
+        } else {
+          deleteItem("/api/data-limits/delete", { device_id: quota.device_id },
+            "Device limit deleted.", deleteButton);
+        }
+      });
+      actions.append(editButton, resetButton, deleteButton);
       if (service) {
         const domains = document.createElement("span");
         domains.textContent = "Domains: " + quota.domains.join(", ");
@@ -2656,6 +3256,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     function editGroup(group) {
       element("group-id").value = group.id;
+      element("group-id").dataset.typed = "true";
       element("group-name").value = group.name;
       element("group-profile").value = group.profile_id || "";
       Array.from(element("group-devices").options).forEach((option) => {
@@ -2664,17 +3265,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       element("group-form").scrollIntoView({ behavior: "smooth", block: "center" });
     }
 
-    async function deleteGroup(group, button) {
-      setButtonBusy(button, true);
-      showMessage("Deleting the device group...", "working");
-      try {
-        await request("/api/groups/delete", "POST", { id: group.id });
-        refreshAfterSuccess("Device group deleted.");
-      } catch (error) {
-        showMessage(error.message, "error");
-      } finally {
-        setButtonBusy(button, false);
-      }
+    function deleteGroup(group, button) {
+      deleteItem("/api/groups/delete", { id: group.id }, "Device group deleted.", button);
     }
 
     function editGroupDataLimit(quota) {
@@ -2694,6 +3286,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     function editServiceQuota(quota) {
       element("service-quota-id").value = quota.id;
+      element("service-quota-id").dataset.typed = "true";
       element("service-quota-name").value = quota.name;
       element("service-quota-device").value = quota.device_id;
       element("service-quota-profile").value = quota.profile_id;
@@ -2718,6 +3311,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     function editTimeQuota(quota) {
       element("time-quota-id").value = quota.id;
+      element("time-quota-id").dataset.typed = "true";
       element("time-quota-name").value = quota.name;
       element("time-quota-device").value = quota.device_id;
       element("time-quota-profile").value = quota.profile_id;
@@ -2804,9 +3398,15 @@ DASHBOARD_HTML = r"""<!doctype html>
       resetButton.type = "button";
       resetButton.textContent = "Reset usage";
       resetButton.addEventListener("click", () => resetTimeQuota(quota, resetButton));
+      const deleteButton = document.createElement("button");
+      deleteButton.type = "button";
+      deleteButton.textContent = "Delete";
+      deleteButton.addEventListener("click", () => deleteItem(
+        "/api/time-quotas/delete", { id: quota.id }, "Time limit deleted.", deleteButton
+      ));
       const domains = document.createElement("span");
       domains.textContent = "Domains: " + quota.domains.join(", ");
-      actions.append(editButton, timerButton, resetButton, domains);
+      actions.append(editButton, timerButton, resetButton, deleteButton, domains);
       row.append(heading, detail, meter, actions);
       return row;
     }
@@ -2891,8 +3491,9 @@ DASHBOARD_HTML = r"""<!doctype html>
     async function loadProfiles() {
       const data = await request("/api/profiles", "GET");
       profiles = data.profiles;
-      element("profiles").textContent = JSON.stringify(profiles, null, 2);
+      renderProfileTable();
       [
+        "device-profile",
         "schedule-profile",
         "timer-profile",
         "progression-start-profile",
@@ -2923,6 +3524,8 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     async function loadDevicesForSchedule() {
       const data = await request("/api/devices", "GET");
+      devices = data.devices;
+      renderDeviceTable();
       [
         "schedule-device",
         "timer-device",
@@ -2977,15 +3580,29 @@ DASHBOARD_HTML = r"""<!doctype html>
       schedules.forEach((schedule) => {
         const row = document.createElement("div");
         row.className = "schedule-row";
+        const text = document.createElement("div");
         const name = document.createElement("span");
-        name.textContent = schedule.id + " · " + schedule.device_id + " → " + schedule.profile_id;
-        const time = document.createElement("span");
-        time.textContent = schedule.days_of_week.join(",") + " · " +
-          String(Math.floor(schedule.start_minute / 60)).padStart(2, "0") + ":" +
-          String(schedule.start_minute % 60).padStart(2, "0") + "–" +
-          String(Math.floor(schedule.end_minute / 60)).padStart(2, "0") + ":" +
-          String(schedule.end_minute % 60).padStart(2, "0");
-        row.append(name, time);
+        name.textContent =
+          deviceName(schedule.device_id) + " → " + profileName(schedule.profile_id);
+        const time = document.createElement("small");
+        time.textContent = formatDays(schedule.days_of_week) + " · " +
+          formatMinute(schedule.start_minute) + "–" + formatMinute(schedule.end_minute) +
+          " · " + schedule.id;
+        text.append(name, time);
+        const actions = document.createElement("div");
+        actions.className = "row-actions";
+        const editButton = document.createElement("button");
+        editButton.type = "button";
+        editButton.textContent = "Edit";
+        editButton.addEventListener("click", () => editSchedule(schedule));
+        const deleteButton = document.createElement("button");
+        deleteButton.type = "button";
+        deleteButton.textContent = "Delete";
+        deleteButton.addEventListener("click", () => deleteItem(
+          "/api/schedules/delete", { id: schedule.id }, "Schedule deleted.", deleteButton
+        ));
+        actions.append(editButton, deleteButton);
+        row.append(text, actions);
         container.appendChild(row);
       });
     }
@@ -3219,11 +3836,11 @@ DASHBOARD_HTML = r"""<!doctype html>
       await loadProfiles();
       await loadHealth();
       await loadObservations();
+      // Device names are needed by the schedule list and the device table.
+      await loadDevicesForSchedule();
       await Promise.all([
-        show("/api/devices", "devices", "devices"),
         show("/api/plan", "plan", "plan"),
         loadState(),
-        loadDevicesForSchedule(),
         loadGroups(),
         loadSchedules(),
         loadTimers(),
@@ -3278,6 +3895,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     element("profile-form").addEventListener("submit", async (event) => {
       event.preventDefault();
+      const kept = savedProfileRandomness;
       try {
         await request("/api/profiles", "POST", {
           id: element("profile-id").value,
@@ -3288,20 +3906,21 @@ DASHBOARD_HTML = r"""<!doctype html>
           reroll_interval_seconds: Number(element("profile-reroll").value),
           reroll_interval_randomness: {
             variation_percent: Number(element("profile-reroll-variation").value),
-            enabled_probability: 100
+            enabled_probability: kept.reroll_interval_randomness.enabled_probability
           },
           outage_probability: Number(element("profile-outage-probability").value),
           outage_duration_seconds: Number(element("profile-outage-duration").value),
           outage_interval_seconds: Number(element("profile-outage-interval").value),
-          outage_duration_randomness: { variation_percent: 0, enabled_probability: 100 },
-          outage_interval_randomness: { variation_percent: 0, enabled_probability: 100 },
+          outage_duration_randomness: kept.outage_duration_randomness,
+          outage_interval_randomness: kept.outage_interval_randomness,
           website_mode: element("profile-website-mode").value,
           website_domains: commaList("profile-website-domains"),
           website_randomness: {
-            variation_percent: 0,
+            variation_percent: kept.website_randomness.variation_percent,
             enabled_probability: Number(element("profile-website-enabled").value)
           }
         });
+        stopEditing("profile");
         refreshAfterSuccess("Profile saved.");
       } catch (error) {
         showMessage(error.message, "error");
@@ -3318,6 +3937,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           profile_id: element("device-profile").value,
           mac_address: element("device-mac").value.trim() || null
         });
+        stopEditing("device");
         refreshAfterSuccess("Device saved.");
       } catch (error) {
         showMessage(error.message, "error");
@@ -3442,6 +4062,17 @@ DASHBOARD_HTML = r"""<!doctype html>
     element("service-quota-device").addEventListener("change", () => populateServiceQuotaDomains());
     element("time-quota-device").addEventListener("change", () => populateTimeQuotaDomains());
     element("check-admin-token").addEventListener("click", checkAdminToken);
+    element("admin-token").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        checkAdminToken();
+      }
+    });
+    element("profile-cancel-edit").addEventListener("click", () => stopEditing("profile"));
+    element("profile-form").addEventListener("reset", () => {
+      savedProfileRandomness = DEFAULT_PROFILE_RANDOMNESS;
+    });
+    element("device-cancel-edit").addEventListener("click", () => stopEditing("device"));
     element("traffic-rate-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       const button = event.currentTarget.querySelector("button[type='submit']");
@@ -3520,6 +4151,56 @@ DASHBOARD_HTML = r"""<!doctype html>
         button.disabled = false;
         button.removeAttribute("aria-busy");
         button.textContent = "Refresh";
+      }
+    });
+    element("export-settings").addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      setButtonBusy(button, true);
+      showMessage("Preparing the settings export...", "working");
+      try {
+        const settings = await request("/api/export", "GET");
+        const file = new Blob(
+          [JSON.stringify(settings, null, 2) + "\n"], { type: "application/json" }
+        );
+        const url = URL.createObjectURL(file);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "jittersim-settings.json";
+        link.click();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+        showMessage("Settings exported.", "success");
+      } catch (error) {
+        showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
+      }
+    });
+    element("import-settings-button").addEventListener("click", () => {
+      element("import-settings").click();
+    });
+    element("import-settings").addEventListener("change", async (event) => {
+      const input = event.currentTarget;
+      const file = input.files[0];
+      input.value = "";
+      if (!file) return;
+      const question = "Replace every profile, device, group, schedule, access rule and limit " +
+        "with the settings in " + file.name + "?";
+      if (!window.confirm(question)) return;
+      showMessage("Importing settings...", "working");
+      let settings;
+      try {
+        settings = JSON.parse(await file.text());
+      } catch (error) {
+        showMessage(file.name + " is not a JSON settings export.", "error");
+        return;
+      }
+      try {
+        const result = await request("/api/import", "POST", settings);
+        refreshAfterSuccess(
+          result.live_applied ? "Settings imported and applied." : "Settings imported."
+        );
+      } catch (error) {
+        showMessage(error.message, "error");
       }
     });
     element("download-backup").addEventListener("click", async (event) => {
@@ -3741,6 +4422,28 @@ DASHBOARD_HTML = r"""<!doctype html>
 </body>
 </html>
 """
+
+
+def _inline_source_hash(tag: str) -> str:
+    content = DASHBOARD_HTML.split(f"<{tag}>", 1)[1].split(f"</{tag}>", 1)[0]
+    digest = hashlib.sha256(content.encode("utf-8")).digest()
+    return "'sha256-" + base64.b64encode(digest).decode("ascii") + "'"
+
+
+# The dashboard may run only its own inline script and style, and talk only
+# to this server.
+DASHBOARD_CONTENT_SECURITY_POLICY = "; ".join(
+    (
+        "default-src 'none'",
+        f"script-src {_inline_source_hash('script')}",
+        f"style-src {_inline_source_hash('style')}",
+        "connect-src 'self'",
+        "img-src 'self' data:",
+        "base-uri 'none'",
+        "form-action 'self'",
+        "frame-ancestors 'none'",
+    )
+)
 
 
 def _impairment_payload(impairment: Impairment) -> Dict[str, Any]:
@@ -4329,6 +5032,12 @@ class ControlServer(HTTPServer):
             )
         if path == "/api/backup":
             return HTTPStatus.OK, "application/vnd.sqlite3", self.repository.backup_bytes()
+        if path == "/api/export":
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                settings_to_payload(
+                    self.repository.saved_settings(), exported_at=int(time.time())
+                )
+            )
         if path == "/api/traffic-settings":
             return HTTPStatus.OK, "application/json", _json_bytes(
                 self.repository.get_traffic_rate_settings()
@@ -4359,6 +5068,8 @@ class ControlServer(HTTPServer):
                 return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
                     {"error": "live traffic directions are unavailable"}
                 )
+            queues = counters.get("queues")
+            device_queues = queues.get("devices") if isinstance(queues, dict) else None
             profile_limits = (
                 self.scheduler.applied_queue_bandwidth_limits()
                 if self.scheduler is not None
@@ -4369,6 +5080,7 @@ class ControlServer(HTTPServer):
                     "available": True,
                     "sampled_at": time.time(),
                     "devices": device_counters,
+                    "queues": device_queues if isinstance(device_queues, dict) else {},
                     "isp_limits": isp_limits,
                     "profile_limits_available": profile_limits is not None,
                     "profile_limits": profile_limits or {},
@@ -4400,6 +5112,81 @@ class ControlServer(HTTPServer):
     def write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
         """Handle one supported configuration or network action request."""
 
+        if path == "/api/import":
+            try:
+                settings = _settings_from_payload(payload)
+                check_settings(
+                    settings,
+                    max_traffic_classes=MAX_SHAPED_MARKS_PER_PLAN,
+                    max_service_domains=MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN,
+                )
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid settings import", error)
+            self.repository.replace_settings(self._with_counter_baselines(settings))
+            return self._apply_saved_change(
+                "imported",
+                {
+                    "profiles": len(settings.profiles),
+                    "devices": len(settings.devices),
+                    "schedules": len(settings.schedules),
+                },
+            )
+
+        if path == "/api/profiles/delete":
+            try:
+                profile_id = _required_text(payload, "id")
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid profile delete request", error)
+            if self.repository.get_profile(profile_id) is None:
+                return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                    {"error": "profile does not exist"}
+                )
+            references = self.repository.profile_references(profile_id, now=int(time.time()))
+            if references:
+                # Deleting would silently remove the rules that use the profile.
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+                    {
+                        "error": "profile is in use by " + ", ".join(references),
+                        "references": list(references),
+                    }
+                )
+            self.repository.delete_profile(profile_id)
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {"profile": {"id": profile_id, "deleted": True}}
+            )
+
+        deletes = {
+            "/api/devices/delete": ("id", "device", self.repository.delete_device),
+            "/api/schedules/delete": ("id", "schedule", self.repository.delete_schedule),
+            "/api/data-limits/delete": (
+                "device_id",
+                "data_limit",
+                self.repository.delete_data_limit,
+            ),
+            "/api/group-data-limits/delete": (
+                "group_id",
+                "group_data_limit",
+                self.repository.delete_group_data_limit,
+            ),
+            "/api/service-quotas/delete": (
+                "id",
+                "service_quota",
+                self.repository.delete_service_quota,
+            ),
+            "/api/time-quotas/delete": ("id", "time_quota", self.repository.delete_time_quota),
+        }
+        if path in deletes:
+            key, kind, delete = deletes[path]
+            label = kind.replace("_", " ")
+            try:
+                identifier = _required_text(payload, key)
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request(f"invalid {label} delete request", error)
+            if not delete(identifier):
+                return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                    {"error": f"{label} does not exist"}
+                )
+            return self._apply_saved_change(kind, {key: identifier, "deleted": True})
         if path == "/api/traffic-settings":
             try:
                 if "upload_kbit" not in payload or "download_kbit" not in payload:
@@ -4455,6 +5242,10 @@ class ControlServer(HTTPServer):
                 device = _device_from_payload(payload)
             except (KeyError, TypeError, ValueError) as error:
                 return _bad_request("invalid device configuration", error)
+            if self.repository.get_device(device.id) is None:
+                capacity_error = self._capacity_error(adding=1)
+                if capacity_error is not None:
+                    return capacity_error
             self.repository.save_device(device)
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {"device": _device_payload(device)}
@@ -4486,7 +5277,7 @@ class ControlServer(HTTPServer):
                     )
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid device group delete request", error)
-            return self._apply_quota_change("group", {"id": group_id, "deleted": True})
+            return self._apply_saved_change("group", {"id": group_id, "deleted": True})
 
         if path == "/api/schedules":
             try:
@@ -4615,7 +5406,7 @@ class ControlServer(HTTPServer):
                 self.repository.save_data_limit(data_limit)
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid data limit configuration", error)
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "data_limit",
                 _data_limit_payload(data_limit, repository=self.repository),
             )
@@ -4638,7 +5429,7 @@ class ControlServer(HTTPServer):
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid data limit reset request", error)
             refreshed = self.repository.get_data_limit(device_id)
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "data_limit",
                 _data_limit_payload(refreshed, repository=self.repository),
             )
@@ -4663,7 +5454,7 @@ class ControlServer(HTTPServer):
                 self.repository.save_group_data_limit(data_limit)
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid group data limit configuration", error)
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "group_data_limit",
                 _group_data_limit_payload(data_limit, repository=self.repository),
             )
@@ -4686,7 +5477,7 @@ class ControlServer(HTTPServer):
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid group data limit reset request", error)
             refreshed = self.repository.get_group_data_limit(group_id)
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "group_data_limit",
                 _group_data_limit_payload(refreshed, repository=self.repository),
             )
@@ -4698,10 +5489,15 @@ class ControlServer(HTTPServer):
                     raise ValueError("device does not exist")
                 if self.repository.get_profile(quota.profile_id) is None:
                     raise ValueError("profile does not exist")
+                existing = self.repository.get_service_quota(quota.id)
+                if quota.enabled and not (existing is not None and existing.enabled):
+                    capacity_error = self._capacity_error(adding=1)
+                    if capacity_error is not None:
+                        return capacity_error
                 self.repository.save_service_quota(quota)
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid service quota configuration", error)
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "service_quota",
                 _service_quota_payload(quota, repository=self.repository),
             )
@@ -4732,15 +5528,14 @@ class ControlServer(HTTPServer):
                         > MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN
                     ):
                         raise ValueError("too many browser service domains")
-                    enabled_assignments = len(other_assignments)
-                    configured_rules = (
-                        len(self.repository.list_devices())
-                        + sum(quota.enabled for quota in self.repository.list_service_quotas())
-                        + sum(quota.enabled for quota in self.repository.list_time_quotas())
-                        + enabled_assignments + 1
+                    already_enabled = any(
+                        current.id == assignment.id and current.enabled
+                        for current in self.repository.list_service_assignments()
                     )
-                    if configured_rules > 15:
-                        raise ValueError("too many combined device and service rules")
+                    if not already_enabled:
+                        capacity_error = self._capacity_error(adding=1)
+                        if capacity_error is not None:
+                            return capacity_error
                     existing = (
                         current for current in other_assignments
                         if current.device_id == assignment.device_id
@@ -4756,7 +5551,7 @@ class ControlServer(HTTPServer):
                 self.repository.save_service_assignment(assignment)
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid service assignment configuration", error)
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "service_assignment",
                 _service_assignment_payload(assignment, repository=self.repository),
             )
@@ -4771,7 +5566,7 @@ class ControlServer(HTTPServer):
                 return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
                     {"error": "service assignment does not exist"}
                 )
-            return self._apply_quota_change("deleted_id", assignment_id)
+            return self._apply_saved_change("deleted_id", assignment_id)
 
         if path == "/api/service-quotas/reset":
             try:
@@ -4791,7 +5586,7 @@ class ControlServer(HTTPServer):
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid service quota reset request", error)
             refreshed = self.repository.get_service_quota(quota_id)
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "service_quota",
                 _service_quota_payload(refreshed, repository=self.repository),
             )
@@ -4803,10 +5598,15 @@ class ControlServer(HTTPServer):
                     raise ValueError("device does not exist")
                 if self.repository.get_profile(quota.profile_id) is None:
                     raise ValueError("profile does not exist")
+                existing = self.repository.get_time_quota(quota.id)
+                if quota.enabled and not (existing is not None and existing.enabled):
+                    capacity_error = self._capacity_error(adding=1)
+                    if capacity_error is not None:
+                        return capacity_error
                 self.repository.save_time_quota(quota)
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid time quota configuration", error)
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "time_quota",
                 _time_quota_payload(quota, repository=self.repository),
             )
@@ -4836,7 +5636,7 @@ class ControlServer(HTTPServer):
                     )
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid time quota start request", error)
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "time_quota",
                 _time_quota_payload(refreshed, repository=self.repository),
             )
@@ -4853,7 +5653,7 @@ class ControlServer(HTTPServer):
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid time quota stop request", error)
             refreshed = self.repository.get_time_quota(quota_id)
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "time_quota",
                 _time_quota_payload(refreshed, repository=self.repository),
             )
@@ -4878,7 +5678,7 @@ class ControlServer(HTTPServer):
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid time quota reset request", error)
             refreshed = self.repository.get_time_quota(quota_id)
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "time_quota",
                 _time_quota_payload(refreshed, repository=self.repository),
             )
@@ -5087,6 +5887,10 @@ class ControlServer(HTTPServer):
             return HTTPStatus.CONFLICT, "application/json", _json_bytes(
                 {"error": "the selected client is no longer verified on JitterSim Wi-Fi"}
             )
+        if self.repository.get_device(device.id) is None:
+            capacity_error = self._capacity_error(adding=1)
+            if capacity_error is not None:
+                return capacity_error
         self.repository.save_device(device)
         status, content_type, body = self._apply_configuration()
         response = json.loads(body.decode("utf-8"))
@@ -5110,6 +5914,47 @@ class ControlServer(HTTPServer):
         value = values.get(identifier) if isinstance(values, dict) else None
         return value if isinstance(value, int) and value >= 0 else None
 
+    def _with_counter_baselines(self, settings: SavedSettings) -> SavedSettings:
+        """Count imported limits from the helper's current counters, not from zero."""
+
+        traffic_counters = getattr(self.helper_client, "traffic_counters", None)
+        if traffic_counters is None:
+            return settings
+        try:
+            counters = traffic_counters()
+        except HelperClientError:
+            LOGGER.warning("could not read quota counters before an import", exc_info=True)
+            return settings
+        devices = counters.get("devices", {})
+        services = counters.get("services", {})
+        members = {group.id: group.device_ids for group in settings.groups}
+
+        def counter(values: Any, key: str) -> int:
+            value = values.get(key) if isinstance(values, dict) else None
+            return value if isinstance(value, int) and value >= 0 else 0
+
+        return replace(
+            settings,
+            data_limits=tuple(
+                replace(limit, counter_bytes=counter(devices, limit.device_id))
+                for limit in settings.data_limits
+            ),
+            group_data_limits=tuple(
+                replace(
+                    limit,
+                    counter_bytes=sum(
+                        counter(devices, device_id)
+                        for device_id in members.get(limit.group_id, ())
+                    ),
+                )
+                for limit in settings.group_data_limits
+            ),
+            service_quotas=tuple(
+                replace(quota, counter_bytes=counter(services, quota.id))
+                for quota in settings.service_quotas
+            ),
+        )
+
     def _group_quota_counter(self, group_id: str) -> Optional[int]:
         """Return the current aggregate device counter for one group."""
 
@@ -5130,12 +5975,12 @@ class ControlServer(HTTPServer):
         values = [counters[device_id] for device_id in group.device_ids]
         return sum(values) if all(isinstance(value, int) and value >= 0 for value in values) else None
 
-    def _apply_quota_change(
+    def _apply_saved_change(
         self,
         key: str,
         value: Any,
     ) -> Tuple[int, str, bytes]:
-        """Return saved settings and apply them when hardware is available."""
+        """Return a saved change and apply it immediately when hardware is available."""
 
         if self.helper_client is None:
             return HTTPStatus.OK, "application/json", _json_bytes(
@@ -5150,6 +5995,26 @@ class ControlServer(HTTPServer):
         response[key] = value
         response.setdefault("live_applied", status == HTTPStatus.OK)
         return status, content_type, _json_bytes(response)
+
+    def _capacity_error(self, *, adding: int) -> Optional[Tuple[int, str, bytes]]:
+        """Refuse a change that needs more traffic classes than the kernel allows."""
+
+        in_use = (
+            len(self.repository.list_devices())
+            + sum(quota.enabled for quota in self.repository.list_service_quotas())
+            + sum(quota.enabled for quota in self.repository.list_time_quotas())
+            + sum(assignment.enabled for assignment in self.repository.list_service_assignments())
+        )
+        if in_use + adding <= MAX_SHAPED_MARKS_PER_PLAN:
+            return None
+        return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+            {
+                "error": (
+                    f"JitterSim can shape at most {MAX_SHAPED_MARKS_PER_PLAN} devices and "
+                    "service rules together; delete one first"
+                )
+            }
+        )
 
     def _apply_after_change(self) -> Tuple[int, str, bytes]:
         """Re-apply the plan for a saved change unless the network was reset."""
@@ -5318,6 +6183,11 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
     """Handle the control-plane routes."""
 
     server: ControlServer
+    server_version = "jittersim"
+
+    def version_string(self) -> str:
+        # Do not advertise the Python version.
+        return self.server_version
 
     @property
     def timeout(self) -> float:
@@ -5353,9 +6223,13 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             status = HTTPStatus.INTERNAL_SERVER_ERROR
             content_type = "application/json"
             body = _json_bytes({"error": "request could not be processed"})
+        downloads = {
+            "/api/backup": "jittersim-backup.db",
+            "/api/export": "jittersim-settings.json",
+        }
         headers = (
-            {"Content-Disposition": 'attachment; filename="jittersim-backup.db"'}
-            if path == "/api/backup"
+            {"Content-Disposition": f'attachment; filename="{downloads[path]}"'}
+            if path in downloads and status == HTTPStatus.OK
             else None
         )
         self._send_response(status=status, content_type=content_type, body=body, headers=headers)
@@ -5375,6 +6249,21 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format_string: str, *args: Any) -> None:
         LOGGER.info("%s - %s", self.address_string(), format_string % args)
+
+    def log_request(self, code: Any = "-", size: Any = "-") -> None:
+        # Keep the dashboard's constant polling out of the journal, but record
+        # changes and every refused or failed request.
+        status = int(code) if isinstance(code, int) else 0
+        if status >= 400:
+            level = logging.WARNING
+        elif self.command == "GET":
+            level = logging.DEBUG
+        else:
+            level = logging.INFO
+        LOGGER.log(level, "%s - \"%s\" %s", self.address_string(), self.requestline, code)
+
+    def log_error(self, format_string: str, *args: Any) -> None:
+        LOGGER.warning("%s - %s", self.address_string(), format_string % args)
 
     def _handle_write(self) -> None:
         path = urlsplit(self.path).path
@@ -5402,7 +6291,10 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            payload = self._read_json_body(required=path not in ACTION_PATHS)
+            payload = self._read_json_body(
+                required=path not in ACTION_PATHS,
+                max_bytes=MAX_IMPORT_BODY_BYTES if path == "/api/import" else MAX_JSON_BODY_BYTES,
+            )
             status, content_type, body = self.server.write_response_for(path, payload)
         except RequestError as error:
             status = HTTPStatus.BAD_REQUEST
@@ -5424,7 +6316,9 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             LOGGER.exception("could not record action history for %s", path)
         self._send_response(status=status, content_type=content_type, body=body)
 
-    def _read_json_body(self, *, required: bool = True) -> Dict[str, Any]:
+    def _read_json_body(
+        self, *, required: bool = True, max_bytes: int = MAX_JSON_BODY_BYTES
+    ) -> Dict[str, Any]:
         length_header = self.headers.get("Content-Length")
         if length_header is None:
             if not required:
@@ -5434,7 +6328,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             length = int(length_header)
         except ValueError as error:
             raise RequestError("request body length is invalid") from error
-        if length < 0 or length > MAX_JSON_BODY_BYTES:
+        if length < 0 or length > max_bytes:
             raise RequestError("request body is too large")
         if length == 0 and not required:
             return {}
@@ -5462,6 +6356,10 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        if content_type.startswith("text/html"):
+            self.send_header("Content-Security-Policy", DASHBOARD_CONTENT_SECURITY_POLICY)
         for name, value in (headers or {}).items():
             self.send_header(name, value)
         self.end_headers()
@@ -5480,6 +6378,15 @@ def _bad_request(message: str, error: Exception) -> Tuple[int, str, bytes]:
     elif isinstance(error, ValueError) and str(error):
         message = f"{message}: {error}"
     return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes({"error": message})
+
+
+def _required_text(payload: Dict[str, Any], key: str) -> str:
+    """Read one required non-empty string field."""
+
+    value = payload[key]
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{key} must be a non-empty string")
+    return value
 
 
 def _list_field(payload: Dict[str, Any], key: str, *, required: bool = False) -> tuple:
@@ -5805,6 +6712,113 @@ def _policies_from_payload(payload: Dict[str, Any]) -> Tuple[MacPolicy, WebsiteP
     )
 
 
+def _imported_reset_fields(value: Dict[str, Any]) -> Dict[str, Any]:
+    reset_mode, reset_interval_seconds, reset_times = _quota_schedule_from_payload(value)
+    return {
+        "reset_mode": reset_mode,
+        "reset_interval_seconds": reset_interval_seconds,
+        "reset_times": reset_times,
+        "enabled": value.get("enabled", True),
+    }
+
+
+def _settings_from_payload(payload: Dict[str, Any]) -> SavedSettings:
+    """Read a settings export, naming the first item that is wrong."""
+
+    if payload.get("format") != SETTINGS_FORMAT or payload.get("version") != SETTINGS_VERSION:
+        raise ValueError("the file is not a JitterSim settings export this version can read")
+    now = int(time.time())
+
+    def items(key: str, parse: Any) -> tuple:
+        values = payload.get(key, [])
+        if not isinstance(values, list):
+            raise ValueError(f"{key} must be a list")
+        parsed = []
+        for index, value in enumerate(values):
+            try:
+                if not isinstance(value, dict):
+                    raise ValueError("must be an object")
+                parsed.append(parse(value))
+            except KeyError as error:
+                raise ValueError(f"{key}[{index}] is missing {error.args[0]}") from error
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"{key}[{index}]: {error}") from error
+        return tuple(parsed)
+
+    policies = payload.get("policies", {})
+    if not isinstance(policies, dict):
+        raise ValueError("policies must be an object")
+    mac_policy, website_policy = _policies_from_payload(policies)
+    # Usage starts again from zero on the new installation.
+    return SavedSettings(
+        profiles=items("profiles", _profile_from_payload),
+        devices=items("devices", _device_from_payload),
+        groups=items("groups", _device_group_from_payload),
+        schedules=items("schedules", _schedule_from_payload),
+        mac_policy=mac_policy,
+        website_policy=website_policy,
+        data_limits=items(
+            "data_limits",
+            lambda value: DataLimit(
+                device_id=value["device_id"],
+                profile_id=value["profile_id"],
+                limit_bytes=value["limit_bytes"],
+                last_reset_at=now,
+                **_imported_reset_fields(value),
+            ),
+        ),
+        group_data_limits=items(
+            "group_data_limits",
+            lambda value: GroupDataLimit(
+                group_id=value["group_id"],
+                profile_id=value["profile_id"],
+                limit_bytes=value["limit_bytes"],
+                last_reset_at=now,
+                **_imported_reset_fields(value),
+            ),
+        ),
+        service_quotas=items(
+            "service_quotas",
+            lambda value: ServiceQuota(
+                id=value["id"],
+                device_id=value["device_id"],
+                name=value["name"],
+                domains=_list_field(value, "domains", required=True),
+                profile_id=value["profile_id"],
+                limit_bytes=value["limit_bytes"],
+                weight_percent=value.get("weight_percent", 100),
+                last_reset_at=now,
+                **_imported_reset_fields(value),
+            ),
+        ),
+        time_quotas=items(
+            "time_quotas",
+            lambda value: TimeQuota(
+                id=value["id"],
+                device_id=value["device_id"],
+                name=value["name"],
+                domains=_list_field(value, "domains", required=True),
+                profile_id=value["profile_id"],
+                limit_seconds=value["limit_seconds"],
+                window_duration_seconds=value.get("window_duration_seconds", 43_200),
+                last_reset_at=now,
+                **_imported_reset_fields(value),
+            ),
+        ),
+        service_assignments=items(
+            "service_assignments",
+            lambda value: ServiceAssignment(
+                id=value["id"],
+                device_id=value["device_id"],
+                name=value["name"],
+                domains=_list_field(value, "domains", required=True),
+                profile_id=value["profile_id"],
+                enabled=value.get("enabled", True),
+            ),
+        ),
+    )
+
+
 def _connected_device_from_payload(
     payload: Dict[str, Any], repository: ConfigRepository
 ) -> Device:
@@ -5913,6 +6927,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--helper-timeout-seconds", type=float, default=8.0)
     parser.add_argument("--tls-cert", type=Path)
     parser.add_argument("--tls-key", type=Path)
+    parser.add_argument(
+        "--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO"
+    )
     return parser
 
 
@@ -5920,6 +6937,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     """Parse server options and start the dashboard."""
 
     arguments = _build_parser().parse_args(argv)
+    logging.basicConfig(
+        level=getattr(logging, arguments.log_level),
+        format="%(levelname)s %(name)s: %(message)s",
+    )
     run_server(
         database_path=arguments.database,
         host=arguments.host,

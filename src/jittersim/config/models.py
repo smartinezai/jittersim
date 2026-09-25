@@ -157,6 +157,8 @@ class Impairment:
     reorder_randomness: Randomness = Randomness()
     duplicate_randomness: Randomness = Randomness()
     corrupt_randomness: Randomness = Randomness()
+    # Average length of a run of lost packets. 0 or 1 loses packets independently.
+    loss_burst_packets: int = 0
 
     def __post_init__(self) -> None:
         _validate_number(self.delay_ms, "delay_ms", 0, 60_000)
@@ -165,6 +167,7 @@ class Impairment:
         _validate_percent(self.reorder_percent, "reorder_percent")
         _validate_percent(self.duplicate_percent, "duplicate_percent")
         _validate_percent(self.corrupt_percent, "corrupt_percent")
+        _validate_number(self.loss_burst_packets, "loss_burst_packets", 0, 100)
         if self.bandwidth_kbit is not None:
             _validate_number(self.bandwidth_kbit, "bandwidth_kbit", 1, 1_000_000)
         for value, field_name in (
@@ -716,3 +719,20 @@ class RuntimeState:
         ):
             if value is not None and (not isinstance(value, str) or len(value) > 500):
                 raise ValidationError(f"{field_name} must be no more than 500 characters")
+
+
+@dataclass(frozen=True)
+class SavedSettings:
+    """Every saved setting that can move between installations, without usage."""
+
+    profiles: Tuple[Profile, ...] = ()
+    devices: Tuple[Device, ...] = ()
+    groups: Tuple[DeviceGroup, ...] = ()
+    schedules: Tuple[Schedule, ...] = ()
+    mac_policy: MacPolicy = MacPolicy()
+    website_policy: WebsitePolicy = WebsitePolicy()
+    data_limits: Tuple[DataLimit, ...] = ()
+    group_data_limits: Tuple[GroupDataLimit, ...] = ()
+    service_quotas: Tuple[ServiceQuota, ...] = ()
+    time_quotas: Tuple[TimeQuota, ...] = ()
+    service_assignments: Tuple[ServiceAssignment, ...] = ()

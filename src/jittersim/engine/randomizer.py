@@ -87,6 +87,7 @@ def reroll_impairment(*, impairment: Impairment, generator: random.Random) -> Im
             maximum=100,
         )
         or 0,
+        loss_burst_packets=impairment.loss_burst_packets,
     )
 
 

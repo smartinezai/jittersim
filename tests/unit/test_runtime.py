@@ -30,11 +30,16 @@ from jittersim.networking.helper import HelperClientError
 class RecordingHelper:
     def __init__(self) -> None:
         self.plans = []
+        self.resets = 0
         self.observations = []
         self.counters = {"devices": {}, "services": {}}
 
     def apply(self, *, plan):
         self.plans.append(plan)
+        return {"commands_run": 1}
+
+    def reset(self):
+        self.resets += 1
         return {"commands_run": 1}
 
     def observe_dns_queries(self):
@@ -898,6 +903,62 @@ class RuntimeSchedulerTests(unittest.TestCase):
         scheduler.tick(repository=self.repository, now=112)
 
         self.assertEqual(self.repository.get_group_data_limit("family").used_bytes, 120)
+
+    def test_a_reset_made_outside_the_dashboard_stops_scheduled_applies(self) -> None:
+        self._save_device(Profile(id="slow", name="Slow", download=Impairment(delay_ms=100)))
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+        scheduler.tick(repository=self.repository, now=0)
+
+        # `jittersim reset` records the reset, then resets through the helper.
+        self.repository.update_runtime_state(
+            observed_state="reset",
+            last_action="reset",
+            last_result="success",
+            last_error=None,
+        )
+        noticed = scheduler.tick(repository=self.repository, now=10)
+        self.repository.save_profile(
+            Profile(id="slow", name="Slow", download=Impairment(delay_ms=900))
+        )
+        later = scheduler.tick(repository=self.repository, now=20)
+
+        self.assertFalse(noticed)
+        self.assertFalse(later)
+        # The scheduler resets once more in case one of its applies raced the reset.
+        self.assertEqual(self.helper.resets, 1)
+        self.assertEqual(len(self.helper.plans), 1)
+        self.assertEqual(self.repository.get_runtime_state().last_action, "reset")
+
+    def test_a_reset_recorded_during_a_scheduled_apply_is_kept(self) -> None:
+        repository = self.repository
+
+        class ResetDuringApplyHelper(RecordingHelper):
+            def apply(self, *, plan):
+                result = super().apply(plan=plan)
+                # `jittersim reset` runs from another process meanwhile.
+                repository.update_runtime_state(
+                    observed_state="reset",
+                    last_action="reset",
+                    last_result="success",
+                    last_error=None,
+                )
+                return result
+
+        self._save_device(Profile(id="slow", name="Slow", download=Impairment(delay_ms=100)))
+        helper = ResetDuringApplyHelper()
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=helper)
+        scheduler.activate(applied_payload={})
+
+        self.assertFalse(scheduler.tick(repository=self.repository, now=0))
+        self.repository.save_profile(
+            Profile(id="slow", name="Slow", download=Impairment(delay_ms=900))
+        )
+        scheduler.tick(repository=self.repository, now=10)
+
+        self.assertEqual(self.repository.get_runtime_state().last_action, "reset")
+        self.assertEqual(helper.resets, 1)
+        self.assertEqual(len(helper.plans), 1)
 
 
 if __name__ == "__main__":

@@ -55,6 +55,22 @@ class InstallerTests(unittest.TestCase):
         self.assertIn('chmod -R go-w "$INSTALL_DIR"', self.installer)
         self.assertNotIn('chown -R jittersim:jittersim "$INSTALL_DIR"', self.installer)
 
+    def test_installer_puts_the_emergency_command_on_the_path(self) -> None:
+        self.assertIn(
+            'ln -sf "$INSTALL_DIR/.venv/bin/jittersim" /usr/local/bin/jittersim',
+            self.installer,
+        )
+
+    def test_installer_checks_the_pi_before_creating_the_test_wifi(self) -> None:
+        # The helper manages a NetworkManager connection with this name.
+        self.assertIn("con-name jittersim-ap", self.installer)
+        self.assertIn("ipv4.method shared", self.installer)
+        # The preflight refuses to take over a Wi-Fi connection in use, such as
+        # one carrying this SSH session, before anything changes.
+        preflight = self.installer.index("preflight.py")
+        self.assertLess(preflight, self.installer.index("apt-get update"))
+        self.assertLess(preflight, self.installer.index("nmcli connection add"))
+
     def test_installer_refreshes_packages_and_reloads_the_firewall(self) -> None:
         self.assertLess(
             self.installer.index("apt-get update"), self.installer.index("apt-get install")

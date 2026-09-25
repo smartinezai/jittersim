@@ -26,6 +26,7 @@ from .models import (
     Progression,
     Randomness,
     RuntimeState,
+    SavedSettings,
     Schedule,
     ServiceAssignment,
     ServiceQuota,
@@ -112,6 +113,7 @@ class ConfigRepository:
     """Store profiles and device assignments in a local SQLite database."""
 
     def __init__(self, database_path: DatabasePath) -> None:
+        self._deferring_commits = False
         self._connection = sqlite3.connect(str(database_path))
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
@@ -339,7 +341,7 @@ class ConfigRepository:
         self._add_column_if_missing("progressions", "traffic_target_bytes", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing("progressions", "traffic_baseline_bytes", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing("service_quotas", "weight_percent", "INTEGER NOT NULL DEFAULT 100")
-        self._connection.commit()
+        self._commit()
 
     def _add_column_if_missing(self, table_name: str, column_name: str, column_definition: str) -> None:
         columns = {
@@ -377,7 +379,7 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
         except sqlite3.IntegrityError as error:
             self._connection.rollback()
             raise StorageError(f"could not save profile {profile.id}") from error
@@ -405,7 +407,7 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
         except sqlite3.IntegrityError as error:
             self._connection.rollback()
             raise StorageError(f"could not save device {device.id}") from error
@@ -464,7 +466,7 @@ class ConfigRepository:
                 updated.last_error,
             ),
         )
-        self._connection.commit()
+        self._commit()
         return updated
 
     def record_action(self, *, action: str, status_code: int) -> None:
@@ -489,7 +491,7 @@ class ConfigRepository:
                 "DELETE FROM action_history WHERE id NOT IN "
                 "(SELECT id FROM action_history ORDER BY id DESC LIMIT 500)"
             )
-            self._connection.commit()
+            self._commit()
         except sqlite3.Error as error:
             self._connection.rollback()
             raise StorageError("could not record action history") from error
@@ -536,6 +538,27 @@ class ConfigRepository:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
 
+    def record_schedule_result(self, *, success: bool) -> bool:
+        """Record a scheduled apply, unless a reset was recorded meanwhile.
+
+        The check and the write are one statement, so a reset made from
+        another process, such as `jittersim reset`, is never overwritten.
+        """
+
+        cursor = self._connection.execute(
+            """
+            UPDATE runtime_state
+            SET observed_state = ?, last_action = 'schedule', last_result = ?, last_error = ?
+            WHERE id = 1 AND (last_action IS NULL OR last_action != 'reset')
+            """,
+            (
+                "applied" if success else "error",
+                "success" if success else "failure",
+                None if success else "scheduled network plan failed",
+            ),
+        )
+        self._commit()
+        return bool(cursor.rowcount)
     def get_traffic_rate_settings(self) -> dict:
         """Return the saved ISP rate references in integer kbit/s."""
 
@@ -724,6 +747,173 @@ class ConfigRepository:
         ).fetchall()
         return tuple(self._device_from_row(row) for row in rows)
 
+    def profile_references(self, profile_id: str, *, now: int) -> tuple:
+        """Describe every device, rule and limit that still uses one profile."""
+
+        device_names = {device.id: device.name for device in self.list_devices()}
+        groups = self.list_device_groups()
+        group_names = {group.id: group.name for group in groups}
+        references = [
+            f"device {device.name}"
+            for device in self.list_devices()
+            if device.profile_id == profile_id
+        ]
+        references.extend(
+            f"group {group.name}" for group in groups if group.profile_id == profile_id
+        )
+        references.extend(
+            f"schedule {schedule.id}"
+            for schedule in self.list_schedules()
+            if schedule.profile_id == profile_id
+        )
+        references.extend(
+            f"timer for {device_names.get(timer.device_id, timer.device_id)}"
+            for timer in self.list_active_timers(now=now)
+            if timer.profile_id == profile_id
+        )
+        references.extend(
+            f"progression for {device_names.get(progression.device_id, progression.device_id)}"
+            for progression in self.list_active_progressions(now=now)
+            if profile_id in (progression.start_profile_id, progression.end_profile_id)
+        )
+        references.extend(
+            f"data limit for {device_names.get(limit.device_id, limit.device_id)}"
+            for limit in self.list_data_limits()
+            if limit.profile_id == profile_id
+        )
+        references.extend(
+            f"shared limit for {group_names.get(limit.group_id, limit.group_id)}"
+            for limit in self.list_group_data_limits()
+            if limit.profile_id == profile_id
+        )
+        references.extend(
+            f"browser service profile {assignment.name}"
+            for assignment in self.list_service_assignments()
+            if assignment.profile_id == profile_id
+        )
+        references.extend(
+            f"service limit {quota.name}"
+            for quota in self.list_service_quotas()
+            if quota.profile_id == profile_id
+        )
+        references.extend(
+            f"time limit {quota.name}"
+            for quota in self.list_time_quotas()
+            if quota.profile_id == profile_id
+        )
+        return tuple(references)
+
+    def delete_profile(self, profile_id: str) -> bool:
+        """Delete one profile that no device uses. Check profile_references first."""
+
+        try:
+            return self._delete_row("profiles", "id", profile_id)
+        except sqlite3.IntegrityError as error:
+            self._connection.rollback()
+            raise StorageError(f"profile {profile_id} is still in use") from error
+
+    def delete_device(self, device_id: str) -> bool:
+        """Delete one device with its schedules, timers, progressions and limits.
+
+        A group left without devices is deleted too, with its shared limit,
+        because a group must contain at least one device.
+        """
+
+        cursor = self._connection.execute("DELETE FROM devices WHERE id = ?", (device_id,))
+        if not cursor.rowcount:
+            return False
+        self._connection.execute(
+            "DELETE FROM device_groups WHERE id NOT IN (SELECT group_id FROM device_group_members)"
+        )
+        self._bump_configuration_version()
+        self._commit()
+        return True
+
+    def _commit(self) -> None:
+        # replace_settings defers the commits of the save methods it calls so
+        # the whole replacement is one transaction.
+        if not self._deferring_commits:
+            self._connection.commit()
+
+    def saved_settings(self) -> SavedSettings:
+        """Return every setting that an export includes."""
+
+        return SavedSettings(
+            profiles=self.list_profiles(),
+            devices=self.list_devices(),
+            groups=self.list_device_groups(),
+            schedules=self.list_schedules(),
+            mac_policy=self.get_mac_policy(),
+            website_policy=self.get_website_policy(),
+            data_limits=self.list_data_limits(),
+            group_data_limits=self.list_group_data_limits(),
+            service_quotas=self.list_service_quotas(),
+            time_quotas=self.list_time_quotas(),
+            service_assignments=self.list_service_assignments(),
+        )
+
+    def replace_settings(self, settings: SavedSettings) -> None:
+        """Replace every saved setting at once. On failure nothing changes.
+
+        DNS observations, action history and the runtime state stay. Timers and
+        progressions are removed because they belong to the replaced devices.
+        """
+
+        self._deferring_commits = True
+        try:
+            for table in (
+                "service_assignments",
+                "time_quotas",
+                "service_quotas",
+                "group_data_limits",
+                "data_limits",
+                "schedules",
+                "timers",
+                "progressions",
+                "device_groups",
+                "devices",
+                "profiles",
+            ):
+                self._connection.execute(f"DELETE FROM {table}")
+            for profile in settings.profiles:
+                self.save_profile(profile)
+            for device in settings.devices:
+                self.save_device(device)
+            for group in settings.groups:
+                self.save_device_group(group)
+            for schedule in settings.schedules:
+                self.save_schedule(schedule)
+            self.save_mac_policy(settings.mac_policy)
+            self.save_website_policy(settings.website_policy)
+            for data_limit in settings.data_limits:
+                self.save_data_limit(data_limit)
+            for group_data_limit in settings.group_data_limits:
+                self.save_group_data_limit(group_data_limit)
+            for service_quota in settings.service_quotas:
+                self.save_service_quota(service_quota)
+            for time_quota in settings.time_quotas:
+                self.save_time_quota(time_quota)
+            for assignment in settings.service_assignments:
+                self.save_service_assignment(assignment)
+        except BaseException as error:
+            # Any error, not only a storage one, must not leave a half-replaced
+            # configuration for the next save to commit.
+            self._connection.rollback()
+            if isinstance(error, sqlite3.Error):
+                raise StorageError("could not replace the saved settings") from error
+            raise
+        finally:
+            self._deferring_commits = False
+        self._connection.commit()
+
+    def _delete_row(self, table: str, key_column: str, key: str) -> bool:
+        cursor = self._connection.execute(f"DELETE FROM {table} WHERE {key_column} = ?", (key,))
+        if not cursor.rowcount:
+            return False
+        self._bump_configuration_version()
+        self._commit()
+        return True
+
     def get_device_group(self, group_id: str) -> Optional[DeviceGroup]:
         """Return one device group or `None` when it is not stored."""
 
@@ -785,7 +975,7 @@ class ConfigRepository:
                 ((group.id, device_id) for device_id in group.device_ids),
             )
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
         except sqlite3.IntegrityError as error:
             self._connection.rollback()
             raise StorageError(f"could not save device group {group.id}") from error
@@ -793,12 +983,7 @@ class ConfigRepository:
     def delete_device_group(self, group_id: str) -> bool:
         """Delete one group and release its device members."""
 
-        cursor = self._connection.execute("DELETE FROM device_groups WHERE id = ?", (group_id,))
-        if cursor.rowcount:
-            self._bump_configuration_version()
-            self._connection.commit()
-            return True
-        return False
+        return self._delete_row("device_groups", "id", group_id)
 
     def save_schedule(self, schedule: Schedule) -> None:
         """Insert or update one repeating schedule."""
@@ -828,18 +1013,15 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
         except sqlite3.IntegrityError as error:
             self._connection.rollback()
             raise StorageError(f"could not save schedule {schedule.id}") from error
 
-    def delete_schedule(self, schedule_id: str) -> None:
+    def delete_schedule(self, schedule_id: str) -> bool:
         """Delete one schedule when it exists."""
 
-        cursor = self._connection.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
-        if cursor.rowcount:
-            self._bump_configuration_version()
-            self._connection.commit()
+        return self._delete_row("schedules", "id", schedule_id)
 
     def list_schedules(self) -> tuple:
         """Return all schedules in stable identifier order."""
@@ -886,7 +1068,7 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
         except sqlite3.IntegrityError as error:
             self._connection.rollback()
             raise StorageError(f"could not save timer {timer.id}") from error
@@ -900,7 +1082,7 @@ class ConfigRepository:
         )
         if cursor.rowcount:
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
             return True
         return False
 
@@ -980,7 +1162,7 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
         except sqlite3.IntegrityError as error:
             self._connection.rollback()
             raise StorageError(f"could not save progression {progression.id}") from error
@@ -994,7 +1176,7 @@ class ConfigRepository:
         )
         if cursor.rowcount:
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
             return True
         return False
 
@@ -1102,7 +1284,7 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
         except sqlite3.IntegrityError as error:
             self._connection.rollback()
             raise StorageError(f"could not save data limit for {data_limit.device_id}") from error
@@ -1112,7 +1294,27 @@ class ConfigRepository:
 
         for table in ("data_limits", "group_data_limits", "service_quotas", "time_quotas"):
             self._connection.execute(f"UPDATE {table} SET counter_bytes = 0")
-        self._connection.commit()
+        self._commit()
+
+    def delete_data_limit(self, device_id: str) -> bool:
+        """Delete one device quota when it exists."""
+
+        return self._delete_row("data_limits", "device_id", device_id)
+
+    def delete_group_data_limit(self, group_id: str) -> bool:
+        """Delete one shared group quota when it exists."""
+
+        return self._delete_row("group_data_limits", "group_id", group_id)
+
+    def delete_service_quota(self, quota_id: str) -> bool:
+        """Delete one service quota when it exists."""
+
+        return self._delete_row("service_quotas", "id", quota_id)
+
+    def delete_time_quota(self, quota_id: str) -> bool:
+        """Delete one timed service quota when it exists."""
+
+        return self._delete_row("time_quotas", "id", quota_id)
 
     def reset_data_limit_usage(
         self,
@@ -1137,7 +1339,7 @@ class ConfigRepository:
             tuple(values),
         )
         if cursor.rowcount:
-            self._connection.commit()
+            self._commit()
             return True
         return False
 
@@ -1158,7 +1360,7 @@ class ConfigRepository:
             """,
             (updated_used, counter_bytes, device_id),
         )
-        self._connection.commit()
+        self._commit()
         return DataLimit(
             device_id=data_limit.device_id,
             profile_id=data_limit.profile_id,
@@ -1235,7 +1437,7 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
         except sqlite3.IntegrityError as error:
             self._connection.rollback()
             raise StorageError(
@@ -1265,7 +1467,7 @@ class ConfigRepository:
             tuple(values),
         )
         if cursor.rowcount:
-            self._connection.commit()
+            self._commit()
             return True
         return False
 
@@ -1278,7 +1480,7 @@ class ConfigRepository:
             "UPDATE group_data_limits SET counter_bytes = ? WHERE group_id = ?",
             (counter_bytes, group_id),
         )
-        self._connection.commit()
+        self._commit()
 
     def record_group_data_usage(
         self,
@@ -1301,7 +1503,7 @@ class ConfigRepository:
             """,
             (updated_used, counter_bytes, group_id),
         )
-        self._connection.commit()
+        self._commit()
         return GroupDataLimit(
             group_id=data_limit.group_id,
             profile_id=data_limit.profile_id,
@@ -1386,7 +1588,7 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
         except sqlite3.IntegrityError as error:
             self._connection.rollback()
             raise StorageError(f"could not save service quota {quota.id}") from error
@@ -1428,7 +1630,7 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
         except sqlite3.IntegrityError as error:
             self._connection.rollback()
             raise StorageError(f"could not save service assignment {assignment.id}") from error
@@ -1468,7 +1670,7 @@ class ConfigRepository:
             tuple(values),
         )
         if cursor.rowcount:
-            self._connection.commit()
+            self._commit()
             return True
         return False
 
@@ -1494,7 +1696,7 @@ class ConfigRepository:
             """,
             (updated_used, counter_bytes, quota_id),
         )
-        self._connection.commit()
+        self._commit()
         return ServiceQuota(
             id=quota.id,
             device_id=quota.device_id,
@@ -1592,7 +1794,7 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
         except sqlite3.IntegrityError as error:
             self._connection.rollback()
             raise StorageError(f"could not save time quota {quota.id}") from error
@@ -1620,7 +1822,7 @@ class ConfigRepository:
             tuple(values),
         )
         if cursor.rowcount:
-            self._connection.commit()
+            self._commit()
             return True
         return False
 
@@ -1665,7 +1867,7 @@ class ConfigRepository:
                 quota_id,
             ),
         )
-        self._connection.commit()
+        self._commit()
         return self.get_time_quota(quota_id)
 
     def stop_time_quota(self, quota_id: str) -> bool:
@@ -1676,7 +1878,7 @@ class ConfigRepository:
             (quota_id,),
         )
         if cursor.rowcount:
-            self._connection.commit()
+            self._commit()
             return True
         return False
 
@@ -1717,7 +1919,7 @@ class ConfigRepository:
             """,
             (updated_used, counter_bytes, sampled_at, quota_id),
         )
-        self._connection.commit()
+        self._commit()
         return TimeQuota(
             id=quota.id,
             device_id=quota.device_id,
@@ -1770,7 +1972,7 @@ class ConfigRepository:
             (policy.mode, json.dumps(list(policy.allowlist)), json.dumps(list(policy.denylist))),
         )
         self._bump_configuration_version()
-        self._connection.commit()
+        self._commit()
 
     def get_website_policy(self) -> WebsitePolicy:
         """Return the saved global website policy."""
@@ -1808,7 +2010,7 @@ class ConfigRepository:
             ),
         )
         self._bump_configuration_version()
-        self._connection.commit()
+        self._commit()
 
     def save_domain_observations(
         self,
@@ -1860,7 +2062,7 @@ class ConfigRepository:
                     (str(observation.ipv4_address), observation.query_count, 2**62),
                 )
             self._prune_domain_observations(now=current_time)
-            self._connection.commit()
+            self._commit()
         except (sqlite3.IntegrityError, sqlite3.OperationalError) as error:
             self._connection.rollback()
             raise StorageError("could not save domain observations") from error

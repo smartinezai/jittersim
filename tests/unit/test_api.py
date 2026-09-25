@@ -1,4 +1,7 @@
+import base64
 import contextlib
+import hashlib
+import http.client
 import json
 import re
 import shutil
@@ -12,7 +15,12 @@ from email.message import Message
 from io import BytesIO
 from pathlib import Path
 
-from jittersim.api.server import DASHBOARD_HTML, ControlRequestHandler, ControlServer
+from jittersim.api.server import (
+    DASHBOARD_HTML,
+    ControlRequestHandler,
+    ControlServer,
+    _build_parser,
+)
 from jittersim.config.models import DataLimit, Device, DomainObservation, Impairment, Profile
 from jittersim.config.storage import ConfigRepository
 from jittersim.engine.runtime import RuntimeScheduler
@@ -112,6 +120,15 @@ class FakeHelper:
                 "services": {},
             },
         }
+
+
+VIDEO_ASSIGNMENT = {
+    "id": "video",
+    "device_id": "alice",
+    "name": "Video",
+    "domains": ["youtube.com"],
+    "profile_id": "slow",
+}
 
 
 class CountingHelper(FakeHelper):
@@ -381,6 +398,7 @@ class ControlServerTests(unittest.TestCase):
             "/api/diagnostics",
             "/api/action-history",
             "/api/observations",
+            "/api/export",
         ):
             with self.subTest(path=path):
                 self.assertEqual(get(path)["status"], 401)
@@ -529,6 +547,31 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(json.loads(body)["status"], "degraded")
         self.assertFalse(json.loads(body)["helper_reachable"])
 
+    def test_live_traffic_includes_what_jittersim_dropped_and_holds(self) -> None:
+        class QueueHelper(FakeHelper):
+            def traffic_counters(self):
+                counters = super().traffic_counters()
+                counters["queues"] = {
+                    "devices": {
+                        "alice": {
+                            "upload_dropped": 24,
+                            "download_dropped": 0,
+                            "upload_queued": 0,
+                            "download_queued": 2,
+                        }
+                    }
+                }
+                return counters
+
+        self.server.helper_client = QueueHelper()
+        with_queues = json.loads(self.server.response_for("/api/traffic")[2])
+        self.server.helper_client = FakeHelper()
+        without_queues = json.loads(self.server.response_for("/api/traffic")[2])
+
+        self.assertEqual(with_queues["queues"]["alice"]["upload_dropped"], 24)
+        self.assertEqual(with_queues["queues"]["alice"]["download_queued"], 2)
+        self.assertEqual(without_queues["queues"], {})
+
     def test_write_history_records_only_authorized_route_and_result(self) -> None:
         self.server.admin_token = "admin-token"
         self.server.helper_client = FakeHelper()
@@ -645,6 +688,333 @@ class ControlServerTests(unittest.TestCase):
                 status, _, body = self.server.write_response_for(path, payload)
                 self.assertEqual(status, 400)
                 self.assertTrue(json.loads(body)["error"].startswith(message))
+
+    def test_deletes_need_the_admin_token(self) -> None:
+        self.server.admin_token = "admin-token"
+
+        unauthorized = self._send(
+            "POST", "/api/devices/delete", authorization="Bearer wrong", body=b'{"id": "alice"}'
+        )
+        missing = self._send("POST", "/api/devices/delete", body=b'{"id": "nobody"}')
+
+        self.assertEqual(unauthorized["status"], 401)
+        self.assertEqual(missing["status"], 404)
+        self.assertIsNotNone(self.repository.get_device("alice"))
+
+    def test_profile_delete_refuses_a_profile_in_use(self) -> None:
+        self.repository.save_profile(Profile(id="unused", name="Unused"))
+
+        in_use_status, _, in_use_body = self.server.write_response_for(
+            "/api/profiles/delete", {"id": "slow"}
+        )
+        unused_status, _, _ = self.server.write_response_for(
+            "/api/profiles/delete", {"id": "unused"}
+        )
+
+        self.assertEqual(in_use_status, 409)
+        self.assertEqual(
+            json.loads(in_use_body),
+            {
+                "error": "profile is in use by device Alice's laptop",
+                "references": ["device Alice's laptop"],
+            },
+        )
+        self.assertEqual(unused_status, 200)
+        self.assertIsNone(self.repository.get_profile("unused"))
+        self.assertIsNotNone(self.repository.get_profile("slow"))
+
+    def test_deleting_a_device_reapplies_the_plan_without_it(self) -> None:
+        helper = FakeHelper()
+        self.server.helper_client = helper
+        self.repository.update_runtime_state(
+            observed_state="applied",
+            last_action="apply",
+            last_result="success",
+            last_error=None,
+        )
+
+        status, _, body = self.server.write_response_for("/api/devices/delete", {"id": "alice"})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["device"], {"id": "alice", "deleted": True})
+        self.assertTrue(json.loads(body)["live_applied"])
+        self.assertEqual(helper.applied_plan.mark_rules, ())
+        self.assertIsNone(self.repository.get_device("alice"))
+
+    def test_rules_and_limits_can_be_deleted(self) -> None:
+        self.server.write_response_for(
+            "/api/schedules",
+            {
+                "id": "work",
+                "device_id": "alice",
+                "profile_id": "slow",
+                "days_of_week": [0],
+                "start_minute": 540,
+                "end_minute": 1_020,
+            },
+        )
+        self.server.write_response_for(
+            "/api/data-limits", {"device_id": "alice", "profile_id": "slow", "limit_bytes": 1_000}
+        )
+        self.server.write_response_for(
+            "/api/groups", {"id": "family", "name": "Family", "device_ids": ["alice"]}
+        )
+        self.server.write_response_for(
+            "/api/group-data-limits", {"group_id": "family", "profile_id": "slow", "limit_bytes": 1}
+        )
+
+        deletes = (
+            ("/api/schedules/delete", {"id": "work"}),
+            ("/api/data-limits/delete", {"device_id": "alice"}),
+            ("/api/group-data-limits/delete", {"group_id": "family"}),
+            ("/api/service-quotas/delete", {"id": "nothing"}),
+            ("/api/time-quotas/delete", {"id": "nothing"}),
+        )
+        statuses = [self.server.write_response_for(path, payload)[0] for path, payload in deletes]
+        repeated = [self.server.write_response_for(path, payload)[0] for path, payload in deletes]
+
+        self.assertEqual(statuses, [200, 200, 200, 404, 404])
+        self.assertEqual(repeated, [404, 404, 404, 404, 404])
+        self.assertEqual(self.repository.list_schedules(), ())
+        self.assertIsNone(self.repository.get_data_limit("alice"))
+        self.assertIsNone(self.repository.get_group_data_limit("family"))
+
+    def test_saving_refuses_more_devices_than_the_kernel_can_shape(self) -> None:
+        for index in range(14):
+            self.repository.save_device(
+                Device(
+                    id=f"device-{index:02d}",
+                    name=f"Device {index}",
+                    ipv4_address=f"192.168.50.{index + 100}",
+                    profile_id="slow",
+                )
+            )
+
+        status, _, body = self.server.write_response_for(
+            "/api/devices",
+            {"id": "extra", "name": "Extra", "ipv4_address": "192.168.50.99", "profile_id": "slow"},
+        )
+        update_status, _, _ = self.server.write_response_for(
+            "/api/devices",
+            {
+                "id": "alice",
+                "name": "Renamed",
+                "ipv4_address": "192.168.50.10",
+                "profile_id": "slow",
+            },
+        )
+
+        self.assertEqual(status, 409)
+        self.assertIn("at most 15 devices and service rules", json.loads(body)["error"])
+        self.assertIsNone(self.repository.get_device("extra"))
+        self.assertEqual(update_status, 200)
+
+    def test_enabling_a_limit_counts_against_the_same_capacity(self) -> None:
+        self.repository.save_domain_observations(
+            (DomainObservation("192.168.50.10", "netflix.com", 1, 10, 10),),
+            now=10,
+        )
+        for index in range(14):
+            self.repository.save_device(
+                Device(
+                    id=f"device-{index:02d}",
+                    name=f"Device {index}",
+                    ipv4_address=f"192.168.50.{index + 100}",
+                    profile_id="slow",
+                )
+            )
+        quota = {
+            "id": "alice-netflix-time",
+            "device_id": "alice",
+            "name": "Netflix time",
+            "domains": ["netflix.com"],
+            "profile_id": "slow",
+            "limit_seconds": 60,
+            "window_duration_seconds": 3_600,
+        }
+
+        disabled_status, _, _ = self.server.write_response_for(
+            "/api/time-quotas", {**quota, "enabled": False}
+        )
+        enabled_status, _, body = self.server.write_response_for(
+            "/api/time-quotas", {**quota, "enabled": True}
+        )
+
+        self.assertEqual(disabled_status, 200)
+        self.assertEqual(enabled_status, 409)
+        self.assertIn("at most 15 devices and service rules", json.loads(body)["error"])
+        self.assertFalse(self.repository.get_time_quota("alice-netflix-time").enabled)
+
+    def test_browser_service_profiles_count_against_the_same_capacity(self) -> None:
+        for index in range(13):
+            self.repository.save_device(
+                Device(
+                    id=f"device-{index:02d}",
+                    name=f"Device {index}",
+                    ipv4_address=f"192.168.50.{index + 100}",
+                    profile_id="slow",
+                )
+            )
+        saved, _, _ = self.server.write_response_for("/api/service-assignments", VIDEO_ASSIGNMENT)
+
+        status, _, body = self.server.write_response_for(
+            "/api/devices",
+            {
+                "id": "carol",
+                "name": "Carol",
+                "ipv4_address": "192.168.50.30",
+                "profile_id": "slow",
+            },
+        )
+
+        renamed, _, _ = self.server.write_response_for(
+            "/api/service-assignments", {**VIDEO_ASSIGNMENT, "name": "Videos"}
+        )
+
+        self.assertEqual(saved, 200)
+        self.assertEqual(status, 409)
+        self.assertIn("at most 15 devices and service rules", json.loads(body)["error"])
+        self.assertIsNone(self.repository.get_device("carol"))
+        # Editing a profile that is already enabled needs no extra capacity.
+        self.assertEqual(renamed, 200)
+
+    def test_a_browser_service_profile_beyond_capacity_is_refused_like_a_device(self) -> None:
+        for index in range(14):
+            self.repository.save_device(
+                Device(
+                    id=f"device-{index:02d}",
+                    name=f"Device {index}",
+                    ipv4_address=f"192.168.50.{index + 100}",
+                    profile_id="slow",
+                )
+            )
+
+        status, _, body = self.server.write_response_for("/api/service-assignments", VIDEO_ASSIGNMENT)
+
+        self.assertEqual(status, 409)
+        self.assertIn("at most 15 devices and service rules", json.loads(body)["error"])
+        self.assertEqual(self.repository.list_service_assignments(), ())
+
+    def test_a_profile_used_by_a_browser_service_profile_cannot_be_deleted(self) -> None:
+        self.repository.save_profile(Profile(id="video", name="Video"))
+        self.server.write_response_for(
+            "/api/service-assignments", {**VIDEO_ASSIGNMENT, "profile_id": "video"}
+        )
+
+        status, _, body = self.server.write_response_for("/api/profiles/delete", {"id": "video"})
+
+        self.assertEqual(status, 409)
+        self.assertEqual(json.loads(body)["references"], ["browser service profile Video"])
+        self.assertEqual(
+            [assignment.id for assignment in self.repository.list_service_assignments()],
+            ["video"],
+        )
+
+    def test_deleting_a_device_removes_its_browser_service_profiles(self) -> None:
+        self.server.write_response_for("/api/service-assignments", VIDEO_ASSIGNMENT)
+
+        status, _, _ = self.server.write_response_for("/api/devices/delete", {"id": "alice"})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self.repository.list_service_assignments(), ())
+        # A leftover assignment would stop every plan from building.
+        self.assertEqual(compile_stored_plan(repository=self.repository).queues, ())
+
+    def test_imports_keep_browser_service_profiles(self) -> None:
+        self.server.write_response_for("/api/service-assignments", VIDEO_ASSIGNMENT)
+        exported = self._export(self.server)
+
+        status, _, _ = self.server.write_response_for("/api/import", exported)
+        with ConfigRepository(":memory:") as other_repository:
+            other = ControlServer(("127.0.0.1", 0), other_repository)
+            try:
+                other_status, _, _ = other.write_response_for("/api/import", exported)
+                copied = other_repository.list_service_assignments()
+            finally:
+                other.server_close()
+
+        self.assertEqual(exported["service_assignments"][0]["domains"], ["youtube.com"])
+        self.assertEqual((status, other_status), (200, 200))
+        self.assertEqual(self.repository.list_service_assignments(), copied)
+        self.assertEqual([assignment.id for assignment in copied], ["video"])
+
+    def _export(self, server):
+        status, _, body = server.response_for("/api/export")
+        self.assertEqual(status, 200)
+        exported = json.loads(body)
+        exported.pop("exported_at")
+        return exported
+
+    def test_settings_move_between_installations_without_usage(self) -> None:
+        self.server.write_response_for(
+            "/api/schedules",
+            {
+                "id": "work",
+                "device_id": "alice",
+                "profile_id": "slow",
+                "days_of_week": [0, 4],
+                "start_minute": 540,
+                "end_minute": 1_020,
+            },
+        )
+        self.server.write_response_for(
+            "/api/data-limits", {"device_id": "alice", "profile_id": "slow", "limit_bytes": 1_000}
+        )
+        self.repository.record_data_usage("alice", 700)
+        self.server.write_response_for(
+            "/api/policies",
+            {"mac": {"mode": "denylist", "denylist": ["aa:bb:cc:dd:ee:ff"]}, "websites": {}},
+        )
+        exported = self._export(self.server)
+        with ConfigRepository(":memory:") as other_repository:
+            other = ControlServer(("127.0.0.1", 0), other_repository)
+            try:
+                status, _, _ = other.write_response_for("/api/import", exported)
+                imported = self._export(other)
+                used = other_repository.get_data_limit("alice").used_bytes
+            finally:
+                other.server_close()
+
+        self.assertEqual(status, 200)
+        self.assertEqual(imported, exported)
+        self.assertEqual(used, 0)
+        self.assertEqual(exported["data_limits"][0]["limit_bytes"], 1_000)
+        self.assertNotIn("used_bytes", exported["data_limits"][0])
+
+    def test_import_rejects_settings_that_do_not_fit_and_changes_nothing(self) -> None:
+        exported = self._export(self.server)
+        broken = dict(exported, devices=exported["devices"] + [
+            {"id": "bob", "name": "Bob", "ipv4_address": "192.168.50.11", "profile_id": "ghost"}
+        ])
+
+        wrong_format_status, _, wrong_format_body = self.server.write_response_for(
+            "/api/import", {"format": "something-else", "version": 1}
+        )
+        broken_status, _, broken_body = self.server.write_response_for("/api/import", broken)
+
+        self.assertEqual(wrong_format_status, 400)
+        self.assertIn("not a JitterSim settings export", json.loads(wrong_format_body)["error"])
+        self.assertEqual(broken_status, 400)
+        self.assertEqual(
+            json.loads(broken_body)["error"],
+            "invalid settings import: device bob uses the missing profile ghost",
+        )
+        self.assertEqual(self._export(self.server), exported)
+
+    def test_imports_may_be_larger_than_ordinary_requests(self) -> None:
+        self.server.admin_token = "admin-token"
+        exported = self._export(self.server)
+        exported["profiles"] = [
+            dict(exported["profiles"][0], id=f"profile-{index:02d}", name="x" * 90)
+            for index in range(40)
+        ] + exported["profiles"]
+        body = json.dumps(exported).encode("utf-8")
+        self.assertGreater(len(body), 64 * 1024)
+
+        response = self._send("POST", "/api/import", body=body)
+
+        self.assertEqual(response["status"], 200)
+        self.assertEqual(len(self.repository.list_profiles()), 41)
 
     def test_list_fields_reject_plain_strings(self) -> None:
         requests = (
@@ -783,6 +1153,65 @@ class ControlServerTests(unittest.TestCase):
         finally:
             server.shutdown()
             thread.join(timeout=5)
+
+    def _get_over_http(self, path: str):
+        thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05})
+        thread.start()
+        try:
+            connection = http.client.HTTPConnection(*self.server.server_address, timeout=5)
+            connection.request("GET", path)
+            response = connection.getresponse()
+            response.read()
+            connection.close()
+            return response
+        finally:
+            self.server.shutdown()
+            thread.join(timeout=5)
+
+    @staticmethod
+    def _inline_hash(tag: str) -> str:
+        content = re.search(f"<{tag}>(.*?)</{tag}>", DASHBOARD_HTML, re.S).group(1)
+        digest = hashlib.sha256(content.encode("utf-8")).digest()
+        return "'sha256-" + base64.b64encode(digest).decode("ascii") + "'"
+
+    def test_dashboard_only_runs_its_own_inline_script_and_style(self) -> None:
+        response = self._get_over_http("/")
+
+        policy = response.getheader("Content-Security-Policy")
+        self.assertIn("default-src 'none'", policy)
+        self.assertIn("script-src " + self._inline_hash("script"), policy)
+        self.assertIn("style-src " + self._inline_hash("style"), policy)
+        self.assertIn("connect-src 'self'", policy)
+        self.assertIn("frame-ancestors 'none'", policy)
+
+    def test_responses_deny_framing_and_hide_the_python_version(self) -> None:
+        response = self._get_over_http("/api/health")
+
+        self.assertEqual(response.getheader("X-Frame-Options"), "DENY")
+        self.assertEqual(response.getheader("Referrer-Policy"), "no-referrer")
+        self.assertEqual(response.getheader("Server"), "jittersim")
+
+    def test_request_logging_keeps_routine_polling_quiet(self) -> None:
+        handler = object.__new__(ControlRequestHandler)
+        handler.server = self.server
+        handler.client_address = ("127.0.0.1", 50000)
+        handler.command = "GET"
+        handler.requestline = "GET /api/state HTTP/1.1"
+
+        with self.assertLogs("jittersim.api.server", level="DEBUG") as logs:
+            handler.log_request(200)
+            handler.command = "POST"
+            handler.requestline = "POST /api/apply HTTP/1.1"
+            handler.log_request(200)
+            handler.log_request(401)
+
+        self.assertEqual(
+            [record.levelname for record in logs.records], ["DEBUG", "INFO", "WARNING"]
+        )
+
+    def test_log_level_can_be_chosen(self) -> None:
+        self.assertEqual(_build_parser().parse_args([]).log_level, "INFO")
+        self.assertEqual(_build_parser().parse_args(["--log-level", "DEBUG"]).log_level, "DEBUG")
 
     def test_an_idle_connection_does_not_block_other_requests(self) -> None:
         response = self._health_after_an_idle_connection(self.server)
@@ -1284,6 +1713,105 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_dashboard_can_edit_and_delete_saved_items(self) -> None:
+        for fragment in (
+            'id="profile-table"',
+            'id="device-table"',
+            '<select id="device-profile" required></select>',
+            'id="profile-cancel-edit"',
+            'id="device-cancel-edit"',
+            "function fillProfileForm(profile)",
+            "function fillDeviceForm(device)",
+            "function editSchedule(schedule)",
+            "function slugify(value)",
+            '"/api/profiles/delete"',
+            '"/api/devices/delete"',
+            '"/api/schedules/delete"',
+            '"/api/data-limits/delete"',
+            '"/api/group-data-limits/delete"',
+            '"/api/service-quotas/delete"',
+            '"/api/time-quotas/delete"',
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, DASHBOARD_HTML)
+        self.assertNotIn('<pre id="profiles">', DASHBOARD_HTML)
+        self.assertNotIn('<pre id="devices">', DASHBOARD_HTML)
+
+    def test_dashboard_keeps_the_id_when_renaming_a_saved_item(self) -> None:
+        for function, prefix in (
+            ("editGroup(group)", "group"),
+            ("editServiceQuota(quota)", "service-quota"),
+            ("editTimeQuota(quota)", "time-quota"),
+        ):
+            with self.subTest(function=function):
+                body = DASHBOARD_HTML.split(f"function {function} {{", 1)[1]
+                body = body.split("\n    }\n", 1)[0]
+                self.assertIn(f'element("{prefix}-id").dataset.typed = "true";', body)
+
+    def test_dashboard_keeps_profile_settings_the_form_does_not_show(self) -> None:
+        submit = DASHBOARD_HTML.split('element("profile-form").addEventListener("submit"', 1)[1]
+        submit = submit.split("\n    });\n", 1)[0]
+
+        for fragment in (
+            "const kept = savedProfileRandomness;",
+            "enabled_probability: kept.reroll_interval_randomness.enabled_probability",
+            "outage_duration_randomness: kept.outage_duration_randomness",
+            "outage_interval_randomness: kept.outage_interval_randomness",
+            "variation_percent: kept.website_randomness.variation_percent",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, submit)
+        self.assertIn('element("profile-form").addEventListener("reset"', DASHBOARD_HTML)
+
+    def test_dashboard_offers_presets_and_burst_loss(self) -> None:
+        for fragment in (
+            'id="profile-preset"',
+            "const PROFILE_PRESETS = [",
+            'name: "Offline"',
+            'id="upload-loss-burst"',
+            'id="download-loss-burst"',
+            'loss_burst_packets: Number(element(prefix + "-loss-burst").value)',
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, DASHBOARD_HTML)
+
+    def test_profiles_accept_burst_loss(self) -> None:
+        status, _, body = self.server.write_response_for(
+            "/api/profiles",
+            {
+                "id": "bursty",
+                "name": "Bursty",
+                "upload": {"loss_percent": 10, "loss_burst_packets": 4},
+            },
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["profile"]["upload"]["loss_burst_packets"], 4)
+        self.assertEqual(self.repository.get_profile("bursty").upload.loss_burst_packets, 4)
+
+    def test_dashboard_can_export_and_import_settings(self) -> None:
+        for fragment in (
+            'id="export-settings"',
+            'id="import-settings-button"',
+            'id="import-settings" type="file"',
+            'request("/api/export", "GET")',
+            'request("/api/import", "POST", settings)',
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, DASHBOARD_HTML)
+
+    def test_dashboard_shows_queue_drops_in_live_traffic(self) -> None:
+        self.assertIn('id="traffic-drop-rate"', DASHBOARD_HTML)
+        self.assertIn('id="traffic-queued"', DASHBOARD_HTML)
+        self.assertIn("function selectedQueueTotals(queues)", DASHBOARD_HTML)
+
+    def test_dashboard_asks_for_the_token_first(self) -> None:
+        self.assertLess(
+            DASHBOARD_HTML.index('id="admin-token"'),
+            DASHBOARD_HTML.index('id="connected-devices"'),
+        )
+        self.assertIn('event.key === "Enter"', DASHBOARD_HTML)
+
     def test_dashboard_contains_configuration_and_network_controls(self) -> None:
         status, content_type, body = self.server.response_for("/")
 
@@ -1672,6 +2200,45 @@ class ControlServerTests(unittest.TestCase):
         )
 
         self.assertEqual(self.repository.get_data_limit("alice").used_bytes, 500)
+
+    def test_an_import_counts_only_traffic_after_it(self) -> None:
+        self.repository.save_domain_observations(
+            (DomainObservation("192.168.50.10", "netflix.com", 1, 10, 10),), now=10
+        )
+        for path, payload in (
+            ("/api/groups", {"id": "family", "name": "Family", "device_ids": ["alice"]}),
+            (
+                "/api/data-limits",
+                {"device_id": "alice", "profile_id": "slow", "limit_bytes": 10**9},
+            ),
+            (
+                "/api/group-data-limits",
+                {"group_id": "family", "profile_id": "slow", "limit_bytes": 10**9},
+            ),
+            (
+                "/api/service-quotas",
+                {
+                    "id": "video",
+                    "name": "Video",
+                    "device_id": "alice",
+                    "profile_id": "slow",
+                    "domains": ["netflix.com"],
+                    "limit_bytes": 10**9,
+                },
+            ),
+        ):
+            self.assertEqual(self.server.write_response_for(path, payload)[0], 200, path)
+        exported = self._export(self.server)
+        self._serve_live(
+            CountingHelper(devices={"alice": 3_000_000}, services={"video": 2_000_000})
+        )
+
+        status, _, _ = self.server.write_response_for("/api/import", exported)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self.repository.get_data_limit("alice").used_bytes, 0)
+        self.assertEqual(self.repository.get_group_data_limit("family").used_bytes, 0)
+        self.assertEqual(self.repository.get_service_quota("video").used_bytes, 0)
 
     def test_live_changes_apply_while_the_network_is_applied(self) -> None:
         helper = FakeHelper()

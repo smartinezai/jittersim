@@ -13,6 +13,7 @@ from jittersim.config.models import (
     Profile,
     Progression,
     Randomness,
+    SavedSettings,
     Schedule,
     ServiceAssignment,
     ServiceQuota,
@@ -358,6 +359,205 @@ class ConfigRepositoryTests(unittest.TestCase):
 
             with ConfigRepository(path) as repository:
                 self.assertEqual(repository.total_domain_queries("192.168.50.10"), 7)
+
+    def _save_lab(self) -> None:
+        for profile in (
+            Profile(id="normal", name="Normal"),
+            Profile(id="slow", name="Slow"),
+            Profile(id="unused", name="Unused"),
+        ):
+            self.repository.save_profile(profile)
+        self.repository.save_device(Device("alice", "Alice's laptop", "192.168.50.10", "normal"))
+        self.repository.save_device(Device("bob", "Bob's phone", "192.168.50.11", "normal"))
+        self.repository.save_device_group(
+            DeviceGroup(id="family", name="Family", device_ids=("alice", "bob"))
+        )
+        self.repository.save_schedule(
+            Schedule(
+                id="work-hours",
+                device_id="alice",
+                profile_id="slow",
+                days_of_week=(0,),
+                start_minute=540,
+                end_minute=1_020,
+            )
+        )
+        self.repository.save_data_limit(
+            DataLimit(device_id="alice", profile_id="slow", limit_bytes=500, last_reset_at=100)
+        )
+        self.repository.save_group_data_limit(
+            GroupDataLimit(group_id="family", profile_id="slow", limit_bytes=500, last_reset_at=100)
+        )
+        self.repository.save_service_quota(
+            ServiceQuota(
+                id="alice-video",
+                device_id="alice",
+                name="Video",
+                domains=("netflix.com",),
+                profile_id="slow",
+                limit_bytes=500,
+                last_reset_at=100,
+            )
+        )
+        self.repository.save_time_quota(
+            TimeQuota(
+                id="alice-video-time",
+                device_id="alice",
+                name="Video time",
+                domains=("netflix.com",),
+                profile_id="slow",
+                limit_seconds=300,
+                window_duration_seconds=3_600,
+                last_reset_at=100,
+            )
+        )
+
+    def test_profile_references_name_everything_that_uses_a_profile(self) -> None:
+        self._save_lab()
+
+        self.assertEqual(
+            self.repository.profile_references("slow", now=200),
+            (
+                "schedule work-hours",
+                "data limit for Alice's laptop",
+                "shared limit for Family",
+                "service limit Video",
+                "time limit Video time",
+            ),
+        )
+        self.assertEqual(
+            self.repository.profile_references("normal", now=200),
+            ("device Alice's laptop", "device Bob's phone"),
+        )
+        self.assertEqual(self.repository.profile_references("unused", now=200), ())
+
+    def test_deleting_a_device_removes_its_rules(self) -> None:
+        self._save_lab()
+
+        self.assertTrue(self.repository.delete_device("alice"))
+
+        self.assertIsNone(self.repository.get_device("alice"))
+        self.assertEqual(self.repository.list_schedules(), ())
+        self.assertIsNone(self.repository.get_data_limit("alice"))
+        self.assertEqual(self.repository.list_service_quotas(), ())
+        self.assertEqual(self.repository.list_time_quotas(), ())
+        self.assertEqual(self.repository.get_device_group("family").device_ids, ("bob",))
+        self.assertFalse(self.repository.delete_device("alice"))
+
+    def test_deleting_a_groups_last_device_removes_the_group(self) -> None:
+        self._save_lab()
+        self.repository.save_device(Device("carol", "Carol", "192.168.50.12", "normal"))
+        self.repository.save_device_group(
+            DeviceGroup(id="solo", name="Solo", device_ids=("carol",))
+        )
+        self.repository.save_group_data_limit(
+            GroupDataLimit(group_id="solo", profile_id="slow", limit_bytes=500, last_reset_at=100)
+        )
+
+        self.repository.delete_device("carol")
+
+        # A group cannot be empty, so reading it back would fail.
+        self.assertEqual(
+            [group.id for group in self.repository.list_device_groups()], ["family"]
+        )
+        self.assertIsNone(self.repository.get_group_data_limit("solo"))
+        self.assertIsNotNone(self.repository.get_group_data_limit("family"))
+
+    def test_deletes_report_whether_something_was_removed(self) -> None:
+        self._save_lab()
+
+        deletes = (
+            (self.repository.delete_schedule, "work-hours"),
+            (self.repository.delete_data_limit, "alice"),
+            (self.repository.delete_group_data_limit, "family"),
+            (self.repository.delete_service_quota, "alice-video"),
+            (self.repository.delete_time_quota, "alice-video-time"),
+            (self.repository.delete_profile, "slow"),
+            (self.repository.delete_profile, "unused"),
+        )
+        for delete, identifier in deletes:
+            with self.subTest(delete=delete.__name__, identifier=identifier):
+                self.assertTrue(delete(identifier))
+                self.assertFalse(delete(identifier))
+        self.assertEqual(self.repository.profile_references("normal", now=200), (
+            "device Alice's laptop",
+            "device Bob's phone",
+        ))
+        self.assertEqual(
+            [profile.id for profile in self.repository.list_profiles()], ["normal"]
+        )
+
+    def test_round_trips_burst_loss_and_loads_older_profiles(self) -> None:
+        profile = Profile(
+            id="bursty",
+            name="Bursty",
+            upload=Impairment(loss_percent=10, loss_burst_packets=4),
+        )
+        self.repository.save_profile(profile)
+        # A profile saved before burst loss existed has no such key.
+        self.repository._connection.execute(
+            "UPDATE profiles SET download_json = ? WHERE id = ?",
+            ('{"delay_ms": 20}', "bursty"),
+        )
+        self.repository._connection.commit()
+
+        stored = self.repository.get_profile("bursty")
+
+        self.assertEqual(stored.upload.loss_burst_packets, 4)
+        self.assertEqual(stored.download, Impairment(delay_ms=20))
+
+    def test_replacing_settings_swaps_every_saved_setting(self) -> None:
+        self._save_lab()
+        self.repository.save_domain_observations(
+            (DomainObservation("192.168.50.10", "example.com", 3, 10, 10),), now=10
+        )
+        replacement = SavedSettings(
+            profiles=(Profile(id="fast", name="Fast"),),
+            devices=(Device("carol", "Carol", "192.168.50.20", "fast"),),
+            mac_policy=MacPolicy(mode="denylist", denylist=("aa:bb:cc:dd:ee:ff",)),
+        )
+
+        self.repository.replace_settings(replacement)
+
+        saved = self.repository.saved_settings()
+        self.assertEqual(saved.profiles, replacement.profiles)
+        self.assertEqual(saved.devices, replacement.devices)
+        self.assertEqual(saved.groups, ())
+        self.assertEqual(saved.schedules, ())
+        self.assertEqual(saved.data_limits, ())
+        self.assertEqual(saved.service_quotas, ())
+        self.assertEqual(saved.mac_policy, replacement.mac_policy)
+        # DNS history is not a setting and stays.
+        self.assertEqual(len(self.repository.list_domain_observations()), 1)
+
+    def test_replacing_settings_changes_nothing_when_it_fails(self) -> None:
+        self._save_lab()
+        before = self.repository.saved_settings()
+        broken = SavedSettings(
+            profiles=(Profile(id="fast", name="Fast"),),
+            devices=(Device("carol", "Carol", "192.168.50.20", "missing-profile"),),
+        )
+
+        with self.assertRaises(StorageError):
+            self.repository.replace_settings(broken)
+
+        self.assertEqual(self.repository.saved_settings(), before)
+
+    def test_replacing_settings_changes_nothing_after_an_unexpected_error(self) -> None:
+        self._save_lab()
+        before = self.repository.saved_settings()
+
+        def interrupted(policy):
+            raise RuntimeError("interrupted")
+
+        self.repository.save_website_policy = interrupted
+        with self.assertRaises(RuntimeError):
+            self.repository.replace_settings(
+                SavedSettings(profiles=(Profile(id="fast", name="Fast"),))
+            )
+        del self.repository.save_website_policy
+
+        self.assertEqual(self.repository.saved_settings(), before)
 
     def test_round_trips_byte_progression_targets(self) -> None:
         self.repository.save_profile(Profile(id="normal", name="Normal"))

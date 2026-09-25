@@ -67,7 +67,12 @@ password so an update does not silently invalidate access. The values in
 `ap.env` are the initial credentials. Later dashboard changes are stored in the
 network connection. The installer also creates a local HTTPS certificate. Its
 private key is readable only by root and the JitterSim service. The installer
-prints the certificate fingerprint.
+prints the certificate fingerprint. It also links the `jittersim` command into
+`/usr/local/bin`.
+
+After updating from a version before September 2026, choose **Reset network**
+once. Older versions left duplicate traffic filters behind, and a reset
+removes them.
 
 Open the dashboard at `https://jittersim.local:8080` or use the Pi's Ethernet
 address. Before trusting the local certificate in a browser, compare its
@@ -274,19 +279,24 @@ for current command behavior.
 
 ## Recover over SSH
 
-Keep SSH access through the Pi's management network. To clear project-owned
-traffic rules after a dashboard problem:
+Keep SSH access through the Pi's management network. If the dashboard cannot
+be reached or misbehaves, clear every JitterSim network change:
 
 ```sh
-sudo systemctl stop jittersim-dashboard.service
-sudo /opt/jittersim/.venv/bin/jittersim-reset
-sudo systemctl start jittersim-dashboard.service
+sudo jittersim reset
 ```
 
-The reset command refuses to run while the dashboard is active. It asks the
-helper to remove only JitterSim's rules then records the reset so a restart
-does not reapply the previous plan. If reset reports an error, leave the
-dashboard stopped and inspect the helper log before starting it again.
+The command records the reset first, so the dashboard keeps the network reset
+after it restarts, then asks the helper to remove only JitterSim's rules and
+queues. A running dashboard notices the reset, stops scheduled changes and
+resets once more in case one of its changes raced the command, so it does not
+need to be stopped first. The older `sudo /opt/jittersim/.venv/bin/jittersim-reset`
+runs the same command. Choose **Apply current configuration** in the dashboard
+to start again.
+
+`sudo jittersim status` shows the last recorded network action and whether the
+helper answers. If reset reports an error, read the helper log as described
+below before applying again.
 
 ## Troubleshoot a failed apply
 

@@ -70,6 +70,17 @@ class ImpairmentTests(unittest.TestCase):
             Impairment(loss_percent=True)
 
 
+class BurstLossTests(unittest.TestCase):
+    def test_loss_is_independent_by_default(self) -> None:
+        self.assertEqual(Impairment().loss_burst_packets, 0)
+
+    def test_rejects_burst_lengths_outside_the_supported_range(self) -> None:
+        for value in (-1, 101, 2.5, True):
+            with self.subTest(value=value):
+                with self.assertRaises(ValidationError):
+                    Impairment(loss_percent=5, loss_burst_packets=value)
+
+
 class ProfileTests(unittest.TestCase):
     def test_accepts_seeded_profile(self) -> None:
         profile = Profile(

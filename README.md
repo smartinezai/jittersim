@@ -14,6 +14,11 @@ is a private lab tool, not a replacement for a home router.
 
 - Delay, jitter, packet loss, bandwidth limits, packet reordering, duplication
   and corruption.
+- Loss that arrives in bursts of several packets, with the configured
+  percentage as the average.
+- Jitter that keeps packets in order. The Reorder setting reorders on purpose.
+- Presets that fill the profile form with rough approximations of common
+  networks, such as 3G, satellite and a train tunnel with outages.
 - Separate upload and download controls where the network supports them.
 - Per-device profile assignment from the dashboard.
 - A safe configuration-only mode for building plans without changing traffic.
@@ -40,8 +45,11 @@ is a private lab tool, not a replacement for a home router.
   stored on the Pi. Categories are phone, tablet, laptop, desktop, TV or
   console, other and unknown. Type labels never change traffic rules.
 - Click-to-select devices and assign profiles from the dashboard.
+- Tables of saved profiles and devices with Edit and Delete, plus Delete for
+  schedules and limits. A profile that is still in use cannot be deleted.
 - Device groups that apply one profile override to several devices at once.
-- A live upload and download graph with packet rates for assigned devices.
+- A live upload and download graph with packet rates for assigned devices,
+  and the packets JitterSim dropped or is still delaying.
 - MAC address allowlists and denylists.
 - A global blocked-site list.
 - Profile-specific website lists that allow selected services while blocking
@@ -84,7 +92,11 @@ bytes.
 - A visible status area for the current mode, connected devices, schedules,
   access rules, diagnostics and a short history of admin actions.
 - Download a point-in-time backup of settings and local DNS observations.
+- Export settings as JSON and import them on another Pi or to repeat a
+  demonstration. Imports are checked first and replace all settings at once.
 - Restore the last applied or reset state when the dashboard service restarts.
+- Clear every network change over SSH with `sudo jittersim reset`, even when
+  the dashboard is down.
 - Optional private remote dashboard access through Tailscale Serve.
 
 ### Browser service profiles
@@ -196,11 +208,12 @@ include device details and observed domain names, so keep them private.
 
 The live graph samples the Pi's device counters every two seconds and shows the
 latest minute. Solid lines show traffic seen by JitterSim before its queues,
-not the speed a device successfully receives. Dashed lines show manually
-configured ISP plan limits and the selected device's applied default-queue
-bandwidth limits. The initial ISP download reference is 100 Mbit/s and upload
-is unset. Edit these values to match the connection. They are graph references
-only and do not change network traffic.
+not the speed a device successfully receives. The dropped and waiting figures
+come from JitterSim's own queues. Dashed lines show manually configured ISP
+plan limits and the selected device's applied default-queue bandwidth limits.
+The initial ISP download reference is 100 Mbit/s and upload is unset. Edit
+these values to match the connection. They are graph references only and do
+not change network traffic.
 
 The ISP plan limit is shared with other home devices and is not a live measure
 of spare bandwidth for JitterSim. Select one device to see its default-queue
@@ -264,6 +277,14 @@ network namespace:
 docker run --rm --cap-add NET_ADMIN --cap-add NET_RAW \
   -v "$PWD":/code:ro -w /code debian:bookworm-slim sh -c \
   'apt-get update -qq && apt-get install -y -qq iproute2 nftables python3 >/dev/null && PYTHONPATH=src python3 tests/integration/linux_network_smoke.py'
+```
+
+The tests in `tests/kernel` apply real `tc` and `nftables` commands inside
+network namespaces. They are skipped unless you run them as root on Linux with
+`JITTERSIM_KERNEL_TESTS=1`. On a Mac, run them in a privileged container:
+
+```bash
+tests/kernel/run-in-docker.sh
 ```
 
 ## Project layout

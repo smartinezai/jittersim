@@ -89,6 +89,21 @@ class RandomizerTests(unittest.TestCase):
         self.assertFalse(outage_is_selected(profile=profile, generator=generator))
 
 
+class BurstLossRandomnessTests(unittest.TestCase):
+    def test_rerolls_and_progressions_keep_the_burst_length(self) -> None:
+        bursty = Impairment(loss_percent=10, loss_burst_packets=4)
+
+        rerolled = reroll_impairment(impairment=bursty, generator=random.Random(1))
+        halfway = interpolate_impairment(
+            start=Impairment(loss_percent=0, loss_burst_packets=2),
+            end=Impairment(loss_percent=10, loss_burst_packets=6),
+            factor=0.5,
+        )
+
+        self.assertEqual(rerolled.loss_burst_packets, 4)
+        self.assertEqual(halfway.loss_burst_packets, 4)
+
+
 class ScheduleTests(unittest.TestCase):
     def setUp(self) -> None:
         self.schedule = Schedule(
