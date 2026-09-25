@@ -10,19 +10,22 @@ from typing import Optional, Sequence
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.config.storage import ConfigRepository, StorageError
 from jittersim.engine.compiler import compile_plan
+from jittersim.measure import main as measure_main
 from jittersim.networking.commands import Command
 from jittersim.networking.helper import HelperClient, HelperClientError
 from jittersim.networking.renderer import render_command_plan
 from jittersim.networking.topology import Topology
 
 CONTROL_COMMANDS = ("reset", "status")
+MEASUREMENT_COMMANDS = ("measure", "compare")
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Render a jittersim policy without changing the host network. "
-            "Use 'jittersim reset' or 'jittersim status' for emergency control."
+            "Use 'jittersim reset' or 'jittersim status' for emergency control, "
+            "and 'jittersim measure' or 'jittersim compare' on a test device."
         )
     )
     parser.add_argument("--uplink", default="eth0", help="Pi interface facing the router")
@@ -141,6 +144,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     """Run a control command, or render a demo profile without applying it."""
 
     raw_arguments = list(sys.argv[1:] if argv is None else argv)
+    if raw_arguments and raw_arguments[0] in MEASUREMENT_COMMANDS:
+        return measure_main(raw_arguments)
     if raw_arguments and raw_arguments[0] in CONTROL_COMMANDS:
         command = raw_arguments[0]
         arguments = _build_control_parser(command).parse_args(raw_arguments[1:])

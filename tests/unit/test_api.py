@@ -25,6 +25,7 @@ from jittersim.config.models import DataLimit, Device, DomainObservation, Impair
 from jittersim.config.storage import ConfigRepository
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.service import compile_stored_plan
+from jittersim.measure import comparison_table
 from jittersim.networking.helper import HelperClientError
 
 
@@ -1771,6 +1772,146 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_dashboard_compares_measurement_files(self) -> None:
+        for fragment in (
+            'id="measurement-files" type="file"',
+            'id="measurement-table"',
+            'id="measurement-chart"',
+            'id="copy-measurements"',
+            "function measurementMarkdown(runs)",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, DASHBOARD_HTML)
+
+    def test_dashboard_measurement_table_matches_the_command_line(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is required to build the table")
+        runs = [
+            {
+                "label": "normal",
+                "target": "1.1.1.1",
+                "summary": {"sent": 50, "loss_percent": 0.0, "rtt_avg_ms": 12.4,
+                            "rtt_p95_ms": 14.07, "jitter_ms": 0.81, "reordered": 0},
+            },
+            {
+                "label": "3G | busy",
+                "target": "1.1.1.1",
+                "summary": {"sent": 50, "loss_percent": 33.3, "rtt_avg_ms": None,
+                            "rtt_p95_ms": None, "jitter_ms": None, "reordered": 2},
+                "download": {"mbit_per_s": 0.78},
+            },
+        ]
+        script = DASHBOARD_HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+        columns = re.search(r"const MEASUREMENT_COLUMNS = \[.*?\];", script, re.S).group(0)
+
+        def function(name):
+            body = script.split(f"    function {name}(", 1)[1].split("\n    }\n", 1)[0]
+            return f"function {name}({body}\n}}\n"
+
+        harness = (
+            columns
+            + "\n"
+            + re.search(r"const ESCAPED_PIPE = .*?;", script).group(0)
+            + "\n"
+            + function("measurementMilliseconds")
+            + function("measurementRow")
+            + function("measurementMarkdown")
+            + "process.stdout.write(measurementMarkdown(JSON.parse(process.argv[1])));\n"
+        )
+        result = subprocess.run(
+            [node, "-e", harness, json.dumps(runs)], capture_output=True, text=True, check=False
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, comparison_table(runs))
+
+    def _dashboard_functions(self, *names):
+        script = DASHBOARD_HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+        functions = ""
+        for name in names:
+            body = script.split(f"    function {name}(", 1)[1].split("\n    }\n", 1)[0]
+            functions += f"function {name}({body}\n}}\n"
+        return functions
+
+    def test_dashboard_refuses_measurements_with_fields_of_the_wrong_type(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is required to check the files")
+        good = {
+            "format": "jittersim-measurement",
+            "version": 1,
+            "label": "normal",
+            "target": "1.1.1.1",
+            "samples": [{"sequence": 0, "rtt_ms": 12.5}],
+            "summary": {"sent": 1, "loss_percent": 0.0, "rtt_avg_ms": 12.5,
+                        "rtt_p95_ms": 12.5, "jitter_ms": None, "reordered": 0},
+        }
+        runs = [
+            good,
+            {**good, "summary": {**good["summary"], "loss_percent": "5"}},
+            {**good, "download": {"url": "http://x"}},
+            {**good, "samples": [{"rtt_ms": "slow"}]},
+            {key: value for key, value in good.items() if key != "label"},
+        ]
+        harness = (
+            self._dashboard_functions("validMeasurement")
+            + "console.log(JSON.stringify(JSON.parse(process.argv[1]).map(validMeasurement)));\n"
+        )
+        result = subprocess.run(
+            [node, "-e", harness, json.dumps(runs)], capture_output=True, text=True, check=False
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), [True, False, False, False, False])
+
+    def test_measurement_chart_shows_every_kind_of_run(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is required to draw the chart")
+        script = DASHBOARD_HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+        colors = re.search(r"const MEASUREMENT_COLORS = \[.*?\];", script, re.S).group(0)
+
+        def drawn(runs):
+            harness = (
+                colors
+                + "\nlet measurementRuns = JSON.parse(process.argv[1]);\n"
+                "const texts = [];\n"
+                "let dots = 0;\n"
+                "const context = {\n"
+                "  setTransform() {}, clearRect() {}, beginPath() {}, moveTo() {},\n"
+                "  lineTo() {}, stroke() {}, arc() { dots += 1; }, fill() {},\n"
+                "  measureText(text) { return {width: 7 * text.length}; },\n"
+                "  fillText(text) { texts.push(text); },\n"
+                "};\n"
+                "const canvas = {getBoundingClientRect: () => ({width: 600, height: 240}),\n"
+                "                getContext: () => context};\n"
+                "const element = () => canvas;\n"
+                "const window = {devicePixelRatio: 1};\n"
+                + self._dashboard_functions("drawMeasurementChart")
+                + "drawMeasurementChart();\n"
+                "console.log(JSON.stringify({texts, dots}));\n"
+            )
+            result = subprocess.run(
+                [node, "-e", harness, json.dumps(runs)], capture_output=True, text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(result.stdout)
+
+        def run(*rtts):
+            samples = [{"sequence": index, "rtt_ms": rtt} for index, rtt in enumerate(rtts)]
+            return {"samples": samples}
+
+        offline = drawn([run()])
+        single = drawn([run(42.0)])
+        fast = drawn([run(0.11, 0.12, 0.15)])
+
+        self.assertIn("No replies to draw: every ping was lost.", offline["texts"])
+        self.assertEqual(single["dots"], 1)
+        labels = [text for text in fast["texts"] if text.endswith(" ms")]
+        self.assertEqual(len(set(labels)), 5, labels)
+
     def test_dashboard_script_is_valid_javascript(self) -> None:
         node = shutil.which("node")
         if node is None:
@@ -1837,6 +1978,38 @@ class ControlServerTests(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, submit)
         self.assertIn('element("profile-form").addEventListener("reset"', DASHBOARD_HTML)
+
+    def test_dashboard_shows_each_device_condition(self) -> None:
+        table = DASHBOARD_HTML.split("function renderDeviceTable() {", 1)[1]
+        table = table.split("\n    }\n", 1)[0]
+
+        self.assertIn('["Device", "Address", "Profile", "Condition"]', table)
+        self.assertIn("deviceConditionCell(device.id)", table)
+        self.assertIn('request("/api/conditions", "GET")', DASHBOARD_HTML)
+        self.assertIn('id="device-conditions-note"', DASHBOARD_HTML)
+        refresh = DASHBOARD_HTML.split("async function refresh() {", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("loadConditions()", refresh)
+
+    def test_dashboard_condition_lookup_ignores_built_in_names(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is required to run the lookup")
+        script = DASHBOARD_HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+        labels = re.search(r"const CONDITION_LABELS = \{.*?\};", script, re.S).group(0)
+        body = script.split("    function deviceConditionCell(", 1)[1].split("\n    }\n", 1)[0]
+        harness = (
+            labels
+            + "\nconst deviceConditions = "
+            + "{applied: true, devices: {alice: {condition: 'normal'}}};\n"
+            + f"function deviceConditionCell({body}\n}}\n"
+            # A device may be called "constructor", like a built-in property.
+            + "console.log(JSON.stringify([deviceConditionCell('constructor'),"
+            + " deviceConditionCell('alice')]));\n"
+        )
+        result = subprocess.run([node, "-e", harness], capture_output=True, text=True, check=False)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), ["—", ["Normal", "No network effects"]])
 
     def test_dashboard_offers_presets_and_burst_loss(self) -> None:
         for fragment in (
@@ -2314,6 +2487,75 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(self.repository.get_data_limit("alice").used_bytes, 0)
         self.assertEqual(self.repository.get_group_data_limit("family").used_bytes, 0)
         self.assertEqual(self.repository.get_service_quota("video").used_bytes, 0)
+
+    def test_conditions_describe_the_saved_plan_until_one_is_applied(self) -> None:
+        status, _, body = self.server.response_for("/api/conditions")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            json.loads(body),
+            {
+                "applied": False,
+                "devices": {
+                    "alice": {"condition": "degraded", "reasons": ["upload: delay 3000 ms"]}
+                },
+            },
+        )
+
+    def test_conditions_leave_the_schedule_alone_while_nothing_is_applied(self) -> None:
+        self.repository.save_profile(
+            Profile(
+                id="slow",
+                name="Slow",
+                upload=Impairment(delay_ms=3_000),
+                reroll_interval_seconds=60,
+                outage_probability=100,
+                outage_duration_seconds=30,
+                outage_interval_seconds=60,
+            )
+        )
+        scheduler = RuntimeScheduler(
+            database_path=":memory:", helper_client=FakeHelper(), poll_seconds=3_600
+        )
+        self.server.scheduler = scheduler
+        self.addCleanup(scheduler.stop)
+
+        for _ in range(3):
+            status, _, body = self.server.response_for("/api/conditions")
+
+        # Building the runtime plan would advance its rerolls and outages, so the
+        # next Apply would start from a state decided while nothing ran.
+        self.assertEqual(status, 200)
+        self.assertEqual(scheduler._rolls, {})
+        self.assertEqual(json.loads(body)["devices"]["alice"]["condition"], "degraded")
+
+    def test_conditions_check_the_saved_mac_address(self) -> None:
+        self.repository.save_device(
+            Device("alice", "Alice's laptop", "192.168.50.10", "slow", "aa:bb:cc:dd:ee:ff")
+        )
+        self.server.write_response_for(
+            "/api/policies",
+            {"mac": {"mode": "denylist", "denylist": ["aa:bb:cc:dd:ee:ff"]}, "websites": {}},
+        )
+
+        conditions = json.loads(self.server.response_for("/api/conditions")[2])
+
+        self.assertEqual(
+            conditions["devices"]["alice"],
+            {"condition": "offline", "reasons": ["MAC address denied"]},
+        )
+
+    def test_conditions_describe_the_applied_plan(self) -> None:
+        helper = self._serve_live(CountingHelper(devices={"alice": 0}))
+        self.assertEqual(self.server.write_response_for("/api/apply", {})[0], 200)
+        self.repository.save_profile(Profile(id="slow", name="Slow"))
+
+        conditions = json.loads(self.server.response_for("/api/conditions")[2])
+
+        # The saved profile changed, but the network still runs the applied plan.
+        self.assertIsNotNone(helper.applied_plan)
+        self.assertTrue(conditions["applied"])
+        self.assertEqual(conditions["devices"]["alice"]["condition"], "degraded")
 
     def test_live_changes_apply_while_the_network_is_applied(self) -> None:
         helper = FakeHelper()

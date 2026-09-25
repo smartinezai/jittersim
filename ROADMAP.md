@@ -134,7 +134,7 @@ Suggested commits:
 
 Goal: create realistic changing conditions without making tests irreproducible.
 
-- [ ] Define normal, degraded and offline states.
+- [x] Define normal, degraded and offline states.
 - [x] Add fixed-duration outages.
 - [x] Add repeating schedules.
 - [x] Add seeded random choices.
@@ -182,10 +182,10 @@ Goal: produce evidence that the selected profile changes observed network behavi
 
 - [x] Add counters for packets, bytes, drops and active state.
 - [x] Show per-device upload and download rates in a live dashboard graph.
-- [ ] Add a latency measurement page.
-- [ ] Add a small scripted test client.
-- [ ] Compare normal and impaired runs.
-- [ ] Capture screenshots or tables for the class report.
+- [x] Add a latency measurement page.
+- [x] Add a small scripted test client.
+- [x] Compare normal and impaired runs.
+- [x] Capture screenshots or tables for the class report.
 - [x] Document packet-level limits and IPv4 profile matching.
 - [x] Test that the reset path works after a failed apply.
 

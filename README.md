@@ -149,6 +149,19 @@ packets or measure download bytes. Device-data mode counts IPv4 upload and
 download bytes for the selected device, so a long Netflix stream can advance a
 progression even when it creates few new DNS queries.
 
+### Measurements
+
+- Each device shows whether it is normal, degraded or offline, and why.
+- `jittersim measure` on a test device pings a public host and saves the
+  loss, round trips, jitter, reordering and, optionally, a download speed.
+  `jittersim compare` turns saved runs into a Markdown or CSV table.
+- The dashboard's **Measurements** panel compares saved runs, draws their
+  round trips and copies the table for a report.
+
+See [Measured effect of the profile presets](docs/measurements-2026-09.md)
+for tables measured through JitterSim's real queues, and how to repeat the
+measurements on the Pi.
+
 ## Network layout
 
 ```text
