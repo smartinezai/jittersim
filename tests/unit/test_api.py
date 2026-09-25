@@ -405,6 +405,28 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("error", json.loads(list_id["body"]))
         self.assertEqual(self.repository.list_recent_actions()[0]["action"], "/api/data-limits")
 
+    def test_list_fields_reject_plain_strings(self) -> None:
+        requests = (
+            ("/api/policies", {"websites": {"mode": "unrestricted", "blocked_domains": "netflix"}}),
+            ("/api/profiles", {"id": "video", "name": "Video", "website_domains": "youtube.com"}),
+            (
+                "/api/schedules",
+                {
+                    "id": "work",
+                    "device_id": "alice",
+                    "profile_id": "slow",
+                    "days_of_week": "12",
+                    "start_minute": 540,
+                    "end_minute": 1_020,
+                },
+            ),
+        )
+        for path, payload in requests:
+            with self.subTest(path=path):
+                status, _, _ = self.server.write_response_for(path, payload)
+                self.assertEqual(status, 400)
+        self.assertEqual(self.repository.get_website_policy().blocked_domains, ())
+
     def test_tls_requires_both_files_and_wraps_the_dashboard_socket(self) -> None:
         with self.assertRaisesRegex(ValueError, "TLS is required"):
             ControlServer(("0.0.0.0", 0), self.repository)

@@ -4716,6 +4716,19 @@ class RequestError(ValueError):
     """Raised when an HTTP request body cannot be safely decoded."""
 
 
+def _list_field(payload: Dict[str, Any], key: str, *, required: bool = False) -> tuple:
+    """Read a JSON list; tuple() alone would split a string into characters."""
+
+    if key not in payload:
+        if required:
+            raise KeyError(key)
+        return ()
+    value = payload[key]
+    if not isinstance(value, list):
+        raise ValueError(f"{key} must be a list")
+    return tuple(value)
+
+
 def _impairment_from_payload(payload: Any) -> Impairment:
     if payload is None:
         return Impairment()
@@ -4766,7 +4779,7 @@ def _profile_from_payload(payload: Dict[str, Any]) -> Profile:
             payload.get("outage_interval_randomness")
         ),
         website_mode=payload.get("website_mode", "unrestricted"),
-        website_domains=tuple(payload.get("website_domains", ())),
+        website_domains=_list_field(payload, "website_domains"),
         website_randomness=_randomness_from_payload(payload.get("website_randomness")),
     )
 
@@ -4786,7 +4799,7 @@ def _schedule_from_payload(payload: Dict[str, Any]) -> Schedule:
         id=payload["id"],
         device_id=payload["device_id"],
         profile_id=payload["profile_id"],
-        days_of_week=tuple(payload["days_of_week"]),
+        days_of_week=_list_field(payload, "days_of_week", required=True),
         start_minute=payload["start_minute"],
         end_minute=payload["end_minute"],
         enabled=payload.get("enabled", True),
@@ -4814,7 +4827,7 @@ def _quota_schedule_from_payload(payload: Dict[str, Any]) -> Tuple[str, int, Tup
 
     reset_mode = payload.get("reset_mode", "manual")
     reset_interval_seconds = payload.get("reset_interval_seconds", 0)
-    reset_times = tuple(payload.get("reset_times", ()))
+    reset_times = _list_field(payload, "reset_times")
     return reset_mode, reset_interval_seconds, reset_times
 
 
@@ -4848,7 +4861,7 @@ def _device_group_from_payload(payload: Dict[str, Any]) -> DeviceGroup:
     return DeviceGroup(
         id=payload.get("id", f"group-{time.time_ns()}"),
         name=payload["name"],
-        device_ids=tuple(payload["device_ids"]),
+        device_ids=_list_field(payload, "device_ids", required=True),
         profile_id=payload.get("profile_id") or None,
     )
 
@@ -4886,7 +4899,9 @@ def _service_quota_from_payload(
 
     quota_id = payload.get("id", f"service-{time.time_ns()}")
     existing = repository.get_service_quota(quota_id)
-    normalized_domains = tuple(normalize_domain(domain) for domain in payload["domains"])
+    normalized_domains = tuple(
+        normalize_domain(domain) for domain in _list_field(payload, "domains", required=True)
+    )
     device = repository.get_device(payload["device_id"])
     if device is not None:
         observed_domains = {
@@ -4931,7 +4946,9 @@ def _time_quota_from_payload(
 
     quota_id = payload.get("id", f"time-{time.time_ns()}")
     existing = repository.get_time_quota(quota_id)
-    normalized_domains = tuple(normalize_domain(domain) for domain in payload["domains"])
+    normalized_domains = tuple(
+        normalize_domain(domain) for domain in _list_field(payload, "domains", required=True)
+    )
     device = repository.get_device(payload["device_id"])
     if device is not None:
         observed_domains = {
@@ -4999,7 +5016,7 @@ def _progression_from_payload(
         traffic_target_queries=traffic_target_queries,
         traffic_baseline_queries=repository.total_domain_queries(str(device.ipv4_address)),
         traffic_target_bytes=traffic_target_bytes,
-        website_domains=tuple(payload.get("website_domains", ())),
+        website_domains=_list_field(payload, "website_domains"),
     )
 
 
@@ -5011,13 +5028,13 @@ def _policies_from_payload(payload: Dict[str, Any]) -> Tuple[MacPolicy, WebsiteP
     return (
         MacPolicy(
             mode=mac_payload.get("mode", "disabled"),
-            allowlist=tuple(mac_payload.get("allowlist", ())),
-            denylist=tuple(mac_payload.get("denylist", ())),
+            allowlist=_list_field(mac_payload, "allowlist"),
+            denylist=_list_field(mac_payload, "denylist"),
         ),
         WebsitePolicy(
             mode=website_payload.get("mode", "unrestricted"),
-            allowed_domains=tuple(website_payload.get("allowed_domains", ())),
-            blocked_domains=tuple(website_payload.get("blocked_domains", ())),
+            allowed_domains=_list_field(website_payload, "allowed_domains"),
+            blocked_domains=_list_field(website_payload, "blocked_domains"),
         ),
     )
 
