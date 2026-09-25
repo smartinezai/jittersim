@@ -17,6 +17,7 @@ from jittersim.config.models import (
     Timer,
     TimeQuota,
     time_quota_counter_id,
+    UnaffectedDevice,
     ValidationError,
     WebsitePolicy,
 )
@@ -368,6 +369,24 @@ class RuntimeStateTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             RuntimeState(configuration_version=-1)
 
+
+class UnaffectedDeviceTests(unittest.TestCase):
+    def test_normalizes_the_address_and_names_it_after_the_address(self) -> None:
+        device = UnaffectedDevice("AA-BB-CC-DD-EE-FF")
+
+        self.assertEqual(device.mac_address, "aa:bb:cc:dd:ee:ff")
+        self.assertEqual(device.name, "aa:bb:cc:dd:ee:ff")
+        self.assertEqual(UnaffectedDevice("aa:bb:cc:dd:ee:ff", "  My phone ").name, "My phone")
+
+    def test_rejects_a_bad_address_or_name(self) -> None:
+        for mac_address, name in (
+            ("not-a-mac", ""),
+            ("aa:bb:cc:dd:ee:ff", "x" * 101),
+            ("aa:bb:cc:dd:ee:ff", 5),
+        ):
+            with self.subTest(mac_address=mac_address, name=name):
+                with self.assertRaises(ValidationError):
+                    UnaffectedDevice(mac_address, name)
 
 if __name__ == "__main__":
     unittest.main()

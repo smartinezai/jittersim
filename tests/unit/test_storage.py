@@ -1,8 +1,10 @@
 import sqlite3
 import tempfile
 import unittest
+from pathlib import Path
 
 from jittersim.config.models import (
+    MAX_UNAFFECTED_DEVICES,
     DataLimit,
     Device,
     DeviceGroup,
@@ -19,6 +21,7 @@ from jittersim.config.models import (
     ServiceQuota,
     TimeQuota,
     Timer,
+    UnaffectedDevice,
     WebsitePolicy,
 )
 from jittersim.config.storage import ConfigRepository, StorageError
@@ -840,6 +843,94 @@ class ConfigRepositoryTests(unittest.TestCase):
         self.assertEqual(profile, ("Normal",))
         self.assertEqual(label, ("Family MacBook", "laptop"))
         self.assertEqual(traffic_rates, (None, 150_000))
+
+
+class EveryoneElseStorageTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.repository = ConfigRepository(":memory:")
+        self.addCleanup(self.repository.close)
+        self.repository.save_profile(Profile(id="slow", name="Slow"))
+
+    def test_the_everyone_else_profile_round_trips_and_keeps_its_profile(self) -> None:
+        self.assertIsNone(self.repository.get_everyone_else_profile_id())
+
+        self.repository.save_everyone_else_profile_id("slow")
+
+        self.assertEqual(self.repository.get_everyone_else_profile_id(), "slow")
+        self.assertIn("everyone else", self.repository.profile_references("slow", now=0))
+        with self.assertRaises(StorageError):
+            self.repository.delete_profile("slow")
+        self.repository.save_everyone_else_profile_id(None)
+        self.assertIsNone(self.repository.get_everyone_else_profile_id())
+
+    def test_a_missing_everyone_else_profile_is_refused(self) -> None:
+        with self.assertRaises(StorageError):
+            self.repository.save_everyone_else_profile_id("missing")
+
+        self.assertIsNone(self.repository.get_everyone_else_profile_id())
+
+    def test_unaffected_devices_round_trip_in_address_order(self) -> None:
+        self.repository.save_unaffected_device(UnaffectedDevice("bb:bb:bb:bb:bb:bb", "Phone"))
+        self.repository.save_unaffected_device(UnaffectedDevice("aa:aa:aa:aa:aa:aa"))
+        self.repository.save_unaffected_device(UnaffectedDevice("bb:bb:bb:bb:bb:bb", "My phone"))
+
+        self.assertEqual(
+            self.repository.list_unaffected_devices(),
+            (
+                UnaffectedDevice("aa:aa:aa:aa:aa:aa"),
+                UnaffectedDevice("bb:bb:bb:bb:bb:bb", "My phone"),
+            ),
+        )
+        self.assertTrue(self.repository.delete_unaffected_device("aa:aa:aa:aa:aa:aa"))
+        self.assertFalse(self.repository.delete_unaffected_device("aa:aa:aa:aa:aa:aa"))
+
+    def test_the_unaffected_list_holds_at_most_256_devices(self) -> None:
+        for index in range(MAX_UNAFFECTED_DEVICES):
+            self.repository.save_unaffected_device(
+                UnaffectedDevice(f"02:00:00:00:{index // 256:02x}:{index % 256:02x}")
+            )
+
+        with self.assertRaises(StorageError):
+            self.repository.save_unaffected_device(UnaffectedDevice("02:00:00:01:00:00"))
+        # A listed device can still be renamed.
+        self.repository.save_unaffected_device(UnaffectedDevice("02:00:00:00:00:00", "Renamed"))
+
+    def test_replacing_settings_carries_the_everyone_else_settings(self) -> None:
+        # The old everyone-else profile is replaced, so it must not block the replace.
+        self.repository.save_everyone_else_profile_id("slow")
+        settings = SavedSettings(
+            profiles=(Profile(id="fast", name="Fast"),),
+            everyone_else_profile_id="fast",
+            unaffected_devices=(UnaffectedDevice("aa:aa:aa:aa:aa:aa", "Laptop"),),
+        )
+
+        self.repository.replace_settings(settings)
+
+        self.assertEqual(self.repository.saved_settings(), settings)
+
+    def test_existing_databases_gain_the_everyone_else_tables(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "jittersim.db"
+            ConfigRepository(path).close()
+            connection = sqlite3.connect(path)
+            connection.executescript(
+                "DROP TABLE everyone_else_settings; DROP TABLE unaffected_devices;"
+            )
+            connection.close()
+
+            with ConfigRepository(path) as repository:
+                self.assertIsNone(repository.get_everyone_else_profile_id())
+                self.assertEqual(repository.list_unaffected_devices(), ())
+
+    def test_finds_a_device_by_its_mac_address(self) -> None:
+        self.repository.save_device(
+            Device("alice", "Alice", "192.168.50.10", "slow", "AA:AA:AA:AA:AA:AA")
+        )
+
+        self.assertEqual(
+            self.repository.get_device_by_mac_address("aa:aa:aa:aa:aa:aa").id, "alice"
+        )
+        self.assertIsNone(self.repository.get_device_by_mac_address("bb:bb:bb:bb:bb:bb"))
 
 
 if __name__ == "__main__":
