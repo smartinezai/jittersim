@@ -19,7 +19,8 @@ endpoint. It also blocks private IPv4 destinations and local IPv6 addresses
 forwarded from the test interface to the uplink, including the router's web
 interface. The generated test Wi-Fi uses IPv4 sharing and does not offer client
 IPv6. Browser proxy tunnels may connect to public IPv4 or IPv6 hosts.
-Dashboard requests and private read routes require the generated admin token.
+Everything on the dashboard needs a sign-in with the generated admin token.
+Without it, the address shows only a plain sign-in page that names nothing.
 
 Do not expose port 8080 or SSH to the public internet. Keep the Pi's router
 connection on `eth0` and use the dashboard from the management network.
@@ -74,11 +75,35 @@ After updating from a version before September 2026, choose **Reset network**
 once. Older versions left duplicate traffic filters behind, and a reset
 removes them.
 
-Open the dashboard at `https://jittersim.local:8080` or use the Pi's Ethernet
-address. Before trusting the local certificate in a browser, compare its
-SHA-256 fingerprint with the value printed by the installer. The certificate
-includes the Pi's current Ethernet address. If that address changes, run the
-installer again and verify and trust the newly printed certificate.
+Open the dashboard at `https://<pi-name>.local:8080`, where `<pi-name>` is the
+Pi's host name, or use the Pi's Ethernet address. Before trusting the local
+certificate in a browser, compare its SHA-256 fingerprint with the value
+printed by the installer. The certificate is named after the Pi and includes
+its current Ethernet address. If either changes, run the installer again and
+verify and trust the newly printed certificate. Updating from a version whose
+certificate said `jittersim.local` makes a new certificate once.
+
+Sign in with the admin token: `sudo grep JITTERSIM_ADMIN_TOKEN
+/etc/jittersim/control.env` shows it. The browser stays signed in for 7 days
+or until you choose **Sign out**. Five wrong tokens from one address make that
+address wait 15 minutes. Changing the token in `control.env` and restarting
+the dashboard signs every browser out.
+
+### Client isolation
+
+The access point isolates its clients: devices on the test Wi-Fi can reach the
+internet through the Pi, but not each other. A visitor's phone can't see your
+laptop's shared folders or other devices on the test Wi-Fi. Casting and screen
+sharing between test Wi-Fi devices stop working too. New installs call the
+test Wi-Fi `TestNet`; existing installs keep their name, and the dashboard can
+change it. The update that turns isolation on restarts the test Wi-Fi once.
+
+To allow test Wi-Fi devices to reach each other, add this line to
+`/etc/jittersim/ap.env` and run the installer again:
+
+```text
+JITTERSIM_AP_ISOLATION=no
+```
 
 After an update, the dashboard supports schedules, one-shot profile timers,
 progression sessions, MAC rules, website rules, traffic observations and
@@ -257,8 +282,8 @@ sudo tailscale serve status
 If prompted, enable HTTPS for the private network in the Tailscale admin
 console. Serve prints the private dashboard address.
 
-Open the `https://...ts.net/` address printed by Serve from the Mac. Enter the
-JitterSim admin token. Test status, a profile apply and Reset network from a
+Open the `https://...ts.net/` address printed by Serve from the Mac. Sign in
+with the JitterSim admin token. Test status, a profile apply and Reset network from a
 separate internet connection such as a friend's Wi-Fi. Confirm the local
 dashboard still opens at home. Tailscale Serve stays private to the tailnet.
 Turn off the test browser's `192.168.50.1:3128` proxy setting before leaving
@@ -328,10 +353,11 @@ Never commit those files or paste their contents into a chat or ticket.
 From the management network, the dashboard should be reachable at:
 
 ```text
-https://jittersim.local:8080
+https://<pi-name>.local:8080
 ```
 
-From a device connected to `JitterSim-Test`, the dashboard and SSH ports must
+Without signing in, it must show only the plain sign-in page. From a device
+connected to the test Wi-Fi, the dashboard and SSH ports must
 not be reachable and `192.168.0.1` must not be reachable through the Pi. The
 device should still receive public internet access through the Pi gateway.
 This is an intentional block rather than a password redirect because a

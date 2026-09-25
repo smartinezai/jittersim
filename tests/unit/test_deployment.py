@@ -85,7 +85,9 @@ class InstallerTests(unittest.TestCase):
     def test_the_test_wifi_has_a_neutral_name_and_isolates_its_clients(self) -> None:
         self.assertIn("JITTERSIM_AP_SSID=TestNet", self.installer)
         self.assertNotIn("JitterSim-Test", self.installer)
-        self.assertIn("802-11-wireless.ap-isolation yes", self.installer)
+        # On unless ap.env turns it off, so an update keeps the owner's choice.
+        self.assertIn('ap_isolation="${JITTERSIM_AP_ISOLATION:-yes}"', self.installer)
+        self.assertIn('802-11-wireless.ap-isolation "$ap_isolation"', self.installer)
         # A changed setting restarts the access point like any other AP setting.
         self.assertEqual(self.installer.count("802-11-wireless.ap-isolation"), 3)
 

@@ -81,6 +81,13 @@ chown root:root "$CONFIG_DIR/runtime.env"
 chmod 0600 "$CONFIG_DIR/runtime.env"
 
 . "$CONFIG_DIR/ap.env"
+# Test Wi-Fi clients can't reach each other unless ap.env sets
+# JITTERSIM_AP_ISOLATION=no.
+ap_isolation="${JITTERSIM_AP_ISOLATION:-yes}"
+case "$ap_isolation" in
+    yes|no) ;;
+    *) echo "JITTERSIM_AP_ISOLATION must be yes or no" >&2; exit 1 ;;
+esac
 ap_active_connection=$(nmcli -g GENERAL.CONNECTION device show "$JITTERSIM_TEST_INTERFACE")
 ap_settings_before=
 if ! nmcli connection show jittersim-ap >/dev/null 2>&1; then
@@ -102,7 +109,7 @@ nmcli connection modify jittersim-ap \
     connection.interface-name "$JITTERSIM_TEST_INTERFACE" \
     connection.autoconnect yes \
     802-11-wireless.mode ap \
-    802-11-wireless.ap-isolation yes \
+    802-11-wireless.ap-isolation "$ap_isolation" \
     ipv4.method shared \
     ipv4.addresses 192.168.50.1/24 \
     ipv4.shared-dhcp-range 192.168.50.100,192.168.50.199 \

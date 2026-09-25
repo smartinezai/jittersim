@@ -175,7 +175,11 @@ Vodafone router ── Ethernet ──> Raspberry Pi
 ```
 
 Only devices on the JitterSim test Wi-Fi are affected. Devices that stay on the
-router Wi-Fi bypass JitterSim. The test Wi-Fi uses IPv4 sharing. Device rules
+router Wi-Fi bypass JitterSim. Devices on the test Wi-Fi can't reach each
+other: the access point isolates its clients, so a visitor can't see your
+laptop's shared folders, and casting between test Wi-Fi devices doesn't work.
+The [Pi guide](deploy/raspberry-pi/README.md#client-isolation) shows how to
+turn that off. The test Wi-Fi uses IPv4 sharing. Device rules
 and quotas match IPv4, while the browser proxy can connect to public IPv4 or
 IPv6 hosts for managed HTTPS traffic.
 
@@ -246,9 +250,13 @@ connected device to check its experienced speed.
   traffic.
 - **Hardware mode** uses the Pi helper to apply the saved plan.
 
-Enter the admin token in the **Control token** box and click **Check token** to
-load diagnostics. Dashboard actions show when they start and whether they
-worked, without requiring you to scroll to the status area.
+Sign in with the admin token. On the Pi, `sudo grep JITTERSIM_ADMIN_TOKEN
+/etc/jittersim/control.env` shows it. The browser stays signed in for 7 days or
+until you choose **Sign out**. Anyone without the token sees only a plain
+sign-in page that doesn't name JitterSim or its features, and an address that
+enters a wrong token 5 times waits 15 minutes. Scripts can still send the token
+as `Authorization: Bearer <token>`. Dashboard actions show when they start and
+whether they worked, without requiring you to scroll to the status area.
 
 For a Vodafone TG3442DE, the dashboard can read the primary Wi-Fi settings and
 turn the primary Wi-Fi radios on or off. The router password is used for one
@@ -264,9 +272,11 @@ through the Pi. The [Pi guide](deploy/raspberry-pi/README.md#remote-control-with
 has setup, access rules, checks and removal steps. Tailscale's Personal plan
 is [free for eligible home use](https://tailscale.com/pricing).
 
-On the Pi, open the dashboard over HTTPS at `https://jittersim.local:8080` or
-the Pi's Ethernet address. The installer creates a local certificate and prints
-its SHA-256 fingerprint. Verify that fingerprint before trusting the
+On the Pi, open the dashboard over HTTPS at `https://<pi-name>.local:8080`,
+where `<pi-name>` is the Pi's host name, or at its Ethernet address. The
+installer creates a local certificate named after the Pi and prints its SHA-256
+fingerprint. If the Pi's name gives JitterSim away, rename the Pi and run the
+installer again. Verify that fingerprint before trusting the
 certificate in your browser. A DHCP address change may require a new
 certificate. HTTPS protects the browser-to-Pi connection, but the TG3442DE's
 own local web interface still uses HTTP between the Pi and router.
