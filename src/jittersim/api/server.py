@@ -47,6 +47,7 @@ from jittersim.config.models import (
     UnaffectedDevice,
     WebsitePolicy,
     normalize_domain,
+    normalize_mac_address,
     time_quota_counter_id,
 )
 from jittersim.config.storage import (
@@ -67,7 +68,7 @@ from jittersim.engine.compiler import (
     MAX_SHAPED_MARKS_PER_PLAN,
     PlanError,
 )
-from jittersim.engine.conditions import device_conditions
+from jittersim.engine.conditions import device_conditions, everyone_else_condition
 from jittersim.engine.progression import progression_factor
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.service import compile_stored_plan
@@ -108,6 +109,9 @@ WRITE_PATHS = frozenset(
         "/api/time-quotas/start",
         "/api/time-quotas/stop",
         "/api/policies",
+        "/api/everyone-else",
+        "/api/unaffected-devices",
+        "/api/unaffected-devices/delete",
         "/api/access-point",
         "/api/router/sync-ap",
         "/api/router/wifi",
@@ -4780,6 +4784,7 @@ def _connected_device_payload(
     *,
     assignments_by_address: Dict[str, Device],
     labels_by_mac: Dict[str, Dict[str, str]],
+    unaffected_macs: frozenset = frozenset(),
 ) -> Dict[str, Any]:
     """Add saved display details and any matching profile to one station."""
 
@@ -4808,6 +4813,7 @@ def _connected_device_payload(
         "assigned_device_id": assignment.id if assignment is not None else None,
         "assigned_device_name": assignment.name if assignment is not None else None,
         "assigned_profile_id": assignment.profile_id if assignment is not None else None,
+        "unaffected": mac_address in unaffected_macs,
     }
 
 
@@ -4986,6 +4992,16 @@ def _policies_payload(repository: ConfigRepository) -> Dict[str, Any]:
     return {
         "mac": asdict(mac_policy),
         "websites": asdict(website_policy),
+    }
+
+
+def _everyone_else_payload(repository: ConfigRepository) -> Dict[str, Any]:
+    return {
+        "profile_id": repository.get_everyone_else_profile_id(),
+        "unaffected_devices": [
+            {"mac_address": device.mac_address, "name": device.name}
+            for device in repository.list_unaffected_devices()
+        ],
     }
 
 
@@ -5195,6 +5211,10 @@ class ControlServer(HTTPServer):
             return HTTPStatus.OK, "application/json", _json_bytes(
                 _policies_payload(self.repository)
             )
+        if path == "/api/everyone-else":
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                _everyone_else_payload(self.repository)
+            )
         if path == "/api/router":
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {
@@ -5269,11 +5289,15 @@ class ControlServer(HTTPServer):
                 str(device.ipv4_address): device for device in self.repository.list_devices()
             }
             labels_by_mac = self.repository.list_connected_device_labels()
+            unaffected_macs = frozenset(
+                device.mac_address for device in self.repository.list_unaffected_devices()
+            )
             devices = [
                 _connected_device_payload(
                     device,
                     assignments_by_address=assignments_by_address,
                     labels_by_mac=labels_by_mac,
+                    unaffected_macs=unaffected_macs,
                 )
                 for device in devices
             ]
@@ -5340,9 +5364,18 @@ class ControlServer(HTTPServer):
                 # Nothing runs on the network, so describe the saved settings.
                 # The scheduler's runtime plan would advance its rerolls.
                 plan = compile_stored_plan(repository=self.repository)
+            everyone_else = everyone_else_condition(plan)
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {
                     "applied": applied,
+                    "everyone_else": (
+                        None
+                        if everyone_else is None
+                        else {
+                            "condition": everyone_else.condition,
+                            "reasons": list(everyone_else.reasons),
+                        }
+                    ),
                     "devices": {
                         device_id: {"condition": state.condition, "reasons": list(state.reasons)}
                         for device_id, state in device_conditions(
@@ -5575,6 +5608,9 @@ class ControlServer(HTTPServer):
                 device = _device_from_payload(payload)
             except (KeyError, TypeError, ValueError) as error:
                 return _bad_request("invalid device configuration", error)
+            conflict = self._unaffected_conflict(device.mac_address)
+            if conflict is not None:
+                return conflict
             if self.repository.get_device(device.id) is None:
                 capacity_error = self._capacity_error(adding=1)
                 if capacity_error is not None:
@@ -6016,6 +6052,61 @@ class ControlServer(HTTPServer):
                 _time_quota_payload(refreshed, repository=self.repository),
             )
 
+        if path == "/api/everyone-else":
+            profile_id = payload.get("profile_id")
+            if profile_id is not None and (
+                not isinstance(profile_id, str) or self.repository.get_profile(profile_id) is None
+            ):
+                return _bad_request(
+                    "invalid everyone-else profile", ValueError("profile does not exist")
+                )
+            if profile_id is not None and self.repository.get_everyone_else_profile_id() is None:
+                capacity_error = self._capacity_error(adding=1)
+                if capacity_error is not None:
+                    return capacity_error
+            self.repository.save_everyone_else_profile_id(profile_id)
+            return self._apply_saved_change(
+                "everyone_else", _everyone_else_payload(self.repository)
+            )
+
+        if path == "/api/unaffected-devices":
+            try:
+                device = UnaffectedDevice(
+                    mac_address=payload["mac_address"], name=payload.get("name") or ""
+                )
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid unaffected device", error)
+            saved = self.repository.get_device_by_mac_address(device.mac_address)
+            if saved is not None:
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+                    {
+                        "error": (
+                            f"{device.mac_address} belongs to the saved device {saved.name}; "
+                            "delete that device first"
+                        )
+                    }
+                )
+            try:
+                self.repository.save_unaffected_device(device)
+            except StorageError as error:
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
+            return self._apply_saved_change(
+                "unaffected_device", {"mac_address": device.mac_address, "name": device.name}
+            )
+
+        if path == "/api/unaffected-devices/delete":
+            try:
+                mac_address = normalize_mac_address(_required_text(payload, "mac_address"))
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid unaffected device delete request", error)
+            if not self.repository.delete_unaffected_device(mac_address):
+                return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                    {"error": "unaffected device does not exist"}
+                )
+            return self._apply_saved_change(
+                "unaffected_device", {"mac_address": mac_address, "deleted": True}
+            )
+
         if path == "/api/policies":
             try:
                 mac_policy, website_policy = _policies_from_payload(payload)
@@ -6204,6 +6295,9 @@ class ControlServer(HTTPServer):
             device = _connected_device_from_payload(payload, self.repository)
         except (KeyError, TypeError, ValueError) as error:
             return _bad_request("invalid connected-device profile assignment", error)
+        conflict = self._unaffected_conflict(device.mac_address)
+        if conflict is not None:
+            return conflict
         try:
             snapshot = self.helper_client.connected_device_snapshot()
         except HelperClientError:
@@ -6329,6 +6423,18 @@ class ControlServer(HTTPServer):
         response.setdefault("live_applied", status == HTTPStatus.OK)
         return status, content_type, _json_bytes(response)
 
+    def _unaffected_conflict(
+        self, mac_address: Optional[str]
+    ) -> Optional[Tuple[int, str, bytes]]:
+        """Refuse to save a device whose MAC address is on the unaffected list."""
+
+        listed = {device.mac_address for device in self.repository.list_unaffected_devices()}
+        if mac_address is None or mac_address not in listed:
+            return None
+        return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+            {"error": f"{mac_address} is on the unaffected list; remove it there first"}
+        )
+
     def _capacity_error(self, *, adding: int) -> Optional[Tuple[int, str, bytes]]:
         """Refuse a change that needs more traffic classes than the kernel allows."""
 
@@ -6337,6 +6443,7 @@ class ControlServer(HTTPServer):
             + sum(quota.enabled for quota in self.repository.list_service_quotas())
             + sum(quota.enabled for quota in self.repository.list_time_quotas())
             + sum(assignment.enabled for assignment in self.repository.list_service_assignments())
+            + (self.repository.get_everyone_else_profile_id() is not None)
         )
         if in_use + adding <= MAX_SHAPED_MARKS_PER_PLAN:
             return None
