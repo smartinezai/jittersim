@@ -2096,6 +2096,8 @@ class ControlServerTests(unittest.TestCase):
             "  connectedTreatment({unaffected: true, assigned_profile_id: null}),\n"
             "  connectedTreatment({unaffected: false, assigned_profile_id: 'slow'}),\n"
             "  connectedTreatment({unaffected: false, assigned_profile_id: null}),\n"
+            # A saved device keeps its own profile even when its address is listed.
+            "  connectedTreatment({unaffected: true, assigned_profile_id: 'slow'}),\n"
             "];\n"
             "everyoneElse = {profile_id: '3g', unaffected_devices: []};\n"
             "labels.push(connectedTreatment({unaffected: false, assigned_profile_id: null}));\n"
@@ -2104,7 +2106,13 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(
             labels,
-            ["Unaffected", "Saved device: Slow", "Normal connection", "Everyone else: 3G"],
+            [
+                "Unaffected",
+                "Saved device: Slow",
+                "Normal connection",
+                "Saved device: Slow (also on the unaffected list)",
+                "Everyone else: 3G",
+            ],
         )
 
     def test_dashboard_lists_everyone_else_with_the_devices(self) -> None:

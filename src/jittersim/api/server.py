@@ -3096,10 +3096,12 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function connectedTreatment(device) {
-      if (device.unaffected) return "Unaffected";
       if (device.assigned_profile_id) {
-        return "Saved device: " + profileName(device.assigned_profile_id);
+        const saved = "Saved device: " + profileName(device.assigned_profile_id);
+        // A saved device keeps its own profile even when its address is listed.
+        return device.unaffected ? saved + " (also on the unaffected list)" : saved;
       }
+      if (device.unaffected) return "Unaffected";
       if (everyoneElse.profile_id) return "Everyone else: " + profileName(everyoneElse.profile_id);
       return "Normal connection";
     }
