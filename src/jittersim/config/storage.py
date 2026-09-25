@@ -552,6 +552,79 @@ class ConfigRepository:
         ).fetchall()
         return tuple(self._device_from_row(row) for row in rows)
 
+    def profile_references(self, profile_id: str, *, now: int) -> tuple:
+        """Describe every device, rule and limit that still uses one profile."""
+
+        device_names = {device.id: device.name for device in self.list_devices()}
+        groups = self.list_device_groups()
+        group_names = {group.id: group.name for group in groups}
+        references = [
+            f"device {device.name}"
+            for device in self.list_devices()
+            if device.profile_id == profile_id
+        ]
+        references.extend(
+            f"group {group.name}" for group in groups if group.profile_id == profile_id
+        )
+        references.extend(
+            f"schedule {schedule.id}"
+            for schedule in self.list_schedules()
+            if schedule.profile_id == profile_id
+        )
+        references.extend(
+            f"timer for {device_names.get(timer.device_id, timer.device_id)}"
+            for timer in self.list_active_timers(now=now)
+            if timer.profile_id == profile_id
+        )
+        references.extend(
+            f"progression for {device_names.get(progression.device_id, progression.device_id)}"
+            for progression in self.list_active_progressions(now=now)
+            if profile_id in (progression.start_profile_id, progression.end_profile_id)
+        )
+        references.extend(
+            f"data limit for {device_names.get(limit.device_id, limit.device_id)}"
+            for limit in self.list_data_limits()
+            if limit.profile_id == profile_id
+        )
+        references.extend(
+            f"shared limit for {group_names.get(limit.group_id, limit.group_id)}"
+            for limit in self.list_group_data_limits()
+            if limit.profile_id == profile_id
+        )
+        references.extend(
+            f"service limit {quota.name}"
+            for quota in self.list_service_quotas()
+            if quota.profile_id == profile_id
+        )
+        references.extend(
+            f"time limit {quota.name}"
+            for quota in self.list_time_quotas()
+            if quota.profile_id == profile_id
+        )
+        return tuple(references)
+
+    def delete_profile(self, profile_id: str) -> bool:
+        """Delete one profile that no device uses. Check profile_references first."""
+
+        try:
+            return self._delete_row("profiles", "id", profile_id)
+        except sqlite3.IntegrityError as error:
+            self._connection.rollback()
+            raise StorageError(f"profile {profile_id} is still in use") from error
+
+    def delete_device(self, device_id: str) -> bool:
+        """Delete one device with its schedules, timers, progressions and limits."""
+
+        return self._delete_row("devices", "id", device_id)
+
+    def _delete_row(self, table: str, key_column: str, key: str) -> bool:
+        cursor = self._connection.execute(f"DELETE FROM {table} WHERE {key_column} = ?", (key,))
+        if not cursor.rowcount:
+            return False
+        self._bump_configuration_version()
+        self._connection.commit()
+        return True
+
     def get_device_group(self, group_id: str) -> Optional[DeviceGroup]:
         """Return one device group or `None` when it is not stored."""
 
@@ -621,12 +694,7 @@ class ConfigRepository:
     def delete_device_group(self, group_id: str) -> bool:
         """Delete one group and release its device members."""
 
-        cursor = self._connection.execute("DELETE FROM device_groups WHERE id = ?", (group_id,))
-        if cursor.rowcount:
-            self._bump_configuration_version()
-            self._connection.commit()
-            return True
-        return False
+        return self._delete_row("device_groups", "id", group_id)
 
     def save_schedule(self, schedule: Schedule) -> None:
         """Insert or update one repeating schedule."""
@@ -661,13 +729,10 @@ class ConfigRepository:
             self._connection.rollback()
             raise StorageError(f"could not save schedule {schedule.id}") from error
 
-    def delete_schedule(self, schedule_id: str) -> None:
+    def delete_schedule(self, schedule_id: str) -> bool:
         """Delete one schedule when it exists."""
 
-        cursor = self._connection.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
-        if cursor.rowcount:
-            self._bump_configuration_version()
-            self._connection.commit()
+        return self._delete_row("schedules", "id", schedule_id)
 
     def list_schedules(self) -> tuple:
         """Return all schedules in stable identifier order."""
@@ -941,6 +1006,26 @@ class ConfigRepository:
         for table in ("data_limits", "group_data_limits", "service_quotas", "time_quotas"):
             self._connection.execute(f"UPDATE {table} SET counter_bytes = 0")
         self._connection.commit()
+
+    def delete_data_limit(self, device_id: str) -> bool:
+        """Delete one device quota when it exists."""
+
+        return self._delete_row("data_limits", "device_id", device_id)
+
+    def delete_group_data_limit(self, group_id: str) -> bool:
+        """Delete one shared group quota when it exists."""
+
+        return self._delete_row("group_data_limits", "group_id", group_id)
+
+    def delete_service_quota(self, quota_id: str) -> bool:
+        """Delete one service quota when it exists."""
+
+        return self._delete_row("service_quotas", "id", quota_id)
+
+    def delete_time_quota(self, quota_id: str) -> bool:
+        """Delete one timed service quota when it exists."""
+
+        return self._delete_row("time_quotas", "id", quota_id)
 
     def reset_data_limit_usage(
         self,

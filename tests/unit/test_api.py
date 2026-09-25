@@ -473,6 +473,162 @@ class ControlServerTests(unittest.TestCase):
                 self.assertEqual(status, 400)
                 self.assertTrue(json.loads(body)["error"].startswith(message))
 
+    def test_deletes_need_the_admin_token(self) -> None:
+        self.server.admin_token = "admin-token"
+
+        unauthorized = self._send(
+            "POST", "/api/devices/delete", authorization="Bearer wrong", body=b'{"id": "alice"}'
+        )
+        missing = self._send("POST", "/api/devices/delete", body=b'{"id": "nobody"}')
+
+        self.assertEqual(unauthorized["status"], 401)
+        self.assertEqual(missing["status"], 404)
+        self.assertIsNotNone(self.repository.get_device("alice"))
+
+    def test_profile_delete_refuses_a_profile_in_use(self) -> None:
+        self.repository.save_profile(Profile(id="unused", name="Unused"))
+
+        in_use_status, _, in_use_body = self.server.write_response_for(
+            "/api/profiles/delete", {"id": "slow"}
+        )
+        unused_status, _, _ = self.server.write_response_for(
+            "/api/profiles/delete", {"id": "unused"}
+        )
+
+        self.assertEqual(in_use_status, 409)
+        self.assertEqual(
+            json.loads(in_use_body),
+            {
+                "error": "profile is in use by device Alice's laptop",
+                "references": ["device Alice's laptop"],
+            },
+        )
+        self.assertEqual(unused_status, 200)
+        self.assertIsNone(self.repository.get_profile("unused"))
+        self.assertIsNotNone(self.repository.get_profile("slow"))
+
+    def test_deleting_a_device_reapplies_the_plan_without_it(self) -> None:
+        helper = FakeHelper()
+        self.server.helper_client = helper
+        self.repository.update_runtime_state(
+            observed_state="applied",
+            last_action="apply",
+            last_result="success",
+            last_error=None,
+        )
+
+        status, _, body = self.server.write_response_for("/api/devices/delete", {"id": "alice"})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["device"], {"id": "alice", "deleted": True})
+        self.assertTrue(json.loads(body)["live_applied"])
+        self.assertEqual(helper.applied_plan.mark_rules, ())
+        self.assertIsNone(self.repository.get_device("alice"))
+
+    def test_rules_and_limits_can_be_deleted(self) -> None:
+        self.server.write_response_for(
+            "/api/schedules",
+            {
+                "id": "work",
+                "device_id": "alice",
+                "profile_id": "slow",
+                "days_of_week": [0],
+                "start_minute": 540,
+                "end_minute": 1_020,
+            },
+        )
+        self.server.write_response_for(
+            "/api/data-limits", {"device_id": "alice", "profile_id": "slow", "limit_bytes": 1_000}
+        )
+        self.server.write_response_for(
+            "/api/groups", {"id": "family", "name": "Family", "device_ids": ["alice"]}
+        )
+        self.server.write_response_for(
+            "/api/group-data-limits", {"group_id": "family", "profile_id": "slow", "limit_bytes": 1}
+        )
+
+        deletes = (
+            ("/api/schedules/delete", {"id": "work"}),
+            ("/api/data-limits/delete", {"device_id": "alice"}),
+            ("/api/group-data-limits/delete", {"group_id": "family"}),
+            ("/api/service-quotas/delete", {"id": "nothing"}),
+            ("/api/time-quotas/delete", {"id": "nothing"}),
+        )
+        statuses = [self.server.write_response_for(path, payload)[0] for path, payload in deletes]
+        repeated = [self.server.write_response_for(path, payload)[0] for path, payload in deletes]
+
+        self.assertEqual(statuses, [200, 200, 200, 404, 404])
+        self.assertEqual(repeated, [404, 404, 404, 404, 404])
+        self.assertEqual(self.repository.list_schedules(), ())
+        self.assertIsNone(self.repository.get_data_limit("alice"))
+        self.assertIsNone(self.repository.get_group_data_limit("family"))
+
+    def test_saving_refuses_more_devices_than_the_kernel_can_shape(self) -> None:
+        for index in range(14):
+            self.repository.save_device(
+                Device(
+                    id=f"device-{index:02d}",
+                    name=f"Device {index}",
+                    ipv4_address=f"192.168.50.{index + 100}",
+                    profile_id="slow",
+                )
+            )
+
+        status, _, body = self.server.write_response_for(
+            "/api/devices",
+            {"id": "extra", "name": "Extra", "ipv4_address": "192.168.50.99", "profile_id": "slow"},
+        )
+        update_status, _, _ = self.server.write_response_for(
+            "/api/devices",
+            {
+                "id": "alice",
+                "name": "Renamed",
+                "ipv4_address": "192.168.50.10",
+                "profile_id": "slow",
+            },
+        )
+
+        self.assertEqual(status, 409)
+        self.assertIn("at most 15 devices and service limits", json.loads(body)["error"])
+        self.assertIsNone(self.repository.get_device("extra"))
+        self.assertEqual(update_status, 200)
+
+    def test_enabling_a_limit_counts_against_the_same_capacity(self) -> None:
+        self.repository.save_domain_observations(
+            (DomainObservation("192.168.50.10", "netflix.com", 1, 10, 10),),
+            now=10,
+        )
+        for index in range(14):
+            self.repository.save_device(
+                Device(
+                    id=f"device-{index:02d}",
+                    name=f"Device {index}",
+                    ipv4_address=f"192.168.50.{index + 100}",
+                    profile_id="slow",
+                )
+            )
+        quota = {
+            "id": "alice-netflix-time",
+            "device_id": "alice",
+            "name": "Netflix time",
+            "domains": ["netflix.com"],
+            "profile_id": "slow",
+            "limit_seconds": 60,
+            "window_duration_seconds": 3_600,
+        }
+
+        disabled_status, _, _ = self.server.write_response_for(
+            "/api/time-quotas", {**quota, "enabled": False}
+        )
+        enabled_status, _, body = self.server.write_response_for(
+            "/api/time-quotas", {**quota, "enabled": True}
+        )
+
+        self.assertEqual(disabled_status, 200)
+        self.assertEqual(enabled_status, 409)
+        self.assertIn("at most 15 devices and service limits", json.loads(body)["error"])
+        self.assertFalse(self.repository.get_time_quota("alice-netflix-time").enabled)
+
     def test_list_fields_reject_plain_strings(self) -> None:
         requests = (
             ("/api/policies", {"websites": {"mode": "unrestricted", "blocked_domains": "netflix"}}),

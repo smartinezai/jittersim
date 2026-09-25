@@ -215,6 +215,114 @@ class ConfigRepositoryTests(unittest.TestCase):
             with ConfigRepository(path) as repository:
                 self.assertEqual(repository.total_domain_queries("192.168.50.10"), 7)
 
+    def _save_lab(self) -> None:
+        for profile in (
+            Profile(id="normal", name="Normal"),
+            Profile(id="slow", name="Slow"),
+            Profile(id="unused", name="Unused"),
+        ):
+            self.repository.save_profile(profile)
+        self.repository.save_device(Device("alice", "Alice's laptop", "192.168.50.10", "normal"))
+        self.repository.save_device(Device("bob", "Bob's phone", "192.168.50.11", "normal"))
+        self.repository.save_device_group(
+            DeviceGroup(id="family", name="Family", device_ids=("alice", "bob"))
+        )
+        self.repository.save_schedule(
+            Schedule(
+                id="work-hours",
+                device_id="alice",
+                profile_id="slow",
+                days_of_week=(0,),
+                start_minute=540,
+                end_minute=1_020,
+            )
+        )
+        self.repository.save_data_limit(
+            DataLimit(device_id="alice", profile_id="slow", limit_bytes=500, last_reset_at=100)
+        )
+        self.repository.save_group_data_limit(
+            GroupDataLimit(group_id="family", profile_id="slow", limit_bytes=500, last_reset_at=100)
+        )
+        self.repository.save_service_quota(
+            ServiceQuota(
+                id="alice-video",
+                device_id="alice",
+                name="Video",
+                domains=("netflix.com",),
+                profile_id="slow",
+                limit_bytes=500,
+                last_reset_at=100,
+            )
+        )
+        self.repository.save_time_quota(
+            TimeQuota(
+                id="alice-video-time",
+                device_id="alice",
+                name="Video time",
+                domains=("netflix.com",),
+                profile_id="slow",
+                limit_seconds=300,
+                window_duration_seconds=3_600,
+                last_reset_at=100,
+            )
+        )
+
+    def test_profile_references_name_everything_that_uses_a_profile(self) -> None:
+        self._save_lab()
+
+        self.assertEqual(
+            self.repository.profile_references("slow", now=200),
+            (
+                "schedule work-hours",
+                "data limit for Alice's laptop",
+                "shared limit for Family",
+                "service limit Video",
+                "time limit Video time",
+            ),
+        )
+        self.assertEqual(
+            self.repository.profile_references("normal", now=200),
+            ("device Alice's laptop", "device Bob's phone"),
+        )
+        self.assertEqual(self.repository.profile_references("unused", now=200), ())
+
+    def test_deleting_a_device_removes_its_rules(self) -> None:
+        self._save_lab()
+
+        self.assertTrue(self.repository.delete_device("alice"))
+
+        self.assertIsNone(self.repository.get_device("alice"))
+        self.assertEqual(self.repository.list_schedules(), ())
+        self.assertIsNone(self.repository.get_data_limit("alice"))
+        self.assertEqual(self.repository.list_service_quotas(), ())
+        self.assertEqual(self.repository.list_time_quotas(), ())
+        self.assertEqual(self.repository.get_device_group("family").device_ids, ("bob",))
+        self.assertFalse(self.repository.delete_device("alice"))
+
+    def test_deletes_report_whether_something_was_removed(self) -> None:
+        self._save_lab()
+
+        deletes = (
+            (self.repository.delete_schedule, "work-hours"),
+            (self.repository.delete_data_limit, "alice"),
+            (self.repository.delete_group_data_limit, "family"),
+            (self.repository.delete_service_quota, "alice-video"),
+            (self.repository.delete_time_quota, "alice-video-time"),
+            (self.repository.delete_profile, "slow"),
+            (self.repository.delete_profile, "unused"),
+        )
+        for delete, identifier in deletes:
+            with self.subTest(delete=delete.__name__, identifier=identifier):
+                self.assertTrue(delete(identifier))
+                self.assertFalse(delete(identifier))
+        self.assertEqual(self.repository.profile_references("normal", now=200), (
+            "device Alice's laptop",
+            "device Bob's phone",
+        ))
+        self.assertEqual(
+            [profile.id for profile in self.repository.list_profiles()], ["normal"]
+        )
+
     def test_round_trips_byte_progression_targets(self) -> None:
         self.repository.save_profile(Profile(id="normal", name="Normal"))
         self.repository.save_profile(Profile(id="slow", name="Slow"))

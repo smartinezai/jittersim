@@ -37,7 +37,7 @@ from jittersim.config.models import (
 )
 from jittersim.config.storage import ConfigRepository, DatabasePath, StorageError
 from jittersim.engine.codec import plan_to_payload
-from jittersim.engine.compiler import PlanError
+from jittersim.engine.compiler import MAX_TRAFFIC_CLASSES_PER_PLAN, PlanError
 from jittersim.engine.progression import progression_factor
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.service import compile_stored_plan
@@ -48,21 +48,28 @@ MAX_JSON_BODY_BYTES = 64 * 1024
 WRITE_PATHS = frozenset(
     (
         "/api/profiles",
+        "/api/profiles/delete",
         "/api/devices",
+        "/api/devices/delete",
         "/api/groups",
         "/api/groups/delete",
         "/api/schedules",
+        "/api/schedules/delete",
         "/api/timers",
         "/api/timers/cancel",
         "/api/progressions",
         "/api/progressions/stop",
         "/api/data-limits",
+        "/api/data-limits/delete",
         "/api/data-limits/reset",
         "/api/group-data-limits",
+        "/api/group-data-limits/delete",
         "/api/group-data-limits/reset",
         "/api/service-quotas",
+        "/api/service-quotas/delete",
         "/api/service-quotas/reset",
         "/api/time-quotas",
+        "/api/time-quotas/delete",
         "/api/time-quotas/reset",
         "/api/time-quotas/start",
         "/api/time-quotas/stop",
@@ -3776,6 +3783,62 @@ class ControlServer(HTTPServer):
     def write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
         """Handle one supported configuration or network action request."""
 
+        if path == "/api/profiles/delete":
+            try:
+                profile_id = _required_text(payload, "id")
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid profile delete request", error)
+            if self.repository.get_profile(profile_id) is None:
+                return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                    {"error": "profile does not exist"}
+                )
+            references = self.repository.profile_references(profile_id, now=int(time.time()))
+            if references:
+                # Deleting would silently remove the rules that use the profile.
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+                    {
+                        "error": "profile is in use by " + ", ".join(references),
+                        "references": list(references),
+                    }
+                )
+            self.repository.delete_profile(profile_id)
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {"profile": {"id": profile_id, "deleted": True}}
+            )
+
+        deletes = {
+            "/api/devices/delete": ("id", "device", self.repository.delete_device),
+            "/api/schedules/delete": ("id", "schedule", self.repository.delete_schedule),
+            "/api/data-limits/delete": (
+                "device_id",
+                "data_limit",
+                self.repository.delete_data_limit,
+            ),
+            "/api/group-data-limits/delete": (
+                "group_id",
+                "group_data_limit",
+                self.repository.delete_group_data_limit,
+            ),
+            "/api/service-quotas/delete": (
+                "id",
+                "service_quota",
+                self.repository.delete_service_quota,
+            ),
+            "/api/time-quotas/delete": ("id", "time_quota", self.repository.delete_time_quota),
+        }
+        if path in deletes:
+            key, kind, delete = deletes[path]
+            label = kind.replace("_", " ")
+            try:
+                identifier = _required_text(payload, key)
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request(f"invalid {label} delete request", error)
+            if not delete(identifier):
+                return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                    {"error": f"{label} does not exist"}
+                )
+            return self._apply_saved_change(kind, {key: identifier, "deleted": True})
+
         if path == "/api/profiles":
             try:
                 profile = _profile_from_payload(payload)
@@ -3791,6 +3854,10 @@ class ControlServer(HTTPServer):
                 device = _device_from_payload(payload)
             except (KeyError, TypeError, ValueError) as error:
                 return _bad_request("invalid device configuration", error)
+            if self.repository.get_device(device.id) is None:
+                capacity_error = self._capacity_error(adding=1)
+                if capacity_error is not None:
+                    return capacity_error
             self.repository.save_device(device)
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {"device": _device_payload(device)}
@@ -3822,7 +3889,7 @@ class ControlServer(HTTPServer):
                     )
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid device group delete request", error)
-            return self._apply_quota_change("group", {"id": group_id, "deleted": True})
+            return self._apply_saved_change("group", {"id": group_id, "deleted": True})
 
         if path == "/api/schedules":
             try:
@@ -3944,7 +4011,7 @@ class ControlServer(HTTPServer):
                 self.repository.save_data_limit(data_limit)
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid data limit configuration", error)
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "data_limit",
                 _data_limit_payload(data_limit, repository=self.repository),
             )
@@ -3967,7 +4034,7 @@ class ControlServer(HTTPServer):
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid data limit reset request", error)
             refreshed = self.repository.get_data_limit(device_id)
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "data_limit",
                 _data_limit_payload(refreshed, repository=self.repository),
             )
@@ -3985,7 +4052,7 @@ class ControlServer(HTTPServer):
                 self.repository.save_group_data_limit(data_limit)
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid group data limit configuration", error)
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "group_data_limit",
                 _group_data_limit_payload(data_limit, repository=self.repository),
             )
@@ -4008,7 +4075,7 @@ class ControlServer(HTTPServer):
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid group data limit reset request", error)
             refreshed = self.repository.get_group_data_limit(group_id)
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "group_data_limit",
                 _group_data_limit_payload(refreshed, repository=self.repository),
             )
@@ -4020,10 +4087,15 @@ class ControlServer(HTTPServer):
                     raise ValueError("device does not exist")
                 if self.repository.get_profile(quota.profile_id) is None:
                     raise ValueError("profile does not exist")
+                existing = self.repository.get_service_quota(quota.id)
+                if quota.enabled and not (existing is not None and existing.enabled):
+                    capacity_error = self._capacity_error(adding=1)
+                    if capacity_error is not None:
+                        return capacity_error
                 self.repository.save_service_quota(quota)
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid service quota configuration", error)
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "service_quota",
                 _service_quota_payload(quota, repository=self.repository),
             )
@@ -4046,7 +4118,7 @@ class ControlServer(HTTPServer):
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid service quota reset request", error)
             refreshed = self.repository.get_service_quota(quota_id)
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "service_quota",
                 _service_quota_payload(refreshed, repository=self.repository),
             )
@@ -4058,10 +4130,15 @@ class ControlServer(HTTPServer):
                     raise ValueError("device does not exist")
                 if self.repository.get_profile(quota.profile_id) is None:
                     raise ValueError("profile does not exist")
+                existing = self.repository.get_time_quota(quota.id)
+                if quota.enabled and not (existing is not None and existing.enabled):
+                    capacity_error = self._capacity_error(adding=1)
+                    if capacity_error is not None:
+                        return capacity_error
                 self.repository.save_time_quota(quota)
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid time quota configuration", error)
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "time_quota",
                 _time_quota_payload(quota, repository=self.repository),
             )
@@ -4091,7 +4168,7 @@ class ControlServer(HTTPServer):
                     )
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid time quota start request", error)
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "time_quota",
                 _time_quota_payload(refreshed, repository=self.repository),
             )
@@ -4108,7 +4185,7 @@ class ControlServer(HTTPServer):
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid time quota stop request", error)
             refreshed = self.repository.get_time_quota(quota_id)
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "time_quota",
                 _time_quota_payload(refreshed, repository=self.repository),
             )
@@ -4133,7 +4210,7 @@ class ControlServer(HTTPServer):
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid time quota reset request", error)
             refreshed = self.repository.get_time_quota(quota_id)
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "time_quota",
                 _time_quota_payload(refreshed, repository=self.repository),
             )
@@ -4326,6 +4403,10 @@ class ControlServer(HTTPServer):
             device = _connected_device_from_payload(payload, self.repository)
         except (KeyError, TypeError, ValueError) as error:
             return _bad_request("invalid connected-device profile assignment", error)
+        if self.repository.get_device(device.id) is None:
+            capacity_error = self._capacity_error(adding=1)
+            if capacity_error is not None:
+                return capacity_error
         self.repository.save_device(device)
         status, content_type, body = self._apply_configuration()
         response = json.loads(body.decode("utf-8"))
@@ -4369,19 +4450,19 @@ class ControlServer(HTTPServer):
         values = [counters[device_id] for device_id in group.device_ids]
         return sum(values) if all(isinstance(value, int) and value >= 0 for value in values) else None
 
-    def _apply_quota_change(
+    def _apply_saved_change(
         self,
         key: str,
         value: Dict[str, Any],
     ) -> Tuple[int, str, bytes]:
-        """Return a saved quota and apply it immediately when hardware is available."""
+        """Return a saved change and apply it immediately when hardware is available."""
 
         if self.helper_client is None:
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {
                     key: value,
                     "live_applied": False,
-                    "message": "quota saved; apply the configuration in hardware mode to start it",
+                    "message": "change saved; apply the configuration in hardware mode to use it",
                 }
             )
         status, content_type, body = self._apply_after_change()
@@ -4389,6 +4470,25 @@ class ControlServer(HTTPServer):
         response[key] = value
         response.setdefault("live_applied", status == HTTPStatus.OK)
         return status, content_type, _json_bytes(response)
+
+    def _capacity_error(self, *, adding: int) -> Optional[Tuple[int, str, bytes]]:
+        """Refuse a change that needs more traffic classes than the kernel allows."""
+
+        in_use = (
+            len(self.repository.list_devices())
+            + sum(quota.enabled for quota in self.repository.list_service_quotas())
+            + sum(quota.enabled for quota in self.repository.list_time_quotas())
+        )
+        if in_use + adding <= MAX_TRAFFIC_CLASSES_PER_PLAN:
+            return None
+        return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+            {
+                "error": (
+                    f"JitterSim can shape at most {MAX_TRAFFIC_CLASSES_PER_PLAN} devices and "
+                    "service limits together; delete one first"
+                )
+            }
+        )
 
     def _apply_after_change(self) -> Tuple[int, str, bytes]:
         """Re-apply the plan for a saved change unless the network was reset."""
@@ -4703,6 +4803,15 @@ def _bad_request(message: str, error: Exception) -> Tuple[int, str, bytes]:
     elif isinstance(error, ValueError) and str(error):
         message = f"{message}: {error}"
     return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes({"error": message})
+
+
+def _required_text(payload: Dict[str, Any], key: str) -> str:
+    """Read one required non-empty string field."""
+
+    value = payload[key]
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{key} must be a non-empty string")
+    return value
 
 
 def _list_field(payload: Dict[str, Any], key: str, *, required: bool = False) -> tuple:
