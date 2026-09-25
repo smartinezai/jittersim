@@ -84,10 +84,11 @@ def _format_impairment_arguments(queue: QueueSpec) -> List[str]:
     return arguments
 
 
-# JitterSim's conntrack mark for connections from unaffected clients. In the
-# forward hook, download packets don't carry the client's MAC address yet, so
-# the connection's upload packets set this mark and its download packets check it.
-UNAFFECTED_CONNECTION_MARK = 0x4A53
+# The conntrack mark bit JitterSim owns for connections from unaffected clients.
+# In the forward hook, download packets don't carry the client's MAC address
+# yet, so the connection's upload packets set this bit and its download packets
+# check it. Other bits of the mark are left alone.
+UNAFFECTED_CONNECTION_BIT = 0x01000000
 
 
 def _render_everyone_else_rules(plan: NetworkPlan, topology: Topology) -> List[str]:
@@ -95,22 +96,23 @@ def _render_everyone_else_rules(plan: NetworkPlan, topology: Topology) -> List[s
     test_interface = topology.test_interface
     unaffected = _render_set(rule.unaffected_macs)
     saved = _render_set([mark_rule.ipv4_address for mark_rule in plan.mark_rules])
-    connection_mark = f"{UNAFFECTED_CONNECTION_MARK:#x}"
+    bit = f"{UNAFFECTED_CONNECTION_BIT:#010x}"
+    other_bits = f"{0xFFFFFFFF ^ UNAFFECTED_CONNECTION_BIT:#010x}"
     upload = f"iifname \"{test_interface}\" meta nfproto ipv4"
     download = f"oifname \"{test_interface}\" meta nfproto ipv4"
     lines = []
     if rule.unaffected_macs:
         upload += f" ether saddr != {unaffected}"
-        download += f" ct mark != {connection_mark}"
+        download += f" ct mark and {bit} != {bit}"
         lines.append(
             f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
-            f"ether saddr {unaffected} ct mark set {connection_mark} "
+            f"ether saddr {unaffected} ct mark set ct mark or {bit} "
             "comment \"mark connections of unaffected clients\""
         )
-        # Only JitterSim's own value is cleared, when a client leaves the list.
         lines.append(
             f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
-            f"ether saddr != {unaffected} ct mark {connection_mark} ct mark set 0 "
+            f"ether saddr != {unaffected} ct mark and {bit} == {bit} "
+            f"ct mark set ct mark and {other_bits} "
             "comment \"clear connections of clients no longer unaffected\""
         )
     if plan.mark_rules:
@@ -118,11 +120,16 @@ def _render_everyone_else_rules(plan: NetworkPlan, topology: Topology) -> List[s
         upload += f" ip saddr != {saved}"
         download += f" ip daddr != {saved}"
     if rule.blocked:
-        for chain in ("input", "forward"):
-            lines.append(
-                f"add rule inet {PROJECT_TABLE} {chain} {upload} drop "
-                "comment \"temporarily disconnect everyone else\""
-            )
+        # A client asking for an address sends from 0.0.0.0 and may be a saved
+        # device, so DHCP still reaches the Pi.
+        lines.append(
+            f"add rule inet {PROJECT_TABLE} input {upload} ip saddr != 0.0.0.0 drop "
+            "comment \"temporarily disconnect everyone else\""
+        )
+        lines.append(
+            f"add rule inet {PROJECT_TABLE} forward {upload} drop "
+            "comment \"temporarily disconnect everyone else\""
+        )
     lines.append(
         f"add rule inet {PROJECT_TABLE} forward {upload} meta mark set {rule.mark} counter "
         "comment \"everyone else upload\""

@@ -46,6 +46,26 @@ ENABLED = (
     and all(shutil.which(tool) for tool in ("ip", "tc", "nft", "ping"))
 )
 NORMAL = Profile(id="normal", name="Normal")
+# Sends a DHCP-style request from 0.0.0.0, like a client that has no address
+# yet. A raw frame is needed because the kernel would pick a real source.
+DHCP_REQUEST_SENDER = r"""
+import socket, struct, sys
+
+interface, mac = sys.argv[1], bytes.fromhex(sys.argv[2].replace(":", ""))
+payload = b"\x01\x01\x06\x00" + bytes(236)
+udp = struct.pack("!HHHH", 68, 67, 8 + len(payload), 0) + payload
+header = struct.pack(
+    "!BBHHHBBH4s4s", 0x45, 0, 20 + len(udp), 0, 0, 64, 17, 0, bytes(4), b"\xff" * 4
+)
+checksum = sum(struct.unpack("!10H", header))
+while checksum >> 16:
+    checksum = (checksum & 0xFFFF) + (checksum >> 16)
+header = header[:10] + struct.pack("!H", ~checksum & 0xFFFF) + header[12:]
+with socket.socket(socket.AF_PACKET, socket.SOCK_RAW) as sender:
+    sender.bind((interface, 0))
+    for _ in range(3):
+        sender.send(b"\xff" * 6 + mac + b"\x08\x00" + header + udp)
+"""
 
 
 def device(device_id: str, last_octet: int, profile_id: str) -> Device:
@@ -420,9 +440,26 @@ class LinuxDatapathTests(unittest.TestCase):
             [device("a-phone", 11, "normal")], NORMAL, unaffected=(OTHER_CLIENT_MAC,), blocked=True
         )
 
-        self.assertFalse(self.ping("192.168.50.10")[0])
-        self.assertTrue(self.ping("192.168.50.11")[0])
-        self.assertTrue(self.ping(namespace=OTHER_CLIENT)[0])
+        # Through the Pi, and to the Pi itself.
+        for destination in (ROUTER_ADDRESS, "192.168.50.1"):
+            with self.subTest(destination=destination):
+                self.assertFalse(self.ping("192.168.50.10", destination=destination)[0])
+                self.assertTrue(self.ping("192.168.50.11", destination=destination)[0])
+                self.assertTrue(self.ping(namespace=OTHER_CLIENT, destination=destination)[0])
+
+    def test_an_everyone_else_outage_still_lets_clients_ask_for_an_address(self) -> None:
+        self.apply_everyone_else([device("a-phone", 11, "normal")], NORMAL, blocked=True)
+        # Count DHCP requests that get past JitterSim's input chain.
+        _in(PI, "nft", "add", "table", "inet", "probe")
+        self.addCleanup(_in, PI, "nft", "delete", "table", "inet", "probe", check=False)
+        _in(PI, "nft", "add", "chain", "inet", "probe", "input",
+            "{ type filter hook input priority 10; }")
+        _in(PI, "nft", "add", "rule", "inet", "probe", "input", "udp", "dport", "67", "counter")
+
+        _in(CLIENT, sys.executable, "-c", DHCP_REQUEST_SENDER, "c0", CLIENT_MAC)
+
+        rules = _in(PI, "nft", "list", "table", "inet", "probe").stdout
+        self.assertEqual(re.search(r"counter packets (\d+)", rules).group(1), "3", rules)
 
 if __name__ == "__main__":
     unittest.main()

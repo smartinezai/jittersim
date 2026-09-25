@@ -553,17 +553,20 @@ class EveryoneElseRenderingTests(unittest.TestCase):
             unaffected_macs=("aa:bb:cc:dd:ee:ff",),
         )
 
+        # JitterSim sets, checks and clears only its own bit of the connection mark.
         expected = [
             'add rule inet jittersim forward iifname "wlan0" ether saddr { aa:bb:cc:dd:ee:ff } '
-            'ct mark set 0x4a53 comment "mark connections of unaffected clients"',
+            "ct mark set ct mark or 0x01000000 "
+            'comment "mark connections of unaffected clients"',
             'add rule inet jittersim forward iifname "wlan0" '
-            "ether saddr != { aa:bb:cc:dd:ee:ff } ct mark 0x4a53 ct mark set 0 "
+            "ether saddr != { aa:bb:cc:dd:ee:ff } ct mark and 0x01000000 == 0x01000000 "
+            "ct mark set ct mark and 0xfeffffff "
             'comment "clear connections of clients no longer unaffected"',
             'add rule inet jittersim forward iifname "wlan0" meta nfproto ipv4 '
             "ether saddr != { aa:bb:cc:dd:ee:ff } ip saddr != { 192.168.50.10 } "
             'meta mark set 2 counter comment "everyone else upload"',
             'add rule inet jittersim forward oifname "wlan0" meta nfproto ipv4 '
-            "ct mark != 0x4a53 ip daddr != { 192.168.50.10 } "
+            "ct mark and 0x01000000 != 0x01000000 ip daddr != { 192.168.50.10 } "
             'meta mark set 2 counter comment "everyone else download"',
         ]
         start = lines.index(expected[0])
@@ -584,15 +587,26 @@ class EveryoneElseRenderingTests(unittest.TestCase):
         self.assertEqual([line for line in lines if "ct mark" in line], [])
 
     def test_an_outage_drops_everyone_else_in_both_chains(self) -> None:
-        lines = self.lines(unaffected_macs=("aa:bb:cc:dd:ee:ff",), blocked=True)
+        lines = self.lines(
+            devices=(make_device("alice", "192.168.50.10", "normal"),),
+            unaffected_macs=("aa:bb:cc:dd:ee:ff",),
+            blocked=True,
+        )
 
-        for chain in ("input", "forward"):
-            self.assertIn(
-                f'add rule inet jittersim {chain} iifname "wlan0" meta nfproto ipv4 '
-                "ether saddr != { aa:bb:cc:dd:ee:ff } drop "
-                'comment "temporarily disconnect everyone else"',
-                lines,
-            )
+        # A client asking for an address sends from 0.0.0.0 and may be a saved
+        # device, so DHCP still reaches the Pi.
+        self.assertIn(
+            'add rule inet jittersim input iifname "wlan0" meta nfproto ipv4 '
+            "ether saddr != { aa:bb:cc:dd:ee:ff } ip saddr != { 192.168.50.10 } "
+            'ip saddr != 0.0.0.0 drop comment "temporarily disconnect everyone else"',
+            lines,
+        )
+        self.assertIn(
+            'add rule inet jittersim forward iifname "wlan0" meta nfproto ipv4 '
+            "ether saddr != { aa:bb:cc:dd:ee:ff } ip saddr != { 192.168.50.10 } "
+            'drop comment "temporarily disconnect everyone else"',
+            lines,
+        )
 
     def test_everyone_else_gets_a_queue_on_both_interfaces(self) -> None:
         commands = render_command_plan(plan=self.plan(), topology=self.topology)
