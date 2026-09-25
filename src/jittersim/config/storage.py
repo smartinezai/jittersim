@@ -715,11 +715,13 @@ class ConfigRepository:
                 self.save_service_quota(service_quota)
             for time_quota in settings.time_quotas:
                 self.save_time_quota(time_quota)
-        except (StorageError, sqlite3.Error) as error:
+        except BaseException as error:
+            # Any error, not only a storage one, must not leave a half-replaced
+            # configuration for the next save to commit.
             self._connection.rollback()
-            if isinstance(error, StorageError):
-                raise
-            raise StorageError("could not replace the saved settings") from error
+            if isinstance(error, sqlite3.Error):
+                raise StorageError("could not replace the saved settings") from error
+            raise
         finally:
             self._deferring_commits = False
         self._connection.commit()

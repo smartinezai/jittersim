@@ -399,6 +399,22 @@ class ConfigRepositoryTests(unittest.TestCase):
 
         self.assertEqual(self.repository.saved_settings(), before)
 
+    def test_replacing_settings_changes_nothing_after_an_unexpected_error(self) -> None:
+        self._save_lab()
+        before = self.repository.saved_settings()
+
+        def interrupted(policy):
+            raise RuntimeError("interrupted")
+
+        self.repository.save_website_policy = interrupted
+        with self.assertRaises(RuntimeError):
+            self.repository.replace_settings(
+                SavedSettings(profiles=(Profile(id="fast", name="Fast"),))
+            )
+        del self.repository.save_website_policy
+
+        self.assertEqual(self.repository.saved_settings(), before)
+
     def test_round_trips_byte_progression_targets(self) -> None:
         self.repository.save_profile(Profile(id="normal", name="Normal"))
         self.repository.save_profile(Profile(id="slow", name="Slow"))
