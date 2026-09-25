@@ -115,8 +115,9 @@ class RuntimeScheduler:
         with self._lock:
             self._current_payload = applied_payload
             self._paused = False
-            self._last_device_counters.clear()
-            self._device_traffic_bytes.clear()
+            # The apply recreated the helper counters, so keep the device
+            # totals and count on from zero.
+            self._last_device_counters = dict.fromkeys(self._last_device_counters, 0)
         self.start()
 
     def build_plan(
@@ -148,6 +149,12 @@ class RuntimeScheduler:
             self._current_payload = None
             self._last_device_counters.clear()
             self._device_traffic_bytes.clear()
+
+    def sample_usage(self, *, repository: ConfigRepository) -> None:
+        """Record quota and device traffic before the helper counters restart."""
+
+        with self._apply_lock:
+            self._sample_quota_usage(repository=repository, now=time.time())
 
     def device_traffic_bytes(self, *, device_id: str) -> int:
         """Return cumulative device bytes observed by the active scheduler."""
@@ -181,9 +188,14 @@ class RuntimeScheduler:
             with self._lock:
                 if payload == self._current_payload:
                     return False
+            # Applying recreates the helper's counters at zero, so record the
+            # traffic they hold first.
+            self._sample_quota_usage(repository=active_repository, now=current_time)
             self._helper_client.apply(plan=plan)
+            active_repository.restart_usage_counters()
             with self._lock:
                 self._current_payload = payload
+                self._last_device_counters = dict.fromkeys(self._last_device_counters, 0)
             active_repository.update_runtime_state(
                 observed_state="applied",
                 last_action="schedule",
@@ -540,6 +552,9 @@ class RuntimeScheduler:
 
         if now - self._last_quota_sample_at < 5:
             return
+        self._sample_quota_usage(repository=repository, now=now)
+
+    def _sample_quota_usage(self, *, repository: ConfigRepository, now: float) -> None:
         data_limits = tuple(
             data_limit
             for data_limit in repository.list_data_limits()

@@ -4451,6 +4451,9 @@ class ControlServer(HTTPServer):
             last_result=None,
             last_error=None,
         )
+        if self.scheduler is not None:
+            # Applying recreates the helper counters, so record their traffic first.
+            self.scheduler.sample_usage(repository=self.repository)
         try:
             result = self.helper_client.apply(plan=plan)
         except HelperClientError as error:
@@ -4464,6 +4467,7 @@ class ControlServer(HTTPServer):
             return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
                 {"error": "network helper apply failed", "state": _runtime_state_payload(state)}
             )
+        self.repository.restart_usage_counters()
         state = self.repository.update_runtime_state(
             observed_state="applied",
             last_action="apply",
@@ -4482,6 +4486,8 @@ class ControlServer(HTTPServer):
                 {"error": "network helper is not configured"}
             )
         if self.scheduler is not None:
+            # Resetting removes the helper counters, so record their traffic first.
+            self.scheduler.sample_usage(repository=self.repository)
             self.scheduler.pause()
         self.repository.update_runtime_state(
             observed_state="resetting",

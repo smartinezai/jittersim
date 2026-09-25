@@ -12,8 +12,9 @@ from io import BytesIO
 from pathlib import Path
 
 from jittersim.api.server import DASHBOARD_HTML, ControlRequestHandler, ControlServer
-from jittersim.config.models import Device, DomainObservation, Impairment, Profile
+from jittersim.config.models import DataLimit, Device, DomainObservation, Impairment, Profile
 from jittersim.config.storage import ConfigRepository
+from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.service import compile_stored_plan
 from jittersim.networking.helper import HelperClientError
 
@@ -1055,6 +1056,9 @@ class ControlServerTests(unittest.TestCase):
             def build_plan(self, *, repository):
                 return compile_stored_plan(repository=repository)
 
+            def sample_usage(self, *, repository):
+                events.append("sample")
+
             def activate(self, *, applied_payload):
                 events.append("activate")
 
@@ -1069,7 +1073,41 @@ class ControlServerTests(unittest.TestCase):
         status, _, _ = self.server.write_response_for("/api/apply", {})
 
         self.assertEqual(status, 200)
-        self.assertEqual(events, ["hold", "apply", "activate", "release"])
+        self.assertEqual(events, ["hold", "sample", "apply", "activate", "release"])
+
+    def test_apply_and_reset_record_usage_before_the_counters_restart(self) -> None:
+        class CountingHelper(FakeHelper):
+            def traffic_counters(self):
+                return {"devices": {"alice": self.alice_bytes}, "services": {}}
+
+        for path in ("/api/apply", "/api/reset"):
+            with self.subTest(path=path):
+                self.repository.save_data_limit(
+                    DataLimit(
+                        device_id="alice",
+                        profile_id="slow",
+                        limit_bytes=10**9,
+                        used_bytes=1_000,
+                        counter_bytes=1_000,
+                        last_reset_at=100,
+                    )
+                )
+                helper = CountingHelper()
+                helper.alice_bytes = 1_600
+                scheduler = RuntimeScheduler(
+                    database_path=":memory:",
+                    helper_client=helper,
+                    poll_seconds=3_600,
+                )
+                self.server.helper_client = helper
+                self.server.scheduler = scheduler
+                try:
+                    status, _, _ = self.server.write_response_for(path, {})
+                finally:
+                    scheduler.stop()
+
+                self.assertEqual(status, 200)
+                self.assertEqual(self.repository.get_data_limit("alice").used_bytes, 1_600)
 
     def test_live_changes_apply_while_the_network_is_applied(self) -> None:
         helper = FakeHelper()

@@ -43,6 +43,18 @@ class RecordingHelper:
         return self.counters
 
 
+class CounterResettingHelper(RecordingHelper):
+    """Like the real helper, each apply recreates the nftables counters at zero."""
+
+    def apply(self, *, plan):
+        result = super().apply(plan=plan)
+        self.counters = {
+            kind: {identifier: 0 for identifier in values}
+            for kind, values in self.counters.items()
+        }
+        return result
+
+
 class RuntimeSchedulerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.repository = ConfigRepository(":memory:")
@@ -370,7 +382,7 @@ class RuntimeSchedulerTests(unittest.TestCase):
             (IPv4Address("203.0.113.10"), IPv4Address("203.0.113.11")),
         )
 
-    def test_interval_reset_clears_usage_and_preserves_the_counter_baseline(self) -> None:
+    def test_interval_reset_clears_usage_and_counts_only_new_traffic(self) -> None:
         normal = Profile(id="normal", name="Normal")
         fallback = Profile(id="fallback", name="Fallback", download=Impairment(delay_ms=700))
         self.repository.save_profile(normal)
@@ -388,16 +400,23 @@ class RuntimeSchedulerTests(unittest.TestCase):
                 last_reset_at=100,
             )
         )
-        self.helper.counters = {"devices": {"alice": 20}, "services": {}}
-        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        helper = CounterResettingHelper()
+        helper.counters = {"devices": {"alice": 20}, "services": {}}
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=helper)
         scheduler.activate(applied_payload={})
 
+        # The reset lifts the fallback, and applying that restarts the counters.
         scheduler.tick(repository=self.repository, now=161)
 
         data_limit = self.repository.get_data_limit("alice")
         self.assertEqual(data_limit.used_bytes, 0)
-        self.assertEqual(data_limit.counter_bytes, 20)
-        self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 0)
+        self.assertEqual(data_limit.counter_bytes, 0)
+        self.assertEqual(helper.plans[-1].queues[1].impairment.delay_ms, 0)
+
+        helper.counters["devices"]["alice"] = 30
+        scheduler.tick(repository=self.repository, now=170)
+
+        self.assertEqual(self.repository.get_data_limit("alice").used_bytes, 30)
 
     def test_time_quota_counts_active_traffic_inside_its_timer(self) -> None:
         normal = Profile(id="normal", name="Normal")
@@ -606,6 +625,63 @@ class RuntimeSchedulerTests(unittest.TestCase):
             self.assertTrue(paused.is_set())
             self.assertFalse(scheduler.tick(now=10))
             self.assertEqual(len(helper.plans), 1)
+
+    def test_quota_usage_survives_plan_reapplies(self) -> None:
+        self.repository.save_profile(Profile(id="normal", name="Normal"))
+        self.repository.save_profile(Profile(id="slow", name="Slow", download=Impairment(delay_ms=900)))
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        self.repository.save_data_limit(
+            DataLimit(device_id="alice", profile_id="slow", limit_bytes=10**9, last_reset_at=100)
+        )
+        helper = CounterResettingHelper()
+        helper.counters = {"devices": {"alice": 1_000}, "services": {}}
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=helper)
+        scheduler.activate(applied_payload={})
+
+        scheduler.tick(repository=self.repository, now=100)
+        helper.counters["devices"]["alice"] = 600
+        # A profile change reapplies the plan before the next regular sample.
+        self.repository.save_profile(
+            Profile(id="normal", name="Normal", download=Impairment(delay_ms=10))
+        )
+        scheduler.tick(repository=self.repository, now=102)
+        helper.counters["devices"]["alice"] = 1_500
+        scheduler.tick(repository=self.repository, now=110)
+
+        self.assertEqual(self.repository.get_data_limit("alice").used_bytes, 3_100)
+
+    def test_byte_progression_keeps_its_progress_after_a_manual_apply(self) -> None:
+        self.repository.save_profile(Profile(id="normal", name="Normal"))
+        self.repository.save_profile(
+            Profile(id="degraded", name="Degraded", download=Impairment(delay_ms=1_000))
+        )
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        self.repository.save_progression(
+            Progression(
+                id="byte-driven",
+                device_id="alice",
+                start_profile_id="normal",
+                end_profile_id="degraded",
+                started_at=100,
+                duration_seconds=1_000,
+                mode="bytes",
+                traffic_target_bytes=1_000,
+            )
+        )
+        helper = CounterResettingHelper()
+        helper.counters = {"devices": {"alice": 0}, "services": {}}
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=helper)
+        scheduler.activate(applied_payload={})
+        scheduler.tick(repository=self.repository, now=100)
+        helper.counters["devices"]["alice"] = 500
+        scheduler.tick(repository=self.repository, now=106)
+
+        # Another change applied from the dashboard, such as a timer for bob.
+        scheduler.activate(applied_payload={})
+        helper.counters["devices"]["alice"] = 100
+        scheduler.tick(repository=self.repository, now=112)
+
+        self.assertEqual(scheduler.device_traffic_bytes(device_id="alice"), 600)
 
 
 if __name__ == "__main__":

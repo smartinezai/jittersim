@@ -923,6 +923,13 @@ class ConfigRepository:
             self._connection.rollback()
             raise StorageError(f"could not save data limit for {data_limit.device_id}") from error
 
+    def restart_usage_counters(self) -> None:
+        """Record that every helper traffic counter restarted at zero."""
+
+        for table in ("data_limits", "group_data_limits", "service_quotas", "time_quotas"):
+            self._connection.execute(f"UPDATE {table} SET counter_bytes = 0")
+        self._connection.commit()
+
     def reset_data_limit_usage(
         self,
         device_id: str,
