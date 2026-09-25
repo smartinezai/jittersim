@@ -1,6 +1,7 @@
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from datetime import datetime
 from ipaddress import IPv4Address
 from pathlib import Path
@@ -1003,6 +1004,38 @@ class EveryoneElseSchedulingTests(unittest.TestCase):
 
         self.assertFalse(first.everyone_else.blocked)
         self.assertTrue(later.everyone_else.blocked)
+
+    def _start_an_everyone_else_outage(self) -> Profile:
+        profile = Profile(
+            id="flaky",
+            name="Flaky",
+            outage_probability=100,
+            outage_duration_seconds=60,
+            outage_interval_seconds=10,
+        )
+        self.repository.save_profile(profile)
+        self.repository.save_everyone_else_profile_id("flaky")
+        self.scheduler.build_plan(repository=self.repository, now=1_000)
+        plan = self.scheduler.build_plan(repository=self.repository, now=1_011)
+        self.assertTrue(plan.everyone_else.blocked)
+        return profile
+
+    def test_editing_the_everyone_else_profile_starts_a_fresh_roll(self) -> None:
+        profile = self._start_an_everyone_else_outage()
+        self.repository.save_profile(replace(profile, upload=Impairment(delay_ms=50)))
+
+        plan = self.scheduler.build_plan(repository=self.repository, now=1_012)
+
+        self.assertFalse(plan.everyone_else.blocked)
+        self.assertEqual(plan.everyone_else.upload_impairment, Impairment(delay_ms=50))
+
+    def test_pausing_forgets_the_everyone_else_roll(self) -> None:
+        self._start_an_everyone_else_outage()
+        self.scheduler.pause()
+
+        plan = self.scheduler.build_plan(repository=self.repository, now=1_012)
+
+        self.assertFalse(plan.everyone_else.blocked)
 
 if __name__ == "__main__":
     unittest.main()

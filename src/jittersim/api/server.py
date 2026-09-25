@@ -2098,6 +2098,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     let devices = [];
     let deviceConditions = { applied: false, devices: {} };
     let everyoneElse = { profile_id: null, unaffected_devices: [] };
+    let lastConnectedDevices = null;
     let groups = [];
     let observedDomainsByDevice = {};
     let connectedDevicesRequestInFlight = false;
@@ -2795,6 +2796,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function renderConnectedDevices(data) {
+      lastConnectedDevices = data;
       const container = element("connected-devices");
       const count = element("connected-count");
       const expandedLabels = new Set(
@@ -3107,9 +3109,10 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function savedChangeMessage(message, result) {
-      return result.live_applied === false
-        ? message + " Apply the configuration to use it."
-        : message;
+      if (result.live_applied !== false) return message;
+      return helperConfigured
+        ? message + " The network is reset, so apply the configuration to use it."
+        : message + " It takes effect when the dashboard runs in hardware mode.";
     }
 
     async function keepUnaffected(macAddress, name, button) {
@@ -3141,6 +3144,15 @@ DASHBOARD_HTML = r"""<!doctype html>
       );
     }
 
+    function rerenderConnectedDevices() {
+      // Client labels name the everyone-else profile. Leave an open editor alone.
+      const container = element("connected-devices");
+      const activeElement = document.activeElement;
+      const editing = activeElement && container.contains(activeElement) &&
+        activeElement.matches("input, select");
+      if (lastConnectedDevices && !editing) renderConnectedDevices(lastConnectedDevices);
+    }
+
     async function loadEveryoneElse() {
       everyoneElse = await request("/api/everyone-else", "GET");
       element("everyone-else-profile").value = everyoneElse.profile_id || "";
@@ -3154,6 +3166,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         }))
       );
       renderDeviceTable();
+      rerenderConnectedDevices();
     }
 
     async function applyProfileToDevice(device, profileId, button) {
@@ -3944,6 +3957,8 @@ DASHBOARD_HTML = r"""<!doctype html>
           profileSelect.appendChild(option);
         });
       });
+      // Rebuilding a menu drops its choice, and saving None would clear the profile.
+      element("everyone-else-profile").value = everyoneElse.profile_id || "";
     }
 
     async function loadDevicesForSchedule() {
@@ -6225,7 +6240,11 @@ class ControlServer(HTTPServer):
             )
 
         if path == "/api/everyone-else":
-            profile_id = payload.get("profile_id")
+            if "profile_id" not in payload:
+                return _bad_request(
+                    "invalid everyone-else profile", KeyError("profile_id is required")
+                )
+            profile_id = payload["profile_id"]
             if profile_id is not None and (
                 not isinstance(profile_id, str) or self.repository.get_profile(profile_id) is None
             ):

@@ -858,10 +858,25 @@ class EveryoneElseStorageTests(unittest.TestCase):
 
         self.assertEqual(self.repository.get_everyone_else_profile_id(), "slow")
         self.assertIn("everyone else", self.repository.profile_references("slow", now=0))
-        with self.assertRaises(StorageError):
-            self.repository.delete_profile("slow")
         self.repository.save_everyone_else_profile_id(None)
         self.assertIsNone(self.repository.get_everyone_else_profile_id())
+
+    def test_deleting_the_profile_row_clears_everyone_else(self) -> None:
+        # The API refuses this delete, but an older version doesn't know about
+        # everyone else and must still be able to delete or replace profiles.
+        self.repository.save_everyone_else_profile_id("slow")
+
+        self.repository.delete_profile("slow")
+
+        self.assertIsNone(self.repository.get_everyone_else_profile_id())
+
+    def test_a_malformed_unaffected_device_is_a_storage_error(self) -> None:
+        self.repository._connection.execute(
+            "INSERT INTO unaffected_devices (mac_address, name) VALUES ('not-a-mac', 'Bad')"
+        )
+
+        with self.assertRaises(StorageError):
+            self.repository.list_unaffected_devices()
 
     def test_a_missing_everyone_else_profile_is_refused(self) -> None:
         with self.assertRaises(StorageError):

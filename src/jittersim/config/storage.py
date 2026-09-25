@@ -293,7 +293,9 @@ class ConfigRepository:
             );
             CREATE TABLE IF NOT EXISTS everyone_else_settings (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
-                profile_id TEXT REFERENCES profiles(id)
+                -- The API refuses to delete this profile. Older versions don't
+                -- know about everyone else, so a delete there clears the choice.
+                profile_id TEXT REFERENCES profiles(id) ON DELETE SET NULL
             );
             CREATE TABLE IF NOT EXISTS unaffected_devices (
                 mac_address TEXT PRIMARY KEY,
@@ -707,7 +709,10 @@ class ConfigRepository:
         rows = self._connection.execute(
             "SELECT mac_address, name FROM unaffected_devices ORDER BY mac_address"
         ).fetchall()
-        return tuple(UnaffectedDevice(row["mac_address"], row["name"]) for row in rows)
+        try:
+            return tuple(UnaffectedDevice(row["mac_address"], row["name"]) for row in rows)
+        except ValidationError as error:
+            raise StorageError("stored unaffected device is malformed") from error
 
     def save_unaffected_device(self, device: UnaffectedDevice) -> None:
         """Add or rename one unaffected device."""

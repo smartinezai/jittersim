@@ -2079,8 +2079,12 @@ class ControlServerTests(unittest.TestCase):
         script = DASHBOARD_HTML.split("<script>", 1)[1].split("</script>", 1)[0]
 
         def function(name):
-            body = script.split(f"    function {name}(", 1)[1].split("\n    }\n", 1)[0]
-            return f"function {name}({body}\n}}\n"
+            for kind in ("async function", "function"):
+                marker = f"    {kind} {name}("
+                if marker in script:
+                    body = script.split(marker, 1)[1].split("\n    }\n", 1)[0]
+                    return f"{kind} {name}({body}\n}}\n"
+            raise AssertionError(f"{name} is not in the dashboard script")
 
         harness = setup + "".join(function(name) for name in names) + calls
         result = subprocess.run([node, "-e", harness], capture_output=True, text=True, check=False)
@@ -2114,6 +2118,65 @@ class ControlServerTests(unittest.TestCase):
                 "Everyone else: 3G",
             ],
         )
+
+    def test_dashboard_messages_say_when_a_change_takes_effect(self) -> None:
+        messages = self._run_dashboard_functions(
+            ["savedChangeMessage"],
+            "let helperConfigured = true;\n",
+            "const messages = [\n"
+            "  savedChangeMessage('Saved.', {live_applied: true}),\n"
+            "  savedChangeMessage('Saved.', {live_applied: false}),\n"
+            "];\n"
+            "helperConfigured = false;\n"
+            "messages.push(savedChangeMessage('Saved.', {live_applied: false}));\n"
+            "console.log(JSON.stringify(messages));\n",
+        )
+
+        self.assertEqual(
+            messages,
+            [
+                "Saved.",
+                "Saved. The network is reset, so apply the configuration to use it.",
+                "Saved. It takes effect when the dashboard runs in hardware mode.",
+            ],
+        )
+
+    def test_dashboard_profile_menus_keep_the_everyone_else_choice(self) -> None:
+        values = self._run_dashboard_functions(
+            ["loadProfiles"],
+            "let profiles = [];\n"
+            "const everyoneElse = {profile_id: '3g', unaffected_devices: []};\n"
+            "const elements = {};\n"
+            "function element(id) {\n"
+            "  elements[id] = elements[id] || {\n"
+            "    options: [], value: '',\n"
+            "    replaceChildren() { this.options = []; this.value = ''; },\n"
+            "    appendChild(option) {\n"
+            "      this.options.push(option);\n"
+            "      if (this.options.length === 1) this.value = option.value;\n"
+            "    },\n"
+            "  };\n"
+            "  return elements[id];\n"
+            "}\n"
+            "const document = {createElement: () => ({value: '', textContent: ''})};\n"
+            "async function request() {\n"
+            "  return {profiles: [{id: 'normal', name: 'Normal'}, {id: '3g', name: '3G'}]};\n"
+            "}\n"
+            "function renderProfileTable() {}\n",
+            "loadProfiles().then(() => {\n"
+            "  console.log(JSON.stringify(elements['everyone-else-profile'].value));\n"
+            "});\n",
+        )
+
+        # Rebuilding the menu must not show None, or Save would clear the profile.
+        self.assertEqual(values, "3g")
+
+    def test_dashboard_relabels_clients_when_everyone_else_changes(self) -> None:
+        load = DASHBOARD_HTML.split("async function loadEveryoneElse() {", 1)[1]
+        load = load.split("\n    }\n", 1)[0]
+
+        self.assertIn("rerenderConnectedDevices()", load)
+        self.assertIn("function rerenderConnectedDevices()", DASHBOARD_HTML)
 
     def test_dashboard_lists_everyone_else_with_the_devices(self) -> None:
         rows = self._run_dashboard_functions(
@@ -2711,6 +2774,38 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(status, 409)
         self.assertIn("at most 15", json.loads(body)["error"])
+
+    def test_everyone_else_takes_one_of_the_fifteen_slots(self) -> None:
+        for index in range(13):
+            self.repository.save_device(
+                Device(f"d{index}", f"D{index}", f"192.168.50.{20 + index}", "slow")
+            )
+        # Alice, 13 more devices and everyone else fill all 15 slots.
+        status, _, body = self.server.write_response_for(
+            "/api/everyone-else", {"profile_id": "slow"}
+        )
+        self.assertEqual(status, 200, body)
+
+        status, _, body = self.server.write_response_for(
+            "/api/devices",
+            {"id": "extra", "name": "Extra", "ipv4_address": "192.168.50.40", "profile_id": "slow"},
+        )
+        self.assertEqual(status, 409, body)
+
+        # Switching everyone else to another profile needs no new slot.
+        self.repository.save_profile(Profile(id="other", name="Other"))
+        status, _, body = self.server.write_response_for(
+            "/api/everyone-else", {"profile_id": "other"}
+        )
+        self.assertEqual(status, 200, body)
+
+    def test_everyone_else_needs_an_explicit_profile_or_none(self) -> None:
+        self.repository.save_everyone_else_profile_id("slow")
+
+        status, _, _ = self.server.write_response_for("/api/everyone-else", {})
+
+        self.assertEqual(status, 400)
+        self.assertEqual(self.repository.get_everyone_else_profile_id(), "slow")
 
     def test_unaffected_devices_are_added_and_removed(self) -> None:
         status, _, body = self.server.write_response_for(
