@@ -1119,6 +1119,37 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_dashboard_can_edit_and_delete_saved_items(self) -> None:
+        for fragment in (
+            'id="profile-table"',
+            'id="device-table"',
+            '<select id="device-profile" required></select>',
+            'id="profile-cancel-edit"',
+            'id="device-cancel-edit"',
+            "function fillProfileForm(profile)",
+            "function fillDeviceForm(device)",
+            "function editSchedule(schedule)",
+            "function slugify(value)",
+            '"/api/profiles/delete"',
+            '"/api/devices/delete"',
+            '"/api/schedules/delete"',
+            '"/api/data-limits/delete"',
+            '"/api/group-data-limits/delete"',
+            '"/api/service-quotas/delete"',
+            '"/api/time-quotas/delete"',
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, DASHBOARD_HTML)
+        self.assertNotIn('<pre id="profiles">', DASHBOARD_HTML)
+        self.assertNotIn('<pre id="devices">', DASHBOARD_HTML)
+
+    def test_dashboard_asks_for_the_token_first(self) -> None:
+        self.assertLess(
+            DASHBOARD_HTML.index('id="admin-token"'),
+            DASHBOARD_HTML.index('id="connected-devices"'),
+        )
+        self.assertIn('event.key === "Enter"', DASHBOARD_HTML)
+
     def test_dashboard_contains_configuration_and_network_controls(self) -> None:
         status, content_type, body = self.server.response_for("/")
 

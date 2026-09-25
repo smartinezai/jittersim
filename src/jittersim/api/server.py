@@ -471,6 +471,44 @@ DASHBOARD_HTML = r"""<!doctype html>
     .token-check-status.success { color: #8de2bc; }
     .token-check-status.error { color: #ffb0b0; }
     .data-grid { margin-top: 1rem; }
+    .data-grid .card.wide { grid-column: 1 / -1; }
+    .table-wrap { overflow-x: auto; }
+    .data-table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+    .data-table th {
+      padding: 0.45rem 0.6rem;
+      border-bottom: 1px solid #2b435f;
+      color: #91a8c1;
+      font-size: 0.72rem;
+      letter-spacing: 0.06em;
+      text-align: left;
+      text-transform: uppercase;
+    }
+    .data-table td {
+      padding: 0.55rem 0.6rem;
+      border-bottom: 1px solid #1d2f45;
+      color: #c7d7eb;
+      vertical-align: top;
+    }
+    .data-table td strong { color: #edf5ff; }
+    .data-table td small { display: block; color: #91a8c1; font-size: 0.76rem; }
+    .row-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.4rem; }
+    .row-actions button { margin-top: 0; padding: 0.35rem 0.6rem; }
+    .edit-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      margin-bottom: 0.75rem;
+      padding: 0.55rem 0.75rem;
+      border: 1px solid #a77b31;
+      border-radius: 0.5rem;
+      background: #3b2a12;
+    }
+    .edit-bar[hidden] { display: none; }
+    .edit-bar p { margin: 0; color: #f5ca78; }
+    .edit-bar button { margin-top: 0; }
+    .schedule-row div:first-child { display: grid; gap: 0.15rem; }
+    .schedule-row small { color: #91a8c1; }
     @media (max-width: 700px) {
       body { padding-top: 1rem; }
       .page-header, .action-bar { display: block; }
@@ -529,6 +567,16 @@ DASHBOARD_HTML = r"""<!doctype html>
       <button id="reset-button" class="danger" type="button">Reset network</button>
     </div>
     <p id="message" class="action-message" role="status" aria-live="polite">Ready.</p>
+  </section>
+  <section class="card token-card">
+    <h2>Control token</h2>
+    <div class="token-controls">
+      <label>Admin token (kept in this page only)
+        <input id="admin-token" type="password" autocomplete="off">
+      </label>
+      <button id="check-admin-token" type="button">Check token</button>
+    </div>
+    <p id="token-check-status" class="token-check-status" role="status" aria-live="polite">Enter the token and choose Check token to load diagnostics.</p>
   </section>
   <section class="card connected-card">
     <div class="section-heading">
@@ -608,20 +656,14 @@ DASHBOARD_HTML = r"""<!doctype html>
     <p id="observation-note" class="observation-note">Scanning is on demand. Results are local aggregates, not exact page visits.</p>
     <div id="observations" class="observation-list" aria-live="polite">No observations yet.</div>
   </section>
-  <section class="card token-card">
-    <h2>Control token</h2>
-    <div class="token-controls">
-      <label>Admin token (kept in this page only)
-        <input id="admin-token" type="password" autocomplete="off">
-      </label>
-      <button id="check-admin-token" type="button">Check token</button>
-    </div>
-    <p id="token-check-status" class="token-check-status" role="status" aria-live="polite">Enter the token and choose Check token to load diagnostics.</p>
-  </section>
   <div class="content-grid">
     <section class="card">
       <h2>Save profile</h2>
       <form id="profile-form">
+        <div id="profile-edit-bar" class="edit-bar" hidden>
+          <p id="profile-edit-status" role="status"></p>
+          <button id="profile-cancel-edit" type="button">Cancel editing</button>
+        </div>
         <div class="fields">
           <label>Profile ID
             <input id="profile-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}">
@@ -813,13 +855,19 @@ DASHBOARD_HTML = r"""<!doctype html>
     <section class="card">
       <h2>Assign a device</h2>
       <form id="device-form">
+        <div id="device-edit-bar" class="edit-bar" hidden>
+          <p id="device-edit-status" role="status"></p>
+          <button id="device-cancel-edit" type="button">Cancel editing</button>
+        </div>
         <div class="fields">
           <label>Device ID <input id="device-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}"></label>
           <label>Name <input id="device-name" required></label>
           <label>Reserved IPv4 address
             <input id="device-ip" required placeholder="192.168.50.10">
           </label>
-          <label>Profile ID <input id="device-profile" required></label>
+          <label>Profile
+            <select id="device-profile" required></select>
+          </label>
           <label>MAC address (optional)
             <input id="device-mac" placeholder="aa:bb:cc:dd:ee:ff">
           </label>
@@ -1213,13 +1261,13 @@ DASHBOARD_HTML = r"""<!doctype html>
     </form>
   </section>
   <div class="data-grid">
-    <section class="card">
+    <section class="card wide">
       <div class="section-heading"><h2>Profiles</h2><p>Saved network behavior</p></div>
-      <pre id="profiles">Loading...</pre>
+      <div id="profile-table" class="table-wrap">Loading...</div>
     </section>
-    <section class="card">
+    <section class="card wide">
       <div class="section-heading"><h2>Devices</h2><p>Assigned test clients</p></div>
-      <pre id="devices">Loading...</pre>
+      <div id="device-table" class="table-wrap">Loading...</div>
     </section>
     <section class="card">
       <div class="section-heading"><h2>Compiled plan</h2><p>Current traffic rules</p></div>
@@ -1289,6 +1337,312 @@ DASHBOARD_HTML = r"""<!doctype html>
       };
     }
 
+    function slugify(value) {
+      return value.toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+/, "")
+        .slice(0, 64)
+        .replace(/-+$/, "");
+    }
+
+    // Fill an ID from its name until someone types the ID by hand.
+    function bindAutoId(nameId, idId) {
+      const nameInput = element(nameId);
+      const idInput = element(idId);
+      idInput.addEventListener("input", () => {
+        idInput.dataset.typed = idInput.value ? "true" : "";
+      });
+      nameInput.addEventListener("input", () => {
+        if (idInput.readOnly || idInput.dataset.typed === "true") return;
+        idInput.value = slugify(nameInput.value);
+      });
+    }
+
+    [
+      ["profile-name", "profile-id"],
+      ["device-name", "device-id"],
+      ["group-name", "group-id"],
+      ["service-quota-name", "service-quota-id"],
+      ["time-quota-name", "time-quota-id"]
+    ].forEach(([nameId, idId]) => bindAutoId(nameId, idId));
+
+    function startEditing(prefix, label) {
+      element(prefix + "-id").readOnly = true;
+      element(prefix + "-edit-status").textContent = "Editing " + label + ". Save to update it.";
+      element(prefix + "-edit-bar").hidden = false;
+      element(prefix + "-form").scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+
+    function stopEditing(prefix) {
+      element(prefix + "-form").reset();
+      element(prefix + "-id").readOnly = false;
+      element(prefix + "-id").dataset.typed = "";
+      element(prefix + "-edit-bar").hidden = true;
+    }
+
+    const IMPAIRMENT_FEATURES = [
+      "delay", "jitter", "loss", "bandwidth", "reorder", "duplicate", "corrupt"
+    ];
+    const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+    function formatBandwidth(kbit) {
+      if (kbit < 1000) return kbit + " kbit/s";
+      return (kbit / 1000).toFixed(kbit % 1000 ? 1 : 0) + " Mbit/s";
+    }
+
+    function describeImpairment(values) {
+      const parts = [];
+      if (values.delay_ms || values.jitter_ms) {
+        const jitter = values.jitter_ms ? " ± " + values.jitter_ms + " ms" : "";
+        parts.push(values.delay_ms + " ms" + jitter);
+      }
+      if (values.loss_percent) parts.push(values.loss_percent + "% loss");
+      if (values.bandwidth_kbit !== null) parts.push(formatBandwidth(values.bandwidth_kbit));
+      if (values.reorder_percent) parts.push(values.reorder_percent + "% reorder");
+      if (values.duplicate_percent) parts.push(values.duplicate_percent + "% duplicate");
+      if (values.corrupt_percent) parts.push(values.corrupt_percent + "% corrupt");
+      return parts.length ? parts.join(" · ") : "Unchanged";
+    }
+
+    function describeExtras(profile) {
+      const parts = [];
+      if (profile.reroll_interval_seconds) {
+        parts.push("rerolls every " + profile.reroll_interval_seconds + " s");
+      }
+      if (profile.outage_probability) {
+        parts.push(
+          profile.outage_probability + "% outage chance, " +
+          profile.outage_duration_seconds + " s long"
+        );
+      }
+      if (profile.website_mode === "allow_only") parts.push("allows only listed sites");
+      return parts.length ? parts.join(" · ") : "—";
+    }
+
+    function hasAdvancedSettings(profile) {
+      const advancedImpairment = (values) => Boolean(
+        values.reorder_percent || values.duplicate_percent || values.corrupt_percent ||
+        IMPAIRMENT_FEATURES.some((feature) => {
+          const randomness = values[feature + "_randomness"];
+          return randomness.variation_percent !== 0 || randomness.enabled_probability !== 100;
+        })
+      );
+      return Boolean(
+        profile.reroll_interval_seconds || profile.outage_probability ||
+        profile.random_seed !== null || profile.website_mode !== "unrestricted" ||
+        profile.website_domains.length ||
+        advancedImpairment(profile.upload) || advancedImpairment(profile.download)
+      );
+    }
+
+    function tableCell(value) {
+      const cell = document.createElement("td");
+      if (Array.isArray(value)) {
+        const primary = document.createElement("strong");
+        primary.textContent = value[0];
+        const secondary = document.createElement("small");
+        secondary.textContent = value[1];
+        cell.append(primary, secondary);
+      } else {
+        cell.textContent = value;
+      }
+      return cell;
+    }
+
+    function renderTable(containerId, emptyText, headings, rows) {
+      const container = element(containerId);
+      container.replaceChildren();
+      if (!rows.length) {
+        container.textContent = emptyText;
+        return;
+      }
+      const table = document.createElement("table");
+      table.className = "data-table";
+      const headRow = document.createElement("tr");
+      headings.concat([""]).forEach((heading) => {
+        const cell = document.createElement("th");
+        cell.scope = "col";
+        cell.textContent = heading;
+        headRow.appendChild(cell);
+      });
+      const head = document.createElement("thead");
+      head.appendChild(headRow);
+      const body = document.createElement("tbody");
+      rows.forEach(({ cells, actions }) => {
+        const row = document.createElement("tr");
+        cells.forEach((value) => row.appendChild(tableCell(value)));
+        const actionCell = document.createElement("td");
+        const actionGroup = document.createElement("div");
+        actionGroup.className = "row-actions";
+        actions.forEach(([label, onClick]) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = label;
+          button.addEventListener("click", () => onClick(button));
+          actionGroup.appendChild(button);
+        });
+        actionCell.appendChild(actionGroup);
+        row.appendChild(actionCell);
+        body.appendChild(row);
+      });
+      table.append(head, body);
+      container.appendChild(table);
+    }
+
+    function profileName(profileId) {
+      const profile = profiles.find((candidate) => candidate.id === profileId);
+      return profile ? profile.name : profileId;
+    }
+
+    function deviceName(deviceId) {
+      const device = devices.find((candidate) => candidate.id === deviceId);
+      return device ? device.name : deviceId;
+    }
+
+    function renderProfileTable() {
+      renderTable(
+        "profile-table",
+        "No profiles saved yet.",
+        ["Profile", "Upload", "Download", "Extras"],
+        profiles.map((profile) => ({
+          cells: [
+            [profile.name, profile.id],
+            describeImpairment(profile.upload),
+            describeImpairment(profile.download),
+            describeExtras(profile)
+          ],
+          actions: [
+            ["Edit", () => fillProfileForm(profile)],
+            ["Delete", (button) => deleteProfile(profile, button)]
+          ]
+        }))
+      );
+    }
+
+    function renderDeviceTable() {
+      renderTable(
+        "device-table",
+        "No devices assigned yet.",
+        ["Device", "Address", "Profile"],
+        devices.map((device) => ({
+          cells: [
+            [device.name, device.id],
+            [device.ipv4_address, device.mac_address || "No MAC address"],
+            profileName(device.profile_id)
+          ],
+          actions: [
+            ["Edit", () => fillDeviceForm(device)],
+            ["Delete", (button) => deleteDevice(device, button)]
+          ]
+        }))
+      );
+    }
+
+    function fillImpairment(prefix, values) {
+      element(prefix + "-delay").value = values.delay_ms;
+      element(prefix + "-jitter").value = values.jitter_ms;
+      element(prefix + "-loss").value = values.loss_percent;
+      element(prefix + "-bandwidth").value =
+        values.bandwidth_kbit === null ? "" : values.bandwidth_kbit;
+      element(prefix + "-reorder").value = values.reorder_percent;
+      element(prefix + "-duplicate").value = values.duplicate_percent;
+      element(prefix + "-corrupt").value = values.corrupt_percent;
+      IMPAIRMENT_FEATURES.forEach((feature) => {
+        const randomness = values[feature + "_randomness"];
+        element(prefix + "-" + feature + "-random-variation").value = randomness.variation_percent;
+        element(prefix + "-" + feature + "-random-enabled").value = randomness.enabled_probability;
+      });
+    }
+
+    function fillProfileForm(profile) {
+      stopEditing("profile");
+      element("profile-id").value = profile.id;
+      element("profile-name").value = profile.name;
+      fillImpairment("upload", profile.upload);
+      fillImpairment("download", profile.download);
+      element("profile-seed").value = profile.random_seed === null ? "" : profile.random_seed;
+      element("profile-reroll").value = profile.reroll_interval_seconds;
+      element("profile-reroll-variation").value =
+        profile.reroll_interval_randomness.variation_percent;
+      element("profile-outage-probability").value = profile.outage_probability;
+      element("profile-outage-duration").value = profile.outage_duration_seconds;
+      element("profile-outage-interval").value = profile.outage_interval_seconds;
+      element("profile-website-mode").value = profile.website_mode;
+      element("profile-website-domains").value = profile.website_domains.join(", ");
+      element("profile-website-enabled").value = profile.website_randomness.enabled_probability;
+      element("profile-form").querySelector("details").open = hasAdvancedSettings(profile);
+      startEditing("profile", profile.name);
+    }
+
+    function fillDeviceForm(device) {
+      stopEditing("device");
+      element("device-id").value = device.id;
+      element("device-name").value = device.name;
+      element("device-ip").value = device.ipv4_address;
+      element("device-profile").value = device.profile_id;
+      element("device-mac").value = device.mac_address || "";
+      startEditing("device", device.name);
+    }
+
+    async function deleteItem(path, body, successMessage, button) {
+      setButtonBusy(button, true);
+      showMessage("Deleting...", "working");
+      try {
+        await request(path, "POST", body);
+        refreshAfterSuccess(successMessage);
+      } catch (error) {
+        showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
+      }
+    }
+
+    function deleteProfile(profile, button) {
+      if (!window.confirm("Delete the profile " + profile.name + "?")) return;
+      deleteItem("/api/profiles/delete", { id: profile.id }, "Profile deleted.", button);
+    }
+
+    function deleteDevice(device, button) {
+      const question = "Delete " + device.name +
+        "? Its schedules, timers, progressions and limits are deleted too.";
+      if (!window.confirm(question)) return;
+      deleteItem("/api/devices/delete", { id: device.id }, "Device deleted.", button);
+    }
+
+    function formatMinute(minute) {
+      const hours = String(Math.floor(minute / 60)).padStart(2, "0");
+      return hours + ":" + String(minute % 60).padStart(2, "0");
+    }
+
+    function formatDays(days) {
+      const sorted = [...days].sort((first, second) => first - second);
+      if (sorted.length === 7) return "Every day";
+      const ranges = [];
+      sorted.forEach((day) => {
+        const last = ranges[ranges.length - 1];
+        if (last && day === last[1] + 1) last[1] = day;
+        else ranges.push([day, day]);
+      });
+      return ranges.map(([start, end]) => {
+        if (start === end) return DAY_NAMES[start];
+        return DAY_NAMES[start] + (end === start + 1 ? ", " : "–") + DAY_NAMES[end];
+      }).join(", ");
+    }
+
+    function editSchedule(schedule) {
+      element("schedule-id").value = schedule.id;
+      element("schedule-device").value = schedule.device_id;
+      element("schedule-profile").value = schedule.profile_id;
+      document.querySelectorAll(".day-toggle").forEach((button) => {
+        const selected = schedule.days_of_week.includes(Number(button.dataset.day));
+        button.setAttribute("aria-pressed", String(selected));
+      });
+      syncScheduleDays();
+      element("schedule-start").value = formatMinute(schedule.start_minute);
+      element("schedule-end").value = formatMinute(schedule.end_minute);
+      element("schedule-form").scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+
     function timeToMinute(id) {
       const parts = element(id).value.split(":").map(Number);
       return parts[0] * 60 + parts[1];
@@ -1347,6 +1701,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     let helperConfigured = false;
     let profiles = [];
+    let devices = [];
     let groups = [];
     let observedDomainsByDevice = {};
     let connectedDevicesRequestInFlight = false;
@@ -2047,7 +2402,22 @@ DASHBOARD_HTML = r"""<!doctype html>
       resetButton.type = "button";
       resetButton.textContent = "Reset usage";
       resetButton.addEventListener("click", () => resetQuota(quota, service, resetButton));
-      actions.append(editButton, resetButton);
+      const deleteButton = document.createElement("button");
+      deleteButton.type = "button";
+      deleteButton.textContent = "Delete";
+      deleteButton.addEventListener("click", () => {
+        if (service === "group") {
+          deleteItem("/api/group-data-limits/delete", { group_id: quota.group_id },
+            "Shared limit deleted.", deleteButton);
+        } else if (service) {
+          deleteItem("/api/service-quotas/delete", { id: quota.id },
+            "Service limit deleted.", deleteButton);
+        } else {
+          deleteItem("/api/data-limits/delete", { device_id: quota.device_id },
+            "Device limit deleted.", deleteButton);
+        }
+      });
+      actions.append(editButton, resetButton, deleteButton);
       if (service) {
         const domains = document.createElement("span");
         domains.textContent = "Domains: " + quota.domains.join(", ");
@@ -2197,17 +2567,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       element("group-form").scrollIntoView({ behavior: "smooth", block: "center" });
     }
 
-    async function deleteGroup(group, button) {
-      setButtonBusy(button, true);
-      showMessage("Deleting the device group...", "working");
-      try {
-        await request("/api/groups/delete", "POST", { id: group.id });
-        refreshAfterSuccess("Device group deleted.");
-      } catch (error) {
-        showMessage(error.message, "error");
-      } finally {
-        setButtonBusy(button, false);
-      }
+    function deleteGroup(group, button) {
+      deleteItem("/api/groups/delete", { id: group.id }, "Device group deleted.", button);
     }
 
     function editGroupDataLimit(quota) {
@@ -2337,9 +2698,15 @@ DASHBOARD_HTML = r"""<!doctype html>
       resetButton.type = "button";
       resetButton.textContent = "Reset usage";
       resetButton.addEventListener("click", () => resetTimeQuota(quota, resetButton));
+      const deleteButton = document.createElement("button");
+      deleteButton.type = "button";
+      deleteButton.textContent = "Delete";
+      deleteButton.addEventListener("click", () => deleteItem(
+        "/api/time-quotas/delete", { id: quota.id }, "Time limit deleted.", deleteButton
+      ));
       const domains = document.createElement("span");
       domains.textContent = "Domains: " + quota.domains.join(", ");
-      actions.append(editButton, timerButton, resetButton, domains);
+      actions.append(editButton, timerButton, resetButton, deleteButton, domains);
       row.append(heading, detail, meter, actions);
       return row;
     }
@@ -2416,8 +2783,9 @@ DASHBOARD_HTML = r"""<!doctype html>
     async function loadProfiles() {
       const data = await request("/api/profiles", "GET");
       profiles = data.profiles;
-      element("profiles").textContent = JSON.stringify(profiles, null, 2);
+      renderProfileTable();
       [
+        "device-profile",
         "schedule-profile",
         "timer-profile",
         "progression-start-profile",
@@ -2447,6 +2815,8 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     async function loadDevicesForSchedule() {
       const data = await request("/api/devices", "GET");
+      devices = data.devices;
+      renderDeviceTable();
       [
         "schedule-device",
         "timer-device",
@@ -2500,15 +2870,29 @@ DASHBOARD_HTML = r"""<!doctype html>
       schedules.forEach((schedule) => {
         const row = document.createElement("div");
         row.className = "schedule-row";
+        const text = document.createElement("div");
         const name = document.createElement("span");
-        name.textContent = schedule.id + " · " + schedule.device_id + " → " + schedule.profile_id;
-        const time = document.createElement("span");
-        time.textContent = schedule.days_of_week.join(",") + " · " +
-          String(Math.floor(schedule.start_minute / 60)).padStart(2, "0") + ":" +
-          String(schedule.start_minute % 60).padStart(2, "0") + "–" +
-          String(Math.floor(schedule.end_minute / 60)).padStart(2, "0") + ":" +
-          String(schedule.end_minute % 60).padStart(2, "0");
-        row.append(name, time);
+        name.textContent =
+          deviceName(schedule.device_id) + " → " + profileName(schedule.profile_id);
+        const time = document.createElement("small");
+        time.textContent = formatDays(schedule.days_of_week) + " · " +
+          formatMinute(schedule.start_minute) + "–" + formatMinute(schedule.end_minute) +
+          " · " + schedule.id;
+        text.append(name, time);
+        const actions = document.createElement("div");
+        actions.className = "row-actions";
+        const editButton = document.createElement("button");
+        editButton.type = "button";
+        editButton.textContent = "Edit";
+        editButton.addEventListener("click", () => editSchedule(schedule));
+        const deleteButton = document.createElement("button");
+        deleteButton.type = "button";
+        deleteButton.textContent = "Delete";
+        deleteButton.addEventListener("click", () => deleteItem(
+          "/api/schedules/delete", { id: schedule.id }, "Schedule deleted.", deleteButton
+        ));
+        actions.append(editButton, deleteButton);
+        row.append(text, actions);
         container.appendChild(row);
       });
     }
@@ -2738,11 +3122,11 @@ DASHBOARD_HTML = r"""<!doctype html>
       await loadProfiles();
       await loadHealth();
       await loadObservations();
+      // Device names are needed by the schedule list and the device table.
+      await loadDevicesForSchedule();
       await Promise.all([
-        show("/api/devices", "devices", "devices"),
         show("/api/plan", "plan", "plan"),
         loadState(),
-        loadDevicesForSchedule(),
         loadGroups(),
         loadSchedules(),
         loadTimers(),
@@ -2820,6 +3204,7 @@ DASHBOARD_HTML = r"""<!doctype html>
             enabled_probability: Number(element("profile-website-enabled").value)
           }
         });
+        stopEditing("profile");
         refreshAfterSuccess("Profile saved.");
       } catch (error) {
         showMessage(error.message, "error");
@@ -2836,6 +3221,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           profile_id: element("device-profile").value,
           mac_address: element("device-mac").value.trim() || null
         });
+        stopEditing("device");
         refreshAfterSuccess("Device saved.");
       } catch (error) {
         showMessage(error.message, "error");
@@ -2960,6 +3346,14 @@ DASHBOARD_HTML = r"""<!doctype html>
     element("service-quota-device").addEventListener("change", () => populateServiceQuotaDomains());
     element("time-quota-device").addEventListener("change", () => populateTimeQuotaDomains());
     element("check-admin-token").addEventListener("click", checkAdminToken);
+    element("admin-token").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        checkAdminToken();
+      }
+    });
+    element("profile-cancel-edit").addEventListener("click", () => stopEditing("profile"));
+    element("device-cancel-edit").addEventListener("click", () => stopEditing("device"));
     element("admin-token").addEventListener("input", () => {
       stopTrafficSampling("Token changed. Choose Check token to restart live traffic sampling.");
       element("token-check-status").textContent = "Token changed. Choose Check token to load diagnostics.";
