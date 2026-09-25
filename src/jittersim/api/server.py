@@ -5,6 +5,7 @@ import hmac
 import json
 import logging
 import os
+import socket
 import ssl
 import time
 from dataclasses import asdict, replace
@@ -3410,6 +3411,9 @@ class ControlServer(HTTPServer):
     """Serve configuration and plan data from one repository."""
 
     allow_reuse_address = True
+    # The server handles one connection at a time, so bound how long an idle or
+    # slow client (such as a browser preconnect) can hold it.
+    request_timeout_seconds = 5.0
 
     def __init__(
         self,
@@ -3438,9 +3442,21 @@ class ControlServer(HTTPServer):
         self.helper_client = helper_client
         self.scheduler = scheduler
         self.secure_transport = tls_context is not None
+        self._tls_context = tls_context
         super().__init__(server_address, ControlRequestHandler)
-        if tls_context is not None:
-            self.socket = tls_context.wrap_socket(self.socket, server_side=True)
+
+    def get_request(self) -> Tuple[socket.socket, Any]:
+        """Accept one connection and finish its TLS handshake within the timeout."""
+
+        connection, address = super().get_request()
+        connection.settimeout(self.request_timeout_seconds)
+        if self._tls_context is None:
+            return connection, address
+        try:
+            return self._tls_context.wrap_socket(connection, server_side=True), address
+        except OSError:
+            connection.close()
+            raise
 
     def response_for(self, path: str) -> Tuple[int, str, bytes]:
         """Build the response body for a supported GET path."""
@@ -4546,6 +4562,10 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
     """Handle the control-plane routes."""
 
     server: ControlServer
+
+    @property
+    def timeout(self) -> float:
+        return self.server.request_timeout_seconds
 
     def do_GET(self) -> None:
         path = urlsplit(self.path).path

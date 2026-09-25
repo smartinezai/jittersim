@@ -6,6 +6,7 @@ import ssl
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from email.message import Message
 from io import BytesIO
@@ -98,6 +99,39 @@ class FakeHelper:
                 "services": {},
             },
         }
+
+
+def create_test_certificate(directory: Path):
+    """Create a throwaway self-signed certificate, or return None without OpenSSL."""
+
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        return None
+    certificate = Path(directory) / "dashboard.crt"
+    key = Path(directory) / "dashboard.key"
+    subprocess.run(
+        [
+            openssl,
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-sha256",
+            "-nodes",
+            "-days",
+            "1",
+            "-keyout",
+            str(key),
+            "-out",
+            str(certificate),
+            "-subj",
+            "/CN=127.0.0.1",
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return certificate, key
 
 
 class ControlServerTests(unittest.TestCase):
@@ -345,34 +379,11 @@ class ControlServerTests(unittest.TestCase):
                 tls_certfile=Path("dashboard.crt"),
             )
 
-        openssl = shutil.which("openssl")
-        if openssl is None:
-            self.skipTest("OpenSSL is required to create a test certificate")
         with tempfile.TemporaryDirectory(prefix="jittersim-tls-test-") as directory:
-            certificate = Path(directory) / "dashboard.crt"
-            key = Path(directory) / "dashboard.key"
-            subprocess.run(
-                [
-                    openssl,
-                    "req",
-                    "-x509",
-                    "-newkey",
-                    "rsa:2048",
-                    "-sha256",
-                    "-nodes",
-                    "-days",
-                    "1",
-                    "-keyout",
-                    str(key),
-                    "-out",
-                    str(certificate),
-                    "-subj",
-                    "/CN=127.0.0.1",
-                ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            files = create_test_certificate(Path(directory))
+            if files is None:
+                self.skipTest("OpenSSL is required to create a test certificate")
+            certificate, key = files
             secure_server = ControlServer(
                 ("127.0.0.1", 0),
                 self.repository,
@@ -404,6 +415,51 @@ class ControlServerTests(unittest.TestCase):
         self.assertTrue(secure_server.secure_transport)
         self.assertEqual(len(response), 1)
         self.assertTrue(response[0].startswith(b"HTTP/1.0 200 OK"))
+
+    def _health_after_an_idle_connection(self, server, wrap_client=None) -> bytes:
+        server.request_timeout_seconds = 0.5
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
+        thread.start()
+        try:
+            with socket.create_connection(server.server_address):
+                with socket.create_connection(server.server_address, timeout=3) as connection:
+                    client = wrap_client(connection) if wrap_client else connection
+                    client.sendall(b"GET /api/health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+                    return client.recv(4096)
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+    def test_an_idle_connection_does_not_block_other_requests(self) -> None:
+        response = self._health_after_an_idle_connection(self.server)
+
+        self.assertTrue(response.startswith(b"HTTP/1.0 200 OK"))
+
+    def test_an_idle_tls_connection_does_not_block_other_requests(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="jittersim-tls-test-") as directory:
+            files = create_test_certificate(Path(directory))
+            if files is None:
+                self.skipTest("OpenSSL is required to create a test certificate")
+            secure_server = ControlServer(
+                ("127.0.0.1", 0),
+                self.repository,
+                tls_certfile=files[0],
+                tls_keyfile=files[1],
+            )
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            try:
+                response = self._health_after_an_idle_connection(
+                    secure_server,
+                    wrap_client=lambda connection: context.wrap_socket(
+                        connection, server_hostname="127.0.0.1"
+                    ),
+                )
+            finally:
+                secure_server.server_close()
+
+        self.assertTrue(response.startswith(b"HTTP/1.0 200 OK"))
 
     def test_data_limit_endpoint_preserves_usage_and_can_reset_it(self) -> None:
         status, _, body = self.server.write_response_for(
