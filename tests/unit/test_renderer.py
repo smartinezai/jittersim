@@ -342,6 +342,24 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(total[total.index("loss") : total.index("loss") + 3],
                          ("loss", "random", "100%"))
 
+    def test_frequent_loss_lengthens_bursts_instead_of_breaking_the_model(self) -> None:
+        frequent = self._upload_netem(Impairment(loss_percent=70, loss_burst_packets=2))
+
+        # Runs of 2 cannot lose 70% on average, so the good state is left after
+        # every packet and runs last (1 - 0.7) / 0.7 on the way out.
+        self.assertEqual(frequent[frequent.index("loss") : frequent.index("loss") + 4],
+                         ("loss", "gemodel", "100.0000%", "42.8571%"))
+        for loss in range(1, 100):
+            for burst in (2, 3, 10, 100):
+                arguments = self._upload_netem(
+                    Impairment(loss_percent=loss, loss_burst_packets=burst)
+                )
+                position = arguments.index("gemodel")
+                percentages = [
+                    float(value.rstrip("%")) for value in arguments[position + 1 : position + 3]
+                ]
+                self.assertTrue(all(0 < value <= 100 for value in percentages), (loss, burst))
+
     def test_jitter_keeps_packets_in_order(self) -> None:
         jitter = self._upload_netem(Impairment(delay_ms=100, jitter_ms=30))
         limited = self._upload_netem(Impairment(delay_ms=100, jitter_ms=30, bandwidth_kbit=500))

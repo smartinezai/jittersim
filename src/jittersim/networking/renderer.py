@@ -41,6 +41,11 @@ def _loss_arguments(loss_percent: int, burst_packets: int) -> List[str]:
     loss = loss_percent / 100
     exit_bad = 1 / burst_packets
     enter_bad = loss * exit_bad / (1 - loss)
+    if enter_bad > 1:
+        # Runs this short cannot lose this much. Leave the good state after
+        # every packet and make the runs longer so the average stays L.
+        enter_bad = 1.0
+        exit_bad = (1 - loss) / loss
     return ["loss", "gemodel", f"{enter_bad * 100:.4f}%", f"{exit_bad * 100:.4f}%"]
 
 

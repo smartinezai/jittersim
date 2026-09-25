@@ -210,6 +210,17 @@ class LinuxDatapathTests(unittest.TestCase):
         self.assertTrue(0.06 <= lost / count <= 0.14, f"{lost} of {count} lost")
         self.assertTrue(3 <= lost / len(runs) <= 5.5, f"mean run {lost / len(runs):.2f}")
 
+    def test_frequent_bursty_loss_still_applies(self) -> None:
+        frequent = Profile(
+            id="frequent", name="Frequent", upload=Impairment(loss_percent=70, loss_burst_packets=2)
+        )
+        self.apply([device("a-phone", 10, "frequent")], frequent)
+
+        _, replies = self.ping("192.168.50.10", count=1_000, interval="0.002")
+
+        lost = 1_000 - len(set(replies))
+        self.assertTrue(600 <= lost <= 800, f"{lost} of 1000 lost")
+
     def test_jitter_keeps_packets_in_order(self) -> None:
         jitter = Profile(id="jitter", name="Jitter", upload=Impairment(delay_ms=100, jitter_ms=50))
         self.apply([device("a-phone", 10, "jitter")], jitter)
