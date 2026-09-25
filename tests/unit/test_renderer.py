@@ -185,6 +185,29 @@ class RendererTests(unittest.TestCase):
         self.assertNotIn("reorder", upload.argv)
         self.assertIn("reorder", download.argv)
 
+    def test_interfaces_without_queues_remove_the_project_root(self) -> None:
+        plan = compile_plan(
+            devices=(),
+            profiles={},
+            mac_policy=MacPolicy(mode="denylist", denylist=("aa:bb:cc:dd:ee:ff",)),
+        )
+
+        commands = render_command_plan(
+            plan=plan,
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+        )
+
+        tc = [command for command in commands if command.executable == "tc"]
+        # prio needs at least two bands, so there is no root to build here.
+        self.assertEqual(
+            [command.argv for command in tc],
+            [
+                ("tc", "qdisc", "del", "dev", "eth0", "root", "handle", "10:"),
+                ("tc", "qdisc", "del", "dev", "wlan0", "root", "handle", "10:"),
+            ],
+        )
+        self.assertTrue(all(command.ignore_failure for command in tc))
+
     def test_renders_jitter_even_without_a_base_delay(self) -> None:
         profile = Profile(
             id="jitter-only",

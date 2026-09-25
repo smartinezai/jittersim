@@ -146,12 +146,23 @@ def _render_nft_script(plan: NetworkPlan) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _remove_root_command(interface: str) -> Command:
+    return Command(
+        executable="tc",
+        arguments=("qdisc", "del", "dev", interface, "root", "handle", ROOT_HANDLE),
+        purpose=f"remove the project-owned root queue from {interface}",
+        ignore_failure=True,
+    )
+
+
 def _render_tc_commands(
     *,
     queues: Sequence[QueueSpec],
     interface: str,
-    device_count: int,
 ) -> List[Command]:
+    if not queues:
+        # prio needs at least two bands, and there is nothing to shape here.
+        return [_remove_root_command(interface)]
     commands = [
         Command(
             executable="tc",
@@ -165,7 +176,7 @@ def _render_tc_commands(
                 ROOT_HANDLE,
                 "prio",
                 "bands",
-                str(device_count + 1),
+                str(max(queue.mark for queue in queues) + 1),
                 "priomap",
                 *("0" for _ in range(16)),
             ),
@@ -269,18 +280,10 @@ def render_command_plan(*, plan: NetworkPlan, topology: Topology) -> Sequence[Co
     upload_queues = tuple(queue for queue in plan.queues if queue.direction == Direction.UPLOAD)
     download_queues = tuple(queue for queue in plan.queues if queue.direction == Direction.DOWNLOAD)
     commands.extend(
-        _render_tc_commands(
-            queues=upload_queues,
-            interface=topology.uplink_interface,
-            device_count=max((queue.mark for queue in upload_queues), default=0),
-        )
+        _render_tc_commands(queues=upload_queues, interface=topology.uplink_interface)
     )
     commands.extend(
-        _render_tc_commands(
-            queues=download_queues,
-            interface=topology.test_interface,
-            device_count=max((queue.mark for queue in download_queues), default=0),
-        )
+        _render_tc_commands(queues=download_queues, interface=topology.test_interface)
     )
     return tuple(commands)
 
@@ -297,12 +300,5 @@ def render_reset_commands(*, topology: Topology) -> Sequence[Command]:
         )
     ]
     for interface in (topology.uplink_interface, topology.test_interface):
-        commands.append(
-            Command(
-                executable="tc",
-                arguments=("qdisc", "del", "dev", interface, "root", "handle", ROOT_HANDLE),
-                purpose=f"remove the project-owned root queue from {interface}",
-                ignore_failure=True,
-            )
-        )
+        commands.append(_remove_root_command(interface))
     return tuple(commands)

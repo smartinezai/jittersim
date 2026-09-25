@@ -13,7 +13,11 @@ from jittersim.config.models import (
     ValidationError,
 )
 
-from .compiler import MAX_DEVICES_PER_PLAN, MAX_SERVICE_QUOTAS_PER_PLAN
+from .compiler import (
+    MAX_DEVICES_PER_PLAN,
+    MAX_SERVICE_QUOTAS_PER_PLAN,
+    MAX_TRAFFIC_CLASSES_PER_PLAN,
+)
 from .plan import (
     Direction,
     MarkRule,
@@ -216,10 +220,7 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
             raise PlanCodecError(f"service_quota_rules[{index}] has no destinations")
         if not isinstance(active, bool):
             raise PlanCodecError(f"service_quota_rules[{index}].active is invalid")
-        if (
-            mark <= len(mark_data)
-            or mark > MAX_DEVICES_PER_PLAN + MAX_SERVICE_QUOTAS_PER_PLAN
-        ):
+        if mark <= len(mark_data) or mark > MAX_TRAFFIC_CLASSES_PER_PLAN:
             raise PlanCodecError(f"service_quota_rules[{index}].mark is outside the safe range")
         service_key = f"quota:{quota_id}"
         if (

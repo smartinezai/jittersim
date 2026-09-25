@@ -21,6 +21,9 @@ class PlanError(ValueError):
 
 MAX_DEVICES_PER_PLAN = 15
 MAX_SERVICE_QUOTAS_PER_PLAN = 15
+# The kernel's prio qdisc supports at most 16 bands and band 0 carries unmarked
+# traffic, so devices and service quotas share 15 marks.
+MAX_TRAFFIC_CLASSES_PER_PLAN = 15
 
 
 def compile_plan(
@@ -104,6 +107,11 @@ def compile_plan(
         raise PlanError(
             f"a plan cannot contain more than {MAX_SERVICE_QUOTAS_PER_PLAN} service quotas"
         )
+    if len(mark_rules) + len(service_quota_rules) > MAX_TRAFFIC_CLASSES_PER_PLAN:
+        raise PlanError(
+            f"a plan cannot use more than {MAX_TRAFFIC_CLASSES_PER_PLAN} traffic classes "
+            "(devices plus service quotas)"
+        )
     quota_ids = set()
     service_queues = []
     for index, quota_rule in enumerate(
@@ -127,7 +135,7 @@ def compile_plan(
             )
         if any(address.version != 4 for address in quota_rule.destination_addresses):
             raise PlanError("service quota contains a non-IPv4 destination")
-        if index > MAX_DEVICES_PER_PLAN + MAX_SERVICE_QUOTAS_PER_PLAN:
+        if index > MAX_TRAFFIC_CLASSES_PER_PLAN:
             raise PlanError("service quota mark is outside the safe range")
         quota_ids.add(quota_rule.quota_id)
         service_queues.extend(

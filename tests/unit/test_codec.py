@@ -80,6 +80,24 @@ class PlanCodecTests(unittest.TestCase):
         with self.assertRaisesRegex(PlanCodecError, "quota_id is invalid"):
             plan_from_payload(payload)
 
+    def test_rejects_a_service_quota_mark_beyond_the_prio_bands(self) -> None:
+        payload = plan_to_payload(self.plan)
+        payload["service_quota_rules"] = [
+            {
+                "quota_id": "video",
+                "device_id": "alice",
+                "device_ip": "192.168.50.10",
+                "destination_addresses": ["203.0.113.10"],
+                "mark": 16,
+                "upload_impairment": {"delay_ms": 1},
+                "download_impairment": {"delay_ms": 1},
+                "active": True,
+            }
+        ]
+
+        with self.assertRaisesRegex(PlanCodecError, "mark is outside the safe range"):
+            plan_from_payload(payload)
+
     def test_rejects_a_non_private_mark_address(self) -> None:
         payload = plan_to_payload(self.plan)
         payload["mark_rules"][0]["ipv4_address"] = "8.8.8.8"

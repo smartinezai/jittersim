@@ -1,8 +1,9 @@
 import unittest
+from ipaddress import IPv4Address
 
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.engine.compiler import PlanError, compile_plan
-from jittersim.engine.plan import Direction
+from jittersim.engine.plan import Direction, ServiceQuotaRule
 
 
 def make_device(device_id: str, address: str, profile_id: str = "normal") -> Device:
@@ -91,6 +92,29 @@ class CompilePlanTests(unittest.TestCase):
             compile_plan(
                 devices=devices,
                 profiles={"normal": Profile(id="normal", name="Normal")},
+            )
+
+    def test_rejects_more_traffic_classes_than_the_prio_layout_supports(self) -> None:
+        devices = tuple(
+            make_device(f"device-{index:02d}", f"192.168.50.{index + 10}")
+            for index in range(15)
+        )
+        quota = ServiceQuotaRule(
+            quota_id="video",
+            device_id="device-00",
+            device_ip=IPv4Address("192.168.50.10"),
+            destination_addresses=(IPv4Address("203.0.113.10"),),
+            mark=0,
+            upload_impairment=Impairment(),
+            download_impairment=Impairment(),
+            active=True,
+        )
+
+        with self.assertRaisesRegex(PlanError, "more than 15 traffic classes"):
+            compile_plan(
+                devices=devices,
+                profiles={"normal": Profile(id="normal", name="Normal")},
+                service_quota_rules=(quota,),
             )
 
 
