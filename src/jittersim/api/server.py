@@ -4,6 +4,7 @@ import argparse
 import base64
 import hashlib
 import hmac
+import html
 import json
 import logging
 import os
@@ -17,8 +18,17 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from ipaddress import IPv4Network
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Tuple
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
+from jittersim.api.session import (
+    SignInLimiter,
+    cleared_session_cookie,
+    issue_session,
+    session_cookie,
+    session_cookie_name,
+    session_from_cookie_header,
+    session_is_valid,
+)
 from jittersim.config.device_labels import (
     DeviceLabelError,
     guess_device_type,
@@ -128,7 +138,6 @@ WRITE_PATHS = frozenset(
     )
 )
 ACTION_PATHS = frozenset(("/api/apply", "/api/reset", "/api/observations/scan"))
-PUBLIC_READ_PATHS = frozenset(("/", "/api/health"))
 
 
 # Raw string: JavaScript escapes such as "\n" must reach the browser unchanged.
@@ -639,14 +648,12 @@ DASHBOARD_HTML = r"""<!doctype html>
     <p id="message" class="action-message" role="status" aria-live="polite">Ready.</p>
   </section>
   <section class="card token-card">
-    <h2>Control token</h2>
-    <div class="token-controls">
-      <label>Admin token (kept in this page only)
-        <input id="admin-token" type="password" autocomplete="off">
-      </label>
-      <button id="check-admin-token" type="button">Check token</button>
-    </div>
-    <p id="token-check-status" class="token-check-status" role="status" aria-live="polite">Enter the token and choose Check token to load diagnostics.</p>
+    <h2>Signed in</h2>
+    <form class="token-controls" method="post" action="/sign-out">
+      <p>This browser stays signed in for 7 days, or until you sign out.</p>
+      <button type="submit">Sign out</button>
+    </form>
+    <p id="token-check-status" class="token-check-status" role="status" aria-live="polite">Loading the dashboard...</p>
   </section>
   <section class="card connected-card">
     <div class="section-heading">
@@ -672,7 +679,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           <option value="all">All assigned devices</option>
         </select>
       </label>
-      <p id="traffic-status" class="traffic-status" role="status" aria-live="polite">Check the admin token to start live traffic sampling.</p>
+      <p id="traffic-status" class="traffic-status" role="status" aria-live="polite">Starting live traffic sampling...</p>
     </div>
     <form id="traffic-rate-form" class="traffic-rate-form">
       <label>ISP download maximum (Mbit/s)
@@ -698,7 +705,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       </div>
     </div>
     <div class="traffic-chart-wrap">
-      <canvas id="traffic-chart" width="900" height="320" role="img" aria-label="Live upload and download rates at JitterSim with configured ISP and device queue limits over the last 60 seconds">Live traffic chart. Check the admin token to begin sampling.</canvas>
+      <canvas id="traffic-chart" width="900" height="320" role="img" aria-label="Live upload and download rates at JitterSim with configured ISP and device queue limits over the last 60 seconds">Live traffic chart.</canvas>
       <div class="traffic-legend" aria-label="Graph legend">
         <span><i class="traffic-key"></i>Upload rate at Pi</span>
         <span><i class="traffic-key download"></i>Download rate at Pi</span>
@@ -711,7 +718,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     <p id="traffic-profile-status" class="traffic-profile-status" role="status" aria-live="polite">Select one device to show its applied default queue limits.</p>
     <p class="traffic-note">Dropped and waiting show packets JitterSim itself discarded or is still
       delaying, in both directions.</p>
-    <p class="traffic-note">Traffic lines count bytes at JitterSim before its queues. They do not show the speed a device receives. Dashed lines show configured limits. The ISP plan line is shared with household traffic and is not a live measurement of spare capacity. Service-specific queues may use different limits. Only assigned devices are included. Check the admin token to start; sampling pauses when this tab is hidden.</p>
+    <p class="traffic-note">Traffic lines count bytes at JitterSim before its queues. They do not show the speed a device receives. Dashed lines show configured limits. The ISP plan line is shared with household traffic and is not a live measurement of spare capacity. Service-specific queues may use different limits. Only assigned devices are included. Sampling pauses when this tab is hidden.</p>
   </section>
   <section class="card wide" aria-labelledby="measurement-title">
     <div class="section-heading">
@@ -1254,7 +1261,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <p class="form-note">Editing a saved limit keeps its current usage. The fallback profile starts when the device total reaches the limit.</p>
       <button class="primary" type="submit">Save device limit</button>
     </form>
-    <div id="data-limit-list" class="quota-list" aria-live="polite">Enter the admin token to view limits.</div>
+    <div id="data-limit-list" class="quota-list" aria-live="polite">Loading...</div>
   </section>
   <section class="card quota-card">
     <div class="section-heading">
@@ -1299,7 +1306,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <p class="form-note">The shared limit adds the byte counters for all group members. A per-device limit takes priority if the same device has both.</p>
       <button class="primary" type="submit">Save group limit</button>
     </form>
-    <div id="group-data-limit-list" class="quota-list" aria-live="polite">Enter the admin token to view group limits.</div>
+    <div id="group-data-limit-list" class="quota-list" aria-live="polite">Loading...</div>
   </section>
   <section class="card quota-card">
     <div class="section-heading">
@@ -1331,7 +1338,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <p class="form-note">Includes subdomains of each name. Configure the Mac browser's HTTPS proxy as 192.168.50.1:3128 while connected to the test Wi-Fi. Other proxied sites keep the device profile. Apps and connections that bypass the proxy are outside this control.</p>
       <button class="primary" type="submit">Save browser service profile</button>
     </form>
-    <div id="service-assignment-list" class="quota-list" aria-live="polite">Enter the admin token to view service profiles.</div>
+    <div id="service-assignment-list" class="quota-list" aria-live="polite">Loading...</div>
   </section>
   <section class="card quota-card">
     <div class="section-heading">
@@ -1388,7 +1395,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <p class="form-note">Only domains observed from the selected device appear here. Select all names used by the service. Matching direct traffic is counted together then multiplied by the quota weight. Browser proxy tunnels are outside this limit.</p>
       <button class="primary" type="submit">Save service limit</button>
     </form>
-    <div id="service-quota-list" class="quota-list" aria-live="polite">Enter the admin token to view service limits.</div>
+    <div id="service-quota-list" class="quota-list" aria-live="polite">Loading...</div>
   </section>
   <section class="card quota-card">
     <div class="section-heading">
@@ -1445,7 +1452,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <p class="form-note">Active time is counted when matching traffic is seen. A long video stream therefore keeps using the allowance even when there are no new clicks. Save the limit then start its timer from the saved row.</p>
       <button class="primary" type="submit">Save time limit</button>
     </form>
-    <div id="time-quota-list" class="quota-list" aria-live="polite">Enter the admin token to view time limits.</div>
+    <div id="time-quota-list" class="quota-list" aria-live="polite">Loading...</div>
   </section>
   <section class="card">
     <h2>Manual Pi access-point fallback</h2>
@@ -1489,14 +1496,14 @@ DASHBOARD_HTML = r"""<!doctype html>
         <div><h2>Diagnostics</h2><p>Runtime state and available traffic counters</p></div>
         <button id="refresh-diagnostics" type="button">Refresh</button>
       </div>
-      <pre id="diagnostics">Enter the admin token to inspect diagnostics.</pre>
+      <pre id="diagnostics">Loading...</pre>
     </section>
     <section class="card">
       <div class="section-heading">
         <div><h2>Backup and action history</h2><p>Recent admin actions without request contents</p></div>
         <button id="download-backup" type="button">Download backup</button>
       </div>
-      <pre id="action-history">Enter the admin token to view recent actions.</pre>
+      <pre id="action-history">Loading...</pre>
       <div class="row-actions transfer-actions">
         <button id="export-settings" type="button">Export settings</button>
         <button id="import-settings-button" type="button">Import settings...</button>
@@ -2059,8 +2066,6 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     async function request(path, method, body) {
       const headers = {};
-      const token = element("admin-token").value.trim();
-      if (token) headers.Authorization = "Bearer " + token;
       if (body !== undefined) headers["Content-Type"] = "application/json";
       const submitButton = pendingFormSubmitButton;
       pendingFormSubmitButton = null;
@@ -2071,6 +2076,13 @@ DASHBOARD_HTML = r"""<!doctype html>
           body: body === undefined ? undefined : JSON.stringify(body),
           cache: "no-store"
         });
+        if (response.status === 401) {
+          // The sign-in expired or was cleared, so show the sign-in page again.
+          window.location.assign("/");
+          const error = new Error("Signed out.");
+          error.status = 401;
+          throw error;
+        }
         const data = await response.json();
         if (!response.ok) {
           const applyHint = data.error === "network helper apply failed" &&
@@ -2093,7 +2105,6 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     let helperConfigured = false;
-    let adminTokenVerified = false;
     let profiles = [];
     let devices = [];
     let deviceConditions = { applied: false, devices: {} };
@@ -2683,7 +2694,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         if (!trafficSamplingAllowed) return;
         resetTrafficHistory();
         if (error.status === 401) {
-          stopTrafficSampling("The admin token was rejected. Check it again to restart live traffic sampling.");
+          stopTrafficSampling("Signed out. Sign in again to restart live traffic sampling.");
         } else {
           element("traffic-status").textContent =
             "Live traffic update failed: " + error.message + ". Retrying in 2 seconds.";
@@ -3352,21 +3363,11 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
     }
 
-    function hasAdminToken() {
-      return Boolean(element("admin-token").value.trim());
-    }
-
     async function loadObservations() {
-      const tokenMessage = "Enter the admin token to view observed domains.";
-      if (!hasAdminToken()) {
-        renderObservations({ available: false, devices: [], message: tokenMessage });
-        return;
-      }
       try {
         renderObservations(await request("/api/observations", "GET"));
       } catch (error) {
-        const message = error.status === 401 ? tokenMessage : error.message;
-        renderObservations({ available: false, devices: [], message: message });
+        renderObservations({ available: false, devices: [], message: error.message });
       }
     }
 
@@ -3865,7 +3866,6 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     async function loadQuotas() {
       try {
-        if (!hasAdminToken()) throw new Error("admin token required");
         const [dataLimits, groupDataLimits, serviceQuotas, timeQuotas] = await Promise.all([
           request("/api/data-limits", "GET"),
           request("/api/group-data-limits", "GET"),
@@ -3877,10 +3877,10 @@ DASHBOARD_HTML = r"""<!doctype html>
         renderServiceQuotas(serviceQuotas);
         renderTimeQuotas(timeQuotas);
       } catch (error) {
-        renderDataLimits({ data_limits: [], error: "Enter the admin token to view device limits." });
-        renderGroupDataLimits({ group_data_limits: [], error: "Enter the admin token to view group limits." });
-        renderServiceQuotas({ service_quotas: [], error: "Enter the admin token to view service limits." });
-        renderTimeQuotas({ time_quotas: [], error: "Enter the admin token to view time limits." });
+        renderDataLimits({ data_limits: [], error: error.message });
+        renderGroupDataLimits({ group_data_limits: [], error: error.message });
+        renderServiceQuotas({ service_quotas: [], error: error.message });
+        renderTimeQuotas({ time_quotas: [], error: error.message });
       }
     }
 
@@ -4206,11 +4206,6 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     async function loadAdminTools() {
-      if (!element("admin-token").value.trim()) {
-        element("diagnostics").textContent = "Enter the admin token to inspect diagnostics.";
-        element("action-history").textContent = "Enter the admin token to view recent actions.";
-        return { ok: false, message: "Enter the admin token first." };
-      }
       try {
         const data = await request("/api/diagnostics", "GET");
         element("diagnostics").textContent = JSON.stringify(data, null, 2);
@@ -4227,47 +4222,24 @@ DASHBOARD_HTML = r"""<!doctype html>
           : "No admin actions have been recorded.";
       } catch (error) {
         element("action-history").textContent = error.message;
-        return { ok: true, message: "Token accepted. Diagnostics loaded, but action history could not be loaded." };
+        return { ok: true, message: "Diagnostics loaded, but action history could not be loaded." };
       }
-      return { ok: true, message: "Token accepted. Diagnostics loaded." };
+      return { ok: true, message: "Diagnostics loaded." };
     }
 
-    async function checkAdminToken() {
-      const button = element("check-admin-token");
+    async function startDashboard() {
+      // Only signed-in browsers get this page, so load everything at once.
       const status = element("token-check-status");
-      if (!element("admin-token").value.trim()) {
-        status.textContent = "Enter the admin token first.";
-        showMessage("Enter the admin token first.", "error");
-        element("admin-token").focus();
-        return;
-      }
-      button.disabled = true;
-      button.setAttribute("aria-busy", "true");
-      button.textContent = "Checking...";
-      status.textContent = "Checking the token and loading diagnostics...";
-      showMessage("Checking the admin token...", "working");
       try {
-        const result = await loadAdminTools();
-        if (result.ok) {
-          adminTokenVerified = true;
-          await refresh();
-          await loadTrafficSettings();
-          await startTrafficSampling();
-        } else {
-          adminTokenVerified = false;
-        }
-        status.textContent = result.ok ? result.message : "Token check failed: " + result.message;
-        status.className = "token-check-status " + (result.ok ? "success" : "error");
-        showMessage(status.textContent, result.ok ? "success" : "error");
+        await refresh();
+        await loadTrafficSettings();
+        await startTrafficSampling();
+        status.textContent = "Signed in.";
+        status.className = "token-check-status success";
       } catch (error) {
-        adminTokenVerified = false;
-        status.textContent = "Token check failed: " + error.message;
+        status.textContent = error.message;
         status.className = "token-check-status error";
-        showMessage(status.textContent, "error");
-      } finally {
-        button.disabled = false;
-        button.removeAttribute("aria-busy");
-        button.textContent = "Check token";
+        showMessage(error.message, "error");
       }
     }
 
@@ -4541,13 +4513,6 @@ DASHBOARD_HTML = r"""<!doctype html>
     element("time-quota-reset-mode").addEventListener("change", () => syncQuotaReset("time-quota"));
     element("service-quota-device").addEventListener("change", () => populateServiceQuotaDomains());
     element("time-quota-device").addEventListener("change", () => populateTimeQuotaDomains());
-    element("check-admin-token").addEventListener("click", checkAdminToken);
-    element("admin-token").addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        checkAdminToken();
-      }
-    });
     element("profile-cancel-edit").addEventListener("click", () => stopEditing("profile"));
     element("profile-form").addEventListener("reset", () => {
       savedProfileRandomness = DEFAULT_PROFILE_RANDOMNESS;
@@ -4574,11 +4539,6 @@ DASHBOARD_HTML = r"""<!doctype html>
       } finally {
         button.disabled = false;
       }
-    });
-    element("admin-token").addEventListener("input", () => {
-      stopTrafficSampling("Token changed. Choose Check token to restart live traffic sampling.");
-      element("token-check-status").textContent = "Token changed. Choose Check token to load diagnostics.";
-      element("token-check-status").className = "token-check-status";
     });
     element("traffic-device").addEventListener("change", () => {
       if (!trafficSamplingAllowed) return;
@@ -4706,20 +4666,15 @@ DASHBOARD_HTML = r"""<!doctype html>
     });
     element("download-backup").addEventListener("click", async (event) => {
       const button = event.currentTarget;
-      const token = element("admin-token").value.trim();
-      if (!token) {
-        element("action-history").textContent = "Enter the admin token before downloading a backup.";
-        showMessage("Enter the admin token before downloading a backup.", "error");
-        return;
-      }
       setButtonBusy(button, true);
       button.textContent = "Preparing backup...";
       showMessage("Preparing the configuration backup...", "working");
       try {
-        const response = await fetch("/api/backup", {
-          headers: { Authorization: "Bearer " + token },
-          cache: "no-store"
-        });
+        const response = await fetch("/api/backup", { cache: "no-store" });
+        if (response.status === 401) {
+          window.location.assign("/");
+          throw new Error("Signed out.");
+        }
         if (!response.ok) {
           const data = await response.json();
           throw new Error(data.error || response.statusText);
@@ -4910,26 +4865,94 @@ DASHBOARD_HTML = r"""<!doctype html>
       routerAction("/api/router/wifi", { enabled: true }, "Turning on router Wi-Fi...", event.currentTarget);
     });
 
-    window.setInterval(() => { if (adminTokenVerified) loadConnectedDevices(); }, 5000);
-    window.setInterval(() => { if (adminTokenVerified) loadTimers(); }, 5000);
-    window.setInterval(() => { if (adminTokenVerified) loadProgressions(); }, 5000);
-    window.setInterval(() => { if (adminTokenVerified) loadQuotas(); }, 5000);
-    window.setInterval(() => { if (adminTokenVerified) loadConditions(); }, 5000);
-    window.setInterval(() => { if (adminTokenVerified) loadObservations(); }, 15000);
+    window.setInterval(() => loadConnectedDevices(), 5000);
+    window.setInterval(() => loadTimers(), 5000);
+    window.setInterval(() => loadProgressions(), 5000);
+    window.setInterval(() => loadQuotas(), 5000);
+    window.setInterval(() => loadConditions(), 5000);
+    window.setInterval(() => loadObservations(), 15000);
 
-    loadHealth().catch((error) => {
-      showMessage(error.message, "error");
-    });
+    startDashboard();
   </script>
 </body>
 </html>
 """
 
 
-def _inline_source_hash(tag: str) -> str:
-    content = DASHBOARD_HTML.split(f"<{tag}>", 1)[1].split(f"</{tag}>", 1)[0]
+def _inline_source_hash(tag: str, page: str = DASHBOARD_HTML) -> str:
+    content = page.split(f"<{tag}>", 1)[1].split(f"</{tag}>", 1)[0]
     digest = hashlib.sha256(content.encode("utf-8")).digest()
     return "'sha256-" + base64.b64encode(digest).decode("ascii") + "'"
+
+
+# The only page anyone without a sign-in sees. It names nothing and has no
+# script, so it gives nothing away about what it protects.
+SIGN_IN_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Sign in</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      margin: 0; min-height: 100vh; display: grid; place-items: center;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: #f4f5f7; color: #1d2433;
+    }
+    main {
+      width: min(22rem, calc(100% - 2rem)); box-sizing: border-box; padding: 2rem;
+      border-radius: 12px; background: #ffffff; box-shadow: 0 8px 24px rgb(0 0 0 / 8%);
+    }
+    h1 { margin: 0 0 1.25rem; font-size: 1.4rem; }
+    label { display: block; margin-bottom: 0.4rem; font-weight: 600; }
+    input {
+      box-sizing: border-box; width: 100%; padding: 0.7rem; font: inherit;
+      border: 1px solid #c4c9d4; border-radius: 8px;
+    }
+    button {
+      width: 100%; margin-top: 1rem; padding: 0.7rem; border: 0; border-radius: 8px;
+      background: #2f5bd3; color: #ffffff; font: inherit; font-weight: 600; cursor: pointer;
+    }
+    .error { margin: 0.75rem 0 0; color: #b42318; }
+    @media (prefers-color-scheme: dark) {
+      body { background: #11151d; color: #e6e9ef; }
+      main { background: #1b212c; box-shadow: none; }
+      input { background: #11151d; color: inherit; border-color: #3a4456; }
+      .error { color: #ff9b91; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Sign in</h1>
+    <form method="post" action="/sign-in">
+      <label for="token">Token</label>
+      <input id="token" name="token" type="password" autocomplete="current-password"
+        required autofocus>
+      {message}
+      <button type="submit">Sign in</button>
+    </form>
+  </main>
+</body>
+</html>
+"""
+
+SIGN_IN_CONTENT_SECURITY_POLICY = "; ".join(
+    (
+        "default-src 'none'",
+        f"style-src {_inline_source_hash('style', SIGN_IN_HTML)}",
+        "base-uri 'none'",
+        "form-action 'self'",
+        "frame-ancestors 'none'",
+    )
+)
+
+
+def _sign_in_page(message: str = "") -> bytes:
+    notice = f'<p class="error" role="alert">{html.escape(message)}</p>' if message else ""
+    return SIGN_IN_HTML.replace("{message}", notice).encode("utf-8")
 
 
 # The dashboard may run only its own inline script and style, and talk only
@@ -5254,6 +5277,7 @@ class ControlServer(HTTPServer):
         self.scheduler = scheduler
         self.secure_transport = tls_context is not None
         self._tls_context = tls_context
+        self.sign_in_limiter = SignInLimiter()
         super().__init__(server_address, ControlRequestHandler)
 
     def get_request(self) -> Tuple[socket.socket, Any]:
@@ -6778,6 +6802,14 @@ class ControlServer(HTTPServer):
             authorization_header=authorization_header,
         )
 
+    def is_signed_in(self, cookie_header: Optional[str]) -> bool:
+        """Return whether a Cookie header holds a current sign-in."""
+
+        value = session_from_cookie_header(
+            cookie_header, name=session_cookie_name(secure=self.secure_transport)
+        )
+        return session_is_valid(self.admin_token, value, now=int(time.time()))
+
     def recover_saved_network_state(self) -> None:
         """Restore the last explicit apply or reset after the service restarts."""
 
@@ -6814,7 +6846,8 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
     """Handle the control-plane routes."""
 
     server: ControlServer
-    server_version = "jittersim"
+    # A neutral name: people who haven't signed in learn nothing from headers.
+    server_version = "server"
 
     def version_string(self) -> str:
         # Do not advertise the Python version.
@@ -6824,9 +6857,47 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
     def timeout(self) -> float:
         return self.server.request_timeout_seconds
 
+    def _signed_in(self) -> bool:
+        return self.server.is_signed_in(self.headers.get("Cookie"))
+
+    def _send_sign_in_required(self) -> None:
+        self._send_response(
+            status=HTTPStatus.UNAUTHORIZED,
+            content_type="application/json",
+            body=_json_bytes({"error": "sign in required"}),
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    def _send_sign_in_page(self, *, status: int = HTTPStatus.OK, message: str = "") -> None:
+        if not message and self.server.admin_token is None:
+            message = "Sign-in isn't set up."
+        self._send_response(
+            status=status,
+            content_type="text/html; charset=utf-8",
+            body=_sign_in_page(message),
+            content_security_policy=SIGN_IN_CONTENT_SECURITY_POLICY,
+        )
+
+    def _redirect_home(self, *, cookie: Optional[str] = None) -> None:
+        headers = {"Location": "/"}
+        if cookie is not None:
+            headers["Set-Cookie"] = cookie
+        self._send_response(
+            status=HTTPStatus.SEE_OTHER,
+            content_type="text/plain; charset=utf-8",
+            body=b"",
+            headers=headers,
+        )
+
     def do_GET(self) -> None:
         path = urlsplit(self.path).path
-        if path.startswith("/api/") and path not in PUBLIC_READ_PATHS:
+        if path in ("/", "/sign-in") and not self._signed_in():
+            self._send_sign_in_page()
+            return
+        if path == "/sign-in":
+            self._redirect_home()
+            return
+        if path.startswith("/api/"):
             if self.server.admin_token is None:
                 self._send_response(
                     status=HTTPStatus.SERVICE_UNAVAILABLE,
@@ -6834,13 +6905,11 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                     body=_json_bytes({"error": "protected reads are disabled"}),
                 )
                 return
-            if not self.server.is_authorized(self.headers.get("Authorization")):
-                self._send_response(
-                    status=HTTPStatus.UNAUTHORIZED,
-                    content_type="application/json",
-                    body=_json_bytes({"error": "valid bearer authentication is required"}),
-                    headers={"WWW-Authenticate": "Bearer"},
-                )
+            if not (
+                self.server.is_authorized(self.headers.get("Authorization"))
+                or self._signed_in()
+            ):
+                self._send_sign_in_required()
                 return
         try:
             status, content_type, body = self.server.response_for(path)
@@ -6865,8 +6934,87 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         )
         self._send_response(status=status, content_type=content_type, body=body, headers=headers)
 
+    def _from_another_site(self) -> bool:
+        # Browsers name where a request comes from. A page elsewhere, including
+        # another app on the Pi, must not sign this browser in or out.
+        return self.headers.get("Sec-Fetch-Site") in ("cross-site", "same-site")
+
     def do_POST(self) -> None:
-        self._handle_write()
+        path = urlsplit(self.path).path
+        if path in ("/sign-in", "/sign-out") and self._from_another_site():
+            # Not counted as a failed sign-in, so other sites can't lock anyone out.
+            self._send_sign_in_page(
+                status=HTTPStatus.FORBIDDEN, message="Please sign in from this page."
+            )
+        elif path == "/sign-in":
+            self._handle_sign_in()
+        elif path == "/sign-out":
+            self._redirect_home(cookie=cleared_session_cookie(secure=self.server.secure_transport))
+        else:
+            self._handle_write()
+
+    def _handle_sign_in(self) -> None:
+        expected = self.server.admin_token
+        if expected is None:
+            self._send_sign_in_page(status=HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        address = self.client_address[0]
+        now = time.time()
+        limiter = self.server.sign_in_limiter
+        if limiter.is_locked(address, now=now):
+            self._send_sign_in_page(
+                status=HTTPStatus.TOO_MANY_REQUESTS,
+                message="Too many attempts. Try again later.",
+            )
+            return
+        try:
+            token = self._read_form_field("token")
+        except RequestError:
+            token = ""
+        # Compare bytes: compare_digest rejects str values with non-ASCII characters.
+        if not hmac.compare_digest(token.encode("utf-8"), expected.encode("utf-8")):
+            limiter.record_failure(address, now=now)
+            self._send_sign_in_page(
+                status=HTTPStatus.UNAUTHORIZED, message="That token didn't work."
+            )
+            return
+        limiter.clear(address)
+        cookie = session_cookie(
+            issue_session(expected, now=int(now)), secure=self.server.secure_transport
+        )
+        self._redirect_home(cookie=cookie)
+
+    def _read_form_field(self, name: str, *, max_bytes: int = 4_096) -> str:
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError as error:
+            raise RequestError("request body length is invalid") from error
+        if length < 0 or length > max_bytes:
+            raise RequestError("request body is too large")
+        raw_body = self.rfile.read(length)
+        if len(raw_body) != length:
+            raise RequestError("request body is incomplete")
+        try:
+            values = parse_qs(raw_body.decode("utf-8"), max_num_fields=10)
+        except (UnicodeDecodeError, ValueError) as error:
+            raise RequestError("request body is invalid") from error
+        return values.get(name, [""])[0]
+
+    def _cross_site_refusal(self) -> Optional[str]:
+        """Refuse a cookie-authorized write that another site could have sent."""
+
+        # Other sites can't send JSON here without the browser asking first.
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if content_type != "application/json":
+            return "requests must send JSON"
+        if self._from_another_site():
+            return "cross-site requests are refused"
+        # With the no-referrer policy some browsers send Origin: null for this
+        # page, so only a real, different origin counts.
+        origin = self.headers.get("Origin")
+        if origin not in (None, "null") and urlsplit(origin).netloc != self.headers.get("Host", ""):
+            return "cross-site requests are refused"
+        return None
 
     def do_PUT(self) -> None:
         self._handle_write()
@@ -6898,13 +7046,8 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_write(self) -> None:
         path = urlsplit(self.path).path
-        if path not in WRITE_PATHS:
-            self._send_response(
-                status=HTTPStatus.NOT_FOUND,
-                content_type="application/json",
-                body=_json_bytes({"error": "not found"}),
-            )
-            return
+        # Check access before the route, so that the answers don't reveal which
+        # routes exist to someone who hasn't signed in.
         if self.server.admin_token is None:
             self._send_response(
                 status=HTTPStatus.SERVICE_UNAVAILABLE,
@@ -6912,14 +7055,26 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 body=_json_bytes({"error": "state-changing actions are disabled"}),
             )
             return
-        if not self.server.is_authorized(self.headers.get("Authorization")):
+        bearer = self.server.is_authorized(self.headers.get("Authorization"))
+        if not bearer and not self._signed_in():
+            self._send_sign_in_required()
+            return
+        if path not in WRITE_PATHS:
             self._send_response(
-                status=HTTPStatus.UNAUTHORIZED,
+                status=HTTPStatus.NOT_FOUND,
                 content_type="application/json",
-                body=_json_bytes({"error": "valid bearer authentication is required"}),
-                headers={"WWW-Authenticate": "Bearer"},
+                body=_json_bytes({"error": "not found"}),
             )
             return
+        if not bearer:
+            refusal = self._cross_site_refusal()
+            if refusal is not None:
+                self._send_response(
+                    status=HTTPStatus.FORBIDDEN,
+                    content_type="application/json",
+                    body=_json_bytes({"error": refusal}),
+                )
+                return
 
         try:
             payload = self._read_json_body(
@@ -6981,6 +7136,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         content_type: str,
         body: bytes,
         headers: Optional[Dict[str, str]] = None,
+        content_security_policy: Optional[str] = None,
     ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -6990,7 +7146,10 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
         if content_type.startswith("text/html"):
-            self.send_header("Content-Security-Policy", DASHBOARD_CONTENT_SECURITY_POLICY)
+            self.send_header(
+                "Content-Security-Policy",
+                content_security_policy or DASHBOARD_CONTENT_SECURITY_POLICY,
+            )
         for name, value in (headers or {}).items():
             self.send_header(name, value)
         self.end_headers()

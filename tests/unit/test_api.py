@@ -10,10 +10,12 @@ import ssl
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from email.message import Message
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import urlencode
 
 from jittersim.api.server import (
     DASHBOARD_HTML,
@@ -21,6 +23,7 @@ from jittersim.api.server import (
     ControlServer,
     _build_parser,
 )
+from jittersim.api.session import issue_session
 from jittersim.config.models import (
     DataLimit,
     Device,
@@ -412,9 +415,10 @@ class ControlServerTests(unittest.TestCase):
                 self.assertEqual(get(path)["status"], 401)
                 self.assertEqual(get(path, "Bearer wrong-token")["status"], 401)
                 self.assertEqual(get(path, "Bearer admin-token")["status"], 200)
-        # Only the dashboard page and the health check are public.
+        # Only the sign-in page is public.
         self.assertEqual(get("/api/profiles")["status"], 401)
-        self.assertEqual(get("/api/health")["status"], 200)
+        self.assertEqual(get("/api/health")["status"], 401)
+        self.assertEqual(get("/api/health", "Bearer admin-token")["status"], 200)
 
     def test_live_traffic_requires_admin_token_and_returns_directional_counters(self) -> None:
         self.server.admin_token = "admin-token"
@@ -1167,7 +1171,7 @@ class ControlServerTests(unittest.TestCase):
                 with socket.create_connection(secure_server.server_address) as connection:
                     with context.wrap_socket(connection, server_hostname="127.0.0.1") as client:
                         client.sendall(
-                            b"GET /api/health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n"
+                            b"GET / HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n"
                         )
                         response.append(client.recv(4096))
 
@@ -1191,18 +1195,18 @@ class ControlServerTests(unittest.TestCase):
             with socket.create_connection(server.server_address):
                 with socket.create_connection(server.server_address, timeout=3) as connection:
                     client = wrap_client(connection) if wrap_client else connection
-                    client.sendall(b"GET /api/health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+                    client.sendall(b"GET / HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
                     return client.recv(4096)
         finally:
             server.shutdown()
             thread.join(timeout=5)
 
-    def _get_over_http(self, path: str):
+    def _get_over_http(self, path: str, headers=None):
         thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05})
         thread.start()
         try:
             connection = http.client.HTTPConnection(*self.server.server_address, timeout=5)
-            connection.request("GET", path)
+            connection.request("GET", path, headers=headers or {})
             response = connection.getresponse()
             response.read()
             connection.close()
@@ -1218,7 +1222,9 @@ class ControlServerTests(unittest.TestCase):
         return "'sha256-" + base64.b64encode(digest).decode("ascii") + "'"
 
     def test_dashboard_only_runs_its_own_inline_script_and_style(self) -> None:
-        response = self._get_over_http("/")
+        self.server.admin_token = "admin-token"
+        session = issue_session("admin-token", now=int(time.time()))
+        response = self._get_over_http("/", headers={"Cookie": f"session={session}"})
 
         policy = response.getheader("Content-Security-Policy")
         self.assertIn("default-src 'none'", policy)
@@ -1227,12 +1233,13 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("connect-src 'self'", policy)
         self.assertIn("frame-ancestors 'none'", policy)
 
-    def test_responses_deny_framing_and_hide_the_python_version(self) -> None:
+    def test_responses_deny_framing_and_hide_the_server(self) -> None:
         response = self._get_over_http("/api/health")
 
         self.assertEqual(response.getheader("X-Frame-Options"), "DENY")
         self.assertEqual(response.getheader("Referrer-Policy"), "no-referrer")
-        self.assertEqual(response.getheader("Server"), "jittersim")
+        # Neither the product nor the Python version is named.
+        self.assertEqual(response.getheader("Server"), "server")
 
     def test_request_logging_keeps_routine_polling_quiet(self) -> None:
         handler = object.__new__(ControlRequestHandler)
@@ -2248,12 +2255,48 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn('id="traffic-queued"', DASHBOARD_HTML)
         self.assertIn("function selectedQueueTotals(queues)", DASHBOARD_HTML)
 
-    def test_dashboard_asks_for_the_token_first(self) -> None:
+    def test_dashboard_offers_sign_out_near_the_top(self) -> None:
         self.assertLess(
-            DASHBOARD_HTML.index('id="admin-token"'),
+            DASHBOARD_HTML.index('action="/sign-out"'),
             DASHBOARD_HTML.index('id="connected-devices"'),
         )
-        self.assertIn('event.key === "Enter"', DASHBOARD_HTML)
+
+    def test_dashboard_leaves_the_token_to_the_sign_in_page(self) -> None:
+        script = DASHBOARD_HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+
+        for gone in (
+            'id="admin-token"',
+            "hasAdminToken",
+            "adminTokenVerified",
+            "checkAdminToken",
+            "Enter the admin token",
+            "Check the admin token",
+        ):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, DASHBOARD_HTML)
+        # The browser's cookie authorizes requests, so the script sends no token.
+        self.assertNotIn("Authorization", script)
+        # Only signed-in browsers get this page, so it loads at once.
+        self.assertTrue(script.rstrip().endswith("startDashboard();"))
+
+    def test_dashboard_returns_to_sign_in_when_signed_out(self) -> None:
+        result = self._run_dashboard_functions(
+            ["request"],
+            "let pendingFormSubmitButton = null;\n"
+            "const assigned = [];\n"
+            "const window = {location: {assign: (url) => assigned.push(url)}};\n"
+            "function setButtonBusy() {}\n"
+            "async function fetch() {\n"
+            "  return {ok: false, status: 401, statusText: 'Unauthorized',\n"
+            "          json: async () => ({error: 'sign in required'})};\n"
+            "}\n",
+            "request('/api/profiles', 'GET').then(\n"
+            "  () => console.log(JSON.stringify({assigned, failed: false})),\n"
+            "  () => console.log(JSON.stringify({assigned, failed: true}))\n"
+            ");\n",
+        )
+
+        self.assertEqual(result, {"assigned": ["/"], "failed": True})
 
     def test_dashboard_contains_configuration_and_network_controls(self) -> None:
         status, content_type, body = self.server.response_for("/")
@@ -2271,20 +2314,10 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("/api/group-data-limits", DASHBOARD_HTML)
         self.assertIn("Apply current configuration", DASHBOARD_HTML)
         self.assertIn("Reset network", DASHBOARD_HTML)
-        self.assertIn('id="check-admin-token"', DASHBOARD_HTML)
-        self.assertIn("Check token", DASHBOARD_HTML)
-        self.assertIn("Checking the admin token...", DASHBOARD_HTML)
         self.assertIn("setButtonBusy(event.submitter, true)", DASHBOARD_HTML)
         self.assertIn("if (submitButton) setButtonBusy(submitButton, false);", DASHBOARD_HTML)
         self.assertIn("Dashboard refresh failed:", DASHBOARD_HTML)
         self.assertIn("Settings changed since the last network action", DASHBOARD_HTML)
-        # Protected panels wait for a token instead of polling into 401 responses.
-        self.assertEqual(DASHBOARD_HTML.count("if (!hasAdminToken())"), 2)
-        self.assertNotIn('element("admin-token").addEventListener("change"', DASHBOARD_HTML)
-        self.assertIn(
-            'element("check-admin-token").addEventListener("click", checkAdminToken)',
-            DASHBOARD_HTML,
-        )
         self.assertIn('id="toast" class="toast" role="status"', DASHBOARD_HTML)
         self.assertIn(
             'element("toast-dismiss").addEventListener("click", dismissToast)',
@@ -3135,6 +3168,208 @@ class ControlServerTests(unittest.TestCase):
         finally:
             token_server.server_close()
 
+
+class SignInTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.repository = ConfigRepository(":memory:")
+        self.repository.save_profile(
+            Profile(id="slow", name="Slow", upload=Impairment(delay_ms=3_000))
+        )
+        self.server = ControlServer(("127.0.0.1", 0), self.repository, admin_token="admin-token")
+        thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05})
+        thread.start()
+
+        def stop() -> None:
+            self.server.shutdown()
+            thread.join(timeout=5)
+            self.server.server_close()
+            self.repository.close()
+
+        self.addCleanup(stop)
+
+    def request(self, method, path, *, body=None, headers=None):
+        connection = http.client.HTTPConnection(*self.server.server_address, timeout=5)
+        try:
+            connection.request(method, path, body=body, headers=headers or {})
+            response = connection.getresponse()
+            return response.status, dict(response.getheaders()), response.read()
+        finally:
+            connection.close()
+
+    def sign_in(self, token="admin-token"):
+        return self.request(
+            "POST",
+            "/sign-in",
+            body=urlencode({"token": token}),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+
+    def session(self) -> str:
+        status, headers, _ = self.sign_in()
+        self.assertEqual(status, 303)
+        return headers["Set-Cookie"].split(";", 1)[0]
+
+    def assert_neutral(self, headers, body) -> None:
+        text = body.decode("utf-8", "replace") + " ".join(f"{k}: {v}" for k, v in headers.items())
+        self.assertNotIn("jittersim", text.lower())
+        # Whole words: the standard "device-width" viewport setting names nothing.
+        self.assertIsNone(
+            re.search(r"\b(profiles?|devices?(?!-width)|networks?)\b", text, re.I)
+        )
+
+    def test_strangers_see_only_a_neutral_sign_in_page(self) -> None:
+        status, headers, body = self.request("GET", "/")
+
+        self.assertEqual(status, 200)
+        self.assertIn(b"<title>Sign in</title>", body)
+        self.assertIn(b'name="token"', body)
+        self.assertNotIn(b"<script", body)
+        self.assertIn("default-src 'none'", headers["Content-Security-Policy"])
+        self.assertNotIn("script-src", headers["Content-Security-Policy"])
+        self.assert_neutral(headers, body)
+
+    def test_other_addresses_stay_generic_without_a_sign_in(self) -> None:
+        for path in ("/api/health", "/api/profiles", "/api/export", "/favicon.ico", "/other"):
+            with self.subTest(path=path):
+                status, headers, body = self.request("GET", path)
+                self.assertIn(status, (401, 404))
+                self.assert_neutral(headers, body)
+        status, headers, body = self.request(
+            "POST", "/api/apply", body="{}", headers={"Content-Type": "application/json"}
+        )
+        self.assertEqual(status, 401)
+        self.assert_neutral(headers, body)
+        # A made-up cookie is no sign-in.
+        status, _, body = self.request("GET", "/", headers={"Cookie": "session=1.2.3"})
+        self.assertIn(b"<title>Sign in</title>", body)
+
+    def test_signing_in_opens_the_dashboard_and_the_api(self) -> None:
+        status, headers, _ = self.sign_in()
+
+        self.assertEqual(status, 303)
+        self.assertEqual(headers["Location"], "/")
+        cookie = headers["Set-Cookie"]
+        for attribute in ("session=", "Path=/", "Max-Age=604800", "HttpOnly", "SameSite=Strict"):
+            self.assertIn(attribute, cookie)
+        # This test server speaks plain HTTP; the Pi's HTTPS adds Secure.
+        self.assertNotIn("Secure", cookie)
+        session = cookie.split(";", 1)[0]
+        status, headers, body = self.request("GET", "/", headers={"Cookie": session})
+        self.assertEqual(status, 200)
+        self.assertEqual(body.decode("utf-8"), DASHBOARD_HTML)
+        self.assertIn("script-src 'sha256-", headers["Content-Security-Policy"])
+        self.assertEqual(self.request("GET", "/api/health", headers={"Cookie": session})[0], 200)
+        # Visiting the sign-in address while signed in goes to the dashboard.
+        status, headers, _ = self.request("GET", "/sign-in", headers={"Cookie": session})
+        self.assertEqual((status, headers["Location"]), (303, "/"))
+
+    def test_a_wrong_token_shows_the_page_again(self) -> None:
+        status, headers, body = self.sign_in("wrong")
+
+        self.assertEqual(status, 401)
+        self.assertIn(b"That token didn", body)
+        self.assertNotIn("Set-Cookie", headers)
+        self.assert_neutral(headers, body)
+
+    def test_repeated_failures_lock_sign_in_for_a_while(self) -> None:
+        for _ in range(5):
+            self.assertEqual(self.sign_in("wrong")[0], 401)
+
+        status, headers, body = self.sign_in()
+
+        self.assertEqual(status, 429)
+        self.assertIn(b"Try again later", body)
+        self.assertNotIn("Set-Cookie", headers)
+
+    def test_sign_in_says_when_it_is_not_set_up(self) -> None:
+        self.server.admin_token = None
+
+        status, _, body = self.request("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertIn(b"Sign-in isn", body)
+        self.assertEqual(self.sign_in()[0], 503)
+
+    def test_unsigned_writes_do_not_reveal_which_routes_exist(self) -> None:
+        for token in ("admin-token", None):
+            with self.subTest(token=token):
+                self.server.admin_token = token
+                answers = {
+                    self.request(
+                        method, path, body="{}", headers={"Content-Type": "application/json"}
+                    )[::2]
+                    for method in ("POST", "PUT")
+                    for path in ("/api/apply", "/api/everyone-else", "/api/not-a-route", "/other")
+                }
+                self.assertEqual(len(answers), 1, answers)
+
+    def test_other_sites_cannot_sign_in_or_out(self) -> None:
+        session = self.session()
+        cross_site = {"Sec-Fetch-Site": "cross-site"}
+
+        status, headers, _ = self.request(
+            "POST", "/sign-out", headers={"Cookie": session, **cross_site}
+        )
+        self.assertEqual(status, 403)
+        self.assertNotIn("Set-Cookie", headers)
+        for _ in range(6):
+            status, headers, body = self.request(
+                "POST",
+                "/sign-in",
+                body=urlencode({"token": "wrong"}),
+                headers={"Content-Type": "application/x-www-form-urlencoded", **cross_site},
+            )
+            self.assertEqual(status, 403)
+            self.assert_neutral(headers, body)
+        # None of those counted as guesses.
+        self.assertEqual(self.sign_in()[0], 303)
+
+    def test_signing_out_clears_the_cookie(self) -> None:
+        status, headers, _ = self.request("POST", "/sign-out", headers={"Cookie": self.session()})
+
+        self.assertEqual((status, headers["Location"]), (303, "/"))
+        self.assertIn("Max-Age=0", headers["Set-Cookie"])
+
+    def test_cookie_writes_must_be_json_from_this_page(self) -> None:
+        session = self.session()
+        host = "127.0.0.1:8080"
+        body = json.dumps({"profile_id": None}).encode("utf-8")
+
+        def write(headers):
+            # Run the handler in this thread: the database belongs to it.
+            handler = object.__new__(ControlRequestHandler)
+            handler.server = self.server
+            handler.path = "/api/everyone-else"
+            handler.client_address = ("127.0.0.1", 50000)
+            handler.headers = Message()
+            handler.headers["Host"] = host
+            handler.headers["Content-Length"] = str(len(body))
+            for name, value in headers.items():
+                handler.headers[name] = value
+            handler.rfile = BytesIO(body)
+            response = {}
+            handler._send_response = lambda **values: response.update(values)
+            handler.do_POST()
+            return response["status"]
+
+        json_type = {"Content-Type": "application/json"}
+        self.assertEqual(write({"Cookie": session, **json_type, "Origin": f"http://{host}"}), 200)
+        self.assertEqual(write({"Cookie": session, **json_type}), 200)
+        self.assertEqual(write({"Cookie": session, "Content-Type": "text/plain"}), 403)
+        self.assertEqual(
+            write({"Cookie": session, **json_type, "Origin": "https://elsewhere.example"}), 403
+        )
+        self.assertEqual(write(json_type), 401)
+        # With the no-referrer policy some browsers send Origin: null for this page.
+        null_origin = {"Origin": "null", "Sec-Fetch-Site": "same-origin"}
+        self.assertEqual(write({"Cookie": session, **json_type, **null_origin}), 200)
+        for site in ("same-site", "cross-site"):
+            with self.subTest(site=site):
+                headers = {"Cookie": session, **json_type, "Sec-Fetch-Site": site}
+                self.assertEqual(write(headers), 403)
+        # Scripts sending the token header aren't browsers, so none of this applies.
+        self.assertEqual(
+            write({"Authorization": "Bearer admin-token", "Content-Type": "text/plain"}), 200
+        )
 
 if __name__ == "__main__":
     unittest.main()

@@ -119,6 +119,8 @@ Goal: control the emulator from a Mac without a screen or keyboard attached to t
 - [x] Add a bounded history of admin actions without request contents.
 - [x] Protect the deployed dashboard with HTTPS.
 - [x] Keep the dashboard exempt from impairment.
+- [x] Show anyone without the admin token only a neutral sign-in page, and keep
+  signed-in browsers signed in for 7 days.
 
 Suggested commits:
 
@@ -228,6 +230,7 @@ another location without exposing the dashboard publicly.
 - [x] Serialize apply and reset, enforce the Linux queue limit and preserve
   foreign root queues.
 - [x] Provision the test AP and document Mac browser setup.
+- [x] Isolate test Wi-Fi clients from each other.
 - [x] Document opt-in Tailscale Serve, access rules and removal.
 - [ ] Verify network queues, Mac browser isolation, the AP and remote control
   on the actual Pi from another location.
