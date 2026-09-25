@@ -2326,6 +2326,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       "Run", "Target", "Sent", "Loss", "RTT avg", "RTT p95", "Jitter", "Reordered", "Download"
     ];
     const MEASUREMENT_COLORS = ["#70b7ff", "#ffa76c", "#70d7a9", "#edc36a", "#c58cff", "#ff8fa3"];
+    // A backslash and a pipe: a bare pipe in a label would start a Markdown column.
+    const ESCAPED_PIPE = "\x5c|";
 
     function measurementMilliseconds(value) {
       return value === null || value === undefined ? "—" : value.toFixed(2) + " ms";
@@ -2352,8 +2354,42 @@ DASHBOARD_HTML = r"""<!doctype html>
       return [
         line(MEASUREMENT_COLUMNS),
         line(MEASUREMENT_COLUMNS.map(() => "---")),
-        ...runs.map((run) => line(measurementRow(run)))
+        ...runs.map((run) => line(
+          measurementRow(run).map((cell) => cell.split("|").join(ESCAPED_PIPE))
+        ))
       ].join("\n") + "\n";
+    }
+
+    // The same checks as `jittersim compare`, so a wrong file is refused whole.
+    function validMeasurement(run) {
+      const isNumber = (value) => typeof value === "number" && Number.isFinite(value);
+      const isCount = (value) => Number.isInteger(value) && value >= 0;
+      if (
+        !run || typeof run !== "object" || run.format !== "jittersim-measurement" ||
+        run.version !== 1 || typeof run.label !== "string" || typeof run.target !== "string"
+      ) {
+        return false;
+      }
+      const summary = run.summary;
+      if (
+        !summary || typeof summary !== "object" || !isCount(summary.sent) ||
+        !isNumber(summary.loss_percent) || !isCount(summary.reordered ?? 0) ||
+        ["rtt_avg_ms", "rtt_p95_ms", "jitter_ms"].some(
+          (key) => summary[key] !== null && summary[key] !== undefined && !isNumber(summary[key])
+        )
+      ) {
+        return false;
+      }
+      const samples = run.samples ?? [];
+      if (
+        !Array.isArray(samples) ||
+        samples.some((sample) => !sample || typeof sample !== "object" || !isNumber(sample.rtt_ms))
+      ) {
+        return false;
+      }
+      const download = run.download;
+      return download === undefined || download === null ||
+        (typeof download === "object" && isNumber(download.mbit_per_s));
     }
 
     function drawMeasurementChart() {
@@ -2375,13 +2411,16 @@ DASHBOARD_HTML = r"""<!doctype html>
       if (!rtts.length) {
         context.textAlign = "center";
         context.textBaseline = "middle";
-        context.fillText(
-          "Add result files to draw their round trips.", bounds.width / 2, bounds.height / 2
-        );
+        const message = measurementRuns.length
+          ? "No replies to draw: every ping was lost."
+          : "Add result files to draw their round trips.";
+        context.fillText(message, bounds.width / 2, bounds.height / 2);
         return;
       }
       const scaleMax = Math.max(...rtts) * 1.1;
-      const labels = [0, 1, 2, 3, 4].map((tick) => (scaleMax * tick / 4).toFixed(0) + " ms");
+      // Enough decimals that the five labels differ, even below a millisecond.
+      const decimals = Math.max(0, Math.ceil(-Math.log10(scaleMax / 4)));
+      const labels = [0, 1, 2, 3, 4].map((tick) => (scaleMax * tick / 4).toFixed(decimals) + " ms");
       const labelWidth = Math.max(...labels.map((label) => context.measureText(label).width));
       const plot = {
         left: Math.ceil(labelWidth) + 16,
@@ -2403,17 +2442,28 @@ DASHBOARD_HTML = r"""<!doctype html>
       });
       const longest = Math.max(2, ...measurementRuns.map((run) => (run.samples || []).length));
       measurementRuns.forEach((run, index) => {
-        context.strokeStyle = MEASUREMENT_COLORS[index % MEASUREMENT_COLORS.length];
+        const color = MEASUREMENT_COLORS[index % MEASUREMENT_COLORS.length];
+        const points = (run.samples || []).map((sample, position) => [
+          plot.left + (plot.right - plot.left) * position / (longest - 1),
+          plot.bottom - (plot.bottom - plot.top) * sample.rtt_ms / scaleMax
+        ]);
+        context.strokeStyle = color;
         context.lineWidth = 2;
         context.beginPath();
-        (run.samples || []).forEach((sample, position) => {
-          const x = plot.left + (plot.right - plot.left) * position / (longest - 1);
-          const y = plot.bottom - (plot.bottom - plot.top) * sample.rtt_ms / scaleMax;
+        points.forEach(([x, y], position) => {
           if (position === 0) context.moveTo(x, y);
           else context.lineTo(x, y);
         });
         context.stroke();
+        // A dot for every reply, so a run with a single reply still shows.
+        context.fillStyle = color;
+        points.forEach(([x, y]) => {
+          context.beginPath();
+          context.arc(x, y, 2, 0, 2 * Math.PI);
+          context.fill();
+        });
       });
+      context.fillStyle = "#91a8c1";
       context.textAlign = "center";
       context.textBaseline = "alphabetic";
       context.fillText(
@@ -2473,10 +2523,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           showMessage(file.name + " is not valid JSON.", "error");
           return;
         }
-        if (
-          !run || run.format !== "jittersim-measurement" || run.version !== 1 ||
-          typeof run.summary !== "object" || run.summary === null
-        ) {
+        if (!validMeasurement(run)) {
           showMessage(file.name + " is not a JitterSim measurement.", "error");
           return;
         }

@@ -1795,7 +1795,7 @@ class ControlServerTests(unittest.TestCase):
                             "rtt_p95_ms": 14.07, "jitter_ms": 0.81, "reordered": 0},
             },
             {
-                "label": "3G",
+                "label": "3G | busy",
                 "target": "1.1.1.1",
                 "summary": {"sent": 50, "loss_percent": 33.3, "rtt_avg_ms": None,
                             "rtt_p95_ms": None, "jitter_ms": None, "reordered": 2},
@@ -1812,6 +1812,8 @@ class ControlServerTests(unittest.TestCase):
         harness = (
             columns
             + "\n"
+            + re.search(r"const ESCAPED_PIPE = .*?;", script).group(0)
+            + "\n"
             + function("measurementMilliseconds")
             + function("measurementRow")
             + function("measurementMarkdown")
@@ -1823,6 +1825,92 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, comparison_table(runs))
+
+    def _dashboard_functions(self, *names):
+        script = DASHBOARD_HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+        functions = ""
+        for name in names:
+            body = script.split(f"    function {name}(", 1)[1].split("\n    }\n", 1)[0]
+            functions += f"function {name}({body}\n}}\n"
+        return functions
+
+    def test_dashboard_refuses_measurements_with_fields_of_the_wrong_type(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is required to check the files")
+        good = {
+            "format": "jittersim-measurement",
+            "version": 1,
+            "label": "normal",
+            "target": "1.1.1.1",
+            "samples": [{"sequence": 0, "rtt_ms": 12.5}],
+            "summary": {"sent": 1, "loss_percent": 0.0, "rtt_avg_ms": 12.5,
+                        "rtt_p95_ms": 12.5, "jitter_ms": None, "reordered": 0},
+        }
+        runs = [
+            good,
+            {**good, "summary": {**good["summary"], "loss_percent": "5"}},
+            {**good, "download": {"url": "http://x"}},
+            {**good, "samples": [{"rtt_ms": "slow"}]},
+            {key: value for key, value in good.items() if key != "label"},
+        ]
+        harness = (
+            self._dashboard_functions("validMeasurement")
+            + "console.log(JSON.stringify(JSON.parse(process.argv[1]).map(validMeasurement)));\n"
+        )
+        result = subprocess.run(
+            [node, "-e", harness, json.dumps(runs)], capture_output=True, text=True, check=False
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), [True, False, False, False, False])
+
+    def test_measurement_chart_shows_every_kind_of_run(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is required to draw the chart")
+        script = DASHBOARD_HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+        colors = re.search(r"const MEASUREMENT_COLORS = \[.*?\];", script, re.S).group(0)
+
+        def drawn(runs):
+            harness = (
+                colors
+                + "\nlet measurementRuns = JSON.parse(process.argv[1]);\n"
+                "const texts = [];\n"
+                "let dots = 0;\n"
+                "const context = {\n"
+                "  setTransform() {}, clearRect() {}, beginPath() {}, moveTo() {},\n"
+                "  lineTo() {}, stroke() {}, arc() { dots += 1; }, fill() {},\n"
+                "  measureText(text) { return {width: 7 * text.length}; },\n"
+                "  fillText(text) { texts.push(text); },\n"
+                "};\n"
+                "const canvas = {getBoundingClientRect: () => ({width: 600, height: 240}),\n"
+                "                getContext: () => context};\n"
+                "const element = () => canvas;\n"
+                "const window = {devicePixelRatio: 1};\n"
+                + self._dashboard_functions("drawMeasurementChart")
+                + "drawMeasurementChart();\n"
+                "console.log(JSON.stringify({texts, dots}));\n"
+            )
+            result = subprocess.run(
+                [node, "-e", harness, json.dumps(runs)], capture_output=True, text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(result.stdout)
+
+        def run(*rtts):
+            samples = [{"sequence": index, "rtt_ms": rtt} for index, rtt in enumerate(rtts)]
+            return {"samples": samples}
+
+        offline = drawn([run()])
+        single = drawn([run(42.0)])
+        fast = drawn([run(0.11, 0.12, 0.15)])
+
+        self.assertIn("No replies to draw: every ping was lost.", offline["texts"])
+        self.assertEqual(single["dots"], 1)
+        labels = [text for text in fast["texts"] if text.endswith(" ms")]
+        self.assertEqual(len(set(labels)), 5, labels)
 
     def test_dashboard_script_is_valid_javascript(self) -> None:
         node = shutil.which("node")

@@ -195,6 +195,31 @@ class MeasurementTests(unittest.TestCase):
                 self.assertEqual(main(["compare", str(output)]), 0)
             self.assertIn("| normal | 1.1.1.1 | 3 | 33.3% |", printed.getvalue())
 
+    def test_refuses_measurements_with_fields_of_the_wrong_type(self) -> None:
+        good = measure("1.1.1.1", count=3, interval=0.2, label="normal",
+                       runner=FakePing(MACOS_PING), now=1)
+        cases = {
+            "loss as text": {**good, "summary": {**good["summary"], "loss_percent": "5"}},
+            "a download without a speed": {**good, "download": {"url": "http://x"}},
+            "samples that are not replies": {**good, "samples": [{"rtt_ms": "slow"}]},
+            "no label": {key: value for key, value in good.items() if key != "label"},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            for case, run in cases.items():
+                with self.subTest(case=case):
+                    path = Path(directory) / "run.json"
+                    path.write_text(json.dumps(run))
+                    with self.assertRaisesRegex(MeasurementError, "not a JitterSim measurement"):
+                        load_run(path)
+
+    def test_markdown_tables_escape_a_pipe_in_a_label(self) -> None:
+        run = measure("1.1.1.1", count=3, interval=0.2, label="wifi|busy",
+                      runner=FakePing(MACOS_PING), now=1)
+
+        row = comparison_table([run]).splitlines()[2]
+
+        self.assertTrue(row.startswith("| wifi\\|busy | 1.1.1.1 |"), row)
+
     def test_refuses_files_that_are_not_measurements(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "settings.json"

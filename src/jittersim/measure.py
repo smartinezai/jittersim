@@ -169,6 +169,52 @@ def measure(
     return run
 
 
+def _is_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    )
+
+
+def _is_count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _is_measurement(run: Any) -> bool:
+    """Check every field the tables and charts use, as the dashboard does."""
+
+    if (
+        not isinstance(run, dict)
+        or run.get("format") != MEASUREMENT_FORMAT
+        or run.get("version") != MEASUREMENT_VERSION
+        or not isinstance(run.get("label"), str)
+        or not isinstance(run.get("target"), str)
+    ):
+        return False
+    summary = run.get("summary")
+    if (
+        not isinstance(summary, dict)
+        or not _is_count(summary.get("sent"))
+        or not _is_number(summary.get("loss_percent"))
+        or not _is_count(summary.get("reordered", 0))
+        or any(
+            summary.get(key) is not None and not _is_number(summary.get(key))
+            for key in ("rtt_avg_ms", "rtt_p95_ms", "jitter_ms")
+        )
+    ):
+        return False
+    samples = run.get("samples")
+    if samples is None:
+        samples = []
+    if not isinstance(samples, list) or any(
+        not isinstance(sample, dict) or not _is_number(sample.get("rtt_ms")) for sample in samples
+    ):
+        return False
+    download = run.get("download")
+    return download is None or (
+        isinstance(download, dict) and _is_number(download.get("mbit_per_s"))
+    )
+
+
 def load_run(path: Path) -> Dict[str, Any]:
     """Read one saved measurement."""
 
@@ -176,12 +222,7 @@ def load_run(path: Path) -> Dict[str, Any]:
         run = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         raise MeasurementError(f"could not read {path}: {error}") from error
-    if (
-        not isinstance(run, dict)
-        or run.get("format") != MEASUREMENT_FORMAT
-        or run.get("version") != MEASUREMENT_VERSION
-        or not isinstance(run.get("summary"), dict)
-    ):
+    if not _is_measurement(run):
         raise MeasurementError(f"{path} is not a JitterSim measurement")
     return run
 
@@ -217,7 +258,8 @@ def comparison_table(runs: Sequence[Dict[str, Any]], *, table_format: str = "mar
         writer.writerows(rows)
         return output.getvalue()
     lines = ["| " + " | ".join(_COLUMNS) + " |", "| " + " | ".join("---" for _ in _COLUMNS) + " |"]
-    lines.extend("| " + " | ".join(row) + " |" for row in rows)
+    # A pipe in a label would start a new column.
+    lines.extend("| " + " | ".join(cell.replace("|", "\\|") for cell in row) + " |" for row in rows)
     return "\n".join(lines) + "\n"
 
 
