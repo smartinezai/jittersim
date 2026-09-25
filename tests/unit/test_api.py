@@ -2393,6 +2393,33 @@ class ControlServerTests(unittest.TestCase):
             },
         )
 
+    def test_conditions_leave_the_schedule_alone_while_nothing_is_applied(self) -> None:
+        self.repository.save_profile(
+            Profile(
+                id="slow",
+                name="Slow",
+                upload=Impairment(delay_ms=3_000),
+                reroll_interval_seconds=60,
+                outage_probability=100,
+                outage_duration_seconds=30,
+                outage_interval_seconds=60,
+            )
+        )
+        scheduler = RuntimeScheduler(
+            database_path=":memory:", helper_client=FakeHelper(), poll_seconds=3_600
+        )
+        self.server.scheduler = scheduler
+        self.addCleanup(scheduler.stop)
+
+        for _ in range(3):
+            status, _, body = self.server.response_for("/api/conditions")
+
+        # Building the runtime plan would advance its rerolls and outages, so the
+        # next Apply would start from a state decided while nothing ran.
+        self.assertEqual(status, 200)
+        self.assertEqual(scheduler._rolls, {})
+        self.assertEqual(json.loads(body)["devices"]["alice"]["condition"], "degraded")
+
     def test_conditions_describe_the_applied_plan(self) -> None:
         helper = self._serve_live(CountingHelper(devices={"alice": 0}))
         self.assertEqual(self.server.write_response_for("/api/apply", {})[0], 200)

@@ -5285,12 +5285,9 @@ class ControlServer(HTTPServer):
             plan = self.scheduler.applied_plan() if self.scheduler is not None else None
             applied = plan is not None
             if plan is None:
-                # Nothing runs on the network, so describe the saved plan.
-                plan = (
-                    self.scheduler.build_plan(repository=self.repository)
-                    if self.scheduler is not None
-                    else compile_stored_plan(repository=self.repository)
-                )
+                # Nothing runs on the network, so describe the saved settings.
+                # The scheduler's runtime plan would advance its rerolls.
+                plan = compile_stored_plan(repository=self.repository)
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {
                     "applied": applied,
