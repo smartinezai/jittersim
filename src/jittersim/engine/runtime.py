@@ -201,22 +201,15 @@ class RuntimeScheduler:
             with self._lock:
                 self._current_payload = payload
                 self._last_device_counters = dict.fromkeys(self._last_device_counters, 0)
-            active_repository.update_runtime_state(
-                observed_state="applied",
-                last_action="schedule",
-                last_result="success",
-                last_error=None,
-            )
+            if not active_repository.record_schedule_result(success=True):
+                # A reset was recorded while this plan was being applied.
+                self._honor_external_reset()
+                return False
             return True
         except (HelperClientError, PlanError, StorageError, OSError):
             LOGGER.exception("scheduled network plan failed")
             try:
-                active_repository.update_runtime_state(
-                    observed_state="error",
-                    last_action="schedule",
-                    last_result="failure",
-                    last_error="scheduled network plan failed",
-                )
+                active_repository.record_schedule_result(success=False)
             except StorageError:
                 LOGGER.exception("could not record scheduled network failure")
             return False

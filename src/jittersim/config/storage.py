@@ -488,6 +488,28 @@ class ConfigRepository:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
 
+    def record_schedule_result(self, *, success: bool) -> bool:
+        """Record a scheduled apply, unless a reset was recorded meanwhile.
+
+        The check and the write are one statement, so a reset made from
+        another process, such as `jittersim reset`, is never overwritten.
+        """
+
+        cursor = self._connection.execute(
+            """
+            UPDATE runtime_state
+            SET observed_state = ?, last_action = 'schedule', last_result = ?, last_error = ?
+            WHERE id = 1 AND (last_action IS NULL OR last_action != 'reset')
+            """,
+            (
+                "applied" if success else "error",
+                "success" if success else "failure",
+                None if success else "scheduled network plan failed",
+            ),
+        )
+        self._commit()
+        return bool(cursor.rowcount)
+
     def _bump_configuration_version(self) -> None:
         # Keep the last network action: startup recovery uses it to re-apply
         # a plan or keep an explicit reset after later settings changes.

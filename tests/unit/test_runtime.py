@@ -753,6 +753,36 @@ class RuntimeSchedulerTests(unittest.TestCase):
         self.assertEqual(len(self.helper.plans), 1)
         self.assertEqual(self.repository.get_runtime_state().last_action, "reset")
 
+    def test_a_reset_recorded_during_a_scheduled_apply_is_kept(self) -> None:
+        repository = self.repository
+
+        class ResetDuringApplyHelper(RecordingHelper):
+            def apply(self, *, plan):
+                result = super().apply(plan=plan)
+                # `jittersim reset` runs from another process meanwhile.
+                repository.update_runtime_state(
+                    observed_state="reset",
+                    last_action="reset",
+                    last_result="success",
+                    last_error=None,
+                )
+                return result
+
+        self._save_device(Profile(id="slow", name="Slow", download=Impairment(delay_ms=100)))
+        helper = ResetDuringApplyHelper()
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=helper)
+        scheduler.activate(applied_payload={})
+
+        self.assertFalse(scheduler.tick(repository=self.repository, now=0))
+        self.repository.save_profile(
+            Profile(id="slow", name="Slow", download=Impairment(delay_ms=900))
+        )
+        scheduler.tick(repository=self.repository, now=10)
+
+        self.assertEqual(self.repository.get_runtime_state().last_action, "reset")
+        self.assertEqual(helper.resets, 1)
+        self.assertEqual(len(helper.plans), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
