@@ -1703,9 +1703,13 @@ DASHBOARD_HTML = r"""<!doctype html>
     const CONDITION_LABELS = { normal: "Normal", degraded: "Degraded", offline: "Offline" };
 
     function deviceConditionCell(deviceId) {
+      // Own keys only: a device may be called "constructor".
+      const known = Object.prototype.hasOwnProperty.call(deviceConditions.devices, deviceId);
+      if (!known) return "—";
       const state = deviceConditions.devices[deviceId];
-      if (!state) return "—";
-      return [CONDITION_LABELS[state.condition], state.reasons.join("; ") || "No network effects"];
+      const reasons = Array.isArray(state.reasons) ? state.reasons : [];
+      const label = CONDITION_LABELS[state.condition] || "—";
+      return [label, reasons.join("; ") || "No network effects"];
     }
 
     function renderDeviceTable() {

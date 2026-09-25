@@ -1902,6 +1902,27 @@ class ControlServerTests(unittest.TestCase):
         refresh = DASHBOARD_HTML.split("async function refresh() {", 1)[1].split("\n    }\n", 1)[0]
         self.assertIn("loadConditions()", refresh)
 
+    def test_dashboard_condition_lookup_ignores_built_in_names(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is required to run the lookup")
+        script = DASHBOARD_HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+        labels = re.search(r"const CONDITION_LABELS = \{.*?\};", script, re.S).group(0)
+        body = script.split("    function deviceConditionCell(", 1)[1].split("\n    }\n", 1)[0]
+        harness = (
+            labels
+            + "\nconst deviceConditions = "
+            + "{applied: true, devices: {alice: {condition: 'normal'}}};\n"
+            + f"function deviceConditionCell({body}\n}}\n"
+            # A device may be called "constructor", like a built-in property.
+            + "console.log(JSON.stringify([deviceConditionCell('constructor'),"
+            + " deviceConditionCell('alice')]));\n"
+        )
+        result = subprocess.run([node, "-e", harness], capture_output=True, text=True, check=False)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), ["—", ["Normal", "No network effects"]])
+
     def test_dashboard_offers_presets_and_burst_loss(self) -> None:
         for fragment in (
             'id="profile-preset"',
