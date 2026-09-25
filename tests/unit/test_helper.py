@@ -663,6 +663,48 @@ class HelperServiceTests(unittest.TestCase):
         self.assertEqual(queues["devices"]["alice"]["upload_dropped"], 524)
         self.assertEqual(queues["devices"]["alice"]["upload_queued"], 7)
 
+    def test_queue_figures_include_an_active_service_limit_queue(self) -> None:
+        # A service limit's rules match the device's address, not its name.
+        nft = (
+            '{"nftables":['
+            '{"rule":{"comment":"usage-device alice upload","expr":['
+            '{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"saddr"}},'
+            '"right":"192.168.50.10"}},'
+            '{"mangle":{"key":{"meta":{"key":"mark"}},"value":1}},'
+            '{"counter":{"packets":40,"bytes":3360}}]}},'
+            '{"rule":{"comment":"apply-service-quota video upload","expr":['
+            '{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"saddr"}},'
+            '"right":"192.168.50.10"}},'
+            '{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},'
+            '"right":{"set":["203.0.113.10"]}}},'
+            '{"mangle":{"key":{"meta":{"key":"mark"}},"value":3}}]}}]}'
+        )
+        upload = (
+            '[{"kind":"netem","handle":"41:","parent":"10:2","drops":5,"qlen":0},'
+            '{"kind":"netem","handle":"43:","parent":"10:4","drops":40,"qlen":1}]'
+        )
+
+        class Executor(FakeExecutor):
+            def run(self, command):
+                self.commands.append(command)
+                if command.executable == "nft":
+                    return CommandResult(return_code=0, stdout=nft)
+                return CommandResult(
+                    return_code=0, stdout=upload if command.argv[-1] == "eth0" else "[]"
+                )
+
+        service = HelperService(
+            NetworkApplier(
+                executor=Executor(),
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            )
+        )
+
+        queues = service.handle_payload({"action": "traffic-counters"})["counters"]["queues"]
+
+        self.assertEqual(queues["devices"]["alice"]["upload_dropped"], 45)
+        self.assertEqual(queues["devices"]["alice"]["upload_queued"], 1)
+
     def test_queue_statistics_follow_the_rendered_queue_layout(self) -> None:
         plan = compile_plan(
             devices=(
