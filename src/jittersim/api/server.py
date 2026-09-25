@@ -593,6 +593,9 @@ DASHBOARD_HTML = r"""<!doctype html>
     .getting-started-steps .step-mark { min-width: 1.2rem; color: #8cc4ff; font-weight: 700; }
     .getting-started-steps li.done { color: #91a8c1; }
     .getting-started-steps li.done .step-mark { color: #8de2bc; }
+    .connected-picker { display: flex; gap: 0.5rem; align-items: end; }
+    .connected-picker label { flex: 1; min-width: 0; }
+    .picker-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: end; }
     .raw-details summary { margin-bottom: 0.6rem; color: #a8c7e8; cursor: pointer; }
     .raw-details pre { max-height: 32rem; overflow: auto; }
     .tabs {
@@ -788,6 +791,14 @@ DASHBOARD_HTML = r"""<!doctype html>
           <button id="device-cancel-edit" type="button">Cancel editing</button>
         </div>
         <div class="fields">
+          <div class="connected-picker">
+            <label>Connected device
+              <select id="device-picker">
+                <option value="">Loading connected devices...</option>
+              </select>
+            </label>
+            <button type="button" data-refresh-connected>Refresh</button>
+          </div>
           <label>Device ID <input id="device-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}"></label>
           <label>Name <input id="device-name" required></label>
           <label>Reserved IPv4 address
@@ -843,6 +854,14 @@ DASHBOARD_HTML = r"""<!doctype html>
         example Private Wi-Fi Address set to Fixed on an iPhone.</p>
       <form id="unaffected-form">
         <div class="fields">
+          <div class="connected-picker">
+            <label>Connected device
+              <select id="unaffected-picker">
+                <option value="">Loading connected devices...</option>
+              </select>
+            </label>
+            <button type="button" data-refresh-connected>Refresh</button>
+          </div>
           <label>MAC address
             <input id="unaffected-mac" required placeholder="aa:bb:cc:dd:ee:ff">
           </label>
@@ -1096,6 +1115,18 @@ DASHBOARD_HTML = r"""<!doctype html>
                   <option value="denylist">Block these MAC addresses</option>
                 </select>
               </label>
+              <div class="connected-picker">
+                <label>Connected device
+                  <select id="mac-picker">
+                    <option value="">Loading connected devices...</option>
+                  </select>
+                </label>
+                <button type="button" data-refresh-connected>Refresh</button>
+              </div>
+              <div class="picker-actions">
+                <button type="button" id="mac-add-allowed">Add to allow list</button>
+                <button type="button" id="mac-add-blocked">Add to block list</button>
+              </div>
               <label>Allowlist (comma separated)
                 <textarea id="mac-allowlist" placeholder="aa:bb:cc:dd:ee:ff"></textarea>
               </label>
@@ -3098,6 +3129,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         deviceTypeNames
       );
       renderGettingStarted();
+      renderConnectedPickers();
     }
 
     function renderSavedConnectedDeviceLabels(container, labels, connectedMacAddresses, typeNames) {
@@ -3265,6 +3297,68 @@ DASHBOARD_HTML = r"""<!doctype html>
         }
         list.appendChild(item);
       });
+    }
+
+    const CONNECTED_PICKERS = ["unaffected-picker", "device-picker", "mac-picker"];
+
+    function connectedDeviceOptions(devices) {
+      return (devices || [])
+        .filter((device) => device.mac_address)
+        .map((device) => ({
+          value: device.mac_address,
+          label: [
+            device.display_name || "Unnamed client",
+            device.ipv4_address || "no IP address yet",
+            device.mac_address
+          ].join(" · ")
+        }));
+    }
+
+    function pickedDeviceFields(device) {
+      const name = device.saved_display_name || device.hostname ||
+        "Client " + (device.ipv4_address || device.mac_address);
+      return {
+        name: name,
+        id: slugify(name),
+        ipv4_address: device.ipv4_address || "",
+        mac_address: device.mac_address
+      };
+    }
+
+    function addMacToList(listText, macAddress) {
+      const entries = listText.split(",").map((value) => value.trim()).filter(Boolean);
+      const listed = entries.some((entry) => entry.toLowerCase() === macAddress.toLowerCase());
+      return (listed ? entries : entries.concat([macAddress])).join(", ");
+    }
+
+    function renderConnectedPickers() {
+      const data = lastConnectedDevices || { available: false, devices: [] };
+      const options = connectedDeviceOptions(data.available ? data.devices : []);
+      CONNECTED_PICKERS.forEach((pickerId) => {
+        const picker = element(pickerId);
+        // Rebuilding an open menu would close it under the pointer.
+        if (document.activeElement === picker) return;
+        const selected = picker.value;
+        picker.replaceChildren();
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        if (!data.available) placeholder.textContent = "Connected devices are unavailable";
+        else if (!options.length) placeholder.textContent = "No devices are connected";
+        else placeholder.textContent = "Choose a connected device...";
+        picker.appendChild(placeholder);
+        options.forEach((choice) => {
+          const option = document.createElement("option");
+          option.value = choice.value;
+          option.textContent = choice.label;
+          picker.appendChild(option);
+        });
+        picker.value = options.some((choice) => choice.value === selected) ? selected : "";
+      });
+    }
+
+    function pickedConnectedDevice(pickerId) {
+      const devices = (lastConnectedDevices && lastConnectedDevices.devices) || [];
+      return devices.find((device) => device.mac_address === element(pickerId).value) || null;
     }
 
     function connectedTreatment(device) {
@@ -5033,6 +5127,45 @@ DASHBOARD_HTML = r"""<!doctype html>
     window.setInterval(() => loadQuotas(), 5000);
     window.setInterval(() => loadConditions(), 5000);
     window.setInterval(() => loadObservations(), 15000);
+
+    element("unaffected-picker").addEventListener("change", () => {
+      const device = pickedConnectedDevice("unaffected-picker");
+      if (!device) return;
+      element("unaffected-mac").value = device.mac_address;
+      element("unaffected-name").value = device.saved_display_name || device.hostname || "";
+    });
+    element("device-picker").addEventListener("change", () => {
+      const device = pickedConnectedDevice("device-picker");
+      if (!device) return;
+      const fields = pickedDeviceFields(device);
+      element("device-name").value = fields.name;
+      // The ID follows the name unless it was typed by hand.
+      element("device-name").dispatchEvent(new Event("input"));
+      element("device-ip").value = fields.ipv4_address;
+      element("device-mac").value = fields.mac_address;
+    });
+    [["mac-add-allowed", "mac-allowlist"], ["mac-add-blocked", "mac-denylist"]].forEach(
+      ([buttonId, listId]) => {
+        element(buttonId).addEventListener("click", () => {
+          const device = pickedConnectedDevice("mac-picker");
+          if (!device) {
+            showMessage("Choose a connected device first.", "error");
+            return;
+          }
+          element(listId).value = addMacToList(element(listId).value, device.mac_address);
+        });
+      }
+    );
+    document.querySelectorAll("[data-refresh-connected]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        setButtonBusy(button, true);
+        try {
+          await loadConnectedDevices();
+        } finally {
+          setButtonBusy(button, false);
+        }
+      });
+    });
 
     document.querySelectorAll(".tabs a").forEach((link) => {
       link.addEventListener("click", (event) => {

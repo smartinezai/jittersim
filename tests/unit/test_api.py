@@ -2386,6 +2386,80 @@ class ControlServerTests(unittest.TestCase):
         refresh = DASHBOARD_HTML.split("async function refresh() {", 1)[1].split("\n    }\n", 1)[0]
         self.assertIn("renderGettingStarted()", refresh)
 
+    def test_forms_offer_the_connected_devices(self) -> None:
+        pickers = {
+            "unaffected-picker": ('id="unaffected-form"', 'id="unaffected-mac"'),
+            "device-picker": ('id="device-form"', 'id="device-ip"'),
+            "mac-picker": ('id="policy-form"', 'id="mac-allowlist"'),
+        }
+        for picker, (form, field) in pickers.items():
+            with self.subTest(picker=picker):
+                form_start = DASHBOARD_HTML.index(form)
+                form_end = DASHBOARD_HTML.index("</form>", form_start)
+                picker_at = DASHBOARD_HTML.index(f'id="{picker}"')
+                self.assertTrue(form_start < picker_at < form_end)
+                self.assertLess(picker_at, DASHBOARD_HTML.index(field))
+                refresh = DASHBOARD_HTML[picker_at:form_end]
+                self.assertIn('data-refresh-connected', refresh)
+        self.assertIn('id="mac-add-allowed"', DASHBOARD_HTML)
+        self.assertIn('id="mac-add-blocked"', DASHBOARD_HTML)
+
+    def test_picking_a_connected_device_fills_the_form(self) -> None:
+        result = self._run_dashboard_functions(
+            ["slugify", "connectedDeviceOptions", "pickedDeviceFields", "addMacToList"],
+            "const devices = [\n"
+            "  {mac_address: 'aa:aa:aa:aa:aa:01', ipv4_address: '192.168.50.23',\n"
+            "   display_name: 'Sam phone', saved_display_name: 'Sam phone', hostname: 'iPhone'},\n"
+            "  {mac_address: 'aa:aa:aa:aa:aa:02', ipv4_address: '192.168.50.24',\n"
+            "   display_name: 'Unnamed client', saved_display_name: '', hostname: null},\n"
+            "  {mac_address: null, ipv4_address: '192.168.50.25', display_name: 'Ghost'},\n"
+            "];\n",
+            "console.log(JSON.stringify({\n"
+            "  options: connectedDeviceOptions(devices),\n"
+            "  named: pickedDeviceFields(devices[0]),\n"
+            "  unnamed: pickedDeviceFields(devices[1]),\n"
+            "  lists: [\n"
+            "    addMacToList('', 'aa:aa:aa:aa:aa:01'),\n"
+            "    addMacToList('bb:bb:bb:bb:bb:bb', 'aa:aa:aa:aa:aa:01'),\n"
+            "    addMacToList('AA:AA:AA:AA:AA:01, bb:bb:bb:bb:bb:bb', 'aa:aa:aa:aa:aa:01'),\n"
+            "  ],\n"
+            "}));\n",
+        )
+
+        self.assertEqual(
+            result["options"],
+            [
+                {
+                    "value": "aa:aa:aa:aa:aa:01",
+                    "label": "Sam phone · 192.168.50.23 · aa:aa:aa:aa:aa:01",
+                },
+                {
+                    "value": "aa:aa:aa:aa:aa:02",
+                    "label": "Unnamed client · 192.168.50.24 · aa:aa:aa:aa:aa:02",
+                },
+            ],
+        )
+        self.assertEqual(
+            result["named"],
+            {
+                "name": "Sam phone",
+                "id": "sam-phone",
+                "ipv4_address": "192.168.50.23",
+                "mac_address": "aa:aa:aa:aa:aa:01",
+            },
+        )
+        self.assertEqual(result["unnamed"]["name"], "Client 192.168.50.24")
+        self.assertEqual(result["unnamed"]["id"], "client-192-168-50-24")
+        self.assertEqual(
+            result["lists"],
+            [
+                "aa:aa:aa:aa:aa:01",
+                "bb:bb:bb:bb:bb:bb, aa:aa:aa:aa:aa:01",
+                # Already listed, whatever its case.
+                "AA:AA:AA:AA:AA:01, bb:bb:bb:bb:bb:bb",
+            ],
+        )
+
     def test_dashboard_offers_sign_out_near_the_top(self) -> None:
         self.assertLess(
             DASHBOARD_HTML.index('action="/sign-out"'),
