@@ -715,9 +715,10 @@ class ControlServerTests(unittest.TestCase):
 
     def test_the_traffic_menu_offers_everyone_else_while_it_has_a_profile(self) -> None:
         result = self._run_dashboard_functions(
-            ["updateTrafficDeviceOptions"],
+            ["updateTrafficDeviceOptions", "everyoneElseAssigned"],
             "const EVERYONE_ELSE_TRAFFIC = '__everyone_else__';\n"
             "let everyoneElse = {profile_id: 'slow'};\n"
+            "let savedSchedules = [];\n"
             "const select = {options: [], value: '',\n"
             "  replaceChildren() { this.options = []; },\n"
             "  appendChild(option) { this.options.push(option); }};\n"
@@ -733,14 +734,19 @@ class ControlServerTests(unittest.TestCase):
             "const kept = [select.value, resets];\n"
             "everyoneElse = {profile_id: null};\n"
             "updateTrafficDeviceOptions(devices);\n"
-            "console.log(JSON.stringify({offered: offered, kept: kept,\n"
-            "  after: [select.options.map((option) => option.value), select.value, resets]}));\n",
+            "const after = [select.options.map((option) => option.value), select.value, resets];\n"
+            "savedSchedules = [{everyone_else: true, enabled: true}];\n"
+            "updateTrafficDeviceOptions(devices);\n"
+            "console.log(JSON.stringify({offered: offered, kept: kept, after: after,\n"
+            "  scheduled: select.options.map((option) => option.value)}));\n",
         )
 
         self.assertEqual(result["offered"], ["all", "alice", "__everyone_else__"])
         self.assertEqual(result["kept"], ["__everyone_else__", 0])
         # Without a profile the choice goes, and the graph starts again for "all".
         self.assertEqual(result["after"], [["all", "alice"], "all", 1])
+        # An everyone-else schedule brings the choice back.
+        self.assertEqual(result["scheduled"], ["all", "alice", "__everyone_else__"])
 
     def test_everyone_else_shows_its_own_queue_limits(self) -> None:
         result = self._run_dashboard_functions(

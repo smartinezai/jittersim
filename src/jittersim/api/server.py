@@ -2498,7 +2498,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         option.textContent = device.name + " (" + device.ipv4_address + ")";
         select.appendChild(option);
       });
-      if (everyoneElse.profile_id) {
+      if (everyoneElseAssigned()) {
         const option = document.createElement("option");
         option.value = EVERYONE_ELSE_TRAFFIC;
         option.textContent = "Everyone else";
@@ -4487,6 +4487,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       const data = await request("/api/schedules", "GET");
       savedSchedules = data.schedules;
       renderSchedules(data.schedules);
+      // An everyone-else schedule adds Everyone else to Live traffic.
+      updateTrafficDeviceOptions(devices);
     }
 
     function formatTimerRemaining(seconds) {
