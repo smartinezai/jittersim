@@ -115,6 +115,44 @@ class HelperServiceTests(unittest.TestCase):
         self.assertEqual(response, {"ok": False, "error": "invalid network plan"})
         self.assertEqual(self.executor.commands, [])
 
+    def test_failed_apply_logs_bounded_diagnostics_without_returning_them(self) -> None:
+        class ApplyFailureExecutor(FakeExecutor):
+            def run(self, command):
+                self.commands.append(command)
+                if command.executable == "nft" and command.arguments == ("-f", "-"):
+                    return CommandResult(
+                        return_code=1,
+                        stderr="private-detail " * 100,
+                    )
+                return CommandResult(return_code=0)
+
+        service = HelperService(
+            NetworkApplier(
+                executor=ApplyFailureExecutor(),
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            )
+        )
+
+        with self.assertLogs("jittersim.networking.helper", level="ERROR") as captured:
+            response = service.handle_payload(
+                {"action": "apply", "plan": plan_to_payload(make_plan())}
+            )
+
+        self.assertEqual(
+            response,
+            {
+                "ok": False,
+                "error": "network plan apply failed",
+                "cleanup_failed": False,
+            },
+        )
+        diagnostic = captured.records[0].getMessage()
+        self.assertIn("step 2", diagnostic)
+        self.assertIn("exit code 1", diagnostic)
+        self.assertIn("private-detail", diagnostic)
+        self.assertLessEqual(len(diagnostic), 900)
+        self.assertNotIn("private-detail", str(response))
+
     def test_handles_reset_as_a_separate_action(self) -> None:
         response = self.service.handle_payload({"action": "reset"})
 

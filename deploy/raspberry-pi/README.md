@@ -288,6 +288,18 @@ helper to remove only JitterSim's rules then records the reset so a restart
 does not reapply the previous plan. If reset reports an error, leave the
 dashboard stopped and inspect the helper log before starting it again.
 
+## Troubleshoot a failed apply
+
+If the dashboard reports `network helper apply failed`, read the helper log on
+the Pi:
+
+```sh
+sudo journalctl -u jittersim-helper.service -n 80 --no-pager
+```
+
+The log shows which network step failed, its error output and whether cleanup
+completed.
+
 ## Credentials
 
 Read the credentials only on the Pi:

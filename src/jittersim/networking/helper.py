@@ -24,6 +24,7 @@ from .topology import Topology
 
 LOGGER = logging.getLogger(__name__)
 MAX_MESSAGE_BYTES = 256 * 1024
+MAX_LOG_DETAIL_CHARS = 512
 MAX_CONNECTED_CLIENTS = 256
 _MAC_ADDRESS_PATTERN = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 _STATION_HEADER_PATTERN = re.compile(
@@ -45,6 +46,13 @@ _PRIVATE_NETWORKS = (
     IPv4Network("172.16.0.0/12"),
     IPv4Network("192.168.0.0/16"),
 )
+
+
+def _log_detail(value: str) -> str:
+    """Keep helper error details on one bounded log line."""
+
+    normalized = " ".join(value[:MAX_LOG_DETAIL_CHARS].split())
+    return normalized or "none"
 
 
 class HelperError(RuntimeError):
@@ -168,18 +176,35 @@ class HelperService:
         try:
             report = self._applier.apply(plan=plan)
         except ApplyError as error:
+            cause = error.cause
+            reset_error = error.reset_error
             state_cleanup_failed = False
-            if error.cleanup_attempted and error.reset_error is None and self._active_plan_path is not None:
+            if error.cleanup_attempted and reset_error is None and self._active_plan_path is not None:
                 try:
                     self._active_plan_path.unlink(missing_ok=True)
                 except OSError:
                     state_cleanup_failed = True
                     LOGGER.exception("could not clear the active plan after apply failure")
-            LOGGER.exception("network plan apply failed")
+            cleanup_result = "completed" if error.cleanup_attempted else "not started"
+            if reset_error is not None:
+                cleanup_result = (
+                    f"failed: {_log_detail(str(reset_error))}; "
+                    f"error output: {_log_detail(reset_error.stderr)}"
+                )
+            LOGGER.exception(
+                "network plan apply failed at step %d: %s; exit code %s; "
+                "timed out %s; error output: %s; cleanup: %s",
+                error.failed_command_index + 1,
+                _log_detail(str(cause)),
+                cause.return_code if cause.return_code is not None else "unknown",
+                cause.timed_out,
+                _log_detail(cause.stderr),
+                cleanup_result,
+            )
             return {
                 "ok": False,
                 "error": "network plan apply failed",
-                "cleanup_failed": error.reset_error is not None or state_cleanup_failed,
+                "cleanup_failed": reset_error is not None or state_cleanup_failed,
             }
         if self._active_plan_path is not None:
             try:

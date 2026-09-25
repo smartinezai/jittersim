@@ -1378,7 +1378,11 @@ DASHBOARD_HTML = """<!doctype html>
         });
         const data = await response.json();
         if (!response.ok) {
-          const error = new Error(data.error || response.statusText);
+          const applyHint = data.error === "network helper apply failed" &&
+            typeof data.hint === "string"
+            ? "Network helper apply failed. " + data.hint
+            : data.error || response.statusText;
+          const error = new Error(applyHint);
           error.status = response.status;
           throw error;
         }
@@ -4970,7 +4974,15 @@ class ControlServer(HTTPServer):
                 last_error="network helper apply failed",
             )
             return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
-                {"error": "network helper apply failed", "state": _runtime_state_payload(state)}
+                {
+                    "error": "network helper apply failed",
+                    "hint": (
+                        "On the Pi, run sudo journalctl -u jittersim-helper.service "
+                        "-n 80 --no-pager to see which network step failed and "
+                        "whether cleanup completed."
+                    ),
+                    "state": _runtime_state_payload(state),
+                }
             )
         state = self.repository.update_runtime_state(
             observed_state="applied",
