@@ -13,6 +13,7 @@ import threading
 import time
 import unittest
 from email.message import Message
+from html.parser import HTMLParser
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlencode
@@ -191,6 +192,54 @@ def create_test_certificate(directory: Path):
         stderr=subprocess.DEVNULL,
     )
     return certificate, key
+
+
+class DashboardStructure(HTMLParser):
+    """Record which tab panel holds each card and heading, checking every tag closes."""
+
+    VOID_TAGS = {"br", "hr", "img", "input", "link", "meta", "source", "wbr"}
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.open_tags = []
+        self.errors = []
+        self.panels = []
+        self.panel_parents = set()
+        self.cards = []
+        self.headings = {}
+        self._heading = None
+
+    def handle_starttag(self, tag, attrs) -> None:
+        attributes = dict(attrs)
+        classes = (attributes.get("class") or "").split()
+        panel = self.open_tags[-1][1] if self.open_tags else None
+        if "tab-panel" in classes:
+            if panel is not None:
+                self.errors.append(f"{attributes.get('id')} is inside {panel}")
+            self.panel_parents.add(tuple(open_tag for open_tag, _ in self.open_tags))
+            panel = attributes.get("id")
+            self.panels.append(panel)
+        if "card" in classes:
+            self.cards.append((classes, panel))
+        if tag in self.VOID_TAGS:
+            return
+        self.open_tags.append((tag, panel))
+        if tag == "h2":
+            self._heading = ""
+
+    def handle_endtag(self, tag) -> None:
+        if not self.open_tags or self.open_tags[-1][0] != tag:
+            expected = self.open_tags[-1][0] if self.open_tags else "nothing"
+            self.errors.append(f"</{tag}> at line {self.getpos()[0]} closes {expected}")
+            return
+        _, panel = self.open_tags.pop()
+        if tag == "h2":
+            self.headings.setdefault(panel, []).append(" ".join(self._heading.split()))
+            self._heading = None
+
+    def handle_data(self, data) -> None:
+        if self._heading is not None:
+            self._heading += data
 
 
 class ControlServerTests(unittest.TestCase):
@@ -2265,6 +2314,42 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn(".content-grid, .data-grid { grid-template-columns: minmax(0, 1fr); }", small)
         self.assertNotIn("grid-template-columns: 1fr;", small)
 
+    def test_connected_client_buttons_wrap_on_a_phone(self) -> None:
+        small = self._small_screen_css()
+
+        # "Keep unaffected" used to push the Overview to 522 pixels on a 375-pixel phone.
+        self.assertIn(".connected-controls { grid-column: 1 / -1; flex-wrap: wrap; }", small)
+        self.assertIn(".connected-controls select { flex: 1 1 100%; min-width: 0; }", small)
+
+    def test_help_text_takes_no_room_until_shown(self) -> None:
+        tooltip = DASHBOARD_HTML.split(".help-icon::after {", 1)[1].split("}", 1)[0]
+
+        # An invisible tooltip still widens the page, so hidden help leaves the layout.
+        self.assertIn("display: none;", tooltip)
+        self.assertNotIn("visibility: hidden;", tooltip)
+        self.assertIn(
+            ".help-icon:hover::after, .help-icon:focus-visible::after { display: block; }",
+            DASHBOARD_HTML,
+        )
+        # On a phone the help spans its field instead of starting at the icon.
+        small = self._small_screen_css()
+        self.assertIn("label, .randomness-title { position: relative; }", small)
+        self.assertIn(".help-icon { position: static; }", small)
+        self.assertIn(".help-icon::after { right: 0; width: auto; }", small)
+
+    def test_hidden_fields_stay_hidden(self) -> None:
+        # label { display: grid } used to override the hidden attribute.
+        self.assertIn("[hidden] { display: none !important; }", DASHBOARD_HTML)
+        script = DASHBOARD_HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+        startup = script.split(
+            '["data-limit", "group-data-limit", "service-quota", "time-quota"].forEach(', 1
+        )[1].split("});", 1)[0]
+        self.assertIn('addEventListener("change", () => syncQuotaReset(prefix));', startup)
+        self.assertIn("syncQuotaReset(prefix);", startup.split("addEventListener", 1)[1])
+
+    def test_devices_tab_cards_keep_their_gap(self) -> None:
+        self.assertIn(".data-grid + .content-grid { margin-top: 1rem; }", DASHBOARD_HTML)
+
     def test_the_controls_bar_stays_slim_on_a_phone(self) -> None:
         small = self._small_screen_css()
 
@@ -2300,7 +2385,9 @@ class ControlServerTests(unittest.TestCase):
             ],
             "measurements": ['id="measurement-files"'],
             "setup": ["Upstream router connection", "Manual Pi access-point fallback"],
-            "diagnostics": ['id="plan"', 'id="state"', 'id="diagnostics"', 'id="action-history"'],
+            "diagnostics": [
+                'id="plan"', 'id="state"', 'id="diagnostics-output"', 'id="action-history"',
+            ],
         }
         for name, fragments in expected.items():
             panel = self._panel(name)
@@ -2311,6 +2398,50 @@ class ControlServerTests(unittest.TestCase):
                     positions.append(panel.index(fragment))
             # Lists come before the forms that edit them.
             self.assertEqual(positions, sorted(positions), name)
+
+    def test_every_card_sits_in_one_tab(self) -> None:
+        structure = DashboardStructure()
+        structure.feed(DASHBOARD_HTML)
+        structure.close()
+
+        self.assertEqual(structure.errors, [])
+        self.assertEqual(structure.open_tags, [])
+        # Sibling panels: hiding one tab never hides another.
+        self.assertEqual(structure.panels, [f"tab-{name}" for name in self.TABS])
+        self.assertEqual(structure.panel_parents, {("html", "body")})
+        # Only the controls bar stays outside the tabs.
+        self.assertEqual(
+            [classes for classes, panel in structure.cards if panel is None],
+            [["card", "action-bar"]],
+        )
+        self.assertEqual(
+            structure.headings,
+            {
+                None: ["Network controls"],
+                "tab-overview": [
+                    "Signed in", "Getting started", "Connected clients", "Live traffic",
+                ],
+                "tab-devices": ["Devices", "Assign a device", "Group devices", "Everyone else"],
+                "tab-profiles": ["Profiles", "Save profile"],
+                "tab-rules": [
+                    "Network access rules", "Schedule a profile", "Run a profile timer",
+                    "Progression mode", "Device data limit", "Shared group data limit",
+                    "Browser service profile", "Service data limit", "Service time limit",
+                    "Traffic discovery",
+                ],
+                "tab-measurements": ["Measurements"],
+                "tab-setup": ["Upstream router connection", "Manual Pi access-point fallback"],
+                "tab-diagnostics": [
+                    "Compiled plan", "Runtime state", "Access rules", "Diagnostics",
+                    "Backup and action history",
+                ],
+            },
+        )
+
+    def test_no_tab_shares_its_name_with_an_element(self) -> None:
+        # The address #<tab> would scroll the page to an element with that ID.
+        ids = set(re.findall(r'\bid="([^"]+)"', DASHBOARD_HTML))
+        self.assertEqual(ids & set(self.TABS), set())
 
     def test_dashboard_tabs_follow_the_address(self) -> None:
         result = self._run_dashboard_functions(
@@ -2326,19 +2457,67 @@ class ControlServerTests(unittest.TestCase):
             "}));\n"
             "const document = {querySelectorAll: () => links};\n"
             "const drawn = [];\n"
+            "const revealed = [];\n"
             "function drawTrafficChart() { drawn.push('traffic'); }\n"
-            "function drawMeasurementChart() { drawn.push('measurements'); }\n",
+            "function drawMeasurementChart() { drawn.push('measurements'); }\n"
+            "function revealTab(link) { revealed.push(link.href); }\n",
             "showTab('devices');\n"
             "console.log(JSON.stringify({\n"
             "  hidden: DASHBOARD_TABS.filter((tab) => panels['tab-' + tab].hidden),\n"
             "  current: links.filter((link) => link.current).map((link) => link.href),\n"
+            "  revealed: revealed,\n"
             "  fallback: [tabFromHash('#nope'), tabFromHash(''), tabFromHash('#rules')],\n"
             "}));\n",
         )
 
         self.assertEqual(result["hidden"], [tab for tab in self.TABS if tab != "devices"])
         self.assertEqual(result["current"], ["#devices"])
+        self.assertEqual(result["revealed"], ["#devices"])
         self.assertEqual(result["fallback"], ["overview", "overview", "rules"])
+
+    def test_the_chosen_tab_scrolls_into_the_tab_bar(self) -> None:
+        result = self._run_dashboard_functions(
+            ["revealTab"],
+            "const bar = {scrollLeft: 100,\n"
+            "  getBoundingClientRect: () => ({left: 16, right: 357})};\n"
+            "const tab = (left, right) => ({parentElement: bar,\n"
+            "  getBoundingClientRect: () => ({left: left, right: right})});\n",
+            "const scrolls = [[400, 480], [-40, 30], [100, 180]].map(([left, right]) => {\n"
+            "  bar.scrollLeft = 100;\n"
+            "  revealTab(tab(left, right));\n"
+            "  return bar.scrollLeft;\n"
+            "});\n"
+            "console.log(JSON.stringify(scrolls));\n",
+        )
+
+        # Past the right edge, past the left edge, already in view. The tab keeps
+        # about the bar's padding clear of the edge.
+        self.assertEqual(result, [231, 36, 100])
+
+    def test_tab_links_leave_modified_clicks_to_the_browser(self) -> None:
+        result = self._run_dashboard_functions(
+            ["followTabLink"],
+            "const shown = [];\n"
+            "const pushed = [];\n"
+            "function showTab(name) { shown.push(name); }\n"
+            "const window = {location: {hash: '#overview'},\n"
+            "  history: {pushState(state, title, url) { pushed.push(url); }}};\n"
+            "const click = (extra) => Object.assign({button: 0, metaKey: false, ctrlKey: false,\n"
+            "  shiftKey: false, altKey: false, prevented: false,\n"
+            "  preventDefault() { this.prevented = true; }}, extra);\n",
+            "const events = [click({}), click({metaKey: true}), click({ctrlKey: true}),\n"
+            "  click({shiftKey: true}), click({altKey: true}), click({button: 1})];\n"
+            "const followed = events.map((event) => followTabLink(event, 'devices'));\n"
+            "console.log(JSON.stringify({followed: followed,\n"
+            "  prevented: events.map((event) => event.prevented),\n"
+            "  shown: shown, pushed: pushed}));\n",
+        )
+
+        # A modified click opens the tab in a new browser tab instead.
+        self.assertEqual(result["followed"], [True, False, False, False, False, False])
+        self.assertEqual(result["prevented"], [True, False, False, False, False, False])
+        self.assertEqual(result["shown"], ["devices"])
+        self.assertEqual(result["pushed"], ["#devices"])
 
     def test_dashboard_folds_raw_json_away(self) -> None:
         # The compiled plan alone used to be about 9,000 pixels tall.
@@ -2353,29 +2532,106 @@ class ControlServerTests(unittest.TestCase):
     def test_dashboard_getting_started_follows_the_setup(self) -> None:
         result = self._run_dashboard_functions(
             ["gettingStartedSteps"],
-            "",
-            "const fresh = gettingStartedSteps({profiles: 0, devices: 0, connected: 0,\n"
-            "  everyoneElseProfile: null, lastAction: null});\n"
-            "const everyone = gettingStartedSteps({profiles: 2, devices: 0, connected: 1,\n"
-            "  everyoneElseProfile: '3g', lastAction: 'reset'});\n"
-            "const saved = gettingStartedSteps({profiles: 1, devices: 1, connected: 0,\n"
-            "  everyoneElseProfile: null, lastAction: 'apply'});\n"
-            "console.log(JSON.stringify([\n"
-            "  fresh.map((step) => step.done), everyone.map((step) => step.done),\n"
-            "  saved.map((step) => step.done), fresh.map((step) => step.tab),\n"
-            "]));\n",
+            "const state = (changes) => Object.assign({profiles: 0, devices: 0, connected: 0,\n"
+            "  everyoneElseProfile: null, lastAction: null, canApply: true}, changes);\n"
+            "const done = (changes) => gettingStartedSteps(state(changes)).map((s) => s.done);\n",
+            "console.log(JSON.stringify({\n"
+            "  fresh: done({}),\n"
+            "  connected: done({connected: 1}),\n"
+            "  everyone: done({profiles: 2, everyoneElseProfile: '3g', lastAction: 'reset'}),\n"
+            "  saved: done({profiles: 1, devices: 1, lastAction: 'apply'}),\n"
+            "  configurationOnly: done({profiles: 1, everyoneElseProfile: '3g',\n"
+            "    canApply: false}),\n"
+            "  tabs: gettingStartedSteps(state({})).map((step) => step.tab),\n"
+            "}));\n",
+        )
+
+        self.assertEqual(result["fresh"], [False, False, False, False])
+        self.assertEqual(result["connected"], [False, True, False, False])
+        # Saved settings finish the list whether or not a device is connected right now.
+        self.assertEqual(result["everyone"], [True, True, True, True])
+        self.assertEqual(result["saved"], [True, True, True, True])
+        # Configuration-only mode can't apply anything, so the list skips that step.
+        self.assertEqual(result["configurationOnly"], [True, True, True])
+        self.assertEqual(result["tabs"], ["profiles", None, "devices", None])
+
+    def test_getting_started_waits_for_the_dashboard_and_keeps_focus(self) -> None:
+        result = self._run_dashboard_functions(
+            ["gettingStartedSteps", "renderGettingStarted"],
+            "let dashboardLoaded = false;\n"
+            "let gettingStartedKey = '';\n"
+            "let helperConfigured = true;\n"
+            "let profiles = [];\n"
+            "let devices = [];\n"
+            "let everyoneElse = {profile_id: null};\n"
+            "let lastRuntimeState = {last_action: null};\n"
+            "let lastConnectedDevices = {available: true, devices: []};\n"
+            "const focused = [];\n"
+            "const fake = (extra) => Object.assign({children: [], listeners: {}, hidden: false,\n"
+            "  appendChild(child) { this.children.push(child); },\n"
+            "  append(...children) { this.children.push(...children); },\n"
+            "  addEventListener(type, listener) { this.listeners[type] = listener; },\n"
+            "  focus() { focused.push(this.id); }}, extra);\n"
+            "let rebuilds = 0;\n"
+            "const list = fake({\n"
+            "  replaceChildren() { rebuilds += 1; this.children = []; },\n"
+            "  contains(node) {\n"
+            "    return this.children.some(\n"
+            "      (item) => item === node || item.children.includes(node));\n"
+            "  }});\n"
+            "const elements = {'getting-started': fake({hidden: true}),\n"
+            "  'getting-started-steps': list, 'tab-profiles': fake({id: 'tab-profiles'})};\n"
+            "const element = (id) => elements[id];\n"
+            "const document = {activeElement: null, createElement: () => fake({}),\n"
+            "  createTextNode: (text) => ({text: text})};\n"
+            "const followed = [];\n"
+            "function followTabLink(event, name) { followed.push(name); return true; }\n",
+            "const seen = [];\n"
+            "const snapshot = () => seen.push([elements['getting-started'].hidden, rebuilds]);\n"
+            "renderGettingStarted();\n"
+            "snapshot();\n"
+            "dashboardLoaded = true;\n"
+            "renderGettingStarted();\n"
+            "snapshot();\n"
+            "renderGettingStarted();\n"
+            "snapshot();\n"
+            "const link = list.children[0].children[1];\n"
+            "document.activeElement = link;\n"
+            "profiles = [{id: 'slow'}];\n"
+            "renderGettingStarted();\n"
+            "snapshot();\n"
+            "link.listeners.click({});\n"
+            "document.activeElement = null;\n"
+            "renderGettingStarted();\n"
+            "snapshot();\n"
+            "everyoneElse = {profile_id: 'slow'};\n"
+            "lastRuntimeState = {last_action: 'apply'};\n"
+            "renderGettingStarted();\n"
+            "snapshot();\n"
+            "lastConnectedDevices = {available: true, devices: [{mac_address: 'a'}]};\n"
+            "renderGettingStarted();\n"
+            "snapshot();\n"
+            "console.log(JSON.stringify({seen: seen, followed: followed, focused: focused}));\n",
         )
 
         self.assertEqual(
-            result,
+            result["seen"],
             [
-                [False, False, False, False],
-                [True, True, True, True],
-                # A saved device means a device has been connected before.
-                [True, True, True, True],
-                ["profiles", None, "devices", None],
+                # Nothing shows until every saved setting has loaded.
+                [True, 0],
+                [False, 1],
+                # Polls with the same steps leave the list, and keyboard focus, alone.
+                [False, 1],
+                [False, 1],
+                [False, 2],
+                [True, 3],
+                # A client connecting doesn't change a finished list.
+                [True, 3],
             ],
         )
+        self.assertEqual(result["followed"], ["profiles"])
+        # The list is out of sight after its link switches tabs, so focus moves on.
+        self.assertEqual(result["focused"], ["tab-profiles"])
 
     def test_dashboard_getting_started_card_sits_on_the_overview(self) -> None:
         overview = self._panel("overview")
@@ -2404,9 +2660,88 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn('id="mac-add-allowed"', DASHBOARD_HTML)
         self.assertIn('id="mac-add-blocked"', DASHBOARD_HTML)
 
+    def test_picking_a_device_fills_the_forms(self) -> None:
+        result = self._run_dashboard_functions(
+            [
+                "slugify", "bindAutoId", "pickedDeviceFields", "pickedConnectedDevice",
+                "fillDeviceFromPicker", "fillUnaffectedFromPicker",
+            ],
+            "const lastConnectedDevices = {available: true, devices: [\n"
+            "  {mac_address: 'aa:aa:aa:aa:aa:01', ipv4_address: '192.168.50.23',\n"
+            "   saved_display_name: 'Sam phone', hostname: 'iPhone'}]};\n"
+            "const field = () => ({value: '', readOnly: false, dataset: {}, listeners: {},\n"
+            "  addEventListener(type, listener) {\n"
+            "    (this.listeners[type] = this.listeners[type] || []).push(listener);\n"
+            "  },\n"
+            "  dispatchEvent(event) {\n"
+            "    (this.listeners[event.type] || []).forEach((listener) => listener(event));\n"
+            "  }});\n"
+            "const elements = {};\n"
+            "['device-picker', 'device-name', 'device-id', 'device-ip', 'device-mac',\n"
+            "  'unaffected-picker', 'unaffected-mac', 'unaffected-name'].forEach(\n"
+            "  (id) => { elements[id] = field(); });\n"
+            "const element = (id) => elements[id];\n",
+            "bindAutoId('device-name', 'device-id');\n"
+            "const values = (ids) => ids.map((id) => elements[id].value);\n"
+            "const deviceFields = ['device-name', 'device-id', 'device-ip', 'device-mac'];\n"
+            "elements['device-picker'].value = 'aa:aa:aa:aa:aa:01';\n"
+            "fillDeviceFromPicker();\n"
+            "const fresh = values(deviceFields);\n"
+            "elements['device-id'].value = 'my-id';\n"
+            "elements['device-id'].dispatchEvent({type: 'input'});\n"
+            "fillDeviceFromPicker();\n"
+            "const typed = values(deviceFields);\n"
+            "elements['device-id'].value = 'saved-id';\n"
+            "elements['device-id'].dataset.typed = '';\n"
+            "elements['device-id'].readOnly = true;\n"
+            "fillDeviceFromPicker();\n"
+            "const editing = values(deviceFields);\n"
+            "elements['unaffected-picker'].value = 'aa:aa:aa:aa:aa:01';\n"
+            "fillUnaffectedFromPicker();\n"
+            "console.log(JSON.stringify({fresh: fresh, typed: typed, editing: editing,\n"
+            "  unaffected: values(['unaffected-mac', 'unaffected-name'])}));\n",
+        )
+
+        filled = ["Sam phone", "sam-phone", "192.168.50.23", "aa:aa:aa:aa:aa:01"]
+        self.assertEqual(result["fresh"], filled)
+        # The ID follows the name unless it was typed by hand or is being edited.
+        self.assertEqual(result["typed"], ["Sam phone", "my-id"] + filled[2:])
+        self.assertEqual(result["editing"], ["Sam phone", "saved-id"] + filled[2:])
+        self.assertEqual(result["unaffected"], ["aa:aa:aa:aa:aa:01", "Sam phone"])
+
+    def test_adding_a_picked_device_to_a_mac_list(self) -> None:
+        result = self._run_dashboard_functions(
+            ["addMacToList", "pickedConnectedDevice", "addPickedMac"],
+            "let lastConnectedDevices = {available: true,\n"
+            "  devices: [{mac_address: 'aa:aa:aa:aa:aa:01'}]};\n"
+            "const elements = {'mac-picker': {value: ''},\n"
+            "  'mac-allowlist': {value: 'bb:bb:bb:bb:bb:bb'}};\n"
+            "const element = (id) => elements[id];\n"
+            "const messages = [];\n"
+            "function showMessage(text, kind) { messages.push([text, kind]); }\n",
+            "addPickedMac('mac-allowlist');\n"
+            "elements['mac-picker'].value = 'aa:aa:aa:aa:aa:01';\n"
+            "addPickedMac('mac-allowlist');\n"
+            "addPickedMac('mac-allowlist');\n"
+            "lastConnectedDevices = {available: false, devices: []};\n"
+            "addPickedMac('mac-allowlist');\n"
+            "console.log(JSON.stringify({list: elements['mac-allowlist'].value,\n"
+            "  messages: messages}));\n",
+        )
+
+        self.assertEqual(result["list"], "bb:bb:bb:bb:bb:bb, aa:aa:aa:aa:aa:01")
+        self.assertEqual(
+            result["messages"],
+            [
+                ["Choose a connected device first.", "error"],
+                # Configuration-only mode can't list connected devices at all.
+                ["Connected devices are unavailable, so type the address in the list.", "error"],
+            ],
+        )
+
     def test_picking_a_connected_device_fills_the_form(self) -> None:
         result = self._run_dashboard_functions(
-            ["slugify", "connectedDeviceOptions", "pickedDeviceFields", "addMacToList"],
+            ["connectedDeviceOptions", "pickedDeviceFields", "addMacToList"],
             "const devices = [\n"
             "  {mac_address: 'aa:aa:aa:aa:aa:01', ipv4_address: '192.168.50.23',\n"
             "   display_name: 'Sam phone', saved_display_name: 'Sam phone', hostname: 'iPhone'},\n"
@@ -2443,13 +2778,11 @@ class ControlServerTests(unittest.TestCase):
             result["named"],
             {
                 "name": "Sam phone",
-                "id": "sam-phone",
                 "ipv4_address": "192.168.50.23",
                 "mac_address": "aa:aa:aa:aa:aa:01",
             },
         )
         self.assertEqual(result["unnamed"]["name"], "Client 192.168.50.24")
-        self.assertEqual(result["unnamed"]["id"], "client-192-168-50-24")
         self.assertEqual(
             result["lists"],
             [
