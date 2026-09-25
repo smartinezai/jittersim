@@ -13,11 +13,12 @@ import subprocess
 import sys
 import unittest
 from dataclasses import replace
+from ipaddress import IPv4Address
 
 from jittersim.config.models import Device, Impairment, MacPolicy, Profile
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import compile_plan
-from jittersim.engine.plan import ServiceAssignmentRule
+from jittersim.engine.plan import ServiceAssignmentRule, ServiceQuotaRule
 from jittersim.networking.applier import ApplyError, NetworkApplier
 from jittersim.networking.executor import CommandExecutionError, SubprocessExecutor
 from jittersim.networking.helper import HelperService
@@ -312,6 +313,35 @@ class LinuxDatapathTests(unittest.TestCase):
             "for _ in range(200):\n"
             "    s.sendto(b'x' * 100, ('192.168.0.1', 9))\n"
         ))
+        counters = service.handle_payload({"action": "traffic-counters"})["counters"]
+
+        dropped = counters["queues"]["devices"]["a-phone"]["upload_dropped"]
+        self.assertTrue(60 <= dropped <= 140, f"{dropped} of 200 dropped")
+
+    def test_helper_counts_what_an_active_service_limit_dropped(self) -> None:
+        service = HelperService(self.applier)
+        phone = device("a-phone", 10, "normal")
+        plan = compile_plan(
+            devices=[phone],
+            profiles={"normal": NORMAL},
+            service_quota_rules=(
+                ServiceQuotaRule(
+                    quota_id="router",
+                    device_id=phone.id,
+                    device_ip=phone.ipv4_address,
+                    destination_addresses=(IPv4Address("192.168.0.1"),),
+                    mark=0,
+                    upload_impairment=Impairment(loss_percent=50),
+                    download_impairment=Impairment(),
+                    active=True,
+                ),
+            ),
+        )
+        self.assertTrue(
+            service.handle_payload({"action": "apply", "plan": plan_to_payload(plan)})["ok"]
+        )
+
+        self.ping("192.168.50.10", count=200, interval="0.005")
         counters = service.handle_payload({"action": "traffic-counters"})["counters"]
 
         dropped = counters["queues"]["devices"]["a-phone"]["upload_dropped"]

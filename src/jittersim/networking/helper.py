@@ -42,6 +42,9 @@ _TRAFFIC_COUNTER_COMMENT_PATTERN = re.compile(
     r"^usage-(?P<kind>device|service) (?P<identifier>[a-z0-9][a-z0-9_-]{0,63}) "
     r"(?P<direction>upload|download)$"
 )
+_SERVICE_QUOTA_MARK_COMMENT_PATTERN = re.compile(
+    r"^apply-service-quota [a-z0-9][a-z0-9_-]{0,63} (?P<direction>upload|download)$"
+)
 _PRIVATE_NETWORKS = (
     IPv4Network("10.0.0.0/8"),
     IPv4Network("172.16.0.0/12"),
@@ -926,6 +929,21 @@ def _rule_marks(rule: Dict[str, Any]) -> Set[int]:
     return marks
 
 
+def _rule_address(rule: Dict[str, Any], field: str) -> Optional[str]:
+    """Return the single IPv4 address an nftables rule matches in one field."""
+
+    for expression in rule.get("expr", []):
+        match = expression.get("match") if isinstance(expression, dict) else None
+        if (
+            isinstance(match, dict)
+            and match.get("op") == "=="
+            and match.get("left") == {"payload": {"protocol": "ip", "field": field}}
+            and isinstance(match.get("right"), str)
+        ):
+            return match["right"]
+    return None
+
+
 def _queue_counter(value: Any) -> int:
     if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 2**63 - 1:
         return value
@@ -988,11 +1006,19 @@ def _parse_traffic_counter_output(output: str) -> Dict[str, Any]:
         "directions": {"devices": {}, "services": {}},
         "marks": {},
     }
+    device_addresses: Dict[str, str] = {}
+    service_quota_marks = []
     for item in payload["nftables"]:
         if not isinstance(item, dict) or not isinstance(item.get("rule"), dict):
             continue
         rule = item["rule"]
         comment = rule.get("comment")
+        quota = _SERVICE_QUOTA_MARK_COMMENT_PATTERN.fullmatch(comment or "")
+        if quota is not None:
+            # An active service limit's rule matches its device by address.
+            field = "saddr" if quota.group("direction") == "upload" else "daddr"
+            service_quota_marks.append((_rule_address(rule, field), _rule_marks(rule)))
+            continue
         match = _TRAFFIC_COUNTER_COMMENT_PATTERN.fullmatch(comment or "")
         if match is None:
             continue
@@ -1025,6 +1051,9 @@ def _parse_traffic_counter_output(output: str) -> Dict[str, Any]:
         direction = match.group("direction")
         if kind == "devices":
             counters["marks"].setdefault(identifier, set()).update(_rule_marks(rule))
+            address = _rule_address(rule, "saddr" if direction == "upload" else "daddr")
+            if address is not None:
+                device_addresses[address] = identifier
         counters[kind][identifier] = counters[kind].get(identifier, 0) + byte_count
         directional = counters["directions"][kind].setdefault(
             identifier,
@@ -1037,6 +1066,10 @@ def _parse_traffic_counter_output(output: str) -> Dict[str, Any]:
         )
         directional[f"{direction}_bytes"] += byte_count
         directional[f"{direction}_packets"] += packet_count
+    for address, marks in service_quota_marks:
+        device_id = device_addresses.get(address)
+        if device_id is not None:
+            counters["marks"].setdefault(device_id, set()).update(marks)
     return counters
 
 

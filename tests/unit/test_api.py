@@ -1619,6 +1619,31 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(self.server.helper_client.applied_plan.mark_rules[0].device_id, "alice")
         self.assertEqual(len(self.server.helper_client.applied_plan.mark_rules), 2)
 
+    def test_connected_device_profile_assignment_keeps_a_reset_network_reset(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.repository.update_runtime_state(
+            observed_state="reset", last_action="reset", last_result="success", last_error=None
+        )
+
+        status, _, body = self.server.write_response_for(
+            "/api/connected-devices/apply-profile",
+            {
+                "ipv4_address": "192.168.50.178",
+                "mac_address": "dc:1e:d5:3e:97:4c",
+                "profile_id": "slow",
+            },
+        )
+
+        self.assertEqual(status, 200)
+        self.assertFalse(json.loads(body)["live_applied"])
+        self.assertIsNone(self.server.helper_client.applied_plan)
+        self.assertEqual(
+            self.repository.get_device_by_ipv4_address("192.168.50.178").profile_id, "slow"
+        )
+        # Only an explicit Apply may undo a Reset, so the dashboard says so.
+        assign = DASHBOARD_HTML.split("async function applyProfileToDevice(", 1)[1]
+        self.assertIn("result.live_applied === false", assign.split("\n    }\n", 1)[0])
+
     def test_profile_assignment_rejects_a_neighbor_without_verified_association(self) -> None:
         class UnverifiedHelper(FakeHelper):
             def connected_device_snapshot(self):
@@ -1692,6 +1717,56 @@ class ControlServerTests(unittest.TestCase):
             capture_output=True,
             text=True,
             check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_traffic_chart_labels_fit_on_the_canvas(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is required to draw the chart")
+        script = DASHBOARD_HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+
+        def function(name):
+            body = script.split(f"    function {name}(", 1)[1].split("\n    }\n", 1)[0]
+            return f"function {name}({body}\n}}\n"
+
+        harness = (
+            "const TRAFFIC_WINDOW_MS = 60000;\n"
+            "const trafficSamples = [];\n"
+            # An ISP plan of 100 Mbit/s sets the scale to 100 Mbit/s.
+            "const latestTrafficReferences = {isp_download: 100};\n"
+            "const drawn = [];\n"
+            "const context = {\n"
+            "  setTransform() {}, clearRect() {}, beginPath() {}, moveTo() {},\n"
+            "  lineTo() {}, stroke() {}, setLineDash() {},\n"
+            "  measureText(text) { return {width: 7 * text.length}; },\n"
+            "  fillText(text, x) { drawn.push({text, x, align: this.textAlign}); },\n"
+            "};\n"
+            "const elements = {\n"
+            "  'traffic-chart': {getBoundingClientRect: () => ({width: 600, height: 320}),\n"
+            "                    getContext: () => context},\n"
+            "  'traffic-device': {value: 'all'},\n"
+            "  'traffic-profile-upload-legend': {},\n"
+            "  'traffic-profile-download-legend': {},\n"
+            "};\n"
+            "const element = (id) => elements[id];\n"
+            "const window = {devicePixelRatio: 1};\n"
+            + function("formatTrafficRate")
+            + function("drawTrafficChart")
+            + "drawTrafficChart();\n"
+            "const clipped = drawn.filter(({text, x, align}) => {\n"
+            "  const width = context.measureText(text).width;\n"
+            "  const offset = {right: width, center: width / 2}[align] || 0;\n"
+            "  return x - offset < 0;\n"
+            "});\n"
+            "if (!drawn.length || clipped.length) {\n"
+            "  console.error(JSON.stringify(clipped));\n"
+            "  process.exit(1);\n"
+            "}\n"
+        )
+        result = subprocess.run(
+            [node, "-e", harness], capture_output=True, text=True, check=False
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
