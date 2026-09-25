@@ -59,6 +59,19 @@ class ServiceQuotaRule:
 
 
 @dataclass(frozen=True)
+class ServiceAssignmentRule:
+    """Hostname match and queue for one managed browser assignment."""
+
+    assignment_id: str
+    device_id: str
+    device_ip: IPv4Address
+    domains: Tuple[str, ...]
+    mark: int
+    upload_impairment: Impairment
+    download_impairment: Impairment
+
+
+@dataclass(frozen=True)
 class NetworkPlan:
     """The complete device-specific plan without executable commands."""
 
@@ -69,3 +82,4 @@ class NetworkPlan:
     website_filters: Tuple[WebsiteFilter, ...] = ()
     blocked_device_addresses: Tuple[IPv4Address, ...] = ()
     service_quota_rules: Tuple[ServiceQuotaRule, ...] = ()
+    service_assignment_rules: Tuple[ServiceAssignmentRule, ...] = ()

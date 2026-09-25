@@ -4,7 +4,7 @@ from ipaddress import IPv4Address
 from jittersim.config.models import Device, Impairment, MacPolicy, Profile
 from jittersim.engine.codec import PlanCodecError, plan_from_payload, plan_to_payload
 from jittersim.engine.compiler import compile_plan
-from jittersim.engine.plan import ServiceQuotaRule, WebsiteFilter
+from jittersim.engine.plan import ServiceAssignmentRule, ServiceQuotaRule, WebsiteFilter
 
 
 class PlanCodecTests(unittest.TestCase):
@@ -79,6 +79,28 @@ class PlanCodecTests(unittest.TestCase):
         )
 
         self.assertEqual(plan_from_payload(plan_to_payload(plan)), plan)
+
+    def test_browser_service_rule_cannot_disagree_with_its_queue(self) -> None:
+        plan = compile_plan(
+            devices=(Device("alice", "Alice", "192.168.50.10", "slow"),),
+            profiles={"slow": Profile(id="slow", name="Slow")},
+            service_assignment_rules=(
+                ServiceAssignmentRule(
+                    assignment_id="video",
+                    device_id="alice",
+                    device_ip=IPv4Address("192.168.50.10"),
+                    domains=("youtube.com",),
+                    mark=0,
+                    upload_impairment=Impairment(delay_ms=200),
+                    download_impairment=Impairment(loss_percent=5),
+                ),
+            ),
+        )
+        payload = plan_to_payload(plan)
+        self.assertEqual(plan_from_payload(payload), plan)
+        payload["service_assignment_rules"][0]["upload_impairment"]["delay_ms"] = 400
+        with self.assertRaisesRegex(PlanCodecError, "does not match"):
+            plan_from_payload(payload)
 
     def test_rejects_an_unsafe_service_quota_id(self) -> None:
         payload = plan_to_payload(self.plan)

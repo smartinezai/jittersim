@@ -164,8 +164,8 @@ Goal: run the system headlessly on the Pi while preserving a reliable recovery p
 - [x] Add a configuration file for management and test interfaces.
 - [x] Add interface safety checks at startup.
 - [x] Restore the last applied plan or finish a reset after restart.
-- [ ] Document DHCP, NAT and the test Wi-Fi network.
-- [ ] Add an SSH reset procedure.
+- [x] Document DHCP, NAT and the test Wi-Fi network.
+- [x] Add an SSH reset procedure.
 
 Suggested commits:
 
@@ -214,6 +214,51 @@ Quota matching uses observed domain names resolved to IPv4 addresses. Services
 can use changing domains or shared delivery addresses. VPNs, encrypted DNS,
 direct IP access and IPv6 can therefore reduce accuracy.
 
+## Milestone 10: selective browser profiles and private control
+
+Goal: shape named HTTPS sites in a managed Mac browser and control the Pi from
+another location without exposing the dashboard publicly.
+
+- [x] Add editable browser service assignments with direct hostname entry.
+- [x] Keep other proxied sites on the device's ordinary queue even when a
+  selected site shares its server address.
+- [x] Bind the browser proxy to the isolated test network and reject private
+  destinations.
+- [x] Protect private dashboard reads and check helper health.
+- [x] Serialize apply and reset, enforce the Linux queue limit and preserve
+  foreign root queues.
+- [x] Provision the test AP and document Mac browser setup.
+- [x] Document opt-in Tailscale Serve, access rules and removal.
+- [ ] Verify network queues, Mac browser isolation, the AP and remote control
+  on the actual Pi from another location.
+
+The first browser release covers HTTPS CONNECT traffic sent through the proxy.
+Native apps and browser paths that bypass it keep the ordinary device profile.
+The test Wi-Fi provides IPv4 client access. Service quotas still use their
+separate address-based matching.
+
+## Milestone 11: household access point readiness
+
+Goal: let the household join one JitterSim Wi-Fi while only chosen devices
+receive network effects. Do not turn off the router Wi-Fi until this has been
+verified on the target Pi under normal household load.
+
+- [x] Keep unconfigured clients out of device-specific profile rules.
+- [x] Give ordinary traffic a fair queue while selected devices are shaped.
+- [x] Check Ethernet routing, AP interface and subnet compatibility before
+  changing services during installation.
+- [x] Avoid restarting an active AP during a routine software update.
+- [ ] Decide whether Wi-Fi devices need the router's wired printers, TVs, NAS
+  and other private services. The current isolated subnet blocks them.
+- [ ] Choose and implement a household network design if normal wired-network
+  access and discovery are required.
+- [ ] Measure Wi-Fi coverage, client count, throughput and reconnection on the
+  actual Pi before migrating every device.
+- [ ] Verify an unconfigured device remains online through repeated profile
+  changes, helper restarts, dashboard restarts and a Pi reboot.
+
+See the [household plan](docs/implementation-plan-household-access-point-2026-09.md).
+
 ## Deliberate non-goals
 
 These should remain outside the first class-project scope:
@@ -228,9 +273,8 @@ These should remain outside the first class-project scope:
 
 The dashboard can control primary Wi-Fi on a Vodafone TG3442DE through its
 local web interface. Other router models still need manual control. JitterSim
-does not inspect HTTPS pages or promise complete website blocking. IPv6 is
-blocked from the test network while a plan is applied rather than shaped per
-device.
+does not inspect HTTPS pages or promise complete website blocking. The test AP
+does not offer client IPv6 while device rules remain IPv4 based.
 
 ## Definition of done for the class project
 

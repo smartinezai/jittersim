@@ -12,7 +12,7 @@ class DeploymentFirewallTests(unittest.TestCase):
             REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "jittersim-control-firewall.nft"
         ).read_text()
 
-        self.assertIn('iifname "wlan0" oifname "eth0"', firewall)
+        self.assertIn('iifname "@TEST_INTERFACE@" oifname "@UPLINK_INTERFACE@"', firewall)
         self.assertIn("10.0.0.0/8", firewall)
         self.assertIn("172.16.0.0/12", firewall)
         self.assertIn("192.168.0.0/16", firewall)

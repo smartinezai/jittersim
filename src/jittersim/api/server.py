@@ -8,13 +8,22 @@ import os
 import socket
 import ssl
 import time
+from contextlib import nullcontext
 from dataclasses import asdict, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from ipaddress import IPv4Network
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
 
+from jittersim.config.device_labels import (
+    DeviceLabelError,
+    guess_device_type,
+    normalize_device_display_name,
+    normalize_device_mac,
+    normalize_device_type,
+)
 from jittersim.config.models import (
     DataLimit,
     Device,
@@ -28,6 +37,7 @@ from jittersim.config.models import (
     Randomness,
     RuntimeState,
     Schedule,
+    ServiceAssignment,
     ServiceQuota,
     TimeQuota,
     Timer,
@@ -35,9 +45,14 @@ from jittersim.config.models import (
     normalize_domain,
     time_quota_counter_id,
 )
-from jittersim.config.storage import ConfigRepository, DatabasePath, StorageError
+from jittersim.config.storage import (
+    ConfigRepository,
+    DatabasePath,
+    StorageError,
+    TrafficRateSettingsError,
+)
 from jittersim.engine.codec import plan_to_payload
-from jittersim.engine.compiler import PlanError
+from jittersim.engine.compiler import MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN, PlanError
 from jittersim.engine.progression import progression_factor
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.service import compile_stored_plan
@@ -62,6 +77,8 @@ WRITE_PATHS = frozenset(
         "/api/group-data-limits/reset",
         "/api/service-quotas",
         "/api/service-quotas/reset",
+        "/api/service-assignments",
+        "/api/service-assignments/delete",
         "/api/time-quotas",
         "/api/time-quotas/reset",
         "/api/time-quotas/start",
@@ -71,6 +88,9 @@ WRITE_PATHS = frozenset(
         "/api/router/sync-ap",
         "/api/router/wifi",
         "/api/connected-devices/apply-profile",
+        "/api/connected-device-labels",
+        "/api/connected-device-labels/delete",
+        "/api/traffic-settings",
         "/api/observations/scan",
         "/api/observations/add-to-profile",
         "/api/observations/add-global-block",
@@ -79,19 +99,7 @@ WRITE_PATHS = frozenset(
     )
 )
 ACTION_PATHS = frozenset(("/api/apply", "/api/reset", "/api/observations/scan"))
-PROTECTED_READ_PATHS = frozenset(
-    (
-        "/api/action-history",
-        "/api/backup",
-        "/api/data-limits",
-        "/api/diagnostics",
-        "/api/group-data-limits",
-        "/api/observations",
-        "/api/service-quotas",
-        "/api/time-quotas",
-        "/api/traffic",
-    )
-)
+PUBLIC_READ_PATHS = frozenset(("/", "/api/health"))
 
 
 # Raw string: JavaScript escapes such as "\n" must reach the browser unchanged.
@@ -292,6 +300,25 @@ DASHBOARD_HTML = r"""<!doctype html>
     .connected-controls { display: flex; align-items: center; gap: 0.5rem; }
     .connected-controls select { min-width: 10rem; }
     .connected-controls button { margin-top: 0; white-space: nowrap; }
+    .connected-label-editor { margin-top: 0.4rem; color: #a8bdd4; font-size: 0.78rem; }
+    .connected-label-editor summary { cursor: pointer; }
+    .connected-label-form {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: end;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
+    .connected-label-form label { min-width: 9rem; max-width: 14rem; flex: 1; }
+    .connected-label-form input { padding: 0.45rem 0.5rem; }
+    .connected-label-form button { margin: 0; padding: 0.45rem 0.6rem; }
+    .saved-device-labels {
+      border-top: 1px solid #2b435f;
+      margin-top: 0.75rem;
+      padding-top: 0.75rem;
+    }
+    .saved-device-labels h3 { margin-top: 0; }
+    .saved-device-label-row { grid-template-columns: minmax(0, 1fr) auto auto; }
     select {
       padding: 0.55rem 0.6rem;
       border: 1px solid #3a526e;
@@ -306,16 +333,26 @@ DASHBOARD_HTML = r"""<!doctype html>
     .traffic-controls { display: grid; grid-template-columns: minmax(14rem, 0.75fr) minmax(0, 1.5fr); align-items: end; gap: 1rem; margin-top: 1rem; }
     .traffic-controls label { max-width: 24rem; }
     .traffic-status { margin: 0; color: #91a8c1; font-size: 0.82rem; }
+    .traffic-rate-form { display: flex; flex-wrap: wrap; align-items: end; gap: 0.75rem; margin-top: 0.85rem; padding: 0.75rem; border: 1px solid #2b435f; border-radius: 0.6rem; background: #0d1b2d; }
+    .traffic-rate-form label { min-width: 10rem; max-width: 14rem; flex: 1; }
+    .traffic-rate-form input { width: 100%; }
+    .traffic-rate-form button { margin: 0; }
+    .traffic-rate-help, .traffic-profile-status { margin: 0; color: #91a8c1; font-size: 0.78rem; }
+    .traffic-rate-help { flex-basis: 100%; }
     .traffic-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.75rem; margin-top: 1rem; }
     .traffic-metric { min-width: 0; padding: 0.75rem; border: 1px solid #2b435f; border-radius: 0.6rem; background: #0d1b2d; }
     .traffic-metric span { display: block; color: #91a8c1; font-size: 0.76rem; }
     .traffic-metric strong { display: block; margin-top: 0.25rem; color: #edf5ff; font-size: 1.05rem; overflow-wrap: anywhere; }
     .traffic-chart-wrap { margin-top: 1rem; padding: 0.65rem; border: 1px solid #2b435f; border-radius: 0.65rem; background: #0b1727; }
     #traffic-chart { display: block; width: 100%; height: 16rem; }
-    .traffic-legend { display: flex; flex-wrap: wrap; gap: 1rem; margin-top: 0.65rem; color: #91a8c1; font-size: 0.78rem; }
+    .traffic-legend { display: flex; flex-wrap: wrap; gap: 0.8rem 1rem; margin-top: 0.65rem; color: #91a8c1; font-size: 0.78rem; }
     .traffic-legend span { display: inline-flex; align-items: center; gap: 0.4rem; }
     .traffic-key { width: 0.75rem; height: 0.2rem; border-radius: 1rem; background: #70b7ff; }
     .traffic-key.download { background: #70d7a9; }
+    .traffic-key.isp-upload { height: 0; border-top: 2px dashed #75a9ff; background: transparent; }
+    .traffic-key.isp-download { height: 0; border-top: 2px dashed #75d7c2; background: transparent; }
+    .traffic-key.profile-upload { height: 0; border-top: 2px dotted #ffa76c; background: transparent; }
+    .traffic-key.profile-download { height: 0; border-top: 2px dotted #edc36a; background: transparent; }
     .traffic-note { margin: 0.75rem 0 0; color: #91a8c1; font-size: 0.8rem; }
     .uplink-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.75rem; margin-top: 1rem; }
     .uplink-value { padding: 0.75rem; border: 1px solid #2b435f; border-radius: 0.6rem; background: #0d1b2d; }
@@ -476,6 +513,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       .connected-row { grid-template-columns: auto minmax(0, 1fr) auto; }
       .connected-controls { grid-column: 1 / -1; }
       .connected-controls select { flex: 1; }
+      .connected-label-form label { max-width: none; }
       .observation-actions { margin-top: 0.75rem; }
       .observation-actions button { width: 100%; }
       .observation-device-heading { display: block; }
@@ -549,6 +587,17 @@ DASHBOARD_HTML = r"""<!doctype html>
       </label>
       <p id="traffic-status" class="traffic-status" role="status" aria-live="polite">Check the admin token to start live traffic sampling.</p>
     </div>
+    <form id="traffic-rate-form" class="traffic-rate-form">
+      <label>ISP download maximum (Mbit/s)
+        <input id="traffic-isp-download" type="number" min="0.1" max="1000" step="0.1" value="100.0">
+      </label>
+      <label>ISP upload maximum (Mbit/s)
+        <input id="traffic-isp-upload" type="number" min="0.1" max="1000" step="0.1" placeholder="Unknown">
+      </label>
+      <button class="primary" type="submit">Save speed references</button>
+      <p id="traffic-rate-status" class="traffic-rate-help" role="status" aria-live="polite"></p>
+      <p class="traffic-rate-help">These reference lines do not limit traffic. The ISP plan maximum is shared with other home devices.</p>
+    </form>
     <div class="traffic-metrics">
       <div class="traffic-metric"><span>Upload rate</span><strong id="traffic-upload-rate">—</strong></div>
       <div class="traffic-metric"><span>Download rate</span><strong id="traffic-download-rate">—</strong></div>
@@ -556,13 +605,18 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div class="traffic-metric"><span>Download packet rate</span><strong id="traffic-download-packets">—</strong></div>
     </div>
     <div class="traffic-chart-wrap">
-      <canvas id="traffic-chart" width="900" height="320" role="img" aria-label="Live upload and download traffic rates over the last 60 seconds">Live traffic chart. Check the admin token to begin sampling.</canvas>
-      <div class="traffic-legend" aria-hidden="true">
-        <span><i class="traffic-key"></i>Upload</span>
-        <span><i class="traffic-key download"></i>Download</span>
+      <canvas id="traffic-chart" width="900" height="320" role="img" aria-label="Live upload and download rates at JitterSim with configured ISP and device queue limits over the last 60 seconds">Live traffic chart. Check the admin token to begin sampling.</canvas>
+      <div class="traffic-legend" aria-label="Graph legend">
+        <span><i class="traffic-key"></i>Upload rate at Pi</span>
+        <span><i class="traffic-key download"></i>Download rate at Pi</span>
+        <span><i class="traffic-key isp-upload"></i>ISP upload plan</span>
+        <span><i class="traffic-key isp-download"></i>ISP download plan</span>
+        <span id="traffic-profile-upload-legend"><i class="traffic-key profile-upload"></i>Default queue upload limit</span>
+        <span id="traffic-profile-download-legend"><i class="traffic-key profile-download"></i>Default queue download limit</span>
       </div>
     </div>
-    <p class="traffic-note">These rates count traffic before JitterSim adds delay or drops packets. They show what reaches JitterSim, not the speed a device successfully receives. Only assigned devices are included. Check the admin token to start; sampling pauses when this tab is hidden.</p>
+    <p id="traffic-profile-status" class="traffic-profile-status" role="status" aria-live="polite">Select one device to show its applied default queue limits.</p>
+    <p class="traffic-note">Traffic lines count bytes at JitterSim before its queues. They do not show the speed a device receives. Dashed lines show configured limits. The ISP plan line is shared with household traffic and is not a live measurement of spare capacity. Service-specific queues may use different limits. Only assigned devices are included. Check the admin token to start; sampling pauses when this tab is hidden.</p>
   </section>
   <section class="card uplink-card">
     <div class="section-heading">
@@ -1079,6 +1133,38 @@ DASHBOARD_HTML = r"""<!doctype html>
   <section class="card quota-card">
     <div class="section-heading">
       <div>
+        <h2>Browser service profile</h2>
+        <p>Apply a profile to named HTTPS sites on one managed test browser</p>
+      </div>
+      <span id="service-assignment-count" class="count-badge">No service profiles</span>
+    </div>
+    <form id="service-assignment-form">
+      <div class="fields">
+        <label>Service ID
+          <input id="service-assignment-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="alice-video">
+        </label>
+        <label>Service name
+          <input id="service-assignment-name" required placeholder="Video sites">
+        </label>
+        <label>Test device
+          <select id="service-assignment-device" required></select>
+        </label>
+        <label>Profile for these sites
+          <select id="service-assignment-profile" required></select>
+        </label>
+        <label class="quota-check"><input id="service-assignment-enabled" type="checkbox" checked> Enabled</label>
+      </div>
+      <label>HTTPS hostnames, one per line
+        <textarea id="service-assignment-domains" rows="4" required placeholder="netflix.com&#10;google.com&#10;youtube.com"></textarea>
+      </label>
+      <p class="form-note">Includes subdomains of each name. Configure the Mac browser's HTTPS proxy as 192.168.50.1:3128 while connected to the test Wi-Fi. Other proxied sites keep the device profile. Apps and connections that bypass the proxy are outside this control.</p>
+      <button class="primary" type="submit">Save browser service profile</button>
+    </form>
+    <div id="service-assignment-list" class="quota-list" aria-live="polite">Enter the admin token to view service profiles.</div>
+  </section>
+  <section class="card quota-card">
+    <div class="section-heading">
+      <div>
         <h2>Service data limit</h2>
         <p>Limit a service made up of several observed DNS domains</p>
       </div>
@@ -1128,7 +1214,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <label>Observed domains for this service
         <select id="service-quota-domains" class="quota-domain-picker" multiple required></select>
       </label>
-      <p class="form-note">Only domains observed from the selected device appear here. Select all names used by the service. Matching traffic is counted together at the service level then multiplied by the quota weight.</p>
+      <p class="form-note">Only domains observed from the selected device appear here. Select all names used by the service. Matching direct traffic is counted together then multiplied by the quota weight. Browser proxy tunnels are outside this limit.</p>
       <button class="primary" type="submit">Save service limit</button>
     </form>
     <div id="service-quota-list" class="quota-list" aria-live="polite">Enter the admin token to view service limits.</div>
@@ -1323,7 +1409,11 @@ DASHBOARD_HTML = r"""<!doctype html>
         });
         const data = await response.json();
         if (!response.ok) {
-          const error = new Error(data.error || response.statusText);
+          const applyHint = data.error === "network helper apply failed" &&
+            typeof data.hint === "string"
+            ? "Network helper apply failed. " + data.hint
+            : data.error || response.statusText;
+          const error = new Error(applyHint);
           error.status = response.status;
           throw error;
         }
@@ -1339,6 +1429,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     let helperConfigured = false;
+    let adminTokenVerified = false;
     let profiles = [];
     let groups = [];
     let observedDomainsByDevice = {};
@@ -1352,6 +1443,13 @@ DASHBOARD_HTML = r"""<!doctype html>
     let trafficSamplingAllowed = false;
     let previousTrafficSample = null;
     let trafficSamples = [];
+    let currentIspTrafficLimits = { upload_kbit: null, download_kbit: 100000 };
+    let latestTrafficReferences = {
+      isp_upload: null,
+      isp_download: 100,
+      profile_upload: null,
+      profile_download: null
+    };
 
     function showMessage(message, kind) {
       const messageElement = element("message");
@@ -1387,6 +1485,42 @@ DASHBOARD_HTML = r"""<!doctype html>
         return (megabitsPerSecond * 1000).toFixed(1) + " kbit/s";
       }
       return megabitsPerSecond.toFixed(2) + " Mbit/s";
+    }
+
+    function trafficRateMbit(kbit) {
+      return kbit === null || kbit === undefined ? null : kbit / 1000;
+    }
+
+    function trafficRateFromInput(id) {
+      const raw = element(id).value.trim();
+      if (raw === "") return null;
+      const rate = Number(raw);
+      const tenths = Math.round(rate * 10);
+      if (!Number.isFinite(rate) || rate < 0.1 || rate > 1000 || Math.abs(rate * 10 - tenths) > 1e-7) {
+        throw new Error("Enter a rate from 0.1 to 1000 Mbit/s in 0.1 Mbit/s steps, or leave it empty.");
+      }
+      return tenths * 100;
+    }
+
+    function setTrafficRateInputs(settings) {
+      currentIspTrafficLimits = {
+        upload_kbit: settings.upload_kbit,
+        download_kbit: settings.download_kbit
+      };
+      latestTrafficReferences.isp_upload = trafficRateMbit(settings.upload_kbit);
+      latestTrafficReferences.isp_download = trafficRateMbit(settings.download_kbit);
+      element("traffic-isp-upload").value = settings.upload_kbit === null
+        ? ""
+        : (settings.upload_kbit / 1000).toFixed(1);
+      element("traffic-isp-download").value = settings.download_kbit === null
+        ? ""
+        : (settings.download_kbit / 1000).toFixed(1);
+      drawTrafficChart();
+    }
+
+    async function loadTrafficSettings() {
+      const settings = await request("/api/traffic-settings", "GET");
+      setTrafficRateInputs(settings);
     }
 
     function formatPacketRate(packetsPerSecond) {
@@ -1446,7 +1580,18 @@ DASHBOARD_HTML = r"""<!doctype html>
       const plotHeight = plot.bottom - plot.top;
       const now = performance.now();
       const visibleSamples = trafficSamples.filter((sample) => now - sample.time <= TRAFFIC_WINDOW_MS);
-      const maxRate = Math.max(0.1, ...visibleSamples.map((sample) => Math.max(sample.upload, sample.download)));
+      const selectedDevice = element("traffic-device").value;
+      const profileSelected = selectedDevice !== "all";
+      element("traffic-profile-upload-legend").hidden = !profileSelected;
+      element("traffic-profile-download-legend").hidden = !profileSelected;
+      const referenceFields = ["isp_upload", "isp_download", "profile_upload", "profile_download"];
+      const graphValues = visibleSamples.flatMap((sample) => [
+        sample.upload,
+        sample.download,
+        ...referenceFields.map((field) => sample[field])
+      ]).filter((value) => Number.isFinite(value));
+      graphValues.push(...Object.values(latestTrafficReferences).filter((value) => Number.isFinite(value)));
+      const maxRate = Math.max(0.1, ...graphValues);
       const scaleMax = Math.pow(10, Math.ceil(Math.log10(maxRate)));
       context.font = "12px system-ui, sans-serif";
       context.textBaseline = "middle";
@@ -1469,35 +1614,107 @@ DASHBOARD_HTML = r"""<!doctype html>
         context.textBaseline = "alphabetic";
         context.fillText(fraction === 1 ? "now" : "−" + Math.round((1 - fraction) * TRAFFIC_WINDOW_MS / 1000) + "s", x, bounds.height - 8);
       });
-      [
-        { field: "upload", color: "#70b7ff" },
-        { field: "download", color: "#70d7a9" }
-      ].forEach((series) => {
+
+      function drawSeries(series) {
         context.strokeStyle = series.color;
-        context.lineWidth = 2.5;
+        context.lineWidth = series.step ? 1.8 : 2.5;
         context.lineJoin = "round";
         context.lineCap = "round";
+        context.setLineDash(series.dash || []);
         context.beginPath();
         let started = false;
+        let previousY = 0;
         visibleSamples.forEach((sample) => {
+          const rate = sample[series.field];
+          if (!Number.isFinite(rate)) {
+            if (series.step) started = false;
+            return;
+          }
           const age = now - sample.time;
           const x = plot.right - plotWidth * age / TRAFFIC_WINDOW_MS;
-          const y = plot.bottom - plotHeight * sample[series.field] / scaleMax;
+          const y = plot.bottom - plotHeight * rate / scaleMax;
           if (!started) {
             context.moveTo(x, y);
             started = true;
+          } else if (series.step) {
+            context.lineTo(x, previousY);
+            context.lineTo(x, y);
           } else {
             context.lineTo(x, y);
           }
+          previousY = y;
         });
         if (started) context.stroke();
-      });
+        context.setLineDash([]);
+      }
+
+      [
+        { field: "isp_upload", color: "#75a9ff", dash: [8, 6], step: true },
+        { field: "isp_download", color: "#75d7c2", dash: [8, 6], step: true },
+        { field: "profile_upload", color: "#ffa76c", dash: [2, 5], step: true },
+        { field: "profile_download", color: "#edc36a", dash: [2, 5], step: true },
+        { field: "upload", color: "#70b7ff" },
+        { field: "download", color: "#70d7a9" }
+      ].forEach(drawSeries);
+
+      if (!visibleSamples.length) {
+        referenceFields.forEach((field) => {
+          const value = latestTrafficReferences[field];
+          if (!Number.isFinite(value)) return;
+          const colors = {
+            isp_upload: "#75a9ff",
+            isp_download: "#75d7c2",
+            profile_upload: "#ffa76c",
+            profile_download: "#edc36a"
+          };
+          context.strokeStyle = colors[field];
+          context.lineWidth = 1.8;
+          context.setLineDash(field.startsWith("isp_") ? [8, 6] : [2, 5]);
+          const y = plot.bottom - plotHeight * value / scaleMax;
+          context.beginPath();
+          context.moveTo(plot.left, y);
+          context.lineTo(plot.right, y);
+          context.stroke();
+        });
+        context.setLineDash([]);
+      }
       if (!visibleSamples.length) {
         context.fillStyle = "#91a8c1";
         context.textAlign = "center";
         context.textBaseline = "middle";
         context.fillText("Waiting for traffic samples...", plot.left + plotWidth / 2, plot.top + plotHeight / 2);
       }
+    }
+
+    function trafficReferencesFromResponse(data) {
+      const ispLimits = data.isp_limits || currentIspTrafficLimits;
+      if (data.isp_limits) {
+        currentIspTrafficLimits = {
+          upload_kbit: data.isp_limits.upload_kbit,
+          download_kbit: data.isp_limits.download_kbit
+        };
+      }
+      const selectedDevice = element("traffic-device").value;
+      const deviceLimits = selectedDevice === "all" || !data.profile_limits_available
+        ? null
+        : (data.profile_limits || {})[selectedDevice];
+      const profileAvailable = selectedDevice !== "all" &&
+        data.profile_limits_available === true && deviceLimits !== undefined;
+      element("traffic-profile-status").textContent = selectedDevice === "all"
+        ? "Select one device to see its applied default queue limit. Service-specific limits are not shown."
+        : !data.profile_limits_available
+          ? "No applied plan is available. Apply the configuration to see current default queue limits."
+          : !profileAvailable
+            ? "The selected device has no applied default queue limits available."
+            : deviceLimits.upload_kbit === null && deviceLimits.download_kbit === null
+              ? "The selected device has no default queue bandwidth cap. Service-specific queues may use other limits."
+              : "The profile line is the applied default queue limit. Service-specific queues may use other limits.";
+      return {
+        isp_upload: trafficRateMbit(ispLimits.upload_kbit),
+        isp_download: trafficRateMbit(ispLimits.download_kbit),
+        profile_upload: profileAvailable ? trafficRateMbit(deviceLimits.upload_kbit) : null,
+        profile_download: profileAvailable ? trafficRateMbit(deviceLimits.download_kbit) : null
+      };
     }
 
     async function pollTraffic() {
@@ -1510,6 +1727,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           stopTrafficSampling(data.message || "Live traffic counters are unavailable in this mode.");
           return;
         }
+        latestTrafficReferences = trafficReferencesFromResponse(data);
         const totals = selectedTrafficTotals(data.devices || {});
         if (!totals) {
           resetTrafficHistory();
@@ -1529,7 +1747,12 @@ DASHBOARD_HTML = r"""<!doctype html>
             const download = Math.max(0, totals.download_bytes - previousTrafficSample.totals.download_bytes) * 8 / elapsedSeconds / 1000000;
             const uploadPackets = Math.max(0, totals.upload_packets - previousTrafficSample.totals.upload_packets) / elapsedSeconds;
             const downloadPackets = Math.max(0, totals.download_packets - previousTrafficSample.totals.download_packets) / elapsedSeconds;
-            trafficSamples.push({ time: sampledAt, upload: upload, download: download });
+            trafficSamples.push({
+              time: sampledAt,
+              upload: upload,
+              download: download,
+              ...latestTrafficReferences
+            });
             trafficSamples = trafficSamples
               .filter((sample) => sampledAt - sample.time <= TRAFFIC_WINDOW_MS)
               .slice(-TRAFFIC_MAX_POINTS);
@@ -1663,23 +1886,46 @@ DASHBOARD_HTML = r"""<!doctype html>
     function renderConnectedDevices(data) {
       const container = element("connected-devices");
       const count = element("connected-count");
+      const expandedLabels = new Set(
+        Array.from(container.querySelectorAll(".connected-label-editor[open]"))
+          .map((editor) => editor.dataset.macAddress)
+      );
       container.replaceChildren();
+      const devices = data.devices || [];
+      const deviceTypeNames = {
+        unknown: "Unknown",
+        phone: "Phone",
+        tablet: "Tablet",
+        laptop: "Laptop",
+        desktop: "Desktop",
+        tv_console: "TV or console",
+        other: "Other"
+      };
       if (!data.available) {
         count.textContent = "Unavailable";
         const empty = document.createElement("p");
         empty.className = "device-empty";
         empty.textContent = data.message || "Connected-client information is unavailable.";
         container.appendChild(empty);
-        return;
+      } else {
+        const connectionLabel = data.association_status_available ? " connected" : " visible";
+        count.textContent = devices.length + connectionLabel;
+        if (!data.association_status_available) {
+          const warning = document.createElement("p");
+          warning.className = "device-empty";
+          warning.textContent =
+            "Wi-Fi connection status is unavailable. Listed IP neighbors may be disconnected " +
+            "and profile actions are disabled.";
+          container.appendChild(warning);
+        }
       }
-      const devices = data.devices || [];
-      count.textContent = devices.length + " connected";
-      if (devices.length === 0) {
+      if (data.available && devices.length === 0) {
         const empty = document.createElement("p");
         empty.className = "device-empty";
-        empty.textContent = "No IPv4 clients are currently visible.";
+        empty.textContent = data.association_status_available
+          ? "No devices are connected to the test Wi-Fi."
+          : "No recent IP neighbors are visible.";
         container.appendChild(empty);
-        return;
       }
       devices.forEach((device) => {
         const row = document.createElement("div");
@@ -1689,18 +1935,86 @@ DASHBOARD_HTML = r"""<!doctype html>
         const details = document.createElement("div");
         const address = document.createElement("p");
         address.className = "connected-address";
-        address.textContent = device.ipv4_address;
+        address.textContent = device.display_name || "Unnamed client";
         const metadata = document.createElement("p");
         metadata.className = "connected-meta";
-        metadata.textContent = device.mac_address;
-        details.append(address, metadata);
+        const metadataParts = [device.ipv4_address || "IP address pending", device.mac_address];
+        if (device.signal_dbm !== undefined && device.signal_dbm !== null) {
+          metadataParts.push("Signal " + device.signal_dbm + " dBm");
+        }
+        metadata.textContent = metadataParts.join(" · ");
+        const deviceType = document.createElement("p");
+        deviceType.className = "connected-meta";
+        const typeName = deviceTypeNames[device.device_type] || "Unknown";
+        deviceType.textContent = "Type: " + typeName + (
+          device.device_type_source === "hostname suggestion" ? " (suggested)" : ""
+        );
+        details.append(address, metadata, deviceType);
+        if (device.hostname) {
+          const hostname = document.createElement("p");
+          hostname.className = "connected-meta";
+          hostname.textContent = "Network name: " + device.hostname;
+          details.appendChild(hostname);
+        }
+        const labelEditor = document.createElement("details");
+        labelEditor.className = "connected-label-editor";
+        labelEditor.dataset.macAddress = device.mac_address;
+        labelEditor.open = expandedLabels.has(device.mac_address);
+        const labelSummary = document.createElement("summary");
+        labelSummary.textContent = "Edit name and type";
+        const labelForm = document.createElement("div");
+        labelForm.className = "connected-label-form";
+        const nameLabel = document.createElement("label");
+        nameLabel.textContent = "Display name";
+        const nameInput = document.createElement("input");
+        nameInput.type = "text";
+        nameInput.maxLength = 64;
+        nameInput.value = device.saved_display_name || device.hostname || "";
+        nameInput.placeholder = "Optional name";
+        nameLabel.appendChild(nameInput);
+        const typeLabel = document.createElement("label");
+        typeLabel.textContent = "Device type";
+        const typeSelect = document.createElement("select");
+        typeSelect.setAttribute(
+          "aria-label",
+          "Device type for " + (device.display_name || device.mac_address)
+        );
+        Object.entries(deviceTypeNames).forEach(([value, name]) => {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = name;
+          option.selected = value === device.device_type;
+          typeSelect.appendChild(option);
+        });
+        typeLabel.appendChild(typeSelect);
+        const saveLabelButton = document.createElement("button");
+        saveLabelButton.type = "button";
+        saveLabelButton.textContent = "Save details";
+        saveLabelButton.addEventListener("click", () => {
+          saveConnectedDeviceLabel(device, nameInput, typeSelect, saveLabelButton);
+        });
+        labelForm.append(nameLabel, typeLabel, saveLabelButton);
+        if (device.has_saved_label) {
+          const clearLabelButton = document.createElement("button");
+          clearLabelButton.type = "button";
+          clearLabelButton.textContent = "Clear saved details";
+          clearLabelButton.addEventListener("click", () => {
+            clearConnectedDeviceLabel(device, clearLabelButton);
+          });
+          labelForm.appendChild(clearLabelButton);
+        }
+        labelEditor.append(labelSummary, labelForm);
+        details.appendChild(labelEditor);
         const state = document.createElement("span");
         state.className = "connected-state";
-        state.textContent = device.state;
+        state.textContent = device.association_verified ? "Connected" : "Status unknown";
         const controls = document.createElement("div");
         controls.className = "connected-controls";
         const profileSelect = document.createElement("select");
-        profileSelect.setAttribute("aria-label", "Profile for " + device.ipv4_address);
+        profileSelect.setAttribute(
+          "aria-label",
+          "Profile for " + (device.display_name || device.mac_address)
+        );
         const emptyOption = document.createElement("option");
         emptyOption.value = "";
         emptyOption.textContent = profiles.length ? "Choose profile..." : "No profiles saved";
@@ -1715,9 +2029,11 @@ DASHBOARD_HTML = r"""<!doctype html>
         const applyButton = document.createElement("button");
         applyButton.type = "button";
         applyButton.textContent = device.assigned_profile_id ? "Apply profile" : "Assign profile";
-        applyButton.disabled = !helperConfigured || profiles.length === 0;
+        applyButton.disabled = !helperConfigured || profiles.length === 0 ||
+          !device.ipv4_address || !device.association_verified;
         profileSelect.addEventListener("change", () => {
-          applyButton.disabled = !helperConfigured || profileSelect.value === "";
+          applyButton.disabled = !helperConfigured || profileSelect.value === "" ||
+            !device.ipv4_address || !device.association_verified;
         });
         applyButton.addEventListener("click", () => {
           applyProfileToDevice(device, profileSelect.value, applyButton);
@@ -1726,6 +2042,83 @@ DASHBOARD_HTML = r"""<!doctype html>
         row.append(dot, details, state, controls);
         container.appendChild(row);
       });
+      renderSavedConnectedDeviceLabels(
+        container,
+        data.saved_labels || [],
+        new Set(devices.map((device) => device.mac_address)),
+        deviceTypeNames
+      );
+    }
+
+    function renderSavedConnectedDeviceLabels(container, labels, connectedMacAddresses, typeNames) {
+      const disconnectedLabels = labels.filter(
+        (label) => !connectedMacAddresses.has(label.mac_address)
+      );
+      if (disconnectedLabels.length === 0) return;
+      const section = document.createElement("div");
+      section.className = "saved-device-labels";
+      const heading = document.createElement("h3");
+      heading.textContent = "Saved labels for devices not listed above";
+      const note = document.createElement("p");
+      note.className = "device-empty";
+      note.textContent = "Remove old labels here if a device's private Wi-Fi address changed.";
+      section.append(heading, note);
+      disconnectedLabels.forEach((label) => {
+        const row = document.createElement("div");
+        row.className = "connected-row saved-device-label-row";
+        const details = document.createElement("div");
+        const name = document.createElement("p");
+        name.className = "connected-address";
+        name.textContent = label.display_name || "Unnamed client";
+        const mac = document.createElement("p");
+        mac.className = "connected-meta";
+        mac.textContent = label.mac_address;
+        details.append(name, mac);
+        const type = document.createElement("span");
+        type.className = "connected-state";
+        type.textContent = typeNames[label.device_type] || "Unknown";
+        const removeButton = document.createElement("button");
+        removeButton.type = "button";
+        removeButton.textContent = "Remove saved label";
+        removeButton.addEventListener("click", () => {
+          clearConnectedDeviceLabel(label, removeButton);
+        });
+        row.append(details, type, removeButton);
+        section.appendChild(row);
+      });
+      container.appendChild(section);
+    }
+
+    async function saveConnectedDeviceLabel(device, nameInput, typeSelect, button) {
+      setButtonBusy(button, true);
+      try {
+        await request("/api/connected-device-labels", "POST", {
+          mac_address: device.mac_address,
+          display_name: nameInput.value,
+          device_type: typeSelect.value
+        });
+        showMessage("Saved device name and type.", "success");
+        await loadConnectedDevices();
+      } catch (error) {
+        showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
+      }
+    }
+
+    async function clearConnectedDeviceLabel(device, button) {
+      setButtonBusy(button, true);
+      try {
+        await request("/api/connected-device-labels/delete", "POST", {
+          mac_address: device.mac_address
+        });
+        showMessage("Removed saved device details.", "success");
+        await loadConnectedDevices();
+      } catch (error) {
+        showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
+      }
     }
 
     function renderUplink(data) {
@@ -1789,9 +2182,31 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     async function loadConnectedDevices() {
       if (connectedDevicesRequestInFlight) return;
+      const container = element("connected-devices");
+      const activeElement = document.activeElement;
+      if (
+        activeElement && container.contains(activeElement) &&
+        activeElement.matches("input, select")
+      ) return;
       connectedDevicesRequestInFlight = true;
       try {
-        renderConnectedDevices(await request("/api/connected-devices", "GET"));
+        const [connectedResult, labelsResult] = await Promise.allSettled([
+          request("/api/connected-devices", "GET"),
+          request("/api/connected-device-labels", "GET")
+        ]);
+        const savedLabels = labelsResult.status === "fulfilled"
+          ? labelsResult.value.labels || []
+          : [];
+        if (connectedResult.status === "rejected") {
+          renderConnectedDevices({
+            available: false,
+            devices: [],
+            saved_labels: savedLabels,
+            message: connectedResult.reason.message
+          });
+        } else {
+          renderConnectedDevices({ ...connectedResult.value, saved_labels: savedLabels });
+        }
       } catch (error) {
         renderConnectedDevices({ available: false, devices: [], message: error.message });
       } finally {
@@ -2126,6 +2541,65 @@ DASHBOARD_HTML = r"""<!doctype html>
       quotas.forEach((quota) => container.appendChild(createQuotaRow({ quota, service: true })));
     }
 
+    function renderServiceAssignments(data) {
+      const assignments = data.service_assignments || [];
+      const container = element("service-assignment-list");
+      element("service-assignment-count").textContent = assignments.length +
+        (assignments.length === 1 ? " service profile" : " service profiles");
+      container.replaceChildren();
+      if (!assignments.length) {
+        container.textContent = data.error || "No browser service profiles saved.";
+        return;
+      }
+      assignments.forEach((assignment) => {
+        const row = document.createElement("div");
+        row.className = "quota-row";
+        const heading = document.createElement("div");
+        heading.className = "quota-heading";
+        const title = document.createElement("strong");
+        title.textContent = assignment.name + " (" + assignment.id + ")";
+        const detail = document.createElement("span");
+        detail.textContent = assignment.device_name + " → " + assignment.profile_name +
+          (assignment.enabled ? "" : " · disabled");
+        heading.append(title, detail);
+        const domains = document.createElement("span");
+        domains.textContent = assignment.domains.join(", ");
+        const actions = document.createElement("div");
+        actions.className = "quota-actions";
+        const editButton = document.createElement("button");
+        editButton.type = "button";
+        editButton.textContent = "Edit";
+        editButton.addEventListener("click", () => editServiceAssignment(assignment));
+        const deleteButton = document.createElement("button");
+        deleteButton.type = "button";
+        deleteButton.textContent = "Delete";
+        deleteButton.addEventListener("click", async () => {
+          setButtonBusy(deleteButton, true);
+          try {
+            await request("/api/service-assignments/delete", "POST", { id: assignment.id });
+            refreshAfterSuccess("Browser service profile deleted.");
+          } catch (error) {
+            showMessage(error.message, "error");
+          } finally {
+            setButtonBusy(deleteButton, false);
+          }
+        });
+        actions.append(editButton, deleteButton);
+        row.append(heading, domains, actions);
+        container.appendChild(row);
+      });
+    }
+
+    function editServiceAssignment(assignment) {
+      element("service-assignment-id").value = assignment.id;
+      element("service-assignment-name").value = assignment.name;
+      element("service-assignment-device").value = assignment.device_id;
+      element("service-assignment-profile").value = assignment.profile_id;
+      element("service-assignment-domains").value = assignment.domains.join("\n");
+      element("service-assignment-enabled").checked = assignment.enabled;
+      element("service-assignment-form").scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+
     function renderTimeQuotas(data) {
       const quotas = data.time_quotas || [];
       const container = element("time-quota-list");
@@ -2378,6 +2852,14 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
     }
 
+    async function loadServiceAssignments() {
+      try {
+        renderServiceAssignments(await request("/api/service-assignments", "GET"));
+      } catch (error) {
+        renderServiceAssignments({ service_assignments: [], error: error.message });
+      }
+    }
+
     async function scanObservations() {
       if (!helperConfigured || observationRequestInFlight) return;
       observationRequestInFlight = true;
@@ -2417,6 +2899,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         "progression-end-profile",
         "data-limit-profile",
         "service-quota-profile",
+        "service-assignment-profile",
         "time-quota-profile",
         "group-profile",
         "group-data-limit-profile"
@@ -2446,6 +2929,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         "progression-device",
         "data-limit-device",
         "service-quota-device",
+        "service-assignment-device",
         "time-quota-device",
         "group-devices"
       ].forEach((selectId) => {
@@ -2708,15 +3192,19 @@ DASHBOARD_HTML = r"""<!doctype html>
       showMessage("Checking the admin token...", "working");
       try {
         const result = await loadAdminTools();
-        if (result.ok) await startTrafficSampling();
+        if (result.ok) {
+          adminTokenVerified = true;
+          await refresh();
+          await loadTrafficSettings();
+          await startTrafficSampling();
+        } else {
+          adminTokenVerified = false;
+        }
         status.textContent = result.ok ? result.message : "Token check failed: " + result.message;
         status.className = "token-check-status " + (result.ok ? "success" : "error");
         showMessage(status.textContent, result.ok ? "success" : "error");
-        if (result.ok) {
-          loadQuotas();
-          loadObservations();
-        }
       } catch (error) {
+        adminTokenVerified = false;
         status.textContent = "Token check failed: " + error.message;
         status.className = "token-check-status error";
         showMessage(status.textContent, "error");
@@ -2744,6 +3232,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         loadConnectedDevices(),
         loadUplink(),
         loadQuotas(),
+        loadServiceAssignments(),
         loadAdminTools()
       ]);
     }
@@ -2953,6 +3442,28 @@ DASHBOARD_HTML = r"""<!doctype html>
     element("service-quota-device").addEventListener("change", () => populateServiceQuotaDomains());
     element("time-quota-device").addEventListener("change", () => populateTimeQuotaDomains());
     element("check-admin-token").addEventListener("click", checkAdminToken);
+    element("traffic-rate-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const button = event.currentTarget.querySelector("button[type='submit']");
+      const status = element("traffic-rate-status");
+      button.disabled = true;
+      try {
+        const settings = await request("/api/traffic-settings", "POST", {
+          upload_kbit: trafficRateFromInput("traffic-isp-upload"),
+          download_kbit: trafficRateFromInput("traffic-isp-download")
+        });
+        setTrafficRateInputs(settings);
+        resetTrafficHistory();
+        status.textContent = "ISP speed references saved. They do not change traffic shaping.";
+        showMessage("ISP speed references saved.", "success");
+        if (trafficSamplingAllowed) await pollTraffic();
+      } catch (error) {
+        status.textContent = error.message;
+        showMessage(error.message, "error");
+      } finally {
+        button.disabled = false;
+      }
+    });
     element("admin-token").addEventListener("input", () => {
       stopTrafficSampling("Token changed. Choose Check token to restart live traffic sampling.");
       element("token-check-status").textContent = "Token changed. Choose Check token to load diagnostics.";
@@ -2994,7 +3505,10 @@ DASHBOARD_HTML = r"""<!doctype html>
       showMessage("Refreshing diagnostics...", "working");
       try {
         const result = await loadAdminTools();
-        if (result.ok) await startTrafficSampling();
+        if (result.ok) {
+          await loadTrafficSettings();
+          await startTrafficSampling();
+        }
         element("token-check-status").textContent = result.message;
         element("token-check-status").className = "token-check-status " + (result.ok ? "success" : "error");
         showMessage(result.message, result.ok ? "success" : "error");
@@ -3078,6 +3592,27 @@ DASHBOARD_HTML = r"""<!doctype html>
         });
         refreshAfterSuccess(
           result.live_applied ? "Shared group limit saved and applied." : "Shared group limit saved.",
+        );
+      } catch (error) {
+        showMessage(error.message, "error");
+      }
+    });
+
+    element("service-assignment-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const domains = element("service-assignment-domains").value.split(/[\s,]+/).filter(Boolean);
+        if (!domains.length) throw new Error("Enter at least one HTTPS hostname.");
+        const result = await request("/api/service-assignments", "POST", {
+          id: element("service-assignment-id").value,
+          name: element("service-assignment-name").value,
+          device_id: element("service-assignment-device").value,
+          profile_id: element("service-assignment-profile").value,
+          domains: domains,
+          enabled: element("service-assignment-enabled").checked
+        });
+        refreshAfterSuccess(
+          result.live_applied ? "Browser service profile saved and applied." : "Browser service profile saved."
         );
       } catch (error) {
         showMessage(error.message, "error");
@@ -3193,15 +3728,14 @@ DASHBOARD_HTML = r"""<!doctype html>
       routerAction("/api/router/wifi", { enabled: true }, "Turning on router Wi-Fi...", event.currentTarget);
     });
 
-    window.setInterval(loadConnectedDevices, 5000);
-    window.setInterval(loadTimers, 5000);
-    window.setInterval(loadProgressions, 5000);
-    window.setInterval(loadQuotas, 5000);
-    window.setInterval(loadObservations, 15000);
+    window.setInterval(() => { if (adminTokenVerified) loadConnectedDevices(); }, 5000);
+    window.setInterval(() => { if (adminTokenVerified) loadTimers(); }, 5000);
+    window.setInterval(() => { if (adminTokenVerified) loadProgressions(); }, 5000);
+    window.setInterval(() => { if (adminTokenVerified) loadQuotas(); }, 5000);
+    window.setInterval(() => { if (adminTokenVerified) loadObservations(); }, 15000);
 
-    refresh().catch((error) => {
+    loadHealth().catch((error) => {
       showMessage(error.message, "error");
-      element("plan").textContent = error.message;
     });
   </script>
 </body>
@@ -3224,6 +3758,42 @@ def _device_payload(device: Device) -> Dict[str, Any]:
         "ipv4_address": str(device.ipv4_address),
         "profile_id": device.profile_id,
         "mac_address": device.mac_address,
+    }
+
+
+def _connected_device_payload(
+    device: Dict[str, Any],
+    *,
+    assignments_by_address: Dict[str, Device],
+    labels_by_mac: Dict[str, Dict[str, str]],
+) -> Dict[str, Any]:
+    """Add saved display details and any matching profile to one station."""
+
+    mac_address = device["mac_address"]
+    saved_label = labels_by_mac.get(mac_address)
+    hostname = device.get("hostname")
+    suggested_type = guess_device_type(hostname)
+    ipv4_address = device.get("ipv4_address")
+    assignment = assignments_by_address.get(ipv4_address)
+    return {
+        **device,
+        "display_name": (
+            saved_label["display_name"]
+            if saved_label and saved_label["display_name"]
+            else hostname or "Unnamed client"
+        ),
+        "saved_display_name": saved_label["display_name"] if saved_label else "",
+        "saved_device_type": saved_label["device_type"] if saved_label else "",
+        "has_saved_label": saved_label is not None,
+        "device_type": saved_label["device_type"] if saved_label else suggested_type,
+        "device_type_source": (
+            "saved"
+            if saved_label is not None
+            else "hostname suggestion" if suggested_type != "unknown" else "unknown"
+        ),
+        "assigned_device_id": assignment.id if assignment is not None else None,
+        "assigned_device_name": assignment.name if assignment is not None else None,
+        "assigned_profile_id": assignment.profile_id if assignment is not None else None,
     }
 
 
@@ -3314,6 +3884,19 @@ def _service_quota_payload(
         "profile_name": profile.name if profile is not None else quota.profile_id,
         "remaining_bytes": max(0, quota.limit_bytes - quota.used_bytes),
         "reached": quota.used_bytes >= quota.limit_bytes,
+    }
+
+
+def _service_assignment_payload(
+    assignment: ServiceAssignment, *, repository: ConfigRepository
+) -> Dict[str, Any]:
+    device = repository.get_device(assignment.device_id)
+    profile = repository.get_profile(assignment.profile_id)
+    return {
+        **asdict(assignment),
+        "domains": list(assignment.domains),
+        "device_name": device.name if device is not None else assignment.device_id,
+        "profile_name": profile.name if profile is not None else assignment.profile_id,
     }
 
 
@@ -3475,11 +4058,18 @@ class ControlServer(HTTPServer):
         if path == "/":
             return HTTPStatus.OK, "text/html; charset=utf-8", DASHBOARD_HTML.encode("utf-8")
         if path == "/api/health":
+            helper_reachable = False
+            if self.helper_client is not None:
+                try:
+                    helper_reachable = self.helper_client.ping().get("ok") is True
+                except HelperClientError:
+                    LOGGER.warning("network helper health check failed")
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {
-                    "status": "ok",
+                    "status": "ok" if self.helper_client is None or helper_reachable else "degraded",
                     "mode": "hardware" if self.helper_client is not None else "configuration-only",
                     "helper_configured": self.helper_client is not None,
+                    "helper_reachable": helper_reachable,
                 }
             )
         if path == "/api/profiles":
@@ -3568,6 +4158,15 @@ class ControlServer(HTTPServer):
                     ]
                 }
             )
+        if path == "/api/service-assignments":
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {
+                    "service_assignments": [
+                        _service_assignment_payload(assignment, repository=self.repository)
+                        for assignment in self.repository.list_service_assignments()
+                    ]
+                }
+            )
         if path == "/api/time-quotas":
             now = int(time.time())
             return HTTPStatus.OK, "application/json", _json_bytes(
@@ -3621,6 +4220,20 @@ class ControlServer(HTTPServer):
                     },
                 }
             )
+        if path == "/api/connected-device-labels":
+            labels = self.repository.list_connected_device_labels()
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {
+                    "labels": [
+                        {
+                            "mac_address": mac_address,
+                            "display_name": label["display_name"],
+                            "device_type": label["device_type"],
+                        }
+                        for mac_address, label in labels.items()
+                    ]
+                }
+            )
         if path == "/api/connected-devices":
             if self.helper_client is None:
                 return HTTPStatus.OK, "application/json", _json_bytes(
@@ -3631,7 +4244,8 @@ class ControlServer(HTTPServer):
                     }
                 )
             try:
-                devices = self.helper_client.connected_devices()
+                snapshot = self.helper_client.connected_device_snapshot()
+                devices = snapshot["devices"]
             except HelperClientError:
                 LOGGER.exception("could not inspect connected clients")
                 return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
@@ -3640,29 +4254,23 @@ class ControlServer(HTTPServer):
             assignments_by_address = {
                 str(device.ipv4_address): device for device in self.repository.list_devices()
             }
+            labels_by_mac = self.repository.list_connected_device_labels()
             devices = [
-                {
-                    **device,
-                    "assigned_device_id": (
-                        assignments_by_address[device["ipv4_address"]].id
-                        if device["ipv4_address"] in assignments_by_address
-                        else None
-                    ),
-                    "assigned_device_name": (
-                        assignments_by_address[device["ipv4_address"]].name
-                        if device["ipv4_address"] in assignments_by_address
-                        else None
-                    ),
-                    "assigned_profile_id": (
-                        assignments_by_address[device["ipv4_address"]].profile_id
-                        if device["ipv4_address"] in assignments_by_address
-                        else None
-                    ),
-                }
+                _connected_device_payload(
+                    device,
+                    assignments_by_address=assignments_by_address,
+                    labels_by_mac=labels_by_mac,
+                )
                 for device in devices
             ]
             return HTTPStatus.OK, "application/json", _json_bytes(
-                {"available": True, "devices": devices}
+                {
+                    "available": True,
+                    "association_status_available": snapshot[
+                        "association_status_available"
+                    ],
+                    "devices": devices,
+                }
             )
         if path == "/api/observations":
             observations = self.repository.list_domain_observations()
@@ -3721,13 +4329,21 @@ class ControlServer(HTTPServer):
             )
         if path == "/api/backup":
             return HTTPStatus.OK, "application/vnd.sqlite3", self.repository.backup_bytes()
+        if path == "/api/traffic-settings":
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                self.repository.get_traffic_rate_settings()
+            )
         if path == "/api/traffic":
+            isp_limits = self.repository.get_traffic_rate_settings()
             if self.helper_client is None:
                 return HTTPStatus.OK, "application/json", _json_bytes(
                     {
                         "available": False,
                         "message": "Live traffic needs hardware mode.",
                         "devices": {},
+                        "isp_limits": isp_limits,
+                        "profile_limits_available": False,
+                        "profile_limits": {},
                     }
                 )
             try:
@@ -3743,11 +4359,19 @@ class ControlServer(HTTPServer):
                 return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
                     {"error": "live traffic directions are unavailable"}
                 )
+            profile_limits = (
+                self.scheduler.applied_queue_bandwidth_limits()
+                if self.scheduler is not None
+                else None
+            )
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {
                     "available": True,
                     "sampled_at": time.time(),
                     "devices": device_counters,
+                    "isp_limits": isp_limits,
+                    "profile_limits_available": profile_limits is not None,
+                    "profile_limits": profile_limits or {},
                 }
             )
         if path == "/api/diagnostics":
@@ -3775,6 +4399,46 @@ class ControlServer(HTTPServer):
 
     def write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
         """Handle one supported configuration or network action request."""
+
+        if path == "/api/traffic-settings":
+            try:
+                if "upload_kbit" not in payload or "download_kbit" not in payload:
+                    raise TrafficRateSettingsError("both rate fields are required")
+                settings = self.repository.save_traffic_rate_settings(
+                    upload_kbit=payload["upload_kbit"],
+                    download_kbit=payload["download_kbit"],
+                )
+            except TrafficRateSettingsError:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid ISP rate references"}
+                )
+            return HTTPStatus.OK, "application/json", _json_bytes(settings)
+
+        if path == "/api/connected-device-labels":
+            try:
+                mac_address = normalize_device_mac(payload.get("mac_address"))
+                display_name = normalize_device_display_name(payload.get("display_name"))
+                device_type = normalize_device_type(payload.get("device_type"))
+            except DeviceLabelError:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "connected-device details are invalid"}
+                )
+            self.repository.save_connected_device_label(
+                mac_address=mac_address,
+                display_name=display_name,
+                device_type=device_type,
+            )
+            return HTTPStatus.OK, "application/json", _json_bytes({"saved": True})
+
+        if path == "/api/connected-device-labels/delete":
+            try:
+                mac_address = normalize_device_mac(payload.get("mac_address"))
+            except DeviceLabelError:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "connected-device address is invalid"}
+                )
+            self.repository.delete_connected_device_label(mac_address=mac_address)
+            return HTTPStatus.OK, "application/json", _json_bytes({"deleted": True})
 
         if path == "/api/profiles":
             try:
@@ -4041,6 +4705,75 @@ class ControlServer(HTTPServer):
                 "service_quota",
                 _service_quota_payload(quota, repository=self.repository),
             )
+
+        if path == "/api/service-assignments":
+            try:
+                assignment = ServiceAssignment(
+                    id=payload["id"],
+                    device_id=payload["device_id"],
+                    name=payload["name"],
+                    domains=payload["domains"],
+                    profile_id=payload["profile_id"],
+                    enabled=payload.get("enabled", True),
+                )
+                device = self.repository.get_device(assignment.device_id)
+                if device is None or device.ipv4_address not in IPv4Network("192.168.50.0/24"):
+                    raise ValueError("device must be on the test Wi-Fi")
+                if self.repository.get_profile(assignment.profile_id) is None:
+                    raise ValueError("profile does not exist")
+                if assignment.enabled:
+                    other_assignments = tuple(
+                        current for current in self.repository.list_service_assignments()
+                        if current.enabled and current.id != assignment.id
+                    )
+                    if (
+                        len(assignment.domains)
+                        + sum(len(current.domains) for current in other_assignments)
+                        > MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN
+                    ):
+                        raise ValueError("too many browser service domains")
+                    enabled_assignments = len(other_assignments)
+                    configured_rules = (
+                        len(self.repository.list_devices())
+                        + sum(quota.enabled for quota in self.repository.list_service_quotas())
+                        + sum(quota.enabled for quota in self.repository.list_time_quotas())
+                        + enabled_assignments + 1
+                    )
+                    if configured_rules > 15:
+                        raise ValueError("too many combined device and service rules")
+                    existing = (
+                        current for current in other_assignments
+                        if current.device_id == assignment.device_id
+                    )
+                    if any(
+                        domain == previous or domain.endswith("." + previous)
+                        or previous.endswith("." + domain)
+                        for current in existing
+                        for domain in assignment.domains
+                        for previous in current.domains
+                    ):
+                        raise ValueError("service assignment domains overlap")
+                self.repository.save_service_assignment(assignment)
+            except (KeyError, TypeError, ValueError, StorageError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid service assignment configuration"}
+                )
+            return self._apply_quota_change(
+                "service_assignment",
+                _service_assignment_payload(assignment, repository=self.repository),
+            )
+
+        if path == "/api/service-assignments/delete":
+            assignment_id = payload.get("id")
+            if not isinstance(assignment_id, str):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid service assignment id"}
+                )
+            if not self.repository.delete_service_assignment(assignment_id):
+                return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                    {"error": "service assignment does not exist"}
+                )
+            return self._apply_quota_change("deleted_id", assignment_id)
 
         if path == "/api/service-quotas/reset":
             try:
@@ -4340,6 +5073,22 @@ class ControlServer(HTTPServer):
             device = _connected_device_from_payload(payload, self.repository)
         except (KeyError, TypeError, ValueError) as error:
             return _bad_request("invalid connected-device profile assignment", error)
+        try:
+            snapshot = self.helper_client.connected_device_snapshot()
+        except HelperClientError:
+            LOGGER.exception("could not verify the connected client before profile assignment")
+            return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
+                {"error": "current Wi-Fi clients could not be verified"}
+            )
+        if not snapshot["association_status_available"] or not any(
+            client["association_verified"]
+            and client["ipv4_address"] == str(device.ipv4_address)
+            and client["mac_address"] == device.mac_address
+            for client in snapshot["devices"]
+        ):
+            return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+                {"error": "the selected client is no longer verified on JitterSim Wi-Fi"}
+            )
         self.repository.save_device(device)
         status, content_type, body = self._apply_configuration()
         response = json.loads(body.decode("utf-8"))
@@ -4386,16 +5135,16 @@ class ControlServer(HTTPServer):
     def _apply_quota_change(
         self,
         key: str,
-        value: Dict[str, Any],
+        value: Any,
     ) -> Tuple[int, str, bytes]:
-        """Return a saved quota and apply it immediately when hardware is available."""
+        """Return saved settings and apply them when hardware is available."""
 
         if self.helper_client is None:
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {
                     key: value,
                     "live_applied": False,
-                    "message": "quota saved; apply the configuration in hardware mode to start it",
+                    "message": "settings saved; apply the configuration in hardware mode to start them",
                 }
             )
         status, content_type, body = self._apply_after_change()
@@ -4418,14 +5167,17 @@ class ControlServer(HTTPServer):
         return self._apply_configuration()
 
     def _apply_configuration(self) -> Tuple[int, str, bytes]:
+        # Scheduled applies, manual applies and resets never interleave.
+        operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
+        with operation:
+            return self._apply_configuration_locked()
+
+    def _apply_configuration_locked(self) -> Tuple[int, str, bytes]:
         if self.helper_client is None:
             return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
                 {"error": "network helper is not configured"}
             )
-        if self.scheduler is None:
-            return self._apply_current_plan()
-        with self.scheduler.exclusive():
-            return self._apply_current_plan()
+        return self._apply_current_plan()
 
     def _apply_current_plan(self) -> Tuple[int, str, bytes]:
         try:
@@ -4458,7 +5210,15 @@ class ControlServer(HTTPServer):
                 last_error="network helper apply failed",
             )
             return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
-                {"error": "network helper apply failed", "state": _runtime_state_payload(state)}
+                {
+                    "error": "network helper apply failed",
+                    "hint": (
+                        "On the Pi, run sudo journalctl -u jittersim-helper.service "
+                        "-n 80 --no-pager to see which network step failed and "
+                        "whether cleanup completed."
+                    ),
+                    "state": _runtime_state_payload(state),
+                }
             )
         self.repository.restart_usage_counters()
         state = self.repository.update_runtime_state(
@@ -4474,6 +5234,11 @@ class ControlServer(HTTPServer):
         )
 
     def _reset_network(self) -> Tuple[int, str, bytes]:
+        operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
+        with operation:
+            return self._reset_network_locked()
+
+    def _reset_network_locked(self) -> Tuple[int, str, bytes]:
         if self.helper_client is None:
             return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
                 {"error": "network helper is not configured"}
@@ -4562,7 +5327,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = urlsplit(self.path).path
-        if path in PROTECTED_READ_PATHS:
+        if path.startswith("/api/") and path not in PUBLIC_READ_PATHS:
             if self.server.admin_token is None:
                 self._send_response(
                     status=HTTPStatus.SERVICE_UNAVAILABLE,

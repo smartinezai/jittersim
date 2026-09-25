@@ -1,9 +1,9 @@
 """Validated domain objects used by the jittersim control plane."""
 
+import re
 from dataclasses import dataclass
 from hashlib import sha256
-from ipaddress import AddressValueError, IPv4Address, IPv4Network
-import re
+from ipaddress import AddressValueError, IPv4Address, IPv4Network, ip_address
 from typing import Optional, Tuple, Union
 
 
@@ -83,6 +83,17 @@ def normalize_domain(value: str) -> str:
     if any(len(label) > 63 or not _DOMAIN_LABEL_PATTERN.fullmatch(label) for label in labels):
         raise ValidationError("domain must contain valid DNS labels")
     return domain
+
+
+def normalize_service_hostname(value: str) -> str:
+    """Require a DNS name rather than a shared server address."""
+
+    domain = normalize_domain(value)
+    try:
+        ip_address(domain)
+    except ValueError:
+        return domain
+    raise ValidationError("browser service domains must be hostnames, not IP addresses")
 
 
 def normalize_mac_address(value: str) -> str:
@@ -505,6 +516,36 @@ class GroupDataLimit:
             reset_times=self.reset_times,
         )
         object.__setattr__(self, "reset_times", normalized_times)
+        if not isinstance(self.enabled, bool):
+            raise ValidationError("enabled must be a boolean")
+
+
+@dataclass(frozen=True)
+class ServiceAssignment:
+    """An immediate browser-proxy profile for named domains on one device."""
+
+    id: str
+    device_id: str
+    name: str
+    domains: Tuple[str, ...]
+    profile_id: str
+    enabled: bool = True
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.id, "service assignment id")
+        _validate_identifier(self.device_id, "device_id")
+        _validate_name(self.name, "service assignment name")
+        _validate_identifier(self.profile_id, "profile_id")
+        object.__setattr__(self, "domains", _normalize_domain_list(self.domains, "domains"))
+        object.__setattr__(self, "domains", tuple(normalize_service_hostname(domain) for domain in self.domains))
+        if not self.domains:
+            raise ValidationError("service assignment requires at least one domain")
+        for index, domain in enumerate(self.domains):
+            if any(
+                domain.endswith("." + previous) or previous.endswith("." + domain)
+                for previous in self.domains[:index]
+            ):
+                raise ValidationError("service assignment domains overlap")
         if not isinstance(self.enabled, bool):
             raise ValidationError("enabled must be a boolean")
 

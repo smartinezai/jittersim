@@ -21,6 +21,8 @@ dependencies = [
 jittersim = "jittersim.cli:main"
 jittersim-dashboard = "jittersim.api.server:main"
 jittersim-helper = "jittersim.networking.helper:main"
+jittersim-browser-proxy = "jittersim.networking.browser_proxy:main"
+jittersim-reset = "jittersim.networking.reset:main"
 
 [project.optional-dependencies]
 dev = [

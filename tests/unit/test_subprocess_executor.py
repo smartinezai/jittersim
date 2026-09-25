@@ -8,6 +8,33 @@ from jittersim.networking.executor import CommandExecutionError, SubprocessExecu
 
 class SubprocessExecutorTests(unittest.TestCase):
     @patch("jittersim.networking.executor.subprocess.run")
+    def test_allows_the_fixed_wifi_station_inspection_command(self, run_command) -> None:
+        run_command.return_value = subprocess.CompletedProcess(
+            args=("iw", "dev", "wlan0", "station", "dump"),
+            returncode=0,
+            stdout="Station aa:bb:cc:dd:ee:ff (on wlan0)\n",
+            stderr="",
+        )
+        command = Command(
+            executable="iw",
+            arguments=("dev", "wlan0", "station", "dump"),
+            purpose="inspect Wi-Fi clients",
+            timeout_seconds=5,
+        )
+
+        result = SubprocessExecutor().run(command)
+
+        self.assertIn("Station aa:bb:cc:dd:ee:ff", result.stdout)
+        run_command.assert_called_once_with(
+            ("iw", "dev", "wlan0", "station", "dump"),
+            input=None,
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+
+    @patch("jittersim.networking.executor.subprocess.run")
     def test_passes_argument_vector_and_stdin_without_a_shell(self, run_command) -> None:
         run_command.return_value = subprocess.CompletedProcess(
             args=("nft", "-f", "-"),

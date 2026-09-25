@@ -30,6 +30,15 @@ class TopologyTests(unittest.TestCase):
 
 
 class RendererTests(unittest.TestCase):
+    def test_empty_plan_does_not_request_an_invalid_priority_queue(self) -> None:
+        plan = compile_plan(devices=(), profiles={})
+        commands = render_command_plan(
+            plan=plan,
+            topology=Topology(uplink_interface="enp1s0", test_interface="wlp2s0"),
+        )
+        self.assertEqual([command.executable for command in commands], ["nft"])
+        self.assertIn("add chain inet jittersim forward", commands[0].stdin)
+
     def test_renders_marks_and_direction_specific_queues(self) -> None:
         profiles = {
             "normal": Profile(id="normal", name="Normal"),
@@ -76,6 +85,8 @@ class RendererTests(unittest.TestCase):
         self.assertIn("usage-service alice-video upload", commands[0].stdin or "")
         self.assertIn("apply-service-quota alice-video download", commands[0].stdin or "")
         self.assertIn("meta mark set 3", commands[0].stdin or "")
+        self.assertIn("add chain inet jittersim output", commands[0].stdin or "")
+        self.assertIn("oifname \"eth0\" meta mark 1 counter", commands[0].stdin or "")
 
         root_commands = [
             command for command in commands if "create project queue root" in command.purpose
@@ -84,6 +95,15 @@ class RendererTests(unittest.TestCase):
         for command in root_commands:
             priomap_start = command.argv.index("priomap") + 1
         self.assertEqual(command.argv[priomap_start:], ("0",) * 16)
+        ordinary_queues = [
+            command for command in commands if "fair queuing for ordinary traffic" in command.purpose
+        ]
+        self.assertEqual([command.argv[-1] for command in ordinary_queues], ["fq_codel"] * 2)
+        self.assertEqual([command.argv[-4] for command in ordinary_queues], ["10:1"] * 2)
+        first_device_filter = next(
+            command for command in commands if command.purpose == "route ip mark 1 on eth0"
+        )
+        self.assertEqual(first_device_filter.argv[-1], "10:2")
 
         alice_upload = [
             command
@@ -97,14 +117,17 @@ class RendererTests(unittest.TestCase):
         self.assertIn("10%", alice_upload[0].argv)
         self.assertIn("rate", alice_upload[0].argv)
 
-        bob_filters = [command for command in commands if "route mark 2" in command.purpose]
+        bob_filters = [command for command in commands if "route ip mark 2" in command.purpose]
         self.assertEqual(len(bob_filters), 2)
-        bob_cleanup = [
+        ipv6_filters = [command for command in commands if "route ipv6 mark 2" in command.purpose]
+        self.assertEqual(len(ipv6_filters), 2)
+        bob_queues = [
             command
             for command in commands
-            if "remove stale impairment for device bob" in command.purpose
+            if "fair queuing for device bob" in command.purpose
         ]
-        self.assertEqual(len(bob_cleanup), 2)
+        self.assertEqual(len(bob_queues), 2)
+        self.assertTrue(all(command.argv[-1] == "fq_codel" for command in bob_queues))
         quota_upload = [
             command
             for command in commands
@@ -133,10 +156,17 @@ class RendererTests(unittest.TestCase):
                 # Unmarked traffic (the Pi itself, ARP, DHCP, unassigned clients)
                 # uses band 0, which is class 10:1.
                 self.assertEqual(root[root.index("priomap") + 1 :], ("0",) * 16)
-                # Clear any impairment an older layout attached to that band.
-                self.assertIn(("tc", "qdisc", "del", "dev", interface, "parent", "10:1"), tc)
+                # That band gets a fair queue, replacing any impairment an older
+                # layout attached to it.
+                self.assertIn(
+                    (
+                        "tc", "qdisc", "replace", "dev", interface,
+                        "parent", "10:1", "handle", "100:", "fq_codel",
+                    ),
+                    tc,
+                )
                 self.assertEqual([argv[argv.index("parent") + 1] for argv in netem], ["10:2"])
-                self.assertEqual([argv[argv.index("flowid") + 1] for argv in filters], ["10:2"])
+                self.assertEqual({argv[argv.index("flowid") + 1] for argv in filters}, {"10:2"})
 
     def test_filters_use_a_fixed_priority_so_reapplying_replaces_them(self) -> None:
         plan = compile_plan(
@@ -153,10 +183,29 @@ class RendererTests(unittest.TestCase):
         )
 
         filters = [command.argv for command in commands if command.argv[1] == "filter"]
-        self.assertEqual(len(filters), 4)
-        for argv in filters:
-            self.assertIn("pref", argv)
-            self.assertEqual(argv[argv.index("pref") + 1], "1")
+        # One fixed priority per mark and protocol; tc rejects two protocols
+        # at the same priority.
+        self.assertEqual(
+            sorted(
+                (
+                    argv[4],
+                    argv[argv.index("protocol") + 1],
+                    argv[argv.index("pref") + 1],
+                    argv[argv.index("handle") + 1],
+                )
+                for argv in filters
+            ),
+            sorted(
+                (interface, protocol, pref, mark)
+                for interface in ("eth0", "wlan0")
+                for protocol, pref, mark in (
+                    ("ip", "1", "1"),
+                    ("ip", "2", "2"),
+                    ("ipv6", "101", "1"),
+                    ("ipv6", "102", "2"),
+                )
+            ),
+        )
 
     def test_reordering_is_only_rendered_with_a_delay(self) -> None:
         profiles = {
@@ -183,7 +232,7 @@ class RendererTests(unittest.TestCase):
         self.assertNotIn("reorder", upload.argv)
         self.assertIn("reorder", download.argv)
 
-    def test_interfaces_without_queues_remove_the_project_root(self) -> None:
+    def test_plans_without_queues_render_no_queue_commands(self) -> None:
         plan = compile_plan(
             devices=(),
             profiles={},
@@ -195,16 +244,33 @@ class RendererTests(unittest.TestCase):
             topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
         )
 
-        tc = [command for command in commands if command.executable == "tc"]
-        # prio needs at least two bands, so there is no root to build here.
-        self.assertEqual(
-            [command.argv for command in tc],
-            [
-                ("tc", "qdisc", "del", "dev", "eth0", "root", "handle", "10:"),
-                ("tc", "qdisc", "del", "dev", "wlan0", "root", "handle", "10:"),
-            ],
-        )
-        self.assertTrue(all(command.ignore_failure for command in tc))
+        # prio needs at least two bands; the applier resets the roots instead.
+        self.assertEqual([command.executable for command in commands], ["nft"])
+
+    def test_each_child_kind_has_its_own_handle(self) -> None:
+        topology = Topology(uplink_interface="eth0", test_interface="wlan0")
+
+        def child(profile):
+            plan = compile_plan(
+                devices=(make_device("alice", "192.168.50.10", profile.id),),
+                profiles={profile.id: profile},
+            )
+            commands = render_command_plan(plan=plan, topology=topology)
+            self.assertFalse(any(command.argv[1:3] == ("qdisc", "del") for command in commands))
+            (argv,) = [
+                command.argv
+                for command in commands
+                if "eth0" in command.argv and "10:2" in command.argv and command.argv[1] == "qdisc"
+            ]
+            return argv[argv.index("handle") + 1 :]
+
+        normal = child(Profile(id="normal", name="Normal"))
+        slow = child(Profile(id="slow", name="Slow", upload=Impairment(delay_ms=50)))
+
+        # tc cannot change a netem into an fq_codel, so a band that switches kind
+        # gets a new child under another handle instead of a change.
+        self.assertEqual(normal, ("61:", "fq_codel"))
+        self.assertEqual(slow[:3], ("41:", "netem", "delay"))
 
     def test_nftables_rules_are_replaced_in_one_transaction(self) -> None:
         plan = compile_plan(
@@ -244,7 +310,11 @@ class RendererTests(unittest.TestCase):
 
         eth0 = [command.argv for command in commands if "eth0" in command.argv]
         parents = [argv[argv.index("parent") + 1] for argv in eth0 if "netem" in argv]
-        flowids = [argv[argv.index("flowid") + 1] for argv in eth0 if argv[1] == "filter"]
+        flowids = [
+            argv[argv.index("flowid") + 1]
+            for argv in eth0
+            if argv[1] == "filter" and "ipv6" not in argv
+        ]
         # tc reads the minor number as hex: mark 9 is band 9, class 10:a.
         expected = [f"10:{mark + 1:x}" for mark in range(1, 16)]
         self.assertEqual(parents, expected)
@@ -378,10 +448,7 @@ class RendererTests(unittest.TestCase):
         )[0].stdin
 
         self.assertIn("ether saddr { aa:bb:cc:dd:ee:ff } drop", nft_script or "")
-        self.assertIn(
-            'iifname "wlan0" oifname "eth0" meta nfproto ipv6 drop',
-            nft_script or "",
-        )
+        self.assertNotIn("meta nfproto ipv6 drop", nft_script or "")
         self.assertIn("ip daddr { 203.0.113.10 } drop", nft_script or "")
         self.assertIn("ip daddr != { 203.0.113.20 } drop", nft_script or "")
         self.assertIn("ip daddr { 203.0.113.30 } drop", nft_script or "")

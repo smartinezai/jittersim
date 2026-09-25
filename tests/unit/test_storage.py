@@ -14,6 +14,7 @@ from jittersim.config.models import (
     Progression,
     Randomness,
     Schedule,
+    ServiceAssignment,
     ServiceQuota,
     TimeQuota,
     Timer,
@@ -54,6 +55,149 @@ class ConfigRepositoryTests(unittest.TestCase):
 
         self.assertEqual(self.repository.get_profile(profile.id), profile)
         self.assertEqual(self.repository.get_device(device.id), device)
+
+    def test_traffic_rate_settings_default_save_and_preserve_network_version(self) -> None:
+        version_before = self.repository.get_runtime_state().configuration_version
+        self.assertEqual(
+            self.repository.get_traffic_rate_settings(),
+            {"upload_kbit": None, "download_kbit": 100_000},
+        )
+
+        saved = self.repository.save_traffic_rate_settings(
+            upload_kbit=20_000,
+            download_kbit=150_000,
+        )
+
+        self.assertEqual(
+            saved,
+            {"upload_kbit": 20_000, "download_kbit": 150_000},
+        )
+        self.assertEqual(self.repository.get_traffic_rate_settings(), saved)
+        self.assertEqual(self.repository.get_runtime_state().configuration_version, version_before)
+
+    def test_traffic_rate_settings_reopen_keeps_saved_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = f"{directory}/settings.db"
+            first = ConfigRepository(database)
+            first.save_traffic_rate_settings(upload_kbit=None, download_kbit=150_000)
+            first.close()
+
+            reopened = ConfigRepository(database)
+            try:
+                self.assertEqual(
+                    reopened.get_traffic_rate_settings(),
+                    {"upload_kbit": None, "download_kbit": 150_000},
+                )
+            finally:
+                reopened.close()
+
+    def test_traffic_rate_settings_upgrade_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = f"{directory}/settings.db"
+            original = ConfigRepository(database)
+            original._connection.execute("DROP TABLE traffic_rate_settings")
+            original._connection.commit()
+            original.close()
+
+            upgraded = ConfigRepository(database)
+            self.assertEqual(
+                upgraded.get_traffic_rate_settings(),
+                {"upload_kbit": None, "download_kbit": 100_000},
+            )
+            saved = upgraded.save_traffic_rate_settings(
+                upload_kbit=10_000,
+                download_kbit=150_000,
+            )
+            upgraded.close()
+
+            reopened = ConfigRepository(database)
+            try:
+                self.assertEqual(reopened.get_traffic_rate_settings(), saved)
+            finally:
+                reopened.close()
+
+    def test_traffic_rate_settings_reject_invalid_values(self) -> None:
+        for invalid in (True, 99, 101, 1_000_100, 100.0, float("inf"), "100000"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(StorageError):
+                    self.repository.save_traffic_rate_settings(
+                        upload_kbit=invalid,
+                        download_kbit=100_000,
+                    )
+
+    def test_connected_device_labels_persist_without_changing_network_version(self) -> None:
+        version_before = self.repository.get_runtime_state().configuration_version
+        self.repository.save_connected_device_label(
+            mac_address="DC:1E:D5:3E:97:4C",
+            display_name="Family MacBook",
+            device_type="laptop",
+        )
+        self.repository.save_connected_device_label(
+            mac_address="dc:1e:d5:3e:97:4c",
+            display_name="Work laptop",
+            device_type="desktop",
+        )
+
+        self.assertEqual(
+            self.repository.list_connected_device_labels(),
+            {
+                "dc:1e:d5:3e:97:4c": {
+                    "display_name": "Work laptop",
+                    "device_type": "desktop",
+                }
+            },
+        )
+        self.assertEqual(self.repository.get_runtime_state().configuration_version, version_before)
+        self.repository.delete_connected_device_label(mac_address="DC:1E:D5:3E:97:4C")
+        self.assertEqual(self.repository.list_connected_device_labels(), {})
+
+    def test_connected_device_labels_reject_invalid_values(self) -> None:
+        with self.assertRaisesRegex(StorageError, "label is invalid"):
+            self.repository.save_connected_device_label(
+                mac_address="not-a-mac",
+                display_name="Guest",
+                device_type="phone",
+            )
+
+    def test_connected_device_labels_have_a_bounded_count(self) -> None:
+        for index in range(256):
+            self.repository.save_connected_device_label(
+                mac_address=f"02:00:00:00:{index // 256:02x}:{index % 256:02x}",
+                display_name=f"Device {index}",
+                device_type="unknown",
+            )
+
+        with self.assertRaisesRegex(StorageError, "label limit reached"):
+            self.repository.save_connected_device_label(
+                mac_address="02:00:00:00:01:00",
+                display_name="Next device",
+                device_type="unknown",
+            )
+
+    def test_browser_service_assignment_survives_reopen_and_can_be_removed(self) -> None:
+        assignment = ServiceAssignment(
+            id="video",
+            device_id="alice",
+            name="Video",
+            domains=("youtube.com", "netflix.com"),
+            profile_id="slow",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            database = f"{directory}/settings.db"
+            first = ConfigRepository(database)
+            try:
+                first.save_profile(Profile(id="slow", name="Slow"))
+                first.save_device(Device("alice", "Alice", "192.168.50.10", "slow"))
+                first.save_service_assignment(assignment)
+            finally:
+                first.close()
+            reopened = ConfigRepository(database)
+            try:
+                self.assertEqual(reopened.list_service_assignments(), (assignment,))
+                self.assertTrue(reopened.delete_service_assignment("video"))
+                self.assertEqual(reopened.list_service_assignments(), ())
+            finally:
+                reopened.close()
 
     def test_round_trips_schedules_and_network_policies(self) -> None:
         self.repository.save_profile(Profile(id="slow", name="Slow"))
@@ -467,6 +611,15 @@ class ConfigRepositoryTests(unittest.TestCase):
 
     def test_backup_is_a_readable_snapshot_of_saved_configuration(self) -> None:
         self.repository.save_profile(Profile(id="normal", name="Normal"))
+        self.repository.save_connected_device_label(
+            mac_address="dc:1e:d5:3e:97:4c",
+            display_name="Family MacBook",
+            device_type="laptop",
+        )
+        self.repository.save_traffic_rate_settings(
+            upload_kbit=None,
+            download_kbit=150_000,
+        )
         backup = self.repository.backup_bytes()
 
         with tempfile.NamedTemporaryFile(suffix=".db") as temporary:
@@ -476,8 +629,17 @@ class ConfigRepositoryTests(unittest.TestCase):
                 profile = snapshot.execute(
                     "SELECT name FROM profiles WHERE id = 'normal'"
                 ).fetchone()
+                label = snapshot.execute(
+                    "SELECT display_name, device_type FROM connected_device_labels "
+                    "WHERE mac_address = 'dc:1e:d5:3e:97:4c'"
+                ).fetchone()
+                traffic_rates = snapshot.execute(
+                    "SELECT upload_kbit, download_kbit FROM traffic_rate_settings WHERE id = 1"
+                ).fetchone()
 
         self.assertEqual(profile, ("Normal",))
+        self.assertEqual(label, ("Family MacBook", "laptop"))
+        self.assertEqual(traffic_rates, (None, 150_000))
 
 
 if __name__ == "__main__":
