@@ -586,6 +586,13 @@ DASHBOARD_HTML = r"""<!doctype html>
     .schedule-row div:first-child { display: grid; gap: 0.15rem; }
     .transfer-actions { justify-content: flex-start; margin-top: 1rem; }
     .schedule-row small { color: #91a8c1; }
+    .getting-started-steps { margin: 0; padding: 0; list-style: none; }
+    .getting-started-steps li {
+      display: flex; gap: 0.65rem; align-items: baseline; padding: 0.3rem 0;
+    }
+    .getting-started-steps .step-mark { min-width: 1.2rem; color: #8cc4ff; font-weight: 700; }
+    .getting-started-steps li.done { color: #91a8c1; }
+    .getting-started-steps li.done .step-mark { color: #8de2bc; }
     .raw-details summary { margin-bottom: 0.6rem; color: #a8c7e8; cursor: pointer; }
     .raw-details pre { max-height: 32rem; overflow: auto; }
     .tabs {
@@ -693,6 +700,10 @@ DASHBOARD_HTML = r"""<!doctype html>
       <button type="submit">Sign out</button>
     </form>
     <p id="token-check-status" class="token-check-status" role="status" aria-live="polite">Loading the dashboard...</p>
+  </section>
+  <section class="card getting-started" id="getting-started" hidden>
+    <h2>Getting started</h2>
+    <ol id="getting-started-steps" class="getting-started-steps"></ol>
   </section>
   <section class="card connected-card">
     <div class="section-heading">
@@ -2195,6 +2206,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     let devices = [];
     let deviceConditions = { applied: false, devices: {} };
     let everyoneElse = { profile_id: null, unaffected_devices: [] };
+    let lastRuntimeState = null;
     let lastConnectedDevices = null;
     let groups = [];
     let observedDomainsByDevice = {};
@@ -3085,6 +3097,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         new Set(devices.map((device) => device.mac_address)),
         deviceTypeNames
       );
+      renderGettingStarted();
     }
 
     function renderSavedConnectedDeviceLabels(container, labels, connectedMacAddresses, typeNames) {
@@ -3192,6 +3205,66 @@ DASHBOARD_HTML = r"""<!doctype html>
         routerLink.href = data.router.settings_url;
       }
       note.textContent = "The router controls below use the TG3442DE local interface. Keep Ethernet connected so the Pi remains reachable if router Wi-Fi is turned off.";
+    }
+
+    function gettingStartedSteps(state) {
+      return [
+        {
+          text: "Create a profile, or start from a preset",
+          tab: "profiles",
+          done: state.profiles > 0
+        },
+        {
+          text: "Connect a device to the test Wi-Fi",
+          tab: null,
+          done: state.connected > 0 || state.devices > 0
+        },
+        {
+          text: "Give it a profile, or choose one for everyone else",
+          tab: "devices",
+          done: state.devices > 0 || Boolean(state.everyoneElseProfile)
+        },
+        // Any network action counts, so a later Reset doesn't bring the list back.
+        { text: "Apply the configuration", tab: null, done: Boolean(state.lastAction) }
+      ];
+    }
+
+    function renderGettingStarted() {
+      const connected = lastConnectedDevices && Array.isArray(lastConnectedDevices.devices)
+        ? lastConnectedDevices.devices.length
+        : 0;
+      const steps = gettingStartedSteps({
+        profiles: profiles.length,
+        devices: devices.length,
+        connected: connected,
+        everyoneElseProfile: everyoneElse.profile_id,
+        lastAction: lastRuntimeState ? lastRuntimeState.last_action : null
+      });
+      element("getting-started").hidden = steps.every((step) => step.done);
+      const list = element("getting-started-steps");
+      list.replaceChildren();
+      steps.forEach((step, index) => {
+        const item = document.createElement("li");
+        if (step.done) item.className = "done";
+        const mark = document.createElement("span");
+        mark.className = "step-mark";
+        mark.textContent = step.done ? "✓" : String(index + 1);
+        item.appendChild(mark);
+        if (step.tab && !step.done) {
+          const link = document.createElement("a");
+          link.href = "#" + step.tab;
+          link.textContent = step.text;
+          link.addEventListener("click", (event) => {
+            event.preventDefault();
+            window.history.pushState(null, "", "#" + step.tab);
+            showTab(step.tab);
+          });
+          item.appendChild(link);
+        } else {
+          item.appendChild(document.createTextNode(step.text));
+        }
+        list.appendChild(item);
+      });
     }
 
     function connectedTreatment(device) {
@@ -4289,6 +4362,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       const data = await request("/api/state", "GET");
       element("state").textContent = JSON.stringify(data.state, null, 2);
       renderRuntimeSummary(data.state);
+      lastRuntimeState = data.state;
+      renderGettingStarted();
     }
 
     async function loadAdminTools() {
@@ -4364,6 +4439,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         loadEveryoneElse(),
         loadAdminTools()
       ]);
+      renderGettingStarted();
     }
 
     function setActionBusy(busy, path) {

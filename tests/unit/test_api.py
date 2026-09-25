@@ -2350,6 +2350,42 @@ class ControlServerTests(unittest.TestCase):
                     f'<pre id="{element_id}">',
                 )
 
+    def test_dashboard_getting_started_follows_the_setup(self) -> None:
+        result = self._run_dashboard_functions(
+            ["gettingStartedSteps"],
+            "",
+            "const fresh = gettingStartedSteps({profiles: 0, devices: 0, connected: 0,\n"
+            "  everyoneElseProfile: null, lastAction: null});\n"
+            "const everyone = gettingStartedSteps({profiles: 2, devices: 0, connected: 1,\n"
+            "  everyoneElseProfile: '3g', lastAction: 'reset'});\n"
+            "const saved = gettingStartedSteps({profiles: 1, devices: 1, connected: 0,\n"
+            "  everyoneElseProfile: null, lastAction: 'apply'});\n"
+            "console.log(JSON.stringify([\n"
+            "  fresh.map((step) => step.done), everyone.map((step) => step.done),\n"
+            "  saved.map((step) => step.done), fresh.map((step) => step.tab),\n"
+            "]));\n",
+        )
+
+        self.assertEqual(
+            result,
+            [
+                [False, False, False, False],
+                [True, True, True, True],
+                # A saved device means a device has been connected before.
+                [True, True, True, True],
+                ["profiles", None, "devices", None],
+            ],
+        )
+
+    def test_dashboard_getting_started_card_sits_on_the_overview(self) -> None:
+        overview = self._panel("overview")
+        self.assertIn('id="getting-started"', overview)
+        self.assertLess(
+            overview.index('id="getting-started"'), overview.index('id="connected-devices"')
+        )
+        refresh = DASHBOARD_HTML.split("async function refresh() {", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("renderGettingStarted()", refresh)
+
     def test_dashboard_offers_sign_out_near_the_top(self) -> None:
         self.assertLess(
             DASHBOARD_HTML.index('action="/sign-out"'),
