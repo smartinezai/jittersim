@@ -26,6 +26,9 @@ class FakeHelper:
         self.applied_plan = None
         self.reset_called = False
 
+    def ping(self):
+        return {"ok": True, "action": "ping"}
+
     def apply(self, *, plan):
         if self.fail_action == "apply":
             raise HelperClientError("simulated helper failure")
@@ -213,6 +216,52 @@ class ControlServerTests(unittest.TestCase):
 
                 self.assertEqual(helper.applied_plan is not None, last_action == "apply")
                 self.assertEqual(helper.reset_called, last_action == "reset")
+
+    def test_startup_recovery_waits_for_the_helper_to_start(self) -> None:
+        class StartingHelper(FakeHelper):
+            pings = 0
+
+            def ping(self):
+                self.pings += 1
+                if self.pings < 3:
+                    raise HelperClientError("helper socket is not ready")
+                return super().ping()
+
+        helper = StartingHelper()
+        self.server.helper_client = helper
+        self.server.helper_poll_seconds = 0.01
+        self.repository.update_runtime_state(
+            observed_state="applied",
+            last_action="apply",
+            last_result="success",
+            last_error=None,
+        )
+
+        self.server.recover_saved_network_state()
+
+        self.assertEqual(helper.pings, 3)
+        self.assertIsNotNone(helper.applied_plan)
+
+    def test_startup_recovery_gives_up_when_the_helper_never_starts(self) -> None:
+        class MissingHelper(FakeHelper):
+            def ping(self):
+                raise HelperClientError("helper socket is not ready")
+
+        helper = MissingHelper()
+        self.server.helper_client = helper
+        self.server.helper_startup_wait_seconds = 0.05
+        self.server.helper_poll_seconds = 0.01
+        self.repository.update_runtime_state(
+            observed_state="applied",
+            last_action="apply",
+            last_result="success",
+            last_error=None,
+        )
+
+        with self.assertLogs("jittersim.api.server", level="ERROR"):
+            self.server.recover_saved_network_state()
+
+        self.assertIsNone(helper.applied_plan)
 
     def test_startup_recovery_does_not_apply_on_a_new_installation(self) -> None:
         helper = FakeHelper()

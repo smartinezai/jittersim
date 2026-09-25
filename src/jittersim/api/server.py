@@ -3414,6 +3414,9 @@ class ControlServer(HTTPServer):
     # The server handles one connection at a time, so bound how long an idle or
     # slow client (such as a browser preconnect) can hold it.
     request_timeout_seconds = 5.0
+    # After a reboot the dashboard can start before the helper's socket exists.
+    helper_startup_wait_seconds = 30.0
+    helper_poll_seconds = 0.5
 
     def __init__(
         self,
@@ -4548,14 +4551,30 @@ class ControlServer(HTTPServer):
         if self.helper_client is None:
             return
         state = self.repository.get_runtime_state()
+        if state.last_action not in {"reset", "apply", "schedule"}:
+            return
+        if not self._wait_for_helper():
+            LOGGER.error("network helper did not answer, so network state was not recovered")
+            return
         if state.last_action == "reset":
             status, _, _ = self._reset_network()
-        elif state.last_action in {"apply", "schedule"}:
-            status, _, _ = self._apply_configuration()
         else:
-            return
+            status, _, _ = self._apply_configuration()
         if status != HTTPStatus.OK:
             LOGGER.error("network state recovery did not complete successfully")
+
+    def _wait_for_helper(self) -> bool:
+        """Return whether the helper answers before the startup wait ends."""
+
+        deadline = time.monotonic() + self.helper_startup_wait_seconds
+        while True:
+            try:
+                self.helper_client.ping()
+                return True
+            except HelperClientError:
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(self.helper_poll_seconds)
 
 
 class ControlRequestHandler(BaseHTTPRequestHandler):
