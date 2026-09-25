@@ -40,10 +40,18 @@ class StorageError(RuntimeError):
     """Raised when stored configuration cannot be read or written safely."""
 
 
+class TrafficRateSettingsError(StorageError):
+    """Raised when a graph-only ISP rate reference is invalid."""
+
+
 DatabasePath = Union[str, Path]
 _DOMAIN_RETENTION_SECONDS = 30 * 24 * 60 * 60
 _MAX_DOMAIN_OBSERVATIONS = 20_000
 _MAX_OBSERVATIONS_PER_DEVICE = 50
+MIN_TRAFFIC_RATE_KBIT = 100
+MAX_TRAFFIC_RATE_KBIT = 1_000_000
+TRAFFIC_RATE_STEP_KBIT = 100
+DEFAULT_ISP_DOWNLOAD_KBIT = 100_000
 
 
 def _serialize_impairment(impairment: Impairment) -> str:
@@ -142,6 +150,25 @@ class ConfigRepository:
                 mac_address TEXT PRIMARY KEY,
                 display_name TEXT NOT NULL,
                 device_type TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS traffic_rate_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                upload_kbit INTEGER,
+                download_kbit INTEGER,
+                CHECK (
+                    upload_kbit IS NULL OR (
+                        typeof(upload_kbit) = 'integer'
+                        AND upload_kbit BETWEEN 100 AND 1000000
+                        AND upload_kbit % 100 = 0
+                    )
+                ),
+                CHECK (
+                    download_kbit IS NULL OR (
+                        typeof(download_kbit) = 'integer'
+                        AND download_kbit BETWEEN 100 AND 1000000
+                        AND download_kbit % 100 = 0
+                    )
+                )
             );
             CREATE TABLE IF NOT EXISTS device_groups (
                 id TEXT PRIMARY KEY,
@@ -287,6 +314,9 @@ class ConfigRepository:
             INSERT OR IGNORE INTO runtime_state (
                 id, configuration_version, observed_state
             ) VALUES (1, 0, 'unknown');
+            INSERT OR IGNORE INTO traffic_rate_settings (
+                id, upload_kbit, download_kbit
+            ) VALUES (1, NULL, 100000);
             INSERT OR IGNORE INTO network_policies (
                 id, mac_mode, mac_allowlist_json, mac_denylist_json,
                 website_mode, website_allowed_json, website_blocked_json
@@ -494,6 +524,58 @@ class ConfigRepository:
                 target.close()
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
+
+    def get_traffic_rate_settings(self) -> dict:
+        """Return the saved ISP rate references in integer kbit/s."""
+
+        try:
+            row = self._connection.execute(
+                "SELECT upload_kbit, download_kbit "
+                "FROM traffic_rate_settings WHERE id = 1"
+            ).fetchone()
+            if row is None:
+                raise StorageError("traffic rate settings are missing")
+            return {
+                "upload_kbit": row["upload_kbit"],
+                "download_kbit": row["download_kbit"],
+            }
+        except sqlite3.Error as error:
+            raise StorageError("could not read traffic rate settings") from error
+
+    def save_traffic_rate_settings(
+        self,
+        *,
+        upload_kbit: Optional[int],
+        download_kbit: Optional[int],
+    ) -> dict:
+        """Save graph-only ISP rate references without changing the network plan."""
+
+        for value in (upload_kbit, download_kbit):
+            if value is None:
+                continue
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not MIN_TRAFFIC_RATE_KBIT <= value <= MAX_TRAFFIC_RATE_KBIT
+                or value % TRAFFIC_RATE_STEP_KBIT
+            ):
+                raise TrafficRateSettingsError("traffic rate is invalid")
+        try:
+            cursor = self._connection.execute(
+                "UPDATE traffic_rate_settings "
+                "SET upload_kbit = ?, download_kbit = ? WHERE id = 1",
+                (upload_kbit, download_kbit),
+            )
+            if cursor.rowcount != 1:
+                raise StorageError("traffic rate settings are missing")
+            self._connection.commit()
+        except sqlite3.Error as error:
+            self._connection.rollback()
+            raise StorageError("could not save traffic rate settings") from error
+        return {
+            "upload_kbit": upload_kbit,
+            "download_kbit": download_kbit,
+        }
 
     def _bump_configuration_version(self) -> None:
         self._connection.execute(

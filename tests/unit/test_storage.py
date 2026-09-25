@@ -56,6 +56,75 @@ class ConfigRepositoryTests(unittest.TestCase):
         self.assertEqual(self.repository.get_profile(profile.id), profile)
         self.assertEqual(self.repository.get_device(device.id), device)
 
+    def test_traffic_rate_settings_default_save_and_preserve_network_version(self) -> None:
+        version_before = self.repository.get_runtime_state().configuration_version
+        self.assertEqual(
+            self.repository.get_traffic_rate_settings(),
+            {"upload_kbit": None, "download_kbit": 100_000},
+        )
+
+        saved = self.repository.save_traffic_rate_settings(
+            upload_kbit=20_000,
+            download_kbit=150_000,
+        )
+
+        self.assertEqual(
+            saved,
+            {"upload_kbit": 20_000, "download_kbit": 150_000},
+        )
+        self.assertEqual(self.repository.get_traffic_rate_settings(), saved)
+        self.assertEqual(self.repository.get_runtime_state().configuration_version, version_before)
+
+    def test_traffic_rate_settings_reopen_keeps_saved_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = f"{directory}/settings.db"
+            first = ConfigRepository(database)
+            first.save_traffic_rate_settings(upload_kbit=None, download_kbit=150_000)
+            first.close()
+
+            reopened = ConfigRepository(database)
+            try:
+                self.assertEqual(
+                    reopened.get_traffic_rate_settings(),
+                    {"upload_kbit": None, "download_kbit": 150_000},
+                )
+            finally:
+                reopened.close()
+
+    def test_traffic_rate_settings_upgrade_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = f"{directory}/settings.db"
+            original = ConfigRepository(database)
+            original._connection.execute("DROP TABLE traffic_rate_settings")
+            original._connection.commit()
+            original.close()
+
+            upgraded = ConfigRepository(database)
+            self.assertEqual(
+                upgraded.get_traffic_rate_settings(),
+                {"upload_kbit": None, "download_kbit": 100_000},
+            )
+            saved = upgraded.save_traffic_rate_settings(
+                upload_kbit=10_000,
+                download_kbit=150_000,
+            )
+            upgraded.close()
+
+            reopened = ConfigRepository(database)
+            try:
+                self.assertEqual(reopened.get_traffic_rate_settings(), saved)
+            finally:
+                reopened.close()
+
+    def test_traffic_rate_settings_reject_invalid_values(self) -> None:
+        for invalid in (True, 99, 101, 1_000_100, 100.0, float("inf"), "100000"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(StorageError):
+                    self.repository.save_traffic_rate_settings(
+                        upload_kbit=invalid,
+                        download_kbit=100_000,
+                    )
+
     def test_connected_device_labels_persist_without_changing_network_version(self) -> None:
         version_before = self.repository.get_runtime_state().configuration_version
         self.repository.save_connected_device_label(
@@ -480,6 +549,10 @@ class ConfigRepositoryTests(unittest.TestCase):
             display_name="Family MacBook",
             device_type="laptop",
         )
+        self.repository.save_traffic_rate_settings(
+            upload_kbit=None,
+            download_kbit=150_000,
+        )
         backup = self.repository.backup_bytes()
 
         with tempfile.NamedTemporaryFile(suffix=".db") as temporary:
@@ -493,9 +566,13 @@ class ConfigRepositoryTests(unittest.TestCase):
                     "SELECT display_name, device_type FROM connected_device_labels "
                     "WHERE mac_address = 'dc:1e:d5:3e:97:4c'"
                 ).fetchone()
+                traffic_rates = snapshot.execute(
+                    "SELECT upload_kbit, download_kbit FROM traffic_rate_settings WHERE id = 1"
+                ).fetchone()
 
         self.assertEqual(profile, ("Normal",))
         self.assertEqual(label, ("Family MacBook", "laptop"))
+        self.assertEqual(traffic_rates, (None, 150_000))
 
 
 if __name__ == "__main__":

@@ -44,7 +44,12 @@ from jittersim.config.models import (
     normalize_domain,
     time_quota_counter_id,
 )
-from jittersim.config.storage import ConfigRepository, DatabasePath, StorageError
+from jittersim.config.storage import (
+    ConfigRepository,
+    DatabasePath,
+    StorageError,
+    TrafficRateSettingsError,
+)
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN, PlanError
 from jittersim.engine.progression import progression_factor
@@ -87,6 +92,7 @@ WRITE_PATHS = frozenset(
         "/api/connected-devices/apply-profile",
         "/api/connected-device-labels",
         "/api/connected-device-labels/delete",
+        "/api/traffic-settings",
         "/api/observations/scan",
         "/api/observations/add-to-profile",
         "/api/observations/add-global-block",
@@ -328,16 +334,26 @@ DASHBOARD_HTML = """<!doctype html>
     .traffic-controls { display: grid; grid-template-columns: minmax(14rem, 0.75fr) minmax(0, 1.5fr); align-items: end; gap: 1rem; margin-top: 1rem; }
     .traffic-controls label { max-width: 24rem; }
     .traffic-status { margin: 0; color: #91a8c1; font-size: 0.82rem; }
+    .traffic-rate-form { display: flex; flex-wrap: wrap; align-items: end; gap: 0.75rem; margin-top: 0.85rem; padding: 0.75rem; border: 1px solid #2b435f; border-radius: 0.6rem; background: #0d1b2d; }
+    .traffic-rate-form label { min-width: 10rem; max-width: 14rem; flex: 1; }
+    .traffic-rate-form input { width: 100%; }
+    .traffic-rate-form button { margin: 0; }
+    .traffic-rate-help, .traffic-profile-status { margin: 0; color: #91a8c1; font-size: 0.78rem; }
+    .traffic-rate-help { flex-basis: 100%; }
     .traffic-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.75rem; margin-top: 1rem; }
     .traffic-metric { min-width: 0; padding: 0.75rem; border: 1px solid #2b435f; border-radius: 0.6rem; background: #0d1b2d; }
     .traffic-metric span { display: block; color: #91a8c1; font-size: 0.76rem; }
     .traffic-metric strong { display: block; margin-top: 0.25rem; color: #edf5ff; font-size: 1.05rem; overflow-wrap: anywhere; }
     .traffic-chart-wrap { margin-top: 1rem; padding: 0.65rem; border: 1px solid #2b435f; border-radius: 0.65rem; background: #0b1727; }
     #traffic-chart { display: block; width: 100%; height: 16rem; }
-    .traffic-legend { display: flex; flex-wrap: wrap; gap: 1rem; margin-top: 0.65rem; color: #91a8c1; font-size: 0.78rem; }
+    .traffic-legend { display: flex; flex-wrap: wrap; gap: 0.8rem 1rem; margin-top: 0.65rem; color: #91a8c1; font-size: 0.78rem; }
     .traffic-legend span { display: inline-flex; align-items: center; gap: 0.4rem; }
     .traffic-key { width: 0.75rem; height: 0.2rem; border-radius: 1rem; background: #70b7ff; }
     .traffic-key.download { background: #70d7a9; }
+    .traffic-key.isp-upload { height: 0; border-top: 2px dashed #75a9ff; background: transparent; }
+    .traffic-key.isp-download { height: 0; border-top: 2px dashed #75d7c2; background: transparent; }
+    .traffic-key.profile-upload { height: 0; border-top: 2px dotted #ffa76c; background: transparent; }
+    .traffic-key.profile-download { height: 0; border-top: 2px dotted #edc36a; background: transparent; }
     .traffic-note { margin: 0.75rem 0 0; color: #91a8c1; font-size: 0.8rem; }
     .uplink-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.75rem; margin-top: 1rem; }
     .uplink-value { padding: 0.75rem; border: 1px solid #2b435f; border-radius: 0.6rem; background: #0d1b2d; }
@@ -572,6 +588,17 @@ DASHBOARD_HTML = """<!doctype html>
       </label>
       <p id="traffic-status" class="traffic-status" role="status" aria-live="polite">Check the admin token to start live traffic sampling.</p>
     </div>
+    <form id="traffic-rate-form" class="traffic-rate-form">
+      <label>ISP download maximum (Mbit/s)
+        <input id="traffic-isp-download" type="number" min="0.1" max="1000" step="0.1" value="100.0">
+      </label>
+      <label>ISP upload maximum (Mbit/s)
+        <input id="traffic-isp-upload" type="number" min="0.1" max="1000" step="0.1" placeholder="Unknown">
+      </label>
+      <button class="primary" type="submit">Save speed references</button>
+      <p id="traffic-rate-status" class="traffic-rate-help" role="status" aria-live="polite"></p>
+      <p class="traffic-rate-help">These reference lines do not limit traffic. The ISP plan maximum is shared with other home devices.</p>
+    </form>
     <div class="traffic-metrics">
       <div class="traffic-metric"><span>Upload rate</span><strong id="traffic-upload-rate">—</strong></div>
       <div class="traffic-metric"><span>Download rate</span><strong id="traffic-download-rate">—</strong></div>
@@ -579,13 +606,18 @@ DASHBOARD_HTML = """<!doctype html>
       <div class="traffic-metric"><span>Download packet rate</span><strong id="traffic-download-packets">—</strong></div>
     </div>
     <div class="traffic-chart-wrap">
-      <canvas id="traffic-chart" width="900" height="320" role="img" aria-label="Live upload and download traffic rates over the last 60 seconds">Live traffic chart. Check the admin token to begin sampling.</canvas>
-      <div class="traffic-legend" aria-hidden="true">
-        <span><i class="traffic-key"></i>Upload</span>
-        <span><i class="traffic-key download"></i>Download</span>
+      <canvas id="traffic-chart" width="900" height="320" role="img" aria-label="Live upload and download rates at JitterSim with configured ISP and device queue limits over the last 60 seconds">Live traffic chart. Check the admin token to begin sampling.</canvas>
+      <div class="traffic-legend" aria-label="Graph legend">
+        <span><i class="traffic-key"></i>Upload rate at Pi</span>
+        <span><i class="traffic-key download"></i>Download rate at Pi</span>
+        <span><i class="traffic-key isp-upload"></i>ISP upload plan</span>
+        <span><i class="traffic-key isp-download"></i>ISP download plan</span>
+        <span id="traffic-profile-upload-legend"><i class="traffic-key profile-upload"></i>Default queue upload limit</span>
+        <span id="traffic-profile-download-legend"><i class="traffic-key profile-download"></i>Default queue download limit</span>
       </div>
     </div>
-    <p class="traffic-note">These rates count traffic before JitterSim adds delay or drops packets. They show what reaches JitterSim, not the speed a device successfully receives. Only assigned devices are included. Check the admin token to start; sampling pauses when this tab is hidden.</p>
+    <p id="traffic-profile-status" class="traffic-profile-status" role="status" aria-live="polite">Select one device to show its applied default queue limits.</p>
+    <p class="traffic-note">Traffic lines count bytes at JitterSim before its queues. They do not show the speed a device receives. Dashed lines show configured limits. The ISP plan line is shared with household traffic and is not a live measurement of spare capacity. Service-specific queues may use different limits. Only assigned devices are included. Check the admin token to start; sampling pauses when this tab is hidden.</p>
   </section>
   <section class="card uplink-card">
     <div class="section-heading">
@@ -1412,6 +1444,13 @@ DASHBOARD_HTML = """<!doctype html>
     let trafficSamplingAllowed = false;
     let previousTrafficSample = null;
     let trafficSamples = [];
+    let currentIspTrafficLimits = { upload_kbit: null, download_kbit: 100000 };
+    let latestTrafficReferences = {
+      isp_upload: null,
+      isp_download: 100,
+      profile_upload: null,
+      profile_download: null
+    };
 
     function showMessage(message, kind) {
       const messageElement = element("message");
@@ -1447,6 +1486,42 @@ DASHBOARD_HTML = """<!doctype html>
         return (megabitsPerSecond * 1000).toFixed(1) + " kbit/s";
       }
       return megabitsPerSecond.toFixed(2) + " Mbit/s";
+    }
+
+    function trafficRateMbit(kbit) {
+      return kbit === null || kbit === undefined ? null : kbit / 1000;
+    }
+
+    function trafficRateFromInput(id) {
+      const raw = element(id).value.trim();
+      if (raw === "") return null;
+      const rate = Number(raw);
+      const tenths = Math.round(rate * 10);
+      if (!Number.isFinite(rate) || rate < 0.1 || rate > 1000 || Math.abs(rate * 10 - tenths) > 1e-7) {
+        throw new Error("Enter a rate from 0.1 to 1000 Mbit/s in 0.1 Mbit/s steps, or leave it empty.");
+      }
+      return tenths * 100;
+    }
+
+    function setTrafficRateInputs(settings) {
+      currentIspTrafficLimits = {
+        upload_kbit: settings.upload_kbit,
+        download_kbit: settings.download_kbit
+      };
+      latestTrafficReferences.isp_upload = trafficRateMbit(settings.upload_kbit);
+      latestTrafficReferences.isp_download = trafficRateMbit(settings.download_kbit);
+      element("traffic-isp-upload").value = settings.upload_kbit === null
+        ? ""
+        : (settings.upload_kbit / 1000).toFixed(1);
+      element("traffic-isp-download").value = settings.download_kbit === null
+        ? ""
+        : (settings.download_kbit / 1000).toFixed(1);
+      drawTrafficChart();
+    }
+
+    async function loadTrafficSettings() {
+      const settings = await request("/api/traffic-settings", "GET");
+      setTrafficRateInputs(settings);
     }
 
     function formatPacketRate(packetsPerSecond) {
@@ -1506,7 +1581,18 @@ DASHBOARD_HTML = """<!doctype html>
       const plotHeight = plot.bottom - plot.top;
       const now = performance.now();
       const visibleSamples = trafficSamples.filter((sample) => now - sample.time <= TRAFFIC_WINDOW_MS);
-      const maxRate = Math.max(0.1, ...visibleSamples.map((sample) => Math.max(sample.upload, sample.download)));
+      const selectedDevice = element("traffic-device").value;
+      const profileSelected = selectedDevice !== "all";
+      element("traffic-profile-upload-legend").hidden = !profileSelected;
+      element("traffic-profile-download-legend").hidden = !profileSelected;
+      const referenceFields = ["isp_upload", "isp_download", "profile_upload", "profile_download"];
+      const graphValues = visibleSamples.flatMap((sample) => [
+        sample.upload,
+        sample.download,
+        ...referenceFields.map((field) => sample[field])
+      ]).filter((value) => Number.isFinite(value));
+      graphValues.push(...Object.values(latestTrafficReferences).filter((value) => Number.isFinite(value)));
+      const maxRate = Math.max(0.1, ...graphValues);
       const scaleMax = Math.pow(10, Math.ceil(Math.log10(maxRate)));
       context.font = "12px system-ui, sans-serif";
       context.textBaseline = "middle";
@@ -1529,35 +1615,107 @@ DASHBOARD_HTML = """<!doctype html>
         context.textBaseline = "alphabetic";
         context.fillText(fraction === 1 ? "now" : "−" + Math.round((1 - fraction) * TRAFFIC_WINDOW_MS / 1000) + "s", x, bounds.height - 8);
       });
-      [
-        { field: "upload", color: "#70b7ff" },
-        { field: "download", color: "#70d7a9" }
-      ].forEach((series) => {
+
+      function drawSeries(series) {
         context.strokeStyle = series.color;
-        context.lineWidth = 2.5;
+        context.lineWidth = series.step ? 1.8 : 2.5;
         context.lineJoin = "round";
         context.lineCap = "round";
+        context.setLineDash(series.dash || []);
         context.beginPath();
         let started = false;
+        let previousY = 0;
         visibleSamples.forEach((sample) => {
+          const rate = sample[series.field];
+          if (!Number.isFinite(rate)) {
+            if (series.step) started = false;
+            return;
+          }
           const age = now - sample.time;
           const x = plot.right - plotWidth * age / TRAFFIC_WINDOW_MS;
-          const y = plot.bottom - plotHeight * sample[series.field] / scaleMax;
+          const y = plot.bottom - plotHeight * rate / scaleMax;
           if (!started) {
             context.moveTo(x, y);
             started = true;
+          } else if (series.step) {
+            context.lineTo(x, previousY);
+            context.lineTo(x, y);
           } else {
             context.lineTo(x, y);
           }
+          previousY = y;
         });
         if (started) context.stroke();
-      });
+        context.setLineDash([]);
+      }
+
+      [
+        { field: "isp_upload", color: "#75a9ff", dash: [8, 6], step: true },
+        { field: "isp_download", color: "#75d7c2", dash: [8, 6], step: true },
+        { field: "profile_upload", color: "#ffa76c", dash: [2, 5], step: true },
+        { field: "profile_download", color: "#edc36a", dash: [2, 5], step: true },
+        { field: "upload", color: "#70b7ff" },
+        { field: "download", color: "#70d7a9" }
+      ].forEach(drawSeries);
+
+      if (!visibleSamples.length) {
+        referenceFields.forEach((field) => {
+          const value = latestTrafficReferences[field];
+          if (!Number.isFinite(value)) return;
+          const colors = {
+            isp_upload: "#75a9ff",
+            isp_download: "#75d7c2",
+            profile_upload: "#ffa76c",
+            profile_download: "#edc36a"
+          };
+          context.strokeStyle = colors[field];
+          context.lineWidth = 1.8;
+          context.setLineDash(field.startsWith("isp_") ? [8, 6] : [2, 5]);
+          const y = plot.bottom - plotHeight * value / scaleMax;
+          context.beginPath();
+          context.moveTo(plot.left, y);
+          context.lineTo(plot.right, y);
+          context.stroke();
+        });
+        context.setLineDash([]);
+      }
       if (!visibleSamples.length) {
         context.fillStyle = "#91a8c1";
         context.textAlign = "center";
         context.textBaseline = "middle";
         context.fillText("Waiting for traffic samples...", plot.left + plotWidth / 2, plot.top + plotHeight / 2);
       }
+    }
+
+    function trafficReferencesFromResponse(data) {
+      const ispLimits = data.isp_limits || currentIspTrafficLimits;
+      if (data.isp_limits) {
+        currentIspTrafficLimits = {
+          upload_kbit: data.isp_limits.upload_kbit,
+          download_kbit: data.isp_limits.download_kbit
+        };
+      }
+      const selectedDevice = element("traffic-device").value;
+      const deviceLimits = selectedDevice === "all" || !data.profile_limits_available
+        ? null
+        : (data.profile_limits || {})[selectedDevice];
+      const profileAvailable = selectedDevice !== "all" &&
+        data.profile_limits_available === true && deviceLimits !== undefined;
+      element("traffic-profile-status").textContent = selectedDevice === "all"
+        ? "Select one device to see its applied default queue limit. Service-specific limits are not shown."
+        : !data.profile_limits_available
+          ? "No applied plan is available. Apply the configuration to see current default queue limits."
+          : !profileAvailable
+            ? "The selected device has no applied default queue limits available."
+            : deviceLimits.upload_kbit === null && deviceLimits.download_kbit === null
+              ? "The selected device has no default queue bandwidth cap. Service-specific queues may use other limits."
+              : "The profile line is the applied default queue limit. Service-specific queues may use other limits.";
+      return {
+        isp_upload: trafficRateMbit(ispLimits.upload_kbit),
+        isp_download: trafficRateMbit(ispLimits.download_kbit),
+        profile_upload: profileAvailable ? trafficRateMbit(deviceLimits.upload_kbit) : null,
+        profile_download: profileAvailable ? trafficRateMbit(deviceLimits.download_kbit) : null
+      };
     }
 
     async function pollTraffic() {
@@ -1570,6 +1728,7 @@ DASHBOARD_HTML = """<!doctype html>
           stopTrafficSampling(data.message || "Live traffic counters are unavailable in this mode.");
           return;
         }
+        latestTrafficReferences = trafficReferencesFromResponse(data);
         const totals = selectedTrafficTotals(data.devices || {});
         if (!totals) {
           resetTrafficHistory();
@@ -1589,7 +1748,12 @@ DASHBOARD_HTML = """<!doctype html>
             const download = Math.max(0, totals.download_bytes - previousTrafficSample.totals.download_bytes) * 8 / elapsedSeconds / 1000000;
             const uploadPackets = Math.max(0, totals.upload_packets - previousTrafficSample.totals.upload_packets) / elapsedSeconds;
             const downloadPackets = Math.max(0, totals.download_packets - previousTrafficSample.totals.download_packets) / elapsedSeconds;
-            trafficSamples.push({ time: sampledAt, upload: upload, download: download });
+            trafficSamples.push({
+              time: sampledAt,
+              upload: upload,
+              download: download,
+              ...latestTrafficReferences
+            });
             trafficSamples = trafficSamples
               .filter((sample) => sampledAt - sample.time <= TRAFFIC_WINDOW_MS)
               .slice(-TRAFFIC_MAX_POINTS);
@@ -3019,6 +3183,7 @@ DASHBOARD_HTML = """<!doctype html>
         if (result.ok) {
           adminTokenVerified = true;
           await refresh();
+          await loadTrafficSettings();
           await startTrafficSampling();
         } else {
           adminTokenVerified = false;
@@ -3265,6 +3430,28 @@ DASHBOARD_HTML = """<!doctype html>
     element("service-quota-device").addEventListener("change", () => populateServiceQuotaDomains());
     element("time-quota-device").addEventListener("change", () => populateTimeQuotaDomains());
     element("check-admin-token").addEventListener("click", checkAdminToken);
+    element("traffic-rate-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const button = event.currentTarget.querySelector("button[type='submit']");
+      const status = element("traffic-rate-status");
+      button.disabled = true;
+      try {
+        const settings = await request("/api/traffic-settings", "POST", {
+          upload_kbit: trafficRateFromInput("traffic-isp-upload"),
+          download_kbit: trafficRateFromInput("traffic-isp-download")
+        });
+        setTrafficRateInputs(settings);
+        resetTrafficHistory();
+        status.textContent = "ISP speed references saved. They do not change traffic shaping.";
+        showMessage("ISP speed references saved.", "success");
+        if (trafficSamplingAllowed) await pollTraffic();
+      } catch (error) {
+        status.textContent = error.message;
+        showMessage(error.message, "error");
+      } finally {
+        button.disabled = false;
+      }
+    });
     element("admin-token").addEventListener("input", () => {
       stopTrafficSampling("Token changed. Choose Check token to restart live traffic sampling.");
       element("token-check-status").textContent = "Token changed. Choose Check token to load diagnostics.";
@@ -3306,7 +3493,10 @@ DASHBOARD_HTML = """<!doctype html>
       showMessage("Refreshing diagnostics...", "working");
       try {
         const result = await loadAdminTools();
-        if (result.ok) await startTrafficSampling();
+        if (result.ok) {
+          await loadTrafficSettings();
+          await startTrafficSampling();
+        }
         element("token-check-status").textContent = result.message;
         element("token-check-status").className = "token-check-status " + (result.ok ? "success" : "error");
         showMessage(result.message, result.ok ? "success" : "error");
@@ -4109,13 +4299,21 @@ class ControlServer(HTTPServer):
             )
         if path == "/api/backup":
             return HTTPStatus.OK, "application/vnd.sqlite3", self.repository.backup_bytes()
+        if path == "/api/traffic-settings":
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                self.repository.get_traffic_rate_settings()
+            )
         if path == "/api/traffic":
+            isp_limits = self.repository.get_traffic_rate_settings()
             if self.helper_client is None:
                 return HTTPStatus.OK, "application/json", _json_bytes(
                     {
                         "available": False,
                         "message": "Live traffic needs hardware mode.",
                         "devices": {},
+                        "isp_limits": isp_limits,
+                        "profile_limits_available": False,
+                        "profile_limits": {},
                     }
                 )
             try:
@@ -4131,11 +4329,19 @@ class ControlServer(HTTPServer):
                 return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
                     {"error": "live traffic directions are unavailable"}
                 )
+            profile_limits = (
+                self.scheduler.applied_queue_bandwidth_limits()
+                if self.scheduler is not None
+                else None
+            )
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {
                     "available": True,
                     "sampled_at": time.time(),
                     "devices": device_counters,
+                    "isp_limits": isp_limits,
+                    "profile_limits_available": profile_limits is not None,
+                    "profile_limits": profile_limits or {},
                 }
             )
         if path == "/api/diagnostics":
@@ -4163,6 +4369,20 @@ class ControlServer(HTTPServer):
 
     def write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
         """Handle one supported configuration or network action request."""
+
+        if path == "/api/traffic-settings":
+            try:
+                if "upload_kbit" not in payload or "download_kbit" not in payload:
+                    raise TrafficRateSettingsError("both rate fields are required")
+                settings = self.repository.save_traffic_rate_settings(
+                    upload_kbit=payload["upload_kbit"],
+                    download_kbit=payload["download_kbit"],
+                )
+            except TrafficRateSettingsError:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid ISP rate references"}
+                )
+            return HTTPStatus.OK, "application/json", _json_bytes(settings)
 
         if path == "/api/connected-device-labels":
             try:

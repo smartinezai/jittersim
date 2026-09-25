@@ -23,6 +23,7 @@ from jittersim.config.models import (
 )
 from jittersim.config.storage import ConfigRepository
 from jittersim.engine.runtime import RuntimeScheduler
+from jittersim.networking.helper import HelperClientError
 
 
 class RecordingHelper:
@@ -128,6 +129,132 @@ class RuntimeSchedulerTests(unittest.TestCase):
         self.assertFalse(scheduler.tick(repository=self.repository, now=30))
         self.assertTrue(scheduler.tick(repository=self.repository, now=61))
         self.assertEqual(len(self.helper.plans), 2)
+
+    def test_applied_queue_limits_read_only_the_last_successful_plan(self) -> None:
+        payload = {
+            "queues": [
+                {
+                    "device_id": "alice",
+                    "direction": "upload",
+                    "impairment": {"bandwidth_kbit": None},
+                },
+                {
+                    "device_id": "alice",
+                    "direction": "download",
+                    "impairment": {"bandwidth_kbit": 20_000},
+                },
+            ]
+        }
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+
+        self.assertIsNone(scheduler.applied_queue_bandwidth_limits())
+        scheduler._current_payload = payload
+        with patch.object(scheduler, "_build_plan", side_effect=AssertionError("must not rebuild")):
+            self.assertEqual(
+                scheduler.applied_queue_bandwidth_limits(),
+                {"alice": {"upload_kbit": None, "download_kbit": 20_000}},
+            )
+        scheduler.pause()
+        self.assertIsNone(scheduler.applied_queue_bandwidth_limits())
+
+    def test_applied_queue_limit_tracks_successful_schedule_switch(self) -> None:
+        normal = Profile(
+            id="normal",
+            name="Normal",
+            download=Impairment(bandwidth_kbit=100_000),
+        )
+        scheduled = Profile(
+            id="scheduled",
+            name="Scheduled",
+            download=Impairment(bandwidth_kbit=20_000),
+        )
+        self.repository.save_profile(normal)
+        self.repository.save_profile(scheduled)
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        self.repository.save_schedule(
+            Schedule(
+                id="work-hours",
+                device_id="alice",
+                profile_id="scheduled",
+                days_of_week=(0,),
+                start_minute=540,
+                end_minute=1_020,
+            )
+        )
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler._paused = False
+        scheduler._current_payload = {
+            "queues": [
+                {
+                    "device_id": "alice",
+                    "direction": "upload",
+                    "impairment": {"bandwidth_kbit": None},
+                },
+                {
+                    "device_id": "alice",
+                    "direction": "download",
+                    "impairment": {"bandwidth_kbit": 100_000},
+                },
+            ]
+        }
+        self.assertEqual(
+            scheduler.applied_queue_bandwidth_limits()["alice"]["download_kbit"],
+            100_000,
+        )
+
+        scheduler.tick(
+            repository=self.repository,
+            now=datetime(2026, 9, 21, 10, 0).timestamp(),
+        )
+
+        self.assertEqual(
+            scheduler.applied_queue_bandwidth_limits()["alice"]["download_kbit"],
+            20_000,
+        )
+
+    def test_failed_profile_apply_keeps_last_successful_bandwidth_reference(self) -> None:
+        class FailingApplyHelper(RecordingHelper):
+            def apply(self, *, plan):
+                raise HelperClientError("simulated apply failure")
+
+        original = Profile(
+            id="normal",
+            name="Normal",
+            download=Impairment(bandwidth_kbit=100_000),
+        )
+        self._save_device(original)
+        scheduler = RuntimeScheduler(
+            database_path=":memory:",
+            helper_client=FailingApplyHelper(),
+        )
+        scheduler._paused = False
+        scheduler._current_payload = {
+            "queues": [
+                {
+                    "device_id": "alice",
+                    "direction": "upload",
+                    "impairment": {"bandwidth_kbit": None},
+                },
+                {
+                    "device_id": "alice",
+                    "direction": "download",
+                    "impairment": {"bandwidth_kbit": 100_000},
+                },
+            ]
+        }
+        self.repository.save_profile(
+            Profile(
+                id="normal",
+                name="Normal updated",
+                download=Impairment(bandwidth_kbit=20_000),
+            )
+        )
+
+        self.assertFalse(scheduler.tick(repository=self.repository))
+        self.assertEqual(
+            scheduler.applied_queue_bandwidth_limits()["alice"]["download_kbit"],
+            100_000,
+        )
 
     def test_schedule_switches_the_profile_for_its_device(self) -> None:
         normal = Profile(id="normal", name="Normal")

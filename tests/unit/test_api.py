@@ -268,6 +268,80 @@ class ControlServerTests(unittest.TestCase):
                 "download_packets": 1,
             },
         )
+        traffic = json.loads(authorized["body"])
+        self.assertEqual(
+            traffic["isp_limits"],
+            {"upload_kbit": None, "download_kbit": 100_000},
+        )
+        self.assertFalse(traffic["profile_limits_available"])
+        self.assertEqual(traffic["profile_limits"], {})
+
+    def test_traffic_settings_write_is_protected_and_does_not_apply_traffic(self) -> None:
+        self.server.admin_token = "admin-token"
+        helper = FakeHelper()
+        self.server.helper_client = helper
+
+        def save_rates(*, authorization, body):
+            handler = object.__new__(ControlRequestHandler)
+            handler.server = self.server
+            handler.path = "/api/traffic-settings"
+            handler.headers = Message()
+            if authorization:
+                handler.headers["Authorization"] = authorization
+            handler.headers["Content-Length"] = str(len(body))
+            handler.rfile = BytesIO(body)
+            response = {}
+            handler._send_response = lambda **values: response.update(values)
+            handler.do_POST()
+            return response
+
+        body = json.dumps(
+            {"upload_kbit": None, "download_kbit": 150_000}
+        ).encode()
+        unauthorized = save_rates(authorization=None, body=body)
+        incorrect = save_rates(authorization="Bearer wrong-token", body=body)
+        authorized = save_rates(authorization="Bearer admin-token", body=body)
+        invalid = save_rates(
+            authorization="Bearer admin-token",
+            body=b'{"upload_kbit":null,"download_kbit":101}',
+        )
+
+        self.assertEqual(unauthorized["status"], 401)
+        self.assertEqual(incorrect["status"], 401)
+        self.assertEqual(authorized["status"], 200)
+        self.assertEqual(invalid["status"], 400)
+        self.assertEqual(
+            json.loads(authorized["body"]),
+            {"upload_kbit": None, "download_kbit": 150_000},
+        )
+        self.assertEqual(
+            self.repository.get_traffic_rate_settings(),
+            {"upload_kbit": None, "download_kbit": 150_000},
+        )
+        self.assertIsNone(helper.applied_plan)
+
+    def test_traffic_endpoint_includes_applied_default_queue_limits(self) -> None:
+        class SnapshotScheduler:
+            def applied_queue_bandwidth_limits(self):
+                return {
+                    "alice": {
+                        "upload_kbit": None,
+                        "download_kbit": 20_000,
+                    }
+                }
+
+        self.server.helper_client = FakeHelper()
+        self.server.scheduler = SnapshotScheduler()
+
+        status, _, body = self.server.response_for("/api/traffic")
+        response = json.loads(body)
+
+        self.assertEqual(status, 200)
+        self.assertTrue(response["profile_limits_available"])
+        self.assertEqual(
+            response["profile_limits"]["alice"],
+            {"upload_kbit": None, "download_kbit": 20_000},
+        )
 
     def test_private_read_routes_require_token_including_backup(self) -> None:
         self.server.admin_token = "admin-token"
@@ -279,6 +353,7 @@ class ControlServerTests(unittest.TestCase):
             "/api/service-assignments",
             "/api/connected-devices",
             "/api/connected-device-labels",
+            "/api/traffic-settings",
         ):
             with self.subTest(path=path):
                 handler = object.__new__(ControlRequestHandler)
@@ -916,6 +991,11 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn('document.addEventListener("submit"', DASHBOARD_HTML)
         self.assertIn("Connected clients", DASHBOARD_HTML)
         self.assertIn("connected-devices", DASHBOARD_HTML)
+        self.assertIn('id="traffic-rate-form"', DASHBOARD_HTML)
+        self.assertIn('id="traffic-isp-download"', DASHBOARD_HTML)
+        self.assertIn('id="traffic-isp-upload"', DASHBOARD_HTML)
+        self.assertIn('request("/api/traffic-settings", "POST"', DASHBOARD_HTML)
+        self.assertIn("Default queue download limit", DASHBOARD_HTML)
         self.assertIn("Edit name and type", DASHBOARD_HTML)
         self.assertIn("/api/connected-device-labels", DASHBOARD_HTML)
         self.assertIn("Saved labels for devices not listed above", DASHBOARD_HTML)
@@ -926,7 +1006,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("TRAFFIC_MAX_POINTS = 30", DASHBOARD_HTML)
         self.assertIn('document.addEventListener("visibilitychange"', DASHBOARD_HTML)
         self.assertIn('request("/api/traffic", "GET")', DASHBOARD_HTML)
-        self.assertIn("before JitterSim adds delay or drops packets", DASHBOARD_HTML)
+        self.assertIn("before its queues", DASHBOARD_HTML)
         self.assertIn("Upstream router connection", DASHBOARD_HTML)
         self.assertIn("/api/uplink", DASHBOARD_HTML)
         self.assertIn("Open router Wi-Fi settings", DASHBOARD_HTML)
@@ -1281,6 +1361,7 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(status, 502)
         self.assertEqual(json.loads(body)["error"], "network helper apply failed")
+        self.assertIn("journalctl -u jittersim-helper.service", json.loads(body)["hint"])
         state = self.repository.get_runtime_state()
         self.assertEqual(state.observed_state, "error")
         self.assertEqual(state.last_error, "network helper apply failed")

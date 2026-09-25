@@ -136,6 +136,49 @@ class RuntimeScheduler:
         with self._lock:
             return self._device_traffic_bytes.get(device_id, 0)
 
+    def applied_queue_bandwidth_limits(
+        self,
+    ) -> Optional[Dict[str, Dict[str, Optional[int]]]]:
+        """Return bandwidth limits from the last successfully applied plan."""
+
+        with self._lock:
+            payload = self._current_payload
+            if not isinstance(payload, dict):
+                return None
+            queues = payload.get("queues")
+            if not isinstance(queues, list):
+                return None
+            limits: Dict[str, Dict[str, Optional[int]]] = {}
+            seen_directions = set()
+            for queue in queues:
+                if not isinstance(queue, dict):
+                    return None
+                device_id = queue.get("device_id")
+                direction = queue.get("direction")
+                impairment = queue.get("impairment")
+                if (
+                    not isinstance(device_id, str)
+                    or direction not in ("upload", "download")
+                    or not isinstance(impairment, dict)
+                ):
+                    return None
+                rate = impairment.get("bandwidth_kbit")
+                if rate is not None and (
+                    isinstance(rate, bool) or not isinstance(rate, int) or rate < 1
+                ):
+                    return None
+                queue_key = (device_id, direction)
+                if queue_key in seen_directions:
+                    return None
+                seen_directions.add(queue_key)
+                device_limits = limits.setdefault(
+                    device_id,
+                    {"upload_kbit": None, "download_kbit": None},
+                )
+                field = f"{direction}_kbit"
+                device_limits[field] = rate
+            return limits
+
     def control_operation(self):
         """Share one lock with manual apply and reset operations."""
 

@@ -195,9 +195,18 @@ traffic or reduce accuracy. The device must use the Pi as its gateway. Backups
 include device details and observed domain names, so keep them private.
 
 The live graph samples the Pi's device counters every two seconds and shows the
-latest minute. It counts traffic before JitterSim adds delay or drops packets,
-so it shows what reaches JitterSim, not the speed a device successfully
-receives. Use a test on the connected device to check its experience.
+latest minute. Solid lines show traffic seen by JitterSim before its queues,
+not the speed a device successfully receives. Dashed lines show manually
+configured ISP plan limits and the selected device's applied default-queue
+bandwidth limits. The initial ISP download reference is 100 Mbit/s and upload
+is unset. Edit these values to match the connection. They are graph references
+only and do not change network traffic.
+
+The ISP plan limit is shared with other home devices and is not a live measure
+of spare bandwidth for JitterSim. Select one device to see its default-queue
+limits. Service-specific queues can use different limits, so those profile
+lines do not represent every flow from that device. Run a speed test on the
+connected device to check its experienced speed.
 
 ## Dashboard modes
 
