@@ -61,12 +61,12 @@ from jittersim.config.transfer import (
     settings_to_payload,
 )
 from jittersim.engine.codec import plan_to_payload
-from jittersim.engine.conditions import device_conditions
 from jittersim.engine.compiler import (
     MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN,
     MAX_SHAPED_MARKS_PER_PLAN,
     PlanError,
 )
+from jittersim.engine.conditions import device_conditions
 from jittersim.engine.progression import progression_factor
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.service import compile_stored_plan
