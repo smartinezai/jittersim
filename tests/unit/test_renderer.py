@@ -140,6 +140,26 @@ class RendererTests(unittest.TestCase):
                 self.assertEqual([argv[argv.index("parent") + 1] for argv in netem], ["10:2"])
                 self.assertEqual([argv[argv.index("flowid") + 1] for argv in filters], ["10:2"])
 
+    def test_filters_use_a_fixed_priority_so_reapplying_replaces_them(self) -> None:
+        plan = compile_plan(
+            devices=(
+                make_device("alice", "192.168.50.10", "normal"),
+                make_device("bob", "192.168.50.11", "normal"),
+            ),
+            profiles={"normal": Profile(id="normal", name="Normal")},
+        )
+
+        commands = render_command_plan(
+            plan=plan,
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+        )
+
+        filters = [command.argv for command in commands if command.argv[1] == "filter"]
+        self.assertEqual(len(filters), 4)
+        for argv in filters:
+            self.assertIn("pref", argv)
+            self.assertEqual(argv[argv.index("pref") + 1], "1")
+
     def test_renders_jitter_even_without_a_base_delay(self) -> None:
         profile = Profile(
             id="jitter-only",

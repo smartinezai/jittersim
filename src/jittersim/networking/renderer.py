@@ -14,6 +14,9 @@ ROOT_HANDLE = "10:"
 # traffic (the Pi itself, ARP, DHCP and unassigned clients) without impairment,
 # and mark N uses band N, which is class 10:N+1.
 DEFAULT_CLASS = f"{ROOT_HANDLE}1"
+# Without a fixed priority, every "tc filter replace" allocates a new one, so
+# each apply would add another copy of every mark filter.
+FILTER_PREF = "1"
 
 
 def _band_class(mark: int) -> str:
@@ -230,6 +233,8 @@ def _render_tc_commands(
                     "ip",
                     "parent",
                     ROOT_HANDLE,
+                    "pref",
+                    FILTER_PREF,
                     "handle",
                     str(queue.mark),
                     "fw",
