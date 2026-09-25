@@ -1697,10 +1697,6 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(events, ["hold", "sample", "apply", "activate", "release"])
 
     def test_apply_and_reset_record_usage_before_the_counters_restart(self) -> None:
-        class CountingHelper(FakeHelper):
-            def traffic_counters(self):
-                return {"devices": {"alice": self.alice_bytes}, "services": {}}
-
         for path in ("/api/apply", "/api/reset"):
             with self.subTest(path=path):
                 self.repository.save_data_limit(
@@ -1713,8 +1709,7 @@ class ControlServerTests(unittest.TestCase):
                         last_reset_at=100,
                     )
                 )
-                helper = CountingHelper()
-                helper.alice_bytes = 1_600
+                helper = CountingHelper(devices={"alice": 1_600})
                 scheduler = RuntimeScheduler(
                     database_path=":memory:",
                     helper_client=helper,
