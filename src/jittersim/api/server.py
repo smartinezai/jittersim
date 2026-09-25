@@ -4592,6 +4592,11 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             status = HTTPStatus.INTERNAL_SERVER_ERROR
             content_type = "application/json"
             body = _json_bytes({"error": "stored configuration could not be read"})
+        except Exception:
+            LOGGER.exception("control-plane response for %s failed", path)
+            status = HTTPStatus.INTERNAL_SERVER_ERROR
+            content_type = "application/json"
+            body = _json_bytes({"error": "request could not be processed"})
         headers = (
             {"Content-Disposition": 'attachment; filename="jittersim-backup.db"'}
             if path == "/api/backup"
@@ -4652,6 +4657,11 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             status = HTTPStatus.CONFLICT
             content_type = "application/json"
             body = _json_bytes({"error": "configuration could not be saved"})
+        except Exception:
+            LOGGER.exception("control-plane request for %s failed", path)
+            status = HTTPStatus.INTERNAL_SERVER_ERROR
+            content_type = "application/json"
+            body = _json_bytes({"error": "request could not be processed"})
         try:
             self.server.repository.record_action(action=path, status_code=int(status))
         except StorageError:
@@ -4677,7 +4687,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             raise RequestError("request body is incomplete")
         try:
             payload = json.loads(raw_body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
             raise RequestError("request body must be valid JSON") from error
         if not isinstance(payload, dict):
             raise RequestError("request body must contain a JSON object")
@@ -5058,10 +5068,11 @@ def _authorization_matches(
     if expected_token is None or authorization_header is None:
         return False
     scheme, separator, token = authorization_header.partition(" ")
+    # Compare bytes: compare_digest rejects str values with non-ASCII characters.
     return (
         separator == " "
         and scheme.lower() == "bearer"
-        and hmac.compare_digest(token, expected_token)
+        and hmac.compare_digest(token.encode("utf-8"), expected_token.encode("utf-8"))
     )
 
 

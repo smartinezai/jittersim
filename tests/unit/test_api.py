@@ -369,6 +369,42 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(len(self.repository.list_recent_actions()), count_after_authorized_request)
         self.assertEqual(unauthorized["status"], 401)
 
+    def _send(self, method, path, *, authorization="Bearer admin-token", body=None):
+        handler = object.__new__(ControlRequestHandler)
+        handler.server = self.server
+        handler.path = path
+        handler.headers = Message()
+        handler.headers["Authorization"] = authorization
+        if body is not None:
+            handler.headers["Content-Length"] = str(len(body))
+            handler.rfile = BytesIO(body)
+        response = {}
+        handler._send_response = lambda **values: response.update(values)
+        if method == "GET":
+            handler.do_GET()
+        else:
+            handler._handle_write()
+        return response
+
+    def test_malformed_requests_get_an_error_response(self) -> None:
+        self.server.admin_token = "admin-token"
+        self.server.helper_client = FakeHelper()
+
+        non_ascii_token = self._send("GET", "/api/diagnostics", authorization="Bearer t\u00f6ken")
+        nested = self._send("POST", "/api/profiles", body=b"[" * 100_000 + b"]" * 100_000)
+        with self.assertLogs("jittersim.api.server", level="ERROR"):
+            list_id = self._send(
+                "POST",
+                "/api/data-limits",
+                body=b'{"device_id": ["alice"], "profile_id": "slow", "limit_bytes": 1}',
+            )
+
+        self.assertEqual(non_ascii_token["status"], 401)
+        self.assertEqual(nested["status"], 400)
+        self.assertEqual(list_id["status"], 500)
+        self.assertIn("error", json.loads(list_id["body"]))
+        self.assertEqual(self.repository.list_recent_actions()[0]["action"], "/api/data-limits")
+
     def test_tls_requires_both_files_and_wraps_the_dashboard_socket(self) -> None:
         with self.assertRaisesRegex(ValueError, "TLS is required"):
             ControlServer(("0.0.0.0", 0), self.repository)
