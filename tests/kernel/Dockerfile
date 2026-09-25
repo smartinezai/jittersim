@@ -1,4 +1,4 @@
-# Runs the Linux datapath tests. Build from the repository root:
+# Runs the Linux datapath tests and the smoke check. Build from the repository root:
 #   docker build -f tests/kernel/Dockerfile -t jittersim-kernel-tests .
 #   docker run --rm --privileged jittersim-kernel-tests
 FROM python:3.11-slim-bookworm
@@ -10,5 +10,7 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install --no-cache-dir .
 COPY tests ./tests
+COPY deploy ./deploy
 ENV JITTERSIM_KERNEL_TESTS=1
-CMD ["python", "-m", "unittest", "discover", "-s", "tests/kernel", "-t", ".", "-v"]
+# The kernel tests, then the smoke check of the real apply, reset and firewall.
+CMD ["sh", "-c", "python -m unittest discover -s tests/kernel -t . -v && python tests/integration/linux_network_smoke.py"]

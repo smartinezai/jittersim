@@ -281,11 +281,15 @@ docker run --rm --cap-add NET_ADMIN --cap-add NET_RAW \
 
 The tests in `tests/kernel` apply real `tc` and `nftables` commands inside
 network namespaces. They are skipped unless you run them as root on Linux with
-`JITTERSIM_KERNEL_TESTS=1`. On a Mac, run them in a privileged container:
+`JITTERSIM_KERNEL_TESTS=1`. On a Mac, run them in a privileged container. The
+same run ends with the smoke check above:
 
 ```bash
 tests/kernel/run-in-docker.sh
 ```
+
+GitHub Actions runs the unit tests on Python 3.9, 3.11 and 3.13, a lint check
+for errors that break code, and these Linux checks on every pull request.
 
 ## Project layout
 
