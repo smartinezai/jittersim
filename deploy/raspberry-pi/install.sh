@@ -38,6 +38,8 @@ python3 -m venv "$INSTALL_DIR/.venv"
 # jittersim-helper runs as root from this directory, so only root may change it.
 chown -R root:root "$INSTALL_DIR"
 chmod -R go-w "$INSTALL_DIR"
+# `sudo jittersim reset` clears the network over SSH when the dashboard is down.
+ln -sf "$INSTALL_DIR/.venv/bin/jittersim" /usr/local/bin/jittersim
 
 if [ ! -s "$CONFIG_DIR/control.env" ]; then
     admin_token=$(openssl rand -hex 32)
