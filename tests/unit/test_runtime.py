@@ -1,3 +1,4 @@
+import threading
 import unittest
 from datetime import datetime
 from ipaddress import IPv4Address
@@ -516,6 +517,30 @@ class RuntimeSchedulerTests(unittest.TestCase):
 
         self.assertTrue(scheduler.tick(repository=self.repository, now=0))
         self.assertEqual(self.helper.plans[-1].mark_rules[0].device_id, device_id)
+
+    def test_scheduler_thread_survives_an_unexpected_tick_error(self) -> None:
+        scheduler = RuntimeScheduler(
+            database_path=":memory:",
+            helper_client=self.helper,
+            poll_seconds=0.01,
+        )
+        calls = []
+        ticked_again = threading.Event()
+
+        def flaky_tick():
+            calls.append(len(calls))
+            if len(calls) == 1:
+                raise RuntimeError("database is locked")
+            ticked_again.set()
+            return False
+
+        scheduler.tick = flaky_tick
+        try:
+            with self.assertLogs("jittersim.engine.runtime", level="ERROR"):
+                scheduler.start()
+                self.assertTrue(ticked_again.wait(timeout=2))
+        finally:
+            scheduler.stop()
 
 
 if __name__ == "__main__":

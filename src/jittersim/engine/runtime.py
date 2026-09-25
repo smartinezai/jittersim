@@ -669,4 +669,9 @@ class RuntimeScheduler:
 
     def _run(self) -> None:
         while not self._stop_event.wait(self._poll_seconds):
-            self.tick()
+            try:
+                self.tick()
+            except Exception:
+                # Keep schedules, timers, outages and quotas running; the next
+                # tick retries with fresh state.
+                LOGGER.exception("scheduler tick failed unexpectedly")
