@@ -36,18 +36,19 @@ the router's Wi-Fi never pass through JitterSim.
 - **Matching by MAC address.** Upload packets are matched by the sender's MAC
   address, as MAC filtering already does. In the forward hook, download
   packets don't have the client's MAC address yet. So the upload packets of a
-  connection from an unaffected client set a conntrack mark, and its download
-  packets check that mark. Because of NAT, every forwarded connection starts
-  at the client. JitterSim writes and clears only its own mark value. After
-  the list changes, an open connection is classified again by its next upload
-  packet.
+  connection from an unaffected client set a conntrack mark bit, and its
+  download packets check that bit. Because of NAT, every forwarded connection
+  starts at the client. JitterSim sets and clears only its own bit and leaves
+  the rest of the mark alone. After the list changes, an open connection is
+  classified again by its next upload packet.
 - **Saved devices** are excluded from the everyone-else rules by IPv4
   address, so their marks, counters and limits don't change. The Pi's own
   traffic, such as DHCP, DNS and the browser proxy, is not forwarded and stays
   unmarked.
 - **What the profile brings.** Everyone else gets the profile's upload and
   download effects, rerolls and outages. An outage drops everyone else's
-  traffic, like a saved device's outage. Website allowlists keep restricting
+  traffic, like a saved device's outage. DHCP requests from 0.0.0.0 still
+  reach the Pi, because a saved device asking for an address sends them too. Website allowlists keep restricting
   only saved devices, as today; this covers the profile's allowlist and the
   global allow-only mode. The global block list already covers every client.
   Schedules, timers, progressions and limits stay per saved device.
