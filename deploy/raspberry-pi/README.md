@@ -96,10 +96,19 @@ internet through the Pi, but not each other. A visitor's phone can't see your
 laptop's shared folders or other devices on the test Wi-Fi. Casting and screen
 sharing between test Wi-Fi devices stop working too. New installs call the
 test Wi-Fi `TestNet`; existing installs keep their name, and the dashboard can
-change it. The update that turns isolation on restarts the test Wi-Fi once.
+change it.
+
+Isolation starts when the test Wi-Fi next restarts. The installer doesn't
+restart a running test Wi-Fi, so after updating, reboot the Pi or run the
+command below. Test Wi-Fi devices drop off for a few seconds.
+
+```bash
+sudo nmcli connection up jittersim-ap
+```
 
 To allow test Wi-Fi devices to reach each other, add this line to
-`/etc/jittersim/ap.env` and run the installer again:
+`/etc/jittersim/ap.env`, run the installer again and restart the test Wi-Fi
+the same way:
 
 ```text
 JITTERSIM_AP_ISOLATION=no

@@ -6,6 +6,7 @@ from jittersim.api.session import (
     cleared_session_cookie,
     issue_session,
     session_cookie,
+    session_cookie_name,
     session_from_cookie_header,
     session_is_valid,
 )
@@ -42,9 +43,12 @@ class SessionTests(unittest.TestCase):
         self.assertNotEqual(issue_session("token", now=1), issue_session("token", now=1))
 
     def test_cookie_attributes(self) -> None:
+        # Over HTTPS the __Host- prefix keeps the cookie apart from other apps'
+        # "session" cookies on the same address.
+        self.assertEqual(session_cookie_name(secure=True), "__Host-session")
         self.assertEqual(
             session_cookie("abc", secure=True),
-            "session=abc; Path=/; Max-Age=604800; HttpOnly; SameSite=Strict; Secure",
+            "__Host-session=abc; Path=/; Max-Age=604800; HttpOnly; SameSite=Strict; Secure",
         )
         self.assertEqual(
             session_cookie("abc", secure=False),
@@ -52,14 +56,23 @@ class SessionTests(unittest.TestCase):
         )
         self.assertEqual(
             cleared_session_cookie(secure=True),
-            "session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict; Secure",
+            "__Host-session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict; Secure",
         )
 
     def test_reads_the_session_from_a_cookie_header(self) -> None:
-        self.assertEqual(session_from_cookie_header("a=1; session=abc.def; b=2"), "abc.def")
-        self.assertIsNone(session_from_cookie_header("a=1"))
-        self.assertIsNone(session_from_cookie_header(None))
-        self.assertIsNone(session_from_cookie_header('bad"cookie'))
+        value = issue_session("token", now=1_000)
+
+        self.assertEqual(session_from_cookie_header(f"a=1; session={value}; b=2"), value)
+        self.assertEqual(
+            session_from_cookie_header(f"__Host-session={value}", name="__Host-session"), value
+        )
+        # Other apps' odd cookies must not hide the session.
+        self.assertEqual(
+            session_from_cookie_header(f'foo; a=b c; path=/; x="y; session={value}'), value
+        )
+        for header in ("a=1", None, "session=not-a-session", "session=" + "1." * 5000):
+            with self.subTest(header=(header or "")[:40]):
+                self.assertIsNone(session_from_cookie_header(header))
 
 
 class SignInLimiterTests(unittest.TestCase):
@@ -85,6 +98,15 @@ class SignInLimiterTests(unittest.TestCase):
             limiter.record_failure("10.0.0.2", now=15 * 60 + 2 + second)
         limiter.clear("10.0.0.2")
         self.assertFalse(limiter.is_locked("10.0.0.2", now=15 * 60 + 10))
+
+    def test_a_lock_lasts_fifteen_minutes_after_the_fifth_failure(self) -> None:
+        limiter = SignInLimiter()
+        for second in (0, 1, 2, 3, 899):
+            limiter.record_failure("10.0.0.2", now=second)
+
+        self.assertTrue(limiter.is_locked("10.0.0.2", now=900))
+        self.assertTrue(limiter.is_locked("10.0.0.2", now=899 + 15 * 60 - 1))
+        self.assertFalse(limiter.is_locked("10.0.0.2", now=899 + 15 * 60))
 
     def test_the_limiter_keeps_a_bounded_number_of_addresses(self) -> None:
         limiter = SignInLimiter(max_addresses=3)
