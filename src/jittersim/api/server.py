@@ -444,7 +444,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       gap: 0.75rem;
       grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
     }
-    label { display: grid; gap: 0.3rem; color: #c7d7eb; font-size: 0.88rem; }
+    label { display: grid; align-content: start; gap: 0.3rem; color: #c7d7eb; font-size: 0.88rem; }
     input {
       width: 100%;
       max-width: 100%;
