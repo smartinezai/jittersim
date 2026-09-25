@@ -1614,6 +1614,15 @@ DASHBOARD_HTML = r"""<!doctype html>
       });
     }
 
+    // Randomness the form shows only in part. Saving keeps the rest as loaded.
+    const DEFAULT_PROFILE_RANDOMNESS = {
+      reroll_interval_randomness: { variation_percent: 0, enabled_probability: 100 },
+      outage_duration_randomness: { variation_percent: 0, enabled_probability: 100 },
+      outage_interval_randomness: { variation_percent: 0, enabled_probability: 100 },
+      website_randomness: { variation_percent: 0, enabled_probability: 100 }
+    };
+    let savedProfileRandomness = DEFAULT_PROFILE_RANDOMNESS;
+
     function fillProfileForm(profile) {
       stopEditing("profile");
       element("profile-id").value = profile.id;
@@ -1623,6 +1632,12 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function fillProfileValues(profile) {
+      savedProfileRandomness = {
+        reroll_interval_randomness: profile.reroll_interval_randomness,
+        outage_duration_randomness: profile.outage_duration_randomness,
+        outage_interval_randomness: profile.outage_interval_randomness,
+        website_randomness: profile.website_randomness
+      };
       fillImpairment("upload", profile.upload);
       fillImpairment("download", profile.download);
       element("profile-seed").value = profile.random_seed === null ? "" : profile.random_seed;
@@ -1724,19 +1739,17 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function applyPreset(preset) {
-      const unchanged = { variation_percent: 0, enabled_probability: 100 };
       fillProfileValues({
+        ...DEFAULT_PROFILE_RANDOMNESS,
         upload: presetImpairment(preset.upload),
         download: presetImpairment(preset.download),
         random_seed: null,
         reroll_interval_seconds: 0,
-        reroll_interval_randomness: unchanged,
         outage_probability: preset.outage_probability || 0,
         outage_duration_seconds: preset.outage_duration_seconds || 0,
         outage_interval_seconds: preset.outage_interval_seconds || 0,
         website_mode: "unrestricted",
-        website_domains: [],
-        website_randomness: unchanged
+        website_domains: []
       });
       // Keep the name of a profile that is being edited.
       if (!element("profile-id").readOnly) {
@@ -3389,6 +3402,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     element("profile-form").addEventListener("submit", async (event) => {
       event.preventDefault();
+      const kept = savedProfileRandomness;
       try {
         await request("/api/profiles", "POST", {
           id: element("profile-id").value,
@@ -3399,17 +3413,17 @@ DASHBOARD_HTML = r"""<!doctype html>
           reroll_interval_seconds: Number(element("profile-reroll").value),
           reroll_interval_randomness: {
             variation_percent: Number(element("profile-reroll-variation").value),
-            enabled_probability: 100
+            enabled_probability: kept.reroll_interval_randomness.enabled_probability
           },
           outage_probability: Number(element("profile-outage-probability").value),
           outage_duration_seconds: Number(element("profile-outage-duration").value),
           outage_interval_seconds: Number(element("profile-outage-interval").value),
-          outage_duration_randomness: { variation_percent: 0, enabled_probability: 100 },
-          outage_interval_randomness: { variation_percent: 0, enabled_probability: 100 },
+          outage_duration_randomness: kept.outage_duration_randomness,
+          outage_interval_randomness: kept.outage_interval_randomness,
           website_mode: element("profile-website-mode").value,
           website_domains: commaList("profile-website-domains"),
           website_randomness: {
-            variation_percent: 0,
+            variation_percent: kept.website_randomness.variation_percent,
             enabled_probability: Number(element("profile-website-enabled").value)
           }
         });
@@ -3562,6 +3576,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
     });
     element("profile-cancel-edit").addEventListener("click", () => stopEditing("profile"));
+    element("profile-form").addEventListener("reset", () => {
+      savedProfileRandomness = DEFAULT_PROFILE_RANDOMNESS;
+    });
     element("device-cancel-edit").addEventListener("click", () => stopEditing("device"));
     element("admin-token").addEventListener("input", () => {
       stopTrafficSampling("Token changed. Choose Check token to restart live traffic sampling.");

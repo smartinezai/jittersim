@@ -1344,6 +1344,21 @@ class ControlServerTests(unittest.TestCase):
                 body = body.split("\n    }\n", 1)[0]
                 self.assertIn(f'element("{prefix}-id").dataset.typed = "true";', body)
 
+    def test_dashboard_keeps_profile_settings_the_form_does_not_show(self) -> None:
+        submit = DASHBOARD_HTML.split('element("profile-form").addEventListener("submit"', 1)[1]
+        submit = submit.split("\n    });\n", 1)[0]
+
+        for fragment in (
+            "const kept = savedProfileRandomness;",
+            "enabled_probability: kept.reroll_interval_randomness.enabled_probability",
+            "outage_duration_randomness: kept.outage_duration_randomness",
+            "outage_interval_randomness: kept.outage_interval_randomness",
+            "variation_percent: kept.website_randomness.variation_percent",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, submit)
+        self.assertIn('element("profile-form").addEventListener("reset"', DASHBOARD_HTML)
+
     def test_dashboard_offers_presets_and_burst_loss(self) -> None:
         for fragment in (
             'id="profile-preset"',
