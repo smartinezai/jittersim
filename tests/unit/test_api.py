@@ -21,7 +21,14 @@ from jittersim.api.server import (
     ControlServer,
     _build_parser,
 )
-from jittersim.config.models import DataLimit, Device, DomainObservation, Impairment, Profile
+from jittersim.config.models import (
+    DataLimit,
+    Device,
+    DomainObservation,
+    Impairment,
+    Profile,
+    UnaffectedDevice,
+)
 from jittersim.config.storage import ConfigRepository
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.service import compile_stored_plan
@@ -938,6 +945,41 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual((status, other_status), (200, 200))
         self.assertEqual(self.repository.list_service_assignments(), copied)
         self.assertEqual([assignment.id for assignment in copied], ["video"])
+
+    def test_import_keeps_the_everyone_else_settings(self) -> None:
+        self.repository.save_everyone_else_profile_id("slow")
+        self.repository.save_unaffected_device(UnaffectedDevice("aa:aa:aa:aa:aa:aa", "Laptop"))
+        exported = self._export(self.server)
+        self.repository.save_everyone_else_profile_id(None)
+        self.repository.delete_unaffected_device("aa:aa:aa:aa:aa:aa")
+
+        status, _, body = self.server.write_response_for("/api/import", exported)
+
+        self.assertEqual(status, 200, body)
+        self.assertEqual(self.repository.get_everyone_else_profile_id(), "slow")
+        self.assertEqual(
+            self.repository.list_unaffected_devices(),
+            (UnaffectedDevice("aa:aa:aa:aa:aa:aa", "Laptop"),),
+        )
+
+    def test_an_export_without_everyone_else_settings_still_imports(self) -> None:
+        exported = self._export(self.server)
+        del exported["everyone_else"]
+        self.repository.save_everyone_else_profile_id("slow")
+
+        status, _, body = self.server.write_response_for("/api/import", exported)
+
+        self.assertEqual(status, 200, body)
+        self.assertIsNone(self.repository.get_everyone_else_profile_id())
+
+    def test_import_names_a_bad_unaffected_device(self) -> None:
+        exported = self._export(self.server)
+        exported["everyone_else"] = {"unaffected_devices": [{"mac_address": "nope"}]}
+
+        status, _, body = self.server.write_response_for("/api/import", exported)
+
+        self.assertEqual(status, 400)
+        self.assertIn("everyone_else.unaffected_devices[0]", json.loads(body)["error"])
 
     def _export(self, server):
         status, _, body = server.response_for("/api/export")

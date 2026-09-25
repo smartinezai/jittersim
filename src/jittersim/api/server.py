@@ -44,6 +44,7 @@ from jittersim.config.models import (
     ServiceQuota,
     TimeQuota,
     Timer,
+    UnaffectedDevice,
     WebsitePolicy,
     normalize_domain,
     time_quota_counter_id,
@@ -7061,10 +7062,9 @@ def _settings_from_payload(payload: Dict[str, Any]) -> SavedSettings:
         raise ValueError("the file is not a JitterSim settings export this version can read")
     now = int(time.time())
 
-    def items(key: str, parse: Any) -> tuple:
-        values = payload.get(key, [])
+    def parse_items(label: str, values: Any, parse: Any) -> tuple:
         if not isinstance(values, list):
-            raise ValueError(f"{key} must be a list")
+            raise ValueError(f"{label} must be a list")
         parsed = []
         for index, value in enumerate(values):
             try:
@@ -7072,15 +7072,32 @@ def _settings_from_payload(payload: Dict[str, Any]) -> SavedSettings:
                     raise ValueError("must be an object")
                 parsed.append(parse(value))
             except KeyError as error:
-                raise ValueError(f"{key}[{index}] is missing {error.args[0]}") from error
+                raise ValueError(f"{label}[{index}] is missing {error.args[0]}") from error
             except (TypeError, ValueError) as error:
-                raise ValueError(f"{key}[{index}]: {error}") from error
+                raise ValueError(f"{label}[{index}]: {error}") from error
         return tuple(parsed)
+
+    def items(key: str, parse: Any) -> tuple:
+        return parse_items(key, payload.get(key, []), parse)
 
     policies = payload.get("policies", {})
     if not isinstance(policies, dict):
         raise ValueError("policies must be an object")
     mac_policy, website_policy = _policies_from_payload(policies)
+    # Exports from before the everyone-else profile have no such section.
+    everyone_else = payload.get("everyone_else", {})
+    if not isinstance(everyone_else, dict):
+        raise ValueError("everyone_else must be an object")
+    everyone_else_profile_id = everyone_else.get("profile_id")
+    if everyone_else_profile_id is not None and not isinstance(everyone_else_profile_id, str):
+        raise ValueError("everyone_else.profile_id must be a profile ID or null")
+    unaffected_devices = parse_items(
+        "everyone_else.unaffected_devices",
+        everyone_else.get("unaffected_devices", []),
+        lambda value: UnaffectedDevice(
+            mac_address=value["mac_address"], name=value.get("name") or ""
+        ),
+    )
     # Usage starts again from zero on the new installation.
     return SavedSettings(
         profiles=items("profiles", _profile_from_payload),
@@ -7148,6 +7165,8 @@ def _settings_from_payload(payload: Dict[str, Any]) -> SavedSettings:
                 enabled=value.get("enabled", True),
             ),
         ),
+        everyone_else_profile_id=everyone_else_profile_id,
+        unaffected_devices=unaffected_devices,
     )
 
 
