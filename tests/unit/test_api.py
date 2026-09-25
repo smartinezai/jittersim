@@ -25,6 +25,7 @@ from jittersim.config.models import DataLimit, Device, DomainObservation, Impair
 from jittersim.config.storage import ConfigRepository
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.service import compile_stored_plan
+from jittersim.measure import comparison_table
 from jittersim.networking.helper import HelperClientError
 
 
@@ -1770,6 +1771,58 @@ class ControlServerTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_dashboard_compares_measurement_files(self) -> None:
+        for fragment in (
+            'id="measurement-files" type="file"',
+            'id="measurement-table"',
+            'id="measurement-chart"',
+            'id="copy-measurements"',
+            "function measurementMarkdown(runs)",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, DASHBOARD_HTML)
+
+    def test_dashboard_measurement_table_matches_the_command_line(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is required to build the table")
+        runs = [
+            {
+                "label": "normal",
+                "target": "1.1.1.1",
+                "summary": {"sent": 50, "loss_percent": 0.0, "rtt_avg_ms": 12.4,
+                            "rtt_p95_ms": 14.07, "jitter_ms": 0.81, "reordered": 0},
+            },
+            {
+                "label": "3G",
+                "target": "1.1.1.1",
+                "summary": {"sent": 50, "loss_percent": 33.3, "rtt_avg_ms": None,
+                            "rtt_p95_ms": None, "jitter_ms": None, "reordered": 2},
+                "download": {"mbit_per_s": 0.78},
+            },
+        ]
+        script = DASHBOARD_HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+        columns = re.search(r"const MEASUREMENT_COLUMNS = \[.*?\];", script, re.S).group(0)
+
+        def function(name):
+            body = script.split(f"    function {name}(", 1)[1].split("\n    }\n", 1)[0]
+            return f"function {name}({body}\n}}\n"
+
+        harness = (
+            columns
+            + "\n"
+            + function("measurementMilliseconds")
+            + function("measurementRow")
+            + function("measurementMarkdown")
+            + "process.stdout.write(measurementMarkdown(JSON.parse(process.argv[1])));\n"
+        )
+        result = subprocess.run(
+            [node, "-e", harness, json.dumps(runs)], capture_output=True, text=True, check=False
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, comparison_table(runs))
 
     def test_dashboard_script_is_valid_javascript(self) -> None:
         node = shutil.which("node")

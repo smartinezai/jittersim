@@ -369,6 +369,15 @@ DASHBOARD_HTML = r"""<!doctype html>
     .traffic-metric strong { display: block; margin-top: 0.25rem; color: #edf5ff; font-size: 1.05rem; overflow-wrap: anywhere; }
     .traffic-chart-wrap { margin-top: 1rem; padding: 0.65rem; border: 1px solid #2b435f; border-radius: 0.65rem; background: #0b1727; }
     #traffic-chart { display: block; width: 100%; height: 16rem; }
+    .measurement-actions {
+      display: flex; flex-wrap: wrap; align-items: end; gap: 0.75rem; margin: 0.75rem 0;
+    }
+    .measurement-actions button { margin: 0; }
+    #measurement-chart { display: block; width: 100%; height: 14rem; margin-top: 1rem; }
+    .measurement-key {
+      display: inline-block; width: 0.7rem; height: 0.7rem;
+      margin-right: 0.45rem; border-radius: 0.2rem;
+    }
     .traffic-legend { display: flex; flex-wrap: wrap; gap: 0.8rem 1rem; margin-top: 0.65rem; color: #91a8c1; font-size: 0.78rem; }
     .traffic-legend span { display: inline-flex; align-items: center; gap: 0.4rem; }
     .traffic-key { width: 0.75rem; height: 0.2rem; border-radius: 1rem; background: #70b7ff; }
@@ -698,6 +707,28 @@ DASHBOARD_HTML = r"""<!doctype html>
     <p class="traffic-note">Dropped and waiting show packets JitterSim itself discarded or is still
       delaying, in both directions.</p>
     <p class="traffic-note">Traffic lines count bytes at JitterSim before its queues. They do not show the speed a device receives. Dashed lines show configured limits. The ISP plan line is shared with household traffic and is not a live measurement of spare capacity. Service-specific queues may use different limits. Only assigned devices are included. Check the admin token to start; sampling pauses when this tab is hidden.</p>
+  </section>
+  <section class="card wide" aria-labelledby="measurement-title">
+    <div class="section-heading">
+      <div>
+        <h2 id="measurement-title">Measurements</h2>
+        <p>Compare the delay, jitter and loss a test device measured</p>
+      </div>
+    </div>
+    <div class="measurement-actions">
+      <label>Result files
+        <input id="measurement-files" type="file" accept=".json,application/json" multiple>
+      </label>
+      <button id="copy-measurements" type="button" disabled>Copy table as Markdown</button>
+      <button id="clear-measurements" type="button" disabled>Clear</button>
+    </div>
+    <div id="measurement-table" class="table-wrap">Add result files to compare runs.</div>
+    <canvas id="measurement-chart" width="900" height="240" role="img"
+      aria-label="Round-trip time of every reply in each run">
+      Round-trip chart of the added runs.</canvas>
+    <p class="traffic-note">On a device connected to the test Wi-Fi, run
+      <code>jittersim measure --label normal</code>, change the device's profile here, run it again
+      with another label, then add both files. The files stay in this browser.</p>
   </section>
   <section class="card uplink-card">
     <div class="section-heading">
@@ -2284,6 +2315,173 @@ DASHBOARD_HTML = r"""<!doctype html>
         context.textBaseline = "middle";
         context.fillText("Waiting for traffic samples...", plot.left + plotWidth / 2, plot.top + plotHeight / 2);
       }
+    }
+
+    let measurementRuns = [];
+    const MEASUREMENT_COLUMNS = [
+      "Run", "Target", "Sent", "Loss", "RTT avg", "RTT p95", "Jitter", "Reordered", "Download"
+    ];
+    const MEASUREMENT_COLORS = ["#70b7ff", "#ffa76c", "#70d7a9", "#edc36a", "#c58cff", "#ff8fa3"];
+
+    function measurementMilliseconds(value) {
+      return value === null || value === undefined ? "—" : value.toFixed(2) + " ms";
+    }
+
+    // The same columns and formatting as `jittersim compare`.
+    function measurementRow(run) {
+      const summary = run.summary;
+      return [
+        String(run.label ?? ""),
+        String(run.target ?? ""),
+        String(summary.sent ?? ""),
+        (summary.loss_percent ?? 0).toFixed(1) + "%",
+        measurementMilliseconds(summary.rtt_avg_ms),
+        measurementMilliseconds(summary.rtt_p95_ms),
+        measurementMilliseconds(summary.jitter_ms),
+        String(summary.reordered ?? 0),
+        run.download ? run.download.mbit_per_s.toFixed(2) + " Mbit/s" : "—"
+      ];
+    }
+
+    function measurementMarkdown(runs) {
+      const line = (cells) => "| " + cells.join(" | ") + " |";
+      return [
+        line(MEASUREMENT_COLUMNS),
+        line(MEASUREMENT_COLUMNS.map(() => "---")),
+        ...runs.map((run) => line(measurementRow(run)))
+      ].join("\n") + "\n";
+    }
+
+    function drawMeasurementChart() {
+      const canvas = element("measurement-chart");
+      const bounds = canvas.getBoundingClientRect();
+      if (!bounds.width || !bounds.height) return;
+      const pixelRatio = window.devicePixelRatio || 1;
+      canvas.width = Math.round(bounds.width * pixelRatio);
+      canvas.height = Math.round(bounds.height * pixelRatio);
+      const context = canvas.getContext("2d");
+      if (!context) return;
+      context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+      context.clearRect(0, 0, bounds.width, bounds.height);
+      context.font = "12px system-ui, sans-serif";
+      context.fillStyle = "#91a8c1";
+      const rtts = measurementRuns.flatMap(
+        (run) => (run.samples || []).map((sample) => sample.rtt_ms)
+      );
+      if (!rtts.length) {
+        context.textAlign = "center";
+        context.textBaseline = "middle";
+        context.fillText(
+          "Add result files to draw their round trips.", bounds.width / 2, bounds.height / 2
+        );
+        return;
+      }
+      const scaleMax = Math.max(...rtts) * 1.1;
+      const labels = [0, 1, 2, 3, 4].map((tick) => (scaleMax * tick / 4).toFixed(0) + " ms");
+      const labelWidth = Math.max(...labels.map((label) => context.measureText(label).width));
+      const plot = {
+        left: Math.ceil(labelWidth) + 16,
+        right: bounds.width - 14,
+        top: 16,
+        bottom: bounds.height - 30
+      };
+      context.textBaseline = "middle";
+      labels.forEach((label, tick) => {
+        const y = plot.bottom - (plot.bottom - plot.top) * tick / 4;
+        context.strokeStyle = "#263c56";
+        context.lineWidth = 1;
+        context.beginPath();
+        context.moveTo(plot.left, y);
+        context.lineTo(plot.right, y);
+        context.stroke();
+        context.textAlign = "right";
+        context.fillText(label, plot.left - 8, y);
+      });
+      const longest = Math.max(2, ...measurementRuns.map((run) => (run.samples || []).length));
+      measurementRuns.forEach((run, index) => {
+        context.strokeStyle = MEASUREMENT_COLORS[index % MEASUREMENT_COLORS.length];
+        context.lineWidth = 2;
+        context.beginPath();
+        (run.samples || []).forEach((sample, position) => {
+          const x = plot.left + (plot.right - plot.left) * position / (longest - 1);
+          const y = plot.bottom - (plot.bottom - plot.top) * sample.rtt_ms / scaleMax;
+          if (position === 0) context.moveTo(x, y);
+          else context.lineTo(x, y);
+        });
+        context.stroke();
+      });
+      context.textAlign = "center";
+      context.textBaseline = "alphabetic";
+      context.fillText(
+        "Replies in the order they arrived", (plot.left + plot.right) / 2, bounds.height - 8
+      );
+    }
+
+    function renderMeasurements() {
+      const container = element("measurement-table");
+      container.replaceChildren();
+      element("copy-measurements").disabled = !measurementRuns.length;
+      element("clear-measurements").disabled = !measurementRuns.length;
+      if (!measurementRuns.length) {
+        container.textContent = "Add result files to compare runs.";
+      } else {
+        const table = document.createElement("table");
+        table.className = "data-table";
+        const headRow = document.createElement("tr");
+        MEASUREMENT_COLUMNS.forEach((heading) => {
+          const cell = document.createElement("th");
+          cell.scope = "col";
+          cell.textContent = heading;
+          headRow.appendChild(cell);
+        });
+        const head = document.createElement("thead");
+        head.appendChild(headRow);
+        const body = document.createElement("tbody");
+        measurementRuns.forEach((run, index) => {
+          const row = document.createElement("tr");
+          measurementRow(run).forEach((value, column) => {
+            const cell = document.createElement("td");
+            if (column === 0) {
+              // The run's color in the chart.
+              const key = document.createElement("i");
+              key.className = "measurement-key";
+              key.style.background = MEASUREMENT_COLORS[index % MEASUREMENT_COLORS.length];
+              cell.appendChild(key);
+            }
+            cell.append(value);
+            row.appendChild(cell);
+          });
+          body.appendChild(row);
+        });
+        table.append(head, body);
+        container.appendChild(table);
+      }
+      drawMeasurementChart();
+    }
+
+    async function loadMeasurementFiles(files) {
+      const loaded = [];
+      for (const file of files) {
+        let run;
+        try {
+          run = JSON.parse(await file.text());
+        } catch (error) {
+          showMessage(file.name + " is not valid JSON.", "error");
+          return;
+        }
+        if (
+          !run || run.format !== "jittersim-measurement" || run.version !== 1 ||
+          typeof run.summary !== "object" || run.summary === null
+        ) {
+          showMessage(file.name + " is not a JitterSim measurement.", "error");
+          return;
+        }
+        loaded.push(run);
+      }
+      measurementRuns = measurementRuns.concat(loaded);
+      renderMeasurements();
+      const added = loaded.length + (loaded.length === 1 ? " run added." : " runs added.");
+      showMessage(added, "success");
     }
 
     function trafficReferencesFromResponse(data) {
@@ -4217,6 +4415,27 @@ DASHBOARD_HTML = r"""<!doctype html>
     element("import-settings-button").addEventListener("click", () => {
       element("import-settings").click();
     });
+    element("measurement-files").addEventListener("change", async (event) => {
+      const input = event.currentTarget;
+      const files = Array.from(input.files);
+      input.value = "";
+      if (files.length) await loadMeasurementFiles(files);
+    });
+    element("copy-measurements").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(measurementMarkdown(measurementRuns));
+        showMessage("Measurement table copied as Markdown.", "success");
+      } catch (error) {
+        showMessage("Could not copy the table: " + error.message, "error");
+      }
+    });
+    element("clear-measurements").addEventListener("click", () => {
+      measurementRuns = [];
+      renderMeasurements();
+    });
+    window.addEventListener("resize", drawMeasurementChart);
+    renderMeasurements();
+
     element("import-settings").addEventListener("change", async (event) => {
       const input = event.currentTarget;
       const file = input.files[0];
