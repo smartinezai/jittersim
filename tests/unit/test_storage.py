@@ -361,7 +361,8 @@ class ConfigRepositoryTests(unittest.TestCase):
         updated = self.repository.get_runtime_state()
         self.assertEqual(updated.configuration_version, 2)
         self.assertEqual(updated.observed_state, "unknown")
-        self.assertIsNone(updated.last_action)
+        # Startup recovery relies on the last explicit network action.
+        self.assertEqual(updated.last_action, "apply")
 
     def test_merges_and_lists_domain_observations_without_bumping_configuration(self) -> None:
         self.repository.save_domain_observations(

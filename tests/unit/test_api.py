@@ -152,6 +152,31 @@ class ControlServerTests(unittest.TestCase):
         self.assertIsNone(helper.applied_plan)
         self.assertEqual(self.repository.get_runtime_state().observed_state, "reset")
 
+    def test_startup_recovery_survives_a_later_settings_change(self) -> None:
+        for last_action in ("apply", "reset"):
+            with self.subTest(last_action=last_action):
+                helper = FakeHelper()
+                self.server.helper_client = helper
+                self.repository.update_runtime_state(
+                    observed_state="applied" if last_action == "apply" else "reset",
+                    last_action=last_action,
+                    last_result="success",
+                    last_error=None,
+                )
+                self.repository.save_device(
+                    Device(
+                        id="alice",
+                        name="Renamed laptop",
+                        ipv4_address="192.168.50.10",
+                        profile_id="slow",
+                    )
+                )
+
+                self.server.recover_saved_network_state()
+
+                self.assertEqual(helper.applied_plan is not None, last_action == "apply")
+                self.assertEqual(helper.reset_called, last_action == "reset")
+
     def test_startup_recovery_does_not_apply_on_a_new_installation(self) -> None:
         helper = FakeHelper()
         self.server.helper_client = helper
@@ -771,6 +796,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("setButtonBusy(event.submitter, true)", DASHBOARD_HTML)
         self.assertIn("if (submitButton) setButtonBusy(submitButton, false);", DASHBOARD_HTML)
         self.assertIn("Dashboard refresh failed:", DASHBOARD_HTML)
+        self.assertIn("Settings changed since the last network action", DASHBOARD_HTML)
         self.assertNotIn('element("admin-token").addEventListener("change"', DASHBOARD_HTML)
         self.assertIn(
             'element("check-admin-token").addEventListener("click", checkAdminToken)',

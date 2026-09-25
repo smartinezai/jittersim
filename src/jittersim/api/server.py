@@ -1653,7 +1653,9 @@ DASHBOARD_HTML = r"""<!doctype html>
         error: "The last network action failed"
       };
       const summary = element("runtime-summary");
-      summary.textContent = labels[state.observed_state] || "Runtime state unavailable";
+      summary.textContent = state.observed_state === "unknown" && state.last_action
+        ? "Settings changed since the last network action"
+        : labels[state.observed_state] || "Runtime state unavailable";
       summary.className = "runtime-summary " + state.observed_state;
     }
 

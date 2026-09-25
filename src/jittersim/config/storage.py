@@ -476,14 +476,13 @@ class ConfigRepository:
                 temporary_path.unlink(missing_ok=True)
 
     def _bump_configuration_version(self) -> None:
+        # Keep the last network action: startup recovery uses it to re-apply
+        # a plan or keep an explicit reset after later settings changes.
         self._connection.execute(
             """
             UPDATE runtime_state
             SET configuration_version = configuration_version + 1,
-                observed_state = 'unknown',
-                last_action = NULL,
-                last_result = NULL,
-                last_error = NULL
+                observed_state = 'unknown'
             WHERE id = 1
             """
         )
