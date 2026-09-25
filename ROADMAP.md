@@ -69,7 +69,7 @@ Goal: apply a plan through a controlled adapter and recover from failure.
 - [x] Add explicit simulation mode.
 - [x] Add bounded command timeouts.
 - [x] Add apply and reset operations.
-- [ ] Prove repeated apply operations are idempotent on Linux.
+- [x] Prove repeated apply operations are idempotent on Linux.
 - [x] Record command output and failures.
 - [x] Add a global reset operation that removes only project-owned state.
 
@@ -91,8 +91,8 @@ Goal: persist configuration without requiring a cloud service.
 - [x] Store desired state separately from observed state.
 - [x] Add configuration versioning.
 - [x] Download a protected SQLite backup of settings and local observations.
-- [ ] Add import and export of non-secret JSON configuration.
-- [ ] Reject malformed imported configuration before persistence.
+- [x] Add import and export of non-secret JSON configuration.
+- [x] Reject malformed imported configuration before persistence.
 
 Suggested commits:
 
@@ -118,7 +118,7 @@ Goal: control the emulator from a Mac without a screen or keyboard attached to t
 - [x] Keep Apply and Reset feedback in a sticky action area.
 - [x] Add a bounded history of admin actions without request contents.
 - [x] Protect the deployed dashboard with HTTPS.
-- [ ] Keep the dashboard exempt from impairment.
+- [x] Keep the dashboard exempt from impairment.
 
 Suggested commits:
 
@@ -142,8 +142,8 @@ Goal: create realistic changing conditions without making tests irreproducible.
 - [x] Vary reroll timing and outage timing.
 - [x] Add time-based and DNS-query-based progression sessions.
 - [x] Stage per-device website blocking during progression sessions.
-- [ ] Add burst loss and correlated impairment presets.
-- [ ] Ensure only one scheduler owns transitions.
+- [x] Add burst loss and correlated impairment presets.
+- [x] Ensure only one scheduler owns transitions.
 - [x] Stop schedules cleanly during reset and shutdown.
 
 Suggested commits:
@@ -164,8 +164,8 @@ Goal: run the system headlessly on the Pi while preserving a reliable recovery p
 - [x] Add a configuration file for management and test interfaces.
 - [x] Add interface safety checks at startup.
 - [x] Restore the last applied plan or finish a reset after restart.
-- [ ] Document DHCP, NAT and the test Wi-Fi network.
-- [ ] Add an SSH reset procedure.
+- [x] Document DHCP, NAT and the test Wi-Fi network.
+- [x] Add an SSH reset procedure.
 
 Suggested commits:
 
@@ -180,14 +180,14 @@ Suggested commits:
 
 Goal: produce evidence that the selected profile changes observed network behavior.
 
-- [ ] Add counters for packets, bytes, drops and active state.
+- [x] Add counters for packets, bytes, drops and active state.
 - [x] Show per-device upload and download rates in a live dashboard graph.
 - [ ] Add a latency measurement page.
 - [ ] Add a small scripted test client.
 - [ ] Compare normal and impaired runs.
 - [ ] Capture screenshots or tables for the class report.
 - [x] Document packet-level limits and IPv4 profile matching.
-- [ ] Test that the reset path works after a failed apply.
+- [x] Test that the reset path works after a failed apply.
 
 Suggested commits:
 

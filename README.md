@@ -13,6 +13,11 @@ is a private lab tool, not a replacement for a home router.
 
 - Delay, jitter, packet loss, bandwidth limits, packet reordering, duplication
   and corruption.
+- Loss that arrives in bursts of several packets, with the configured
+  percentage as the average.
+- Jitter that keeps packets in order. The Reorder setting reorders on purpose.
+- Presets that fill the profile form with rough approximations of common
+  networks, such as 3G, satellite and a train tunnel with outages.
 - Separate upload and download controls where the network supports them.
 - Per-device profile assignment from the dashboard.
 - A safe configuration-only mode for building plans without changing traffic.
@@ -33,8 +38,11 @@ is a private lab tool, not a replacement for a home router.
 
 - Connected-device discovery with device names, IP addresses and MAC addresses.
 - Click-to-select devices and assign profiles from the dashboard.
+- Tables of saved profiles and devices with Edit and Delete, plus Delete for
+  schedules and limits. A profile that is still in use cannot be deleted.
 - Device groups that apply one profile override to several devices at once.
-- A live upload and download graph with packet rates for assigned devices.
+- A live upload and download graph with packet rates for assigned devices,
+  and the packets JitterSim dropped or is still delaying.
 - MAC address allowlists and denylists.
 - A global blocked-site list.
 - Profile-specific website lists that allow selected services while blocking
@@ -77,7 +85,11 @@ bytes.
 - A visible status area for the current mode, connected devices, schedules,
   access rules, diagnostics and a short history of admin actions.
 - Download a point-in-time backup of settings and local DNS observations.
+- Export settings as JSON and import them on another Pi or to repeat a
+  demonstration. Imports are checked first and replace all settings at once.
 - Restore the last applied or reset state when the dashboard service restarts.
+- Clear every network change over SSH with `sudo jittersim reset`, even when
+  the dashboard is down.
 
 Traffic discovery stores local summaries of DNS names and query counts. Select
 several observed names when creating a service quota because one service can
@@ -123,7 +135,8 @@ include device details and observed domain names, so keep them private.
 The live graph samples the Pi's device counters every two seconds and shows the
 latest minute. It counts traffic before JitterSim adds delay or drops packets,
 so it shows what reaches JitterSim, not the speed a device successfully
-receives. Use a test on the connected device to check its experience.
+receives. The dropped and waiting figures come from JitterSim's own queues.
+Use a test on the connected device to check its experience.
 
 ## Dashboard modes
 
@@ -163,6 +176,14 @@ service uses HTTPS. Run the tests with:
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -p 'test*.py'
+```
+
+The tests in `tests/kernel` apply real `tc` and `nftables` commands inside
+network namespaces. They are skipped unless you run them as root on Linux with
+`JITTERSIM_KERNEL_TESTS=1`. On a Mac, run them in a privileged container:
+
+```bash
+tests/kernel/run-in-docker.sh
 ```
 
 ## Project layout

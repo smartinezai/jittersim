@@ -43,6 +43,12 @@ systemd units and enables the management firewall. It preserves existing
 credential files so an update does not silently invalidate access. It also
 creates a local HTTPS certificate. Its private key is readable only by root
 and the JitterSim service. The installer prints the certificate fingerprint.
+It also creates the test Wi-Fi when it is missing and links the `jittersim`
+command into `/usr/local/bin`.
+
+After updating from a version before September 2026, choose **Reset network**
+once. Older versions left duplicate traffic filters behind, and a reset
+removes them.
 
 Open the dashboard at `https://jittersim.local:8080` or use the Pi's Ethernet
 address. Before trusting the local certificate in a browser, compare its
@@ -73,6 +79,49 @@ sudo cat /etc/jittersim/ap.env
 ```
 
 Never commit those files or paste their contents into a chat or ticket.
+
+## Test Wi-Fi, DHCP and NAT
+
+The helper manages the test Wi-Fi through a NetworkManager connection named
+`jittersim-ap`. When that connection is missing, the installer creates it on
+the test interface with the SSID and password from `ap.env`. It uses
+NetworkManager's shared mode, which gives test devices addresses in
+`192.168.50.0/24` from DHCP, answers their DNS queries and translates their
+traffic to the Pi's Ethernet address. IPv6 is turned off on the test Wi-Fi
+because device rules match IPv4.
+
+The installer skips this step when the test interface carries the Pi's default
+route, because turning it into an access point would cut off the session.
+Connect the Pi by Ethernet and run the installer again. To create the
+connection by hand instead:
+
+```sh
+sudo nmcli connection add type wifi ifname wlan0 con-name jittersim-ap \
+    autoconnect yes ssid JitterSim-Test 802-11-wireless.mode ap \
+    802-11-wireless.band bg ipv4.method shared ipv4.addresses 192.168.50.1/24 \
+    ipv6.method disabled wifi-sec.key-mgmt wpa-psk wifi-sec.psk 'the password'
+```
+
+Check it with `nmcli connection show jittersim-ap`. This step has not yet been
+tested on a Pi.
+
+## Emergency reset over SSH
+
+If the dashboard cannot be reached, clear every JitterSim network change from
+an SSH session on the management network:
+
+```sh
+sudo jittersim reset
+```
+
+The command records the reset first, so the dashboard keeps the network reset
+after it restarts, then asks the helper to remove JitterSim's rules and queues.
+A running dashboard notices the reset, stops scheduled changes and resets once
+more in case one of its changes raced the command. Choose **Apply current
+configuration** in the dashboard to start again.
+
+`sudo jittersim status` shows the last recorded network action and whether the
+helper answers.
 
 ## Verify the boundary
 
