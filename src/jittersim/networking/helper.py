@@ -11,11 +11,11 @@ import stat
 import time
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from jittersim.config.models import ValidationError, normalize_domain
 from jittersim.engine.codec import PlanCodecError, plan_from_payload, plan_to_payload
-from jittersim.engine.plan import NetworkPlan
+from jittersim.engine.plan import EVERYONE_ELSE_QUEUE_ID, NetworkPlan
 
 from .applier import ApplyError, NetworkApplier
 from .executor import CommandExecutionError, SubprocessExecutor
@@ -42,6 +42,7 @@ _TRAFFIC_COUNTER_COMMENT_PATTERN = re.compile(
     r"^usage-(?P<kind>device|service) (?P<identifier>[a-z0-9][a-z0-9_-]{0,63}) "
     r"(?P<direction>upload|download)$"
 )
+_EVERYONE_ELSE_COMMENT_PATTERN = re.compile(r"^everyone else (?P<direction>upload|download)$")
 _SERVICE_QUOTA_MARK_COMMENT_PATTERN = re.compile(
     r"^apply-service-quota [a-z0-9][a-z0-9_-]{0,63} (?P<direction>upload|download)$"
 )
@@ -401,10 +402,35 @@ class UnixHelperServer(socketserver.UnixStreamServer):
             pass
 
 
-def _validated_queues(raw_queues: Any) -> Dict[str, Dict[str, Dict[str, int]]]:
+def _validated_flows(raw_flows: Any) -> Dict[str, int]:
+    """Check one set of directional byte and packet counts from a helper response."""
+
+    if not isinstance(raw_flows, dict):
+        raise HelperClientError("helper returned invalid traffic directions")
+    flows: Dict[str, int] = {}
+    for field in ("upload_bytes", "download_bytes", "upload_packets", "download_packets"):
+        value = raw_flows.get(field)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+            or value > 2**63 - 1
+        ):
+            raise HelperClientError("helper returned invalid traffic directions")
+        flows[field] = value
+    return flows
+
+
+def _validated_queues(raw_queues: Any) -> Dict[str, Any]:
     """Keep only well-formed per-device queue figures from a helper response."""
 
-    queues: Dict[str, Dict[str, Dict[str, int]]] = {"devices": {}}
+    queues: Dict[str, Any] = {"devices": {}}
+    everyone_else = raw_queues.get("everyone_else") if isinstance(raw_queues, dict) else None
+    if isinstance(everyone_else, dict):
+        queues["everyone_else"] = {
+            field: _queue_counter(everyone_else.get(field))
+            for field in ("upload_dropped", "download_dropped", "upload_queued", "download_queued")
+        }
     devices = raw_queues.get("devices") if isinstance(raw_queues, dict) else None
     if not isinstance(devices, dict):
         return queues
@@ -605,6 +631,11 @@ class HelperClient:
                         raise HelperClientError("helper returned invalid traffic directions")
                     directions[kind][identifier][field] = value
         result["directions"] = directions
+        # Helpers from before everyone else existed don't send it.
+        raw_everyone_else = counters.get("everyone_else")
+        result["everyone_else"] = (
+            None if raw_everyone_else is None else _validated_flows(raw_everyone_else)
+        )
         result["queues"] = _validated_queues(counters.get("queues"))
         return result
 
@@ -987,7 +1018,36 @@ def _parse_queue_statistics(
             )
             statistics[f"{direction}_dropped"] += _queue_counter(qdisc.get("drops"))
             statistics[f"{direction}_queued"] += _queue_counter(qdisc.get("qlen"))
-    return {"devices": devices}
+    queues: Dict[str, Any] = {"devices": devices}
+    everyone_else = devices.pop(EVERYONE_ELSE_QUEUE_ID, None)
+    if everyone_else is not None:
+        queues["everyone_else"] = everyone_else
+    return queues
+
+
+def _rule_counter(rule: Dict[str, Any]) -> Optional[Tuple[int, int]]:
+    """Return a rule's byte and packet counts, when it has a valid counter."""
+
+    for expression in rule.get("expr", []):
+        if not isinstance(expression, dict) or not isinstance(expression.get("counter"), dict):
+            continue
+        counter = expression["counter"]
+        candidate_bytes = counter.get("bytes")
+        candidate_packets = counter.get("packets")
+        if (
+            isinstance(candidate_bytes, int)
+            and not isinstance(candidate_bytes, bool)
+            and 0 <= candidate_bytes <= 2**63 - 1
+        ):
+            packets = (
+                candidate_packets
+                if isinstance(candidate_packets, int)
+                and not isinstance(candidate_packets, bool)
+                and 0 <= candidate_packets <= 2**63 - 1
+                else 0
+            )
+            return candidate_bytes, packets
+    return None
 
 
 def _parse_traffic_counter_output(output: str) -> Dict[str, Any]:
@@ -1019,33 +1079,32 @@ def _parse_traffic_counter_output(output: str) -> Dict[str, Any]:
             field = "saddr" if quota.group("direction") == "upload" else "daddr"
             service_quota_marks.append((_rule_address(rule, field), _rule_marks(rule)))
             continue
+        everyone_else = _EVERYONE_ELSE_COMMENT_PATTERN.fullmatch(comment or "")
+        if everyone_else is not None:
+            # Queue figures find everyone else's band by its mark, like a device's.
+            counters["marks"].setdefault(EVERYONE_ELSE_QUEUE_ID, set()).update(_rule_marks(rule))
+            counts = _rule_counter(rule)
+            if counts is not None:
+                totals = counters.setdefault(
+                    "everyone_else",
+                    {
+                        "upload_bytes": 0,
+                        "download_bytes": 0,
+                        "upload_packets": 0,
+                        "download_packets": 0,
+                    },
+                )
+                direction = everyone_else.group("direction")
+                totals[f"{direction}_bytes"] += counts[0]
+                totals[f"{direction}_packets"] += counts[1]
+            continue
         match = _TRAFFIC_COUNTER_COMMENT_PATTERN.fullmatch(comment or "")
         if match is None:
             continue
-        byte_count = None
-        packet_count = None
-        for expression in rule.get("expr", []):
-            if not isinstance(expression, dict) or not isinstance(expression.get("counter"), dict):
-                continue
-            counter = expression["counter"]
-            candidate_bytes = counter.get("bytes")
-            candidate_packets = counter.get("packets")
-            if (
-                isinstance(candidate_bytes, int)
-                and not isinstance(candidate_bytes, bool)
-                and 0 <= candidate_bytes <= 2**63 - 1
-            ):
-                byte_count = candidate_bytes
-                packet_count = (
-                    candidate_packets
-                    if isinstance(candidate_packets, int)
-                    and not isinstance(candidate_packets, bool)
-                    and 0 <= candidate_packets <= 2**63 - 1
-                    else 0
-                )
-                break
-        if byte_count is None or packet_count is None:
+        counts = _rule_counter(rule)
+        if counts is None:
             continue
+        byte_count, packet_count = counts
         kind = "devices" if match.group("kind") == "device" else "services"
         identifier = match.group("identifier")
         direction = match.group("direction")

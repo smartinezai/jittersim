@@ -13,6 +13,7 @@ from jittersim.networking.commands import CommandResult
 from jittersim.networking.executor import CommandExecutionError, FakeExecutor
 from jittersim.networking.helper import (
     HelperClient,
+    HelperClientError,
     HelperError,
     HelperService,
     UnixHelperServer,
@@ -662,6 +663,93 @@ class HelperServiceTests(unittest.TestCase):
 
         self.assertEqual(queues["devices"]["alice"]["upload_dropped"], 524)
         self.assertEqual(queues["devices"]["alice"]["upload_queued"], 7)
+
+    def test_counts_what_everyone_else_sends_and_what_its_queues_hold(self) -> None:
+        nft = (
+            '{"nftables":['
+            '{"rule":{"comment":"usage-device alice upload","expr":['
+            '{"mangle":{"key":{"meta":{"key":"mark"}},"value":1}},'
+            '{"counter":{"packets":1,"bytes":100}}]}},'
+            '{"rule":{"comment":"everyone else upload","expr":['
+            '{"mangle":{"key":{"meta":{"key":"mark"}},"value":2}},'
+            '{"counter":{"packets":7,"bytes":7000}}]}},'
+            '{"rule":{"comment":"everyone else download","expr":['
+            '{"mangle":{"key":{"meta":{"key":"mark"}},"value":2}},'
+            '{"counter":{"packets":9,"bytes":90000}}]}}]}'
+        )
+        upload = (
+            '[{"kind":"netem","handle":"41:","parent":"10:2","drops":3,"qlen":0},'
+            '{"kind":"netem","handle":"42:","parent":"10:3","drops":11,"qlen":4}]'
+        )
+
+        class Executor(FakeExecutor):
+            def run(self, command):
+                self.commands.append(command)
+                if command.executable == "nft":
+                    return CommandResult(return_code=0, stdout=nft)
+                return CommandResult(
+                    return_code=0, stdout=upload if command.argv[-1] == "eth0" else "[]"
+                )
+
+        service = HelperService(
+            NetworkApplier(
+                executor=Executor(),
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            )
+        )
+
+        counters = service.handle_payload({"action": "traffic-counters"})["counters"]
+
+        self.assertEqual(
+            counters["everyone_else"],
+            {
+                "upload_bytes": 7_000,
+                "download_bytes": 90_000,
+                "upload_packets": 7,
+                "download_packets": 9,
+            },
+        )
+        self.assertEqual(
+            counters["queues"]["everyone_else"],
+            {
+                "upload_dropped": 11,
+                "download_dropped": 0,
+                "upload_queued": 4,
+                "download_queued": 0,
+            },
+        )
+        # Everyone else isn't a device.
+        self.assertEqual(set(counters["devices"]), {"alice"})
+        self.assertEqual(set(counters["queues"]["devices"]), {"alice"})
+        self.assertEqual(counters["queues"]["devices"]["alice"]["upload_dropped"], 3)
+
+    def test_client_checks_everyone_else_counters(self) -> None:
+        # The socket is never opened: the request itself is replaced.
+        client = HelperClient(socket_path=Path("unused.sock"))
+        base = {
+            "devices": {},
+            "services": {},
+            "directions": {"devices": {}, "services": {}},
+            "queues": {"devices": {}},
+        }
+        flows = {"upload_bytes": 1, "download_bytes": 2, "upload_packets": 3, "download_packets": 4}
+        queue = {
+            "upload_dropped": 5, "download_dropped": 0, "upload_queued": 0, "download_queued": 1
+        }
+
+        def answer(counters):
+            client._request = lambda payload: {"ok": True, "counters": counters}
+            return client.traffic_counters()
+
+        # A helper without everyone else reports none.
+        self.assertIsNone(answer(base)["everyone_else"])
+        counters = answer(
+            {**base, "everyone_else": flows, "queues": {"devices": {}, "everyone_else": queue}}
+        )
+        self.assertEqual(counters["everyone_else"], flows)
+        self.assertEqual(counters["queues"]["everyone_else"], queue)
+        with self.assertRaises(HelperClientError):
+            answer({**base, "everyone_else": {**flows, "upload_bytes": -1}})
 
     def test_queue_figures_include_an_active_service_limit_queue(self) -> None:
         # A service limit's rules match the device's address, not its name.
