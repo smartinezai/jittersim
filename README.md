@@ -48,9 +48,12 @@ is a private lab tool, not a replacement for a home router.
 - Tables of saved profiles and devices with Edit and Delete, plus Delete for
   schedules and limits. A profile that is still in use cannot be deleted.
 - Device groups that apply one profile override to several devices at once.
+- One profile for everyone else on the test Wi-Fi, with an Unaffected devices
+  list whose members keep a normal connection.
 - A live upload and download graph with packet rates for assigned devices,
   and the packets JitterSim dropped or is still delaying.
-- MAC address allowlists and denylists.
+- MAC address allowlists and denylists. The filtering mode decides which list
+  applies.
 - A global blocked-site list.
 - Profile-specific website lists that allow selected services while blocking
   the rest.
@@ -179,9 +182,12 @@ IPv6 hosts for managed HTTPS traffic.
 Any household device can join the JitterSim Wi-Fi without a JitterSim device
 record. The DHCP service and ordinary internet forwarding run in
 NetworkManager, independently of the dashboard and network helper. A network
-plan only marks devices you add in the dashboard. Other clients use a normal
-fair queue when a profile is active. They do not inherit a selected device's
-delay, loss or bandwidth limit.
+plan marks devices you add in the dashboard. Other clients get a normal
+connection unless you choose a profile for everyone else. Everyone else then
+shares one queue with that profile, so its speed limit is shared by all of
+them. Devices on the Unaffected devices list keep a normal connection. The
+list matches MAC addresses, so use the address shown in Connected clients, and
+keep a phone's private Wi-Fi address fixed for the JitterSim network.
 
 The connected-device list shows devices currently associated with the Pi's
 Wi-Fi. It can show the IP address, signal strength and a DHCP-provided network

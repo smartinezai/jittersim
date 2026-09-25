@@ -11,6 +11,7 @@ from jittersim.config.models import (
     Schedule,
     ServiceAssignment,
     ServiceQuota,
+    UnaffectedDevice,
 )
 from jittersim.config.transfer import check_settings, settings_to_payload
 
@@ -209,6 +210,60 @@ class SettingsTransferTests(unittest.TestCase):
             max_traffic_classes=2,
             max_service_domains=1,
         )
+
+
+    def test_export_carries_the_everyone_else_settings(self) -> None:
+        payload = settings_to_payload(
+            SavedSettings(
+                profiles=(Profile(id="slow", name="Slow"),),
+                everyone_else_profile_id="slow",
+                unaffected_devices=(UnaffectedDevice("aa:aa:aa:aa:aa:aa", "Laptop"),),
+            ),
+            exported_at=0,
+        )
+
+        self.assertEqual(
+            payload["everyone_else"],
+            {
+                "profile_id": "slow",
+                "unaffected_devices": [{"mac_address": "aa:aa:aa:aa:aa:aa", "name": "Laptop"}],
+            },
+        )
+
+    def test_check_refuses_everyone_else_settings_that_do_not_fit(self) -> None:
+        slow = Profile(id="slow", name="Slow")
+        mac = "aa:aa:aa:aa:aa:aa"
+        cases = {
+            "everyone else uses the missing profile gone": SavedSettings(
+                everyone_else_profile_id="gone"
+            ),
+            "unaffected device aa:aa:aa:aa:aa:aa appears twice": SavedSettings(
+                unaffected_devices=(UnaffectedDevice(mac), UnaffectedDevice(mac))
+            ),
+            "aa:aa:aa:aa:aa:aa is unaffected and belongs to device alice": SavedSettings(
+                profiles=(slow,),
+                devices=(Device("alice", "Alice", "192.168.50.10", "slow", mac),),
+                unaffected_devices=(UnaffectedDevice(mac),),
+            ),
+            "the unaffected list holds at most 256 devices": SavedSettings(
+                unaffected_devices=tuple(
+                    UnaffectedDevice(f"02:00:00:00:{index // 256:02x}:{index % 256:02x}")
+                    for index in range(257)
+                )
+            ),
+            "JitterSim can shape at most 15": SavedSettings(
+                profiles=(slow,),
+                devices=tuple(
+                    Device(f"d{index}", f"D{index}", f"192.168.50.{10 + index}", "slow")
+                    for index in range(15)
+                ),
+                everyone_else_profile_id="slow",
+            ),
+        }
+        for message, settings in cases.items():
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValueError, message):
+                    check_settings(settings, max_traffic_classes=15, max_service_domains=200)
 
 
 if __name__ == "__main__":

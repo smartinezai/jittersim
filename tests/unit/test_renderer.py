@@ -3,7 +3,7 @@ from ipaddress import IPv4Address
 
 from jittersim.config.models import Device, Impairment, MacPolicy, Profile
 from jittersim.engine.compiler import compile_plan
-from jittersim.engine.plan import ServiceQuotaRule, WebsiteFilter
+from jittersim.engine.plan import EveryoneElseRule, ServiceQuotaRule, WebsiteFilter
 from jittersim.networking.renderer import render_command_plan, render_reset_commands
 from jittersim.networking.topology import Topology, TopologyError
 
@@ -506,6 +506,119 @@ class RendererTests(unittest.TestCase):
         self.assertIn("ip daddr != { 203.0.113.20 } drop", nft_script or "")
         self.assertIn("ip daddr { 203.0.113.30 } drop", nft_script or "")
 
+    def test_mac_filtering_uses_only_the_list_its_mode_names(self) -> None:
+        allowed, denied = "11:22:33:44:55:66", "aa:bb:cc:dd:ee:ff"
+        expected = {
+            "disabled": [],
+            "allowlist": [f"ether saddr != {{ {allowed} }} drop"],
+            "denylist": [f"ether saddr {{ {denied} }} drop"],
+        }
+        for mode, fragments in expected.items():
+            with self.subTest(mode=mode):
+                policy = MacPolicy(mode=mode, allowlist=(allowed,), denylist=(denied,))
+                script = render_command_plan(
+                    plan=compile_plan(devices=(), profiles={}, mac_policy=policy),
+                    topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+                )[0].stdin
+                drops = [line for line in script.splitlines() if "ether saddr" in line]
+                # One rule in the input chain and one in the forward chain.
+                self.assertEqual(len(drops), 2 * len(fragments))
+                for fragment in fragments:
+                    self.assertIn(fragment, script)
+
+
+class EveryoneElseRenderingTests(unittest.TestCase):
+    topology = Topology(uplink_interface="eth0", test_interface="wlan0")
+
+    def plan(self, *, devices=(), unaffected_macs=(), blocked=False):
+        return compile_plan(
+            devices=devices,
+            profiles={"normal": Profile(id="normal", name="Normal")},
+            everyone_else=EveryoneElseRule(
+                mark=0,
+                upload_impairment=Impairment(delay_ms=100),
+                download_impairment=Impairment(),
+                unaffected_macs=unaffected_macs,
+                blocked=blocked,
+            ),
+        )
+
+    def lines(self, **changes):
+        plan = self.plan(**changes)
+        return render_command_plan(plan=plan, topology=self.topology)[0].stdin.splitlines()
+
+    def test_marks_clients_that_are_neither_saved_nor_unaffected(self) -> None:
+        lines = self.lines(
+            devices=(make_device("alice", "192.168.50.10", "normal"),),
+            unaffected_macs=("aa:bb:cc:dd:ee:ff",),
+        )
+
+        # JitterSim sets, checks and clears only its own bit of the connection mark.
+        expected = [
+            'add rule inet jittersim forward iifname "wlan0" ether saddr { aa:bb:cc:dd:ee:ff } '
+            "ct mark set ct mark or 0x01000000 "
+            'comment "mark connections of unaffected clients"',
+            'add rule inet jittersim forward iifname "wlan0" '
+            "ether saddr != { aa:bb:cc:dd:ee:ff } ct mark and 0x01000000 == 0x01000000 "
+            "ct mark set ct mark and 0xfeffffff "
+            'comment "clear connections of clients no longer unaffected"',
+            'add rule inet jittersim forward iifname "wlan0" meta nfproto ipv4 '
+            "ether saddr != { aa:bb:cc:dd:ee:ff } ip saddr != { 192.168.50.10 } "
+            'meta mark set 2 counter comment "everyone else upload"',
+            'add rule inet jittersim forward oifname "wlan0" meta nfproto ipv4 '
+            "ct mark and 0x01000000 != 0x01000000 ip daddr != { 192.168.50.10 } "
+            'meta mark set 2 counter comment "everyone else download"',
+        ]
+        start = lines.index(expected[0])
+        self.assertEqual(lines[start:start + 4], expected)
+        # Saved devices keep their own rules, which come after these.
+        device_rule = next(i for i, line in enumerate(lines) if "usage-device alice upload" in line)
+        self.assertLess(start, device_rule)
+
+    def test_without_a_list_or_saved_devices_every_client_is_marked(self) -> None:
+        lines = self.lines()
+
+        for direction, interface in (("upload", "iifname"), ("download", "oifname")):
+            self.assertIn(
+                f'add rule inet jittersim forward {interface} "wlan0" meta nfproto ipv4 '
+                f'meta mark set 1 counter comment "everyone else {direction}"',
+                lines,
+            )
+        self.assertEqual([line for line in lines if "ct mark" in line], [])
+
+    def test_an_outage_drops_everyone_else_in_both_chains(self) -> None:
+        lines = self.lines(
+            devices=(make_device("alice", "192.168.50.10", "normal"),),
+            unaffected_macs=("aa:bb:cc:dd:ee:ff",),
+            blocked=True,
+        )
+
+        # A client asking for an address sends from 0.0.0.0 and may be a saved
+        # device, so DHCP still reaches the Pi.
+        self.assertIn(
+            'add rule inet jittersim input iifname "wlan0" meta nfproto ipv4 '
+            "ether saddr != { aa:bb:cc:dd:ee:ff } ip saddr != { 192.168.50.10 } "
+            'ip saddr != 0.0.0.0 drop comment "temporarily disconnect everyone else"',
+            lines,
+        )
+        self.assertIn(
+            'add rule inet jittersim forward iifname "wlan0" meta nfproto ipv4 '
+            "ether saddr != { aa:bb:cc:dd:ee:ff } ip saddr != { 192.168.50.10 } "
+            'drop comment "temporarily disconnect everyone else"',
+            lines,
+        )
+
+    def test_everyone_else_gets_a_queue_on_both_interfaces(self) -> None:
+        commands = render_command_plan(plan=self.plan(), topology=self.topology)
+
+        children = {
+            (command.arguments[3], command.arguments[8])
+            for command in commands
+            if command.executable == "tc"
+            and command.arguments[:2] == ("qdisc", "replace")
+            and command.arguments[5] == "10:2"
+        }
+        self.assertEqual(children, {("eth0", "netem"), ("wlan0", "fq_codel")})
 
 if __name__ == "__main__":
     unittest.main()

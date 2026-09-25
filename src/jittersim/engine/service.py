@@ -5,7 +5,7 @@ from dataclasses import replace
 from jittersim.config.storage import ConfigRepository
 
 from .compiler import compile_plan
-from .plan import NetworkPlan, ServiceAssignmentRule, ServiceQuotaRule
+from .plan import EveryoneElseRule, NetworkPlan, ServiceAssignmentRule, ServiceQuotaRule
 from .website import build_website_filters, resolve_domains
 
 
@@ -103,6 +103,22 @@ def compile_stored_plan(*, repository: ConfigRepository) -> NetworkPlan:
                 download_impairment=profile.download,
             )
         )
+    everyone_else = None
+    everyone_else_profile_id = repository.get_everyone_else_profile_id()
+    if everyone_else_profile_id is not None:
+        profile = profiles.get(everyone_else_profile_id)
+        if profile is None:
+            raise ValueError(
+                f"everyone else references missing profile {everyone_else_profile_id}"
+            )
+        everyone_else = EveryoneElseRule(
+            mark=0,
+            upload_impairment=profile.upload,
+            download_impairment=profile.download,
+            unaffected_macs=tuple(
+                unaffected.mac_address for unaffected in repository.list_unaffected_devices()
+            ),
+        )
     return compile_plan(
         devices=devices,
         profiles=profiles,
@@ -111,4 +127,5 @@ def compile_stored_plan(*, repository: ConfigRepository) -> NetworkPlan:
         website_filters=website_filters,
         service_quota_rules=service_quota_rules,
         service_assignment_rules=service_assignment_rules,
+        everyone_else=everyone_else,
     )

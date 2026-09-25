@@ -3,8 +3,17 @@ from ipaddress import IPv4Address
 
 from jittersim.config.models import Device, Impairment, MacPolicy, Profile
 from jittersim.engine.compiler import compile_plan
-from jittersim.engine.conditions import DeviceCondition, device_conditions
-from jittersim.engine.plan import ServiceAssignmentRule, ServiceQuotaRule, WebsiteFilter
+from jittersim.engine.conditions import (
+    DeviceCondition,
+    device_conditions,
+    everyone_else_condition,
+)
+from jittersim.engine.plan import (
+    EveryoneElseRule,
+    ServiceAssignmentRule,
+    ServiceQuotaRule,
+    WebsiteFilter,
+)
 
 ALICE = Device("alice", "Alice", "192.168.50.10", "profile")
 
@@ -75,6 +84,18 @@ class DeviceConditionTests(unittest.TestCase):
 
                 self.assertEqual(condition, DeviceCondition("offline", (reason,)))
 
+    def test_mac_filtering_uses_only_the_list_its_mode_names(self) -> None:
+        mac = "aa:bb:cc:dd:ee:ff"
+        for mode in ("disabled", "allowlist"):
+            with self.subTest(mode=mode):
+                policy = MacPolicy(mode=mode, allowlist=(mac,), denylist=(mac,))
+
+                condition = device_conditions(
+                    plan_with(mac_policy=policy), mac_addresses={"alice": mac}
+                )["alice"]
+
+                self.assertEqual(condition, DeviceCondition("normal"))
+
     def test_service_rules_with_effects_degrade_part_of_a_device(self) -> None:
         def quota(quota_id, *, active, download):
             return ServiceQuotaRule(
@@ -131,6 +152,32 @@ class DeviceConditionTests(unittest.TestCase):
 
         self.assertEqual(device_conditions(plan)["alice"].condition, "normal")
 
+
+class EveryoneElseConditionTests(unittest.TestCase):
+    def plan(self, **changes):
+        values = {"mark": 0, "upload_impairment": Impairment(), "download_impairment": Impairment()}
+        values.update(changes)
+        return compile_plan(devices=(), profiles={}, everyone_else=EveryoneElseRule(**values))
+
+    def test_without_a_profile_there_is_no_condition(self) -> None:
+        self.assertIsNone(everyone_else_condition(compile_plan(devices=(), profiles={})))
+
+    def test_everyone_else_conditions_follow_the_rule(self) -> None:
+        cases = [
+            ({}, DeviceCondition("normal")),
+            (
+                {"upload_impairment": Impairment(delay_ms=100)},
+                DeviceCondition("degraded", ("upload: delay 100 ms",)),
+            ),
+            ({"blocked": True}, DeviceCondition("offline", ("outage",))),
+            (
+                {"download_impairment": Impairment(loss_percent=100)},
+                DeviceCondition("offline", ("download: every packet lost",)),
+            ),
+        ]
+        for changes, expected in cases:
+            with self.subTest(changes=changes):
+                self.assertEqual(everyone_else_condition(self.plan(**changes)), expected)
 
 if __name__ == "__main__":
     unittest.main()

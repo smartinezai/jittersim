@@ -122,9 +122,11 @@ DHCP address and ordinary internet access. Only devices with a record and an
 active profile get device-specific traffic marks. A plan keeps unconfigured
 clients on a fair queue even when one test client has delay or loss. The AP,
 DHCP and ordinary forwarding belong to NetworkManager, so they do not depend
-on the dashboard or helper process staying up. Leave global website blocks and
-MAC allowlists off during this trial because those controls can affect clients
-without a device record.
+on the dashboard or helper process staying up. Leave global website blocks,
+MAC allowlists and the everyone-else profile off during this trial because
+those controls affect clients without a device record. With an everyone-else
+profile, every household device that isn't saved or on the Unaffected devices
+list gets that profile.
 
 This remains a routed, isolated test network. Wi-Fi clients cannot reach
 private addresses behind the Ethernet router. Wired clients cannot normally

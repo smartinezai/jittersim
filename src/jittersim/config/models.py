@@ -248,6 +248,24 @@ class Device:
             object.__setattr__(self, "mac_address", normalize_mac_address(self.mac_address))
 
 
+MAX_UNAFFECTED_DEVICES = 256
+
+
+@dataclass(frozen=True)
+class UnaffectedDevice:
+    """A test Wi-Fi client that keeps a normal connection, found by its MAC address."""
+
+    mac_address: str
+    name: str = ""
+
+    def __post_init__(self) -> None:
+        mac_address = normalize_mac_address(self.mac_address)
+        if not isinstance(self.name, str):
+            raise ValidationError("name must be a string")
+        object.__setattr__(self, "mac_address", mac_address)
+        object.__setattr__(self, "name", _validate_name(self.name.strip() or mac_address, "name"))
+
+
 @dataclass(frozen=True)
 class DeviceGroup:
     """A named set of devices that can share a profile and quota."""
@@ -736,3 +754,5 @@ class SavedSettings:
     service_quotas: Tuple[ServiceQuota, ...] = ()
     time_quotas: Tuple[TimeQuota, ...] = ()
     service_assignments: Tuple[ServiceAssignment, ...] = ()
+    everyone_else_profile_id: Optional[str] = None
+    unaffected_devices: Tuple[UnaffectedDevice, ...] = ()

@@ -245,6 +245,8 @@ verified on the target Pi under normal household load.
 
 - [x] Keep unconfigured clients out of device-specific profile rules.
 - [x] Give ordinary traffic a fair queue while selected devices are shaped.
+- [x] Give everyone else one shared profile, except devices on an unaffected
+  list.
 - [x] Check Ethernet routing, AP interface and subnet compatibility before
   changing services during installation.
 - [x] Avoid restarting an active AP during a routine software update.

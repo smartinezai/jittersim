@@ -46,6 +46,26 @@ def _rule_effects(kind: str, name: str, upload: Impairment, download: Impairment
     return reasons
 
 
+def _direction_reasons(upload: Impairment, download: Impairment) -> Tuple[List[str], List[str]]:
+    offline = []
+    degraded = []
+    for direction, impairment in (("upload", upload), ("download", download)):
+        if impairment.loss_percent >= 100:
+            offline.append(f"{direction}: every packet lost")
+        effects = _effects(impairment)
+        if effects:
+            degraded.append(f"{direction}: " + ", ".join(effects))
+    return offline, degraded
+
+
+def _condition(offline: List[str], degraded: List[str]) -> DeviceCondition:
+    if offline:
+        return DeviceCondition("offline", tuple(offline))
+    if degraded:
+        return DeviceCondition("degraded", tuple(degraded))
+    return DeviceCondition("normal")
+
+
 def device_conditions(
     plan: NetworkPlan, *, mac_addresses: Optional[Mapping[str, Optional[str]]] = None
 ) -> Dict[str, DeviceCondition]:
@@ -72,17 +92,17 @@ def device_conditions(
         if rule.ipv4_address in closed:
             offline.append("no allowed site resolved")
         mac = (mac_addresses or {}).get(rule.device_id)
-        if mac and mac in plan.mac_policy.denylist:
+        policy = plan.mac_policy
+        if mac and policy.mode == "denylist" and mac in policy.denylist:
             offline.append("MAC address denied")
-        elif mac and plan.mac_policy.mode == "allowlist" and mac not in plan.mac_policy.allowlist:
+        elif mac and policy.mode == "allowlist" and mac not in policy.allowlist:
             offline.append("MAC address not allowed")
-        for direction in (Direction.UPLOAD, Direction.DOWNLOAD):
-            impairment = impairments.get((rule.device_id, direction), Impairment())
-            if impairment.loss_percent >= 100:
-                offline.append(f"{direction.value}: every packet lost")
-            effects = _effects(impairment)
-            if effects:
-                degraded.append(f"{direction.value}: " + ", ".join(effects))
+        direction_offline, direction_degraded = _direction_reasons(
+            impairments.get((rule.device_id, Direction.UPLOAD), Impairment()),
+            impairments.get((rule.device_id, Direction.DOWNLOAD), Impairment()),
+        )
+        offline.extend(direction_offline)
+        degraded.extend(direction_degraded)
         # Service rules shape only some of the device's traffic.
         for quota in plan.service_quota_rules:
             if quota.active and quota.device_id == rule.device_id:
@@ -104,10 +124,17 @@ def device_conditions(
                         assignment.download_impairment,
                     )
                 )
-        if offline:
-            conditions[rule.device_id] = DeviceCondition("offline", tuple(offline))
-        elif degraded:
-            conditions[rule.device_id] = DeviceCondition("degraded", tuple(degraded))
-        else:
-            conditions[rule.device_id] = DeviceCondition("normal")
+        conditions[rule.device_id] = _condition(offline, degraded)
     return conditions
+
+
+def everyone_else_condition(plan: NetworkPlan) -> Optional[DeviceCondition]:
+    """How the plan treats test Wi-Fi clients that are neither saved nor unaffected."""
+
+    rule = plan.everyone_else
+    if rule is None:
+        return None
+    offline, degraded = _direction_reasons(rule.upload_impairment, rule.download_impairment)
+    if rule.blocked:
+        offline.insert(0, "outage")
+    return _condition(offline, degraded)

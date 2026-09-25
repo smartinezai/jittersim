@@ -15,6 +15,7 @@ from .device_labels import (
     normalize_device_type,
 )
 from .models import (
+    MAX_UNAFFECTED_DEVICES,
     DataLimit,
     Device,
     DeviceGroup,
@@ -32,6 +33,7 @@ from .models import (
     ServiceQuota,
     TimeQuota,
     Timer,
+    UnaffectedDevice,
     ValidationError,
     WebsitePolicy,
 )
@@ -289,6 +291,16 @@ class ConfigRepository:
                 website_allowed_json TEXT NOT NULL,
                 website_blocked_json TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS everyone_else_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                -- The API refuses to delete this profile. Older versions don't
+                -- know about everyone else, so a delete there clears the choice.
+                profile_id TEXT REFERENCES profiles(id) ON DELETE SET NULL
+            );
+            CREATE TABLE IF NOT EXISTS unaffected_devices (
+                mac_address TEXT PRIMARY KEY,
+                name TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS runtime_state (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 configuration_version INTEGER NOT NULL,
@@ -334,6 +346,7 @@ class ConfigRepository:
                 id, mac_mode, mac_allowlist_json, mac_denylist_json,
                 website_mode, website_allowed_json, website_blocked_json
             ) VALUES (1, 'disabled', '[]', '[]', 'unrestricted', '[]', '[]');
+            INSERT OR IGNORE INTO everyone_else_settings (id, profile_id) VALUES (1, NULL);
             """
         )
         self._add_column_if_missing("profiles", "settings_json", "TEXT NOT NULL DEFAULT '{}'")
@@ -659,6 +672,72 @@ class ConfigRepository:
             return None
         return self._device_from_row(row)
 
+    def get_device_by_mac_address(self, mac_address: str) -> Optional[Device]:
+        """Return the device assignment saved with one MAC address or `None`."""
+
+        row = self._connection.execute(
+            "SELECT id, name, ipv4_address, profile_id, mac_address FROM devices "
+            "WHERE mac_address = ? ORDER BY id",
+            (mac_address,),
+        ).fetchone()
+        return None if row is None else self._device_from_row(row)
+
+    def get_everyone_else_profile_id(self) -> Optional[str]:
+        """Return the profile for test Wi-Fi clients that aren't saved or unaffected."""
+
+        row = self._connection.execute(
+            "SELECT profile_id FROM everyone_else_settings WHERE id = 1"
+        ).fetchone()
+        return None if row is None else row["profile_id"]
+
+    def save_everyone_else_profile_id(self, profile_id: Optional[str]) -> None:
+        """Choose the everyone-else profile, or None for a normal connection."""
+
+        try:
+            self._connection.execute(
+                "UPDATE everyone_else_settings SET profile_id = ? WHERE id = 1", (profile_id,)
+            )
+            self._bump_configuration_version()
+            self._commit()
+        except sqlite3.IntegrityError as error:
+            self._connection.rollback()
+            raise StorageError(f"profile {profile_id} does not exist") from error
+
+    def list_unaffected_devices(self) -> tuple:
+        """Return the devices that keep a normal connection, in address order."""
+
+        rows = self._connection.execute(
+            "SELECT mac_address, name FROM unaffected_devices ORDER BY mac_address"
+        ).fetchall()
+        try:
+            return tuple(UnaffectedDevice(row["mac_address"], row["name"]) for row in rows)
+        except ValidationError as error:
+            raise StorageError("stored unaffected device is malformed") from error
+
+    def save_unaffected_device(self, device: UnaffectedDevice) -> None:
+        """Add or rename one unaffected device."""
+
+        exists = self._connection.execute(
+            "SELECT 1 FROM unaffected_devices WHERE mac_address = ?", (device.mac_address,)
+        ).fetchone()
+        count = self._connection.execute("SELECT COUNT(*) FROM unaffected_devices").fetchone()[0]
+        if exists is None and count >= MAX_UNAFFECTED_DEVICES:
+            raise StorageError(
+                f"the unaffected list holds at most {MAX_UNAFFECTED_DEVICES} devices"
+            )
+        self._connection.execute(
+            "INSERT INTO unaffected_devices (mac_address, name) VALUES (?, ?) "
+            "ON CONFLICT(mac_address) DO UPDATE SET name = excluded.name",
+            (device.mac_address, device.name),
+        )
+        self._bump_configuration_version()
+        self._commit()
+
+    def delete_unaffected_device(self, mac_address: str) -> bool:
+        """Remove one device from the unaffected list."""
+
+        return self._delete_row("unaffected_devices", "mac_address", mac_address)
+
     def list_connected_device_labels(self) -> Dict[str, Dict[str, str]]:
         """Read locally saved names and types for Wi-Fi client addresses."""
 
@@ -801,6 +880,8 @@ class ConfigRepository:
             for quota in self.list_time_quotas()
             if quota.profile_id == profile_id
         )
+        if self.get_everyone_else_profile_id() == profile_id:
+            references.append("everyone else")
         return tuple(references)
 
     def delete_profile(self, profile_id: str) -> bool:
@@ -850,6 +931,8 @@ class ConfigRepository:
             service_quotas=self.list_service_quotas(),
             time_quotas=self.list_time_quotas(),
             service_assignments=self.list_service_assignments(),
+            everyone_else_profile_id=self.get_everyone_else_profile_id(),
+            unaffected_devices=self.list_unaffected_devices(),
         )
 
     def replace_settings(self, settings: SavedSettings) -> None:
@@ -861,7 +944,10 @@ class ConfigRepository:
 
         self._deferring_commits = True
         try:
+            # The everyone-else profile refers to a profile that is replaced below.
+            self._connection.execute("UPDATE everyone_else_settings SET profile_id = NULL")
             for table in (
+                "unaffected_devices",
                 "service_assignments",
                 "time_quotas",
                 "service_quotas",
@@ -895,6 +981,9 @@ class ConfigRepository:
                 self.save_time_quota(time_quota)
             for assignment in settings.service_assignments:
                 self.save_service_assignment(assignment)
+            for unaffected in settings.unaffected_devices:
+                self.save_unaffected_device(unaffected)
+            self.save_everyone_else_profile_id(settings.everyone_else_profile_id)
         except BaseException as error:
             # Any error, not only a storage one, must not leave a half-replaced
             # configuration for the next save to commit.

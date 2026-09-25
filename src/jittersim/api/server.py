@@ -44,8 +44,10 @@ from jittersim.config.models import (
     ServiceQuota,
     TimeQuota,
     Timer,
+    UnaffectedDevice,
     WebsitePolicy,
     normalize_domain,
+    normalize_mac_address,
     time_quota_counter_id,
 )
 from jittersim.config.storage import (
@@ -66,7 +68,7 @@ from jittersim.engine.compiler import (
     MAX_SHAPED_MARKS_PER_PLAN,
     PlanError,
 )
-from jittersim.engine.conditions import device_conditions
+from jittersim.engine.conditions import device_conditions, everyone_else_condition
 from jittersim.engine.progression import progression_factor
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.service import compile_stored_plan
@@ -107,6 +109,9 @@ WRITE_PATHS = frozenset(
         "/api/time-quotas/start",
         "/api/time-quotas/stop",
         "/api/policies",
+        "/api/everyone-else",
+        "/api/unaffected-devices",
+        "/api/unaffected-devices/delete",
         "/api/access-point",
         "/api/router/sync-ap",
         "/api/router/wifi",
@@ -1027,6 +1032,37 @@ DASHBOARD_HTML = r"""<!doctype html>
       </form>
       <div id="group-list" class="quota-list" aria-live="polite">No groups saved.</div>
     </section>
+    <section class="card">
+      <h2>Everyone else</h2>
+      <p class="form-note">Choose a profile for every test Wi-Fi client that isn't a saved
+        device or on the unaffected list. They share one connection, so a speed limit in
+        this profile is shared by all of them.</p>
+      <form id="everyone-else-form">
+        <div class="fields">
+          <label>Profile for everyone else
+            <select id="everyone-else-profile">
+              <option value="">None: normal connection</option>
+            </select>
+          </label>
+        </div>
+        <button type="submit">Save everyone-else profile</button>
+      </form>
+      <h3>Unaffected devices</h3>
+      <p class="form-note">These keep a normal connection while everyone else has a profile.
+        Use the MAC address shown in Connected clients. A phone can use a private address
+        that changes, so keep its private address fixed for the JitterSim network, for
+        example Private Wi-Fi Address set to Fixed on an iPhone.</p>
+      <form id="unaffected-form">
+        <div class="fields">
+          <label>MAC address
+            <input id="unaffected-mac" required placeholder="aa:bb:cc:dd:ee:ff">
+          </label>
+          <label>Name (optional) <input id="unaffected-name" placeholder="My phone"></label>
+        </div>
+        <button type="submit">Add to unaffected</button>
+      </form>
+      <div id="unaffected-table" class="table-wrap">No unaffected devices.</div>
+    </section>
   </div>
   <div class="content-grid">
     <section class="card">
@@ -1702,33 +1738,53 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     const CONDITION_LABELS = { normal: "Normal", degraded: "Degraded", offline: "Offline" };
 
-    function deviceConditionCell(deviceId) {
-      // Own keys only: a device may be called "constructor".
-      const known = Object.prototype.hasOwnProperty.call(deviceConditions.devices, deviceId);
-      if (!known) return "—";
-      const state = deviceConditions.devices[deviceId];
+    function conditionCell(state) {
+      if (!state) return "—";
       const reasons = Array.isArray(state.reasons) ? state.reasons : [];
       const label = CONDITION_LABELS[state.condition] || "—";
       return [label, reasons.join("; ") || "No network effects"];
     }
 
+    function deviceConditionCell(deviceId) {
+      // Own keys only: a device may be called "constructor".
+      const known = Object.prototype.hasOwnProperty.call(deviceConditions.devices, deviceId);
+      return conditionCell(known ? deviceConditions.devices[deviceId] : null);
+    }
+
+    function everyoneElseRow() {
+      const condition = deviceConditions.everyone_else || null;
+      if (!everyoneElse.profile_id && !condition) return null;
+      return {
+        cells: [
+          ["Everyone else", "Test Wi-Fi clients that aren't saved or unaffected"],
+          ["Any address", everyoneElse.unaffected_devices.length + " unaffected"],
+          everyoneElse.profile_id ? profileName(everyoneElse.profile_id) : "None",
+          conditionCell(condition)
+        ],
+        actions: []
+      };
+    }
+
     function renderDeviceTable() {
+      const rows = devices.map((device) => ({
+        cells: [
+          [device.name, device.id],
+          [device.ipv4_address, device.mac_address || "No MAC address"],
+          profileName(device.profile_id),
+          deviceConditionCell(device.id)
+        ],
+        actions: [
+          ["Edit", () => fillDeviceForm(device)],
+          ["Delete", (button) => deleteDevice(device, button)]
+        ]
+      }));
+      const others = everyoneElseRow();
+      if (others) rows.push(others);
       renderTable(
         "device-table",
         "No devices assigned yet.",
         ["Device", "Address", "Profile", "Condition"],
-        devices.map((device) => ({
-          cells: [
-            [device.name, device.id],
-            [device.ipv4_address, device.mac_address || "No MAC address"],
-            profileName(device.profile_id),
-            deviceConditionCell(device.id)
-          ],
-          actions: [
-            ["Edit", () => fillDeviceForm(device)],
-            ["Delete", (button) => deleteDevice(device, button)]
-          ]
-        }))
+        rows
       );
     }
 
@@ -2041,6 +2097,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     let profiles = [];
     let devices = [];
     let deviceConditions = { applied: false, devices: {} };
+    let everyoneElse = { profile_id: null, unaffected_devices: [] };
+    let lastConnectedDevices = null;
     let groups = [];
     let observedDomainsByDevice = {};
     let connectedDevicesRequestInFlight = false;
@@ -2738,6 +2796,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function renderConnectedDevices(data) {
+      lastConnectedDevices = data;
       const container = element("connected-devices");
       const count = element("connected-count");
       const expandedLabels = new Set(
@@ -2804,6 +2863,10 @@ DASHBOARD_HTML = r"""<!doctype html>
           device.device_type_source === "hostname suggestion" ? " (suggested)" : ""
         );
         details.append(address, metadata, deviceType);
+        const treatment = document.createElement("p");
+        treatment.className = "connected-meta";
+        treatment.textContent = connectedTreatment(device);
+        details.appendChild(treatment);
         if (device.hostname) {
           const hostname = document.createElement("p");
           hostname.className = "connected-meta";
@@ -2893,6 +2956,29 @@ DASHBOARD_HTML = r"""<!doctype html>
           applyProfileToDevice(device, profileSelect.value, applyButton);
         });
         controls.append(profileSelect, applyButton);
+        if (device.unaffected) {
+          // An unaffected client can't get a profile until it leaves the list.
+          const removeButton = document.createElement("button");
+          removeButton.type = "button";
+          removeButton.textContent = "Remove from unaffected";
+          removeButton.addEventListener("click", () => {
+            removeUnaffected(device.mac_address, removeButton);
+          });
+          controls.replaceChildren(removeButton);
+        } else if (!device.assigned_device_id) {
+          const keepButton = document.createElement("button");
+          keepButton.type = "button";
+          keepButton.textContent = "Keep unaffected";
+          keepButton.disabled = !device.mac_address;
+          keepButton.addEventListener("click", () => {
+            keepUnaffected(
+              device.mac_address,
+              device.saved_display_name || device.hostname || "",
+              keepButton
+            );
+          });
+          controls.appendChild(keepButton);
+        }
         row.append(dot, details, state, controls);
         container.appendChild(row);
       });
@@ -3009,6 +3095,78 @@ DASHBOARD_HTML = r"""<!doctype html>
         routerLink.href = data.router.settings_url;
       }
       note.textContent = "The router controls below use the TG3442DE local interface. Keep Ethernet connected so the Pi remains reachable if router Wi-Fi is turned off.";
+    }
+
+    function connectedTreatment(device) {
+      if (device.assigned_profile_id) {
+        const saved = "Saved device: " + profileName(device.assigned_profile_id);
+        // A saved device keeps its own profile even when its address is listed.
+        return device.unaffected ? saved + " (also on the unaffected list)" : saved;
+      }
+      if (device.unaffected) return "Unaffected";
+      if (everyoneElse.profile_id) return "Everyone else: " + profileName(everyoneElse.profile_id);
+      return "Normal connection";
+    }
+
+    function savedChangeMessage(message, result) {
+      if (result.live_applied !== false) return message;
+      return helperConfigured
+        ? message + " The network is reset, so apply the configuration to use it."
+        : message + " It takes effect when the dashboard runs in hardware mode.";
+    }
+
+    async function keepUnaffected(macAddress, name, button) {
+      if (button) setButtonBusy(button, true);
+      showMessage("Adding " + macAddress + " to the unaffected list...", "working");
+      try {
+        const result = await request("/api/unaffected-devices", "POST", {
+          mac_address: macAddress,
+          name: name
+        });
+        refreshAfterSuccess(savedChangeMessage(
+          "Added " + result.unaffected_device.name + " to the unaffected list.", result
+        ));
+        return true;
+      } catch (error) {
+        showMessage(error.message, "error");
+        return false;
+      } finally {
+        if (button) setButtonBusy(button, false);
+      }
+    }
+
+    function removeUnaffected(macAddress, button) {
+      deleteItem(
+        "/api/unaffected-devices/delete",
+        { mac_address: macAddress },
+        "Removed from the unaffected list.",
+        button
+      );
+    }
+
+    function rerenderConnectedDevices() {
+      // Client labels name the everyone-else profile. Leave an open editor alone.
+      const container = element("connected-devices");
+      const activeElement = document.activeElement;
+      const editing = activeElement && container.contains(activeElement) &&
+        activeElement.matches("input, select");
+      if (lastConnectedDevices && !editing) renderConnectedDevices(lastConnectedDevices);
+    }
+
+    async function loadEveryoneElse() {
+      everyoneElse = await request("/api/everyone-else", "GET");
+      element("everyone-else-profile").value = everyoneElse.profile_id || "";
+      renderTable(
+        "unaffected-table",
+        "No unaffected devices.",
+        ["Unaffected device"],
+        everyoneElse.unaffected_devices.map((device) => ({
+          cells: [[device.name, device.mac_address]],
+          actions: [["Remove", (button) => removeUnaffected(device.mac_address, button)]]
+        }))
+      );
+      renderDeviceTable();
+      rerenderConnectedDevices();
     }
 
     async function applyProfileToDevice(device, profileId, button) {
@@ -3777,14 +3935,19 @@ DASHBOARD_HTML = r"""<!doctype html>
         "service-assignment-profile",
         "time-quota-profile",
         "group-profile",
-        "group-data-limit-profile"
+        "group-data-limit-profile",
+        "everyone-else-profile"
       ].forEach((selectId) => {
         const profileSelect = element(selectId);
         profileSelect.replaceChildren();
-        if (selectId === "group-profile") {
+        const emptyLabels = {
+          "group-profile": "Use each device profile",
+          "everyone-else-profile": "None: normal connection"
+        };
+        if (emptyLabels[selectId]) {
           const option = document.createElement("option");
           option.value = "";
-          option.textContent = "Use each device profile";
+          option.textContent = emptyLabels[selectId];
           profileSelect.appendChild(option);
         }
         profiles.forEach((profile) => {
@@ -3794,6 +3957,8 @@ DASHBOARD_HTML = r"""<!doctype html>
           profileSelect.appendChild(option);
         });
       });
+      // Rebuilding a menu drops its choice, and saving None would clear the profile.
+      element("everyone-else-profile").value = everyoneElse.profile_id || "";
     }
 
     async function loadDevicesForSchedule() {
@@ -4138,6 +4303,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         loadQuotas(),
         loadServiceAssignments(),
         loadConditions(),
+        loadEveryoneElse(),
         loadAdminTools()
       ]);
     }
@@ -4248,6 +4414,32 @@ DASHBOARD_HTML = r"""<!doctype html>
       } catch (error) {
         showMessage(error.message, "error");
       }
+    });
+
+    element("everyone-else-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const profileId = element("everyone-else-profile").value || null;
+      try {
+        const result = await request("/api/everyone-else", "POST", { profile_id: profileId });
+        refreshAfterSuccess(savedChangeMessage(
+          profileId
+            ? "Everyone else now gets " + profileName(profileId) + "."
+            : "Everyone else now gets a normal connection.",
+          result
+        ));
+      } catch (error) {
+        showMessage(error.message, "error");
+      }
+    });
+
+    element("unaffected-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const added = await keepUnaffected(
+        element("unaffected-mac").value.trim(),
+        element("unaffected-name").value.trim(),
+        event.submitter || null
+      );
+      if (added) element("unaffected-form").reset();
     });
 
     element("policy-form").addEventListener("submit", async (event) => {
@@ -4779,6 +4971,7 @@ def _connected_device_payload(
     *,
     assignments_by_address: Dict[str, Device],
     labels_by_mac: Dict[str, Dict[str, str]],
+    unaffected_macs: frozenset = frozenset(),
 ) -> Dict[str, Any]:
     """Add saved display details and any matching profile to one station."""
 
@@ -4807,6 +5000,7 @@ def _connected_device_payload(
         "assigned_device_id": assignment.id if assignment is not None else None,
         "assigned_device_name": assignment.name if assignment is not None else None,
         "assigned_profile_id": assignment.profile_id if assignment is not None else None,
+        "unaffected": mac_address in unaffected_macs,
     }
 
 
@@ -4985,6 +5179,16 @@ def _policies_payload(repository: ConfigRepository) -> Dict[str, Any]:
     return {
         "mac": asdict(mac_policy),
         "websites": asdict(website_policy),
+    }
+
+
+def _everyone_else_payload(repository: ConfigRepository) -> Dict[str, Any]:
+    return {
+        "profile_id": repository.get_everyone_else_profile_id(),
+        "unaffected_devices": [
+            {"mac_address": device.mac_address, "name": device.name}
+            for device in repository.list_unaffected_devices()
+        ],
     }
 
 
@@ -5194,6 +5398,10 @@ class ControlServer(HTTPServer):
             return HTTPStatus.OK, "application/json", _json_bytes(
                 _policies_payload(self.repository)
             )
+        if path == "/api/everyone-else":
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                _everyone_else_payload(self.repository)
+            )
         if path == "/api/router":
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {
@@ -5268,11 +5476,15 @@ class ControlServer(HTTPServer):
                 str(device.ipv4_address): device for device in self.repository.list_devices()
             }
             labels_by_mac = self.repository.list_connected_device_labels()
+            unaffected_macs = frozenset(
+                device.mac_address for device in self.repository.list_unaffected_devices()
+            )
             devices = [
                 _connected_device_payload(
                     device,
                     assignments_by_address=assignments_by_address,
                     labels_by_mac=labels_by_mac,
+                    unaffected_macs=unaffected_macs,
                 )
                 for device in devices
             ]
@@ -5339,9 +5551,18 @@ class ControlServer(HTTPServer):
                 # Nothing runs on the network, so describe the saved settings.
                 # The scheduler's runtime plan would advance its rerolls.
                 plan = compile_stored_plan(repository=self.repository)
+            everyone_else = everyone_else_condition(plan)
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {
                     "applied": applied,
+                    "everyone_else": (
+                        None
+                        if everyone_else is None
+                        else {
+                            "condition": everyone_else.condition,
+                            "reasons": list(everyone_else.reasons),
+                        }
+                    ),
                     "devices": {
                         device_id: {"condition": state.condition, "reasons": list(state.reasons)}
                         for device_id, state in device_conditions(
@@ -5574,6 +5795,9 @@ class ControlServer(HTTPServer):
                 device = _device_from_payload(payload)
             except (KeyError, TypeError, ValueError) as error:
                 return _bad_request("invalid device configuration", error)
+            conflict = self._unaffected_conflict(device.mac_address)
+            if conflict is not None:
+                return conflict
             if self.repository.get_device(device.id) is None:
                 capacity_error = self._capacity_error(adding=1)
                 if capacity_error is not None:
@@ -6015,6 +6239,65 @@ class ControlServer(HTTPServer):
                 _time_quota_payload(refreshed, repository=self.repository),
             )
 
+        if path == "/api/everyone-else":
+            if "profile_id" not in payload:
+                return _bad_request(
+                    "invalid everyone-else profile", KeyError("profile_id is required")
+                )
+            profile_id = payload["profile_id"]
+            if profile_id is not None and (
+                not isinstance(profile_id, str) or self.repository.get_profile(profile_id) is None
+            ):
+                return _bad_request(
+                    "invalid everyone-else profile", ValueError("profile does not exist")
+                )
+            if profile_id is not None and self.repository.get_everyone_else_profile_id() is None:
+                capacity_error = self._capacity_error(adding=1)
+                if capacity_error is not None:
+                    return capacity_error
+            self.repository.save_everyone_else_profile_id(profile_id)
+            return self._apply_saved_change(
+                "everyone_else", _everyone_else_payload(self.repository)
+            )
+
+        if path == "/api/unaffected-devices":
+            try:
+                device = UnaffectedDevice(
+                    mac_address=payload["mac_address"], name=payload.get("name") or ""
+                )
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid unaffected device", error)
+            saved = self.repository.get_device_by_mac_address(device.mac_address)
+            if saved is not None:
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+                    {
+                        "error": (
+                            f"{device.mac_address} belongs to the saved device {saved.name}; "
+                            "delete that device first"
+                        )
+                    }
+                )
+            try:
+                self.repository.save_unaffected_device(device)
+            except StorageError as error:
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
+            return self._apply_saved_change(
+                "unaffected_device", {"mac_address": device.mac_address, "name": device.name}
+            )
+
+        if path == "/api/unaffected-devices/delete":
+            try:
+                mac_address = normalize_mac_address(_required_text(payload, "mac_address"))
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid unaffected device delete request", error)
+            if not self.repository.delete_unaffected_device(mac_address):
+                return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                    {"error": "unaffected device does not exist"}
+                )
+            return self._apply_saved_change(
+                "unaffected_device", {"mac_address": mac_address, "deleted": True}
+            )
+
         if path == "/api/policies":
             try:
                 mac_policy, website_policy = _policies_from_payload(payload)
@@ -6203,6 +6486,9 @@ class ControlServer(HTTPServer):
             device = _connected_device_from_payload(payload, self.repository)
         except (KeyError, TypeError, ValueError) as error:
             return _bad_request("invalid connected-device profile assignment", error)
+        conflict = self._unaffected_conflict(device.mac_address)
+        if conflict is not None:
+            return conflict
         try:
             snapshot = self.helper_client.connected_device_snapshot()
         except HelperClientError:
@@ -6328,6 +6614,18 @@ class ControlServer(HTTPServer):
         response.setdefault("live_applied", status == HTTPStatus.OK)
         return status, content_type, _json_bytes(response)
 
+    def _unaffected_conflict(
+        self, mac_address: Optional[str]
+    ) -> Optional[Tuple[int, str, bytes]]:
+        """Refuse to save a device whose MAC address is on the unaffected list."""
+
+        listed = {device.mac_address for device in self.repository.list_unaffected_devices()}
+        if mac_address is None or mac_address not in listed:
+            return None
+        return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+            {"error": f"{mac_address} is on the unaffected list; remove it there first"}
+        )
+
     def _capacity_error(self, *, adding: int) -> Optional[Tuple[int, str, bytes]]:
         """Refuse a change that needs more traffic classes than the kernel allows."""
 
@@ -6336,6 +6634,7 @@ class ControlServer(HTTPServer):
             + sum(quota.enabled for quota in self.repository.list_service_quotas())
             + sum(quota.enabled for quota in self.repository.list_time_quotas())
             + sum(assignment.enabled for assignment in self.repository.list_service_assignments())
+            + (self.repository.get_everyone_else_profile_id() is not None)
         )
         if in_use + adding <= MAX_SHAPED_MARKS_PER_PLAN:
             return None
@@ -7061,10 +7360,9 @@ def _settings_from_payload(payload: Dict[str, Any]) -> SavedSettings:
         raise ValueError("the file is not a JitterSim settings export this version can read")
     now = int(time.time())
 
-    def items(key: str, parse: Any) -> tuple:
-        values = payload.get(key, [])
+    def parse_items(label: str, values: Any, parse: Any) -> tuple:
         if not isinstance(values, list):
-            raise ValueError(f"{key} must be a list")
+            raise ValueError(f"{label} must be a list")
         parsed = []
         for index, value in enumerate(values):
             try:
@@ -7072,15 +7370,32 @@ def _settings_from_payload(payload: Dict[str, Any]) -> SavedSettings:
                     raise ValueError("must be an object")
                 parsed.append(parse(value))
             except KeyError as error:
-                raise ValueError(f"{key}[{index}] is missing {error.args[0]}") from error
+                raise ValueError(f"{label}[{index}] is missing {error.args[0]}") from error
             except (TypeError, ValueError) as error:
-                raise ValueError(f"{key}[{index}]: {error}") from error
+                raise ValueError(f"{label}[{index}]: {error}") from error
         return tuple(parsed)
+
+    def items(key: str, parse: Any) -> tuple:
+        return parse_items(key, payload.get(key, []), parse)
 
     policies = payload.get("policies", {})
     if not isinstance(policies, dict):
         raise ValueError("policies must be an object")
     mac_policy, website_policy = _policies_from_payload(policies)
+    # Exports from before the everyone-else profile have no such section.
+    everyone_else = payload.get("everyone_else", {})
+    if not isinstance(everyone_else, dict):
+        raise ValueError("everyone_else must be an object")
+    everyone_else_profile_id = everyone_else.get("profile_id")
+    if everyone_else_profile_id is not None and not isinstance(everyone_else_profile_id, str):
+        raise ValueError("everyone_else.profile_id must be a profile ID or null")
+    unaffected_devices = parse_items(
+        "everyone_else.unaffected_devices",
+        everyone_else.get("unaffected_devices", []),
+        lambda value: UnaffectedDevice(
+            mac_address=value["mac_address"], name=value.get("name") or ""
+        ),
+    )
     # Usage starts again from zero on the new installation.
     return SavedSettings(
         profiles=items("profiles", _profile_from_payload),
@@ -7148,6 +7463,8 @@ def _settings_from_payload(payload: Dict[str, Any]) -> SavedSettings:
                 enabled=value.get("enabled", True),
             ),
         ),
+        everyone_else_profile_id=everyone_else_profile_id,
+        unaffected_devices=unaffected_devices,
     )
 
 

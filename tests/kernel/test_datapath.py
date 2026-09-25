@@ -12,19 +12,24 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from ipaddress import IPv4Address
 
 from jittersim.config.models import Device, Impairment, MacPolicy, Profile
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import compile_plan
-from jittersim.engine.plan import ServiceAssignmentRule, ServiceQuotaRule
+from jittersim.engine.plan import EveryoneElseRule, ServiceAssignmentRule, ServiceQuotaRule
 from jittersim.measure import load_run
 from jittersim.networking.applier import ApplyError, NetworkApplier
 from jittersim.networking.helper import HelperService
 
 from .lab import (
     CLIENT,
+    CLIENT_MAC,
+    OTHER_CLIENT,
+    OTHER_CLIENT_ADDRESSES,
+    OTHER_CLIENT_MAC,
     PI,
     ROUTER_ADDRESS,
     TOPOLOGY,
@@ -41,6 +46,26 @@ ENABLED = (
     and all(shutil.which(tool) for tool in ("ip", "tc", "nft", "ping"))
 )
 NORMAL = Profile(id="normal", name="Normal")
+# Sends a DHCP-style request from 0.0.0.0, like a client that has no address
+# yet. A raw frame is needed because the kernel would pick a real source.
+DHCP_REQUEST_SENDER = r"""
+import socket, struct, sys
+
+interface, mac = sys.argv[1], bytes.fromhex(sys.argv[2].replace(":", ""))
+payload = b"\x01\x01\x06\x00" + bytes(236)
+udp = struct.pack("!HHHH", 68, 67, 8 + len(payload), 0) + payload
+header = struct.pack(
+    "!BBHHHBBH4s4s", 0x45, 0, 20 + len(udp), 0, 0, 64, 17, 0, bytes(4), b"\xff" * 4
+)
+checksum = sum(struct.unpack("!10H", header))
+while checksum >> 16:
+    checksum = (checksum & 0xFFFF) + (checksum >> 16)
+header = header[:10] + struct.pack("!H", ~checksum & 0xFFFF) + header[12:]
+with socket.socket(socket.AF_PACKET, socket.SOCK_RAW) as sender:
+    sender.bind((interface, 0))
+    for _ in range(3):
+        sender.send(b"\xff" * 6 + mac + b"\x08\x00" + header + udp)
+"""
 
 
 def device(device_id: str, last_octet: int, profile_id: str) -> Device:
@@ -76,6 +101,27 @@ class LinuxDatapathTests(unittest.TestCase):
         result = _in(namespace, *argv, destination, check=False)
         replies = [int(seq) for seq in re.findall(r"icmp_seq=(\d+)", result.stdout)]
         return result.returncode == 0, replies
+
+    def apply_everyone_else(self, devices, profile, *, unaffected=(), blocked=False):
+        rule = EveryoneElseRule(
+            mark=0,
+            upload_impairment=profile.upload,
+            download_impairment=profile.download,
+            unaffected_macs=tuple(unaffected),
+            blocked=blocked,
+        )
+        plan = compile_plan(devices=devices, profiles={NORMAL.id: NORMAL}, everyone_else=rule)
+        self.applier.apply(plan=plan)
+        return plan
+
+    def round_trip(self, source=None, *, namespace=CLIENT):
+        argv = ["ping", "-n", "-c", "4", "-i", "0.2", "-W", "2"]
+        if source:
+            argv += ["-I", source]
+        result = _in(namespace, *argv, ROUTER_ADDRESS, check=False)
+        times = [float(value) for value in re.findall(r"time=([\d.]+) ms", result.stdout)]
+        self.assertTrue(times, result.stdout + result.stderr)
+        return sum(times) / len(times)
 
     def netem_lines(self, interface="eth0"):
         output = _in(PI, "tc", "qdisc", "show", "dev", interface).stdout
@@ -337,6 +383,83 @@ class LinuxDatapathTests(unittest.TestCase):
         rules = _in(PI, "nft", "list", "table", "inet", "jittersim").stdout
         self.assertIn("deny listed test client", rules)
 
+    def test_disabled_mac_filtering_lets_a_block_listed_client_through(self) -> None:
+        for mode, reachable in (("disabled", True), ("denylist", False)):
+            with self.subTest(mode=mode):
+                policy = MacPolicy(mode=mode, denylist=(CLIENT_MAC,))
+                self.applier.apply(plan=compile_plan(devices=(), profiles={}, mac_policy=policy))
+
+                self.assertEqual(self.ping("192.168.50.12")[0], reachable)
+
+
+    def test_everyone_else_gets_its_profile_except_saved_and_unaffected_clients(self) -> None:
+        self.apply_everyone_else(
+            [device("a-phone", 11, "normal")],
+            Profile(id="slow", name="Slow", upload=Impairment(delay_ms=100)),
+            unaffected=(OTHER_CLIENT_MAC,),
+        )
+
+        self.assertGreater(self.round_trip("192.168.50.10"), 90, "everyone else")
+        self.assertLess(self.round_trip("192.168.50.11"), 50, "a saved device")
+        self.assertLess(self.round_trip(namespace=OTHER_CLIENT), 50, "an unaffected client")
+
+    def test_an_unaffected_client_keeps_a_normal_download_on_any_address(self) -> None:
+        # Only downloads are delayed, so this checks the connection mark.
+        self.apply_everyone_else(
+            [],
+            Profile(id="slow", name="Slow", download=Impairment(delay_ms=100)),
+            unaffected=(OTHER_CLIENT_MAC,),
+        )
+
+        for address in OTHER_CLIENT_ADDRESSES:
+            with self.subTest(address=address):
+                self.assertLess(self.round_trip(address, namespace=OTHER_CLIENT), 50)
+        self.assertGreater(self.round_trip("192.168.50.10"), 90)
+
+    def test_an_open_connection_follows_the_list(self) -> None:
+        both_ways = Impairment(delay_ms=50)
+        profile = Profile(id="slow", name="Slow", upload=both_ways, download=both_ways)
+        self.apply_everyone_else([], profile, unaffected=(OTHER_CLIENT_MAC, CLIENT_MAC))
+        # One ping process keeps one connection, so its later replies show the new list.
+        ping = subprocess.Popen(
+            ["ip", "netns", "exec", OTHER_CLIENT, "ping", "-n", "-c", "30", "-i", "0.1",
+             ROUTER_ADDRESS],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        time.sleep(1)
+        self.apply_everyone_else([], profile, unaffected=(CLIENT_MAC,))
+        output = ping.communicate(timeout=30)[0]
+
+        times = [float(value) for value in re.findall(r"time=([\d.]+) ms", output)]
+        self.assertLess(max(times[:5]), 50, times)
+        self.assertGreater(min(times[-5:]), 90, times)
+
+    def test_an_outage_disconnects_only_everyone_else(self) -> None:
+        self.apply_everyone_else(
+            [device("a-phone", 11, "normal")], NORMAL, unaffected=(OTHER_CLIENT_MAC,), blocked=True
+        )
+
+        # Through the Pi, and to the Pi itself.
+        for destination in (ROUTER_ADDRESS, "192.168.50.1"):
+            with self.subTest(destination=destination):
+                self.assertFalse(self.ping("192.168.50.10", destination=destination)[0])
+                self.assertTrue(self.ping("192.168.50.11", destination=destination)[0])
+                self.assertTrue(self.ping(namespace=OTHER_CLIENT, destination=destination)[0])
+
+    def test_an_everyone_else_outage_still_lets_clients_ask_for_an_address(self) -> None:
+        self.apply_everyone_else([device("a-phone", 11, "normal")], NORMAL, blocked=True)
+        # Count DHCP requests that get past JitterSim's input chain.
+        _in(PI, "nft", "add", "table", "inet", "probe")
+        self.addCleanup(_in, PI, "nft", "delete", "table", "inet", "probe", check=False)
+        _in(PI, "nft", "add", "chain", "inet", "probe", "input",
+            "{ type filter hook input priority 10; }")
+        _in(PI, "nft", "add", "rule", "inet", "probe", "input", "udp", "dport", "67", "counter")
+
+        _in(CLIENT, sys.executable, "-c", DHCP_REQUEST_SENDER, "c0", CLIENT_MAC)
+
+        rules = _in(PI, "nft", "list", "table", "inet", "probe").stdout
+        self.assertEqual(re.search(r"counter packets (\d+)", rules).group(1), "3", rules)
 
 if __name__ == "__main__":
     unittest.main()

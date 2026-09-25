@@ -23,7 +23,13 @@ from jittersim.networking.helper import HelperClient, HelperClientError
 
 from .codec import PlanCodecError, plan_from_payload, plan_to_payload
 from .compiler import PlanError, compile_plan
-from .plan import NetworkPlan, ServiceAssignmentRule, ServiceQuotaRule
+from .plan import (
+    EVERYONE_ELSE_QUEUE_ID,
+    EveryoneElseRule,
+    NetworkPlan,
+    ServiceAssignmentRule,
+    ServiceQuotaRule,
+)
 from .progression import interpolate_profile, progression_factor
 from .randomizer import (
     outage_duration_seconds,
@@ -390,75 +396,14 @@ class RuntimeScheduler:
             if selected_profile is None:
                 raise PlanError(f"device {device.id} references missing profile {source_profile_id}")
             active_device_ids.add(device.id)
-            roll = self._rolls.get(device.id)
-            if (
-                roll is None
-                or roll.profile_id != source_key
-                or roll.source_profiles != source_profiles
-            ):
-                roll = _DeviceRollState(
-                    profile_id=source_key,
-                    source_profiles=source_profiles,
-                    runtime_profile=selected_profile,
-                    roll_number=0,
-                    next_roll_at=now + max(1, selected_profile.reroll_interval_seconds),
-                    next_outage_check_at=now
-                    + max(
-                        1,
-                        selected_profile.outage_interval_seconds
-                        or selected_profile.reroll_interval_seconds,
-                    ),
-                    outage_until=0,
-                )
-                self._rolls[device.id] = roll
-
-            if progression is not None:
-                generator = seeded_generator(
-                    profile=selected_profile,
-                    device_id=device.id,
-                    roll_number=roll.roll_number,
-                )
-                roll.runtime_profile = reroll_profile(
-                    profile=selected_profile,
-                    generator=generator,
-                )
-
-            if selected_profile.reroll_interval_seconds and now >= roll.next_roll_at:
-                generator = seeded_generator(
-                    profile=selected_profile,
-                    device_id=device.id,
-                    roll_number=roll.roll_number,
-                )
-                roll.runtime_profile = reroll_profile(
-                    profile=selected_profile,
-                    generator=generator,
-                )
-                roll.roll_number += 1
-                roll.next_roll_at = now + max(
-                    1,
-                    reroll_interval_seconds(profile=selected_profile, generator=generator),
-                )
-
-            outage_interval = selected_profile.outage_interval_seconds or selected_profile.reroll_interval_seconds
-            if outage_interval and now >= roll.next_outage_check_at:
-                # Count outage checks separately: the reroll number stays at 0
-                # when rerolls are off, which would repeat the same outcome.
-                generator = seeded_generator(
-                    profile=selected_profile,
-                    device_id=device.id,
-                    roll_number=100_000 + roll.outage_check_number,
-                )
-                roll.outage_check_number += 1
-                if outage_is_selected(profile=selected_profile, generator=generator):
-                    duration = outage_duration_seconds(
-                        profile=selected_profile,
-                        generator=generator,
-                    )
-                    roll.outage_until = now + duration if duration else now
-                roll.next_outage_check_at = now + max(
-                    1,
-                    outage_interval_seconds(profile=selected_profile, generator=generator),
-                )
+            roll = self._roll(
+                key=device.id,
+                selected_profile=selected_profile,
+                source_key=source_key,
+                source_profiles=source_profiles,
+                now=now,
+                reroll_each_tick=progression is not None,
+            )
             if roll.outage_until > now:
                 blocked_addresses.append(device.ipv4_address)
 
@@ -467,6 +412,32 @@ class RuntimeScheduler:
             runtime_profile_id = f"runtime-{len(runtime_devices) + 1}"
             runtime_profiles[runtime_profile_id] = roll.runtime_profile
             runtime_devices.append(replace(device, profile_id=runtime_profile_id))
+
+        everyone_else = None
+        everyone_else_profile_id = repository.get_everyone_else_profile_id()
+        if everyone_else_profile_id is not None:
+            profile = profiles.get(everyone_else_profile_id)
+            if profile is None:
+                raise PlanError(
+                    f"everyone else references missing profile {everyone_else_profile_id}"
+                )
+            active_device_ids.add(EVERYONE_ELSE_QUEUE_ID)
+            roll = self._roll(
+                key=EVERYONE_ELSE_QUEUE_ID,
+                selected_profile=profile,
+                source_key=profile.id,
+                source_profiles=profile,
+                now=now,
+            )
+            everyone_else = EveryoneElseRule(
+                mark=0,
+                upload_impairment=roll.runtime_profile.upload,
+                download_impairment=roll.runtime_profile.download,
+                unaffected_macs=tuple(
+                    unaffected.mac_address for unaffected in repository.list_unaffected_devices()
+                ),
+                blocked=roll.outage_until > now,
+            )
 
         self._rolls = {
             device_id: roll
@@ -514,7 +485,93 @@ class RuntimeScheduler:
             blocked_device_addresses=blocked_addresses,
             service_quota_rules=service_quota_rules,
             service_assignment_rules=service_assignment_rules,
+            everyone_else=everyone_else,
         )
+
+    def _roll(
+        self,
+        *,
+        key: str,
+        selected_profile: Profile,
+        source_key: str,
+        source_profiles: object,
+        now: float,
+        reroll_each_tick: bool = False,
+    ) -> _DeviceRollState:
+        """Advance the rerolls and outage checks kept under one key."""
+
+        roll = self._rolls.get(key)
+        if (
+            roll is None
+            or roll.profile_id != source_key
+            or roll.source_profiles != source_profiles
+        ):
+            roll = _DeviceRollState(
+                profile_id=source_key,
+                source_profiles=source_profiles,
+                runtime_profile=selected_profile,
+                roll_number=0,
+                next_roll_at=now + max(1, selected_profile.reroll_interval_seconds),
+                next_outage_check_at=now
+                + max(
+                    1,
+                    selected_profile.outage_interval_seconds
+                    or selected_profile.reroll_interval_seconds,
+                ),
+                outage_until=0,
+            )
+            self._rolls[key] = roll
+
+        if reroll_each_tick:
+            generator = seeded_generator(
+                profile=selected_profile,
+                device_id=key,
+                roll_number=roll.roll_number,
+            )
+            roll.runtime_profile = reroll_profile(
+                profile=selected_profile,
+                generator=generator,
+            )
+
+        if selected_profile.reroll_interval_seconds and now >= roll.next_roll_at:
+            generator = seeded_generator(
+                profile=selected_profile,
+                device_id=key,
+                roll_number=roll.roll_number,
+            )
+            roll.runtime_profile = reroll_profile(
+                profile=selected_profile,
+                generator=generator,
+            )
+            roll.roll_number += 1
+            roll.next_roll_at = now + max(
+                1,
+                reroll_interval_seconds(profile=selected_profile, generator=generator),
+            )
+
+        outage_interval = (
+            selected_profile.outage_interval_seconds or selected_profile.reroll_interval_seconds
+        )
+        if outage_interval and now >= roll.next_outage_check_at:
+            # Count outage checks separately: the reroll number stays at 0
+            # when rerolls are off, which would repeat the same outcome.
+            generator = seeded_generator(
+                profile=selected_profile,
+                device_id=key,
+                roll_number=100_000 + roll.outage_check_number,
+            )
+            roll.outage_check_number += 1
+            if outage_is_selected(profile=selected_profile, generator=generator):
+                duration = outage_duration_seconds(
+                    profile=selected_profile,
+                    generator=generator,
+                )
+                roll.outage_until = now + duration if duration else now
+            roll.next_outage_check_at = now + max(
+                1,
+                outage_interval_seconds(profile=selected_profile, generator=generator),
+            )
+        return roll
 
     def _build_service_quota_rules(
         self,

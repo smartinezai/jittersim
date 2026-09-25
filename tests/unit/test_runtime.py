@@ -1,6 +1,7 @@
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from datetime import datetime
 from ipaddress import IPv4Address
 from pathlib import Path
@@ -20,6 +21,7 @@ from jittersim.config.models import (
     ServiceQuota,
     TimeQuota,
     Timer,
+    UnaffectedDevice,
     time_quota_counter_id,
 )
 from jittersim.config.storage import ConfigRepository
@@ -960,6 +962,80 @@ class RuntimeSchedulerTests(unittest.TestCase):
         self.assertEqual(helper.resets, 1)
         self.assertEqual(len(helper.plans), 1)
 
+
+class EveryoneElseSchedulingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.repository = ConfigRepository(":memory:")
+        self.addCleanup(self.repository.close)
+        self.scheduler = RuntimeScheduler(database_path=":memory:", helper_client=None)
+
+    def test_no_everyone_else_profile_means_no_rule(self) -> None:
+        plan = self.scheduler.build_plan(repository=self.repository, now=1_000)
+
+        self.assertIsNone(plan.everyone_else)
+
+    def test_everyone_else_gets_its_profile_and_the_unaffected_addresses(self) -> None:
+        self.repository.save_profile(
+            Profile(id="slow", name="Slow", upload=Impairment(delay_ms=100))
+        )
+        self.repository.save_everyone_else_profile_id("slow")
+        self.repository.save_unaffected_device(UnaffectedDevice("aa:aa:aa:aa:aa:aa"))
+
+        plan = self.scheduler.build_plan(repository=self.repository, now=1_000)
+
+        self.assertEqual(plan.everyone_else.upload_impairment, Impairment(delay_ms=100))
+        self.assertEqual(plan.everyone_else.unaffected_macs, ("aa:aa:aa:aa:aa:aa",))
+        self.assertFalse(plan.everyone_else.blocked)
+
+    def test_everyone_else_follows_the_profile_outages(self) -> None:
+        self.repository.save_profile(
+            Profile(
+                id="flaky",
+                name="Flaky",
+                outage_probability=100,
+                outage_duration_seconds=60,
+                outage_interval_seconds=10,
+            )
+        )
+        self.repository.save_everyone_else_profile_id("flaky")
+
+        first = self.scheduler.build_plan(repository=self.repository, now=1_000)
+        later = self.scheduler.build_plan(repository=self.repository, now=1_011)
+
+        self.assertFalse(first.everyone_else.blocked)
+        self.assertTrue(later.everyone_else.blocked)
+
+    def _start_an_everyone_else_outage(self) -> Profile:
+        profile = Profile(
+            id="flaky",
+            name="Flaky",
+            outage_probability=100,
+            outage_duration_seconds=60,
+            outage_interval_seconds=10,
+        )
+        self.repository.save_profile(profile)
+        self.repository.save_everyone_else_profile_id("flaky")
+        self.scheduler.build_plan(repository=self.repository, now=1_000)
+        plan = self.scheduler.build_plan(repository=self.repository, now=1_011)
+        self.assertTrue(plan.everyone_else.blocked)
+        return profile
+
+    def test_editing_the_everyone_else_profile_starts_a_fresh_roll(self) -> None:
+        profile = self._start_an_everyone_else_outage()
+        self.repository.save_profile(replace(profile, upload=Impairment(delay_ms=50)))
+
+        plan = self.scheduler.build_plan(repository=self.repository, now=1_012)
+
+        self.assertFalse(plan.everyone_else.blocked)
+        self.assertEqual(plan.everyone_else.upload_impairment, Impairment(delay_ms=50))
+
+    def test_pausing_forgets_the_everyone_else_roll(self) -> None:
+        self._start_an_everyone_else_outage()
+        self.scheduler.pause()
+
+        plan = self.scheduler.build_plan(repository=self.repository, now=1_012)
+
+        self.assertFalse(plan.everyone_else.blocked)
 
 if __name__ == "__main__":
     unittest.main()

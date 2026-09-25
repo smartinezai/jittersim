@@ -21,7 +21,14 @@ from jittersim.api.server import (
     ControlServer,
     _build_parser,
 )
-from jittersim.config.models import DataLimit, Device, DomainObservation, Impairment, Profile
+from jittersim.config.models import (
+    DataLimit,
+    Device,
+    DomainObservation,
+    Impairment,
+    Profile,
+    UnaffectedDevice,
+)
 from jittersim.config.storage import ConfigRepository
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.service import compile_stored_plan
@@ -939,6 +946,41 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(self.repository.list_service_assignments(), copied)
         self.assertEqual([assignment.id for assignment in copied], ["video"])
 
+    def test_import_keeps_the_everyone_else_settings(self) -> None:
+        self.repository.save_everyone_else_profile_id("slow")
+        self.repository.save_unaffected_device(UnaffectedDevice("aa:aa:aa:aa:aa:aa", "Laptop"))
+        exported = self._export(self.server)
+        self.repository.save_everyone_else_profile_id(None)
+        self.repository.delete_unaffected_device("aa:aa:aa:aa:aa:aa")
+
+        status, _, body = self.server.write_response_for("/api/import", exported)
+
+        self.assertEqual(status, 200, body)
+        self.assertEqual(self.repository.get_everyone_else_profile_id(), "slow")
+        self.assertEqual(
+            self.repository.list_unaffected_devices(),
+            (UnaffectedDevice("aa:aa:aa:aa:aa:aa", "Laptop"),),
+        )
+
+    def test_an_export_without_everyone_else_settings_still_imports(self) -> None:
+        exported = self._export(self.server)
+        del exported["everyone_else"]
+        self.repository.save_everyone_else_profile_id("slow")
+
+        status, _, body = self.server.write_response_for("/api/import", exported)
+
+        self.assertEqual(status, 200, body)
+        self.assertIsNone(self.repository.get_everyone_else_profile_id())
+
+    def test_import_names_a_bad_unaffected_device(self) -> None:
+        exported = self._export(self.server)
+        exported["everyone_else"] = {"unaffected_devices": [{"mac_address": "nope"}]}
+
+        status, _, body = self.server.write_response_for("/api/import", exported)
+
+        self.assertEqual(status, 400)
+        self.assertIn("everyone_else.unaffected_devices[0]", json.loads(body)["error"])
+
     def _export(self, server):
         status, _, body = server.response_for("/api/export")
         self.assertEqual(status, 200)
@@ -1590,6 +1632,7 @@ class ControlServerTests(unittest.TestCase):
                         "assigned_device_id": None,
                         "assigned_device_name": None,
                         "assigned_profile_id": None,
+                        "unaffected": False,
                     }
                 ],
             },
@@ -1996,12 +2039,16 @@ class ControlServerTests(unittest.TestCase):
             self.skipTest("Node.js is required to run the lookup")
         script = DASHBOARD_HTML.split("<script>", 1)[1].split("</script>", 1)[0]
         labels = re.search(r"const CONDITION_LABELS = \{.*?\};", script, re.S).group(0)
-        body = script.split("    function deviceConditionCell(", 1)[1].split("\n    }\n", 1)[0]
+        def function(name):
+            body = script.split(f"    function {name}(", 1)[1].split("\n    }\n", 1)[0]
+            return f"function {name}({body}\n}}\n"
+
         harness = (
             labels
             + "\nconst deviceConditions = "
             + "{applied: true, devices: {alice: {condition: 'normal'}}};\n"
-            + f"function deviceConditionCell({body}\n}}\n"
+            + function("conditionCell")
+            + function("deviceConditionCell")
             # A device may be called "constructor", like a built-in property.
             + "console.log(JSON.stringify([deviceConditionCell('constructor'),"
             + " deviceConditionCell('alice')]));\n"
@@ -2010,6 +2057,154 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), ["—", ["Normal", "No network effects"]])
+
+    def test_dashboard_has_the_everyone_else_controls(self) -> None:
+        for fragment in (
+            'id="everyone-else-form"',
+            'id="everyone-else-profile"',
+            'id="unaffected-form"',
+            'id="unaffected-table"',
+            'request("/api/everyone-else", "GET")',
+            '"/api/unaffected-devices/delete"',
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, DASHBOARD_HTML)
+        refresh = DASHBOARD_HTML.split("async function refresh() {", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("loadEveryoneElse()", refresh)
+
+    def _run_dashboard_functions(self, names, setup, calls):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is required to run the dashboard functions")
+        script = DASHBOARD_HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+
+        def function(name):
+            for kind in ("async function", "function"):
+                marker = f"    {kind} {name}("
+                if marker in script:
+                    body = script.split(marker, 1)[1].split("\n    }\n", 1)[0]
+                    return f"{kind} {name}({body}\n}}\n"
+            raise AssertionError(f"{name} is not in the dashboard script")
+
+        harness = setup + "".join(function(name) for name in names) + calls
+        result = subprocess.run([node, "-e", harness], capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_dashboard_labels_what_each_connected_client_gets(self) -> None:
+        labels = self._run_dashboard_functions(
+            ["profileName", "connectedTreatment"],
+            "const profiles = [{id: 'slow', name: 'Slow'}, {id: '3g', name: '3G'}];\n"
+            "let everyoneElse = {profile_id: null, unaffected_devices: []};\n",
+            "const labels = [\n"
+            "  connectedTreatment({unaffected: true, assigned_profile_id: null}),\n"
+            "  connectedTreatment({unaffected: false, assigned_profile_id: 'slow'}),\n"
+            "  connectedTreatment({unaffected: false, assigned_profile_id: null}),\n"
+            # A saved device keeps its own profile even when its address is listed.
+            "  connectedTreatment({unaffected: true, assigned_profile_id: 'slow'}),\n"
+            "];\n"
+            "everyoneElse = {profile_id: '3g', unaffected_devices: []};\n"
+            "labels.push(connectedTreatment({unaffected: false, assigned_profile_id: null}));\n"
+            "console.log(JSON.stringify(labels));\n",
+        )
+
+        self.assertEqual(
+            labels,
+            [
+                "Unaffected",
+                "Saved device: Slow",
+                "Normal connection",
+                "Saved device: Slow (also on the unaffected list)",
+                "Everyone else: 3G",
+            ],
+        )
+
+    def test_dashboard_messages_say_when_a_change_takes_effect(self) -> None:
+        messages = self._run_dashboard_functions(
+            ["savedChangeMessage"],
+            "let helperConfigured = true;\n",
+            "const messages = [\n"
+            "  savedChangeMessage('Saved.', {live_applied: true}),\n"
+            "  savedChangeMessage('Saved.', {live_applied: false}),\n"
+            "];\n"
+            "helperConfigured = false;\n"
+            "messages.push(savedChangeMessage('Saved.', {live_applied: false}));\n"
+            "console.log(JSON.stringify(messages));\n",
+        )
+
+        self.assertEqual(
+            messages,
+            [
+                "Saved.",
+                "Saved. The network is reset, so apply the configuration to use it.",
+                "Saved. It takes effect when the dashboard runs in hardware mode.",
+            ],
+        )
+
+    def test_dashboard_profile_menus_keep_the_everyone_else_choice(self) -> None:
+        values = self._run_dashboard_functions(
+            ["loadProfiles"],
+            "let profiles = [];\n"
+            "const everyoneElse = {profile_id: '3g', unaffected_devices: []};\n"
+            "const elements = {};\n"
+            "function element(id) {\n"
+            "  elements[id] = elements[id] || {\n"
+            "    options: [], value: '',\n"
+            "    replaceChildren() { this.options = []; this.value = ''; },\n"
+            "    appendChild(option) {\n"
+            "      this.options.push(option);\n"
+            "      if (this.options.length === 1) this.value = option.value;\n"
+            "    },\n"
+            "  };\n"
+            "  return elements[id];\n"
+            "}\n"
+            "const document = {createElement: () => ({value: '', textContent: ''})};\n"
+            "async function request() {\n"
+            "  return {profiles: [{id: 'normal', name: 'Normal'}, {id: '3g', name: '3G'}]};\n"
+            "}\n"
+            "function renderProfileTable() {}\n",
+            "loadProfiles().then(() => {\n"
+            "  console.log(JSON.stringify(elements['everyone-else-profile'].value));\n"
+            "});\n",
+        )
+
+        # Rebuilding the menu must not show None, or Save would clear the profile.
+        self.assertEqual(values, "3g")
+
+    def test_dashboard_relabels_clients_when_everyone_else_changes(self) -> None:
+        load = DASHBOARD_HTML.split("async function loadEveryoneElse() {", 1)[1]
+        load = load.split("\n    }\n", 1)[0]
+
+        self.assertIn("rerenderConnectedDevices()", load)
+        self.assertIn("function rerenderConnectedDevices()", DASHBOARD_HTML)
+
+    def test_dashboard_lists_everyone_else_with_the_devices(self) -> None:
+        rows = self._run_dashboard_functions(
+            ["profileName", "conditionCell", "everyoneElseRow"],
+            "const CONDITION_LABELS = {normal: 'Normal', degraded: 'Degraded'};\n"
+            "const profiles = [{id: '3g', name: '3G'}];\n"
+            "let everyoneElse = {profile_id: null, unaffected_devices: []};\n"
+            "let deviceConditions = {applied: false, devices: {}, everyone_else: null};\n",
+            "const rows = [everyoneElseRow()];\n"
+            "everyoneElse = {profile_id: '3g', unaffected_devices: [{mac_address: 'x'}]};\n"
+            "deviceConditions.everyone_else = "
+            "{condition: 'degraded', reasons: ['upload: delay 100 ms']};\n"
+            "rows.push(everyoneElseRow().cells);\n"
+            "console.log(JSON.stringify(rows));\n",
+        )
+
+        self.assertEqual(
+            rows,
+            [
+                None,
+                [
+                    ["Everyone else", "Test Wi-Fi clients that aren't saved or unaffected"],
+                    ["Any address", "1 unaffected"],
+                    "3G",
+                    ["Degraded", "upload: delay 100 ms"],
+                ],
+            ],
+        )
 
     def test_dashboard_offers_presets_and_burst_loss(self) -> None:
         for fragment in (
@@ -2499,6 +2694,7 @@ class ControlServerTests(unittest.TestCase):
                 "devices": {
                     "alice": {"condition": "degraded", "reasons": ["upload: delay 3000 ms"]}
                 },
+                "everyone_else": None,
             },
         )
 
@@ -2543,6 +2739,180 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(
             conditions["devices"]["alice"],
             {"condition": "offline", "reasons": ["MAC address denied"]},
+        )
+
+    def test_everyone_else_profile_round_trips(self) -> None:
+        status, _, body = self.server.write_response_for(
+            "/api/everyone-else", {"profile_id": "slow"}
+        )
+
+        self.assertEqual(status, 200, body)
+        self.assertEqual(
+            json.loads(self.server.response_for("/api/everyone-else")[2]),
+            {"profile_id": "slow", "unaffected_devices": []},
+        )
+        self.server.write_response_for("/api/everyone-else", {"profile_id": None})
+        self.assertIsNone(self.repository.get_everyone_else_profile_id())
+
+    def test_everyone_else_refuses_an_unknown_profile(self) -> None:
+        status, _, _ = self.server.write_response_for(
+            "/api/everyone-else", {"profile_id": "gone"}
+        )
+
+        self.assertEqual(status, 400)
+        self.assertIsNone(self.repository.get_everyone_else_profile_id())
+
+    def test_everyone_else_counts_toward_the_shaping_capacity(self) -> None:
+        for index in range(14):
+            self.repository.save_device(
+                Device(f"d{index}", f"D{index}", f"192.168.50.{20 + index}", "slow")
+            )
+
+        status, _, body = self.server.write_response_for(
+            "/api/everyone-else", {"profile_id": "slow"}
+        )
+
+        self.assertEqual(status, 409)
+        self.assertIn("at most 15", json.loads(body)["error"])
+
+    def test_everyone_else_takes_one_of_the_fifteen_slots(self) -> None:
+        for index in range(13):
+            self.repository.save_device(
+                Device(f"d{index}", f"D{index}", f"192.168.50.{20 + index}", "slow")
+            )
+        # Alice, 13 more devices and everyone else fill all 15 slots.
+        status, _, body = self.server.write_response_for(
+            "/api/everyone-else", {"profile_id": "slow"}
+        )
+        self.assertEqual(status, 200, body)
+
+        status, _, body = self.server.write_response_for(
+            "/api/devices",
+            {"id": "extra", "name": "Extra", "ipv4_address": "192.168.50.40", "profile_id": "slow"},
+        )
+        self.assertEqual(status, 409, body)
+
+        # Switching everyone else to another profile needs no new slot.
+        self.repository.save_profile(Profile(id="other", name="Other"))
+        status, _, body = self.server.write_response_for(
+            "/api/everyone-else", {"profile_id": "other"}
+        )
+        self.assertEqual(status, 200, body)
+
+    def test_everyone_else_needs_an_explicit_profile_or_none(self) -> None:
+        self.repository.save_everyone_else_profile_id("slow")
+
+        status, _, _ = self.server.write_response_for("/api/everyone-else", {})
+
+        self.assertEqual(status, 400)
+        self.assertEqual(self.repository.get_everyone_else_profile_id(), "slow")
+
+    def test_unaffected_devices_are_added_and_removed(self) -> None:
+        status, _, body = self.server.write_response_for(
+            "/api/unaffected-devices", {"mac_address": "AA:AA:AA:AA:AA:AA"}
+        )
+        self.assertEqual(status, 200, body)
+        self.assertEqual(
+            json.loads(self.server.response_for("/api/everyone-else")[2])["unaffected_devices"],
+            [{"mac_address": "aa:aa:aa:aa:aa:aa", "name": "aa:aa:aa:aa:aa:aa"}],
+        )
+
+        status, _, _ = self.server.write_response_for(
+            "/api/unaffected-devices/delete", {"mac_address": "aa:aa:aa:aa:aa:aa"}
+        )
+        self.assertEqual(status, 200)
+        status, _, _ = self.server.write_response_for(
+            "/api/unaffected-devices/delete", {"mac_address": "aa:aa:aa:aa:aa:aa"}
+        )
+        self.assertEqual(status, 404)
+
+    def test_a_saved_device_address_and_the_list_exclude_each_other(self) -> None:
+        self.repository.save_device(
+            Device("bob", "Bob", "192.168.50.11", "slow", "bb:bb:bb:bb:bb:bb")
+        )
+        status, _, body = self.server.write_response_for(
+            "/api/unaffected-devices", {"mac_address": "bb:bb:bb:bb:bb:bb"}
+        )
+        self.assertEqual(status, 409)
+        self.assertIn("Bob", json.loads(body)["error"])
+
+        self.repository.save_unaffected_device(UnaffectedDevice("cc:cc:cc:cc:cc:cc"))
+        status, _, body = self.server.write_response_for(
+            "/api/devices",
+            {
+                "id": "carol",
+                "name": "Carol",
+                "ipv4_address": "192.168.50.12",
+                "profile_id": "slow",
+                "mac_address": "cc:cc:cc:cc:cc:cc",
+            },
+        )
+        self.assertEqual(status, 409)
+        self.assertIn("unaffected list", json.loads(body)["error"])
+
+    def test_a_listed_connected_client_cannot_get_a_profile(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.repository.save_unaffected_device(UnaffectedDevice("dc:1e:d5:3e:97:4c"))
+
+        status, _, _ = self.server.write_response_for(
+            "/api/connected-devices/apply-profile",
+            {
+                "ipv4_address": "192.168.50.178",
+                "mac_address": "dc:1e:d5:3e:97:4c",
+                "profile_id": "slow",
+            },
+        )
+
+        self.assertEqual(status, 409)
+        self.assertIsNone(self.repository.get_device_by_ipv4_address("192.168.50.178"))
+
+    def test_a_profile_used_for_everyone_else_cannot_be_deleted(self) -> None:
+        self.repository.save_profile(Profile(id="spare", name="Spare"))
+        self.repository.save_everyone_else_profile_id("spare")
+
+        status, _, body = self.server.write_response_for("/api/profiles/delete", {"id": "spare"})
+
+        self.assertEqual(status, 409)
+        self.assertIn("everyone else", json.loads(body)["error"])
+
+    def test_everyone_else_changes_apply_unless_the_network_is_reset(self) -> None:
+        for last_action, applied in (("apply", True), ("reset", False)):
+            with self.subTest(last_action=last_action):
+                helper = FakeHelper()
+                self.server.helper_client = helper
+                self.repository.update_runtime_state(
+                    observed_state="applied" if applied else "reset",
+                    last_action=last_action,
+                    last_result="success",
+                    last_error=None,
+                )
+
+                status, _, body = self.server.write_response_for(
+                    "/api/everyone-else", {"profile_id": "slow"}
+                )
+
+                self.assertEqual(status, 200, body)
+                self.assertEqual(json.loads(body)["live_applied"], applied)
+                self.assertEqual(helper.applied_plan is not None, applied)
+                if applied:
+                    self.assertIsNotNone(helper.applied_plan.everyone_else)
+
+    def test_connected_clients_show_which_are_unaffected(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.repository.save_unaffected_device(UnaffectedDevice("dc:1e:d5:3e:97:4c"))
+
+        devices = json.loads(self.server.response_for("/api/connected-devices")[2])["devices"]
+
+        self.assertTrue(devices[0]["unaffected"])
+
+    def test_conditions_describe_everyone_else(self) -> None:
+        self.repository.save_everyone_else_profile_id("slow")
+
+        conditions = json.loads(self.server.response_for("/api/conditions")[2])
+
+        self.assertEqual(
+            conditions["everyone_else"],
+            {"condition": "degraded", "reasons": ["upload: delay 3000 ms"]},
         )
 
     def test_conditions_describe_the_applied_plan(self) -> None:

@@ -4,7 +4,7 @@ from collections import Counter
 from dataclasses import asdict
 from typing import Any, Dict, Iterable
 
-from .models import SavedSettings
+from .models import MAX_UNAFFECTED_DEVICES, SavedSettings
 
 SETTINGS_FORMAT = "jittersim-settings"
 SETTINGS_VERSION = 1
@@ -107,6 +107,13 @@ def settings_to_payload(settings: SavedSettings, *, exported_at: int) -> Dict[st
         "service_assignments": [
             _json_values(asdict(assignment)) for assignment in settings.service_assignments
         ],
+        "everyone_else": {
+            "profile_id": settings.everyone_else_profile_id,
+            "unaffected_devices": [
+                {"mac_address": device.mac_address, "name": device.name}
+                for device in settings.unaffected_devices
+            ],
+        },
     }
 
 
@@ -136,6 +143,11 @@ def check_settings(
         "browser service profile",
         (assignment.id for assignment in settings.service_assignments),
     )
+    _require_unique(
+        "unaffected device", (device.mac_address for device in settings.unaffected_devices)
+    )
+    if len(settings.unaffected_devices) > MAX_UNAFFECTED_DEVICES:
+        raise ValueError(f"the unaffected list holds at most {MAX_UNAFFECTED_DEVICES} devices")
 
     profile_ids = {profile.id for profile in settings.profiles}
     device_ids = {device.id for device in settings.devices}
@@ -181,6 +193,17 @@ def check_settings(
     for assignment in settings.service_assignments:
         require_device(f"browser service profile {assignment.id}", assignment.device_id)
         require_profile(f"browser service profile {assignment.id}", assignment.profile_id)
+    if settings.everyone_else_profile_id is not None:
+        require_profile("everyone else", settings.everyone_else_profile_id)
+    devices_by_mac = {
+        device.mac_address: device.id for device in settings.devices if device.mac_address
+    }
+    for unaffected in settings.unaffected_devices:
+        if unaffected.mac_address in devices_by_mac:
+            raise ValueError(
+                f"{unaffected.mac_address} is unaffected and belongs to device "
+                f"{devices_by_mac[unaffected.mac_address]}"
+            )
     # Only enabled browser service profiles reach the plan.
     assignments = tuple(
         assignment for assignment in settings.service_assignments if assignment.enabled
@@ -207,6 +230,7 @@ def check_settings(
         + sum(quota.enabled for quota in settings.service_quotas)
         + sum(quota.enabled for quota in settings.time_quotas)
         + len(assignments)
+        + (settings.everyone_else_profile_id is not None)
     )
     if traffic_classes > max_traffic_classes:
         raise ValueError(
