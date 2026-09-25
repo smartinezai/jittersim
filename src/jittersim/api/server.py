@@ -3941,6 +3941,13 @@ class ControlServer(HTTPServer):
                     raise ValueError("device does not exist")
                 if self.repository.get_profile(data_limit.profile_id) is None:
                     raise ValueError("profile does not exist")
+                existing = self.repository.get_data_limit(data_limit.device_id)
+                if data_limit.enabled and not (existing is not None and existing.enabled):
+                    # The device counter already holds traffic from before the limit.
+                    data_limit = replace(
+                        data_limit,
+                        counter_bytes=self._quota_counter("devices", data_limit.device_id) or 0,
+                    )
                 self.repository.save_data_limit(data_limit)
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid data limit configuration", error)
@@ -3982,6 +3989,13 @@ class ControlServer(HTTPServer):
                     raise ValueError("device group does not exist")
                 if self.repository.get_profile(data_limit.profile_id) is None:
                     raise ValueError("profile does not exist")
+                existing = self.repository.get_group_data_limit(data_limit.group_id)
+                if data_limit.enabled and not (existing is not None and existing.enabled):
+                    # The device counters already hold traffic from before the limit.
+                    data_limit = replace(
+                        data_limit,
+                        counter_bytes=self._group_quota_counter(data_limit.group_id) or 0,
+                    )
                 self.repository.save_group_data_limit(data_limit)
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid group data limit configuration", error)

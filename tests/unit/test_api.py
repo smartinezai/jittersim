@@ -103,6 +103,24 @@ class FakeHelper:
         }
 
 
+class CountingHelper(FakeHelper):
+    """Count traffic like the real helper: every apply restarts the counters."""
+
+    def __init__(self, *, devices=None, services=None) -> None:
+        super().__init__()
+        self.devices = dict(devices or {})
+        self.services = dict(services or {})
+
+    def apply(self, *, plan):
+        result = super().apply(plan=plan)
+        self.devices = dict.fromkeys(self.devices, 0)
+        self.services = dict.fromkeys(self.services, 0)
+        return result
+
+    def traffic_counters(self):
+        return {"devices": dict(self.devices), "services": dict(self.services)}
+
+
 def create_test_certificate(directory: Path):
     """Create a throwaway self-signed certificate, or return None without OpenSSL."""
 
@@ -1267,10 +1285,6 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(events, ["hold", "sample", "apply", "activate", "release"])
 
     def test_apply_and_reset_record_usage_before_the_counters_restart(self) -> None:
-        class CountingHelper(FakeHelper):
-            def traffic_counters(self):
-                return {"devices": {"alice": self.alice_bytes}, "services": {}}
-
         for path in ("/api/apply", "/api/reset"):
             with self.subTest(path=path):
                 self.repository.save_data_limit(
@@ -1283,8 +1297,7 @@ class ControlServerTests(unittest.TestCase):
                         last_reset_at=100,
                     )
                 )
-                helper = CountingHelper()
-                helper.alice_bytes = 1_600
+                helper = CountingHelper(devices={"alice": 1_600})
                 scheduler = RuntimeScheduler(
                     database_path=":memory:",
                     helper_client=helper,
@@ -1299,6 +1312,55 @@ class ControlServerTests(unittest.TestCase):
 
                 self.assertEqual(status, 200)
                 self.assertEqual(self.repository.get_data_limit("alice").used_bytes, 1_600)
+
+    def _serve_live(self, helper):
+        scheduler = RuntimeScheduler(
+            database_path=":memory:", helper_client=helper, poll_seconds=3_600
+        )
+        self.server.helper_client = helper
+        self.server.scheduler = scheduler
+        self.addCleanup(scheduler.stop)
+        return helper
+
+    def test_a_new_limit_counts_only_traffic_after_it_is_saved(self) -> None:
+        helper = self._serve_live(CountingHelper(devices={"alice": 0}))
+        self.server.write_response_for(
+            "/api/groups", {"id": "family", "name": "Family", "device_ids": ["alice"]}
+        )
+        helper.devices["alice"] = 3_000_000
+
+        self.server.write_response_for(
+            "/api/data-limits", {"device_id": "alice", "profile_id": "slow", "limit_bytes": 10**9}
+        )
+        helper.devices["alice"] = 2_000_000
+        self.server.write_response_for(
+            "/api/group-data-limits",
+            {"group_id": "family", "profile_id": "slow", "limit_bytes": 10**9},
+        )
+
+        self.assertEqual(self.repository.get_data_limit("alice").used_bytes, 2_000_000)
+        self.assertEqual(self.repository.get_group_data_limit("family").used_bytes, 0)
+
+    def test_a_reenabled_limit_skips_traffic_from_while_it_was_off(self) -> None:
+        self.repository.save_data_limit(
+            DataLimit(
+                device_id="alice",
+                profile_id="slow",
+                limit_bytes=10**9,
+                used_bytes=500,
+                counter_bytes=0,
+                last_reset_at=100,
+                enabled=False,
+            )
+        )
+        self._serve_live(CountingHelper(devices={"alice": 3_000_000}))
+
+        self.server.write_response_for(
+            "/api/data-limits",
+            {"device_id": "alice", "profile_id": "slow", "limit_bytes": 10**9, "enabled": True},
+        )
+
+        self.assertEqual(self.repository.get_data_limit("alice").used_bytes, 500)
 
     def test_live_changes_apply_while_the_network_is_applied(self) -> None:
         helper = FakeHelper()
