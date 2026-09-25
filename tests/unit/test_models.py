@@ -267,6 +267,23 @@ class PolicyAndScheduleTests(unittest.TestCase):
                 mode="traffic",
             )
 
+    def test_a_moved_traffic_progression_may_count_from_below_zero(self) -> None:
+        # A device that moves to an address with fewer recorded queries keeps
+        # its progress through a baseline below zero.
+        progression = Progression(
+            id="degrade",
+            device_id="alice",
+            start_profile_id="normal",
+            end_profile_id="slow",
+            started_at=100,
+            duration_seconds=600,
+            mode="traffic",
+            traffic_target_queries=200,
+            traffic_baseline_queries=-100,
+        )
+
+        self.assertEqual(progression.traffic_baseline_queries, -100)
+
     def test_bytes_progression_requires_a_positive_byte_target(self) -> None:
         with self.assertRaisesRegex(ValueError, "positive byte target"):
             Progression(

@@ -6,7 +6,7 @@ import tempfile
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Union
+from typing import Dict, Optional, Sequence, Tuple, Union
 
 from .device_labels import (
     MAX_SAVED_CONNECTED_DEVICE_LABELS,
@@ -1300,6 +1300,50 @@ class ConfigRepository:
             (now, now),
         ).fetchall()
         return tuple(self._progression_from_row(row) for row in rows)
+
+    def move_device_addresses(self, moves: Dict[str, Tuple[str, str]]) -> bool:
+        """Move saved devices from one address to another, all at once.
+
+        Returns False and changes nothing when any device no longer has the
+        address the caller read, for example because it was edited meanwhile.
+        DNS queries are counted by address, so a traffic progression's baseline
+        moves with its device and keeps the progress made.
+        """
+
+        try:
+            # Park each device on a unique placeholder first: addresses are
+            # unique, and devices that swap or pass addresses on would collide.
+            for device_id, (old_address, _) in moves.items():
+                cursor = self._connection.execute(
+                    "UPDATE devices SET ipv4_address = ? WHERE id = ? AND ipv4_address = ?",
+                    (f"moving:{device_id}", device_id, old_address),
+                )
+                if cursor.rowcount != 1:
+                    self._connection.rollback()
+                    return False
+            for device_id, (old_address, new_address) in moves.items():
+                self._connection.execute(
+                    "UPDATE devices SET ipv4_address = ? WHERE id = ?",
+                    (new_address, device_id),
+                )
+                self._connection.execute(
+                    """
+                    UPDATE progressions
+                    SET traffic_baseline_queries = traffic_baseline_queries + ?
+                    WHERE device_id = ? AND mode = 'traffic' AND enabled = 1
+                    """,
+                    (
+                        self.total_domain_queries(new_address)
+                        - self.total_domain_queries(old_address),
+                        device_id,
+                    ),
+                )
+            self._bump_configuration_version()
+            self._commit()
+            return True
+        except sqlite3.Error as error:
+            self._connection.rollback()
+            raise StorageError("could not move saved devices to their new addresses") from error
 
     def total_domain_queries(self, ipv4_address: str) -> int:
         """Return the running DNS query total for one observed client."""

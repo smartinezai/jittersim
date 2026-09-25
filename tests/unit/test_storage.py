@@ -297,6 +297,69 @@ class ConfigRepositoryTests(unittest.TestCase):
         self.assertTrue(self.repository.delete_progression(progression.id))
         self.assertEqual(self.repository.list_active_progressions(now=200), ())
 
+    def test_devices_move_together_and_swap_addresses(self) -> None:
+        self.repository.save_profile(Profile(id="slow", name="Slow"))
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "slow"))
+        self.repository.save_device(Device("bob", "Bob", "192.168.50.11", "slow"))
+
+        moved = self.repository.move_device_addresses(
+            {"alice": ("192.168.50.10", "192.168.50.11"), "bob": ("192.168.50.11", "192.168.50.10")}
+        )
+
+        self.assertTrue(moved)
+        self.assertEqual(str(self.repository.get_device("alice").ipv4_address), "192.168.50.11")
+        self.assertEqual(str(self.repository.get_device("bob").ipv4_address), "192.168.50.10")
+
+    def test_a_device_changed_since_the_check_does_not_move(self) -> None:
+        self.repository.save_profile(Profile(id="slow", name="Slow"))
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "slow"))
+        self.repository.save_device(Device("bob", "Bob", "192.168.50.11", "slow"))
+
+        # Someone saved alice at .12 after the check read .10.
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.12", "slow"))
+        moved = self.repository.move_device_addresses(
+            {"bob": ("192.168.50.11", "192.168.50.30"), "alice": ("192.168.50.10", "192.168.50.20")}
+        )
+
+        self.assertFalse(moved)
+        self.assertEqual(str(self.repository.get_device("alice").ipv4_address), "192.168.50.12")
+        self.assertEqual(str(self.repository.get_device("bob").ipv4_address), "192.168.50.11")
+        self.assertIsNone(self.repository.get_device("ghost"))
+        self.assertFalse(
+            self.repository.move_device_addresses({"ghost": ("192.168.50.40", "192.168.50.41")})
+        )
+
+    def test_a_move_keeps_a_traffic_progression_going(self) -> None:
+        self.repository.save_profile(Profile(id="normal", name="Normal"))
+        self.repository.save_profile(Profile(id="slow", name="Slow"))
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        observations = tuple(
+            DomainObservation(
+                ipv4_address=address, domain="example.com", query_count=count,
+                first_seen=100, last_seen=100,
+            )
+            for address, count in (("192.168.50.10", 500), ("192.168.50.23", 30))
+        )
+        self.repository.save_domain_observations(observations, now=100)
+        self.repository.save_progression(
+            Progression(
+                id="degrade", device_id="alice", start_profile_id="normal",
+                end_profile_id="slow", started_at=100, duration_seconds=600, mode="traffic",
+                traffic_target_queries=200, traffic_baseline_queries=400,
+            )
+        )
+
+        self.repository.move_device_addresses({"alice": ("192.168.50.10", "192.168.50.23")})
+
+        progression = self.repository.list_active_progressions(now=200)[0]
+        # 100 queries counted before the move are still counted after it.
+        self.assertEqual(progression.traffic_baseline_queries, -70)
+        self.assertEqual(
+            self.repository.total_domain_queries("192.168.50.23")
+            - progression.traffic_baseline_queries,
+            100,
+        )
+
     def test_timer_and_progression_replace_each_other_for_a_device(self) -> None:
         self.repository.save_profile(Profile(id="normal", name="Normal"))
         self.repository.save_profile(Profile(id="slow", name="Slow"))

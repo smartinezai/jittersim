@@ -685,6 +685,94 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(result["others"], [500, {"dropped": 9, "queued": 2}])
         self.assertIn('option.value = EVERYONE_ELSE_TRAFFIC;', DASHBOARD_HTML)
 
+    def test_live_traffic_adds_everyone_else_to_the_counters(self) -> None:
+        result = self._run_dashboard_functions(
+            ["mergedTrafficCounters"],
+            "const EVERYONE_ELSE_TRAFFIC = '__everyone_else__';\n",
+            "const data = {devices: {alice: {upload_bytes: 1}}, queues: {alice: {queued: 1}},\n"
+            "  everyone_else: {upload_bytes: 9}, everyone_else_queue: {queued: 2}};\n"
+            "const merged = mergedTrafficCounters(data);\n"
+            "const without = mergedTrafficCounters({devices: {alice: {upload_bytes: 1}}});\n"
+            "console.log(JSON.stringify({merged: merged, without: without,\n"
+            "  untouched: Object.keys(data.devices)}));\n",
+        )
+
+        self.assertEqual(
+            result["merged"],
+            {
+                "devices": {"alice": {"upload_bytes": 1}, "__everyone_else__": {"upload_bytes": 9}},
+                "queues": {"alice": {"queued": 1}, "__everyone_else__": {"queued": 2}},
+            },
+        )
+        self.assertEqual(
+            result["without"], {"devices": {"alice": {"upload_bytes": 1}}, "queues": {}}
+        )
+        self.assertEqual(result["untouched"], ["alice"])
+
+    def test_the_traffic_menu_offers_everyone_else_while_it_has_a_profile(self) -> None:
+        result = self._run_dashboard_functions(
+            ["updateTrafficDeviceOptions"],
+            "const EVERYONE_ELSE_TRAFFIC = '__everyone_else__';\n"
+            "let everyoneElse = {profile_id: 'slow'};\n"
+            "const select = {options: [], value: '',\n"
+            "  replaceChildren() { this.options = []; },\n"
+            "  appendChild(option) { this.options.push(option); }};\n"
+            "const element = () => select;\n"
+            "const document = {createElement: () => ({})};\n"
+            "let resets = 0;\n"
+            "function resetTrafficHistory() { resets += 1; }\n",
+            "const devices = [{id: 'alice', name: 'Alice', ipv4_address: '192.168.50.10'}];\n"
+            "updateTrafficDeviceOptions(devices);\n"
+            "const offered = select.options.map((option) => option.value);\n"
+            "select.value = EVERYONE_ELSE_TRAFFIC;\n"
+            "updateTrafficDeviceOptions(devices);\n"
+            "const kept = [select.value, resets];\n"
+            "everyoneElse = {profile_id: null};\n"
+            "updateTrafficDeviceOptions(devices);\n"
+            "console.log(JSON.stringify({offered: offered, kept: kept,\n"
+            "  after: [select.options.map((option) => option.value), select.value, resets]}));\n",
+        )
+
+        self.assertEqual(result["offered"], ["all", "alice", "__everyone_else__"])
+        self.assertEqual(result["kept"], ["__everyone_else__", 0])
+        # Without a profile the choice goes, and the graph starts again for "all".
+        self.assertEqual(result["after"], [["all", "alice"], "all", 1])
+
+    def test_everyone_else_shows_its_own_queue_limits(self) -> None:
+        result = self._run_dashboard_functions(
+            ["trafficRateMbit", "trafficReferencesFromResponse"],
+            "const EVERYONE_ELSE_TRAFFIC = '__everyone_else__';\n"
+            "const EVERYONE_ELSE_QUEUE_ID = 'rule:everyone-else';\n"
+            "let currentIspTrafficLimits = {upload_kbit: null, download_kbit: 100000};\n"
+            "const fields = {'traffic-device': {value: EVERYONE_ELSE_TRAFFIC},\n"
+            "  'traffic-profile-status': {textContent: ''}};\n"
+            "const element = (id) => fields[id];\n",
+            "const references = trafficReferencesFromResponse({profile_limits_available: true,\n"
+            "  profile_limits: {'rule:everyone-else': {upload_kbit: 1000, download_kbit: 2000},\n"
+            "    alice: {upload_kbit: 5, download_kbit: 5}}});\n"
+            "console.log(JSON.stringify([references.profile_upload,\n"
+            "  references.profile_download]));\n",
+        )
+
+        self.assertEqual(result, [1, 2])
+
+    def test_loading_everyone_else_refreshes_the_traffic_menu(self) -> None:
+        result = self._run_dashboard_functions(
+            ["loadEveryoneElse"],
+            "let everyoneElse = {profile_id: null, unaffected_devices: []};\n"
+            "const devices = [];\n"
+            "const element = () => ({value: ''});\n"
+            "async function request() { return {profile_id: 'slow', unaffected_devices: []}; }\n"
+            "function renderTable() {}\n"
+            "function renderDeviceTable() {}\n"
+            "function rerenderConnectedDevices() {}\n"
+            "const menus = [];\n"
+            "function updateTrafficDeviceOptions() { menus.push(everyoneElse.profile_id); }\n",
+            "loadEveryoneElse().then(() => console.log(JSON.stringify(menus)));\n",
+        )
+
+        self.assertEqual(result, ["slow"])
+
     def test_write_history_records_only_authorized_route_and_result(self) -> None:
         self.server.admin_token = "admin-token"
         self.server.helper_client = FakeHelper()
