@@ -13,6 +13,7 @@ from jittersim.config.models import (
     Profile,
     Progression,
     Randomness,
+    SavedSettings,
     Schedule,
     ServiceQuota,
     TimeQuota,
@@ -341,6 +342,43 @@ class ConfigRepositoryTests(unittest.TestCase):
 
         self.assertEqual(stored.upload.loss_burst_packets, 4)
         self.assertEqual(stored.download, Impairment(delay_ms=20))
+
+    def test_replacing_settings_swaps_every_saved_setting(self) -> None:
+        self._save_lab()
+        self.repository.save_domain_observations(
+            (DomainObservation("192.168.50.10", "example.com", 3, 10, 10),), now=10
+        )
+        replacement = SavedSettings(
+            profiles=(Profile(id="fast", name="Fast"),),
+            devices=(Device("carol", "Carol", "192.168.50.20", "fast"),),
+            mac_policy=MacPolicy(mode="denylist", denylist=("aa:bb:cc:dd:ee:ff",)),
+        )
+
+        self.repository.replace_settings(replacement)
+
+        saved = self.repository.saved_settings()
+        self.assertEqual(saved.profiles, replacement.profiles)
+        self.assertEqual(saved.devices, replacement.devices)
+        self.assertEqual(saved.groups, ())
+        self.assertEqual(saved.schedules, ())
+        self.assertEqual(saved.data_limits, ())
+        self.assertEqual(saved.service_quotas, ())
+        self.assertEqual(saved.mac_policy, replacement.mac_policy)
+        # DNS history is not a setting and stays.
+        self.assertEqual(len(self.repository.list_domain_observations()), 1)
+
+    def test_replacing_settings_changes_nothing_when_it_fails(self) -> None:
+        self._save_lab()
+        before = self.repository.saved_settings()
+        broken = SavedSettings(
+            profiles=(Profile(id="fast", name="Fast"),),
+            devices=(Device("carol", "Carol", "192.168.50.20", "missing-profile"),),
+        )
+
+        with self.assertRaises(StorageError):
+            self.repository.replace_settings(broken)
+
+        self.assertEqual(self.repository.saved_settings(), before)
 
     def test_round_trips_byte_progression_targets(self) -> None:
         self.repository.save_profile(Profile(id="normal", name="Normal"))

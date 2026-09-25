@@ -678,3 +678,19 @@ class RuntimeState:
         ):
             if value is not None and (not isinstance(value, str) or len(value) > 500):
                 raise ValidationError(f"{field_name} must be no more than 500 characters")
+
+
+@dataclass(frozen=True)
+class SavedSettings:
+    """Every saved setting that can move between installations, without usage."""
+
+    profiles: Tuple[Profile, ...] = ()
+    devices: Tuple[Device, ...] = ()
+    groups: Tuple[DeviceGroup, ...] = ()
+    schedules: Tuple[Schedule, ...] = ()
+    mac_policy: MacPolicy = MacPolicy()
+    website_policy: WebsitePolicy = WebsitePolicy()
+    data_limits: Tuple[DataLimit, ...] = ()
+    group_data_limits: Tuple[GroupDataLimit, ...] = ()
+    service_quotas: Tuple[ServiceQuota, ...] = ()
+    time_quotas: Tuple[TimeQuota, ...] = ()

@@ -29,6 +29,7 @@ from jittersim.config.models import (
     Progression,
     Randomness,
     RuntimeState,
+    SavedSettings,
     Schedule,
     ServiceQuota,
     TimeQuota,
@@ -38,6 +39,12 @@ from jittersim.config.models import (
     time_quota_counter_id,
 )
 from jittersim.config.storage import ConfigRepository, DatabasePath, StorageError
+from jittersim.config.transfer import (
+    SETTINGS_FORMAT,
+    SETTINGS_VERSION,
+    check_settings,
+    settings_to_payload,
+)
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import MAX_TRAFFIC_CLASSES_PER_PLAN, PlanError
 from jittersim.engine.progression import progression_factor
@@ -47,6 +54,8 @@ from jittersim.networking.helper import HelperClient, HelperClientError
 
 LOGGER = logging.getLogger(__name__)
 MAX_JSON_BODY_BYTES = 64 * 1024
+# A settings export with many profiles is larger than ordinary requests.
+MAX_IMPORT_BODY_BYTES = 1024 * 1024
 WRITE_PATHS = frozenset(
     (
         "/api/profiles",
@@ -83,6 +92,7 @@ WRITE_PATHS = frozenset(
         "/api/observations/scan",
         "/api/observations/add-to-profile",
         "/api/observations/add-global-block",
+        "/api/import",
         "/api/apply",
         "/api/reset",
     )
@@ -94,6 +104,7 @@ PROTECTED_READ_PATHS = frozenset(
         "/api/backup",
         "/api/data-limits",
         "/api/diagnostics",
+        "/api/export",
         "/api/group-data-limits",
         "/api/observations",
         "/api/service-quotas",
@@ -510,6 +521,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     .edit-bar p { margin: 0; color: #f5ca78; }
     .edit-bar button { margin-top: 0; }
     .schedule-row div:first-child { display: grid; gap: 0.15rem; }
+    .transfer-actions { justify-content: flex-start; margin-top: 1rem; }
     .schedule-row small { color: #91a8c1; }
     @media (max-width: 700px) {
       body { padding-top: 1rem; }
@@ -1319,6 +1331,14 @@ DASHBOARD_HTML = r"""<!doctype html>
         <button id="download-backup" type="button">Download backup</button>
       </div>
       <pre id="action-history">Enter the admin token to view recent actions.</pre>
+      <div class="row-actions transfer-actions">
+        <button id="export-settings" type="button">Export settings</button>
+        <button id="import-settings-button" type="button">Import settings...</button>
+        <input id="import-settings" type="file" accept=".json,application/json" hidden>
+      </div>
+      <p class="form-note">A settings export holds profiles, devices, groups, schedules,
+        access rules and limits, without usage or DNS history. Importing one replaces all
+        of them.</p>
     </section>
   </div>
   <script>
@@ -3565,6 +3585,56 @@ DASHBOARD_HTML = r"""<!doctype html>
         button.textContent = "Refresh";
       }
     });
+    element("export-settings").addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      setButtonBusy(button, true);
+      showMessage("Preparing the settings export...", "working");
+      try {
+        const settings = await request("/api/export", "GET");
+        const file = new Blob(
+          [JSON.stringify(settings, null, 2) + "\n"], { type: "application/json" }
+        );
+        const url = URL.createObjectURL(file);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "jittersim-settings.json";
+        link.click();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+        showMessage("Settings exported.", "success");
+      } catch (error) {
+        showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
+      }
+    });
+    element("import-settings-button").addEventListener("click", () => {
+      element("import-settings").click();
+    });
+    element("import-settings").addEventListener("change", async (event) => {
+      const input = event.currentTarget;
+      const file = input.files[0];
+      input.value = "";
+      if (!file) return;
+      const question = "Replace every profile, device, group, schedule, access rule and limit " +
+        "with the settings in " + file.name + "?";
+      if (!window.confirm(question)) return;
+      showMessage("Importing settings...", "working");
+      let settings;
+      try {
+        settings = JSON.parse(await file.text());
+      } catch (error) {
+        showMessage(file.name + " is not a JSON settings export.", "error");
+        return;
+      }
+      try {
+        const result = await request("/api/import", "POST", settings);
+        refreshAfterSuccess(
+          result.live_applied ? "Settings imported and applied." : "Settings imported."
+        );
+      } catch (error) {
+        showMessage(error.message, "error");
+      }
+    });
     element("download-backup").addEventListener("click", async (event) => {
       const button = event.currentTarget;
       const token = element("admin-token").value.trim();
@@ -4300,6 +4370,12 @@ class ControlServer(HTTPServer):
             )
         if path == "/api/backup":
             return HTTPStatus.OK, "application/vnd.sqlite3", self.repository.backup_bytes()
+        if path == "/api/export":
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                settings_to_payload(
+                    self.repository.saved_settings(), exported_at=int(time.time())
+                )
+            )
         if path == "/api/traffic":
             if self.helper_client is None:
                 return HTTPStatus.OK, "application/json", _json_bytes(
@@ -4354,6 +4430,22 @@ class ControlServer(HTTPServer):
 
     def write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
         """Handle one supported configuration or network action request."""
+
+        if path == "/api/import":
+            try:
+                settings = _settings_from_payload(payload)
+                check_settings(settings, max_traffic_classes=MAX_TRAFFIC_CLASSES_PER_PLAN)
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid settings import", error)
+            self.repository.replace_settings(settings)
+            return self._apply_saved_change(
+                "imported",
+                {
+                    "profiles": len(settings.profiles),
+                    "devices": len(settings.devices),
+                    "schedules": len(settings.schedules),
+                },
+            )
 
         if path == "/api/profiles/delete":
             try:
@@ -5253,9 +5345,13 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             status = HTTPStatus.INTERNAL_SERVER_ERROR
             content_type = "application/json"
             body = _json_bytes({"error": "request could not be processed"})
+        downloads = {
+            "/api/backup": "jittersim-backup.db",
+            "/api/export": "jittersim-settings.json",
+        }
         headers = (
-            {"Content-Disposition": 'attachment; filename="jittersim-backup.db"'}
-            if path == "/api/backup"
+            {"Content-Disposition": f'attachment; filename="{downloads[path]}"'}
+            if path in downloads and status == HTTPStatus.OK
             else None
         )
         self._send_response(status=status, content_type=content_type, body=body, headers=headers)
@@ -5317,7 +5413,10 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            payload = self._read_json_body(required=path not in ACTION_PATHS)
+            payload = self._read_json_body(
+                required=path not in ACTION_PATHS,
+                max_bytes=MAX_IMPORT_BODY_BYTES if path == "/api/import" else MAX_JSON_BODY_BYTES,
+            )
             status, content_type, body = self.server.write_response_for(path, payload)
         except RequestError as error:
             status = HTTPStatus.BAD_REQUEST
@@ -5339,7 +5438,9 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             LOGGER.exception("could not record action history for %s", path)
         self._send_response(status=status, content_type=content_type, body=body)
 
-    def _read_json_body(self, *, required: bool = True) -> Dict[str, Any]:
+    def _read_json_body(
+        self, *, required: bool = True, max_bytes: int = MAX_JSON_BODY_BYTES
+    ) -> Dict[str, Any]:
         length_header = self.headers.get("Content-Length")
         if length_header is None:
             if not required:
@@ -5349,7 +5450,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             length = int(length_header)
         except ValueError as error:
             raise RequestError("request body length is invalid") from error
-        if length < 0 or length > MAX_JSON_BODY_BYTES:
+        if length < 0 or length > max_bytes:
             raise RequestError("request body is too large")
         if length == 0 and not required:
             return {}
@@ -5729,6 +5830,102 @@ def _policies_from_payload(payload: Dict[str, Any]) -> Tuple[MacPolicy, WebsiteP
             mode=website_payload.get("mode", "unrestricted"),
             allowed_domains=_list_field(website_payload, "allowed_domains"),
             blocked_domains=_list_field(website_payload, "blocked_domains"),
+        ),
+    )
+
+
+def _imported_reset_fields(value: Dict[str, Any]) -> Dict[str, Any]:
+    reset_mode, reset_interval_seconds, reset_times = _quota_schedule_from_payload(value)
+    return {
+        "reset_mode": reset_mode,
+        "reset_interval_seconds": reset_interval_seconds,
+        "reset_times": reset_times,
+        "enabled": value.get("enabled", True),
+    }
+
+
+def _settings_from_payload(payload: Dict[str, Any]) -> SavedSettings:
+    """Read a settings export, naming the first item that is wrong."""
+
+    if payload.get("format") != SETTINGS_FORMAT or payload.get("version") != SETTINGS_VERSION:
+        raise ValueError("the file is not a JitterSim settings export this version can read")
+    now = int(time.time())
+
+    def items(key: str, parse: Any) -> tuple:
+        values = payload.get(key, [])
+        if not isinstance(values, list):
+            raise ValueError(f"{key} must be a list")
+        parsed = []
+        for index, value in enumerate(values):
+            try:
+                if not isinstance(value, dict):
+                    raise ValueError("must be an object")
+                parsed.append(parse(value))
+            except KeyError as error:
+                raise ValueError(f"{key}[{index}] is missing {error.args[0]}") from error
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"{key}[{index}]: {error}") from error
+        return tuple(parsed)
+
+    policies = payload.get("policies", {})
+    if not isinstance(policies, dict):
+        raise ValueError("policies must be an object")
+    mac_policy, website_policy = _policies_from_payload(policies)
+    # Usage starts again from zero on the new installation.
+    return SavedSettings(
+        profiles=items("profiles", _profile_from_payload),
+        devices=items("devices", _device_from_payload),
+        groups=items("groups", _device_group_from_payload),
+        schedules=items("schedules", _schedule_from_payload),
+        mac_policy=mac_policy,
+        website_policy=website_policy,
+        data_limits=items(
+            "data_limits",
+            lambda value: DataLimit(
+                device_id=value["device_id"],
+                profile_id=value["profile_id"],
+                limit_bytes=value["limit_bytes"],
+                last_reset_at=now,
+                **_imported_reset_fields(value),
+            ),
+        ),
+        group_data_limits=items(
+            "group_data_limits",
+            lambda value: GroupDataLimit(
+                group_id=value["group_id"],
+                profile_id=value["profile_id"],
+                limit_bytes=value["limit_bytes"],
+                last_reset_at=now,
+                **_imported_reset_fields(value),
+            ),
+        ),
+        service_quotas=items(
+            "service_quotas",
+            lambda value: ServiceQuota(
+                id=value["id"],
+                device_id=value["device_id"],
+                name=value["name"],
+                domains=_list_field(value, "domains", required=True),
+                profile_id=value["profile_id"],
+                limit_bytes=value["limit_bytes"],
+                weight_percent=value.get("weight_percent", 100),
+                last_reset_at=now,
+                **_imported_reset_fields(value),
+            ),
+        ),
+        time_quotas=items(
+            "time_quotas",
+            lambda value: TimeQuota(
+                id=value["id"],
+                device_id=value["device_id"],
+                name=value["name"],
+                domains=_list_field(value, "domains", required=True),
+                profile_id=value["profile_id"],
+                limit_seconds=value["limit_seconds"],
+                window_duration_seconds=value.get("window_duration_seconds", 43_200),
+                last_reset_at=now,
+                **_imported_reset_fields(value),
+            ),
         ),
     )
 

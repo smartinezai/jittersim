@@ -349,6 +349,7 @@ class ControlServerTests(unittest.TestCase):
             "/api/diagnostics",
             "/api/action-history",
             "/api/observations",
+            "/api/export",
         ):
             with self.subTest(path=path):
                 self.assertEqual(get(path)["status"], 401)
@@ -637,6 +638,84 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(enabled_status, 409)
         self.assertIn("at most 15 devices and service limits", json.loads(body)["error"])
         self.assertFalse(self.repository.get_time_quota("alice-netflix-time").enabled)
+
+    def _export(self, server):
+        status, _, body = server.response_for("/api/export")
+        self.assertEqual(status, 200)
+        exported = json.loads(body)
+        exported.pop("exported_at")
+        return exported
+
+    def test_settings_move_between_installations_without_usage(self) -> None:
+        self.server.write_response_for(
+            "/api/schedules",
+            {
+                "id": "work",
+                "device_id": "alice",
+                "profile_id": "slow",
+                "days_of_week": [0, 4],
+                "start_minute": 540,
+                "end_minute": 1_020,
+            },
+        )
+        self.server.write_response_for(
+            "/api/data-limits", {"device_id": "alice", "profile_id": "slow", "limit_bytes": 1_000}
+        )
+        self.repository.record_data_usage("alice", 700)
+        self.server.write_response_for(
+            "/api/policies",
+            {"mac": {"mode": "denylist", "denylist": ["aa:bb:cc:dd:ee:ff"]}, "websites": {}},
+        )
+        exported = self._export(self.server)
+        with ConfigRepository(":memory:") as other_repository:
+            other = ControlServer(("127.0.0.1", 0), other_repository)
+            try:
+                status, _, _ = other.write_response_for("/api/import", exported)
+                imported = self._export(other)
+                used = other_repository.get_data_limit("alice").used_bytes
+            finally:
+                other.server_close()
+
+        self.assertEqual(status, 200)
+        self.assertEqual(imported, exported)
+        self.assertEqual(used, 0)
+        self.assertEqual(exported["data_limits"][0]["limit_bytes"], 1_000)
+        self.assertNotIn("used_bytes", exported["data_limits"][0])
+
+    def test_import_rejects_settings_that_do_not_fit_and_changes_nothing(self) -> None:
+        exported = self._export(self.server)
+        broken = dict(exported, devices=exported["devices"] + [
+            {"id": "bob", "name": "Bob", "ipv4_address": "192.168.50.11", "profile_id": "ghost"}
+        ])
+
+        wrong_format_status, _, wrong_format_body = self.server.write_response_for(
+            "/api/import", {"format": "something-else", "version": 1}
+        )
+        broken_status, _, broken_body = self.server.write_response_for("/api/import", broken)
+
+        self.assertEqual(wrong_format_status, 400)
+        self.assertIn("not a JitterSim settings export", json.loads(wrong_format_body)["error"])
+        self.assertEqual(broken_status, 400)
+        self.assertEqual(
+            json.loads(broken_body)["error"],
+            "invalid settings import: device bob uses the missing profile ghost",
+        )
+        self.assertEqual(self._export(self.server), exported)
+
+    def test_imports_may_be_larger_than_ordinary_requests(self) -> None:
+        self.server.admin_token = "admin-token"
+        exported = self._export(self.server)
+        exported["profiles"] = [
+            dict(exported["profiles"][0], id=f"profile-{index:02d}", name="x" * 90)
+            for index in range(40)
+        ] + exported["profiles"]
+        body = json.dumps(exported).encode("utf-8")
+        self.assertGreater(len(body), 64 * 1024)
+
+        response = self._send("POST", "/api/import", body=body)
+
+        self.assertEqual(response["status"], 200)
+        self.assertEqual(len(self.repository.list_profiles()), 41)
 
     def test_list_fields_reject_plain_strings(self) -> None:
         requests = (
@@ -1236,6 +1315,17 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["profile"]["upload"]["loss_burst_packets"], 4)
         self.assertEqual(self.repository.get_profile("bursty").upload.loss_burst_packets, 4)
+
+    def test_dashboard_can_export_and_import_settings(self) -> None:
+        for fragment in (
+            'id="export-settings"',
+            'id="import-settings-button"',
+            'id="import-settings" type="file"',
+            'request("/api/export", "GET")',
+            'request("/api/import", "POST", settings)',
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, DASHBOARD_HTML)
 
     def test_dashboard_asks_for_the_token_first(self) -> None:
         self.assertLess(
