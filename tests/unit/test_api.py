@@ -2420,6 +2420,22 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(scheduler._rolls, {})
         self.assertEqual(json.loads(body)["devices"]["alice"]["condition"], "degraded")
 
+    def test_conditions_check_the_saved_mac_address(self) -> None:
+        self.repository.save_device(
+            Device("alice", "Alice's laptop", "192.168.50.10", "slow", "aa:bb:cc:dd:ee:ff")
+        )
+        self.server.write_response_for(
+            "/api/policies",
+            {"mac": {"mode": "denylist", "denylist": ["aa:bb:cc:dd:ee:ff"]}, "websites": {}},
+        )
+
+        conditions = json.loads(self.server.response_for("/api/conditions")[2])
+
+        self.assertEqual(
+            conditions["devices"]["alice"],
+            {"condition": "offline", "reasons": ["MAC address denied"]},
+        )
+
     def test_conditions_describe_the_applied_plan(self) -> None:
         helper = self._serve_live(CountingHelper(devices={"alice": 0}))
         self.assertEqual(self.server.write_response_for("/api/apply", {})[0], 200)

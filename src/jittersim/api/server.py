@@ -5293,7 +5293,13 @@ class ControlServer(HTTPServer):
                     "applied": applied,
                     "devices": {
                         device_id: {"condition": state.condition, "reasons": list(state.reasons)}
-                        for device_id, state in device_conditions(plan).items()
+                        for device_id, state in device_conditions(
+                            plan,
+                            mac_addresses={
+                                device.id: device.mac_address
+                                for device in self.repository.list_devices()
+                            },
+                        ).items()
                     },
                 }
             )

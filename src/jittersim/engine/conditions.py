@@ -1,7 +1,7 @@
 """Describe each device's network condition as normal, degraded or offline."""
 
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Mapping, Optional, Tuple
 
 from jittersim.config.models import Impairment
 
@@ -37,8 +37,23 @@ def _effects(impairment: Impairment) -> List[str]:
     return effects
 
 
-def device_conditions(plan: NetworkPlan) -> Dict[str, DeviceCondition]:
-    """Offline when nothing gets through, degraded with any effect, else normal."""
+def _rule_effects(kind: str, name: str, upload: Impairment, download: Impairment) -> List[str]:
+    reasons = []
+    for direction, impairment in (("upload", upload), ("download", download)):
+        effects = _effects(impairment)
+        if effects:
+            reasons.append(f"{kind} {name}, {direction}: " + ", ".join(effects))
+    return reasons
+
+
+def device_conditions(
+    plan: NetworkPlan, *, mac_addresses: Optional[Mapping[str, Optional[str]]] = None
+) -> Dict[str, DeviceCondition]:
+    """Offline when nothing gets through, degraded with any effect, else normal.
+
+    The plan does not hold MAC addresses, so pass the devices' saved ones to
+    check the MAC policy.
+    """
 
     blocked = set(plan.blocked_device_addresses)
     # An allowlist whose domains resolved to nothing drops all traffic.
@@ -56,6 +71,11 @@ def device_conditions(plan: NetworkPlan) -> Dict[str, DeviceCondition]:
             offline.append("outage")
         if rule.ipv4_address in closed:
             offline.append("no allowed site resolved")
+        mac = (mac_addresses or {}).get(rule.device_id)
+        if mac and mac in plan.mac_policy.denylist:
+            offline.append("MAC address denied")
+        elif mac and plan.mac_policy.mode == "allowlist" and mac not in plan.mac_policy.allowlist:
+            offline.append("MAC address not allowed")
         for direction in (Direction.UPLOAD, Direction.DOWNLOAD):
             impairment = impairments.get((rule.device_id, direction), Impairment())
             if impairment.loss_percent >= 100:
@@ -63,6 +83,27 @@ def device_conditions(plan: NetworkPlan) -> Dict[str, DeviceCondition]:
             effects = _effects(impairment)
             if effects:
                 degraded.append(f"{direction.value}: " + ", ".join(effects))
+        # Service rules shape only some of the device's traffic.
+        for quota in plan.service_quota_rules:
+            if quota.active and quota.device_id == rule.device_id:
+                degraded.extend(
+                    _rule_effects(
+                        "service limit",
+                        quota.quota_id,
+                        quota.upload_impairment,
+                        quota.download_impairment,
+                    )
+                )
+        for assignment in plan.service_assignment_rules:
+            if assignment.device_id == rule.device_id:
+                degraded.extend(
+                    _rule_effects(
+                        "browser service profile",
+                        assignment.assignment_id,
+                        assignment.upload_impairment,
+                        assignment.download_impairment,
+                    )
+                )
         if offline:
             conditions[rule.device_id] = DeviceCondition("offline", tuple(offline))
         elif degraded:
