@@ -29,6 +29,9 @@ is a private lab tool, not a replacement for a home router.
 ### Schedules, timers and randomness
 
 - Multiple daily time windows with click-to-select days and overnight ranges.
+  A schedule applies to one device, a group or everyone else. A device's own
+  schedule wins over its group's, and an everyone-else schedule works without
+  an everyone-else profile.
 - One-shot timers that activate a profile for a chosen duration.
 - Progression sessions that move from a starting profile to an ending profile
   over time, after a DNS-query target or after a device-data target, then
