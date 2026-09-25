@@ -173,7 +173,10 @@ def check_settings(
                 raise ValueError(f"device {device_id} is in more than one group")
             grouped.add(device_id)
     for schedule in settings.schedules:
-        require_device(f"schedule {schedule.id}", schedule.device_id)
+        if schedule.device_id is not None:
+            require_device(f"schedule {schedule.id}", schedule.device_id)
+        if schedule.group_id is not None and schedule.group_id not in group_ids:
+            raise ValueError(f"schedule {schedule.id} uses the missing group {schedule.group_id}")
         require_profile(f"schedule {schedule.id}", schedule.profile_id)
     for limit in settings.data_limits:
         require_device(f"data limit for {limit.device_id}", limit.device_id)
@@ -230,7 +233,11 @@ def check_settings(
         + sum(quota.enabled for quota in settings.service_quotas)
         + sum(quota.enabled for quota in settings.time_quotas)
         + len(assignments)
-        + (settings.everyone_else_profile_id is not None)
+        # One class serves everyone else's profile and all its schedules.
+        + (
+            settings.everyone_else_profile_id is not None
+            or any(schedule.everyone_else and schedule.enabled for schedule in settings.schedules)
+        )
     )
     if traffic_classes > max_traffic_classes:
         raise ValueError(

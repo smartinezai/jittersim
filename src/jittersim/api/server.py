@@ -13,6 +13,7 @@ import ssl
 import time
 from contextlib import nullcontext
 from dataclasses import asdict, replace
+from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from ipaddress import IPv4Network
@@ -81,6 +82,7 @@ from jittersim.engine.compiler import (
 from jittersim.engine.conditions import device_conditions, everyone_else_condition
 from jittersim.engine.progression import progression_factor
 from jittersim.engine.runtime import RuntimeScheduler
+from jittersim.engine.schedules import active_schedule
 from jittersim.engine.service import compile_stored_plan
 from jittersim.networking.helper import HelperClient, HelperClientError
 
@@ -5590,8 +5592,18 @@ def _policies_payload(repository: ConfigRepository) -> Dict[str, Any]:
 
 
 def _everyone_else_payload(repository: ConfigRepository) -> Dict[str, Any]:
+    profile_id = repository.get_everyone_else_profile_id()
+    # The settings' answer for this minute; the scheduler applies it while the
+    # network runs.
+    schedule = active_schedule(
+        schedules=repository.list_schedules(),
+        everyone_else=True,
+        moment=datetime.fromtimestamp(time.time()),
+    )
     return {
-        "profile_id": repository.get_everyone_else_profile_id(),
+        "profile_id": profile_id,
+        "active_profile_id": schedule.profile_id if schedule is not None else profile_id,
+        "active_schedule_id": schedule.id if schedule is not None else None,
         "unaffected_devices": [
             {"mac_address": device.mac_address, "name": device.name}
             for device in repository.list_unaffected_devices()
@@ -6252,8 +6264,22 @@ class ControlServer(HTTPServer):
         if path == "/api/schedules":
             try:
                 schedule = _schedule_from_payload(payload)
+                if (
+                    schedule.device_id is not None
+                    and self.repository.get_device(schedule.device_id) is None
+                ):
+                    raise ValueError("device does not exist")
+                if (
+                    schedule.group_id is not None
+                    and self.repository.get_device_group(schedule.group_id) is None
+                ):
+                    raise ValueError("group does not exist")
             except (KeyError, TypeError, ValueError) as error:
                 return _bad_request("invalid schedule configuration", error)
+            if schedule.everyone_else and schedule.enabled and not self._everyone_else_counted():
+                capacity_error = self._capacity_error(adding=1)
+                if capacity_error is not None:
+                    return capacity_error
             self.repository.save_schedule(schedule)
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {"schedule": _schedule_payload(schedule)}
@@ -6665,7 +6691,7 @@ class ControlServer(HTTPServer):
                 return _bad_request(
                     "invalid everyone-else profile", ValueError("profile does not exist")
                 )
-            if profile_id is not None and self.repository.get_everyone_else_profile_id() is None:
+            if profile_id is not None and not self._everyone_else_counted():
                 capacity_error = self._capacity_error(adding=1)
                 if capacity_error is not None:
                     return capacity_error
@@ -7040,6 +7066,15 @@ class ControlServer(HTTPServer):
             {"error": f"{mac_address} is on the unaffected list; remove it there first"}
         )
 
+    def _everyone_else_counted(self) -> bool:
+        """Return whether everyone else already holds a traffic class."""
+
+        # One class serves the saved profile and every schedule, whichever applies.
+        return self.repository.get_everyone_else_profile_id() is not None or any(
+            schedule.everyone_else and schedule.enabled
+            for schedule in self.repository.list_schedules()
+        )
+
     def _capacity_error(self, *, adding: int) -> Optional[Tuple[int, str, bytes]]:
         """Refuse a change that needs more traffic classes than the kernel allows."""
 
@@ -7048,7 +7083,7 @@ class ControlServer(HTTPServer):
             + sum(quota.enabled for quota in self.repository.list_service_quotas())
             + sum(quota.enabled for quota in self.repository.list_time_quotas())
             + sum(assignment.enabled for assignment in self.repository.list_service_assignments())
-            + (self.repository.get_everyone_else_profile_id() is not None)
+            + self._everyone_else_counted()
         )
         if in_use + adding <= MAX_SHAPED_MARKS_PER_PLAN:
             return None
@@ -7650,12 +7685,14 @@ def _device_from_payload(payload: Dict[str, Any]) -> Device:
 def _schedule_from_payload(payload: Dict[str, Any]) -> Schedule:
     return Schedule(
         id=payload["id"],
-        device_id=payload["device_id"],
+        device_id=payload.get("device_id"),
         profile_id=payload["profile_id"],
         days_of_week=_list_field(payload, "days_of_week", required=True),
         start_minute=payload["start_minute"],
         end_minute=payload["end_minute"],
         enabled=payload.get("enabled", True),
+        group_id=payload.get("group_id"),
+        everyone_else=payload.get("everyone_else", False),
     )
 
 

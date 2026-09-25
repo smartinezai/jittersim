@@ -212,6 +212,67 @@ class SettingsTransferTests(unittest.TestCase):
         )
 
 
+    def test_export_holds_group_and_everyone_else_schedules(self) -> None:
+        window = {"profile_id": "slow", "days_of_week": (0,), "start_minute": 60, "end_minute": 90}
+        payload = settings_to_payload(
+            lab_settings(
+                schedules=(
+                    Schedule(id="family", device_id=None, group_id="family", **window),
+                    Schedule(id="others", device_id=None, everyone_else=True, **window),
+                )
+            ),
+            exported_at=0,
+        )
+
+        self.assertEqual(
+            [
+                (schedule["device_id"], schedule["group_id"], schedule["everyone_else"])
+                for schedule in payload["schedules"]
+            ],
+            [(None, "family", False), (None, None, True)],
+        )
+
+    def test_check_follows_group_and_everyone_else_schedules(self) -> None:
+        window = {"profile_id": "slow", "days_of_week": (0,), "start_minute": 60, "end_minute": 90}
+        slow = Profile(id="slow", name="Slow")
+        fifteen = tuple(
+            Device(f"d{index}", f"D{index}", f"192.168.50.{10 + index}", "slow")
+            for index in range(15)
+        )
+        with self.assertRaisesRegex(ValueError, "schedule family uses the missing group ghost"):
+            check_settings(
+                lab_settings(
+                    schedules=(Schedule(id="family", device_id=None, group_id="ghost", **window),)
+                ),
+                max_traffic_classes=15,
+                max_service_domains=200,
+            )
+        # An everyone-else schedule needs the everyone-else traffic class...
+        with self.assertRaisesRegex(ValueError, "JitterSim can shape at most 15"):
+            check_settings(
+                SavedSettings(
+                    profiles=(slow,),
+                    devices=fifteen,
+                    schedules=(Schedule(id="o", device_id=None, everyone_else=True, **window),),
+                ),
+                max_traffic_classes=15,
+                max_service_domains=200,
+            )
+        # ...unless it is turned off.
+        check_settings(
+            SavedSettings(
+                profiles=(slow,),
+                devices=fifteen,
+                schedules=(
+                    Schedule(
+                        id="o", device_id=None, everyone_else=True, enabled=False, **window
+                    ),
+                ),
+            ),
+            max_traffic_classes=15,
+            max_service_domains=200,
+        )
+
     def test_export_carries_the_everyone_else_settings(self) -> None:
         payload = settings_to_payload(
             SavedSettings(

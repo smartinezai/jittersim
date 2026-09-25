@@ -12,10 +12,12 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime
 from email.message import Message
 from html.parser import HTMLParser
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import urlencode
 
 from jittersim.api.server import (
@@ -28,9 +30,11 @@ from jittersim.api.session import issue_session
 from jittersim.config.models import (
     DataLimit,
     Device,
+    DeviceGroup,
     DomainObservation,
     Impairment,
     Profile,
+    Schedule,
     UnaffectedDevice,
 )
 from jittersim.config.storage import ConfigRepository
@@ -3099,6 +3103,128 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(policies["mac"]["mode"], "denylist")
         self.assertEqual(policies["websites"]["blocked_domains"], ["ads.example.com"])
 
+    SCHEDULE_WINDOW = {
+        "profile_id": "slow", "days_of_week": [0], "start_minute": 540, "end_minute": 1020
+    }
+
+    def test_saves_group_and_everyone_else_schedules(self) -> None:
+        self.repository.save_device_group(DeviceGroup("family", "Family", ("alice",)))
+
+        group_status, _, group_body = self.server.write_response_for(
+            "/api/schedules", {"id": "family-day", "group_id": "family", **self.SCHEDULE_WINDOW}
+        )
+        others_status, _, others_body = self.server.write_response_for(
+            "/api/schedules", {"id": "others-day", "everyone_else": True, **self.SCHEDULE_WINDOW}
+        )
+
+        self.assertEqual((group_status, others_status), (200, 200), (group_body, others_body))
+        self.assertEqual(json.loads(group_body)["schedule"]["group_id"], "family")
+        self.assertTrue(json.loads(others_body)["schedule"]["everyone_else"])
+        _, _, body = self.server.response_for("/api/schedules")
+        self.assertEqual(
+            [
+                (schedule["id"], schedule["device_id"], schedule["group_id"])
+                for schedule in json.loads(body)["schedules"]
+            ],
+            [("family-day", None, "family"), ("others-day", None, None)],
+        )
+
+    def test_a_schedule_must_name_one_existing_target(self) -> None:
+        cases = {
+            "device does not exist": {"device_id": "ghost"},
+            "group does not exist": {"group_id": "ghost"},
+            "exactly one of a device": {},
+        }
+        for message, target in cases.items():
+            with self.subTest(message=message):
+                status, _, body = self.server.write_response_for(
+                    "/api/schedules", {"id": "bad", **target, **self.SCHEDULE_WINDOW}
+                )
+                self.assertEqual(status, 400)
+                self.assertIn(message, json.loads(body)["error"])
+
+    def test_everyone_else_schedules_use_one_traffic_class(self) -> None:
+        for index in range(1, 14):
+            self.repository.save_device(
+                Device(f"d{index}", f"D{index}", f"192.168.50.{20 + index}", "slow")
+            )
+        others = {"everyone_else": True, **self.SCHEDULE_WINDOW}
+
+        # 14 devices: the first everyone-else schedule takes the last class.
+        first, _, _ = self.server.write_response_for("/api/schedules", {"id": "a", **others})
+        self.repository.save_device(Device("d14", "D14", "192.168.50.34", "slow"))
+        # A second schedule or a profile for everyone else needs no new class...
+        second, _, _ = self.server.write_response_for("/api/schedules", {"id": "b", **others})
+        profile, _, _ = self.server.write_response_for(
+            "/api/everyone-else", {"profile_id": "slow"}
+        )
+        # ...but a new device does.
+        device, _, _ = self.server.write_response_for(
+            "/api/devices",
+            {"id": "d15", "name": "D15", "ipv4_address": "192.168.50.35", "profile_id": "slow"},
+        )
+
+        self.assertEqual((first, second, profile, device), (200, 200, 200, 409))
+
+    def test_the_first_everyone_else_schedule_needs_a_free_traffic_class(self) -> None:
+        for index in range(1, 15):
+            self.repository.save_device(
+                Device(f"d{index}", f"D{index}", f"192.168.50.{20 + index}", "slow")
+            )
+
+        status, _, body = self.server.write_response_for(
+            "/api/schedules", {"id": "others", "everyone_else": True, **self.SCHEDULE_WINDOW}
+        )
+
+        self.assertEqual(status, 409, body)
+        self.assertEqual(self.repository.list_schedules(), ())
+
+    def test_everyone_else_reports_the_profile_it_gets_now(self) -> None:
+        self.repository.save_schedule(
+            Schedule(
+                id="others-day", device_id=None, everyone_else=True, profile_id="slow",
+                days_of_week=(0,), start_minute=540, end_minute=1_020,
+            )
+        )
+        # 21 September 2026 is a Monday.
+        answers = []
+        for hour in (10, 20):
+            moment = datetime(2026, 9, 21, hour, 0).timestamp()
+            with patch("time.time", return_value=moment):
+                _, _, body = self.server.response_for("/api/everyone-else")
+            answers.append(json.loads(body))
+
+        self.assertEqual(
+            [(answer["active_profile_id"], answer["active_schedule_id"]) for answer in answers],
+            [("slow", "others-day"), (None, None)],
+        )
+        self.assertEqual([answer["profile_id"] for answer in answers], [None, None])
+
+    def test_imports_group_and_everyone_else_schedules(self) -> None:
+        self.repository.save_device_group(DeviceGroup("family", "Family", ("alice",)))
+        for payload in (
+            {"id": "family-day", "group_id": "family", **self.SCHEDULE_WINDOW},
+            {"id": "others-day", "everyone_else": True, **self.SCHEDULE_WINDOW},
+        ):
+            saved, _, _ = self.server.write_response_for("/api/schedules", payload)
+            self.assertEqual(saved, 200)
+        exported = self._export(self.server)
+        schedules = self.repository.list_schedules()
+        # Exports from before group schedules have no target fields but a device.
+        older = dict(exported, schedules=[
+            {"id": "work", "device_id": "alice", **self.SCHEDULE_WINDOW}
+        ])
+
+        status, _, body = self.server.write_response_for("/api/import", exported)
+        imported = self.repository.list_schedules()
+        older_status, _, older_body = self.server.write_response_for("/api/import", older)
+
+        self.assertEqual((status, older_status), (200, 200), (body, older_body))
+        self.assertEqual(imported, schedules)
+        self.assertEqual(
+            [schedule.device_id for schedule in self.repository.list_schedules()], ["alice"]
+        )
+
     def test_starts_and_cancels_a_profile_timer(self) -> None:
         status, _, body = self.server.write_response_for(
             "/api/timers",
@@ -3372,7 +3498,12 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertEqual(
             json.loads(self.server.response_for("/api/everyone-else")[2]),
-            {"profile_id": "slow", "unaffected_devices": []},
+            {
+                "profile_id": "slow",
+                "active_profile_id": "slow",
+                "active_schedule_id": None,
+                "unaffected_devices": [],
+            },
         )
         self.server.write_response_for("/api/everyone-else", {"profile_id": None})
         self.assertIsNone(self.repository.get_everyone_else_profile_id())
