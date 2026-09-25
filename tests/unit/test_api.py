@@ -2255,12 +2255,48 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn('id="traffic-queued"', DASHBOARD_HTML)
         self.assertIn("function selectedQueueTotals(queues)", DASHBOARD_HTML)
 
-    def test_dashboard_asks_for_the_token_first(self) -> None:
+    def test_dashboard_offers_sign_out_near_the_top(self) -> None:
         self.assertLess(
-            DASHBOARD_HTML.index('id="admin-token"'),
+            DASHBOARD_HTML.index('action="/sign-out"'),
             DASHBOARD_HTML.index('id="connected-devices"'),
         )
-        self.assertIn('event.key === "Enter"', DASHBOARD_HTML)
+
+    def test_dashboard_leaves_the_token_to_the_sign_in_page(self) -> None:
+        script = DASHBOARD_HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+
+        for gone in (
+            'id="admin-token"',
+            "hasAdminToken",
+            "adminTokenVerified",
+            "checkAdminToken",
+            "Enter the admin token",
+            "Check the admin token",
+        ):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, DASHBOARD_HTML)
+        # The browser's cookie authorizes requests, so the script sends no token.
+        self.assertNotIn("Authorization", script)
+        # Only signed-in browsers get this page, so it loads at once.
+        self.assertTrue(script.rstrip().endswith("startDashboard();"))
+
+    def test_dashboard_returns_to_sign_in_when_signed_out(self) -> None:
+        result = self._run_dashboard_functions(
+            ["request"],
+            "let pendingFormSubmitButton = null;\n"
+            "const assigned = [];\n"
+            "const window = {location: {assign: (url) => assigned.push(url)}};\n"
+            "function setButtonBusy() {}\n"
+            "async function fetch() {\n"
+            "  return {ok: false, status: 401, statusText: 'Unauthorized',\n"
+            "          json: async () => ({error: 'sign in required'})};\n"
+            "}\n",
+            "request('/api/profiles', 'GET').then(\n"
+            "  () => console.log(JSON.stringify({assigned, failed: false})),\n"
+            "  () => console.log(JSON.stringify({assigned, failed: true}))\n"
+            ");\n",
+        )
+
+        self.assertEqual(result, {"assigned": ["/"], "failed": True})
 
     def test_dashboard_contains_configuration_and_network_controls(self) -> None:
         status, content_type, body = self.server.response_for("/")
@@ -2278,20 +2314,10 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("/api/group-data-limits", DASHBOARD_HTML)
         self.assertIn("Apply current configuration", DASHBOARD_HTML)
         self.assertIn("Reset network", DASHBOARD_HTML)
-        self.assertIn('id="check-admin-token"', DASHBOARD_HTML)
-        self.assertIn("Check token", DASHBOARD_HTML)
-        self.assertIn("Checking the admin token...", DASHBOARD_HTML)
         self.assertIn("setButtonBusy(event.submitter, true)", DASHBOARD_HTML)
         self.assertIn("if (submitButton) setButtonBusy(submitButton, false);", DASHBOARD_HTML)
         self.assertIn("Dashboard refresh failed:", DASHBOARD_HTML)
         self.assertIn("Settings changed since the last network action", DASHBOARD_HTML)
-        # Protected panels wait for a token instead of polling into 401 responses.
-        self.assertEqual(DASHBOARD_HTML.count("if (!hasAdminToken())"), 2)
-        self.assertNotIn('element("admin-token").addEventListener("change"', DASHBOARD_HTML)
-        self.assertIn(
-            'element("check-admin-token").addEventListener("click", checkAdminToken)',
-            DASHBOARD_HTML,
-        )
         self.assertIn('id="toast" class="toast" role="status"', DASHBOARD_HTML)
         self.assertIn(
             'element("toast-dismiss").addEventListener("click", dismissToast)',

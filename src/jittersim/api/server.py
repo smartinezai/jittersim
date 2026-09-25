@@ -647,14 +647,12 @@ DASHBOARD_HTML = r"""<!doctype html>
     <p id="message" class="action-message" role="status" aria-live="polite">Ready.</p>
   </section>
   <section class="card token-card">
-    <h2>Control token</h2>
-    <div class="token-controls">
-      <label>Admin token (kept in this page only)
-        <input id="admin-token" type="password" autocomplete="off">
-      </label>
-      <button id="check-admin-token" type="button">Check token</button>
-    </div>
-    <p id="token-check-status" class="token-check-status" role="status" aria-live="polite">Enter the token and choose Check token to load diagnostics.</p>
+    <h2>Signed in</h2>
+    <form class="token-controls" method="post" action="/sign-out">
+      <p>This browser stays signed in for 7 days, or until you sign out.</p>
+      <button type="submit">Sign out</button>
+    </form>
+    <p id="token-check-status" class="token-check-status" role="status" aria-live="polite">Loading the dashboard...</p>
   </section>
   <section class="card connected-card">
     <div class="section-heading">
@@ -680,7 +678,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           <option value="all">All assigned devices</option>
         </select>
       </label>
-      <p id="traffic-status" class="traffic-status" role="status" aria-live="polite">Check the admin token to start live traffic sampling.</p>
+      <p id="traffic-status" class="traffic-status" role="status" aria-live="polite">Starting live traffic sampling...</p>
     </div>
     <form id="traffic-rate-form" class="traffic-rate-form">
       <label>ISP download maximum (Mbit/s)
@@ -706,7 +704,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       </div>
     </div>
     <div class="traffic-chart-wrap">
-      <canvas id="traffic-chart" width="900" height="320" role="img" aria-label="Live upload and download rates at JitterSim with configured ISP and device queue limits over the last 60 seconds">Live traffic chart. Check the admin token to begin sampling.</canvas>
+      <canvas id="traffic-chart" width="900" height="320" role="img" aria-label="Live upload and download rates at JitterSim with configured ISP and device queue limits over the last 60 seconds">Live traffic chart.</canvas>
       <div class="traffic-legend" aria-label="Graph legend">
         <span><i class="traffic-key"></i>Upload rate at Pi</span>
         <span><i class="traffic-key download"></i>Download rate at Pi</span>
@@ -719,7 +717,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     <p id="traffic-profile-status" class="traffic-profile-status" role="status" aria-live="polite">Select one device to show its applied default queue limits.</p>
     <p class="traffic-note">Dropped and waiting show packets JitterSim itself discarded or is still
       delaying, in both directions.</p>
-    <p class="traffic-note">Traffic lines count bytes at JitterSim before its queues. They do not show the speed a device receives. Dashed lines show configured limits. The ISP plan line is shared with household traffic and is not a live measurement of spare capacity. Service-specific queues may use different limits. Only assigned devices are included. Check the admin token to start; sampling pauses when this tab is hidden.</p>
+    <p class="traffic-note">Traffic lines count bytes at JitterSim before its queues. They do not show the speed a device receives. Dashed lines show configured limits. The ISP plan line is shared with household traffic and is not a live measurement of spare capacity. Service-specific queues may use different limits. Only assigned devices are included. Sampling pauses when this tab is hidden.</p>
   </section>
   <section class="card wide" aria-labelledby="measurement-title">
     <div class="section-heading">
@@ -1262,7 +1260,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <p class="form-note">Editing a saved limit keeps its current usage. The fallback profile starts when the device total reaches the limit.</p>
       <button class="primary" type="submit">Save device limit</button>
     </form>
-    <div id="data-limit-list" class="quota-list" aria-live="polite">Enter the admin token to view limits.</div>
+    <div id="data-limit-list" class="quota-list" aria-live="polite">Loading...</div>
   </section>
   <section class="card quota-card">
     <div class="section-heading">
@@ -1307,7 +1305,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <p class="form-note">The shared limit adds the byte counters for all group members. A per-device limit takes priority if the same device has both.</p>
       <button class="primary" type="submit">Save group limit</button>
     </form>
-    <div id="group-data-limit-list" class="quota-list" aria-live="polite">Enter the admin token to view group limits.</div>
+    <div id="group-data-limit-list" class="quota-list" aria-live="polite">Loading...</div>
   </section>
   <section class="card quota-card">
     <div class="section-heading">
@@ -1339,7 +1337,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <p class="form-note">Includes subdomains of each name. Configure the Mac browser's HTTPS proxy as 192.168.50.1:3128 while connected to the test Wi-Fi. Other proxied sites keep the device profile. Apps and connections that bypass the proxy are outside this control.</p>
       <button class="primary" type="submit">Save browser service profile</button>
     </form>
-    <div id="service-assignment-list" class="quota-list" aria-live="polite">Enter the admin token to view service profiles.</div>
+    <div id="service-assignment-list" class="quota-list" aria-live="polite">Loading...</div>
   </section>
   <section class="card quota-card">
     <div class="section-heading">
@@ -1396,7 +1394,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <p class="form-note">Only domains observed from the selected device appear here. Select all names used by the service. Matching direct traffic is counted together then multiplied by the quota weight. Browser proxy tunnels are outside this limit.</p>
       <button class="primary" type="submit">Save service limit</button>
     </form>
-    <div id="service-quota-list" class="quota-list" aria-live="polite">Enter the admin token to view service limits.</div>
+    <div id="service-quota-list" class="quota-list" aria-live="polite">Loading...</div>
   </section>
   <section class="card quota-card">
     <div class="section-heading">
@@ -1453,7 +1451,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <p class="form-note">Active time is counted when matching traffic is seen. A long video stream therefore keeps using the allowance even when there are no new clicks. Save the limit then start its timer from the saved row.</p>
       <button class="primary" type="submit">Save time limit</button>
     </form>
-    <div id="time-quota-list" class="quota-list" aria-live="polite">Enter the admin token to view time limits.</div>
+    <div id="time-quota-list" class="quota-list" aria-live="polite">Loading...</div>
   </section>
   <section class="card">
     <h2>Manual Pi access-point fallback</h2>
@@ -1497,14 +1495,14 @@ DASHBOARD_HTML = r"""<!doctype html>
         <div><h2>Diagnostics</h2><p>Runtime state and available traffic counters</p></div>
         <button id="refresh-diagnostics" type="button">Refresh</button>
       </div>
-      <pre id="diagnostics">Enter the admin token to inspect diagnostics.</pre>
+      <pre id="diagnostics">Loading...</pre>
     </section>
     <section class="card">
       <div class="section-heading">
         <div><h2>Backup and action history</h2><p>Recent admin actions without request contents</p></div>
         <button id="download-backup" type="button">Download backup</button>
       </div>
-      <pre id="action-history">Enter the admin token to view recent actions.</pre>
+      <pre id="action-history">Loading...</pre>
       <div class="row-actions transfer-actions">
         <button id="export-settings" type="button">Export settings</button>
         <button id="import-settings-button" type="button">Import settings...</button>
@@ -2067,8 +2065,6 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     async function request(path, method, body) {
       const headers = {};
-      const token = element("admin-token").value.trim();
-      if (token) headers.Authorization = "Bearer " + token;
       if (body !== undefined) headers["Content-Type"] = "application/json";
       const submitButton = pendingFormSubmitButton;
       pendingFormSubmitButton = null;
@@ -2079,6 +2075,13 @@ DASHBOARD_HTML = r"""<!doctype html>
           body: body === undefined ? undefined : JSON.stringify(body),
           cache: "no-store"
         });
+        if (response.status === 401) {
+          // The sign-in expired or was cleared, so show the sign-in page again.
+          window.location.assign("/");
+          const error = new Error("Signed out.");
+          error.status = 401;
+          throw error;
+        }
         const data = await response.json();
         if (!response.ok) {
           const applyHint = data.error === "network helper apply failed" &&
@@ -2101,7 +2104,6 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     let helperConfigured = false;
-    let adminTokenVerified = false;
     let profiles = [];
     let devices = [];
     let deviceConditions = { applied: false, devices: {} };
@@ -2691,7 +2693,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         if (!trafficSamplingAllowed) return;
         resetTrafficHistory();
         if (error.status === 401) {
-          stopTrafficSampling("The admin token was rejected. Check it again to restart live traffic sampling.");
+          stopTrafficSampling("Signed out. Sign in again to restart live traffic sampling.");
         } else {
           element("traffic-status").textContent =
             "Live traffic update failed: " + error.message + ". Retrying in 2 seconds.";
@@ -3360,21 +3362,11 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
     }
 
-    function hasAdminToken() {
-      return Boolean(element("admin-token").value.trim());
-    }
-
     async function loadObservations() {
-      const tokenMessage = "Enter the admin token to view observed domains.";
-      if (!hasAdminToken()) {
-        renderObservations({ available: false, devices: [], message: tokenMessage });
-        return;
-      }
       try {
         renderObservations(await request("/api/observations", "GET"));
       } catch (error) {
-        const message = error.status === 401 ? tokenMessage : error.message;
-        renderObservations({ available: false, devices: [], message: message });
+        renderObservations({ available: false, devices: [], message: error.message });
       }
     }
 
@@ -3873,7 +3865,6 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     async function loadQuotas() {
       try {
-        if (!hasAdminToken()) throw new Error("admin token required");
         const [dataLimits, groupDataLimits, serviceQuotas, timeQuotas] = await Promise.all([
           request("/api/data-limits", "GET"),
           request("/api/group-data-limits", "GET"),
@@ -3885,10 +3876,10 @@ DASHBOARD_HTML = r"""<!doctype html>
         renderServiceQuotas(serviceQuotas);
         renderTimeQuotas(timeQuotas);
       } catch (error) {
-        renderDataLimits({ data_limits: [], error: "Enter the admin token to view device limits." });
-        renderGroupDataLimits({ group_data_limits: [], error: "Enter the admin token to view group limits." });
-        renderServiceQuotas({ service_quotas: [], error: "Enter the admin token to view service limits." });
-        renderTimeQuotas({ time_quotas: [], error: "Enter the admin token to view time limits." });
+        renderDataLimits({ data_limits: [], error: error.message });
+        renderGroupDataLimits({ group_data_limits: [], error: error.message });
+        renderServiceQuotas({ service_quotas: [], error: error.message });
+        renderTimeQuotas({ time_quotas: [], error: error.message });
       }
     }
 
@@ -4214,11 +4205,6 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     async function loadAdminTools() {
-      if (!element("admin-token").value.trim()) {
-        element("diagnostics").textContent = "Enter the admin token to inspect diagnostics.";
-        element("action-history").textContent = "Enter the admin token to view recent actions.";
-        return { ok: false, message: "Enter the admin token first." };
-      }
       try {
         const data = await request("/api/diagnostics", "GET");
         element("diagnostics").textContent = JSON.stringify(data, null, 2);
@@ -4235,47 +4221,24 @@ DASHBOARD_HTML = r"""<!doctype html>
           : "No admin actions have been recorded.";
       } catch (error) {
         element("action-history").textContent = error.message;
-        return { ok: true, message: "Token accepted. Diagnostics loaded, but action history could not be loaded." };
+        return { ok: true, message: "Diagnostics loaded, but action history could not be loaded." };
       }
-      return { ok: true, message: "Token accepted. Diagnostics loaded." };
+      return { ok: true, message: "Diagnostics loaded." };
     }
 
-    async function checkAdminToken() {
-      const button = element("check-admin-token");
+    async function startDashboard() {
+      // Only signed-in browsers get this page, so load everything at once.
       const status = element("token-check-status");
-      if (!element("admin-token").value.trim()) {
-        status.textContent = "Enter the admin token first.";
-        showMessage("Enter the admin token first.", "error");
-        element("admin-token").focus();
-        return;
-      }
-      button.disabled = true;
-      button.setAttribute("aria-busy", "true");
-      button.textContent = "Checking...";
-      status.textContent = "Checking the token and loading diagnostics...";
-      showMessage("Checking the admin token...", "working");
       try {
-        const result = await loadAdminTools();
-        if (result.ok) {
-          adminTokenVerified = true;
-          await refresh();
-          await loadTrafficSettings();
-          await startTrafficSampling();
-        } else {
-          adminTokenVerified = false;
-        }
-        status.textContent = result.ok ? result.message : "Token check failed: " + result.message;
-        status.className = "token-check-status " + (result.ok ? "success" : "error");
-        showMessage(status.textContent, result.ok ? "success" : "error");
+        await refresh();
+        await loadTrafficSettings();
+        await startTrafficSampling();
+        status.textContent = "Signed in.";
+        status.className = "token-check-status success";
       } catch (error) {
-        adminTokenVerified = false;
-        status.textContent = "Token check failed: " + error.message;
+        status.textContent = error.message;
         status.className = "token-check-status error";
-        showMessage(status.textContent, "error");
-      } finally {
-        button.disabled = false;
-        button.removeAttribute("aria-busy");
-        button.textContent = "Check token";
+        showMessage(error.message, "error");
       }
     }
 
@@ -4549,13 +4512,6 @@ DASHBOARD_HTML = r"""<!doctype html>
     element("time-quota-reset-mode").addEventListener("change", () => syncQuotaReset("time-quota"));
     element("service-quota-device").addEventListener("change", () => populateServiceQuotaDomains());
     element("time-quota-device").addEventListener("change", () => populateTimeQuotaDomains());
-    element("check-admin-token").addEventListener("click", checkAdminToken);
-    element("admin-token").addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        checkAdminToken();
-      }
-    });
     element("profile-cancel-edit").addEventListener("click", () => stopEditing("profile"));
     element("profile-form").addEventListener("reset", () => {
       savedProfileRandomness = DEFAULT_PROFILE_RANDOMNESS;
@@ -4582,11 +4538,6 @@ DASHBOARD_HTML = r"""<!doctype html>
       } finally {
         button.disabled = false;
       }
-    });
-    element("admin-token").addEventListener("input", () => {
-      stopTrafficSampling("Token changed. Choose Check token to restart live traffic sampling.");
-      element("token-check-status").textContent = "Token changed. Choose Check token to load diagnostics.";
-      element("token-check-status").className = "token-check-status";
     });
     element("traffic-device").addEventListener("change", () => {
       if (!trafficSamplingAllowed) return;
@@ -4714,20 +4665,15 @@ DASHBOARD_HTML = r"""<!doctype html>
     });
     element("download-backup").addEventListener("click", async (event) => {
       const button = event.currentTarget;
-      const token = element("admin-token").value.trim();
-      if (!token) {
-        element("action-history").textContent = "Enter the admin token before downloading a backup.";
-        showMessage("Enter the admin token before downloading a backup.", "error");
-        return;
-      }
       setButtonBusy(button, true);
       button.textContent = "Preparing backup...";
       showMessage("Preparing the configuration backup...", "working");
       try {
-        const response = await fetch("/api/backup", {
-          headers: { Authorization: "Bearer " + token },
-          cache: "no-store"
-        });
+        const response = await fetch("/api/backup", { cache: "no-store" });
+        if (response.status === 401) {
+          window.location.assign("/");
+          throw new Error("Signed out.");
+        }
         if (!response.ok) {
           const data = await response.json();
           throw new Error(data.error || response.statusText);
@@ -4918,16 +4864,14 @@ DASHBOARD_HTML = r"""<!doctype html>
       routerAction("/api/router/wifi", { enabled: true }, "Turning on router Wi-Fi...", event.currentTarget);
     });
 
-    window.setInterval(() => { if (adminTokenVerified) loadConnectedDevices(); }, 5000);
-    window.setInterval(() => { if (adminTokenVerified) loadTimers(); }, 5000);
-    window.setInterval(() => { if (adminTokenVerified) loadProgressions(); }, 5000);
-    window.setInterval(() => { if (adminTokenVerified) loadQuotas(); }, 5000);
-    window.setInterval(() => { if (adminTokenVerified) loadConditions(); }, 5000);
-    window.setInterval(() => { if (adminTokenVerified) loadObservations(); }, 15000);
+    window.setInterval(() => loadConnectedDevices(), 5000);
+    window.setInterval(() => loadTimers(), 5000);
+    window.setInterval(() => loadProgressions(), 5000);
+    window.setInterval(() => loadQuotas(), 5000);
+    window.setInterval(() => loadConditions(), 5000);
+    window.setInterval(() => loadObservations(), 15000);
 
-    loadHealth().catch((error) => {
-      showMessage(error.message, "error");
-    });
+    startDashboard();
   </script>
 </body>
 </html>
