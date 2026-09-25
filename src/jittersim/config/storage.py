@@ -670,11 +670,15 @@ class ConfigRepository:
         return tuple(self._schedule_from_row(row) for row in rows)
 
     def save_timer(self, timer: Timer) -> None:
-        """Persist one temporary profile override."""
+        """Persist one timer and replace other active overrides for its device."""
 
         try:
             self._connection.execute(
                 "UPDATE timers SET enabled = 0 WHERE device_id = ? AND enabled = 1",
+                (timer.device_id,),
+            )
+            self._connection.execute(
+                "UPDATE progressions SET enabled = 0 WHERE device_id = ? AND enabled = 1",
                 (timer.device_id,),
             )
             self._connection.execute(
