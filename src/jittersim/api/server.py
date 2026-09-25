@@ -1,6 +1,8 @@
 """Small HTTP server for the jittersim control plane."""
 
 import argparse
+import base64
+import hashlib
 import hmac
 import json
 import logging
@@ -3610,6 +3612,28 @@ DASHBOARD_HTML = r"""<!doctype html>
 """
 
 
+def _inline_source_hash(tag: str) -> str:
+    content = DASHBOARD_HTML.split(f"<{tag}>", 1)[1].split(f"</{tag}>", 1)[0]
+    digest = hashlib.sha256(content.encode("utf-8")).digest()
+    return "'sha256-" + base64.b64encode(digest).decode("ascii") + "'"
+
+
+# The dashboard may run only its own inline script and style, and talk only
+# to this server.
+DASHBOARD_CONTENT_SECURITY_POLICY = "; ".join(
+    (
+        "default-src 'none'",
+        f"script-src {_inline_source_hash('script')}",
+        f"style-src {_inline_source_hash('style')}",
+        "connect-src 'self'",
+        "img-src 'self' data:",
+        "base-uri 'none'",
+        "form-action 'self'",
+        "frame-ancestors 'none'",
+    )
+)
+
+
 def _impairment_payload(impairment: Impairment) -> Dict[str, Any]:
     return asdict(impairment)
 
@@ -5035,6 +5059,11 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
     """Handle the control-plane routes."""
 
     server: ControlServer
+    server_version = "jittersim"
+
+    def version_string(self) -> str:
+        # Do not advertise the Python version.
+        return self.server_version
 
     @property
     def timeout(self) -> float:
@@ -5092,6 +5121,21 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format_string: str, *args: Any) -> None:
         LOGGER.info("%s - %s", self.address_string(), format_string % args)
+
+    def log_request(self, code: Any = "-", size: Any = "-") -> None:
+        # Keep the dashboard's constant polling out of the journal, but record
+        # changes and every refused or failed request.
+        status = int(code) if isinstance(code, int) else 0
+        if status >= 400:
+            level = logging.WARNING
+        elif self.command == "GET":
+            level = logging.DEBUG
+        else:
+            level = logging.INFO
+        LOGGER.log(level, "%s - \"%s\" %s", self.address_string(), self.requestline, code)
+
+    def log_error(self, format_string: str, *args: Any) -> None:
+        LOGGER.warning("%s - %s", self.address_string(), format_string % args)
 
     def _handle_write(self) -> None:
         path = urlsplit(self.path).path
@@ -5179,6 +5223,10 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        if content_type.startswith("text/html"):
+            self.send_header("Content-Security-Policy", DASHBOARD_CONTENT_SECURITY_POLICY)
         for name, value in (headers or {}).items():
             self.send_header(name, value)
         self.end_headers()
@@ -5639,6 +5687,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--helper-timeout-seconds", type=float, default=8.0)
     parser.add_argument("--tls-cert", type=Path)
     parser.add_argument("--tls-key", type=Path)
+    parser.add_argument(
+        "--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO"
+    )
     return parser
 
 
@@ -5646,6 +5697,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     """Parse server options and start the dashboard."""
 
     arguments = _build_parser().parse_args(argv)
+    logging.basicConfig(
+        level=getattr(logging, arguments.log_level),
+        format="%(levelname)s %(name)s: %(message)s",
+    )
     run_server(
         database_path=arguments.database,
         host=arguments.host,

@@ -1,5 +1,9 @@
+import base64
 import contextlib
+import hashlib
+import http.client
 import json
+import re
 import shutil
 import socket
 import ssl
@@ -11,7 +15,12 @@ from email.message import Message
 from io import BytesIO
 from pathlib import Path
 
-from jittersim.api.server import DASHBOARD_HTML, ControlRequestHandler, ControlServer
+from jittersim.api.server import (
+    DASHBOARD_HTML,
+    ControlRequestHandler,
+    ControlServer,
+    _build_parser,
+)
 from jittersim.config.models import DataLimit, Device, DomainObservation, Impairment, Profile
 from jittersim.config.storage import ConfigRepository
 from jittersim.engine.runtime import RuntimeScheduler
@@ -711,6 +720,65 @@ class ControlServerTests(unittest.TestCase):
         finally:
             server.shutdown()
             thread.join(timeout=5)
+
+    def _get_over_http(self, path: str):
+        thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05})
+        thread.start()
+        try:
+            connection = http.client.HTTPConnection(*self.server.server_address, timeout=5)
+            connection.request("GET", path)
+            response = connection.getresponse()
+            response.read()
+            connection.close()
+            return response
+        finally:
+            self.server.shutdown()
+            thread.join(timeout=5)
+
+    @staticmethod
+    def _inline_hash(tag: str) -> str:
+        content = re.search(f"<{tag}>(.*?)</{tag}>", DASHBOARD_HTML, re.S).group(1)
+        digest = hashlib.sha256(content.encode("utf-8")).digest()
+        return "'sha256-" + base64.b64encode(digest).decode("ascii") + "'"
+
+    def test_dashboard_only_runs_its_own_inline_script_and_style(self) -> None:
+        response = self._get_over_http("/")
+
+        policy = response.getheader("Content-Security-Policy")
+        self.assertIn("default-src 'none'", policy)
+        self.assertIn("script-src " + self._inline_hash("script"), policy)
+        self.assertIn("style-src " + self._inline_hash("style"), policy)
+        self.assertIn("connect-src 'self'", policy)
+        self.assertIn("frame-ancestors 'none'", policy)
+
+    def test_responses_deny_framing_and_hide_the_python_version(self) -> None:
+        response = self._get_over_http("/api/health")
+
+        self.assertEqual(response.getheader("X-Frame-Options"), "DENY")
+        self.assertEqual(response.getheader("Referrer-Policy"), "no-referrer")
+        self.assertEqual(response.getheader("Server"), "jittersim")
+
+    def test_request_logging_keeps_routine_polling_quiet(self) -> None:
+        handler = object.__new__(ControlRequestHandler)
+        handler.server = self.server
+        handler.client_address = ("127.0.0.1", 50000)
+        handler.command = "GET"
+        handler.requestline = "GET /api/state HTTP/1.1"
+
+        with self.assertLogs("jittersim.api.server", level="DEBUG") as logs:
+            handler.log_request(200)
+            handler.command = "POST"
+            handler.requestline = "POST /api/apply HTTP/1.1"
+            handler.log_request(200)
+            handler.log_request(401)
+
+        self.assertEqual(
+            [record.levelname for record in logs.records], ["DEBUG", "INFO", "WARNING"]
+        )
+
+    def test_log_level_can_be_chosen(self) -> None:
+        self.assertEqual(_build_parser().parse_args([]).log_level, "INFO")
+        self.assertEqual(_build_parser().parse_args(["--log-level", "DEBUG"]).log_level, "DEBUG")
 
     def test_an_idle_connection_does_not_block_other_requests(self) -> None:
         response = self._health_after_an_idle_connection(self.server)

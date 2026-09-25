@@ -514,6 +514,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     """Parse helper options and start the explicit hardware process."""
 
     arguments = _build_parser().parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     run_helper(
         socket_path=arguments.socket,
         topology=Topology(
