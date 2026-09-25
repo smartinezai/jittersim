@@ -61,6 +61,14 @@ class InstallerTests(unittest.TestCase):
             self.installer,
         )
 
+    def test_installer_creates_the_test_wifi_only_when_it_is_safe(self) -> None:
+        # The helper manages a NetworkManager connection with this name.
+        self.assertIn("con-name jittersim-ap", self.installer)
+        self.assertIn("ipv4.method shared", self.installer)
+        self.assertIn("grep -qx jittersim-ap", self.installer)
+        # Never turn the interface carrying the SSH session into an access point.
+        self.assertIn('[ "$default_interface" = "$JITTERSIM_TEST_INTERFACE" ]', self.installer)
+
     def test_installer_refreshes_packages_and_reloads_the_firewall(self) -> None:
         self.assertLess(
             self.installer.index("apt-get update"), self.installer.index("apt-get install")

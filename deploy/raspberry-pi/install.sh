@@ -70,6 +70,27 @@ fi
 chown root:root "$CONFIG_DIR/runtime.env"
 chmod 0600 "$CONFIG_DIR/runtime.env"
 
+# The helper manages the test Wi-Fi through a NetworkManager connection named
+# jittersim-ap. Create it when it is missing. Shared mode gives test devices
+# DHCP, DNS and NAT through the Pi.
+if command -v nmcli >/dev/null 2>&1 \
+    && ! nmcli -t -f NAME connection show | grep -qx jittersim-ap; then
+    . "$CONFIG_DIR/runtime.env"
+    . "$CONFIG_DIR/ap.env"
+    default_interface=$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}')
+    if [ "$default_interface" = "$JITTERSIM_TEST_INTERFACE" ]; then
+        # Turning this interface into an access point would cut off this session.
+        echo "warning: $JITTERSIM_TEST_INTERFACE carries the default route, so the test" \
+            "Wi-Fi was not created. Connect the Pi by Ethernet and run the installer again." >&2
+    elif ! nmcli connection add type wifi ifname "$JITTERSIM_TEST_INTERFACE" \
+        con-name jittersim-ap autoconnect yes ssid "$JITTERSIM_AP_SSID" \
+        802-11-wireless.mode ap 802-11-wireless.band bg \
+        ipv4.method shared ipv4.addresses 192.168.50.1/24 ipv6.method disabled \
+        wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$JITTERSIM_AP_PASSWORD" >/dev/null; then
+        echo "warning: could not create the jittersim-ap test Wi-Fi; see the deployment guide" >&2
+    fi
+fi
+
 dashboard_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (p = 1; p <= NF; p++) if ($p == "src") {print $(p + 1); exit}}' || true)
 if [ -z "$dashboard_ip" ]; then
     dashboard_ip=127.0.0.1
