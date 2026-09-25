@@ -307,6 +307,31 @@ class LinuxDatapathTests(unittest.TestCase):
         self.assertTrue(60 <= dropped <= 140, f"{dropped} of 200 dropped")
         self.assertEqual(counters["directions"]["devices"]["a-phone"]["upload_packets"], 200)
 
+    def test_helper_counts_what_everyone_else_sent_and_dropped(self) -> None:
+        service = HelperService(self.applier)
+        rule = EveryoneElseRule(
+            mark=0,
+            upload_impairment=Impairment(loss_percent=50),
+            download_impairment=Impairment(),
+        )
+        plan = compile_plan(
+            devices=[device("a-phone", 11, "normal")],
+            profiles={NORMAL.id: NORMAL},
+            everyone_else=rule,
+        )
+        applied = service.handle_payload({"action": "apply", "plan": plan_to_payload(plan)})
+        self.assertTrue(applied["ok"])
+
+        self.ping("192.168.50.10", count=200, interval="0.005")
+        counters = service.handle_payload({"action": "traffic-counters"})["counters"]
+
+        self.assertEqual(counters["everyone_else"]["upload_packets"], 200)
+        dropped = counters["queues"]["everyone_else"]["upload_dropped"]
+        self.assertTrue(60 <= dropped <= 140, f"{dropped} of 200 dropped")
+        # The saved device's own queue counts none of everyone else's drops.
+        self.assertEqual(set(counters["queues"]["devices"]), {"a-phone"})
+        self.assertEqual(counters["queues"]["devices"]["a-phone"]["upload_dropped"], 0)
+
     def test_helper_counts_what_a_browser_service_profile_dropped(self) -> None:
         service = HelperService(self.applier)
         phone = device("a-phone", 10, "normal")
