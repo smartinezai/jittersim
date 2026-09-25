@@ -42,10 +42,11 @@ def _format_impairment_arguments(queue: QueueSpec) -> List[str]:
         arguments.extend(["reorder", f"{impairment.reorder_percent}%"])
     if impairment.duplicate_percent:
         arguments.extend(["duplicate", f"{impairment.duplicate_percent}%"])
-    if impairment.corrupt_percent:
-        arguments.extend(["corrupt", f"{impairment.corrupt_percent}%"])
-    if impairment.bandwidth_kbit is not None:
-        arguments.extend(["rate", f"{impairment.bandwidth_kbit}kbit"])
+    # "tc qdisc replace" changes an existing netem in place and keeps any
+    # corrupt or rate setting it is not given, so always state both.
+    arguments.extend(["corrupt", f"{impairment.corrupt_percent}%"])
+    rate = "0bit" if impairment.bandwidth_kbit is None else f"{impairment.bandwidth_kbit}kbit"
+    arguments.extend(["rate", rate])
     return arguments
 
 

@@ -281,6 +281,42 @@ class RendererTests(unittest.TestCase):
         # An allow-only rule with no resolved addresses still blocks everything.
         self.assertIn("ip saddr 192.168.50.11 drop", nft_script)
 
+    def test_netem_options_are_always_stated_so_old_values_do_not_linger(self) -> None:
+        profiles = {
+            "plain": Profile(id="plain", name="Plain", upload=Impairment(delay_ms=100)),
+            "limited": Profile(
+                id="limited",
+                name="Limited",
+                upload=Impairment(delay_ms=100, corrupt_percent=5, bandwidth_kbit=1_000),
+            ),
+        }
+        plan = compile_plan(
+            devices=(
+                make_device("alice", "192.168.50.10", "plain"),
+                make_device("bob", "192.168.50.11", "limited"),
+            ),
+            profiles=profiles,
+        )
+
+        commands = render_command_plan(
+            plan=plan,
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+        )
+
+        def netem_arguments(device_id):
+            purpose = f"upload impairment for device {device_id}"
+            command = next(c for c in commands if purpose in c.purpose)
+            return command.argv[command.argv.index("netem") :]
+
+        # "tc qdisc replace" changes an existing netem in place and keeps any
+        # corrupt or rate setting it is not given.
+        plain = netem_arguments("alice")
+        limited = netem_arguments("bob")
+        self.assertEqual(plain[plain.index("corrupt") + 1], "0%")
+        self.assertEqual(plain[plain.index("rate") + 1], "0bit")
+        self.assertEqual(limited[limited.index("corrupt") + 1], "5%")
+        self.assertEqual(limited[limited.index("rate") + 1], "1000kbit")
+
     def test_renders_jitter_even_without_a_base_delay(self) -> None:
         profile = Profile(
             id="jitter-only",
