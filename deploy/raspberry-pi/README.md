@@ -45,7 +45,17 @@ sharing and address `192.168.50.1/24`. DHCP gives out
 addresses outside that range. This requires NetworkManager 1.50 or newer.
 Before installing packages or changing services, the installer checks the
 NetworkManager version, Ethernet route, AP interface and subnet overlap. It
-does not replace an active Wi-Fi connection used for another purpose. It then
+also checks that Wi-Fi is enabled and does not replace an active Wi-Fi
+connection used for another purpose. On a Pi 3 Model B+, set the correct WLAN
+country before installation with `sudo raspi-config` under Localisation
+Options. Raspberry Pi documents this as a prerequisite for its dual-band
+radio. Use a good 5 V/2.5 A power supply. See the
+[Pi 3 B+ specifications](https://www.raspberrypi.com/products/raspberry-pi-3-model-b-plus/)
+and [wireless setup guide](https://www.raspberrypi.com/documentation/computers/configuration.html).
+
+Raspberry Pi OS Lite identifies the edition but not the release. Check the
+release and NetworkManager version on the Pi with `cat /etc/os-release` and
+`nmcli --version`. The installer requires NetworkManager 1.50 or newer. It then
 installs a virtual environment, writes the systemd units, enables the
 management firewall and starts the browser proxy. Installed code is root-owned.
 An update does not restart an already active `jittersim-ap`. If saved AP
@@ -98,6 +108,8 @@ network or the private Tailscale address for control.
 There is no automatic fallback if the Pi, its power supply, its radio or its
 Ethernet link fails. The built-in radio's coverage and load capacity need
 measurement on the actual Pi. Keep the router Wi-Fi on during the trial.
+The first household trial uses internet access only. Reaching devices on the
+router's wired network would require a separate network design.
 
 1. Install while connected to the Pi over Ethernet. Confirm the installer
    preflight passes and keep the router's Wi-Fi name available for recovery.

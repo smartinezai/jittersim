@@ -163,6 +163,13 @@ capacity have not been measured in your house. A Pi outage would disconnect
 every device using its Wi-Fi. Keep the router's Wi-Fi available while following
 the [household trial](deploy/raspberry-pi/README.md#household-wi-fi-trial).
 
+The target Pi 3 Model B+ has 1 GB of memory and a 300 Mbps maximum Ethernet
+throughput. Its built-in Wi-Fi supports 2.4 GHz and 5 GHz. These specifications
+do not establish the speed, coverage or client count the AP will achieve in
+your home. Use a good 5 V/2.5 A power supply and set the WLAN country before
+the trial. See the [official hardware specifications](https://www.raspberrypi.com/products/raspberry-pi-3-model-b-plus/)
+and [wireless setup guide](https://www.raspberrypi.com/documentation/computers/configuration.html).
+
 Test Wi-Fi clients can use the Pi for public internet access but cannot reach
 the dashboard or private upstream addresses such as the Vodafone router's
 `192.168.0.1`. Dashboard changes also require the administrator token.

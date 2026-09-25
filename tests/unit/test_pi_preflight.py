@@ -39,7 +39,14 @@ class PiPreflightTests(unittest.TestCase):
         with patch.object(
             preflight,
             "_output",
-            side_effect=["nmcli tool, version 1.52.1", "wifi", "yes", "home-wifi"],
+            side_effect=["nmcli tool, version 1.52.1", "enabled", "wifi", "yes", "home-wifi"],
         ), patch.object(preflight, "_json_output", return_value=[{}]):
             with self.assertRaisesRegex(preflight.PreflightError, "another active connection"):
+                preflight.check_gateway(uplink="eth0", test_interface="wlan0")
+
+    def test_rejects_disabled_wifi_before_installation(self) -> None:
+        with patch.object(
+            preflight, "_output", side_effect=["nmcli tool, version 1.52.1", "disabled"]
+        ), patch.object(preflight, "_json_output", return_value=[{}]):
+            with self.assertRaisesRegex(preflight.PreflightError, "WLAN country"):
                 preflight.check_gateway(uplink="eth0", test_interface="wlan0")

@@ -9,22 +9,25 @@ the router's local network, uses IPv4 sharing and replaces the uplink's normal
 traffic queue whenever a profile is applied. These choices need review before
 the Pi becomes the household's main Wi-Fi.
 
-Keep the isolated test setup as the default. Protect unconfigured devices with
-a normal traffic queue and prove that profile changes do not disconnect them.
-Add a separately selected household setup only after deciding whether clients
-need access to wired printers, TVs and other local devices. A routed household
-setup can allow local IPv4 access but still has NAT and does not provide normal
-cross-network discovery or inbound connections. A bridged setup would need a
-larger network redesign and another verification cycle. The built-in Pi radio's
-coverage and client capacity need measurement in the actual house.
+Keep the isolated test setup as the default. The requested household trial only
+needs internet access. Protect unconfigured devices with a normal traffic queue
+and prove that profile changes do not disconnect them. A future setup that
+reaches wired printers, TVs and other local devices needs a separate design.
+The built-in Pi radio's coverage and client capacity need measurement in the
+actual house.
 
 **Risk: high.** A faulty install, Wi-Fi setting, DHCP setting or traffic rule
 could disconnect every household device. Keep the router's Wi-Fi available
 during rollout and keep wired access to the Pi for recovery.
 
-**Open questions:** Which Pi model and Raspberry Pi OS release will be used?
-How many devices will join? Do Wi-Fi devices need normal access to equipment on
-the router's wired network?
+**Known hardware:** Raspberry Pi 3 Model B+. Raspberry Pi OS Lite is likely,
+but the release and NetworkManager version are not yet known. The board has
+1 GB of memory and Ethernet throughput capped at 300 Mbps. This does not
+predict household Wi-Fi performance. Use a suitable 5 V/2.5 A supply and set
+the WLAN country before testing.
+
+**Open questions:** Which Raspberry Pi OS release is installed? How many
+devices will join and what coverage does the house need?
 
 ## Current behavior and gaps
 
@@ -47,7 +50,7 @@ the router's wired network?
    evidence.
 6. The installer requires a NetworkManager version with a configurable DHCP
    range. Before this change, it checked compatibility after creating the AP
-   profile.
+   profile. It also needs Wi-Fi enabled before changing services.
 
 ## Work that does not depend on the open questions
 
@@ -63,9 +66,10 @@ the router's wired network?
    path, staged client migration, local-network tests and sustained load tests
    before disabling the router's Wi-Fi.
 
-## Decision-dependent household setup
+## Future local-network access
 
-If local wired-network access is required, choose one of these explicitly:
+The household trial will use the existing internet-only setup. If local
+wired-network access becomes necessary later, choose one of these explicitly:
 
 - A routed mode can permit private upstream access. It keeps NAT and needs
   checks for printers, casting, games and inbound connections.
@@ -74,8 +78,8 @@ If local wired-network access is required, choose one of these explicitly:
   current routed gateway. Do not claim that the existing browser proxy or
   network plan works in a bridge without proving it on the Pi.
 
-If internet-only use is sufficient, keep the existing isolation and explain
-its limits in the setup guide.
+The current setup keeps the existing isolation and explains its limits in the
+setup guide.
 
 ## Verification and rollout
 

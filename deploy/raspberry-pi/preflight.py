@@ -79,6 +79,10 @@ def check_gateway(*, uplink: str, test_interface: str) -> None:
     _check_version(_output(["nmcli", "--version"]))
     for interface in (uplink, test_interface):
         _json_output(["ip", "-j", "link", "show", "dev", interface])
+    if _output(["nmcli", "radio", "wifi"]) != "enabled":
+        raise PreflightError(
+            "Wi-Fi is disabled. Set the WLAN country and enable Wi-Fi before installation"
+        )
     device_type = _output(["nmcli", "-g", "GENERAL.TYPE", "device", "show", test_interface])
     if device_type != "wifi":
         raise PreflightError("the test interface is not a NetworkManager Wi-Fi device")
