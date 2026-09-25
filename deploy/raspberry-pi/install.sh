@@ -34,7 +34,9 @@ fi
 
 python3 -m venv "$INSTALL_DIR/.venv"
 "$INSTALL_DIR/.venv/bin/pip" install "$INSTALL_DIR"
-chown -R jittersim:jittersim "$INSTALL_DIR"
+# jittersim-helper runs as root from this directory, so only root may change it.
+chown -R root:root "$INSTALL_DIR"
+chmod -R go-w "$INSTALL_DIR"
 
 if [ ! -s "$CONFIG_DIR/control.env" ]; then
     admin_token=$(openssl rand -hex 32)

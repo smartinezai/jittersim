@@ -1,3 +1,5 @@
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -30,6 +32,28 @@ class DeploymentFirewallTests(unittest.TestCase):
         self.assertIn('chmod 0640 "$CONFIG_DIR/dashboard.key"', installer)
         self.assertIn("subjectAltName=DNS:jittersim.local,IP:$dashboard_ip", installer)
         self.assertIn('openssl x509 -in "$CONFIG_DIR/dashboard.crt" -noout -text', installer)
+
+
+class InstallerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.installer_path = REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "install.sh"
+        self.installer = self.installer_path.read_text()
+
+    def test_installer_is_valid_shell(self) -> None:
+        shell = shutil.which("sh")
+        if shell is None:
+            self.skipTest("a POSIX shell is required to check the installer")
+        result = subprocess.run(
+            [shell, "-n", str(self.installer_path)], capture_output=True, text=True
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_code_run_by_the_root_helper_stays_owned_by_root(self) -> None:
+        # jittersim-helper runs as root from this directory.
+        self.assertIn('chown -R root:root "$INSTALL_DIR"', self.installer)
+        self.assertIn('chmod -R go-w "$INSTALL_DIR"', self.installer)
+        self.assertNotIn('chown -R jittersim:jittersim "$INSTALL_DIR"', self.installer)
 
 
 if __name__ == "__main__":
