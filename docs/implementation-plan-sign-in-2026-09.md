@@ -51,6 +51,11 @@ leaks to someone without access.
   - the installer's default test Wi-Fi name is `JitterSim-Test` and becomes
     `TestNet` for new installs. Existing installs keep their name, which the
     dashboard can change.
+- **Client isolation on the test Wi-Fi.** The installer turns on the access
+  point's client isolation, so a visitor's device can't reach other test Wi-Fi
+  devices, such as a laptop's shared folders. Casting between test Wi-Fi
+  devices stops working too; the guide shows how to turn isolation off. The
+  test Wi-Fi restarts once on the update that turns it on.
 - **No token configured.** The sign-in page says sign-in isn't set up.
 - **Unchanged:** the firewall still blocks the dashboard from the test Wi-Fi,
   and the CLI and helper don't use the dashboard.
@@ -71,7 +76,8 @@ leaks to someone without access.
 3. The neutral `Server` header and the cross-site checks on cookie writes.
 4. The dashboard: loading on arrival, sign out, and returning to sign in on
    401.
-5. The installer's certificate name and default Wi-Fi name, plus the guides.
+5. The installer's certificate name, default Wi-Fi name and client isolation,
+   plus the guides.
 
 Each slice is committed separately with its tests.
 

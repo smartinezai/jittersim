@@ -30,8 +30,19 @@ class DeploymentFirewallTests(unittest.TestCase):
         self.assertIn("--tls-key /etc/jittersim/dashboard.key", service)
         self.assertIn('chown root:jittersim "$CONFIG_DIR/dashboard.key"', installer)
         self.assertIn('chmod 0640 "$CONFIG_DIR/dashboard.key"', installer)
-        self.assertIn("subjectAltName=DNS:jittersim.local,IP:$dashboard_ip", installer)
         self.assertIn('openssl x509 -in "$CONFIG_DIR/dashboard.crt" -noout -text', installer)
+
+    def test_the_certificate_is_named_after_the_pi(self) -> None:
+        installer = (REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "install.sh").read_text()
+
+        # The browser shows the certificate's name to anyone who opens the address.
+        self.assertIn('dashboard_host="$(hostname -s).local"', installer)
+        self.assertIn('-subj "/CN=$dashboard_host"', installer)
+        self.assertIn("subjectAltName=DNS:$dashboard_host,IP:$dashboard_ip", installer)
+        # A certificate for another name or address is made again.
+        self.assertIn('grep -Fq "DNS:$dashboard_host"', installer)
+        self.assertIn('grep -Fq "IP Address:$dashboard_ip"', installer)
+        self.assertNotIn("jittersim.local", installer)
 
 
 class InstallerTests(unittest.TestCase):
@@ -70,6 +81,13 @@ class InstallerTests(unittest.TestCase):
         preflight = self.installer.index("preflight.py")
         self.assertLess(preflight, self.installer.index("apt-get update"))
         self.assertLess(preflight, self.installer.index("nmcli connection add"))
+
+    def test_the_test_wifi_has_a_neutral_name_and_isolates_its_clients(self) -> None:
+        self.assertIn("JITTERSIM_AP_SSID=TestNet", self.installer)
+        self.assertNotIn("JitterSim-Test", self.installer)
+        self.assertIn("802-11-wireless.ap-isolation yes", self.installer)
+        # A changed setting restarts the access point like any other AP setting.
+        self.assertEqual(self.installer.count("802-11-wireless.ap-isolation"), 3)
 
     def test_installer_refreshes_packages_and_reloads_the_firewall(self) -> None:
         self.assertLess(

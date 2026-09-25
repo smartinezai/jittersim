@@ -63,7 +63,7 @@ if [ ! -s "$CONFIG_DIR/ap.env" ]; then
     ap_password=$(openssl rand -hex 12)
     umask 077
     {
-        printf 'JITTERSIM_AP_SSID=JitterSim-Test\n'
+        printf 'JITTERSIM_AP_SSID=TestNet\n'
         printf 'JITTERSIM_AP_PASSWORD=%s\n' "$ap_password"
     } > "$CONFIG_DIR/ap.env"
 fi
@@ -91,7 +91,7 @@ if ! nmcli connection show jittersim-ap >/dev/null 2>&1; then
         802-11-wireless-security.psk "$JITTERSIM_AP_PASSWORD"
 else
     ap_settings_before=$(nmcli -g \
-        connection.interface-name,connection.autoconnect,802-11-wireless.mode,ipv4.method,ipv4.addresses,ipv4.shared-dhcp-range,ipv6.method \
+        connection.interface-name,connection.autoconnect,802-11-wireless.mode,802-11-wireless.ap-isolation,ipv4.method,ipv4.addresses,ipv4.shared-dhcp-range,ipv6.method \
         connection show jittersim-ap)
 fi
 if ! nmcli -g ipv4.shared-dhcp-range connection show jittersim-ap >/dev/null 2>&1; then
@@ -102,31 +102,37 @@ nmcli connection modify jittersim-ap \
     connection.interface-name "$JITTERSIM_TEST_INTERFACE" \
     connection.autoconnect yes \
     802-11-wireless.mode ap \
+    802-11-wireless.ap-isolation yes \
     ipv4.method shared \
     ipv4.addresses 192.168.50.1/24 \
     ipv4.shared-dhcp-range 192.168.50.100,192.168.50.199 \
     ipv6.method disabled
 ap_settings_after=$(nmcli -g \
-    connection.interface-name,connection.autoconnect,802-11-wireless.mode,ipv4.method,ipv4.addresses,ipv4.shared-dhcp-range,ipv6.method \
+    connection.interface-name,connection.autoconnect,802-11-wireless.mode,802-11-wireless.ap-isolation,ipv4.method,ipv4.addresses,ipv4.shared-dhcp-range,ipv6.method \
     connection show jittersim-ap)
 
 dashboard_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (p = 1; p <= NF; p++) if ($p == "src") {print $(p + 1); exit}}' || true)
 if [ -z "$dashboard_ip" ]; then
     dashboard_ip=127.0.0.1
 fi
-dashboard_cert_matches_ip=false
-if [ -s "$CONFIG_DIR/dashboard.crt" ] && [ -s "$CONFIG_DIR/dashboard.key" ] \
-    && openssl x509 -in "$CONFIG_DIR/dashboard.crt" -noout -text 2>/dev/null \
-        | grep -Fq "IP Address:$dashboard_ip"; then
-    dashboard_cert_matches_ip=true
+# Browsers show the certificate's name to anyone who opens the dashboard
+# address, so it uses the Pi's own name rather than the product's.
+dashboard_host="$(hostname -s).local"
+dashboard_cert_matches=false
+if [ -s "$CONFIG_DIR/dashboard.crt" ] && [ -s "$CONFIG_DIR/dashboard.key" ]; then
+    dashboard_cert_text=$(openssl x509 -in "$CONFIG_DIR/dashboard.crt" -noout -text 2>/dev/null || true)
+    if printf '%s\n' "$dashboard_cert_text" | grep -Fq "IP Address:$dashboard_ip" \
+        && printf '%s\n' "$dashboard_cert_text" | grep -Fq "DNS:$dashboard_host"; then
+        dashboard_cert_matches=true
+    fi
 fi
-if [ "$dashboard_cert_matches_ip" = false ]; then
+if [ "$dashboard_cert_matches" = false ]; then
     umask 077
     openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 825 \
         -keyout "$CONFIG_DIR/dashboard.key" \
         -out "$CONFIG_DIR/dashboard.crt" \
-        -subj "/CN=jittersim.local" \
-        -addext "subjectAltName=DNS:jittersim.local,IP:$dashboard_ip" \
+        -subj "/CN=$dashboard_host" \
+        -addext "subjectAltName=DNS:$dashboard_host,IP:$dashboard_ip" \
         -addext "extendedKeyUsage=serverAuth"
 fi
 chown root:jittersim "$CONFIG_DIR/dashboard.key"
