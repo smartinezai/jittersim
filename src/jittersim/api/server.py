@@ -92,7 +92,8 @@ PROTECTED_READ_PATHS = frozenset(
 )
 
 
-DASHBOARD_HTML = """<!doctype html>
+# Raw string: JavaScript escapes such as "\n" must reach the browser unchanged.
+DASHBOARD_HTML = r"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -1954,7 +1955,7 @@ DASHBOARD_HTML = """<!doctype html>
           .map((value) => value.trim())
           .filter(Boolean)
           .map((value) => {
-            const match = /^(\\d{1,2}):(\\d{2})$/.exec(value);
+            const match = /^(\d{1,2}):(\d{2})$/.exec(value);
             if (!match || Number(match[1]) > 23 || Number(match[2]) > 59) {
               throw new Error("Reset times must use HH:MM format.");
             }

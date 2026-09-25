@@ -700,6 +700,27 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(plan["mark_rules"][0]["mark"], 1)
         self.assertEqual(plan["queues"][0]["impairment"]["delay_ms"], 3_000)
 
+    def test_dashboard_keeps_javascript_escapes_intact(self) -> None:
+        self.assertIn('.join("\\n")', DASHBOARD_HTML)
+        self.assertIn("/^(\\d{1,2}):(\\d{2})$/", DASHBOARD_HTML)
+
+    def test_dashboard_script_is_valid_javascript(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is required to parse the dashboard script")
+        script = DASHBOARD_HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            script_path = Path(directory) / "dashboard.js"
+            script_path.write_text(script, encoding="utf-8")
+            result = subprocess.run(
+                [node, "--check", str(script_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_dashboard_contains_configuration_and_network_controls(self) -> None:
         status, content_type, body = self.server.response_for("/")
 
