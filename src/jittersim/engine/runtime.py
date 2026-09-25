@@ -83,6 +83,7 @@ class RuntimeScheduler:
         self._last_quota_sample_at = 0.0
         self._last_device_counters: Dict[str, int] = {}
         self._device_traffic_bytes: Dict[str, int] = {}
+        self._group_members: Dict[str, frozenset] = {}
 
     def start(self) -> None:
         """Start the scheduler loop when hardware control is available."""
@@ -149,6 +150,7 @@ class RuntimeScheduler:
             self._current_payload = None
             self._last_device_counters.clear()
             self._device_traffic_bytes.clear()
+            self._group_members.clear()
 
     def sample_usage(self, *, repository: ConfigRepository) -> None:
         """Record quota and device traffic before the helper counters restart."""
@@ -612,6 +614,14 @@ class RuntimeScheduler:
                 aggregate_counter = sum(
                     device_counters[device_id] for device_id in group.device_ids
                 )
+                members = frozenset(group.device_ids)
+                previous_members = self._group_members.get(data_limit.group_id)
+                self._group_members[data_limit.group_id] = members
+                if previous_members is not None and previous_members != members:
+                    # New or removed members change the summed counter without
+                    # any new group traffic, so count on from the new sum.
+                    repository.rebaseline_group_data_usage(data_limit.group_id, aggregate_counter)
+                    continue
                 repository.record_group_data_usage(data_limit.group_id, aggregate_counter)
             for quota in service_quotas:
                 counter = service_counters.get(quota.id)

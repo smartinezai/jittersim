@@ -683,6 +683,37 @@ class RuntimeSchedulerTests(unittest.TestCase):
 
         self.assertEqual(scheduler.device_traffic_bytes(device_id="alice"), 600)
 
+    def test_changing_group_members_does_not_charge_the_group_limit(self) -> None:
+        for profile in (
+            Profile(id="normal", name="Normal"),
+            Profile(id="slow", name="Slow", download=Impairment(delay_ms=900)),
+        ):
+            self.repository.save_profile(profile)
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        self.repository.save_device(Device("bob", "Bob", "192.168.50.11", "normal"))
+        self.repository.save_device_group(
+            DeviceGroup(id="family", name="Family", device_ids=("alice",))
+        )
+        self.repository.save_group_data_limit(
+            GroupDataLimit(group_id="family", profile_id="slow", limit_bytes=10**9, last_reset_at=100)
+        )
+        helper = CounterResettingHelper()
+        helper.counters = {"devices": {"alice": 100, "bob": 5_000}, "services": {}}
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=helper)
+        scheduler.activate(applied_payload={})
+        scheduler.tick(repository=self.repository, now=100)
+
+        # Bob joins with 3,000 bytes he used outside the group.
+        helper.counters["devices"].update({"alice": 50, "bob": 3_000})
+        self.repository.save_device_group(
+            DeviceGroup(id="family", name="Family", device_ids=("alice", "bob"))
+        )
+        scheduler.tick(repository=self.repository, now=106)
+        helper.counters["devices"].update({"alice": 60, "bob": 3_010})
+        scheduler.tick(repository=self.repository, now=112)
+
+        self.assertEqual(self.repository.get_group_data_limit("family").used_bytes, 120)
+
 
 if __name__ == "__main__":
     unittest.main()

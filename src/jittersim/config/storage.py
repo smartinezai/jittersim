@@ -1089,6 +1089,17 @@ class ConfigRepository:
             return True
         return False
 
+    def rebaseline_group_data_usage(self, group_id: str, counter_bytes: int) -> None:
+        """Start counting a group's traffic from a new aggregate without charging it."""
+
+        if not isinstance(counter_bytes, int) or counter_bytes < 0:
+            raise StorageError("group traffic counter is invalid")
+        self._connection.execute(
+            "UPDATE group_data_limits SET counter_bytes = ? WHERE group_id = ?",
+            (counter_bytes, group_id),
+        )
+        self._connection.commit()
+
     def record_group_data_usage(
         self,
         group_id: str,
