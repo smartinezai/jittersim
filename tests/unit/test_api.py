@@ -2255,6 +2255,23 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn('id="traffic-queued"', DASHBOARD_HTML)
         self.assertIn("function selectedQueueTotals(queues)", DASHBOARD_HTML)
 
+    def _small_screen_css(self) -> str:
+        return DASHBOARD_HTML.split("@media (max-width: 700px) {", 1)[1].split("\n    }\n", 1)[0]
+
+    def test_dashboard_fits_a_phone_screen(self) -> None:
+        small = self._small_screen_css()
+
+        # A plain 1fr column grows to its widest content, such as the JSON boxes.
+        self.assertIn(".content-grid, .data-grid { grid-template-columns: minmax(0, 1fr); }", small)
+        self.assertNotIn("grid-template-columns: 1fr;", small)
+
+    def test_the_controls_bar_stays_slim_on_a_phone(self) -> None:
+        small = self._small_screen_css()
+
+        self.assertIn('<p class="action-description">', DASHBOARD_HTML)
+        self.assertIn(".action-description { display: none; }", small)
+        self.assertIn(".action-buttons button { flex: 1;", small)
+
     def test_dashboard_offers_sign_out_near_the_top(self) -> None:
         self.assertLess(
             DASHBOARD_HTML.index('action="/sign-out"'),

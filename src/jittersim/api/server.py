@@ -588,13 +588,29 @@ DASHBOARD_HTML = r"""<!doctype html>
     .schedule-row small { color: #91a8c1; }
     @media (max-width: 700px) {
       body { padding-top: 1rem; }
-      .page-header, .action-bar { display: block; }
+      .page-header { display: block; }
+      /* One slim row on phones: title and status, then both buttons. */
+      .action-bar {
+        display: flex; flex-wrap: wrap; align-items: center;
+        gap: 0.35rem 0.6rem; top: 0.25rem; padding: 0.6rem 0.75rem;
+      }
+      .action-copy {
+        display: flex; flex: 1 1 100%; gap: 0.6rem; align-items: baseline; min-width: 0;
+      }
+      .action-copy h2 { margin: 0; font-size: 0.95rem; white-space: nowrap; }
+      .action-description { display: none; }
+      .runtime-summary, .action-message {
+        margin: 0; overflow: hidden; font-size: 0.8rem;
+        white-space: nowrap; text-overflow: ellipsis;
+      }
+      .action-message { flex: 1 1 100%; }
       .badge { display: inline-block; margin-top: 1rem; }
-      .action-buttons { flex-wrap: wrap; }
-      .action-buttons button { margin-top: 0.9rem; }
-      .content-grid, .data-grid { grid-template-columns: 1fr; }
-      .policy-grid { grid-template-columns: 1fr; }
-      .uplink-grid { grid-template-columns: 1fr; }
+      .action-buttons { display: flex; flex: 1 1 100%; gap: 0.5rem; }
+      .action-buttons button { flex: 1; margin-top: 0; padding: 0.5rem; font-size: 0.85rem; }
+      /* minmax(0, 1fr): a plain 1fr column grows to its widest content. */
+      .content-grid, .data-grid { grid-template-columns: minmax(0, 1fr); }
+      .policy-grid { grid-template-columns: minmax(0, 1fr); }
+      .uplink-grid { grid-template-columns: minmax(0, 1fr); }
       .connected-row { grid-template-columns: auto minmax(0, 1fr) auto; }
       .connected-controls { grid-column: 1 / -1; }
       .connected-controls select { flex: 1; }
@@ -602,7 +618,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       .observation-actions { margin-top: 0.75rem; }
       .observation-actions button { width: 100%; }
       .observation-device-heading { display: block; }
-      .randomness-inputs { grid-template-columns: 1fr; }
+      .randomness-inputs { grid-template-columns: minmax(0, 1fr); }
       .timer-row { display: block; }
       .timer-row button { width: 100%; margin-top: 0.7rem; }
       .progression-row-heading { display: block; }
@@ -610,7 +626,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       .quota-row-heading { display: block; }
       .quota-actions button { flex: 1; }
       .token-controls { align-items: stretch; flex-direction: column; }
-      .traffic-controls { grid-template-columns: 1fr; }
+      .traffic-controls { grid-template-columns: minmax(0, 1fr); }
       .traffic-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
     @media (prefers-reduced-motion: reduce) {
@@ -637,7 +653,8 @@ DASHBOARD_HTML = r"""<!doctype html>
   <section class="card action-bar" aria-label="Network actions">
     <div class="action-copy">
       <h2>Network controls</h2>
-      <p>Apply the saved configuration or return the test network to its normal state.</p>
+      <p class="action-description">Apply the saved configuration or return the test network
+        to its normal state.</p>
       <p id="runtime-summary" class="runtime-summary unknown">Checking runtime state...</p>
     </div>
     <div class="action-buttons">
