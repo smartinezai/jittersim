@@ -4,6 +4,7 @@ import argparse
 import base64
 import hashlib
 import hmac
+import html
 import json
 import logging
 import os
@@ -17,8 +18,16 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from ipaddress import IPv4Network
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Tuple
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
+from jittersim.api.session import (
+    SignInLimiter,
+    cleared_session_cookie,
+    issue_session,
+    session_cookie,
+    session_from_cookie_header,
+    session_is_valid,
+)
 from jittersim.config.device_labels import (
     DeviceLabelError,
     guess_device_type,
@@ -128,7 +137,6 @@ WRITE_PATHS = frozenset(
     )
 )
 ACTION_PATHS = frozenset(("/api/apply", "/api/reset", "/api/observations/scan"))
-PUBLIC_READ_PATHS = frozenset(("/", "/api/health"))
 
 
 # Raw string: JavaScript escapes such as "\n" must reach the browser unchanged.
@@ -4926,10 +4934,80 @@ DASHBOARD_HTML = r"""<!doctype html>
 """
 
 
-def _inline_source_hash(tag: str) -> str:
-    content = DASHBOARD_HTML.split(f"<{tag}>", 1)[1].split(f"</{tag}>", 1)[0]
+def _inline_source_hash(tag: str, page: str = DASHBOARD_HTML) -> str:
+    content = page.split(f"<{tag}>", 1)[1].split(f"</{tag}>", 1)[0]
     digest = hashlib.sha256(content.encode("utf-8")).digest()
     return "'sha256-" + base64.b64encode(digest).decode("ascii") + "'"
+
+
+# The only page anyone without a sign-in sees. It names nothing and has no
+# script, so it gives nothing away about what it protects.
+SIGN_IN_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Sign in</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      margin: 0; min-height: 100vh; display: grid; place-items: center;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: #f4f5f7; color: #1d2433;
+    }
+    main {
+      width: min(22rem, calc(100% - 2rem)); box-sizing: border-box; padding: 2rem;
+      border-radius: 12px; background: #ffffff; box-shadow: 0 8px 24px rgb(0 0 0 / 8%);
+    }
+    h1 { margin: 0 0 1.25rem; font-size: 1.4rem; }
+    label { display: block; margin-bottom: 0.4rem; font-weight: 600; }
+    input {
+      box-sizing: border-box; width: 100%; padding: 0.7rem; font: inherit;
+      border: 1px solid #c4c9d4; border-radius: 8px;
+    }
+    button {
+      width: 100%; margin-top: 1rem; padding: 0.7rem; border: 0; border-radius: 8px;
+      background: #2f5bd3; color: #ffffff; font: inherit; font-weight: 600; cursor: pointer;
+    }
+    .error { margin: 0.75rem 0 0; color: #b42318; }
+    @media (prefers-color-scheme: dark) {
+      body { background: #11151d; color: #e6e9ef; }
+      main { background: #1b212c; box-shadow: none; }
+      input { background: #11151d; color: inherit; border-color: #3a4456; }
+      .error { color: #ff9b91; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Sign in</h1>
+    <form method="post" action="/sign-in">
+      <label for="token">Token</label>
+      <input id="token" name="token" type="password" autocomplete="current-password"
+        required autofocus>
+      {message}
+      <button type="submit">Sign in</button>
+    </form>
+  </main>
+</body>
+</html>
+"""
+
+SIGN_IN_CONTENT_SECURITY_POLICY = "; ".join(
+    (
+        "default-src 'none'",
+        f"style-src {_inline_source_hash('style', SIGN_IN_HTML)}",
+        "base-uri 'none'",
+        "form-action 'self'",
+        "frame-ancestors 'none'",
+    )
+)
+
+
+def _sign_in_page(message: str = "") -> bytes:
+    notice = f'<p class="error" role="alert">{html.escape(message)}</p>' if message else ""
+    return SIGN_IN_HTML.replace("{message}", notice).encode("utf-8")
 
 
 # The dashboard may run only its own inline script and style, and talk only
@@ -5254,6 +5332,7 @@ class ControlServer(HTTPServer):
         self.scheduler = scheduler
         self.secure_transport = tls_context is not None
         self._tls_context = tls_context
+        self.sign_in_limiter = SignInLimiter()
         super().__init__(server_address, ControlRequestHandler)
 
     def get_request(self) -> Tuple[socket.socket, Any]:
@@ -6778,6 +6857,13 @@ class ControlServer(HTTPServer):
             authorization_header=authorization_header,
         )
 
+    def is_signed_in(self, cookie_header: Optional[str]) -> bool:
+        """Return whether a Cookie header holds a current sign-in."""
+
+        return session_is_valid(
+            self.admin_token, session_from_cookie_header(cookie_header), now=int(time.time())
+        )
+
     def recover_saved_network_state(self) -> None:
         """Restore the last explicit apply or reset after the service restarts."""
 
@@ -6814,7 +6900,8 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
     """Handle the control-plane routes."""
 
     server: ControlServer
-    server_version = "jittersim"
+    # A neutral name: people who haven't signed in learn nothing from headers.
+    server_version = "server"
 
     def version_string(self) -> str:
         # Do not advertise the Python version.
@@ -6824,9 +6911,47 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
     def timeout(self) -> float:
         return self.server.request_timeout_seconds
 
+    def _signed_in(self) -> bool:
+        return self.server.is_signed_in(self.headers.get("Cookie"))
+
+    def _send_sign_in_required(self) -> None:
+        self._send_response(
+            status=HTTPStatus.UNAUTHORIZED,
+            content_type="application/json",
+            body=_json_bytes({"error": "sign in required"}),
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    def _send_sign_in_page(self, *, status: int = HTTPStatus.OK, message: str = "") -> None:
+        if not message and self.server.admin_token is None:
+            message = "Sign-in isn't set up."
+        self._send_response(
+            status=status,
+            content_type="text/html; charset=utf-8",
+            body=_sign_in_page(message),
+            content_security_policy=SIGN_IN_CONTENT_SECURITY_POLICY,
+        )
+
+    def _redirect_home(self, *, cookie: Optional[str] = None) -> None:
+        headers = {"Location": "/"}
+        if cookie is not None:
+            headers["Set-Cookie"] = cookie
+        self._send_response(
+            status=HTTPStatus.SEE_OTHER,
+            content_type="text/plain; charset=utf-8",
+            body=b"",
+            headers=headers,
+        )
+
     def do_GET(self) -> None:
         path = urlsplit(self.path).path
-        if path.startswith("/api/") and path not in PUBLIC_READ_PATHS:
+        if path in ("/", "/sign-in") and not self._signed_in():
+            self._send_sign_in_page()
+            return
+        if path == "/sign-in":
+            self._redirect_home()
+            return
+        if path.startswith("/api/"):
             if self.server.admin_token is None:
                 self._send_response(
                     status=HTTPStatus.SERVICE_UNAVAILABLE,
@@ -6834,13 +6959,11 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                     body=_json_bytes({"error": "protected reads are disabled"}),
                 )
                 return
-            if not self.server.is_authorized(self.headers.get("Authorization")):
-                self._send_response(
-                    status=HTTPStatus.UNAUTHORIZED,
-                    content_type="application/json",
-                    body=_json_bytes({"error": "valid bearer authentication is required"}),
-                    headers={"WWW-Authenticate": "Bearer"},
-                )
+            if not (
+                self.server.is_authorized(self.headers.get("Authorization"))
+                or self._signed_in()
+            ):
+                self._send_sign_in_required()
                 return
         try:
             status, content_type, body = self.server.response_for(path)
@@ -6866,7 +6989,72 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         self._send_response(status=status, content_type=content_type, body=body, headers=headers)
 
     def do_POST(self) -> None:
-        self._handle_write()
+        path = urlsplit(self.path).path
+        if path == "/sign-in":
+            self._handle_sign_in()
+        elif path == "/sign-out":
+            self._redirect_home(cookie=cleared_session_cookie(secure=self.server.secure_transport))
+        else:
+            self._handle_write()
+
+    def _handle_sign_in(self) -> None:
+        expected = self.server.admin_token
+        if expected is None:
+            self._send_sign_in_page(status=HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        address = self.client_address[0]
+        now = time.time()
+        limiter = self.server.sign_in_limiter
+        if limiter.is_locked(address, now=now):
+            self._send_sign_in_page(
+                status=HTTPStatus.TOO_MANY_REQUESTS,
+                message="Too many attempts. Try again later.",
+            )
+            return
+        try:
+            token = self._read_form_field("token")
+        except RequestError:
+            token = ""
+        # Compare bytes: compare_digest rejects str values with non-ASCII characters.
+        if not hmac.compare_digest(token.encode("utf-8"), expected.encode("utf-8")):
+            limiter.record_failure(address, now=now)
+            self._send_sign_in_page(
+                status=HTTPStatus.UNAUTHORIZED, message="That token didn't work."
+            )
+            return
+        limiter.clear(address)
+        cookie = session_cookie(
+            issue_session(expected, now=int(now)), secure=self.server.secure_transport
+        )
+        self._redirect_home(cookie=cookie)
+
+    def _read_form_field(self, name: str, *, max_bytes: int = 4_096) -> str:
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError as error:
+            raise RequestError("request body length is invalid") from error
+        if length < 0 or length > max_bytes:
+            raise RequestError("request body is too large")
+        raw_body = self.rfile.read(length)
+        if len(raw_body) != length:
+            raise RequestError("request body is incomplete")
+        try:
+            values = parse_qs(raw_body.decode("utf-8"), max_num_fields=10)
+        except (UnicodeDecodeError, ValueError) as error:
+            raise RequestError("request body is invalid") from error
+        return values.get(name, [""])[0]
+
+    def _cross_site_refusal(self) -> Optional[str]:
+        """Refuse a cookie-authorized write that another site could have sent."""
+
+        # Other sites can't send JSON here without the browser asking first.
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if content_type != "application/json":
+            return "requests must send JSON"
+        origin = self.headers.get("Origin")
+        if origin is not None and urlsplit(origin).netloc != self.headers.get("Host", ""):
+            return "cross-site requests are refused"
+        return None
 
     def do_PUT(self) -> None:
         self._handle_write()
@@ -6913,13 +7101,17 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             )
             return
         if not self.server.is_authorized(self.headers.get("Authorization")):
-            self._send_response(
-                status=HTTPStatus.UNAUTHORIZED,
-                content_type="application/json",
-                body=_json_bytes({"error": "valid bearer authentication is required"}),
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-            return
+            if not self._signed_in():
+                self._send_sign_in_required()
+                return
+            refusal = self._cross_site_refusal()
+            if refusal is not None:
+                self._send_response(
+                    status=HTTPStatus.FORBIDDEN,
+                    content_type="application/json",
+                    body=_json_bytes({"error": refusal}),
+                )
+                return
 
         try:
             payload = self._read_json_body(
@@ -6981,6 +7173,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         content_type: str,
         body: bytes,
         headers: Optional[Dict[str, str]] = None,
+        content_security_policy: Optional[str] = None,
     ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -6990,7 +7183,10 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
         if content_type.startswith("text/html"):
-            self.send_header("Content-Security-Policy", DASHBOARD_CONTENT_SECURITY_POLICY)
+            self.send_header(
+                "Content-Security-Policy",
+                content_security_policy or DASHBOARD_CONTENT_SECURITY_POLICY,
+            )
         for name, value in (headers or {}).items():
             self.send_header(name, value)
         self.end_headers()
