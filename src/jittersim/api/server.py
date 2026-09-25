@@ -4473,7 +4473,7 @@ class ControlServer(HTTPServer):
                 check_settings(settings, max_traffic_classes=MAX_TRAFFIC_CLASSES_PER_PLAN)
             except (KeyError, TypeError, ValueError) as error:
                 return _bad_request("invalid settings import", error)
-            self.repository.replace_settings(settings)
+            self.repository.replace_settings(self._with_counter_baselines(settings))
             return self._apply_saved_change(
                 "imported",
                 {
@@ -4708,6 +4708,13 @@ class ControlServer(HTTPServer):
                     raise ValueError("device does not exist")
                 if self.repository.get_profile(data_limit.profile_id) is None:
                     raise ValueError("profile does not exist")
+                existing = self.repository.get_data_limit(data_limit.device_id)
+                if data_limit.enabled and not (existing is not None and existing.enabled):
+                    # The device counter already holds traffic from before the limit.
+                    data_limit = replace(
+                        data_limit,
+                        counter_bytes=self._quota_counter("devices", data_limit.device_id) or 0,
+                    )
                 self.repository.save_data_limit(data_limit)
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid data limit configuration", error)
@@ -4749,6 +4756,13 @@ class ControlServer(HTTPServer):
                     raise ValueError("device group does not exist")
                 if self.repository.get_profile(data_limit.profile_id) is None:
                     raise ValueError("profile does not exist")
+                existing = self.repository.get_group_data_limit(data_limit.group_id)
+                if data_limit.enabled and not (existing is not None and existing.enabled):
+                    # The device counters already hold traffic from before the limit.
+                    data_limit = replace(
+                        data_limit,
+                        counter_bytes=self._group_quota_counter(data_limit.group_id) or 0,
+                    )
                 self.repository.save_group_data_limit(data_limit)
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid group data limit configuration", error)
@@ -5129,6 +5143,47 @@ class ControlServer(HTTPServer):
         values = counters.get(kind, {})
         value = values.get(identifier) if isinstance(values, dict) else None
         return value if isinstance(value, int) and value >= 0 else None
+
+    def _with_counter_baselines(self, settings: SavedSettings) -> SavedSettings:
+        """Count imported limits from the helper's current counters, not from zero."""
+
+        traffic_counters = getattr(self.helper_client, "traffic_counters", None)
+        if traffic_counters is None:
+            return settings
+        try:
+            counters = traffic_counters()
+        except HelperClientError:
+            LOGGER.warning("could not read quota counters before an import", exc_info=True)
+            return settings
+        devices = counters.get("devices", {})
+        services = counters.get("services", {})
+        members = {group.id: group.device_ids for group in settings.groups}
+
+        def counter(values: Any, key: str) -> int:
+            value = values.get(key) if isinstance(values, dict) else None
+            return value if isinstance(value, int) and value >= 0 else 0
+
+        return replace(
+            settings,
+            data_limits=tuple(
+                replace(limit, counter_bytes=counter(devices, limit.device_id))
+                for limit in settings.data_limits
+            ),
+            group_data_limits=tuple(
+                replace(
+                    limit,
+                    counter_bytes=sum(
+                        counter(devices, device_id)
+                        for device_id in members.get(limit.group_id, ())
+                    ),
+                )
+                for limit in settings.group_data_limits
+            ),
+            service_quotas=tuple(
+                replace(quota, counter_bytes=counter(services, quota.id))
+                for quota in settings.service_quotas
+            ),
+        )
 
     def _group_quota_counter(self, group_id: str) -> Optional[int]:
         """Return the current aggregate device counter for one group."""

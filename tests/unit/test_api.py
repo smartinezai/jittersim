@@ -112,6 +112,24 @@ class FakeHelper:
         }
 
 
+class CountingHelper(FakeHelper):
+    """Count traffic like the real helper: every apply restarts the counters."""
+
+    def __init__(self, *, devices=None, services=None) -> None:
+        super().__init__()
+        self.devices = dict(devices or {})
+        self.services = dict(services or {})
+
+    def apply(self, *, plan):
+        result = super().apply(plan=plan)
+        self.devices = dict.fromkeys(self.devices, 0)
+        self.services = dict.fromkeys(self.services, 0)
+        return result
+
+    def traffic_counters(self):
+        return {"devices": dict(self.devices), "services": dict(self.services)}
+
+
 def create_test_certificate(directory: Path):
     """Create a throwaway self-signed certificate, or return None without OpenSSL."""
 
@@ -1711,6 +1729,91 @@ class ControlServerTests(unittest.TestCase):
 
                 self.assertEqual(status, 200)
                 self.assertEqual(self.repository.get_data_limit("alice").used_bytes, 1_600)
+
+    def _serve_live(self, helper):
+        scheduler = RuntimeScheduler(
+            database_path=":memory:", helper_client=helper, poll_seconds=3_600
+        )
+        self.server.helper_client = helper
+        self.server.scheduler = scheduler
+        self.addCleanup(scheduler.stop)
+        return helper
+
+    def test_a_new_limit_counts_only_traffic_after_it_is_saved(self) -> None:
+        helper = self._serve_live(CountingHelper(devices={"alice": 0}))
+        self.server.write_response_for(
+            "/api/groups", {"id": "family", "name": "Family", "device_ids": ["alice"]}
+        )
+        helper.devices["alice"] = 3_000_000
+
+        self.server.write_response_for(
+            "/api/data-limits", {"device_id": "alice", "profile_id": "slow", "limit_bytes": 10**9}
+        )
+        helper.devices["alice"] = 2_000_000
+        self.server.write_response_for(
+            "/api/group-data-limits",
+            {"group_id": "family", "profile_id": "slow", "limit_bytes": 10**9},
+        )
+
+        self.assertEqual(self.repository.get_data_limit("alice").used_bytes, 2_000_000)
+        self.assertEqual(self.repository.get_group_data_limit("family").used_bytes, 0)
+
+    def test_a_reenabled_limit_skips_traffic_from_while_it_was_off(self) -> None:
+        self.repository.save_data_limit(
+            DataLimit(
+                device_id="alice",
+                profile_id="slow",
+                limit_bytes=10**9,
+                used_bytes=500,
+                counter_bytes=0,
+                last_reset_at=100,
+                enabled=False,
+            )
+        )
+        self._serve_live(CountingHelper(devices={"alice": 3_000_000}))
+
+        self.server.write_response_for(
+            "/api/data-limits",
+            {"device_id": "alice", "profile_id": "slow", "limit_bytes": 10**9, "enabled": True},
+        )
+
+        self.assertEqual(self.repository.get_data_limit("alice").used_bytes, 500)
+
+    def test_an_import_counts_only_traffic_after_it(self) -> None:
+        self.repository.save_domain_observations(
+            (DomainObservation("192.168.50.10", "netflix.com", 1, 10, 10),), now=10
+        )
+        for path, payload in (
+            ("/api/groups", {"id": "family", "name": "Family", "device_ids": ["alice"]}),
+            ("/api/data-limits", {"device_id": "alice", "profile_id": "slow", "limit_bytes": 10**9}),
+            (
+                "/api/group-data-limits",
+                {"group_id": "family", "profile_id": "slow", "limit_bytes": 10**9},
+            ),
+            (
+                "/api/service-quotas",
+                {
+                    "id": "video",
+                    "name": "Video",
+                    "device_id": "alice",
+                    "profile_id": "slow",
+                    "domains": ["netflix.com"],
+                    "limit_bytes": 10**9,
+                },
+            ),
+        ):
+            self.assertEqual(self.server.write_response_for(path, payload)[0], 200, path)
+        exported = self._export(self.server)
+        self._serve_live(
+            CountingHelper(devices={"alice": 3_000_000}, services={"video": 2_000_000})
+        )
+
+        status, _, _ = self.server.write_response_for("/api/import", exported)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self.repository.get_data_limit("alice").used_bytes, 0)
+        self.assertEqual(self.repository.get_group_data_limit("family").used_bytes, 0)
+        self.assertEqual(self.repository.get_service_quota("video").used_bytes, 0)
 
     def test_live_changes_apply_while_the_network_is_applied(self) -> None:
         helper = FakeHelper()
