@@ -5,6 +5,7 @@ from jittersim.config.models import Device, Impairment, MacPolicy, Profile
 from jittersim.engine.codec import PlanCodecError, plan_from_payload, plan_to_payload
 from jittersim.engine.compiler import compile_plan
 from jittersim.engine.plan import (
+    EVERYONE_ELSE_QUEUE_ID,
     EveryoneElseRule,
     ServiceAssignmentRule,
     ServiceQuotaRule,
@@ -226,6 +227,91 @@ class EveryoneElseCodecTests(unittest.TestCase):
 
                 with self.assertRaises(PlanCodecError):
                     plan_from_payload(payload)
+
+    def test_rejects_a_rule_that_shares_a_device_mark(self) -> None:
+        # Device marks don't have to be 1..N, so a rule can't assume they are.
+        def move_alice_to_mark_15(payload):
+            payload["mark_rules"][0]["mark"] = 15
+            for queue in payload["queues"]:
+                if queue["device_id"] == "alice":
+                    queue["mark"] = 15
+
+        assignment = ServiceAssignmentRule(
+            assignment_id="yt",
+            device_id="alice",
+            device_ip=IPv4Address("192.168.50.10"),
+            domains=("youtube.com",),
+            mark=0,
+            upload_impairment=Impairment(delay_ms=50),
+            download_impairment=Impairment(),
+        )
+        cases = {
+            "everyone else": (self.plan(), "everyone_else", EVERYONE_ELSE_QUEUE_ID),
+            "a browser service profile": (
+                compile_plan(
+                    devices=(Device("alice", "Alice", "192.168.50.10", "normal"),),
+                    profiles={"normal": Profile(id="normal", name="Normal")},
+                    service_assignment_rules=(assignment,),
+                ),
+                "service_assignment_rules",
+                "assignment:yt",
+            ),
+        }
+        for name, (plan, key, queue_id) in cases.items():
+            with self.subTest(name=name):
+                payload = plan_to_payload(plan)
+                move_alice_to_mark_15(payload)
+                rule = payload[key] if key == "everyone_else" else payload[key][0]
+                rule["mark"] = 15
+                for queue in payload["queues"]:
+                    if queue["device_id"] == queue_id:
+                        queue["mark"] = 15
+
+                with self.assertRaises(PlanCodecError):
+                    plan_from_payload(payload)
+
+    def test_round_trips_everyone_else_after_every_kind_of_rule(self) -> None:
+        plan = compile_plan(
+            devices=(Device("alice", "Alice", "192.168.50.10", "normal"),),
+            profiles={"normal": Profile(id="normal", name="Normal")},
+            service_quota_rules=(
+                ServiceQuotaRule(
+                    quota_id="video",
+                    device_id="alice",
+                    device_ip=IPv4Address("192.168.50.10"),
+                    destination_addresses=(IPv4Address("203.0.113.10"),),
+                    mark=0,
+                    upload_impairment=Impairment(),
+                    download_impairment=Impairment(bandwidth_kbit=500),
+                    active=True,
+                ),
+            ),
+            service_assignment_rules=(
+                ServiceAssignmentRule(
+                    assignment_id="yt",
+                    device_id="alice",
+                    device_ip=IPv4Address("192.168.50.10"),
+                    domains=("youtube.com",),
+                    mark=0,
+                    upload_impairment=Impairment(delay_ms=50),
+                    download_impairment=Impairment(),
+                ),
+            ),
+            everyone_else=EveryoneElseRule(
+                mark=0,
+                upload_impairment=Impairment(delay_ms=100),
+                download_impairment=Impairment(),
+            ),
+        )
+
+        self.assertEqual(
+            [rule.mark for rule in plan.mark_rules]
+            + [rule.mark for rule in plan.service_quota_rules]
+            + [rule.mark for rule in plan.service_assignment_rules]
+            + [plan.everyone_else.mark],
+            [1, 2, 3, 4],
+        )
+        self.assertEqual(plan_from_payload(plan_to_payload(plan)), plan)
 
 if __name__ == "__main__":
     unittest.main()

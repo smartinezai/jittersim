@@ -314,7 +314,11 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
         if mark <= len(mark_data) + len(service_quota_rules) or mark > MAX_SHAPED_MARKS_PER_PLAN:
             raise PlanCodecError(f"service_assignment_rules[{index}].mark is outside the safe range")
         key = f"assignment:{assignment_id}"
-        if key in service_marks or mark in service_marks.values():
+        if (
+            key in service_marks
+            or mark in marks_by_device.values()
+            or mark in service_marks.values()
+        ):
             raise PlanCodecError(f"duplicate service assignment mark {mark}")
         prior_domains = domains_by_device.setdefault(device_id, [])
         for domain in domains:
@@ -364,6 +368,7 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
         if (
             mark <= len(mark_data) + len(service_quota_rules) + len(service_assignment_rules)
             or mark > MAX_SHAPED_MARKS_PER_PLAN
+            or mark in marks_by_device.values()
             or mark in service_marks.values()
         ):
             raise PlanCodecError("everyone_else.mark is outside the safe range")
