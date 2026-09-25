@@ -847,3 +847,4 @@ class SavedSettings:
     service_assignments: Tuple[ServiceAssignment, ...] = ()
     everyone_else_profile_id: Optional[str] = None
     unaffected_devices: Tuple[UnaffectedDevice, ...] = ()
+    scenarios: Tuple[Scenario, ...] = ()

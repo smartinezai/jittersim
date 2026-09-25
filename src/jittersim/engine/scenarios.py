@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from jittersim.config.models import Scenario
+from jittersim.config.storage import ConfigRepository
 
 
 @dataclass(frozen=True)
@@ -40,3 +41,14 @@ def scenario_position(
                 total_remaining_seconds=None if scenario.loop else math.ceil(total - elapsed),
             )
     return None
+
+
+def active_scenario_runs(repository: ConfigRepository, *, now: float) -> tuple:
+    """Return (run, scenario, position) for every run still going, newest first."""
+
+    active = []
+    for run, scenario in repository.list_scenario_runs():
+        position = scenario_position(scenario, started_at=run.started_at, now=now)
+        if position is not None:
+            active.append((run, scenario, position))
+    return tuple(active)

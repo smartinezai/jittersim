@@ -16,6 +16,9 @@ from jittersim.config.models import (
     Progression,
     Randomness,
     SavedSettings,
+    Scenario,
+    ScenarioRun,
+    ScenarioStep,
     Schedule,
     ServiceAssignment,
     ServiceQuota,
@@ -25,6 +28,7 @@ from jittersim.config.models import (
     WebsitePolicy,
 )
 from jittersim.config.storage import ConfigRepository, StorageError
+from jittersim.engine.scenarios import active_scenario_runs
 
 
 class ConfigRepositoryTests(unittest.TestCase):
@@ -1119,6 +1123,111 @@ class TargetScheduleStorageTests(unittest.TestCase):
                 # Deleting the only member deletes the group, and both cascades still work.
                 self.assertTrue(repository.delete_device("alice"))
                 self.assertEqual(repository.list_schedules(), ())
+
+
+class ScenarioStorageTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.repository = ConfigRepository(":memory:")
+        self.addCleanup(self.repository.close)
+        for profile_id in ("normal", "3g", "slow"):
+            self.repository.save_profile(Profile(id=profile_id, name=profile_id))
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        self.repository.save_device(Device("bob", "Bob", "192.168.50.11", "normal"))
+        self.repository.save_device_group(DeviceGroup("family", "Family", ("alice", "bob")))
+        self.scenario = Scenario(
+            id="commute", name="Commute", steps=(ScenarioStep("3g", 60), ScenarioStep("slow", 30))
+        )
+        self.repository.save_scenario(self.scenario)
+
+    def start(self, run_id: str, started_at: int = 100, **target) -> None:
+        self.repository.start_scenario_run(
+            ScenarioRun(id=run_id, scenario_id="commute", started_at=started_at, **target)
+        )
+
+    def active(self, now: int = 110) -> list:
+        return [run.id for run, _, _ in active_scenario_runs(self.repository, now=now)]
+
+    def timer(self, timer_id: str) -> None:
+        self.repository.save_timer(
+            Timer(id=timer_id, device_id="alice", profile_id="slow", started_at=100, expires_at=700)
+        )
+
+    def test_round_trips_scenarios(self) -> None:
+        looping = Scenario(id="a-loop", name="Loop", steps=(ScenarioStep("slow", 10),), loop=True)
+        self.repository.save_scenario(looping)
+
+        self.assertEqual(self.repository.list_scenarios(), (looping, self.scenario))
+        self.assertEqual(self.repository.get_scenario("commute"), self.scenario)
+        self.assertIsNone(self.repository.get_scenario("ghost"))
+
+    def test_a_run_replaces_the_other_run_for_its_target(self) -> None:
+        self.start("run-1", device_id="alice")
+        self.start("run-2", group_id="family")
+        self.start("run-3", device_id="alice")
+
+        self.assertEqual(self.active(), ["run-3", "run-2"])
+
+    def test_a_device_run_and_its_timer_or_progression_replace_each_other(self) -> None:
+        self.timer("t1")
+        self.start("run-1", device_id="alice")
+        timers_after_run = self.repository.list_active_timers(now=110)
+        self.timer("t2")
+        runs_after_timer = self.active()
+        self.start("run-2", device_id="alice")
+        self.repository.save_progression(
+            Progression(
+                id="p1", device_id="alice", start_profile_id="normal", end_profile_id="slow",
+                started_at=100, duration_seconds=600,
+            )
+        )
+        runs_after_progression = self.active()
+        # A group's run leaves its members' own timers alone.
+        self.timer("t3")
+        self.start("run-3", group_id="family")
+
+        self.assertEqual(timers_after_run, ())
+        self.assertEqual(runs_after_timer, [])
+        self.assertEqual(runs_after_progression, [])
+        self.assertEqual(
+            [timer.id for timer in self.repository.list_active_timers(now=110)], ["t3"]
+        )
+
+    def test_stopped_and_finished_runs_are_not_active(self) -> None:
+        self.start("run-1", device_id="alice")
+        self.start("run-2", device_id="bob")
+
+        self.assertTrue(self.repository.stop_scenario_run("run-2"))
+        self.assertFalse(self.repository.stop_scenario_run("run-2"))
+        self.assertEqual(self.active(now=150), ["run-1"])
+        run, scenario, position = active_scenario_runs(self.repository, now=170)[0]
+        self.assertEqual((run.id, scenario.id, position.step_index), ("run-1", "commute", 1))
+        # The two steps take 90 seconds.
+        self.assertEqual(self.active(now=190), [])
+
+    def test_deleting_a_scenario_group_or_device_ends_its_runs(self) -> None:
+        self.start("run-1", device_id="alice")
+        self.start("run-2", group_id="family")
+        self.start("run-3", everyone_else=True)
+
+        self.assertTrue(self.repository.delete_device_group("family"))
+        self.assertTrue(self.repository.delete_device("alice"))
+        self.assertEqual(self.active(), ["run-3"])
+        self.assertTrue(self.repository.delete_scenario("commute"))
+        self.assertEqual(self.active(), [])
+
+    def test_profiles_a_scenario_uses_are_named(self) -> None:
+        self.assertIn("scenario Commute", self.repository.profile_references("slow", now=110))
+        self.assertNotIn("scenario Commute", self.repository.profile_references("normal", now=110))
+
+    def test_settings_carry_scenarios_but_not_runs(self) -> None:
+        self.start("run-1", everyone_else=True)
+        settings = self.repository.saved_settings()
+
+        self.repository.replace_settings(settings)
+
+        self.assertEqual(settings.scenarios, (self.scenario,))
+        self.assertEqual(self.repository.list_scenarios(), (self.scenario,))
+        self.assertEqual(self.active(), [])
 
 
 if __name__ == "__main__":
