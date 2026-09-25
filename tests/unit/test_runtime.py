@@ -473,6 +473,40 @@ class RuntimeSchedulerTests(unittest.TestCase):
             (IPv4Address("192.168.50.10"),),
         )
 
+    def test_edited_profile_values_apply_without_a_reset(self) -> None:
+        self._save_device(Profile(id="slow", name="Slow", download=Impairment(delay_ms=100)))
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+        scheduler.tick(repository=self.repository, now=0)
+
+        self.repository.save_profile(
+            Profile(id="slow", name="Slow", download=Impairment(delay_ms=500))
+        )
+        scheduler.tick(repository=self.repository, now=10)
+
+        self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 500)
+
+    def test_changing_a_group_profile_applies_the_new_values(self) -> None:
+        for profile in (
+            Profile(id="normal", name="Normal"),
+            Profile(id="slow", name="Slow", download=Impairment(delay_ms=400)),
+            Profile(id="slower", name="Slower", download=Impairment(delay_ms=900)),
+        ):
+            self.repository.save_profile(profile)
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        group = DeviceGroup(id="family", name="Family", device_ids=("alice",), profile_id="slow")
+        self.repository.save_device_group(group)
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+        scheduler.tick(repository=self.repository, now=0)
+
+        self.repository.save_device_group(
+            DeviceGroup(id="family", name="Family", device_ids=("alice",), profile_id="slower")
+        )
+        scheduler.tick(repository=self.repository, now=10)
+
+        self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 900)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -46,6 +46,8 @@ class _DeviceRollState:
     """Mutable scheduler state for one device between ticks."""
 
     profile_id: str
+    # The profile values this state was built from, so edits start a fresh roll.
+    source_profiles: object
     runtime_profile: Profile
     roll_number: int
     next_roll_at: float
@@ -232,6 +234,7 @@ class RuntimeScheduler:
                 else schedule.profile_id
             )
             selected_profile = profiles.get(source_profile_id)
+            source_profiles = selected_profile
             source_key = (
                 f"group-profile:{group.id}"
                 if group is not None and group_profile_id is not None and schedule is None
@@ -240,6 +243,7 @@ class RuntimeScheduler:
             if timer is not None:
                 source_profile_id = timer.profile_id
                 selected_profile = profiles.get(source_profile_id)
+                source_profiles = selected_profile
                 source_key = f"timer:{timer.id}"
             elif progression is not None:
                 start_profile = profiles.get(progression.start_profile_id)
@@ -260,6 +264,9 @@ class RuntimeScheduler:
                     end=end_profile,
                     factor=factor,
                 )
+                # The interpolated profile changes as the progression advances,
+                # so only edits to its start or end profile restart the roll.
+                source_profiles = (start_profile, end_profile)
                 source_key = f"progression:{progression.id}"
                 domain_count = int(len(progression.website_domains) * factor)
                 if domain_count:
@@ -272,6 +279,7 @@ class RuntimeScheduler:
                         f"data limit for device {device.id} references a missing profile"
                     )
                 selected_profile = fallback_profile
+                source_profiles = fallback_profile
                 source_key = f"data-limit:{device.id}"
             elif group is not None:
                 group_data_limit = group_data_limits.get(group.id)
@@ -286,14 +294,20 @@ class RuntimeScheduler:
                             f"group data limit for {group.id} references a missing profile"
                         )
                     selected_profile = fallback_profile
+                    source_profiles = fallback_profile
                     source_key = f"group-data-limit:{group.id}"
             if selected_profile is None:
                 raise PlanError(f"device {device.id} references missing profile {source_profile_id}")
             active_device_ids.add(device.id)
             roll = self._rolls.get(device.id)
-            if roll is None or roll.profile_id != source_key:
+            if (
+                roll is None
+                or roll.profile_id != source_key
+                or roll.source_profiles != source_profiles
+            ):
                 roll = _DeviceRollState(
                     profile_id=source_key,
+                    source_profiles=source_profiles,
                     runtime_profile=selected_profile,
                     roll_number=0,
                     next_roll_at=now + max(1, selected_profile.reroll_interval_seconds),
