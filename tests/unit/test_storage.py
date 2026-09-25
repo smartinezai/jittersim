@@ -56,6 +56,55 @@ class ConfigRepositoryTests(unittest.TestCase):
         self.assertEqual(self.repository.get_profile(profile.id), profile)
         self.assertEqual(self.repository.get_device(device.id), device)
 
+    def test_connected_device_labels_persist_without_changing_network_version(self) -> None:
+        version_before = self.repository.get_runtime_state().configuration_version
+        self.repository.save_connected_device_label(
+            mac_address="DC:1E:D5:3E:97:4C",
+            display_name="Family MacBook",
+            device_type="laptop",
+        )
+        self.repository.save_connected_device_label(
+            mac_address="dc:1e:d5:3e:97:4c",
+            display_name="Work laptop",
+            device_type="desktop",
+        )
+
+        self.assertEqual(
+            self.repository.list_connected_device_labels(),
+            {
+                "dc:1e:d5:3e:97:4c": {
+                    "display_name": "Work laptop",
+                    "device_type": "desktop",
+                }
+            },
+        )
+        self.assertEqual(self.repository.get_runtime_state().configuration_version, version_before)
+        self.repository.delete_connected_device_label(mac_address="DC:1E:D5:3E:97:4C")
+        self.assertEqual(self.repository.list_connected_device_labels(), {})
+
+    def test_connected_device_labels_reject_invalid_values(self) -> None:
+        with self.assertRaisesRegex(StorageError, "label is invalid"):
+            self.repository.save_connected_device_label(
+                mac_address="not-a-mac",
+                display_name="Guest",
+                device_type="phone",
+            )
+
+    def test_connected_device_labels_have_a_bounded_count(self) -> None:
+        for index in range(256):
+            self.repository.save_connected_device_label(
+                mac_address=f"02:00:00:00:{index // 256:02x}:{index % 256:02x}",
+                display_name=f"Device {index}",
+                device_type="unknown",
+            )
+
+        with self.assertRaisesRegex(StorageError, "label limit reached"):
+            self.repository.save_connected_device_label(
+                mac_address="02:00:00:00:01:00",
+                display_name="Next device",
+                device_type="unknown",
+            )
+
     def test_browser_service_assignment_survives_reopen_and_can_be_removed(self) -> None:
         assignment = ServiceAssignment(
             id="video",
@@ -426,6 +475,11 @@ class ConfigRepositoryTests(unittest.TestCase):
 
     def test_backup_is_a_readable_snapshot_of_saved_configuration(self) -> None:
         self.repository.save_profile(Profile(id="normal", name="Normal"))
+        self.repository.save_connected_device_label(
+            mac_address="dc:1e:d5:3e:97:4c",
+            display_name="Family MacBook",
+            device_type="laptop",
+        )
         backup = self.repository.backup_bytes()
 
         with tempfile.NamedTemporaryFile(suffix=".db") as temporary:
@@ -435,8 +489,13 @@ class ConfigRepositoryTests(unittest.TestCase):
                 profile = snapshot.execute(
                     "SELECT name FROM profiles WHERE id = 'normal'"
                 ).fetchone()
+                label = snapshot.execute(
+                    "SELECT display_name, device_type FROM connected_device_labels "
+                    "WHERE mac_address = 'dc:1e:d5:3e:97:4c'"
+                ).fetchone()
 
         self.assertEqual(profile, ("Normal",))
+        self.assertEqual(label, ("Family MacBook", "laptop"))
 
 
 if __name__ == "__main__":

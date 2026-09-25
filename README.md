@@ -34,7 +34,11 @@ is a private lab tool, not a replacement for a home router.
 
 ### Devices and website rules
 
-- Connected-device discovery with device names, IP addresses and MAC addresses.
+- Connected-device discovery with current Wi-Fi connection status, IP and MAC
+  addresses, signal strength and DHCP names when available.
+- Device type suggestions from local DHCP names plus editable names and types
+  stored on the Pi. Categories are phone, tablet, laptop, desktop, TV or
+  console, other and unknown. Type labels never change traffic rules.
 - Click-to-select devices and assign profiles from the dashboard.
 - Device groups that apply one profile override to several devices at once.
 - A live upload and download graph with packet rates for assigned devices.
@@ -153,6 +157,17 @@ NetworkManager, independently of the dashboard and network helper. A network
 plan only marks devices you add in the dashboard. Other clients use a normal
 fair queue when a profile is active. They do not inherit a selected device's
 delay, loss or bandwidth limit.
+
+The connected-device list shows devices currently associated with the Pi's
+Wi-Fi. It can show the IP address, signal strength and a DHCP-provided network
+name. Type suggestions use only clear words in that name and may be wrong.
+Names and types you save stay on the Pi and do not affect traffic. They are
+saved against the Wi-Fi MAC address. Apple and Android devices can use private
+addresses that change or differ by network, so a saved label may need to be
+entered again after an address changes. Offline labels can be removed from the
+dashboard. Up to 256 labels are saved. See [Apple's private Wi-Fi address
+guide](https://support.apple.com/en-ie/102509) and [Android's MAC
+randomization guide](https://source.android.com/docs/core/connect/wifi-mac-randomization-behavior).
 
 **Do not switch the whole house to this AP yet.** The current setup is a
 separate IPv4 network behind NAT. Its firewall intentionally blocks access to

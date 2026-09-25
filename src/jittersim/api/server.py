@@ -16,6 +16,13 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
 
+from jittersim.config.device_labels import (
+    DeviceLabelError,
+    guess_device_type,
+    normalize_device_display_name,
+    normalize_device_mac,
+    normalize_device_type,
+)
 from jittersim.config.models import (
     DataLimit,
     Device,
@@ -78,6 +85,8 @@ WRITE_PATHS = frozenset(
         "/api/router/sync-ap",
         "/api/router/wifi",
         "/api/connected-devices/apply-profile",
+        "/api/connected-device-labels",
+        "/api/connected-device-labels/delete",
         "/api/observations/scan",
         "/api/observations/add-to-profile",
         "/api/observations/add-global-block",
@@ -286,6 +295,25 @@ DASHBOARD_HTML = """<!doctype html>
     .connected-controls { display: flex; align-items: center; gap: 0.5rem; }
     .connected-controls select { min-width: 10rem; }
     .connected-controls button { margin-top: 0; white-space: nowrap; }
+    .connected-label-editor { margin-top: 0.4rem; color: #a8bdd4; font-size: 0.78rem; }
+    .connected-label-editor summary { cursor: pointer; }
+    .connected-label-form {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: end;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
+    .connected-label-form label { min-width: 9rem; max-width: 14rem; flex: 1; }
+    .connected-label-form input { padding: 0.45rem 0.5rem; }
+    .connected-label-form button { margin: 0; padding: 0.45rem 0.6rem; }
+    .saved-device-labels {
+      border-top: 1px solid #2b435f;
+      margin-top: 0.75rem;
+      padding-top: 0.75rem;
+    }
+    .saved-device-labels h3 { margin-top: 0; }
+    .saved-device-label-row { grid-template-columns: minmax(0, 1fr) auto auto; }
     select {
       padding: 0.55rem 0.6rem;
       border: 1px solid #3a526e;
@@ -470,6 +498,7 @@ DASHBOARD_HTML = """<!doctype html>
       .connected-row { grid-template-columns: auto minmax(0, 1fr) auto; }
       .connected-controls { grid-column: 1 / -1; }
       .connected-controls select { flex: 1; }
+      .connected-label-form label { max-width: none; }
       .observation-actions { margin-top: 0.75rem; }
       .observation-actions button { width: 100%; }
       .observation-device-heading { display: block; }
@@ -1688,23 +1717,46 @@ DASHBOARD_HTML = """<!doctype html>
     function renderConnectedDevices(data) {
       const container = element("connected-devices");
       const count = element("connected-count");
+      const expandedLabels = new Set(
+        Array.from(container.querySelectorAll(".connected-label-editor[open]"))
+          .map((editor) => editor.dataset.macAddress)
+      );
       container.replaceChildren();
+      const devices = data.devices || [];
+      const deviceTypeNames = {
+        unknown: "Unknown",
+        phone: "Phone",
+        tablet: "Tablet",
+        laptop: "Laptop",
+        desktop: "Desktop",
+        tv_console: "TV or console",
+        other: "Other"
+      };
       if (!data.available) {
         count.textContent = "Unavailable";
         const empty = document.createElement("p");
         empty.className = "device-empty";
         empty.textContent = data.message || "Connected-client information is unavailable.";
         container.appendChild(empty);
-        return;
+      } else {
+        const connectionLabel = data.association_status_available ? " connected" : " visible";
+        count.textContent = devices.length + connectionLabel;
+        if (!data.association_status_available) {
+          const warning = document.createElement("p");
+          warning.className = "device-empty";
+          warning.textContent =
+            "Wi-Fi connection status is unavailable. Listed IP neighbors may be disconnected " +
+            "and profile actions are disabled.";
+          container.appendChild(warning);
+        }
       }
-      const devices = data.devices || [];
-      count.textContent = devices.length + " connected";
-      if (devices.length === 0) {
+      if (data.available && devices.length === 0) {
         const empty = document.createElement("p");
         empty.className = "device-empty";
-        empty.textContent = "No IPv4 clients are currently visible.";
+        empty.textContent = data.association_status_available
+          ? "No devices are connected to the test Wi-Fi."
+          : "No recent IP neighbors are visible.";
         container.appendChild(empty);
-        return;
       }
       devices.forEach((device) => {
         const row = document.createElement("div");
@@ -1714,18 +1766,86 @@ DASHBOARD_HTML = """<!doctype html>
         const details = document.createElement("div");
         const address = document.createElement("p");
         address.className = "connected-address";
-        address.textContent = device.ipv4_address;
+        address.textContent = device.display_name || "Unnamed client";
         const metadata = document.createElement("p");
         metadata.className = "connected-meta";
-        metadata.textContent = device.mac_address;
-        details.append(address, metadata);
+        const metadataParts = [device.ipv4_address || "IP address pending", device.mac_address];
+        if (device.signal_dbm !== undefined && device.signal_dbm !== null) {
+          metadataParts.push("Signal " + device.signal_dbm + " dBm");
+        }
+        metadata.textContent = metadataParts.join(" · ");
+        const deviceType = document.createElement("p");
+        deviceType.className = "connected-meta";
+        const typeName = deviceTypeNames[device.device_type] || "Unknown";
+        deviceType.textContent = "Type: " + typeName + (
+          device.device_type_source === "hostname suggestion" ? " (suggested)" : ""
+        );
+        details.append(address, metadata, deviceType);
+        if (device.hostname) {
+          const hostname = document.createElement("p");
+          hostname.className = "connected-meta";
+          hostname.textContent = "Network name: " + device.hostname;
+          details.appendChild(hostname);
+        }
+        const labelEditor = document.createElement("details");
+        labelEditor.className = "connected-label-editor";
+        labelEditor.dataset.macAddress = device.mac_address;
+        labelEditor.open = expandedLabels.has(device.mac_address);
+        const labelSummary = document.createElement("summary");
+        labelSummary.textContent = "Edit name and type";
+        const labelForm = document.createElement("div");
+        labelForm.className = "connected-label-form";
+        const nameLabel = document.createElement("label");
+        nameLabel.textContent = "Display name";
+        const nameInput = document.createElement("input");
+        nameInput.type = "text";
+        nameInput.maxLength = 64;
+        nameInput.value = device.saved_display_name || device.hostname || "";
+        nameInput.placeholder = "Optional name";
+        nameLabel.appendChild(nameInput);
+        const typeLabel = document.createElement("label");
+        typeLabel.textContent = "Device type";
+        const typeSelect = document.createElement("select");
+        typeSelect.setAttribute(
+          "aria-label",
+          "Device type for " + (device.display_name || device.mac_address)
+        );
+        Object.entries(deviceTypeNames).forEach(([value, name]) => {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = name;
+          option.selected = value === device.device_type;
+          typeSelect.appendChild(option);
+        });
+        typeLabel.appendChild(typeSelect);
+        const saveLabelButton = document.createElement("button");
+        saveLabelButton.type = "button";
+        saveLabelButton.textContent = "Save details";
+        saveLabelButton.addEventListener("click", () => {
+          saveConnectedDeviceLabel(device, nameInput, typeSelect, saveLabelButton);
+        });
+        labelForm.append(nameLabel, typeLabel, saveLabelButton);
+        if (device.has_saved_label) {
+          const clearLabelButton = document.createElement("button");
+          clearLabelButton.type = "button";
+          clearLabelButton.textContent = "Clear saved details";
+          clearLabelButton.addEventListener("click", () => {
+            clearConnectedDeviceLabel(device, clearLabelButton);
+          });
+          labelForm.appendChild(clearLabelButton);
+        }
+        labelEditor.append(labelSummary, labelForm);
+        details.appendChild(labelEditor);
         const state = document.createElement("span");
         state.className = "connected-state";
-        state.textContent = device.state;
+        state.textContent = device.association_verified ? "Connected" : "Status unknown";
         const controls = document.createElement("div");
         controls.className = "connected-controls";
         const profileSelect = document.createElement("select");
-        profileSelect.setAttribute("aria-label", "Profile for " + device.ipv4_address);
+        profileSelect.setAttribute(
+          "aria-label",
+          "Profile for " + (device.display_name || device.mac_address)
+        );
         const emptyOption = document.createElement("option");
         emptyOption.value = "";
         emptyOption.textContent = profiles.length ? "Choose profile..." : "No profiles saved";
@@ -1740,9 +1860,11 @@ DASHBOARD_HTML = """<!doctype html>
         const applyButton = document.createElement("button");
         applyButton.type = "button";
         applyButton.textContent = device.assigned_profile_id ? "Apply profile" : "Assign profile";
-        applyButton.disabled = !helperConfigured || profiles.length === 0;
+        applyButton.disabled = !helperConfigured || profiles.length === 0 ||
+          !device.ipv4_address || !device.association_verified;
         profileSelect.addEventListener("change", () => {
-          applyButton.disabled = !helperConfigured || profileSelect.value === "";
+          applyButton.disabled = !helperConfigured || profileSelect.value === "" ||
+            !device.ipv4_address || !device.association_verified;
         });
         applyButton.addEventListener("click", () => {
           applyProfileToDevice(device, profileSelect.value, applyButton);
@@ -1751,6 +1873,83 @@ DASHBOARD_HTML = """<!doctype html>
         row.append(dot, details, state, controls);
         container.appendChild(row);
       });
+      renderSavedConnectedDeviceLabels(
+        container,
+        data.saved_labels || [],
+        new Set(devices.map((device) => device.mac_address)),
+        deviceTypeNames
+      );
+    }
+
+    function renderSavedConnectedDeviceLabels(container, labels, connectedMacAddresses, typeNames) {
+      const disconnectedLabels = labels.filter(
+        (label) => !connectedMacAddresses.has(label.mac_address)
+      );
+      if (disconnectedLabels.length === 0) return;
+      const section = document.createElement("div");
+      section.className = "saved-device-labels";
+      const heading = document.createElement("h3");
+      heading.textContent = "Saved labels for devices not listed above";
+      const note = document.createElement("p");
+      note.className = "device-empty";
+      note.textContent = "Remove old labels here if a device's private Wi-Fi address changed.";
+      section.append(heading, note);
+      disconnectedLabels.forEach((label) => {
+        const row = document.createElement("div");
+        row.className = "connected-row saved-device-label-row";
+        const details = document.createElement("div");
+        const name = document.createElement("p");
+        name.className = "connected-address";
+        name.textContent = label.display_name || "Unnamed client";
+        const mac = document.createElement("p");
+        mac.className = "connected-meta";
+        mac.textContent = label.mac_address;
+        details.append(name, mac);
+        const type = document.createElement("span");
+        type.className = "connected-state";
+        type.textContent = typeNames[label.device_type] || "Unknown";
+        const removeButton = document.createElement("button");
+        removeButton.type = "button";
+        removeButton.textContent = "Remove saved label";
+        removeButton.addEventListener("click", () => {
+          clearConnectedDeviceLabel(label, removeButton);
+        });
+        row.append(details, type, removeButton);
+        section.appendChild(row);
+      });
+      container.appendChild(section);
+    }
+
+    async function saveConnectedDeviceLabel(device, nameInput, typeSelect, button) {
+      setButtonBusy(button, true);
+      try {
+        await request("/api/connected-device-labels", "POST", {
+          mac_address: device.mac_address,
+          display_name: nameInput.value,
+          device_type: typeSelect.value
+        });
+        showMessage("Saved device name and type.", "success");
+        await loadConnectedDevices();
+      } catch (error) {
+        showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
+      }
+    }
+
+    async function clearConnectedDeviceLabel(device, button) {
+      setButtonBusy(button, true);
+      try {
+        await request("/api/connected-device-labels/delete", "POST", {
+          mac_address: device.mac_address
+        });
+        showMessage("Removed saved device details.", "success");
+        await loadConnectedDevices();
+      } catch (error) {
+        showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
+      }
     }
 
     function renderUplink(data) {
@@ -1814,9 +2013,31 @@ DASHBOARD_HTML = """<!doctype html>
 
     async function loadConnectedDevices() {
       if (connectedDevicesRequestInFlight) return;
+      const container = element("connected-devices");
+      const activeElement = document.activeElement;
+      if (
+        activeElement && container.contains(activeElement) &&
+        activeElement.matches("input, select")
+      ) return;
       connectedDevicesRequestInFlight = true;
       try {
-        renderConnectedDevices(await request("/api/connected-devices", "GET"));
+        const [connectedResult, labelsResult] = await Promise.allSettled([
+          request("/api/connected-devices", "GET"),
+          request("/api/connected-device-labels", "GET")
+        ]);
+        const savedLabels = labelsResult.status === "fulfilled"
+          ? labelsResult.value.labels || []
+          : [];
+        if (connectedResult.status === "rejected") {
+          renderConnectedDevices({
+            available: false,
+            devices: [],
+            saved_labels: savedLabels,
+            message: connectedResult.reason.message
+          });
+        } else {
+          renderConnectedDevices({ ...connectedResult.value, saved_labels: savedLabels });
+        }
       } catch (error) {
         renderConnectedDevices({ available: false, devices: [], message: error.message });
       } finally {
@@ -3334,6 +3555,42 @@ def _device_payload(device: Device) -> Dict[str, Any]:
     }
 
 
+def _connected_device_payload(
+    device: Dict[str, Any],
+    *,
+    assignments_by_address: Dict[str, Device],
+    labels_by_mac: Dict[str, Dict[str, str]],
+) -> Dict[str, Any]:
+    """Add saved display details and any matching profile to one station."""
+
+    mac_address = device["mac_address"]
+    saved_label = labels_by_mac.get(mac_address)
+    hostname = device.get("hostname")
+    suggested_type = guess_device_type(hostname)
+    ipv4_address = device.get("ipv4_address")
+    assignment = assignments_by_address.get(ipv4_address)
+    return {
+        **device,
+        "display_name": (
+            saved_label["display_name"]
+            if saved_label and saved_label["display_name"]
+            else hostname or "Unnamed client"
+        ),
+        "saved_display_name": saved_label["display_name"] if saved_label else "",
+        "saved_device_type": saved_label["device_type"] if saved_label else "",
+        "has_saved_label": saved_label is not None,
+        "device_type": saved_label["device_type"] if saved_label else suggested_type,
+        "device_type_source": (
+            "saved"
+            if saved_label is not None
+            else "hostname suggestion" if suggested_type != "unknown" else "unknown"
+        ),
+        "assigned_device_id": assignment.id if assignment is not None else None,
+        "assigned_device_name": assignment.name if assignment is not None else None,
+        "assigned_profile_id": assignment.profile_id if assignment is not None else None,
+    }
+
+
 def _device_group_payload(
     group: DeviceGroup,
     *,
@@ -3739,6 +3996,20 @@ class ControlServer(HTTPServer):
                     },
                 }
             )
+        if path == "/api/connected-device-labels":
+            labels = self.repository.list_connected_device_labels()
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {
+                    "labels": [
+                        {
+                            "mac_address": mac_address,
+                            "display_name": label["display_name"],
+                            "device_type": label["device_type"],
+                        }
+                        for mac_address, label in labels.items()
+                    ]
+                }
+            )
         if path == "/api/connected-devices":
             if self.helper_client is None:
                 return HTTPStatus.OK, "application/json", _json_bytes(
@@ -3749,7 +4020,8 @@ class ControlServer(HTTPServer):
                     }
                 )
             try:
-                devices = self.helper_client.connected_devices()
+                snapshot = self.helper_client.connected_device_snapshot()
+                devices = snapshot["devices"]
             except HelperClientError:
                 LOGGER.exception("could not inspect connected clients")
                 return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
@@ -3758,29 +4030,23 @@ class ControlServer(HTTPServer):
             assignments_by_address = {
                 str(device.ipv4_address): device for device in self.repository.list_devices()
             }
+            labels_by_mac = self.repository.list_connected_device_labels()
             devices = [
-                {
-                    **device,
-                    "assigned_device_id": (
-                        assignments_by_address[device["ipv4_address"]].id
-                        if device["ipv4_address"] in assignments_by_address
-                        else None
-                    ),
-                    "assigned_device_name": (
-                        assignments_by_address[device["ipv4_address"]].name
-                        if device["ipv4_address"] in assignments_by_address
-                        else None
-                    ),
-                    "assigned_profile_id": (
-                        assignments_by_address[device["ipv4_address"]].profile_id
-                        if device["ipv4_address"] in assignments_by_address
-                        else None
-                    ),
-                }
+                _connected_device_payload(
+                    device,
+                    assignments_by_address=assignments_by_address,
+                    labels_by_mac=labels_by_mac,
+                )
                 for device in devices
             ]
             return HTTPStatus.OK, "application/json", _json_bytes(
-                {"available": True, "devices": devices}
+                {
+                    "available": True,
+                    "association_status_available": snapshot[
+                        "association_status_available"
+                    ],
+                    "devices": devices,
+                }
             )
         if path == "/api/observations":
             observations = self.repository.list_domain_observations()
@@ -3893,6 +4159,32 @@ class ControlServer(HTTPServer):
 
     def write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
         """Handle one supported configuration or network action request."""
+
+        if path == "/api/connected-device-labels":
+            try:
+                mac_address = normalize_device_mac(payload.get("mac_address"))
+                display_name = normalize_device_display_name(payload.get("display_name"))
+                device_type = normalize_device_type(payload.get("device_type"))
+            except DeviceLabelError:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "connected-device details are invalid"}
+                )
+            self.repository.save_connected_device_label(
+                mac_address=mac_address,
+                display_name=display_name,
+                device_type=device_type,
+            )
+            return HTTPStatus.OK, "application/json", _json_bytes({"saved": True})
+
+        if path == "/api/connected-device-labels/delete":
+            try:
+                mac_address = normalize_device_mac(payload.get("mac_address"))
+            except DeviceLabelError:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "connected-device address is invalid"}
+                )
+            self.repository.delete_connected_device_label(mac_address=mac_address)
+            return HTTPStatus.OK, "application/json", _json_bytes({"deleted": True})
 
         if path == "/api/profiles":
             try:
@@ -4560,6 +4852,22 @@ class ControlServer(HTTPServer):
         except (KeyError, TypeError, ValueError):
             return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
                 {"error": "invalid connected-device profile assignment"}
+            )
+        try:
+            snapshot = self.helper_client.connected_device_snapshot()
+        except HelperClientError:
+            LOGGER.exception("could not verify the connected client before profile assignment")
+            return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
+                {"error": "current Wi-Fi clients could not be verified"}
+            )
+        if not snapshot["association_status_available"] or not any(
+            client["association_verified"]
+            and client["ipv4_address"] == str(device.ipv4_address)
+            and client["mac_address"] == device.mac_address
+            for client in snapshot["devices"]
+        ):
+            return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+                {"error": "the selected client is no longer verified on JitterSim Wi-Fi"}
             )
         self.repository.save_device(device)
         status, content_type, body = self._apply_configuration()

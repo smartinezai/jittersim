@@ -9,13 +9,16 @@ from jittersim.engine.compiler import compile_plan
 from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.browser_proxy import load_active_plan
 from jittersim.networking.commands import CommandResult
-from jittersim.networking.executor import FakeExecutor
+from jittersim.networking.executor import CommandExecutionError, FakeExecutor
 from jittersim.networking.helper import (
     HelperClient,
     HelperError,
     HelperService,
     UnixHelperServer,
+    _merge_connected_device_output,
+    _parse_dhcp_lease_output,
     _parse_neighbor_output,
+    _parse_station_output,
     _parse_traffic_counter_output,
     run_helper,
 )
@@ -216,15 +219,157 @@ class HelperServiceTests(unittest.TestCase):
         self.assertEqual(response, {"ok": False, "error": "invalid access point settings"})
         self.assertEqual(self.executor.commands, [])
 
-    def test_lists_valid_ipv4_neighbors_without_failed_entries(self) -> None:
-        executor = OutputExecutor(
-            """
-            192.168.50.178 dev wlan0 lladdr DC:1E:D5:3E:97:4C REACHABLE
-            192.168.50.10 dev wlan0 lladdr 00:11:22:33:44:55 STALE
-            192.168.50.99 dev wlan0 INCOMPLETE
-            invalid dev wlan0 lladdr 00:11:22:33:44:66 REACHABLE
-            """
+    def test_lists_associated_wifi_clients_and_joins_local_details(self) -> None:
+        station_output = (
+            "Station dc:1e:d5:3e:97:4c (on wlan0)\n"
+            "\tsignal: -47 dBm\n\tconnected time: 95 seconds\n"
+            "Station 00:11:22:33:44:55 (on wlan0)\n\tsignal: -70 dBm\n"
         )
+        neighbor_output = (
+            "192.168.50.178 dev wlan0 lladdr DC:1E:D5:3E:97:4C REACHABLE\n"
+            "192.168.50.10 dev wlan0 lladdr 00:11:22:33:44:55 STALE\n"
+            "192.168.50.99 dev wlan0 INCOMPLETE\n"
+            "invalid dev wlan0 lladdr 00:11:22:33:44:66 REACHABLE\n"
+        )
+
+        class ClientOutputExecutor(FakeExecutor):
+            def run(self, command):
+                self.commands.append(command)
+                output = station_output if command.executable == "iw" else neighbor_output
+                return CommandResult(return_code=0, stdout=output)
+
+        executor = ClientOutputExecutor()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "dnsmasq-wlan0.leases").write_text(
+                "4102444800 dc:1e:d5:3e:97:4c 192.168.50.178 MacBook-Pro *\n"
+                "4102444800 00:11:22:33:44:55 192.168.50.10 * *\n",
+                encoding="utf-8",
+            )
+            service = HelperService(
+                NetworkApplier(
+                    executor=executor,
+                    topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+                    lease_directory=Path(temp_dir),
+                )
+            )
+            response = service.handle_payload({"action": "clients"})
+
+        self.assertEqual(response["action"], "clients")
+        self.assertTrue(response["association_status_available"])
+        self.assertEqual(
+            response["devices"],
+            [
+                {
+                    "mac_address": "00:11:22:33:44:55",
+                    "signal_dbm": -70,
+                    "ipv4_address": "192.168.50.10",
+                    "state": "connected",
+                    "association_verified": True,
+                    "neighbor_state": "stale",
+                    "hostname": None,
+                },
+                {
+                    "mac_address": "dc:1e:d5:3e:97:4c",
+                    "signal_dbm": -47,
+                    "connected_seconds": 95,
+                    "ipv4_address": "192.168.50.178",
+                    "state": "connected",
+                    "association_verified": True,
+                    "neighbor_state": "reachable",
+                    "hostname": "MacBook-Pro",
+                },
+            ],
+        )
+        self.assertEqual(
+            [command.argv for command in executor.commands],
+            [
+                ("iw", "dev", "wlan0", "station", "dump"),
+                ("ip", "-4", "neigh", "show", "dev", "wlan0"),
+            ],
+        )
+
+    def test_station_and_lease_parsers_ignore_bad_and_expired_rows(self) -> None:
+        stations = _parse_station_output(
+            "Station AA:BB:CC:DD:EE:02 (on wlan0)\n"
+            " signal: -45 dBm\n"
+            " connected time: 50 seconds\n"
+            "Station bad-mac (on wlan0)\n"
+            "Station AA:BB:CC:DD:EE:02 (on wlan0)\n"
+            " signal: -140 dBm\n"
+        )
+        leases = _parse_dhcp_lease_output(
+            "4102444800 aa:bb:cc:dd:ee:02 192.168.50.10 iPhone *\n"
+            "1 aa:bb:cc:dd:ee:03 192.168.50.11 stale *\n"
+            "broken row\n"
+            "4102444800 01:bb:cc:dd:ee:04 192.168.50.12 multicast *\n"
+            "4102444800 aa:bb:cc:dd:ee:05 invalid bad-ip *\n",
+            observed_at=100,
+        )
+
+        self.assertEqual(
+            stations,
+            [
+                {
+                    "mac_address": "aa:bb:cc:dd:ee:02",
+                    "signal_dbm": -45,
+                    "connected_seconds": 50,
+                }
+            ],
+        )
+        self.assertEqual(
+            leases,
+            {
+                "aa:bb:cc:dd:ee:02": {
+                    "ipv4_address": "192.168.50.10",
+                    "hostname": "iPhone",
+                    "expiry": 4102444800,
+                }
+            },
+        )
+
+    def test_connected_clients_exclude_neighbor_entries_without_a_station(self) -> None:
+        devices = _merge_connected_device_output(
+            "Station aa:bb:cc:dd:ee:02 (on wlan0)\n",
+            "192.168.50.10 dev wlan0 lladdr aa:bb:cc:dd:ee:02 STALE\n"
+            "192.168.50.11 dev wlan0 lladdr aa:bb:cc:dd:ee:03 REACHABLE\n",
+            "",
+            observed_at=100,
+        )
+
+        self.assertEqual(len(devices), 1)
+        self.assertEqual(devices[0]["ipv4_address"], "192.168.50.10")
+        self.assertEqual(devices[0]["state"], "connected")
+
+    def test_station_without_ip_remains_visible(self) -> None:
+        devices = _merge_connected_device_output(
+            "Station aa:bb:cc:dd:ee:02 (on wlan0)\n",
+            "",
+            "",
+            observed_at=100,
+        )
+
+        self.assertIsNone(devices[0]["ipv4_address"])
+
+    def test_station_parser_limits_the_number_of_clients(self) -> None:
+        output = "\n".join(
+            f"Station 02:00:00:{index >> 16:02x}:{index >> 8 & 255:02x}:{index & 255:02x}"
+            for index in range(257)
+        )
+
+        self.assertEqual(len(_parse_station_output(output)), 256)
+
+    def test_neighbor_details_remain_visible_when_station_status_fails(self) -> None:
+        class StationFailureExecutor(FakeExecutor):
+            def run(self, command):
+                self.commands.append(command)
+                if command.executable == "iw":
+                    raise CommandExecutionError("iw is unavailable")
+                return CommandResult(
+                    return_code=0,
+                    stdout="192.168.50.10 dev wlan0 lladdr aa:bb:cc:dd:ee:02 STALE\n",
+                )
+
+        executor = StationFailureExecutor()
         service = HelperService(
             NetworkApplier(
                 executor=executor,
@@ -234,26 +379,9 @@ class HelperServiceTests(unittest.TestCase):
 
         response = service.handle_payload({"action": "clients"})
 
-        self.assertEqual(response["action"], "clients")
-        self.assertEqual(
-            response["devices"],
-            [
-                {
-                    "ipv4_address": "192.168.50.10",
-                    "mac_address": "00:11:22:33:44:55",
-                    "state": "stale",
-                },
-                {
-                    "ipv4_address": "192.168.50.178",
-                    "mac_address": "dc:1e:d5:3e:97:4c",
-                    "state": "reachable",
-                },
-            ],
-        )
-        self.assertEqual(
-            executor.commands[0].argv,
-            ("ip", "-4", "neigh", "show", "dev", "wlan0"),
-        )
+        self.assertFalse(response["association_status_available"])
+        self.assertEqual(response["devices"][0]["state"], "unknown")
+        self.assertFalse(response["devices"][0]["association_verified"])
 
     def test_reports_the_pi_ethernet_connection_and_gateway(self) -> None:
         executor = UplinkOutputExecutor()
@@ -429,6 +557,7 @@ class UnixHelperServerTests(unittest.TestCase):
         self.assertEqual(client.ping()["action"], "ping")
         self.assertEqual(client.apply(plan=make_plan())["action"], "apply")
         self.assertEqual(client.reset()["action"], "reset")
+        self.assertEqual(client.connected_devices(), [])
         self.assertEqual(
             client.configure_access_point(
                 ssid="JitterSim-Test",

@@ -60,12 +60,20 @@ class FakeHelper:
             {
                 "ipv4_address": "192.168.50.178",
                 "mac_address": "dc:1e:d5:3e:97:4c",
-                "state": "reachable",
-                "assigned_device_id": None,
-                "assigned_device_name": None,
-                "assigned_profile_id": None,
+                "state": "connected",
+                "association_verified": True,
+                "neighbor_state": "reachable",
+                "hostname": "MacBook-Pro",
+                "signal_dbm": -47,
+                "connected_seconds": 95,
             }
         ]
+
+    def connected_device_snapshot(self):
+        return {
+            "devices": self.connected_devices(),
+            "association_status_available": True,
+        }
 
     def uplink_info(self):
         return {
@@ -263,7 +271,15 @@ class ControlServerTests(unittest.TestCase):
 
     def test_private_read_routes_require_token_including_backup(self) -> None:
         self.server.admin_token = "admin-token"
-        for path in ("/api/backup", "/api/observations", "/api/devices", "/api/plan", "/api/service-assignments"):
+        for path in (
+            "/api/backup",
+            "/api/observations",
+            "/api/devices",
+            "/api/plan",
+            "/api/service-assignments",
+            "/api/connected-devices",
+            "/api/connected-device-labels",
+        ):
             with self.subTest(path=path):
                 handler = object.__new__(ControlRequestHandler)
                 handler.server = self.server
@@ -287,10 +303,10 @@ class ControlServerTests(unittest.TestCase):
         self.server.admin_token = "admin-token"
         self.server.helper_client = FakeHelper()
 
-        def handle_write(*, authorization, body):
+        def handle_write(*, authorization, body, path="/api/apply"):
             handler = object.__new__(ControlRequestHandler)
             handler.server = self.server
-            handler.path = "/api/apply"
+            handler.path = path
             handler.headers = Message()
             handler.headers["Authorization"] = authorization
             handler.headers["Content-Length"] = str(len(body))
@@ -318,6 +334,62 @@ class ControlServerTests(unittest.TestCase):
         self.assertNotIn("note", history[0])
         self.assertEqual(len(self.repository.list_recent_actions()), count_after_authorized_request)
         self.assertEqual(unauthorized["status"], 401)
+
+    def test_connected_label_auth_and_profile_isolation(self) -> None:
+        self.server.admin_token = "admin-token"
+        handler = object.__new__(ControlRequestHandler)
+        handler.server = self.server
+        handler.path = "/api/connected-device-labels"
+        handler.headers = Message()
+        body = json.dumps(
+            {
+                "mac_address": "DC:1E:D5:3E:97:4C",
+                "display_name": "Family MacBook",
+                "device_type": "laptop",
+            }
+        ).encode()
+        handler.headers["Content-Length"] = str(len(body))
+        handler.rfile = BytesIO(body)
+        response = {}
+        handler._send_response = lambda **values: response.update(values)
+
+        handler.do_POST()
+        self.assertEqual(response["status"], 401)
+
+        handler.headers["Authorization"] = "Bearer admin-token"
+        handler.do_POST()
+        saved = self.repository.list_connected_device_labels()
+
+        self.assertEqual(response["status"], 200)
+        self.assertEqual(
+            saved["dc:1e:d5:3e:97:4c"],
+            {"display_name": "Family MacBook", "device_type": "laptop"},
+        )
+        self.assertEqual(self.repository.get_device("alice").profile_id, "slow")
+        _, _, labels_body = self.server.response_for("/api/connected-device-labels")
+        self.assertEqual(
+            json.loads(labels_body)["labels"],
+            [
+                {
+                    "mac_address": "dc:1e:d5:3e:97:4c",
+                    "display_name": "Family MacBook",
+                    "device_type": "laptop",
+                }
+            ],
+        )
+        self.server.helper_client = FakeHelper()
+        _, _, connected_body = self.server.response_for("/api/connected-devices")
+        connected_device = json.loads(connected_body)["devices"][0]
+        self.assertEqual(connected_device["display_name"], "Family MacBook")
+        self.assertEqual(connected_device["device_type_source"], "saved")
+
+        status, _, body = self.server.write_response_for(
+            "/api/connected-device-labels/delete",
+            {"mac_address": "dc:1e:d5:3e:97:4c"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"deleted": True})
+        self.assertEqual(self.repository.list_connected_device_labels(), {})
 
     def test_tls_requires_both_files_and_wraps_the_dashboard_socket(self) -> None:
         with self.assertRaisesRegex(ValueError, "TLS is required"):
@@ -710,11 +782,23 @@ class ControlServerTests(unittest.TestCase):
             json.loads(body),
             {
                 "available": True,
+                "association_status_available": True,
                 "devices": [
                     {
                         "ipv4_address": "192.168.50.178",
                         "mac_address": "dc:1e:d5:3e:97:4c",
-                        "state": "reachable",
+                        "state": "connected",
+                        "association_verified": True,
+                        "neighbor_state": "reachable",
+                        "hostname": "MacBook-Pro",
+                        "signal_dbm": -47,
+                        "connected_seconds": 95,
+                        "display_name": "MacBook-Pro",
+                        "saved_display_name": "",
+                        "saved_device_type": "",
+                        "has_saved_label": False,
+                        "device_type": "laptop",
+                        "device_type_source": "hostname suggestion",
                         "assigned_device_id": None,
                         "assigned_device_name": None,
                         "assigned_profile_id": None,
@@ -747,6 +831,28 @@ class ControlServerTests(unittest.TestCase):
         )
         self.assertEqual(self.server.helper_client.applied_plan.mark_rules[0].device_id, "alice")
         self.assertEqual(len(self.server.helper_client.applied_plan.mark_rules), 2)
+
+    def test_profile_assignment_rejects_a_neighbor_without_verified_association(self) -> None:
+        class UnverifiedHelper(FakeHelper):
+            def connected_device_snapshot(self):
+                device = self.connected_devices()[0]
+                device["state"] = "unknown"
+                device["association_verified"] = False
+                return {"devices": [device], "association_status_available": False}
+
+        self.server.helper_client = UnverifiedHelper()
+        status, _, body = self.server.write_response_for(
+            "/api/connected-devices/apply-profile",
+            {
+                "ipv4_address": "192.168.50.178",
+                "mac_address": "dc:1e:d5:3e:97:4c",
+                "profile_id": "slow",
+            },
+        )
+
+        self.assertEqual(status, 409)
+        self.assertIn("no longer verified", json.loads(body)["error"])
+        self.assertIsNone(self.repository.get_device_by_ipv4_address("192.168.50.178"))
 
     def test_observation_scan_persists_and_lists_domains(self) -> None:
         self.server.helper_client = FakeHelper()
@@ -810,6 +916,9 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn('document.addEventListener("submit"', DASHBOARD_HTML)
         self.assertIn("Connected clients", DASHBOARD_HTML)
         self.assertIn("connected-devices", DASHBOARD_HTML)
+        self.assertIn("Edit name and type", DASHBOARD_HTML)
+        self.assertIn("/api/connected-device-labels", DASHBOARD_HTML)
+        self.assertIn("Saved labels for devices not listed above", DASHBOARD_HTML)
         self.assertIn('id="traffic-chart"', DASHBOARD_HTML)
         self.assertIn('id="traffic-device"', DASHBOARD_HTML)
         self.assertIn("Last 60 seconds", DASHBOARD_HTML)

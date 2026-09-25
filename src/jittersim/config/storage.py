@@ -6,8 +6,14 @@ import tempfile
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Optional, Sequence, Union
+from typing import Dict, Optional, Sequence, Union
 
+from .device_labels import (
+    MAX_SAVED_CONNECTED_DEVICE_LABELS,
+    normalize_device_display_name,
+    normalize_device_mac,
+    normalize_device_type,
+)
 from .models import (
     DataLimit,
     Device,
@@ -131,6 +137,11 @@ class ConfigRepository:
                 ipv4_address TEXT NOT NULL UNIQUE,
                 profile_id TEXT NOT NULL REFERENCES profiles(id),
                 mac_address TEXT
+            );
+            CREATE TABLE IF NOT EXISTS connected_device_labels (
+                mac_address TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                device_type TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS device_groups (
                 id TEXT PRIMARY KEY,
@@ -532,6 +543,76 @@ class ConfigRepository:
         if row is None:
             return None
         return self._device_from_row(row)
+
+    def list_connected_device_labels(self) -> Dict[str, Dict[str, str]]:
+        """Read locally saved names and types for Wi-Fi client addresses."""
+
+        try:
+            rows = self._connection.execute(
+                "SELECT mac_address, display_name, device_type "
+                "FROM connected_device_labels ORDER BY mac_address"
+            ).fetchall()
+            return {
+                row["mac_address"]: {
+                    "display_name": row["display_name"],
+                    "device_type": row["device_type"],
+                }
+                for row in rows
+            }
+        except sqlite3.Error as error:
+            raise StorageError("could not read connected-device labels") from error
+
+    def save_connected_device_label(
+        self, *, mac_address: str, display_name: str, device_type: str
+    ) -> None:
+        """Save a validated label without changing traffic configuration."""
+
+        try:
+            mac = normalize_device_mac(mac_address)
+            name = normalize_device_display_name(display_name)
+            kind = normalize_device_type(device_type)
+        except ValueError as error:
+            raise StorageError("connected-device label is invalid") from error
+        try:
+            exists = self._connection.execute(
+                "SELECT 1 FROM connected_device_labels WHERE mac_address = ?", (mac,)
+            ).fetchone()
+            count = self._connection.execute(
+                "SELECT COUNT(*) FROM connected_device_labels"
+            ).fetchone()[0]
+        except sqlite3.Error as error:
+            raise StorageError("could not check connected-device label limit") from error
+        if exists is None and count >= MAX_SAVED_CONNECTED_DEVICE_LABELS:
+            raise StorageError("saved device label limit reached; remove an older label")
+        try:
+            self._connection.execute(
+                "INSERT INTO connected_device_labels "
+                "(mac_address, display_name, device_type) VALUES (?, ?, ?) "
+                "ON CONFLICT(mac_address) DO UPDATE SET "
+                "display_name = excluded.display_name, "
+                "device_type = excluded.device_type",
+                (mac, name, kind),
+            )
+            self._connection.commit()
+        except sqlite3.Error as error:
+            self._connection.rollback()
+            raise StorageError("could not save connected-device label") from error
+
+    def delete_connected_device_label(self, *, mac_address: str) -> None:
+        """Remove a locally saved label for one Wi-Fi address."""
+
+        try:
+            mac = normalize_device_mac(mac_address)
+        except ValueError as error:
+            raise StorageError("connected-device address is invalid") from error
+        try:
+            self._connection.execute(
+                "DELETE FROM connected_device_labels WHERE mac_address = ?", (mac,)
+            )
+            self._connection.commit()
+        except sqlite3.Error as error:
+            self._connection.rollback()
+            raise StorageError("could not remove connected-device label") from error
 
     def list_profiles(self) -> tuple:
         """Return all stored profiles in stable identifier order."""

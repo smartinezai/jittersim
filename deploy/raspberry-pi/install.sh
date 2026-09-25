@@ -30,7 +30,7 @@ fi
 python3 "$SOURCE_DIR/deploy/raspberry-pi/preflight.py" \
     --uplink "$JITTERSIM_UPLINK" --test-interface "$JITTERSIM_TEST_INTERFACE"
 
-apt-get install -y dnsmasq-base nftables openssl python3-venv tcpdump
+apt-get install -y dnsmasq-base iw nftables openssl python3-venv tcpdump
 
 install -d -m 0750 -o root -g jittersim "$CONFIG_DIR"
 install -d -m 0750 -o jittersim -g jittersim "$DATA_DIR"

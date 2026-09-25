@@ -3,6 +3,7 @@
 import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Optional
 
 from jittersim.config.models import ValidationError
@@ -43,9 +44,16 @@ class ApplyError(RuntimeError):
 class NetworkApplier:
     """Apply one plan and recover with project-owned cleanup when it fails."""
 
-    def __init__(self, *, executor: CommandExecutor, topology: Topology) -> None:
+    def __init__(
+        self,
+        *,
+        executor: CommandExecutor,
+        topology: Topology,
+        lease_directory: Path = Path("/var/lib/NetworkManager"),
+    ) -> None:
         self._executor = executor
         self._topology = topology
+        self._lease_directory = lease_directory
 
     def apply(self, *, plan: NetworkPlan) -> ApplyReport:
         """Apply a plan and attempt a bounded reset if any command fails."""
@@ -162,6 +170,34 @@ class NetworkApplier:
             )
         )
         return result.stdout
+
+    def list_connected_stations(self) -> str:
+        """Read Wi-Fi stations associated with the test access point."""
+
+        result = self._executor.run(
+            Command(
+                executable="iw",
+                arguments=("dev", self._topology.test_interface, "station", "dump"),
+                purpose=f"inspect Wi-Fi clients on {self._topology.test_interface}",
+                timeout_seconds=5,
+            )
+        )
+        return result.stdout
+
+    def list_connected_leases(self) -> str:
+        """Read bounded DHCP names from this interface's NetworkManager leases."""
+
+        lease_path = self._lease_directory / (
+            f"dnsmasq-{self._topology.test_interface}.leases"
+        )
+        try:
+            with lease_path.open("rb") as lease_file:
+                contents = lease_file.read(64 * 1024 + 1)
+        except OSError:
+            return ""
+        if len(contents) > 64 * 1024:
+            return ""
+        return contents.decode("utf-8", errors="replace")
 
     def uplink_info(self) -> Dict[str, Optional[str]]:
         """Read the Pi's Ethernet connection name and default gateway."""

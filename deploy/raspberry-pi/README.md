@@ -52,6 +52,8 @@ Options. Raspberry Pi documents this as a prerequisite for its dual-band
 radio. Use a good 5 V/2.5 A power supply. See the
 [Pi 3 B+ specifications](https://www.raspberrypi.com/products/raspberry-pi-3-model-b-plus/)
 and [wireless setup guide](https://www.raspberrypi.com/documentation/computers/configuration.html).
+The installer also installs `iw`, which the dashboard uses to distinguish
+devices currently connected to the access point from old neighbor entries.
 
 Raspberry Pi OS Lite identifies the edition but not the release. Check the
 release and NetworkManager version on the Pi with `cat /etc/os-release` and
@@ -84,6 +86,26 @@ returns to the normal schedule or profile when it expires.
 After a service restart, JitterSim restores the last applied plan or completes
 the last reset. A fresh installation with no prior action leaves the network
 unchanged.
+
+## Connected device details
+
+The dashboard lists Wi-Fi clients currently associated with the Pi. It joins
+the station list to IPv4 neighbors and NetworkManager's local DHCP lease file
+at `/var/lib/NetworkManager/dnsmasq-<interface>.leases` (normally
+`dnsmasq-wlan0.leases`). The helper reads this file only for the configured
+test interface and ignores it when it is missing or larger than 64 KiB. The
+DHCP name can be missing or chosen by the client. Type suggestions come from
+clear words in that name and should be treated as a hint.
+If the station command is unavailable, neighbor entries are marked with an
+unknown connection status and cannot be used to assign a profile.
+
+You can save a display name and type from the dashboard. These labels are kept
+in the local database, included in its backup and keyed to the client's current
+Wi-Fi MAC address. Private Wi-Fi addresses may change and cause a device to
+appear with a new label entry. Clearing a saved label removes it from the
+database. Saved labels for devices that are offline can also be removed in the
+dashboard. The label list is limited to 256 entries. This feature does not scan
+devices, look up manufacturers online or collect browser activity.
 
 Progression traffic mode is a local DNS-query signal. It is useful for testing
 changing behavior but it does not measure every packet or download byte.
