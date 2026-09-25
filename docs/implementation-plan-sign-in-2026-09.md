@@ -55,7 +55,8 @@ leaks to someone without access.
   point's client isolation, so a visitor's device can't reach other test Wi-Fi
   devices, such as a laptop's shared folders. Casting between test Wi-Fi
   devices stops working too; the guide shows how to turn isolation off. The
-  test Wi-Fi restarts once on the update that turns it on.
+  installer doesn't restart a running test Wi-Fi, so isolation starts at the
+  next restart; the installer prints the command.
 - **No token configured.** The sign-in page says sign-in isn't set up.
 - **Unchanged:** the firewall still blocks the dashboard from the test Wi-Fi,
   and the CLI and helper don't use the dashboard.

@@ -25,6 +25,7 @@ from jittersim.api.session import (
     cleared_session_cookie,
     issue_session,
     session_cookie,
+    session_cookie_name,
     session_from_cookie_header,
     session_is_valid,
 )
@@ -285,6 +286,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       color: #dcecff;
       box-shadow: 0 0.9rem 2rem rgba(0, 0, 0, 0.4);
     }
+    /* Rules such as label { display: grid } would otherwise show hidden fields. */
+    [hidden] { display: none !important; }
     .toast[hidden] { display: none; }
     .toast.success { border-color: #2c9d73; border-left-color: #70d7a9; background: #123b31; }
     .toast.error { border-color: #a9565d; border-left-color: #ff8585; background: #45222c; }
@@ -457,15 +460,12 @@ DASHBOARD_HTML = r"""<!doctype html>
       font-size: 0.78rem;
       font-weight: 400;
       line-height: 1.4;
-      opacity: 0;
+      /* Invisible help would still widen the page, so it leaves the layout. */
+      display: none;
       pointer-events: none;
-      visibility: hidden;
       box-shadow: 0 0.6rem 1.2rem rgba(0, 0, 0, 0.35);
     }
-    .help-icon:hover::after, .help-icon:focus-visible::after {
-      opacity: 1;
-      visibility: visible;
-    }
+    .help-icon:hover::after, .help-icon:focus-visible::after { display: block; }
     .randomness-fields {
       display: grid;
       gap: 0.75rem;
@@ -547,6 +547,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     .token-check-status.success { color: #8de2bc; }
     .token-check-status.error { color: #ffb0b0; }
     .data-grid { margin-top: 1rem; }
+    .data-grid + .content-grid { margin-top: 1rem; }
     .data-grid .card.wide { grid-column: 1 / -1; }
     .table-wrap { overflow-x: auto; }
     .data-table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
@@ -611,6 +612,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     .tabs a:hover { background: rgba(60, 102, 144, 0.35); }
     .tabs a[aria-current="page"] { background: #1f4f86; color: #ffffff; }
     .tabs a:focus-visible { outline: 2px solid #8cc4ff; outline-offset: 2px; }
+    .tab-panel:focus { outline: none; }
     @media (max-width: 700px) {
       body { padding-top: 1rem; }
       .page-header { display: block; }
@@ -637,8 +639,13 @@ DASHBOARD_HTML = r"""<!doctype html>
       .policy-grid { grid-template-columns: minmax(0, 1fr); }
       .uplink-grid { grid-template-columns: minmax(0, 1fr); }
       .connected-row { grid-template-columns: auto minmax(0, 1fr) auto; }
-      .connected-controls { grid-column: 1 / -1; }
-      .connected-controls select { flex: 1; }
+      .connected-controls { grid-column: 1 / -1; flex-wrap: wrap; }
+      .connected-controls select { flex: 1 1 100%; min-width: 0; }
+      .connected-controls button { flex: 1 1 auto; }
+      /* Help spans its field, so it can't run past the edge of the screen. */
+      label, .randomness-title { position: relative; }
+      .help-icon { position: static; }
+      .help-icon::after { right: 0; width: auto; }
       .connected-label-form label { max-width: none; }
       .observation-actions { margin-top: 0.75rem; }
       .observation-actions button { width: 100%; }
@@ -697,7 +704,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     <a href="#setup">Setup</a>
     <a href="#diagnostics">Diagnostics</a>
   </nav>
-  <div class="tab-panel" id="tab-overview">
+  <div class="tab-panel" id="tab-overview" tabindex="-1">
   <section class="card token-card">
     <h2>Signed in</h2>
     <form class="token-controls" method="post" action="/sign-out">
@@ -776,7 +783,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     <p class="traffic-note">Traffic lines count bytes at JitterSim before its queues. They do not show the speed a device receives. Dashed lines show configured limits. The ISP plan line is shared with household traffic and is not a live measurement of spare capacity. Service-specific queues may use different limits. Only assigned devices are included. Sampling pauses when this tab is hidden.</p>
   </section>
   </div>
-  <div class="tab-panel" id="tab-devices" hidden>
+  <div class="tab-panel" id="tab-devices" tabindex="-1" hidden>
   <div class="data-grid">
     <section class="card wide">
       <div class="section-heading"><h2>Devices</h2><p>Assigned test clients</p></div>
@@ -875,7 +882,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     </section>
   </div>
   </div>
-  <div class="tab-panel" id="tab-profiles" hidden>
+  <div class="tab-panel" id="tab-profiles" tabindex="-1" hidden>
   <div class="data-grid">
     <section class="card wide">
       <div class="section-heading"><h2>Profiles</h2><p>Saved network behavior</p></div>
@@ -1101,7 +1108,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       </form>
     </section>
   </div>
-  <div class="tab-panel" id="tab-rules" hidden>
+  <div class="tab-panel" id="tab-rules" tabindex="-1" hidden>
   <div class="content-grid">
     <section class="card">
       <h2>Network access rules</h2>
@@ -1512,7 +1519,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div id="observations" class="observation-list" aria-live="polite">No observations yet.</div>
   </section>
   </div>
-  <div class="tab-panel" id="tab-measurements" hidden>
+  <div class="tab-panel" id="tab-measurements" tabindex="-1" hidden>
   <section class="card wide" aria-labelledby="measurement-title">
     <div class="section-heading">
       <div>
@@ -1536,7 +1543,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       with another label, then add both files. The files stay in this browser.</p>
   </section>
   </div>
-  <div class="tab-panel" id="tab-setup" hidden>
+  <div class="tab-panel" id="tab-setup" tabindex="-1" hidden>
   <section class="card uplink-card">
     <div class="section-heading">
       <div>
@@ -1576,7 +1583,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     </form>
   </section>
   </div>
-  <div class="tab-panel" id="tab-diagnostics" hidden>
+  <div class="tab-panel" id="tab-diagnostics" tabindex="-1" hidden>
   <div class="data-grid">
     <section class="card">
       <div class="section-heading"><h2>Compiled plan</h2><p>Current traffic rules</p></div>
@@ -1604,7 +1611,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         <div><h2>Diagnostics</h2><p>Runtime state and available traffic counters</p></div>
         <button id="refresh-diagnostics" type="button">Refresh</button>
       </div>
-      <pre id="diagnostics">Loading...</pre>
+      <pre id="diagnostics-output">Loading...</pre>
     </section>
     <section class="card">
       <div class="section-heading">
@@ -1640,12 +1647,42 @@ DASHBOARD_HTML = r"""<!doctype html>
         element("tab-" + tab).hidden = tab !== name;
       });
       document.querySelectorAll(".tabs a").forEach((link) => {
-        if (link.getAttribute("href") === "#" + name) link.setAttribute("aria-current", "page");
-        else link.removeAttribute("aria-current");
+        if (link.getAttribute("href") === "#" + name) {
+          link.setAttribute("aria-current", "page");
+          revealTab(link);
+        } else {
+          link.removeAttribute("aria-current");
+        }
       });
       // A chart drawn while its tab was hidden has no size, so draw it again.
       if (name === "overview") drawTrafficChart();
       if (name === "measurements") drawMeasurementChart();
+    }
+
+    function revealTab(link) {
+      // On a phone the tab bar scrolls sideways. Scroll only the bar:
+      // scrollIntoView would move the page too.
+      const bar = link.parentElement;
+      const barBox = bar.getBoundingClientRect();
+      const linkBox = link.getBoundingClientRect();
+      // Keep about the bar's padding between the tab and the edge.
+      const left = barBox.left + 8;
+      const right = barBox.right - 8;
+      if (linkBox.left < left) bar.scrollLeft -= left - linkBox.left;
+      else if (linkBox.right > right) bar.scrollLeft += linkBox.right - right;
+    }
+
+    function followTabLink(event, name) {
+      // A modified click opens the tab in a new browser tab instead.
+      if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey ||
+          event.altKey) {
+        return false;
+      }
+      event.preventDefault();
+      // pushState keeps Back working without jumping to an element with that ID.
+      if (window.location.hash !== "#" + name) window.history.pushState(null, "", "#" + name);
+      showTab(name);
+      return true;
     }
 
     function optionalNumber(id) {
@@ -2240,6 +2277,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     let deviceConditions = { applied: false, devices: {} };
     let everyoneElse = { profile_id: null, unaffected_devices: [] };
     let lastRuntimeState = null;
+    let dashboardLoaded = false;
+    let gettingStartedKey = "";
     // Device IDs can't start with an underscore, so this value is free.
     const EVERYONE_ELSE_TRAFFIC = "__everyone_else__";
     const EVERYONE_ELSE_QUEUE_ID = "rule:everyone-else";
@@ -3263,7 +3302,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function gettingStartedSteps(state) {
-      return [
+      const assigned = state.devices > 0 || Boolean(state.everyoneElseProfile);
+      const steps = [
         {
           text: "Create a profile, or start from a preset",
           tab: "profiles",
@@ -3272,19 +3312,26 @@ DASHBOARD_HTML = r"""<!doctype html>
         {
           text: "Connect a device to the test Wi-Fi",
           tab: null,
-          done: state.connected > 0 || state.devices > 0
+          // Saved settings count too, so the list doesn't return when clients leave.
+          done: state.connected > 0 || assigned
         },
         {
           text: "Give it a profile, or choose one for everyone else",
           tab: "devices",
-          done: state.devices > 0 || Boolean(state.everyoneElseProfile)
-        },
-        // Any network action counts, so a later Reset doesn't bring the list back.
-        { text: "Apply the configuration", tab: null, done: Boolean(state.lastAction) }
+          done: assigned
+        }
       ];
+      // Configuration-only mode can't apply anything. Any network action counts,
+      // so a later Reset doesn't bring the list back.
+      if (state.canApply) {
+        steps.push({ text: "Apply the configuration", tab: null, done: Boolean(state.lastAction) });
+      }
+      return steps;
     }
 
     function renderGettingStarted() {
+      // Before everything has loaded, saved settings would look missing.
+      if (!dashboardLoaded) return;
       const connected = lastConnectedDevices && Array.isArray(lastConnectedDevices.devices)
         ? lastConnectedDevices.devices.length
         : 0;
@@ -3293,10 +3340,15 @@ DASHBOARD_HTML = r"""<!doctype html>
         devices: devices.length,
         connected: connected,
         everyoneElseProfile: everyoneElse.profile_id,
-        lastAction: lastRuntimeState ? lastRuntimeState.last_action : null
+        lastAction: lastRuntimeState ? lastRuntimeState.last_action : null,
+        canApply: helperConfigured
       });
       element("getting-started").hidden = steps.every((step) => step.done);
       const list = element("getting-started-steps");
+      const key = JSON.stringify(steps.map((step) => [step.text, step.done]));
+      // Rebuilding on every poll would take keyboard focus away from a link.
+      if (key === gettingStartedKey || list.contains(document.activeElement)) return;
+      gettingStartedKey = key;
       list.replaceChildren();
       steps.forEach((step, index) => {
         const item = document.createElement("li");
@@ -3310,9 +3362,8 @@ DASHBOARD_HTML = r"""<!doctype html>
           link.href = "#" + step.tab;
           link.textContent = step.text;
           link.addEventListener("click", (event) => {
-            event.preventDefault();
-            window.history.pushState(null, "", "#" + step.tab);
-            showTab(step.tab);
+            // The list is out of sight once the tab changes, so focus moves with it.
+            if (followTabLink(event, step.tab)) element("tab-" + step.tab).focus();
           });
           item.appendChild(link);
         } else {
@@ -3342,7 +3393,6 @@ DASHBOARD_HTML = r"""<!doctype html>
         "Client " + (device.ipv4_address || device.mac_address);
       return {
         name: name,
-        id: slugify(name),
         ipv4_address: device.ipv4_address || "",
         mac_address: device.mac_address
       };
@@ -3382,6 +3432,36 @@ DASHBOARD_HTML = r"""<!doctype html>
     function pickedConnectedDevice(pickerId) {
       const devices = (lastConnectedDevices && lastConnectedDevices.devices) || [];
       return devices.find((device) => device.mac_address === element(pickerId).value) || null;
+    }
+
+    function fillUnaffectedFromPicker() {
+      const device = pickedConnectedDevice("unaffected-picker");
+      if (!device) return;
+      element("unaffected-mac").value = device.mac_address;
+      element("unaffected-name").value = device.saved_display_name || device.hostname || "";
+    }
+
+    function fillDeviceFromPicker() {
+      const device = pickedConnectedDevice("device-picker");
+      if (!device) return;
+      const fields = pickedDeviceFields(device);
+      element("device-name").value = fields.name;
+      // The ID follows the name unless it was typed by hand or is being edited.
+      element("device-name").dispatchEvent(new Event("input"));
+      element("device-ip").value = fields.ipv4_address;
+      element("device-mac").value = fields.mac_address;
+    }
+
+    function addPickedMac(listId) {
+      const device = pickedConnectedDevice("mac-picker");
+      if (!device) {
+        const available = Boolean(lastConnectedDevices && lastConnectedDevices.available);
+        showMessage(available
+          ? "Choose a connected device first."
+          : "Connected devices are unavailable, so type the address in the list.", "error");
+        return;
+      }
+      element(listId).value = addMacToList(element(listId).value, device.mac_address);
     }
 
     function connectedTreatment(device) {
@@ -4487,9 +4567,9 @@ DASHBOARD_HTML = r"""<!doctype html>
     async function loadAdminTools() {
       try {
         const data = await request("/api/diagnostics", "GET");
-        element("diagnostics").textContent = JSON.stringify(data, null, 2);
+        element("diagnostics-output").textContent = JSON.stringify(data, null, 2);
       } catch (error) {
-        element("diagnostics").textContent = error.message;
+        element("diagnostics-output").textContent = error.message;
         element("action-history").textContent = error.message;
         return { ok: false, message: error.message };
       }
@@ -4557,6 +4637,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         loadEveryoneElse(),
         loadAdminTools()
       ]);
+      dashboardLoaded = true;
       renderGettingStarted();
     }
 
@@ -4787,10 +4868,10 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
     });
 
-    element("data-limit-reset-mode").addEventListener("change", () => syncQuotaReset("data-limit"));
-    element("group-data-limit-reset-mode").addEventListener("change", () => syncQuotaReset("group-data-limit"));
-    element("service-quota-reset-mode").addEventListener("change", () => syncQuotaReset("service-quota"));
-    element("time-quota-reset-mode").addEventListener("change", () => syncQuotaReset("time-quota"));
+    ["data-limit", "group-data-limit", "service-quota", "time-quota"].forEach((prefix) => {
+      element(prefix + "-reset-mode").addEventListener("change", () => syncQuotaReset(prefix));
+      syncQuotaReset(prefix);
+    });
     element("service-quota-device").addEventListener("change", () => populateServiceQuotaDomains());
     element("time-quota-device").addEventListener("change", () => populateTimeQuotaDomains());
     element("profile-cancel-edit").addEventListener("click", () => stopEditing("profile"));
@@ -5152,34 +5233,10 @@ DASHBOARD_HTML = r"""<!doctype html>
     window.setInterval(() => loadConditions(), 5000);
     window.setInterval(() => loadObservations(), 15000);
 
-    element("unaffected-picker").addEventListener("change", () => {
-      const device = pickedConnectedDevice("unaffected-picker");
-      if (!device) return;
-      element("unaffected-mac").value = device.mac_address;
-      element("unaffected-name").value = device.saved_display_name || device.hostname || "";
-    });
-    element("device-picker").addEventListener("change", () => {
-      const device = pickedConnectedDevice("device-picker");
-      if (!device) return;
-      const fields = pickedDeviceFields(device);
-      element("device-name").value = fields.name;
-      // The ID follows the name unless it was typed by hand.
-      element("device-name").dispatchEvent(new Event("input"));
-      element("device-ip").value = fields.ipv4_address;
-      element("device-mac").value = fields.mac_address;
-    });
-    [["mac-add-allowed", "mac-allowlist"], ["mac-add-blocked", "mac-denylist"]].forEach(
-      ([buttonId, listId]) => {
-        element(buttonId).addEventListener("click", () => {
-          const device = pickedConnectedDevice("mac-picker");
-          if (!device) {
-            showMessage("Choose a connected device first.", "error");
-            return;
-          }
-          element(listId).value = addMacToList(element(listId).value, device.mac_address);
-        });
-      }
-    );
+    element("unaffected-picker").addEventListener("change", fillUnaffectedFromPicker);
+    element("device-picker").addEventListener("change", fillDeviceFromPicker);
+    element("mac-add-allowed").addEventListener("click", () => addPickedMac("mac-allowlist"));
+    element("mac-add-blocked").addEventListener("click", () => addPickedMac("mac-denylist"));
     document.querySelectorAll("[data-refresh-connected]").forEach((button) => {
       button.addEventListener("click", async () => {
         setButtonBusy(button, true);
@@ -5193,11 +5250,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     document.querySelectorAll(".tabs a").forEach((link) => {
       link.addEventListener("click", (event) => {
-        event.preventDefault();
-        const name = tabFromHash(link.getAttribute("href"));
-        // pushState keeps Back working without jumping to an element with that ID.
-        if (window.location.hash !== "#" + name) window.history.pushState(null, "", "#" + name);
-        showTab(name);
+        followTabLink(event, tabFromHash(link.getAttribute("href")));
       });
     });
     window.addEventListener("popstate", () => showTab(tabFromHash(window.location.hash)));
@@ -7142,9 +7195,10 @@ class ControlServer(HTTPServer):
     def is_signed_in(self, cookie_header: Optional[str]) -> bool:
         """Return whether a Cookie header holds a current sign-in."""
 
-        return session_is_valid(
-            self.admin_token, session_from_cookie_header(cookie_header), now=int(time.time())
+        value = session_from_cookie_header(
+            cookie_header, name=session_cookie_name(secure=self.secure_transport)
         )
+        return session_is_valid(self.admin_token, value, now=int(time.time()))
 
     def recover_saved_network_state(self) -> None:
         """Restore the last explicit apply or reset after the service restarts."""
@@ -7270,9 +7324,19 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         )
         self._send_response(status=status, content_type=content_type, body=body, headers=headers)
 
+    def _from_another_site(self) -> bool:
+        # Browsers name where a request comes from. A page elsewhere, including
+        # another app on the Pi, must not sign this browser in or out.
+        return self.headers.get("Sec-Fetch-Site") in ("cross-site", "same-site")
+
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
-        if path == "/sign-in":
+        if path in ("/sign-in", "/sign-out") and self._from_another_site():
+            # Not counted as a failed sign-in, so other sites can't lock anyone out.
+            self._send_sign_in_page(
+                status=HTTPStatus.FORBIDDEN, message="Please sign in from this page."
+            )
+        elif path == "/sign-in":
             self._handle_sign_in()
         elif path == "/sign-out":
             self._redirect_home(cookie=cleared_session_cookie(secure=self.server.secure_transport))
@@ -7333,8 +7397,12 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
         if content_type != "application/json":
             return "requests must send JSON"
+        if self._from_another_site():
+            return "cross-site requests are refused"
+        # With the no-referrer policy some browsers send Origin: null for this
+        # page, so only a real, different origin counts.
         origin = self.headers.get("Origin")
-        if origin is not None and urlsplit(origin).netloc != self.headers.get("Host", ""):
+        if origin not in (None, "null") and urlsplit(origin).netloc != self.headers.get("Host", ""):
             return "cross-site requests are refused"
         return None
 
@@ -7368,13 +7436,8 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_write(self) -> None:
         path = urlsplit(self.path).path
-        if path not in WRITE_PATHS:
-            self._send_response(
-                status=HTTPStatus.NOT_FOUND,
-                content_type="application/json",
-                body=_json_bytes({"error": "not found"}),
-            )
-            return
+        # Check access before the route, so that the answers don't reveal which
+        # routes exist to someone who hasn't signed in.
         if self.server.admin_token is None:
             self._send_response(
                 status=HTTPStatus.SERVICE_UNAVAILABLE,
@@ -7382,10 +7445,18 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 body=_json_bytes({"error": "state-changing actions are disabled"}),
             )
             return
-        if not self.server.is_authorized(self.headers.get("Authorization")):
-            if not self._signed_in():
-                self._send_sign_in_required()
-                return
+        bearer = self.server.is_authorized(self.headers.get("Authorization"))
+        if not bearer and not self._signed_in():
+            self._send_sign_in_required()
+            return
+        if path not in WRITE_PATHS:
+            self._send_response(
+                status=HTTPStatus.NOT_FOUND,
+                content_type="application/json",
+                body=_json_bytes({"error": "not found"}),
+            )
+            return
+        if not bearer:
             refusal = self._cross_site_refusal()
             if refusal is not None:
                 self._send_response(

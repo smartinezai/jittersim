@@ -261,6 +261,13 @@ enters a wrong token 5 times waits 15 minutes. Scripts can still send the token
 as `Authorization: Bearer <token>`. Dashboard actions show when they start and
 whether they worked, without requiring you to scroll to the status area.
 
+The dashboard's sections sit in tabs: Overview, Devices, Profiles, Rules &
+limits, Measurements, Setup and Diagnostics. The address names the open tab,
+so a reload or bookmark returns to it. A **Getting started** checklist on the
+Overview guides a first setup and disappears once it is done. Forms that need a
+device's address offer a menu of the connected devices, with **Refresh**, so
+addresses don't have to be typed. The page fits a phone screen.
+
 For a Vodafone TG3442DE, the dashboard can read the primary Wi-Fi settings and
 turn the primary Wi-Fi radios on or off. The router password is used for one
 authenticated request and is not saved. Keep the Pi connected by Ethernet
