@@ -542,6 +542,28 @@ class RuntimeSchedulerTests(unittest.TestCase):
         finally:
             scheduler.stop()
 
+    def test_outage_checks_vary_when_rerolls_are_off(self) -> None:
+        self._save_device(
+            Profile(
+                id="flaky",
+                name="Flaky",
+                outage_probability=50,
+                outage_duration_seconds=1,
+                outage_interval_seconds=1,
+                random_seed=7,
+            )
+        )
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.build_plan(repository=self.repository, now=0)
+
+        # Each build after the first runs one outage check.
+        outcomes = {
+            bool(scheduler.build_plan(repository=self.repository, now=second).blocked_device_addresses)
+            for second in range(2, 80, 2)
+        }
+
+        self.assertEqual(outcomes, {True, False})
+
 
 if __name__ == "__main__":
     unittest.main()

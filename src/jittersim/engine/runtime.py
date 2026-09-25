@@ -53,6 +53,7 @@ class _DeviceRollState:
     next_roll_at: float
     next_outage_check_at: float
     outage_until: float
+    outage_check_number: int = 0
 
 
 class RuntimeScheduler:
@@ -350,11 +351,14 @@ class RuntimeScheduler:
 
             outage_interval = selected_profile.outage_interval_seconds or selected_profile.reroll_interval_seconds
             if outage_interval and now >= roll.next_outage_check_at:
+                # Count outage checks separately: the reroll number stays at 0
+                # when rerolls are off, which would repeat the same outcome.
                 generator = seeded_generator(
                     profile=selected_profile,
                     device_id=device.id,
-                    roll_number=100_000 + roll.roll_number,
+                    roll_number=100_000 + roll.outage_check_number,
                 )
+                roll.outage_check_number += 1
                 if outage_is_selected(profile=selected_profile, generator=generator):
                     duration = outage_duration_seconds(
                         profile=selected_profile,
