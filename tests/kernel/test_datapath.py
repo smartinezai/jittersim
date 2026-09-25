@@ -12,13 +12,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from ipaddress import IPv4Address
 
 from jittersim.config.models import Device, Impairment, MacPolicy, Profile
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import compile_plan
-from jittersim.engine.plan import ServiceAssignmentRule, ServiceQuotaRule
+from jittersim.engine.plan import EveryoneElseRule, ServiceAssignmentRule, ServiceQuotaRule
 from jittersim.measure import load_run
 from jittersim.networking.applier import ApplyError, NetworkApplier
 from jittersim.networking.helper import HelperService
@@ -26,6 +27,9 @@ from jittersim.networking.helper import HelperService
 from .lab import (
     CLIENT,
     CLIENT_MAC,
+    OTHER_CLIENT,
+    OTHER_CLIENT_ADDRESSES,
+    OTHER_CLIENT_MAC,
     PI,
     ROUTER_ADDRESS,
     TOPOLOGY,
@@ -77,6 +81,27 @@ class LinuxDatapathTests(unittest.TestCase):
         result = _in(namespace, *argv, destination, check=False)
         replies = [int(seq) for seq in re.findall(r"icmp_seq=(\d+)", result.stdout)]
         return result.returncode == 0, replies
+
+    def apply_everyone_else(self, devices, profile, *, unaffected=(), blocked=False):
+        rule = EveryoneElseRule(
+            mark=0,
+            upload_impairment=profile.upload,
+            download_impairment=profile.download,
+            unaffected_macs=tuple(unaffected),
+            blocked=blocked,
+        )
+        plan = compile_plan(devices=devices, profiles={NORMAL.id: NORMAL}, everyone_else=rule)
+        self.applier.apply(plan=plan)
+        return plan
+
+    def round_trip(self, source=None, *, namespace=CLIENT):
+        argv = ["ping", "-n", "-c", "4", "-i", "0.2", "-W", "2"]
+        if source:
+            argv += ["-I", source]
+        result = _in(namespace, *argv, ROUTER_ADDRESS, check=False)
+        times = [float(value) for value in re.findall(r"time=([\d.]+) ms", result.stdout)]
+        self.assertTrue(times, result.stdout + result.stderr)
+        return sum(times) / len(times)
 
     def netem_lines(self, interface="eth0"):
         output = _in(PI, "tc", "qdisc", "show", "dev", interface).stdout
@@ -346,6 +371,58 @@ class LinuxDatapathTests(unittest.TestCase):
 
                 self.assertEqual(self.ping("192.168.50.12")[0], reachable)
 
+
+    def test_everyone_else_gets_its_profile_except_saved_and_unaffected_clients(self) -> None:
+        self.apply_everyone_else(
+            [device("a-phone", 11, "normal")],
+            Profile(id="slow", name="Slow", upload=Impairment(delay_ms=100)),
+            unaffected=(OTHER_CLIENT_MAC,),
+        )
+
+        self.assertGreater(self.round_trip("192.168.50.10"), 90, "everyone else")
+        self.assertLess(self.round_trip("192.168.50.11"), 50, "a saved device")
+        self.assertLess(self.round_trip(namespace=OTHER_CLIENT), 50, "an unaffected client")
+
+    def test_an_unaffected_client_keeps_a_normal_download_on_any_address(self) -> None:
+        # Only downloads are delayed, so this checks the connection mark.
+        self.apply_everyone_else(
+            [],
+            Profile(id="slow", name="Slow", download=Impairment(delay_ms=100)),
+            unaffected=(OTHER_CLIENT_MAC,),
+        )
+
+        for address in OTHER_CLIENT_ADDRESSES:
+            with self.subTest(address=address):
+                self.assertLess(self.round_trip(address, namespace=OTHER_CLIENT), 50)
+        self.assertGreater(self.round_trip("192.168.50.10"), 90)
+
+    def test_an_open_connection_follows_the_list(self) -> None:
+        both_ways = Impairment(delay_ms=50)
+        profile = Profile(id="slow", name="Slow", upload=both_ways, download=both_ways)
+        self.apply_everyone_else([], profile, unaffected=(OTHER_CLIENT_MAC, CLIENT_MAC))
+        # One ping process keeps one connection, so its later replies show the new list.
+        ping = subprocess.Popen(
+            ["ip", "netns", "exec", OTHER_CLIENT, "ping", "-n", "-c", "30", "-i", "0.1",
+             ROUTER_ADDRESS],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        time.sleep(1)
+        self.apply_everyone_else([], profile, unaffected=(CLIENT_MAC,))
+        output = ping.communicate(timeout=30)[0]
+
+        times = [float(value) for value in re.findall(r"time=([\d.]+) ms", output)]
+        self.assertLess(max(times[:5]), 50, times)
+        self.assertGreater(min(times[-5:]), 90, times)
+
+    def test_an_outage_disconnects_only_everyone_else(self) -> None:
+        self.apply_everyone_else(
+            [device("a-phone", 11, "normal")], NORMAL, unaffected=(OTHER_CLIENT_MAC,), blocked=True
+        )
+
+        self.assertFalse(self.ping("192.168.50.10")[0])
+        self.assertTrue(self.ping("192.168.50.11")[0])
+        self.assertTrue(self.ping(namespace=OTHER_CLIENT)[0])
 
 if __name__ == "__main__":
     unittest.main()

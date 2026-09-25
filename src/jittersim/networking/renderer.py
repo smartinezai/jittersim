@@ -84,6 +84,56 @@ def _format_impairment_arguments(queue: QueueSpec) -> List[str]:
     return arguments
 
 
+# JitterSim's conntrack mark for connections from unaffected clients. In the
+# forward hook, download packets don't carry the client's MAC address yet, so
+# the connection's upload packets set this mark and its download packets check it.
+UNAFFECTED_CONNECTION_MARK = 0x4A53
+
+
+def _render_everyone_else_rules(plan: NetworkPlan, topology: Topology) -> List[str]:
+    rule = plan.everyone_else
+    test_interface = topology.test_interface
+    unaffected = _render_set(rule.unaffected_macs)
+    saved = _render_set([mark_rule.ipv4_address for mark_rule in plan.mark_rules])
+    connection_mark = f"{UNAFFECTED_CONNECTION_MARK:#x}"
+    upload = f"iifname \"{test_interface}\" meta nfproto ipv4"
+    download = f"oifname \"{test_interface}\" meta nfproto ipv4"
+    lines = []
+    if rule.unaffected_macs:
+        upload += f" ether saddr != {unaffected}"
+        download += f" ct mark != {connection_mark}"
+        lines.append(
+            f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
+            f"ether saddr {unaffected} ct mark set {connection_mark} "
+            "comment \"mark connections of unaffected clients\""
+        )
+        # Only JitterSim's own value is cleared, when a client leaves the list.
+        lines.append(
+            f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
+            f"ether saddr != {unaffected} ct mark {connection_mark} ct mark set 0 "
+            "comment \"clear connections of clients no longer unaffected\""
+        )
+    if plan.mark_rules:
+        # Saved devices keep their own rules, counters and limits.
+        upload += f" ip saddr != {saved}"
+        download += f" ip daddr != {saved}"
+    if rule.blocked:
+        for chain in ("input", "forward"):
+            lines.append(
+                f"add rule inet {PROJECT_TABLE} {chain} {upload} drop "
+                "comment \"temporarily disconnect everyone else\""
+            )
+    lines.append(
+        f"add rule inet {PROJECT_TABLE} forward {upload} meta mark set {rule.mark} counter "
+        "comment \"everyone else upload\""
+    )
+    lines.append(
+        f"add rule inet {PROJECT_TABLE} forward {download} meta mark set {rule.mark} counter "
+        "comment \"everyone else download\""
+    )
+    return lines
+
+
 def _render_nft_script(plan: NetworkPlan, topology: Topology) -> str:
     test_interface = topology.test_interface
     lines = [
@@ -165,6 +215,8 @@ def _render_nft_script(plan: NetworkPlan, topology: Topology) -> str:
             f"ip saddr {_render_set(plan.blocked_device_addresses)} drop "
             "comment \"temporarily disconnect randomized clients\""
         )
+    if plan.everyone_else is not None:
+        lines.extend(_render_everyone_else_rules(plan, topology))
     for rule in plan.mark_rules:
         lines.append(
             f"add rule inet {PROJECT_TABLE} forward "
