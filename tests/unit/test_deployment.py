@@ -55,6 +55,12 @@ class InstallerTests(unittest.TestCase):
         self.assertIn('chmod -R go-w "$INSTALL_DIR"', self.installer)
         self.assertNotIn('chown -R jittersim:jittersim "$INSTALL_DIR"', self.installer)
 
+    def test_installer_refreshes_packages_and_reloads_the_firewall(self) -> None:
+        self.assertLess(
+            self.installer.index("apt-get update"), self.installer.index("apt-get install")
+        )
+        self.assertIn("systemctl restart jittersim-control-firewall.service", self.installer)
+
 
 if __name__ == "__main__":
     unittest.main()

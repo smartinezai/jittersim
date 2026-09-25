@@ -21,6 +21,7 @@ if ! getent passwd jittersim >/dev/null; then
     exit 1
 fi
 
+apt-get update
 apt-get install -y nftables openssl python3-venv tcpdump
 
 install -d -m 0750 -o root -g jittersim "$CONFIG_DIR"
@@ -105,7 +106,8 @@ install -m 0644 -o root -g root \
     /etc/systemd/system/jittersim-dashboard.service
 
 systemctl daemon-reload
-systemctl enable --now jittersim-control-firewall.service
+systemctl enable jittersim-control-firewall.service
+systemctl restart jittersim-control-firewall.service
 systemctl enable jittersim-helper.service jittersim-dashboard.service
 systemctl restart jittersim-helper.service
 systemctl restart jittersim-dashboard.service
