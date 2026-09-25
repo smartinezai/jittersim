@@ -14,7 +14,7 @@ import sys
 import unittest
 from dataclasses import replace
 
-from jittersim.config.models import Device, Impairment, Profile
+from jittersim.config.models import Device, Impairment, MacPolicy, Profile
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import compile_plan
 from jittersim.engine.plan import ServiceAssignmentRule
@@ -316,6 +316,17 @@ class LinuxDatapathTests(unittest.TestCase):
 
         dropped = counters["queues"]["devices"]["a-phone"]["upload_dropped"]
         self.assertTrue(60 <= dropped <= 140, f"{dropped} of 200 dropped")
+
+    def test_a_plan_without_devices_keeps_its_rules(self) -> None:
+        self.apply([device("a-phone", 10, "normal")])
+        denied = MacPolicy(mode="denylist", denylist=("aa:bb:cc:dd:ee:ff",))
+
+        self.applier.apply(plan=compile_plan(devices=(), profiles={}, mac_policy=denied))
+
+        for interface in ("eth0", "wlan0"):
+            self.assertNotIn("prio", _in(PI, "tc", "qdisc", "show", "dev", interface).stdout)
+        rules = _in(PI, "nft", "list", "table", "inet", "jittersim").stdout
+        self.assertIn("deny listed test client", rules)
 
 
 if __name__ == "__main__":
