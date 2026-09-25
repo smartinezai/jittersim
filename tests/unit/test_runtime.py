@@ -579,7 +579,11 @@ class RuntimeSchedulerTests(unittest.TestCase):
 
         # Each build after the first runs one outage check.
         outcomes = {
-            bool(scheduler.build_plan(repository=self.repository, now=second).blocked_device_addresses)
+            bool(
+                scheduler.build_plan(
+                    repository=self.repository, now=second
+                ).blocked_device_addresses
+            )
             for second in range(2, 80, 2)
         }
 
@@ -628,7 +632,9 @@ class RuntimeSchedulerTests(unittest.TestCase):
 
     def test_quota_usage_survives_plan_reapplies(self) -> None:
         self.repository.save_profile(Profile(id="normal", name="Normal"))
-        self.repository.save_profile(Profile(id="slow", name="Slow", download=Impairment(delay_ms=900)))
+        self.repository.save_profile(
+            Profile(id="slow", name="Slow", download=Impairment(delay_ms=900))
+        )
         self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
         self.repository.save_data_limit(
             DataLimit(device_id="alice", profile_id="slow", limit_bytes=10**9, last_reset_at=100)
@@ -695,7 +701,9 @@ class RuntimeSchedulerTests(unittest.TestCase):
             DeviceGroup(id="family", name="Family", device_ids=("alice",))
         )
         self.repository.save_group_data_limit(
-            GroupDataLimit(group_id="family", profile_id="slow", limit_bytes=10**9, last_reset_at=100)
+            GroupDataLimit(
+                group_id="family", profile_id="slow", limit_bytes=10**9, last_reset_at=100
+            )
         )
         helper = CounterResettingHelper()
         helper.counters = {"devices": {"alice": 100, "bob": 5_000}, "services": {}}

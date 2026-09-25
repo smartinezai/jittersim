@@ -1218,7 +1218,10 @@ class ControlServerTests(unittest.TestCase):
 
         requests = (
             ("/api/data-limits/reset", {"device_id": "alice"}),
-            ("/api/timers", {"id": "t", "device_id": "alice", "profile_id": "slow", "duration_minutes": 5}),
+            (
+                "/api/timers",
+                {"id": "t", "device_id": "alice", "profile_id": "slow", "duration_minutes": 5},
+            ),
             ("/api/timers/cancel", {"id": "t"}),
         )
         for path, payload in requests:
