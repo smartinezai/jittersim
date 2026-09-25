@@ -1221,6 +1221,27 @@ class ControlServerTests(unittest.TestCase):
         # string would reach the browser doubled.
         self.assertNotIn("\\\\", DASHBOARD_HTML)
 
+    def test_dashboard_input_patterns_are_valid(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is required to compile the input patterns")
+        patterns = re.findall(r' pattern="([^"]*)"', DASHBOARD_HTML)
+        self.assertTrue(patterns)
+        # Browsers compile pattern attributes with the "v" flag and skip
+        # validation for any pattern it rejects.
+        script = (
+            "for (const pattern of JSON.parse(process.argv[1])) "
+            "new RegExp('^(?:' + pattern + ')$', 'v');"
+        )
+        result = subprocess.run(
+            [node, "-e", script, json.dumps(patterns)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_dashboard_script_is_valid_javascript(self) -> None:
         node = shutil.which("node")
         if node is None:

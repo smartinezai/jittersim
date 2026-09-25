@@ -671,7 +671,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <form id="profile-form">
         <div class="fields">
           <label>Profile ID
-            <input id="profile-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}">
+            <input id="profile-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}">
           </label>
           <label>Name <input id="profile-name" required></label>
         </div>
@@ -861,7 +861,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <h2>Assign a device</h2>
       <form id="device-form">
         <div class="fields">
-          <label>Device ID <input id="device-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}"></label>
+          <label>Device ID <input id="device-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}"></label>
           <label>Name <input id="device-name" required></label>
           <label>Reserved IPv4 address
             <input id="device-ip" required placeholder="192.168.50.10">
@@ -879,7 +879,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <p class="form-note">Choose several assigned devices to give them one profile override or one shared data limit. A device can belong to one group.</p>
       <form id="group-form">
         <div class="fields">
-          <label>Group ID <input id="group-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="family"></label>
+          <label>Group ID <input id="group-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}" placeholder="family"></label>
           <label>Group name <input id="group-name" required placeholder="Family devices"></label>
           <label>Profile override
             <select id="group-profile"><option value="">Use each device profile</option></select>
@@ -942,7 +942,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <h2>Schedule a profile</h2>
       <form id="schedule-form">
         <div class="fields">
-          <label>Schedule ID <input id="schedule-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}"></label>
+          <label>Schedule ID <input id="schedule-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}"></label>
           <label>Device
             <select id="schedule-device" required></select>
           </label>
@@ -1141,7 +1141,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     <form id="service-assignment-form">
       <div class="fields">
         <label>Service ID
-          <input id="service-assignment-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="alice-video">
+          <input id="service-assignment-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}" placeholder="alice-video">
         </label>
         <label>Service name
           <input id="service-assignment-name" required placeholder="Video sites">
@@ -1173,7 +1173,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     <form id="service-quota-form">
       <div class="fields">
         <label>Service ID
-          <input id="service-quota-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="alice-netflix">
+          <input id="service-quota-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}" placeholder="alice-netflix">
         </label>
         <label>Service name
           <input id="service-quota-name" required placeholder="Netflix">
@@ -1230,7 +1230,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     <form id="time-quota-form">
       <div class="fields">
         <label>Service ID
-          <input id="time-quota-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="alice-netflix-time">
+          <input id="time-quota-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}" placeholder="alice-netflix-time">
         </label>
         <label>Service name
           <input id="time-quota-name" required placeholder="Netflix time">
