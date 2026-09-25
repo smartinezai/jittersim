@@ -88,8 +88,10 @@ class InstallerTests(unittest.TestCase):
         # On unless ap.env turns it off, so an update keeps the owner's choice.
         self.assertIn('ap_isolation="${JITTERSIM_AP_ISOLATION:-yes}"', self.installer)
         self.assertIn('802-11-wireless.ap-isolation "$ap_isolation"', self.installer)
-        # A changed setting restarts the access point like any other AP setting.
+        # A changed setting is noticed like any other AP setting, and the
+        # installer says how to restart the running Wi-Fi to use it.
         self.assertEqual(self.installer.count("802-11-wireless.ap-isolation"), 3)
+        self.assertIn("sudo nmcli connection up jittersim-ap", self.installer)
 
     def test_installer_refreshes_packages_and_reloads_the_firewall(self) -> None:
         self.assertLess(

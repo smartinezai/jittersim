@@ -3494,6 +3494,40 @@ class SignInTests(unittest.TestCase):
         self.assertIn(b"Sign-in isn", body)
         self.assertEqual(self.sign_in()[0], 503)
 
+    def test_unsigned_writes_do_not_reveal_which_routes_exist(self) -> None:
+        for token in ("admin-token", None):
+            with self.subTest(token=token):
+                self.server.admin_token = token
+                answers = {
+                    self.request(
+                        method, path, body="{}", headers={"Content-Type": "application/json"}
+                    )[::2]
+                    for method in ("POST", "PUT")
+                    for path in ("/api/apply", "/api/everyone-else", "/api/not-a-route", "/other")
+                }
+                self.assertEqual(len(answers), 1, answers)
+
+    def test_other_sites_cannot_sign_in_or_out(self) -> None:
+        session = self.session()
+        cross_site = {"Sec-Fetch-Site": "cross-site"}
+
+        status, headers, _ = self.request(
+            "POST", "/sign-out", headers={"Cookie": session, **cross_site}
+        )
+        self.assertEqual(status, 403)
+        self.assertNotIn("Set-Cookie", headers)
+        for _ in range(6):
+            status, headers, body = self.request(
+                "POST",
+                "/sign-in",
+                body=urlencode({"token": "wrong"}),
+                headers={"Content-Type": "application/x-www-form-urlencoded", **cross_site},
+            )
+            self.assertEqual(status, 403)
+            self.assert_neutral(headers, body)
+        # None of those counted as guesses.
+        self.assertEqual(self.sign_in()[0], 303)
+
     def test_signing_out_clears_the_cookie(self) -> None:
         status, headers, _ = self.request("POST", "/sign-out", headers={"Cookie": self.session()})
 
@@ -3530,6 +3564,13 @@ class SignInTests(unittest.TestCase):
             write({"Cookie": session, **json_type, "Origin": "https://elsewhere.example"}), 403
         )
         self.assertEqual(write(json_type), 401)
+        # With the no-referrer policy some browsers send Origin: null for this page.
+        null_origin = {"Origin": "null", "Sec-Fetch-Site": "same-origin"}
+        self.assertEqual(write({"Cookie": session, **json_type, **null_origin}), 200)
+        for site in ("same-site", "cross-site"):
+            with self.subTest(site=site):
+                headers = {"Cookie": session, **json_type, "Sec-Fetch-Site": site}
+                self.assertEqual(write(headers), 403)
         # Scripts sending the token header aren't browsers, so none of this applies.
         self.assertEqual(
             write({"Authorization": "Bearer admin-token", "Content-Type": "text/plain"}), 200

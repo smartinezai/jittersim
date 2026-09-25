@@ -25,6 +25,7 @@ from jittersim.api.session import (
     cleared_session_cookie,
     issue_session,
     session_cookie,
+    session_cookie_name,
     session_from_cookie_header,
     session_is_valid,
 )
@@ -7114,9 +7115,10 @@ class ControlServer(HTTPServer):
     def is_signed_in(self, cookie_header: Optional[str]) -> bool:
         """Return whether a Cookie header holds a current sign-in."""
 
-        return session_is_valid(
-            self.admin_token, session_from_cookie_header(cookie_header), now=int(time.time())
+        value = session_from_cookie_header(
+            cookie_header, name=session_cookie_name(secure=self.secure_transport)
         )
+        return session_is_valid(self.admin_token, value, now=int(time.time()))
 
     def recover_saved_network_state(self) -> None:
         """Restore the last explicit apply or reset after the service restarts."""
@@ -7242,9 +7244,19 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         )
         self._send_response(status=status, content_type=content_type, body=body, headers=headers)
 
+    def _from_another_site(self) -> bool:
+        # Browsers name where a request comes from. A page elsewhere, including
+        # another app on the Pi, must not sign this browser in or out.
+        return self.headers.get("Sec-Fetch-Site") in ("cross-site", "same-site")
+
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
-        if path == "/sign-in":
+        if path in ("/sign-in", "/sign-out") and self._from_another_site():
+            # Not counted as a failed sign-in, so other sites can't lock anyone out.
+            self._send_sign_in_page(
+                status=HTTPStatus.FORBIDDEN, message="Please sign in from this page."
+            )
+        elif path == "/sign-in":
             self._handle_sign_in()
         elif path == "/sign-out":
             self._redirect_home(cookie=cleared_session_cookie(secure=self.server.secure_transport))
@@ -7305,8 +7317,12 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
         if content_type != "application/json":
             return "requests must send JSON"
+        if self._from_another_site():
+            return "cross-site requests are refused"
+        # With the no-referrer policy some browsers send Origin: null for this
+        # page, so only a real, different origin counts.
         origin = self.headers.get("Origin")
-        if origin is not None and urlsplit(origin).netloc != self.headers.get("Host", ""):
+        if origin not in (None, "null") and urlsplit(origin).netloc != self.headers.get("Host", ""):
             return "cross-site requests are refused"
         return None
 
@@ -7340,13 +7356,8 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_write(self) -> None:
         path = urlsplit(self.path).path
-        if path not in WRITE_PATHS:
-            self._send_response(
-                status=HTTPStatus.NOT_FOUND,
-                content_type="application/json",
-                body=_json_bytes({"error": "not found"}),
-            )
-            return
+        # Check access before the route, so that the answers don't reveal which
+        # routes exist to someone who hasn't signed in.
         if self.server.admin_token is None:
             self._send_response(
                 status=HTTPStatus.SERVICE_UNAVAILABLE,
@@ -7354,10 +7365,18 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 body=_json_bytes({"error": "state-changing actions are disabled"}),
             )
             return
-        if not self.server.is_authorized(self.headers.get("Authorization")):
-            if not self._signed_in():
-                self._send_sign_in_required()
-                return
+        bearer = self.server.is_authorized(self.headers.get("Authorization"))
+        if not bearer and not self._signed_in():
+            self._send_sign_in_required()
+            return
+        if path not in WRITE_PATHS:
+            self._send_response(
+                status=HTTPStatus.NOT_FOUND,
+                content_type="application/json",
+                body=_json_bytes({"error": "not found"}),
+            )
+            return
+        if not bearer:
             refusal = self._cross_site_refusal()
             if refusal is not None:
                 self._send_response(

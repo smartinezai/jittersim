@@ -176,7 +176,8 @@ systemctl restart jittersim-dashboard.service
 if [ "$ap_active_connection" = jittersim-ap ]; then
     if [ "$ap_settings_before" != "$ap_settings_after" ]; then
         echo "AP settings were saved but the active Wi-Fi was not restarted." >&2
-        echo "Restart jittersim-ap during a planned maintenance window." >&2
+        echo "To use them now, run: sudo nmcli connection up jittersim-ap" >&2
+        echo "Test Wi-Fi devices reconnect after a few seconds. A reboot also works." >&2
     fi
 else
     nmcli connection up jittersim-ap
