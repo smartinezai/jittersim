@@ -10,6 +10,14 @@ from .topology import Topology
 
 PROJECT_TABLE = "jittersim"
 ROOT_HANDLE = "10:"
+# prio class minors start at 1, so band 0 is class 10:1. Band 0 carries unmarked
+# traffic (the Pi itself, ARP, DHCP and unassigned clients) without impairment,
+# and mark N uses band N, which is class 10:N+1.
+DEFAULT_CLASS = f"{ROOT_HANDLE}1"
+
+
+def _band_class(mark: int) -> str:
+    return f"{ROOT_HANDLE}{mark + 1}"
 
 
 def _render_set(values: Sequence[object]) -> str:
@@ -157,10 +165,16 @@ def _render_tc_commands(
                 *("0" for _ in range(16)),
             ),
             purpose=f"create project queue root on {interface}",
-        )
+        ),
+        Command(
+            executable="tc",
+            arguments=("qdisc", "del", "dev", interface, "parent", DEFAULT_CLASS),
+            purpose=f"keep unmarked traffic on {interface} unimpaired",
+            ignore_failure=True,
+        ),
     ]
     for queue in queues:
-        band = str(queue.mark)
+        band_class = _band_class(queue.mark)
         child_handle = f"{queue.mark + 10}:"
         if queue.impairment != Impairment():
             commands.append(
@@ -172,7 +186,7 @@ def _render_tc_commands(
                         "dev",
                         interface,
                         "parent",
-                        f"{ROOT_HANDLE}{band}",
+                        band_class,
                         "handle",
                         child_handle,
                         *_format_impairment_arguments(queue),
@@ -193,7 +207,7 @@ def _render_tc_commands(
                         "dev",
                         interface,
                         "parent",
-                        f"{ROOT_HANDLE}{band}",
+                        band_class,
                         "handle",
                         child_handle,
                     ),
@@ -220,7 +234,7 @@ def _render_tc_commands(
                     str(queue.mark),
                     "fw",
                     "flowid",
-                    f"{ROOT_HANDLE}{band}",
+                    band_class,
                 ),
                 purpose=f"route mark {queue.mark} on {interface}",
             )

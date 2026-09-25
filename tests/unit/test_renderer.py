@@ -114,6 +114,32 @@ class RendererTests(unittest.TestCase):
         ]
         self.assertEqual(len(quota_upload), 1)
 
+    def test_unmarked_traffic_bypasses_device_impairments(self) -> None:
+        lossy = Impairment(loss_percent=100)
+        plan = compile_plan(
+            devices=(make_device("alice", "192.168.50.10", "lossy"),),
+            profiles={"lossy": Profile(id="lossy", name="Lossy", upload=lossy, download=lossy)},
+        )
+
+        commands = render_command_plan(
+            plan=plan,
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+        )
+
+        for interface in ("eth0", "wlan0"):
+            with self.subTest(interface=interface):
+                tc = [command.argv for command in commands if interface in command.argv]
+                root = next(argv for argv in tc if "root" in argv)
+                netem = [argv for argv in tc if "netem" in argv]
+                filters = [argv for argv in tc if argv[1] == "filter"]
+                # Unmarked traffic (the Pi itself, ARP, DHCP, unassigned clients)
+                # uses band 0, which is class 10:1.
+                self.assertEqual(root[root.index("priomap") + 1 :], ("0",) * 16)
+                # Clear any impairment an older layout attached to that band.
+                self.assertIn(("tc", "qdisc", "del", "dev", interface, "parent", "10:1"), tc)
+                self.assertEqual([argv[argv.index("parent") + 1] for argv in netem], ["10:2"])
+                self.assertEqual([argv[argv.index("flowid") + 1] for argv in filters], ["10:2"])
+
     def test_renders_jitter_even_without_a_base_delay(self) -> None:
         profile = Profile(
             id="jitter-only",
