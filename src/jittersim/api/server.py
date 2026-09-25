@@ -5528,15 +5528,14 @@ class ControlServer(HTTPServer):
                         > MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN
                     ):
                         raise ValueError("too many browser service domains")
-                    enabled_assignments = len(other_assignments)
-                    configured_rules = (
-                        len(self.repository.list_devices())
-                        + sum(quota.enabled for quota in self.repository.list_service_quotas())
-                        + sum(quota.enabled for quota in self.repository.list_time_quotas())
-                        + enabled_assignments + 1
+                    already_enabled = any(
+                        current.id == assignment.id and current.enabled
+                        for current in self.repository.list_service_assignments()
                     )
-                    if configured_rules > 15:
-                        raise ValueError("too many combined device and service rules")
+                    if not already_enabled:
+                        capacity_error = self._capacity_error(adding=1)
+                        if capacity_error is not None:
+                            return capacity_error
                     existing = (
                         current for current in other_assignments
                         if current.device_id == assignment.device_id

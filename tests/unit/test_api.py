@@ -867,10 +867,33 @@ class ControlServerTests(unittest.TestCase):
             },
         )
 
+        renamed, _, _ = self.server.write_response_for(
+            "/api/service-assignments", {**VIDEO_ASSIGNMENT, "name": "Videos"}
+        )
+
         self.assertEqual(saved, 200)
         self.assertEqual(status, 409)
         self.assertIn("at most 15 devices and service rules", json.loads(body)["error"])
         self.assertIsNone(self.repository.get_device("carol"))
+        # Editing a profile that is already enabled needs no extra capacity.
+        self.assertEqual(renamed, 200)
+
+    def test_a_browser_service_profile_beyond_capacity_is_refused_like_a_device(self) -> None:
+        for index in range(14):
+            self.repository.save_device(
+                Device(
+                    id=f"device-{index:02d}",
+                    name=f"Device {index}",
+                    ipv4_address=f"192.168.50.{index + 100}",
+                    profile_id="slow",
+                )
+            )
+
+        status, _, body = self.server.write_response_for("/api/service-assignments", VIDEO_ASSIGNMENT)
+
+        self.assertEqual(status, 409)
+        self.assertIn("at most 15 devices and service rules", json.loads(body)["error"])
+        self.assertEqual(self.repository.list_service_assignments(), ())
 
     def test_a_profile_used_by_a_browser_service_profile_cannot_be_deleted(self) -> None:
         self.repository.save_profile(Profile(id="video", name="Video"))
