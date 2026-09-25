@@ -3771,10 +3771,8 @@ class ControlServer(HTTPServer):
         if path == "/api/profiles":
             try:
                 profile = _profile_from_payload(payload)
-            except (KeyError, TypeError, ValueError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid profile configuration"}
-                )
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid profile configuration", error)
             self.repository.save_profile(profile)
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {"profile": _profile_payload(profile)}
@@ -3783,10 +3781,8 @@ class ControlServer(HTTPServer):
         if path == "/api/devices":
             try:
                 device = _device_from_payload(payload)
-            except (KeyError, TypeError, ValueError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid device configuration"}
-                )
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid device configuration", error)
             self.repository.save_device(device)
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {"device": _device_payload(device)}
@@ -3801,10 +3797,8 @@ class ControlServer(HTTPServer):
                 if group.profile_id is not None and self.repository.get_profile(group.profile_id) is None:
                     raise ValueError("profile does not exist")
                 self.repository.save_device_group(group)
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid device group configuration"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid device group configuration", error)
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {"group": _device_group_payload(group, repository=self.repository)}
             )
@@ -3818,19 +3812,15 @@ class ControlServer(HTTPServer):
                     return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
                         {"error": "device group does not exist"}
                     )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid device group delete request"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid device group delete request", error)
             return self._apply_quota_change("group", {"id": group_id, "deleted": True})
 
         if path == "/api/schedules":
             try:
                 schedule = _schedule_from_payload(payload)
-            except (KeyError, TypeError, ValueError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid schedule configuration"}
-                )
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid schedule configuration", error)
             self.repository.save_schedule(schedule)
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {"schedule": _schedule_payload(schedule)}
@@ -3844,10 +3834,8 @@ class ControlServer(HTTPServer):
                 if self.repository.get_profile(timer.profile_id) is None:
                     raise ValueError("profile does not exist")
                 self.repository.save_timer(timer)
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid timer configuration"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid timer configuration", error)
             if self.helper_client is None:
                 return HTTPStatus.OK, "application/json", _json_bytes(
                     {
@@ -3871,10 +3859,8 @@ class ControlServer(HTTPServer):
                     return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
                         {"error": "timer does not exist or is already inactive"}
                     )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid timer cancellation"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid timer cancellation", error)
             if self.helper_client is None:
                 return HTTPStatus.OK, "application/json", _json_bytes(
                     {"timer_id": timer_id, "live_applied": False}
@@ -3895,10 +3881,8 @@ class ControlServer(HTTPServer):
                 if self.repository.get_profile(progression.end_profile_id) is None:
                     raise ValueError("end profile does not exist")
                 self.repository.save_progression(progression)
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid progression configuration"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid progression configuration", error)
             if self.helper_client is None:
                 return HTTPStatus.OK, "application/json", _json_bytes(
                     {
@@ -3930,10 +3914,8 @@ class ControlServer(HTTPServer):
                     return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
                         {"error": "progression does not exist or is already inactive"}
                     )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid progression stop request"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid progression stop request", error)
             if self.helper_client is None:
                 return HTTPStatus.OK, "application/json", _json_bytes(
                     {"progression_id": progression_id, "live_applied": False}
@@ -3952,10 +3934,8 @@ class ControlServer(HTTPServer):
                 if self.repository.get_profile(data_limit.profile_id) is None:
                     raise ValueError("profile does not exist")
                 self.repository.save_data_limit(data_limit)
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid data limit configuration"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid data limit configuration", error)
             return self._apply_quota_change(
                 "data_limit",
                 _data_limit_payload(data_limit, repository=self.repository),
@@ -3976,10 +3956,8 @@ class ControlServer(HTTPServer):
                     counter_bytes=self._quota_counter("devices", device_id),
                     reset_at=int(time.time()),
                 )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid data limit reset request"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid data limit reset request", error)
             refreshed = self.repository.get_data_limit(device_id)
             return self._apply_quota_change(
                 "data_limit",
@@ -3997,10 +3975,8 @@ class ControlServer(HTTPServer):
                 if self.repository.get_profile(data_limit.profile_id) is None:
                     raise ValueError("profile does not exist")
                 self.repository.save_group_data_limit(data_limit)
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid group data limit configuration"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid group data limit configuration", error)
             return self._apply_quota_change(
                 "group_data_limit",
                 _group_data_limit_payload(data_limit, repository=self.repository),
@@ -4021,10 +3997,8 @@ class ControlServer(HTTPServer):
                     counter_bytes=self._group_quota_counter(group_id),
                     reset_at=int(time.time()),
                 )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid group data limit reset request"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid group data limit reset request", error)
             refreshed = self.repository.get_group_data_limit(group_id)
             return self._apply_quota_change(
                 "group_data_limit",
@@ -4039,10 +4013,8 @@ class ControlServer(HTTPServer):
                 if self.repository.get_profile(quota.profile_id) is None:
                     raise ValueError("profile does not exist")
                 self.repository.save_service_quota(quota)
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid service quota configuration"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid service quota configuration", error)
             return self._apply_quota_change(
                 "service_quota",
                 _service_quota_payload(quota, repository=self.repository),
@@ -4063,10 +4035,8 @@ class ControlServer(HTTPServer):
                     counter_bytes=self._quota_counter("services", quota_id),
                     reset_at=int(time.time()),
                 )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid service quota reset request"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid service quota reset request", error)
             refreshed = self.repository.get_service_quota(quota_id)
             return self._apply_quota_change(
                 "service_quota",
@@ -4081,10 +4051,8 @@ class ControlServer(HTTPServer):
                 if self.repository.get_profile(quota.profile_id) is None:
                     raise ValueError("profile does not exist")
                 self.repository.save_time_quota(quota)
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid time quota configuration"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid time quota configuration", error)
             return self._apply_quota_change(
                 "time_quota",
                 _time_quota_payload(quota, repository=self.repository),
@@ -4113,10 +4081,8 @@ class ControlServer(HTTPServer):
                     return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
                         {"error": "time quota does not exist"}
                     )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid time quota start request"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid time quota start request", error)
             return self._apply_quota_change(
                 "time_quota",
                 _time_quota_payload(refreshed, repository=self.repository),
@@ -4131,10 +4097,8 @@ class ControlServer(HTTPServer):
                     return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
                         {"error": "time quota does not exist"}
                     )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid time quota stop request"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid time quota stop request", error)
             refreshed = self.repository.get_time_quota(quota_id)
             return self._apply_quota_change(
                 "time_quota",
@@ -4158,10 +4122,8 @@ class ControlServer(HTTPServer):
                     ),
                     reset_at=int(time.time()),
                 )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid time quota reset request"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid time quota reset request", error)
             refreshed = self.repository.get_time_quota(quota_id)
             return self._apply_quota_change(
                 "time_quota",
@@ -4171,10 +4133,8 @@ class ControlServer(HTTPServer):
         if path == "/api/policies":
             try:
                 mac_policy, website_policy = _policies_from_payload(payload)
-            except (KeyError, TypeError, ValueError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid network policy configuration"}
-                )
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid network policy configuration", error)
             self.repository.save_mac_policy(mac_policy)
             self.repository.save_website_policy(website_policy)
             return HTTPStatus.OK, "application/json", _json_bytes(
@@ -4191,10 +4151,8 @@ class ControlServer(HTTPServer):
                     ssid=payload["ssid"],
                     password=payload["password"],
                 )
-            except (KeyError, TypeError, ValueError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid access point settings"}
-                )
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid access point settings", error)
             except HelperClientError:
                 LOGGER.exception("access point configuration failed")
                 return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
@@ -4326,10 +4284,8 @@ class ControlServer(HTTPServer):
                 website_domains=tuple(dict.fromkeys(profile.website_domains + (domain,))),
             )
             self.repository.save_profile(updated)
-        except (KeyError, TypeError, ValueError, StorageError):
-            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                {"error": "could not add domain to profile"}
-            )
+        except (KeyError, TypeError, ValueError, StorageError) as error:
+            return _bad_request("could not add domain to profile", error)
         return HTTPStatus.OK, "application/json", _json_bytes(
             {"profile": _profile_payload(updated)}
         )
@@ -4345,10 +4301,8 @@ class ControlServer(HTTPServer):
                 blocked_domains=tuple(dict.fromkeys(policy.blocked_domains + (domain,))),
             )
             self.repository.save_website_policy(updated)
-        except (KeyError, TypeError, ValueError, StorageError):
-            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                {"error": "could not add domain to global block list"}
-            )
+        except (KeyError, TypeError, ValueError, StorageError) as error:
+            return _bad_request("could not add domain to global block list", error)
         return HTTPStatus.OK, "application/json", _json_bytes(
             {"policies": _policies_payload(self.repository)}
         )
@@ -4362,10 +4316,8 @@ class ControlServer(HTTPServer):
             )
         try:
             device = _connected_device_from_payload(payload, self.repository)
-        except (KeyError, TypeError, ValueError):
-            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                {"error": "invalid connected-device profile assignment"}
-            )
+        except (KeyError, TypeError, ValueError) as error:
+            return _bad_request("invalid connected-device profile assignment", error)
         self.repository.save_device(device)
         status, content_type, body = self._apply_configuration()
         response = json.loads(body.decode("utf-8"))
@@ -4733,6 +4685,16 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
 
 class RequestError(ValueError):
     """Raised when an HTTP request body cannot be safely decoded."""
+
+
+def _bad_request(message: str, error: Exception) -> Tuple[int, str, bytes]:
+    """Reject a request, adding the validation reason when there is one."""
+
+    if isinstance(error, KeyError) and error.args:
+        message = f"{message}: missing {error.args[0]}"
+    elif isinstance(error, ValueError) and str(error):
+        message = f"{message}: {error}"
+    return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes({"error": message})
 
 
 def _list_field(payload: Dict[str, Any], key: str, *, required: bool = False) -> tuple:

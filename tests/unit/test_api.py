@@ -454,6 +454,26 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("error", json.loads(list_id["body"]))
         self.assertEqual(self.repository.list_recent_actions()[0]["action"], "/api/data-limits")
 
+    def test_rejected_requests_explain_what_was_wrong(self) -> None:
+        cases = (
+            (
+                "/api/profiles",
+                {"id": "Bad Profile!", "name": "Bad"},
+                "invalid profile configuration: id must contain 1 to 64 lowercase letters",
+            ),
+            ("/api/profiles", {"id": "slow"}, "invalid profile configuration: missing name"),
+            (
+                "/api/timers",
+                {"device_id": "alice", "profile_id": "slow", "duration_minutes": 0},
+                "invalid timer configuration: duration_minutes must be between 1 and 10080",
+            ),
+        )
+        for path, payload, message in cases:
+            with self.subTest(path=path, payload=payload):
+                status, _, body = self.server.write_response_for(path, payload)
+                self.assertEqual(status, 400)
+                self.assertTrue(json.loads(body)["error"].startswith(message))
+
     def test_list_fields_reject_plain_strings(self) -> None:
         requests = (
             ("/api/policies", {"websites": {"mode": "unrestricted", "blocked_domains": "netflix"}}),
@@ -653,7 +673,11 @@ class ControlServerTests(unittest.TestCase):
         )
 
         self.assertEqual(status, 400)
-        self.assertEqual(json.loads(body), {"error": "invalid service quota configuration"})
+        self.assertEqual(
+            json.loads(body)["error"],
+            "invalid service quota configuration: "
+            "service quota domains must come from DNS observations",
+        )
 
     def test_time_quota_can_be_saved_started_stopped_and_reset(self) -> None:
         self.repository.save_domain_observations(
@@ -1302,7 +1326,10 @@ class ControlServerTests(unittest.TestCase):
         )
 
         self.assertEqual(status, 400)
-        self.assertEqual(json.loads(body), {"error": "invalid timer configuration"})
+        self.assertEqual(
+            json.loads(body)["error"],
+            "invalid timer configuration: duration_minutes must be between 1 and 10080",
+        )
 
     def test_starts_and_stops_a_profile_progression(self) -> None:
         status, _, body = self.server.write_response_for(
@@ -1353,7 +1380,10 @@ class ControlServerTests(unittest.TestCase):
         )
 
         self.assertEqual(status, 400)
-        self.assertEqual(json.loads(body), {"error": "invalid progression configuration"})
+        self.assertEqual(
+            json.loads(body)["error"],
+            "invalid progression configuration: traffic mode requires a positive query target",
+        )
 
     def test_starts_a_byte_progression(self) -> None:
         status, _, body = self.server.write_response_for(
@@ -1414,7 +1444,11 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(status, 400)
         self.assertEqual(content_type, "application/json")
-        self.assertEqual(json.loads(body), {"error": "invalid profile configuration"})
+        self.assertEqual(
+            json.loads(body)["error"],
+            "invalid profile configuration: id must contain 1 to 64 lowercase letters, "
+            "numbers, hyphens or underscores",
+        )
         self.assertIsNone(self.repository.get_profile("unsafe id"))
 
     def test_apply_and_reset_require_a_configured_helper(self) -> None:
