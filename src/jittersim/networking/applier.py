@@ -154,6 +154,24 @@ class NetworkApplier:
         )
         return result.stdout
 
+    def queue_statistics(self) -> Dict[str, str]:
+        """Read traffic-control queue statistics as JSON for each direction."""
+
+        outputs = {}
+        for direction, interface in (
+            ("upload", self._topology.uplink_interface),
+            ("download", self._topology.test_interface),
+        ):
+            result = self._executor.run(
+                Command(
+                    executable="tc",
+                    arguments=("-s", "-j", "qdisc", "show", "dev", interface),
+                    purpose=f"inspect JitterSim queues on {interface}",
+                )
+            )
+            outputs[direction] = result.stdout
+        return outputs
+
     def configure_access_point(self, *, ssid: str, password: str) -> int:
         """Set the local test AP credentials without touching the upstream router."""
 

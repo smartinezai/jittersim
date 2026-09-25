@@ -129,6 +129,15 @@ class HelperService:
         except (CommandExecutionError, ValueError):
             LOGGER.exception("traffic counter inspection failed")
             return {"ok": False, "error": "traffic counter inspection failed"}
+        marks = counters.pop("marks")
+        try:
+            counters["queues"] = _parse_queue_statistics(
+                self._applier.queue_statistics(), marks=marks
+            )
+        except (CommandExecutionError, ValueError):
+            # The byte counters are still useful without queue figures.
+            LOGGER.warning("queue statistics inspection failed", exc_info=True)
+            counters["queues"] = {"devices": {}}
         return {"ok": True, "action": "traffic-counters", "counters": counters}
 
     def _handle_apply(self, payload: Any) -> Dict[str, Any]:
@@ -296,6 +305,27 @@ class UnixHelperServer(socketserver.UnixStreamServer):
             pass
 
 
+def _validated_queues(raw_queues: Any) -> Dict[str, Dict[str, Dict[str, int]]]:
+    """Keep only well-formed per-device queue figures from a helper response."""
+
+    queues: Dict[str, Dict[str, Dict[str, int]]] = {"devices": {}}
+    devices = raw_queues.get("devices") if isinstance(raw_queues, dict) else None
+    if not isinstance(devices, dict):
+        return queues
+    for identifier, values in devices.items():
+        if (
+            not isinstance(identifier, str)
+            or not re.fullmatch(r"^[a-z0-9][a-z0-9_-]{0,63}$", identifier)
+            or not isinstance(values, dict)
+        ):
+            raise HelperClientError("helper returned invalid queue statistics")
+        queues["devices"][identifier] = {
+            field: _queue_counter(values.get(field))
+            for field in ("upload_dropped", "download_dropped", "upload_queued", "download_queued")
+        }
+    return queues
+
+
 class HelperClient:
     """Send bounded requests to a local privileged helper."""
 
@@ -445,6 +475,7 @@ class HelperClient:
                         raise HelperClientError("helper returned invalid traffic directions")
                     directions[kind][identifier][field] = value
         result["directions"] = directions
+        result["queues"] = _validated_queues(counters.get("queues"))
         return result
 
     def _request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -584,6 +615,58 @@ def _parse_dns_query_output(output: str, *, observed_at: int) -> List[Dict[str, 
     ]
 
 
+def _rule_mark(rule: Dict[str, Any]) -> Optional[int]:
+    """Return the packet mark an nftables rule sets, if any."""
+
+    for expression in rule.get("expr", []):
+        mangle = expression.get("mangle") if isinstance(expression, dict) else None
+        if not isinstance(mangle, dict) or mangle.get("key") != {"meta": {"key": "mark"}}:
+            continue
+        value = mangle.get("value")
+        if isinstance(value, int) and not isinstance(value, bool) and 0 < value < 2**32:
+            return value
+    return None
+
+
+def _queue_counter(value: Any) -> int:
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 2**63 - 1:
+        return value
+    return 0
+
+
+def _parse_queue_statistics(outputs: Dict[str, str], *, marks: Dict[str, int]) -> Dict[str, Any]:
+    """Report what each device's netem queue dropped or holds, by direction."""
+
+    # The renderer gives mark N the netem handle N+10, which tc prints as written.
+    devices_by_handle = {f"{mark + 10}:": device_id for device_id, mark in marks.items()}
+    devices: Dict[str, Dict[str, int]] = {}
+    for direction, output in outputs.items():
+        try:
+            qdiscs = json.loads(output)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ValueError("tc statistics output is not valid JSON") from error
+        if not isinstance(qdiscs, list):
+            raise ValueError("tc statistics output has an invalid shape")
+        for qdisc in qdiscs:
+            if not isinstance(qdisc, dict) or qdisc.get("kind") != "netem":
+                continue
+            device_id = devices_by_handle.get(qdisc.get("handle"))
+            if device_id is None:
+                continue
+            statistics = devices.setdefault(
+                device_id,
+                {
+                    "upload_dropped": 0,
+                    "download_dropped": 0,
+                    "upload_queued": 0,
+                    "download_queued": 0,
+                },
+            )
+            statistics[f"{direction}_dropped"] = _queue_counter(qdisc.get("drops"))
+            statistics[f"{direction}_queued"] = _queue_counter(qdisc.get("qlen"))
+    return {"devices": devices}
+
+
 def _parse_traffic_counter_output(output: str) -> Dict[str, Any]:
     """Extract project-owned byte and packet counters from nftables JSON."""
 
@@ -598,6 +681,7 @@ def _parse_traffic_counter_output(output: str) -> Dict[str, Any]:
         "devices": {},
         "services": {},
         "directions": {"devices": {}, "services": {}},
+        "marks": {},
     }
     for item in payload["nftables"]:
         if not isinstance(item, dict) or not isinstance(item.get("rule"), dict):
@@ -634,6 +718,10 @@ def _parse_traffic_counter_output(output: str) -> Dict[str, Any]:
         kind = "devices" if match.group("kind") == "device" else "services"
         identifier = match.group("identifier")
         direction = match.group("direction")
+        if kind == "devices":
+            mark = _rule_mark(rule)
+            if mark is not None:
+                counters["marks"][identifier] = mark
         counters[kind][identifier] = counters[kind].get(identifier, 0) + byte_count
         directional = counters["directions"][kind].setdefault(
             identifier,

@@ -44,6 +44,41 @@ class OutputExecutor(FakeExecutor):
         return CommandResult(return_code=0, stdout=self.output)
 
 
+# Real kernel output after applying 50% upload loss and 20 ms download delay
+# to alice (mark 1) and sending 40 pings.
+NFT_COUNTERS_WITH_MARKS = (
+    '{"nftables":['
+    '{"rule":{"comment":"usage-device alice upload","expr":['
+    '{"mangle":{"key":{"meta":{"key":"mark"}},"value":1}},'
+    '{"counter":{"packets":40,"bytes":3360}}]}},'
+    '{"rule":{"comment":"usage-device alice download","expr":['
+    '{"mangle":{"key":{"meta":{"key":"mark"}},"value":1}},'
+    '{"counter":{"packets":16,"bytes":1344}}]}}]}'
+)
+TC_UPLOAD_STATISTICS = (
+    '[{"kind":"prio","handle":"10:","root":true,"drops":24,"backlog":0,"qlen":0},'
+    '{"kind":"netem","handle":"11:","parent":"10:2","bytes":1568,"packets":16,'
+    '"drops":24,"backlog":0,"qlen":0}]'
+)
+TC_DOWNLOAD_STATISTICS = (
+    '[{"kind":"prio","handle":"10:","root":true,"drops":0,"backlog":0,"qlen":0},'
+    '{"kind":"netem","handle":"11:","parent":"10:2","bytes":1568,"packets":16,'
+    '"drops":0,"backlog":196,"qlen":2}]'
+)
+
+
+class CounterExecutor(FakeExecutor):
+    """Answer nft and tc statistics commands the way the kernel does."""
+
+    def run(self, command):
+        self.commands.append(command)
+        if command.executable == "nft":
+            return CommandResult(return_code=0, stdout=NFT_COUNTERS_WITH_MARKS)
+        interface = command.argv[-1]
+        output = TC_UPLOAD_STATISTICS if interface == "eth0" else TC_DOWNLOAD_STATISTICS
+        return CommandResult(return_code=0, stdout=output)
+
+
 class UplinkOutputExecutor(FakeExecutor):
     def run(self, command):
         self.commands.append(command)
@@ -331,7 +366,9 @@ class HelperServiceTests(unittest.TestCase):
             )
         )
 
-        response = service.handle_payload({"action": "traffic-counters"})
+        # This executor answers tc with nftables output, so queue figures are skipped.
+        with self.assertLogs("jittersim.networking.helper", level="WARNING"):
+            response = service.handle_payload({"action": "traffic-counters"})
 
         self.assertEqual(response["action"], "traffic-counters")
         self.assertEqual(
@@ -357,11 +394,44 @@ class HelperServiceTests(unittest.TestCase):
                         }
                     },
                 },
+                "queues": {"devices": {}},
             },
         )
         self.assertEqual(
             executor.commands[0].argv,
             ("nft", "-j", "list", "chain", "inet", "jittersim", "forward"),
+        )
+
+    def test_reports_what_each_device_queue_dropped_or_holds(self) -> None:
+        executor = CounterExecutor()
+        service = HelperService(
+            NetworkApplier(
+                executor=executor,
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            )
+        )
+
+        response = service.handle_payload({"action": "traffic-counters"})
+
+        self.assertEqual(
+            response["counters"]["queues"],
+            {
+                "devices": {
+                    "alice": {
+                        "upload_dropped": 24,
+                        "download_dropped": 0,
+                        "upload_queued": 0,
+                        "download_queued": 2,
+                    }
+                }
+            },
+        )
+        self.assertEqual(
+            [command.argv for command in executor.commands[1:]],
+            [
+                ("tc", "-s", "-j", "qdisc", "show", "dev", "eth0"),
+                ("tc", "-s", "-j", "qdisc", "show", "dev", "wlan0"),
+            ],
         )
 
     def test_rejects_invalid_traffic_counter_json(self) -> None:
@@ -435,13 +505,15 @@ class UnixHelperServerTests(unittest.TestCase):
         traffic_thread = threading.Thread(target=traffic_server.serve_forever)
         traffic_thread.start()
         try:
-            counters = HelperClient(socket_path=traffic_socket).traffic_counters()
+            with self.assertLogs("jittersim.networking.helper", level="WARNING"):
+                counters = HelperClient(socket_path=traffic_socket).traffic_counters()
         finally:
             traffic_server.shutdown()
             traffic_server.server_close()
             traffic_thread.join(timeout=2)
 
         self.assertEqual(counters["devices"], {"alice": 1_200})
+        self.assertEqual(counters["queues"], {"devices": {}})
         self.assertEqual(
             counters["directions"]["devices"]["alice"],
             {

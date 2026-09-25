@@ -391,6 +391,31 @@ class ControlServerTests(unittest.TestCase):
             },
         )
 
+    def test_live_traffic_includes_what_jittersim_dropped_and_holds(self) -> None:
+        class QueueHelper(FakeHelper):
+            def traffic_counters(self):
+                counters = super().traffic_counters()
+                counters["queues"] = {
+                    "devices": {
+                        "alice": {
+                            "upload_dropped": 24,
+                            "download_dropped": 0,
+                            "upload_queued": 0,
+                            "download_queued": 2,
+                        }
+                    }
+                }
+                return counters
+
+        self.server.helper_client = QueueHelper()
+        with_queues = json.loads(self.server.response_for("/api/traffic")[2])
+        self.server.helper_client = FakeHelper()
+        without_queues = json.loads(self.server.response_for("/api/traffic")[2])
+
+        self.assertEqual(with_queues["queues"]["alice"]["upload_dropped"], 24)
+        self.assertEqual(with_queues["queues"]["alice"]["download_queued"], 2)
+        self.assertEqual(without_queues["queues"], {})
+
     def test_write_history_records_only_authorized_route_and_result(self) -> None:
         self.server.admin_token = "admin-token"
         self.server.helper_client = FakeHelper()
@@ -1326,6 +1351,11 @@ class ControlServerTests(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, DASHBOARD_HTML)
+
+    def test_dashboard_shows_queue_drops_in_live_traffic(self) -> None:
+        self.assertIn('id="traffic-drop-rate"', DASHBOARD_HTML)
+        self.assertIn('id="traffic-queued"', DASHBOARD_HTML)
+        self.assertIn("function selectedQueueTotals(queues)", DASHBOARD_HTML)
 
     def test_dashboard_asks_for_the_token_first(self) -> None:
         self.assertLess(

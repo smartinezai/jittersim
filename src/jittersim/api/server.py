@@ -326,7 +326,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     .traffic-controls { display: grid; grid-template-columns: minmax(14rem, 0.75fr) minmax(0, 1.5fr); align-items: end; gap: 1rem; margin-top: 1rem; }
     .traffic-controls label { max-width: 24rem; }
     .traffic-status { margin: 0; color: #91a8c1; font-size: 0.82rem; }
-    .traffic-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.75rem; margin-top: 1rem; }
+    .traffic-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.75rem; margin-top: 1rem; }
     .traffic-metric { min-width: 0; padding: 0.75rem; border: 1px solid #2b435f; border-radius: 0.6rem; background: #0d1b2d; }
     .traffic-metric span { display: block; color: #91a8c1; font-size: 0.76rem; }
     .traffic-metric strong { display: block; margin-top: 0.25rem; color: #edf5ff; font-size: 1.05rem; overflow-wrap: anywhere; }
@@ -623,6 +623,12 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div class="traffic-metric"><span>Download rate</span><strong id="traffic-download-rate">—</strong></div>
       <div class="traffic-metric"><span>Upload packet rate</span><strong id="traffic-upload-packets">—</strong></div>
       <div class="traffic-metric"><span>Download packet rate</span><strong id="traffic-download-packets">—</strong></div>
+      <div class="traffic-metric">
+        <span>Dropped by JitterSim</span><strong id="traffic-drop-rate">—</strong>
+      </div>
+      <div class="traffic-metric">
+        <span>Waiting in JitterSim</span><strong id="traffic-queued">—</strong>
+      </div>
     </div>
     <div class="traffic-chart-wrap">
       <canvas id="traffic-chart" width="900" height="320" role="img" aria-label="Live upload and download traffic rates over the last 60 seconds">Live traffic chart. Check the admin token to begin sampling.</canvas>
@@ -631,6 +637,8 @@ DASHBOARD_HTML = r"""<!doctype html>
         <span><i class="traffic-key download"></i>Download</span>
       </div>
     </div>
+    <p class="traffic-note">Dropped and waiting show packets JitterSim itself discarded or is still
+      delaying, in both directions.</p>
     <p class="traffic-note">These rates count traffic before JitterSim adds delay or drops packets. They show what reaches JitterSim, not the speed a device successfully receives. Only assigned devices are included. Check the admin token to start; sampling pauses when this tab is hidden.</p>
   </section>
   <section class="card uplink-card">
@@ -1905,8 +1913,14 @@ DASHBOARD_HTML = r"""<!doctype html>
     function resetTrafficHistory() {
       previousTrafficSample = null;
       trafficSamples = [];
-      ["traffic-upload-rate", "traffic-download-rate", "traffic-upload-packets", "traffic-download-packets"]
-        .forEach((id) => { element(id).textContent = "—"; });
+      [
+        "traffic-upload-rate",
+        "traffic-download-rate",
+        "traffic-upload-packets",
+        "traffic-download-packets",
+        "traffic-drop-rate",
+        "traffic-queued"
+      ].forEach((id) => { element(id).textContent = "—"; });
       drawTrafficChart();
     }
 
@@ -1943,6 +1957,17 @@ DASHBOARD_HTML = r"""<!doctype html>
         });
         return totals;
       }, { upload_bytes: 0, download_bytes: 0, upload_packets: 0, download_packets: 0 });
+    }
+
+    function selectedQueueTotals(queues) {
+      const selectedDevice = element("traffic-device").value;
+      const figures = selectedDevice === "all"
+        ? Object.values(queues)
+        : queues[selectedDevice] ? [queues[selectedDevice]] : [];
+      return figures.reduce((totals, current) => ({
+        dropped: totals.dropped + current.upload_dropped + current.download_dropped,
+        queued: totals.queued + current.upload_queued + current.download_queued
+      }), { dropped: 0, queued: 0 });
     }
 
     function updateTrafficDeviceOptions(devices) {
@@ -2049,6 +2074,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           return;
         }
         const totals = selectedTrafficTotals(data.devices || {});
+        const queueTotals = selectedQueueTotals(data.queues || {});
         if (!totals) {
           resetTrafficHistory();
           element("traffic-status").textContent = "No counters yet. Assign a profile and apply the configuration.";
@@ -2075,12 +2101,16 @@ DASHBOARD_HTML = r"""<!doctype html>
             element("traffic-download-rate").textContent = formatTrafficRate(download);
             element("traffic-upload-packets").textContent = formatPacketRate(uploadPackets);
             element("traffic-download-packets").textContent = formatPacketRate(downloadPackets);
+            // Drops restart from zero when a plan is applied.
+            const dropped = Math.max(0, queueTotals.dropped - previousTrafficSample.queues.dropped);
+            element("traffic-drop-rate").textContent = formatPacketRate(dropped / elapsedSeconds);
+            element("traffic-queued").textContent = queueTotals.queued + " packets";
             element("traffic-status").textContent = "Sampling live traffic every 2 seconds.";
           }
         } else {
           element("traffic-status").textContent = "Collecting the first sample...";
         }
-        previousTrafficSample = { time: sampledAt, totals: totals };
+        previousTrafficSample = { time: sampledAt, totals: totals, queues: queueTotals };
         drawTrafficChart();
       } catch (error) {
         if (!trafficSamplingAllowed) return;
@@ -4398,11 +4428,14 @@ class ControlServer(HTTPServer):
                 return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
                     {"error": "live traffic directions are unavailable"}
                 )
+            queues = counters.get("queues")
+            device_queues = queues.get("devices") if isinstance(queues, dict) else None
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {
                     "available": True,
                     "sampled_at": time.time(),
                     "devices": device_counters,
+                    "queues": device_queues if isinstance(device_queues, dict) else {},
                 }
             )
         if path == "/api/diagnostics":
