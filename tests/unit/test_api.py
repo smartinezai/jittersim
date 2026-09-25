@@ -584,6 +584,58 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(with_queues["queues"]["alice"]["download_queued"], 2)
         self.assertEqual(without_queues["queues"], {})
 
+    def test_live_traffic_includes_everyone_else(self) -> None:
+        flows = {
+            "upload_bytes": 700, "download_bytes": 9_000, "upload_packets": 7, "download_packets": 9
+        }
+        queue = {
+            "upload_dropped": 11, "download_dropped": 0, "upload_queued": 4, "download_queued": 0
+        }
+
+        class EveryoneElseHelper(FakeHelper):
+            def traffic_counters(self):
+                counters = super().traffic_counters()
+                counters["everyone_else"] = flows
+                counters["queues"] = {"devices": {}, "everyone_else": queue}
+                return counters
+
+        self.server.helper_client = EveryoneElseHelper()
+        traffic = json.loads(self.server.response_for("/api/traffic")[2])
+        self.server.helper_client = FakeHelper()
+        without = json.loads(self.server.response_for("/api/traffic")[2])
+
+        self.assertEqual(traffic["everyone_else"], flows)
+        self.assertEqual(traffic["everyone_else_queue"], queue)
+        # Everyone else is not one of the devices.
+        self.assertEqual(set(traffic["devices"]), {"alice"})
+        self.assertIsNone(without["everyone_else"])
+        self.assertIsNone(without["everyone_else_queue"])
+
+    def test_live_traffic_can_show_everyone_else(self) -> None:
+        result = self._run_dashboard_functions(
+            ["selectedTrafficTotals", "selectedQueueTotals"],
+            "const EVERYONE_ELSE_TRAFFIC = '__everyone_else__';\n"
+            "const picked = {value: 'all'};\n"
+            "const element = () => picked;\n"
+            "const flows = (bytes) => ({upload_bytes: bytes, download_bytes: bytes,\n"
+            "  upload_packets: 1, download_packets: 1});\n"
+            "const counters = {alice: flows(10), bob: flows(20), __everyone_else__: flows(500)};\n"
+            "const queues = {alice: {upload_dropped: 1, download_dropped: 0, upload_queued: 0,\n"
+            "  download_queued: 0}, __everyone_else__: {upload_dropped: 9, download_dropped: 0,\n"
+            "  upload_queued: 2, download_queued: 0}};\n",
+            "const all = [selectedTrafficTotals(counters).upload_bytes,\n"
+            "  selectedQueueTotals(queues)];\n"
+            "picked.value = EVERYONE_ELSE_TRAFFIC;\n"
+            "const others = [selectedTrafficTotals(counters).upload_bytes,\n"
+            "  selectedQueueTotals(queues)];\n"
+            "console.log(JSON.stringify({all, others}));\n",
+        )
+
+        # "All assigned devices" keeps meaning the saved devices.
+        self.assertEqual(result["all"], [30, {"dropped": 1, "queued": 0}])
+        self.assertEqual(result["others"], [500, {"dropped": 9, "queued": 2}])
+        self.assertIn('option.value = EVERYONE_ELSE_TRAFFIC;', DASHBOARD_HTML)
+
     def test_write_history_records_only_authorized_route_and_result(self) -> None:
         self.server.admin_token = "admin-token"
         self.server.helper_client = FakeHelper()
