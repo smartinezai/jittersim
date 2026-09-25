@@ -181,6 +181,40 @@ class ConfigRepositoryTests(unittest.TestCase):
         self.assertEqual(self.repository.list_active_progressions(now=300), (progression,))
         self.assertEqual(self.repository.list_active_timers(now=300), ())
 
+    def test_query_totals_keep_counting_after_old_observations_are_pruned(self) -> None:
+        day = 24 * 60 * 60
+        self.repository.save_domain_observations(
+            (DomainObservation("192.168.50.10", "old.example", 7, 100, 100),),
+            now=100,
+        )
+        # Saving 31 days later prunes the first row.
+        later = 100 + 31 * day
+        self.repository.save_domain_observations(
+            (DomainObservation("192.168.50.10", "new.example", 3, later, later),),
+            now=later,
+        )
+
+        self.assertEqual(
+            [observation.domain for observation in self.repository.list_domain_observations()],
+            ["new.example"],
+        )
+        self.assertEqual(self.repository.total_domain_queries("192.168.50.10"), 10)
+
+    def test_query_totals_start_from_existing_observations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = f"{directory}/jittersim.db"
+            with ConfigRepository(path) as repository:
+                repository.save_domain_observations(
+                    (DomainObservation("192.168.50.10", "example.com", 7, 100, 100),),
+                    now=100,
+                )
+                # Simulate a database written before running totals existed.
+                repository._connection.execute("DROP TABLE domain_query_totals")
+                repository._connection.commit()
+
+            with ConfigRepository(path) as repository:
+                self.assertEqual(repository.total_domain_queries("192.168.50.10"), 7)
+
     def test_round_trips_byte_progression_targets(self) -> None:
         self.repository.save_profile(Profile(id="normal", name="Normal"))
         self.repository.save_profile(Profile(id="slow", name="Slow"))

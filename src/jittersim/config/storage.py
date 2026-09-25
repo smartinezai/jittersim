@@ -264,6 +264,17 @@ class ConfigRepository:
             );
             CREATE INDEX IF NOT EXISTS domain_observations_last_seen_idx
                 ON domain_observations (last_seen);
+            -- Running query totals per client. Pruning old observations must
+            -- not lower them, because DNS-driven progressions measure from them.
+            CREATE TABLE IF NOT EXISTS domain_query_totals (
+                ipv4_address TEXT PRIMARY KEY,
+                query_count INTEGER NOT NULL
+            );
+            INSERT OR IGNORE INTO domain_query_totals (ipv4_address, query_count)
+                SELECT ipv4_address, SUM(query_count)
+                FROM domain_observations
+                WHERE NOT EXISTS (SELECT 1 FROM domain_query_totals)
+                GROUP BY ipv4_address;
             INSERT OR IGNORE INTO runtime_state (
                 id, configuration_version, observed_state
             ) VALUES (1, 0, 'unknown');
@@ -848,16 +859,13 @@ class ConfigRepository:
         return tuple(self._progression_from_row(row) for row in rows)
 
     def total_domain_queries(self, ipv4_address: str) -> int:
-        """Return the bounded DNS query total for one observed client."""
+        """Return the running DNS query total for one observed client."""
 
         row = self._connection.execute(
-            """
-            SELECT COALESCE(SUM(query_count), 0) AS total
-            FROM domain_observations WHERE ipv4_address = ?
-            """,
+            "SELECT query_count FROM domain_query_totals WHERE ipv4_address = ?",
             (ipv4_address,),
         ).fetchone()
-        return int(row["total"] if row is not None else 0)
+        return int(row["query_count"]) if row is not None else 0
 
     def get_data_limit(self, device_id: str) -> Optional[DataLimit]:
         """Return one device quota or `None` when it is not stored."""
@@ -1612,6 +1620,18 @@ class ConfigRepository:
                         observation.last_seen,
                         1_000_000_000,
                     ),
+                )
+                self._connection.execute(
+                    """
+                    INSERT INTO domain_query_totals (ipv4_address, query_count)
+                    VALUES (?, ?)
+                    ON CONFLICT(ipv4_address) DO UPDATE SET
+                        query_count = MIN(
+                            domain_query_totals.query_count + excluded.query_count,
+                            ?
+                        )
+                    """,
+                    (str(observation.ipv4_address), observation.query_count, 2**62),
                 )
             self._prune_domain_observations(now=current_time)
             self._connection.commit()
