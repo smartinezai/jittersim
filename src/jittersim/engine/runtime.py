@@ -368,7 +368,9 @@ class RuntimeScheduler:
             if roll.outage_until > now:
                 blocked_addresses.append(device.ipv4_address)
 
-            runtime_profile_id = f"runtime-{device.id}"
+            # Device ids may already use the full identifier length, so number
+            # the runtime profiles instead of prefixing the device id.
+            runtime_profile_id = f"runtime-{len(runtime_devices) + 1}"
             runtime_profiles[runtime_profile_id] = roll.runtime_profile
             runtime_devices.append(replace(device, profile_id=runtime_profile_id))
 

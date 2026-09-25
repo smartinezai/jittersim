@@ -507,6 +507,16 @@ class RuntimeSchedulerTests(unittest.TestCase):
 
         self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 900)
 
+    def test_devices_with_the_longest_allowed_id_can_be_scheduled(self) -> None:
+        device_id = "d" * 64
+        self.repository.save_profile(Profile(id="slow", name="Slow"))
+        self.repository.save_device(Device(device_id, "Long", "192.168.50.10", "slow"))
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+
+        self.assertTrue(scheduler.tick(repository=self.repository, now=0))
+        self.assertEqual(self.helper.plans[-1].mark_rules[0].device_id, device_id)
+
 
 if __name__ == "__main__":
     unittest.main()
