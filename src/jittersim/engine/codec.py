@@ -6,11 +6,13 @@ from ipaddress import AddressValueError, IPv4Address
 from typing import Any, Dict, List, Mapping, Set
 
 from jittersim.config.models import (
+    MAX_UNAFFECTED_DEVICES,
     Device,
     Impairment,
     MacPolicy,
     Randomness,
     ValidationError,
+    normalize_mac_address,
     normalize_service_hostname,
 )
 
@@ -21,7 +23,9 @@ from .compiler import (
     MAX_SHAPED_MARKS_PER_PLAN,
 )
 from .plan import (
+    EVERYONE_ELSE_QUEUE_ID,
     Direction,
+    EveryoneElseRule,
     MarkRule,
     NetworkPlan,
     QueueSpec,
@@ -149,6 +153,17 @@ def plan_to_payload(plan: NetworkPlan) -> Dict[str, Any]:
             }
             for rule in plan.service_assignment_rules
         ],
+        "everyone_else": (
+            None
+            if plan.everyone_else is None
+            else {
+                "mark": plan.everyone_else.mark,
+                "upload_impairment": asdict(plan.everyone_else.upload_impairment),
+                "download_impairment": asdict(plan.everyone_else.download_impairment),
+                "unaffected_macs": list(plan.everyone_else.unaffected_macs),
+                "blocked": plan.everyone_else.blocked,
+            }
+        ),
     }
 
 
@@ -322,6 +337,45 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
             )
         )
 
+    everyone_else = None
+    everyone_else_data = plan_data.get("everyone_else")
+    if everyone_else_data is not None:
+        rule_data = _as_mapping(everyone_else_data, "everyone_else")
+        try:
+            mark = _as_integer(rule_data["mark"], "everyone_else.mark")
+            upload_impairment = _impairment_from_payload(rule_data["upload_impairment"])
+            download_impairment = _impairment_from_payload(rule_data["download_impairment"])
+            unaffected_macs = tuple(
+                normalize_mac_address(value)
+                for value in _as_list(
+                    rule_data.get("unaffected_macs", []), "everyone_else.unaffected_macs"
+                )
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise PlanCodecError("everyone_else is invalid") from error
+        blocked = rule_data.get("blocked", False)
+        if not isinstance(blocked, bool):
+            raise PlanCodecError("everyone_else.blocked is invalid")
+        if (
+            len(unaffected_macs) > MAX_UNAFFECTED_DEVICES
+            or len(set(unaffected_macs)) != len(unaffected_macs)
+        ):
+            raise PlanCodecError("everyone_else.unaffected_macs is invalid")
+        if (
+            mark <= len(mark_data) + len(service_quota_rules) + len(service_assignment_rules)
+            or mark > MAX_SHAPED_MARKS_PER_PLAN
+            or mark in service_marks.values()
+        ):
+            raise PlanCodecError("everyone_else.mark is outside the safe range")
+        service_marks[EVERYONE_ELSE_QUEUE_ID] = mark
+        everyone_else = EveryoneElseRule(
+            mark=mark,
+            upload_impairment=upload_impairment,
+            download_impairment=download_impairment,
+            unaffected_macs=unaffected_macs,
+            blocked=blocked,
+        )
+
     if len(queue_data) != (len(mark_data) + len(service_marks)) * 2:
         raise PlanCodecError("a plan must contain two queues per device or service")
 
@@ -384,6 +438,13 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
             or queue_impairments[(key, Direction.DOWNLOAD)] != rule.download_impairment
         ):
             raise PlanCodecError("browser service queue impairment does not match its rule")
+    if everyone_else is not None and (
+        queue_impairments[(EVERYONE_ELSE_QUEUE_ID, Direction.UPLOAD)]
+        != everyone_else.upload_impairment
+        or queue_impairments[(EVERYONE_ELSE_QUEUE_ID, Direction.DOWNLOAD)]
+        != everyone_else.download_impairment
+    ):
+        raise PlanCodecError("everyone-else queue impairment does not match its rule")
 
     try:
         mac_policy_data = _as_mapping(plan_data.get("mac_policy", {}), "mac_policy")
@@ -464,4 +525,5 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
         blocked_device_addresses=blocked_device_addresses,
         service_quota_rules=tuple(service_quota_rules),
         service_assignment_rules=tuple(service_assignment_rules),
+        everyone_else=everyone_else,
     )

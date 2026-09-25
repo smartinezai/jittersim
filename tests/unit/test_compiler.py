@@ -3,7 +3,12 @@ from ipaddress import IPv4Address
 
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.engine.compiler import PlanError, compile_plan
-from jittersim.engine.plan import Direction, ServiceQuotaRule
+from jittersim.engine.plan import (
+    EVERYONE_ELSE_QUEUE_ID,
+    Direction,
+    EveryoneElseRule,
+    ServiceQuotaRule,
+)
 
 
 def make_device(device_id: str, address: str, profile_id: str = "normal") -> Device:
@@ -116,6 +121,48 @@ class CompilePlanTests(unittest.TestCase):
                 service_quota_rules=(quota,),
             )
 
+
+class EveryoneElseCompileTests(unittest.TestCase):
+    slow = Profile(id="slow", name="Slow")
+
+    def rule(self, **changes):
+        values = {"mark": 0, "upload_impairment": Impairment(), "download_impairment": Impairment()}
+        values.update(changes)
+        return EveryoneElseRule(**values)
+
+    def test_everyone_else_gets_the_mark_after_the_other_rules(self) -> None:
+        plan = compile_plan(
+            devices=(make_device("alice", "192.168.50.10", "slow"),),
+            profiles={"slow": self.slow},
+            everyone_else=self.rule(
+                upload_impairment=Impairment(delay_ms=100),
+                unaffected_macs=("BB:BB:BB:BB:BB:BB", "aa:aa:aa:aa:aa:aa", "bb:bb:bb:bb:bb:bb"),
+            ),
+        )
+
+        self.assertEqual(
+            plan.everyone_else,
+            self.rule(
+                mark=2,
+                upload_impairment=Impairment(delay_ms=100),
+                unaffected_macs=("aa:aa:aa:aa:aa:aa", "bb:bb:bb:bb:bb:bb"),
+            ),
+        )
+        self.assertEqual(
+            [(queue.device_id, queue.direction, queue.mark) for queue in plan.queues[2:]],
+            [
+                (EVERYONE_ELSE_QUEUE_ID, Direction.UPLOAD, 2),
+                (EVERYONE_ELSE_QUEUE_ID, Direction.DOWNLOAD, 2),
+            ],
+        )
+
+    def test_everyone_else_counts_toward_the_fifteen_marks(self) -> None:
+        devices = tuple(
+            make_device(f"d{index}", f"192.168.50.{10 + index}", "slow") for index in range(15)
+        )
+
+        with self.assertRaises(PlanError):
+            compile_plan(devices=devices, profiles={"slow": self.slow}, everyone_else=self.rule())
 
 if __name__ == "__main__":
     unittest.main()

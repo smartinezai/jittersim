@@ -1,12 +1,22 @@
 """Compile validated configuration into a deterministic network plan."""
 
+from dataclasses import replace
 from ipaddress import IPv4Address
-from typing import Mapping, Sequence
+from typing import Mapping, Optional, Sequence
 
-from jittersim.config.models import Device, MacPolicy, Profile, normalize_service_hostname
+from jittersim.config.models import (
+    MAX_UNAFFECTED_DEVICES,
+    Device,
+    MacPolicy,
+    Profile,
+    normalize_mac_address,
+    normalize_service_hostname,
+)
 
 from .plan import (
+    EVERYONE_ELSE_QUEUE_ID,
     Direction,
+    EveryoneElseRule,
     MarkRule,
     NetworkPlan,
     QueueSpec,
@@ -38,6 +48,7 @@ def compile_plan(
     blocked_device_addresses: Sequence[IPv4Address] = (),
     service_quota_rules: Sequence[ServiceQuotaRule] = (),
     service_assignment_rules: Sequence[ServiceAssignmentRule] = (),
+    everyone_else: Optional[EveryoneElseRule] = None,
 ) -> NetworkPlan:
     """Compile device assignments into deterministic marks and directional queues."""
 
@@ -111,7 +122,10 @@ def compile_plan(
             f"a plan cannot contain more than {MAX_SERVICE_QUOTAS_PER_PLAN} service quotas"
         )
     if (
-        len(mark_rules) + len(service_quota_rules) + len(service_assignment_rules)
+        len(mark_rules)
+        + len(service_quota_rules)
+        + len(service_assignment_rules)
+        + (everyone_else is not None)
         > MAX_SHAPED_MARKS_PER_PLAN
     ):
         raise PlanError(
@@ -236,13 +250,55 @@ def compile_plan(
             )
         )
 
+    normalized_everyone_else = None
+    everyone_else_queues = ()
+    if everyone_else is not None:
+        try:
+            unaffected_macs = tuple(
+                sorted(
+                    dict.fromkeys(
+                        normalize_mac_address(value) for value in everyone_else.unaffected_macs
+                    )
+                )
+            )
+        except ValueError as error:
+            raise PlanError("everyone else has an invalid unaffected MAC address") from error
+        if len(unaffected_macs) > MAX_UNAFFECTED_DEVICES:
+            raise PlanError(
+                f"a plan cannot list more than {MAX_UNAFFECTED_DEVICES} unaffected devices"
+            )
+        mark = len(mark_rules) + len(service_quota_rules) + len(service_assignment_rules) + 1
+        normalized_everyone_else = replace(
+            everyone_else, mark=mark, unaffected_macs=unaffected_macs
+        )
+        everyone_else_queues = (
+            QueueSpec(
+                device_id=EVERYONE_ELSE_QUEUE_ID,
+                direction=Direction.UPLOAD,
+                mark=mark,
+                impairment=everyone_else.upload_impairment,
+            ),
+            QueueSpec(
+                device_id=EVERYONE_ELSE_QUEUE_ID,
+                direction=Direction.DOWNLOAD,
+                mark=mark,
+                impairment=everyone_else.download_impairment,
+            ),
+        )
+
     return NetworkPlan(
         mark_rules=tuple(mark_rules),
-        queues=tuple(queues) + tuple(service_queues) + tuple(assignment_queues),
+        queues=(
+            tuple(queues)
+            + tuple(service_queues)
+            + tuple(assignment_queues)
+            + everyone_else_queues
+        ),
         mac_policy=mac_policy,
         global_blocked_addresses=tuple(sorted(set(global_blocked_addresses), key=str)),
         website_filters=tuple(website_filters),
         blocked_device_addresses=tuple(sorted(set(blocked_device_addresses), key=str)),
         service_quota_rules=normalized_service_rules,
         service_assignment_rules=tuple(normalized_assignments),
+        everyone_else=normalized_everyone_else,
     )

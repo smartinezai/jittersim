@@ -71,6 +71,22 @@ class ServiceAssignmentRule:
     download_impairment: Impairment
 
 
+# Queue key for everyone else. Device IDs can't contain a colon.
+EVERYONE_ELSE_QUEUE_ID = "rule:everyone-else"
+
+
+@dataclass(frozen=True)
+class EveryoneElseRule:
+    """The shared queue for test Wi-Fi clients that are neither saved nor unaffected."""
+
+    mark: int
+    upload_impairment: Impairment
+    download_impairment: Impairment
+    unaffected_macs: Tuple[str, ...] = ()
+    # True while an outage of the everyone-else profile disconnects them.
+    blocked: bool = False
+
+
 @dataclass(frozen=True)
 class NetworkPlan:
     """The complete device-specific plan without executable commands."""
@@ -83,3 +99,4 @@ class NetworkPlan:
     blocked_device_addresses: Tuple[IPv4Address, ...] = ()
     service_quota_rules: Tuple[ServiceQuotaRule, ...] = ()
     service_assignment_rules: Tuple[ServiceAssignmentRule, ...] = ()
+    everyone_else: Optional[EveryoneElseRule] = None

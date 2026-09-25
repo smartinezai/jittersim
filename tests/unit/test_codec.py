@@ -4,7 +4,12 @@ from ipaddress import IPv4Address
 from jittersim.config.models import Device, Impairment, MacPolicy, Profile
 from jittersim.engine.codec import PlanCodecError, plan_from_payload, plan_to_payload
 from jittersim.engine.compiler import compile_plan
-from jittersim.engine.plan import ServiceAssignmentRule, ServiceQuotaRule, WebsiteFilter
+from jittersim.engine.plan import (
+    EveryoneElseRule,
+    ServiceAssignmentRule,
+    ServiceQuotaRule,
+    WebsiteFilter,
+)
 
 
 class PlanCodecTests(unittest.TestCase):
@@ -176,6 +181,51 @@ class PlanCodecTests(unittest.TestCase):
         with self.assertRaisesRegex(PlanCodecError, "two queues per device"):
             plan_from_payload(payload)
 
+
+class EveryoneElseCodecTests(unittest.TestCase):
+    def plan(self):
+        return compile_plan(
+            devices=(Device("alice", "Alice", "192.168.50.10", "normal"),),
+            profiles={"normal": Profile(id="normal", name="Normal")},
+            everyone_else=EveryoneElseRule(
+                mark=0,
+                upload_impairment=Impairment(delay_ms=100),
+                download_impairment=Impairment(loss_percent=5),
+                unaffected_macs=("aa:aa:aa:aa:aa:aa",),
+                blocked=True,
+            ),
+        )
+
+    def test_round_trips_the_everyone_else_rule(self) -> None:
+        plan = self.plan()
+
+        self.assertEqual(plan_from_payload(plan_to_payload(plan)), plan)
+
+    def test_a_payload_without_everyone_else_has_none(self) -> None:
+        payload = plan_to_payload(compile_plan(devices=(), profiles={}))
+        del payload["everyone_else"]
+
+        self.assertIsNone(plan_from_payload(payload).everyone_else)
+
+    def test_rejects_an_unsafe_everyone_else_rule(self) -> None:
+        changes = {
+            "a device's mark": lambda payload: payload["everyone_else"].update(mark=1),
+            "past the kernel limit": lambda payload: payload["everyone_else"].update(mark=16),
+            "a bad address": lambda payload: payload["everyone_else"].update(
+                unaffected_macs=["nope"]
+            ),
+            "blocked as text": lambda payload: payload["everyone_else"].update(blocked="yes"),
+            "a queue that differs": lambda payload: payload["queues"][2]["impairment"].update(
+                delay_ms=5
+            ),
+        }
+        for name, change in changes.items():
+            with self.subTest(name=name):
+                payload = plan_to_payload(self.plan())
+                change(payload)
+
+                with self.assertRaises(PlanCodecError):
+                    plan_from_payload(payload)
 
 if __name__ == "__main__":
     unittest.main()
