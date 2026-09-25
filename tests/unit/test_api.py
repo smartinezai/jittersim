@@ -1619,6 +1619,31 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(self.server.helper_client.applied_plan.mark_rules[0].device_id, "alice")
         self.assertEqual(len(self.server.helper_client.applied_plan.mark_rules), 2)
 
+    def test_connected_device_profile_assignment_keeps_a_reset_network_reset(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.repository.update_runtime_state(
+            observed_state="reset", last_action="reset", last_result="success", last_error=None
+        )
+
+        status, _, body = self.server.write_response_for(
+            "/api/connected-devices/apply-profile",
+            {
+                "ipv4_address": "192.168.50.178",
+                "mac_address": "dc:1e:d5:3e:97:4c",
+                "profile_id": "slow",
+            },
+        )
+
+        self.assertEqual(status, 200)
+        self.assertFalse(json.loads(body)["live_applied"])
+        self.assertIsNone(self.server.helper_client.applied_plan)
+        self.assertEqual(
+            self.repository.get_device_by_ipv4_address("192.168.50.178").profile_id, "slow"
+        )
+        # Only an explicit Apply may undo a Reset, so the dashboard says so.
+        assign = DASHBOARD_HTML.split("async function applyProfileToDevice(", 1)[1]
+        self.assertIn("result.live_applied === false", assign.split("\n    }\n", 1)[0])
+
     def test_profile_assignment_rejects_a_neighbor_without_verified_association(self) -> None:
         class UnverifiedHelper(FakeHelper):
             def connected_device_snapshot(self):

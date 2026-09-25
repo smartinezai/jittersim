@@ -2759,12 +2759,17 @@ DASHBOARD_HTML = r"""<!doctype html>
       setButtonBusy(button, true);
       showMessage("Applying " + profileId + " to " + device.ipv4_address + "...", "working");
       try {
-        await request("/api/connected-devices/apply-profile", "POST", {
+        const result = await request("/api/connected-devices/apply-profile", "POST", {
           ipv4_address: device.ipv4_address,
           mac_address: device.mac_address,
           profile_id: profileId
         });
-        refreshAfterSuccess("Applied " + profileId + " to " + device.ipv4_address + ".");
+        refreshAfterSuccess(
+          result.live_applied === false
+            ? "Saved " + profileId + " for " + device.ipv4_address +
+              ". The network is reset, so apply the configuration to use it."
+            : "Applied " + profileId + " to " + device.ipv4_address + "."
+        );
       } catch (error) {
         showMessage(error.message, "error");
       } finally {
@@ -5900,7 +5905,7 @@ class ControlServer(HTTPServer):
             if capacity_error is not None:
                 return capacity_error
         self.repository.save_device(device)
-        status, content_type, body = self._apply_configuration()
+        status, content_type, body = self._apply_after_change()
         response = json.loads(body.decode("utf-8"))
         response["device"] = _device_payload(device)
         return status, content_type, _json_bytes(response)
