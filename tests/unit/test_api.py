@@ -1,3 +1,4 @@
+import contextlib
 import json
 import shutil
 import socket
@@ -13,6 +14,7 @@ from pathlib import Path
 from jittersim.api.server import DASHBOARD_HTML, ControlRequestHandler, ControlServer
 from jittersim.config.models import Device, DomainObservation, Impairment, Profile
 from jittersim.config.storage import ConfigRepository
+from jittersim.engine.service import compile_stored_plan
 from jittersim.networking.helper import HelperClientError
 
 
@@ -1039,6 +1041,35 @@ class ControlServerTests(unittest.TestCase):
                 self.assertFalse(json.loads(body)["live_applied"])
         self.assertIsNone(helper.applied_plan)
         self.assertEqual(self.repository.get_runtime_state().last_action, "reset")
+
+    def test_manual_apply_runs_while_scheduled_applies_are_held(self) -> None:
+        events = []
+
+        class RecordingScheduler:
+            @contextlib.contextmanager
+            def exclusive(self):
+                events.append("hold")
+                yield
+                events.append("release")
+
+            def build_plan(self, *, repository):
+                return compile_stored_plan(repository=repository)
+
+            def activate(self, *, applied_payload):
+                events.append("activate")
+
+        class RecordingHelper(FakeHelper):
+            def apply(self, *, plan):
+                events.append("apply")
+                return super().apply(plan=plan)
+
+        self.server.helper_client = RecordingHelper()
+        self.server.scheduler = RecordingScheduler()
+
+        status, _, _ = self.server.write_response_for("/api/apply", {})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(events, ["hold", "apply", "activate", "release"])
 
     def test_live_changes_apply_while_the_network_is_applied(self) -> None:
         helper = FakeHelper()

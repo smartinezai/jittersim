@@ -1,12 +1,13 @@
 """Background runtime for schedules, randomized rerolls and outages."""
 
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 import logging
 from pathlib import Path
 import threading
 import time
-from typing import Dict, Optional, Sequence, Union
+from typing import Dict, Iterator, Optional, Sequence, Union
 
 from jittersim.config.models import (
     DataLimit,
@@ -73,6 +74,9 @@ class RuntimeScheduler:
         self._current_payload = None
         self._paused = True
         self._lock = threading.RLock()
+        # Held while a plan is built and applied, so pause() and manual applies
+        # never interleave with a scheduled apply.
+        self._apply_lock = threading.RLock()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_traffic_sample_at = 0.0
@@ -124,12 +128,21 @@ class RuntimeScheduler:
         """Build the current runtime plan, including timers and schedules."""
 
         current_time = time.time() if now is None else now
-        return self._build_plan(repository=repository, now=current_time)
+        with self._apply_lock:
+            return self._build_plan(repository=repository, now=current_time)
+
+    @contextmanager
+    def exclusive(self) -> Iterator[None]:
+        """Hold off scheduled applies while a manual apply runs."""
+
+        with self._apply_lock:
+            yield
 
     def pause(self) -> None:
         """Pause scheduled reapplication after a manual network reset."""
 
-        with self._lock:
+        # Wait for an in-flight scheduled apply so a reset cannot be undone by it.
+        with self._apply_lock, self._lock:
             self._paused = True
             self._rolls.clear()
             self._current_payload = None
@@ -150,9 +163,13 @@ class RuntimeScheduler:
     ) -> bool:
         """Recompute and apply a changed runtime plan once."""
 
-        with self._lock:
-            if self._paused or self._helper_client is None:
-                return False
+        with self._apply_lock:
+            with self._lock:
+                if self._paused or self._helper_client is None:
+                    return False
+            return self._tick(repository=repository, now=now)
+
+    def _tick(self, *, repository: Optional[ConfigRepository], now: Optional[float]) -> bool:
         current_time = time.time() if now is None else now
         owned_repository = repository is None
         active_repository = repository or ConfigRepository(self._database_path)

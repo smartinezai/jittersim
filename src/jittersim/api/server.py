@@ -4429,6 +4429,12 @@ class ControlServer(HTTPServer):
             return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
                 {"error": "network helper is not configured"}
             )
+        if self.scheduler is None:
+            return self._apply_current_plan()
+        with self.scheduler.exclusive():
+            return self._apply_current_plan()
+
+    def _apply_current_plan(self) -> Tuple[int, str, bytes]:
         try:
             plan = (
                 self.scheduler.build_plan(repository=self.repository)

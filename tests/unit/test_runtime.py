@@ -1,6 +1,8 @@
+import tempfile
 import threading
 import unittest
 from datetime import datetime
+from pathlib import Path
 from ipaddress import IPv4Address
 from unittest.mock import patch
 
@@ -563,6 +565,47 @@ class RuntimeSchedulerTests(unittest.TestCase):
         }
 
         self.assertEqual(outcomes, {True, False})
+
+    def test_pause_waits_for_an_in_flight_scheduled_apply(self) -> None:
+        applying = threading.Event()
+        release = threading.Event()
+
+        class BlockingHelper(RecordingHelper):
+            def apply(self, *, plan):
+                applying.set()
+                release.wait(timeout=5)
+                return super().apply(plan=plan)
+
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "jittersim.db"
+            with ConfigRepository(database_path) as repository:
+                repository.save_profile(Profile(id="slow", name="Slow"))
+                repository.save_device(Device("alice", "Alice", "192.168.50.10", "slow"))
+            helper = BlockingHelper()
+            scheduler = RuntimeScheduler(
+                database_path=database_path,
+                helper_client=helper,
+                poll_seconds=3_600,
+            )
+            scheduler.activate(applied_payload={})
+            tick = threading.Thread(target=lambda: scheduler.tick(now=0))
+            paused = threading.Event()
+            pause = threading.Thread(target=lambda: (scheduler.pause(), paused.set()))
+            try:
+                tick.start()
+                self.assertTrue(applying.wait(timeout=5))
+                pause.start()
+                # A reset must not run while the scheduler is still applying.
+                self.assertFalse(paused.wait(timeout=0.2))
+            finally:
+                release.set()
+                tick.join(timeout=5)
+                pause.join(timeout=5)
+                scheduler.stop()
+
+            self.assertTrue(paused.is_set())
+            self.assertFalse(scheduler.tick(now=10))
+            self.assertEqual(len(helper.plans), 1)
 
 
 if __name__ == "__main__":
