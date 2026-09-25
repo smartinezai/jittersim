@@ -72,6 +72,29 @@ class NetworkApplierTests(unittest.TestCase):
         self.assertEqual(commands_run, 1)
         self.assertFalse(any(command.arguments[:2] == ("qdisc", "del") for command in executor.commands))
 
+    def test_a_plan_without_queues_removes_the_project_roots(self) -> None:
+        executor = RootQueueExecutor()
+        plan = compile_plan(devices=(), profiles={})
+
+        NetworkApplier(executor=executor, topology=self.topology).apply(plan=plan)
+
+        removed = [
+            command.argv for command in executor.commands if command.arguments[:2] == ("qdisc", "del")
+        ]
+        self.assertEqual(
+            removed,
+            [
+                ("tc", "qdisc", "del", "dev", "eth0", "root", "handle", "10:"),
+                ("tc", "qdisc", "del", "dev", "wlan0", "root", "handle", "10:"),
+            ],
+        )
+        # The nft script replaces the table in one transaction, so deny and
+        # block rules never disappear, even for a moment.
+        self.assertEqual(
+            [command.argv for command in executor.commands if command.executable == "nft"],
+            [("nft", "-f", "-")],
+        )
+
     def test_apply_rejects_a_foreign_root_queue_before_mutation(self) -> None:
         executor = RootQueueExecutor(handle="20:", kind="htb")
         with self.assertRaisesRegex(ApplyError, "could not safely change"):
@@ -79,18 +102,18 @@ class NetworkApplierTests(unittest.TestCase):
         self.assertFalse(any(command.executable == "nft" for command in executor.commands))
 
     def test_failed_apply_attempts_cleanup(self) -> None:
-        executor = FakeExecutor(fail_on_index=4)
+        executor = FakeExecutor(fail_on_index=3)
         applier = NetworkApplier(executor=executor, topology=self.topology)
 
         with self.assertRaisesRegex(ApplyError, "cleanup completed") as context:
             applier.apply(plan=make_plan())
 
-        self.assertEqual(context.exception.failed_command_index, 2)
+        self.assertEqual(context.exception.failed_command_index, 1)
         self.assertIsNone(context.exception.reset_error)
         self.assertEqual(executor.commands[-1].purpose, "remove the project-owned nftables table")
 
     def test_reports_when_cleanup_also_fails(self) -> None:
-        executor = FailingResetExecutor(fail_on_index=4)
+        executor = FailingResetExecutor(fail_on_index=3)
         applier = NetworkApplier(executor=executor, topology=self.topology)
 
         with self.assertRaisesRegex(ApplyError, "cleanup also failed") as context:

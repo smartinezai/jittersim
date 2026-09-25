@@ -3,6 +3,7 @@ import threading
 import unittest
 from datetime import datetime
 from ipaddress import IPv4Address
+from pathlib import Path
 from unittest.mock import patch
 
 from jittersim.config.models import (
@@ -41,6 +42,18 @@ class RecordingHelper:
 
     def traffic_counters(self):
         return self.counters
+
+
+class CounterResettingHelper(RecordingHelper):
+    """Like the real helper, each apply recreates the nftables counters at zero."""
+
+    def apply(self, *, plan):
+        result = super().apply(plan=plan)
+        self.counters = {
+            kind: {identifier: 0 for identifier in values}
+            for kind, values in self.counters.items()
+        }
+        return result
 
 
 class RuntimeSchedulerTests(unittest.TestCase):
@@ -546,7 +559,7 @@ class RuntimeSchedulerTests(unittest.TestCase):
             (IPv4Address("203.0.113.10"), IPv4Address("203.0.113.11")),
         )
 
-    def test_interval_reset_clears_usage_and_preserves_the_counter_baseline(self) -> None:
+    def test_interval_reset_clears_usage_and_counts_only_new_traffic(self) -> None:
         normal = Profile(id="normal", name="Normal")
         fallback = Profile(id="fallback", name="Fallback", download=Impairment(delay_ms=700))
         self.repository.save_profile(normal)
@@ -564,16 +577,23 @@ class RuntimeSchedulerTests(unittest.TestCase):
                 last_reset_at=100,
             )
         )
-        self.helper.counters = {"devices": {"alice": 20}, "services": {}}
-        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        helper = CounterResettingHelper()
+        helper.counters = {"devices": {"alice": 20}, "services": {}}
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=helper)
         scheduler.activate(applied_payload={})
 
+        # The reset lifts the fallback, and applying that restarts the counters.
         scheduler.tick(repository=self.repository, now=161)
 
         data_limit = self.repository.get_data_limit("alice")
         self.assertEqual(data_limit.used_bytes, 0)
-        self.assertEqual(data_limit.counter_bytes, 20)
-        self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 0)
+        self.assertEqual(data_limit.counter_bytes, 0)
+        self.assertEqual(helper.plans[-1].queues[1].impairment.delay_ms, 0)
+
+        helper.counters["devices"]["alice"] = 30
+        scheduler.tick(repository=self.repository, now=170)
+
+        self.assertEqual(self.repository.get_data_limit("alice").used_bytes, 30)
 
     def test_time_quota_counts_active_traffic_inside_its_timer(self) -> None:
         normal = Profile(id="normal", name="Normal")
@@ -651,6 +671,233 @@ class RuntimeSchedulerTests(unittest.TestCase):
             self.helper.plans[-1].blocked_device_addresses,
             (IPv4Address("192.168.50.10"),),
         )
+
+    def test_edited_profile_values_apply_without_a_reset(self) -> None:
+        self._save_device(Profile(id="slow", name="Slow", download=Impairment(delay_ms=100)))
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+        scheduler.tick(repository=self.repository, now=0)
+
+        self.repository.save_profile(
+            Profile(id="slow", name="Slow", download=Impairment(delay_ms=500))
+        )
+        scheduler.tick(repository=self.repository, now=10)
+
+        self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 500)
+
+    def test_changing_a_group_profile_applies_the_new_values(self) -> None:
+        for profile in (
+            Profile(id="normal", name="Normal"),
+            Profile(id="slow", name="Slow", download=Impairment(delay_ms=400)),
+            Profile(id="slower", name="Slower", download=Impairment(delay_ms=900)),
+        ):
+            self.repository.save_profile(profile)
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        group = DeviceGroup(id="family", name="Family", device_ids=("alice",), profile_id="slow")
+        self.repository.save_device_group(group)
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+        scheduler.tick(repository=self.repository, now=0)
+
+        self.repository.save_device_group(
+            DeviceGroup(id="family", name="Family", device_ids=("alice",), profile_id="slower")
+        )
+        scheduler.tick(repository=self.repository, now=10)
+
+        self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 900)
+
+    def test_devices_with_the_longest_allowed_id_can_be_scheduled(self) -> None:
+        device_id = "d" * 64
+        self.repository.save_profile(Profile(id="slow", name="Slow"))
+        self.repository.save_device(Device(device_id, "Long", "192.168.50.10", "slow"))
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+
+        self.assertTrue(scheduler.tick(repository=self.repository, now=0))
+        self.assertEqual(self.helper.plans[-1].mark_rules[0].device_id, device_id)
+
+    def test_scheduler_thread_survives_an_unexpected_tick_error(self) -> None:
+        scheduler = RuntimeScheduler(
+            database_path=":memory:",
+            helper_client=self.helper,
+            poll_seconds=0.01,
+        )
+        calls = []
+        ticked_again = threading.Event()
+
+        def flaky_tick():
+            calls.append(len(calls))
+            if len(calls) == 1:
+                raise RuntimeError("database is locked")
+            ticked_again.set()
+            return False
+
+        scheduler.tick = flaky_tick
+        try:
+            with self.assertLogs("jittersim.engine.runtime", level="ERROR"):
+                scheduler.start()
+                self.assertTrue(ticked_again.wait(timeout=2))
+        finally:
+            scheduler.stop()
+
+    def test_outage_checks_vary_when_rerolls_are_off(self) -> None:
+        self._save_device(
+            Profile(
+                id="flaky",
+                name="Flaky",
+                outage_probability=50,
+                outage_duration_seconds=1,
+                outage_interval_seconds=1,
+                random_seed=7,
+            )
+        )
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.build_plan(repository=self.repository, now=0)
+
+        # Each build after the first runs one outage check.
+        outcomes = {
+            bool(
+                scheduler.build_plan(
+                    repository=self.repository, now=second
+                ).blocked_device_addresses
+            )
+            for second in range(2, 80, 2)
+        }
+
+        self.assertEqual(outcomes, {True, False})
+
+    def test_pause_waits_for_an_in_flight_scheduled_apply(self) -> None:
+        applying = threading.Event()
+        release = threading.Event()
+
+        class BlockingHelper(RecordingHelper):
+            def apply(self, *, plan):
+                applying.set()
+                release.wait(timeout=5)
+                return super().apply(plan=plan)
+
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "jittersim.db"
+            with ConfigRepository(database_path) as repository:
+                repository.save_profile(Profile(id="slow", name="Slow"))
+                repository.save_device(Device("alice", "Alice", "192.168.50.10", "slow"))
+            helper = BlockingHelper()
+            scheduler = RuntimeScheduler(
+                database_path=database_path,
+                helper_client=helper,
+                poll_seconds=3_600,
+            )
+            scheduler.activate(applied_payload={})
+            tick = threading.Thread(target=lambda: scheduler.tick(now=0))
+            paused = threading.Event()
+            pause = threading.Thread(target=lambda: (scheduler.pause(), paused.set()))
+            try:
+                tick.start()
+                self.assertTrue(applying.wait(timeout=5))
+                pause.start()
+                # A reset must not run while the scheduler is still applying.
+                self.assertFalse(paused.wait(timeout=0.2))
+            finally:
+                release.set()
+                tick.join(timeout=5)
+                pause.join(timeout=5)
+                scheduler.stop()
+
+            self.assertTrue(paused.is_set())
+            self.assertFalse(scheduler.tick(now=10))
+            self.assertEqual(len(helper.plans), 1)
+
+    def test_quota_usage_survives_plan_reapplies(self) -> None:
+        self.repository.save_profile(Profile(id="normal", name="Normal"))
+        self.repository.save_profile(
+            Profile(id="slow", name="Slow", download=Impairment(delay_ms=900))
+        )
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        self.repository.save_data_limit(
+            DataLimit(device_id="alice", profile_id="slow", limit_bytes=10**9, last_reset_at=100)
+        )
+        helper = CounterResettingHelper()
+        helper.counters = {"devices": {"alice": 1_000}, "services": {}}
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=helper)
+        scheduler.activate(applied_payload={})
+
+        scheduler.tick(repository=self.repository, now=100)
+        helper.counters["devices"]["alice"] = 600
+        # A profile change reapplies the plan before the next regular sample.
+        self.repository.save_profile(
+            Profile(id="normal", name="Normal", download=Impairment(delay_ms=10))
+        )
+        scheduler.tick(repository=self.repository, now=102)
+        helper.counters["devices"]["alice"] = 1_500
+        scheduler.tick(repository=self.repository, now=110)
+
+        self.assertEqual(self.repository.get_data_limit("alice").used_bytes, 3_100)
+
+    def test_byte_progression_keeps_its_progress_after_a_manual_apply(self) -> None:
+        self.repository.save_profile(Profile(id="normal", name="Normal"))
+        self.repository.save_profile(
+            Profile(id="degraded", name="Degraded", download=Impairment(delay_ms=1_000))
+        )
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        self.repository.save_progression(
+            Progression(
+                id="byte-driven",
+                device_id="alice",
+                start_profile_id="normal",
+                end_profile_id="degraded",
+                started_at=100,
+                duration_seconds=1_000,
+                mode="bytes",
+                traffic_target_bytes=1_000,
+            )
+        )
+        helper = CounterResettingHelper()
+        helper.counters = {"devices": {"alice": 0}, "services": {}}
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=helper)
+        scheduler.activate(applied_payload={})
+        scheduler.tick(repository=self.repository, now=100)
+        helper.counters["devices"]["alice"] = 500
+        scheduler.tick(repository=self.repository, now=106)
+
+        # Another change applied from the dashboard, such as a timer for bob.
+        scheduler.activate(applied_payload={})
+        helper.counters["devices"]["alice"] = 100
+        scheduler.tick(repository=self.repository, now=112)
+
+        self.assertEqual(scheduler.device_traffic_bytes(device_id="alice"), 600)
+
+    def test_changing_group_members_does_not_charge_the_group_limit(self) -> None:
+        for profile in (
+            Profile(id="normal", name="Normal"),
+            Profile(id="slow", name="Slow", download=Impairment(delay_ms=900)),
+        ):
+            self.repository.save_profile(profile)
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        self.repository.save_device(Device("bob", "Bob", "192.168.50.11", "normal"))
+        self.repository.save_device_group(
+            DeviceGroup(id="family", name="Family", device_ids=("alice",))
+        )
+        self.repository.save_group_data_limit(
+            GroupDataLimit(
+                group_id="family", profile_id="slow", limit_bytes=10**9, last_reset_at=100
+            )
+        )
+        helper = CounterResettingHelper()
+        helper.counters = {"devices": {"alice": 100, "bob": 5_000}, "services": {}}
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=helper)
+        scheduler.activate(applied_payload={})
+        scheduler.tick(repository=self.repository, now=100)
+
+        # Bob joins with 3,000 bytes he used outside the group.
+        helper.counters["devices"].update({"alice": 50, "bob": 3_000})
+        self.repository.save_device_group(
+            DeviceGroup(id="family", name="Family", device_ids=("alice", "bob"))
+        )
+        scheduler.tick(repository=self.repository, now=106)
+        helper.counters["devices"].update({"alice": 60, "bob": 3_010})
+        scheduler.tick(repository=self.repository, now=112)
+
+        self.assertEqual(self.repository.get_group_data_limit("family").used_bytes, 120)
 
 
 if __name__ == "__main__":

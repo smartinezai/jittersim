@@ -1,3 +1,4 @@
+import contextlib
 import json
 import re
 import shutil
@@ -12,8 +13,10 @@ from io import BytesIO
 from pathlib import Path
 
 from jittersim.api.server import DASHBOARD_HTML, ControlRequestHandler, ControlServer
-from jittersim.config.models import Device, DomainObservation, Impairment, Profile
+from jittersim.config.models import DataLimit, Device, DomainObservation, Impairment, Profile
 from jittersim.config.storage import ConfigRepository
+from jittersim.engine.runtime import RuntimeScheduler
+from jittersim.engine.service import compile_stored_plan
 from jittersim.networking.helper import HelperClientError
 
 
@@ -111,6 +114,57 @@ class FakeHelper:
         }
 
 
+class CountingHelper(FakeHelper):
+    """Count traffic like the real helper: every apply restarts the counters."""
+
+    def __init__(self, *, devices=None, services=None) -> None:
+        super().__init__()
+        self.devices = dict(devices or {})
+        self.services = dict(services or {})
+
+    def apply(self, *, plan):
+        result = super().apply(plan=plan)
+        self.devices = dict.fromkeys(self.devices, 0)
+        self.services = dict.fromkeys(self.services, 0)
+        return result
+
+    def traffic_counters(self):
+        return {"devices": dict(self.devices), "services": dict(self.services)}
+
+
+def create_test_certificate(directory: Path):
+    """Create a throwaway self-signed certificate, or return None without OpenSSL."""
+
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        return None
+    certificate = Path(directory) / "dashboard.crt"
+    key = Path(directory) / "dashboard.key"
+    subprocess.run(
+        [
+            openssl,
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-sha256",
+            "-nodes",
+            "-days",
+            "1",
+            "-keyout",
+            str(key),
+            "-out",
+            str(certificate),
+            "-subj",
+            "/CN=127.0.0.1",
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return certificate, key
+
+
 class ControlServerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.repository = ConfigRepository(":memory:")
@@ -165,6 +219,77 @@ class ControlServerTests(unittest.TestCase):
         self.assertTrue(helper.reset_called)
         self.assertIsNone(helper.applied_plan)
         self.assertEqual(self.repository.get_runtime_state().observed_state, "reset")
+
+    def test_startup_recovery_survives_a_later_settings_change(self) -> None:
+        for last_action in ("apply", "reset"):
+            with self.subTest(last_action=last_action):
+                helper = FakeHelper()
+                self.server.helper_client = helper
+                self.repository.update_runtime_state(
+                    observed_state="applied" if last_action == "apply" else "reset",
+                    last_action=last_action,
+                    last_result="success",
+                    last_error=None,
+                )
+                self.repository.save_device(
+                    Device(
+                        id="alice",
+                        name="Renamed laptop",
+                        ipv4_address="192.168.50.10",
+                        profile_id="slow",
+                    )
+                )
+
+                self.server.recover_saved_network_state()
+
+                self.assertEqual(helper.applied_plan is not None, last_action == "apply")
+                self.assertEqual(helper.reset_called, last_action == "reset")
+
+    def test_startup_recovery_waits_for_the_helper_to_start(self) -> None:
+        class StartingHelper(FakeHelper):
+            pings = 0
+
+            def ping(self):
+                self.pings += 1
+                if self.pings < 3:
+                    raise HelperClientError("helper socket is not ready")
+                return super().ping()
+
+        helper = StartingHelper()
+        self.server.helper_client = helper
+        self.server.helper_poll_seconds = 0.01
+        self.repository.update_runtime_state(
+            observed_state="applied",
+            last_action="apply",
+            last_result="success",
+            last_error=None,
+        )
+
+        self.server.recover_saved_network_state()
+
+        self.assertEqual(helper.pings, 3)
+        self.assertIsNotNone(helper.applied_plan)
+
+    def test_startup_recovery_gives_up_when_the_helper_never_starts(self) -> None:
+        class MissingHelper(FakeHelper):
+            def ping(self):
+                raise HelperClientError("helper socket is not ready")
+
+        helper = MissingHelper()
+        self.server.helper_client = helper
+        self.server.helper_startup_wait_seconds = 0.05
+        self.server.helper_poll_seconds = 0.01
+        self.repository.update_runtime_state(
+            observed_state="applied",
+            last_action="apply",
+            last_result="success",
+            last_error=None,
+        )
+
+        with self.assertLogs("jittersim.api.server", level="ERROR"):
+            self.server.recover_saved_network_state()
+
+        self.assertIsNone(helper.applied_plan)
 
     def test_startup_recovery_does_not_apply_on_a_new_installation(self) -> None:
         helper = FakeHelper()
@@ -234,6 +359,36 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(backup_status, 200)
         self.assertEqual(content_type, "application/vnd.sqlite3")
         self.assertTrue(backup.startswith(b"SQLite format 3\x00"))
+
+    def test_admin_reads_require_admin_token(self) -> None:
+        self.server.admin_token = "admin-token"
+        self.server.helper_client = FakeHelper()
+
+        def get(path, authorization=None):
+            handler = object.__new__(ControlRequestHandler)
+            handler.server = self.server
+            handler.path = path
+            handler.headers = Message()
+            if authorization:
+                handler.headers["Authorization"] = authorization
+            response = {}
+            handler._send_response = lambda **values: response.update(values)
+            handler.do_GET()
+            return response
+
+        for path in (
+            "/api/backup",
+            "/api/diagnostics",
+            "/api/action-history",
+            "/api/observations",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(get(path)["status"], 401)
+                self.assertEqual(get(path, "Bearer wrong-token")["status"], 401)
+                self.assertEqual(get(path, "Bearer admin-token")["status"], 200)
+        # Only the dashboard page and the health check are public.
+        self.assertEqual(get("/api/profiles")["status"], 401)
+        self.assertEqual(get("/api/health")["status"], 200)
 
     def test_live_traffic_requires_admin_token_and_returns_directional_counters(self) -> None:
         self.server.admin_token = "admin-token"
@@ -410,6 +565,108 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(len(self.repository.list_recent_actions()), count_after_authorized_request)
         self.assertEqual(unauthorized["status"], 401)
 
+    def _send(self, method, path, *, authorization="Bearer admin-token", body=None):
+        handler = object.__new__(ControlRequestHandler)
+        handler.server = self.server
+        handler.path = path
+        handler.headers = Message()
+        handler.headers["Authorization"] = authorization
+        if body is not None:
+            handler.headers["Content-Length"] = str(len(body))
+            handler.rfile = BytesIO(body)
+        response = {}
+        handler._send_response = lambda **values: response.update(values)
+        if method == "GET":
+            handler.do_GET()
+        else:
+            handler._handle_write()
+        return response
+
+    def test_malformed_requests_get_an_error_response(self) -> None:
+        self.server.admin_token = "admin-token"
+        self.server.helper_client = FakeHelper()
+
+        non_ascii_token = self._send("GET", "/api/diagnostics", authorization="Bearer t\u00f6ken")
+        nested = self._send("POST", "/api/profiles", body=b"[" * 100_000 + b"]" * 100_000)
+        with self.assertLogs("jittersim.api.server", level="ERROR"):
+            list_id = self._send(
+                "POST",
+                "/api/data-limits",
+                body=b'{"device_id": ["alice"], "profile_id": "slow", "limit_bytes": 1}',
+            )
+
+        self.assertEqual(non_ascii_token["status"], 401)
+        self.assertEqual(nested["status"], 400)
+        self.assertEqual(list_id["status"], 500)
+        self.assertIn("error", json.loads(list_id["body"]))
+        self.assertEqual(self.repository.list_recent_actions()[0]["action"], "/api/data-limits")
+
+    def test_browser_service_profile_rejections_say_why(self) -> None:
+        video = {
+            "id": "video",
+            "device_id": "alice",
+            "name": "Video",
+            "domains": ["youtube.com"],
+            "profile_id": "slow",
+        }
+        cases = (
+            ({"profile_id": "ghost"}, "profile does not exist"),
+            ({"domains": ["youtube.com", "m.youtube.com"]}, "service assignment domains overlap"),
+            ({"device_id": "ghost"}, "device must be on the test Wi-Fi"),
+        )
+        for change, reason in cases:
+            with self.subTest(reason=reason):
+                status, _, body = self.server.write_response_for(
+                    "/api/service-assignments", {**video, **change}
+                )
+
+                self.assertEqual(status, 400)
+                self.assertEqual(
+                    json.loads(body)["error"],
+                    f"invalid service assignment configuration: {reason}",
+                )
+
+    def test_rejected_requests_explain_what_was_wrong(self) -> None:
+        cases = (
+            (
+                "/api/profiles",
+                {"id": "Bad Profile!", "name": "Bad"},
+                "invalid profile configuration: id must contain 1 to 64 lowercase letters",
+            ),
+            ("/api/profiles", {"id": "slow"}, "invalid profile configuration: missing name"),
+            (
+                "/api/timers",
+                {"device_id": "alice", "profile_id": "slow", "duration_minutes": 0},
+                "invalid timer configuration: duration_minutes must be between 1 and 10080",
+            ),
+        )
+        for path, payload, message in cases:
+            with self.subTest(path=path, payload=payload):
+                status, _, body = self.server.write_response_for(path, payload)
+                self.assertEqual(status, 400)
+                self.assertTrue(json.loads(body)["error"].startswith(message))
+
+    def test_list_fields_reject_plain_strings(self) -> None:
+        requests = (
+            ("/api/policies", {"websites": {"mode": "unrestricted", "blocked_domains": "netflix"}}),
+            ("/api/profiles", {"id": "video", "name": "Video", "website_domains": "youtube.com"}),
+            (
+                "/api/schedules",
+                {
+                    "id": "work",
+                    "device_id": "alice",
+                    "profile_id": "slow",
+                    "days_of_week": "12",
+                    "start_minute": 540,
+                    "end_minute": 1_020,
+                },
+            ),
+        )
+        for path, payload in requests:
+            with self.subTest(path=path):
+                status, _, _ = self.server.write_response_for(path, payload)
+                self.assertEqual(status, 400)
+        self.assertEqual(self.repository.get_website_policy().blocked_domains, ())
     def test_connected_label_auth_and_profile_isolation(self) -> None:
         self.server.admin_token = "admin-token"
         handler = object.__new__(ControlRequestHandler)
@@ -476,34 +733,11 @@ class ControlServerTests(unittest.TestCase):
                 tls_certfile=Path("dashboard.crt"),
             )
 
-        openssl = shutil.which("openssl")
-        if openssl is None:
-            self.skipTest("OpenSSL is required to create a test certificate")
         with tempfile.TemporaryDirectory(prefix="jittersim-tls-test-") as directory:
-            certificate = Path(directory) / "dashboard.crt"
-            key = Path(directory) / "dashboard.key"
-            subprocess.run(
-                [
-                    openssl,
-                    "req",
-                    "-x509",
-                    "-newkey",
-                    "rsa:2048",
-                    "-sha256",
-                    "-nodes",
-                    "-days",
-                    "1",
-                    "-keyout",
-                    str(key),
-                    "-out",
-                    str(certificate),
-                    "-subj",
-                    "/CN=127.0.0.1",
-                ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            files = create_test_certificate(Path(directory))
+            if files is None:
+                self.skipTest("OpenSSL is required to create a test certificate")
+            certificate, key = files
             secure_server = ControlServer(
                 ("127.0.0.1", 0),
                 self.repository,
@@ -535,6 +769,51 @@ class ControlServerTests(unittest.TestCase):
         self.assertTrue(secure_server.secure_transport)
         self.assertEqual(len(response), 1)
         self.assertTrue(response[0].startswith(b"HTTP/1.0 200 OK"))
+
+    def _health_after_an_idle_connection(self, server, wrap_client=None) -> bytes:
+        server.request_timeout_seconds = 0.5
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
+        thread.start()
+        try:
+            with socket.create_connection(server.server_address):
+                with socket.create_connection(server.server_address, timeout=3) as connection:
+                    client = wrap_client(connection) if wrap_client else connection
+                    client.sendall(b"GET /api/health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+                    return client.recv(4096)
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+    def test_an_idle_connection_does_not_block_other_requests(self) -> None:
+        response = self._health_after_an_idle_connection(self.server)
+
+        self.assertTrue(response.startswith(b"HTTP/1.0 200 OK"))
+
+    def test_an_idle_tls_connection_does_not_block_other_requests(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="jittersim-tls-test-") as directory:
+            files = create_test_certificate(Path(directory))
+            if files is None:
+                self.skipTest("OpenSSL is required to create a test certificate")
+            secure_server = ControlServer(
+                ("127.0.0.1", 0),
+                self.repository,
+                tls_certfile=files[0],
+                tls_keyfile=files[1],
+            )
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            try:
+                response = self._health_after_an_idle_connection(
+                    secure_server,
+                    wrap_client=lambda connection: context.wrap_socket(
+                        connection, server_hostname="127.0.0.1"
+                    ),
+                )
+            finally:
+                secure_server.server_close()
+
+        self.assertTrue(response.startswith(b"HTTP/1.0 200 OK"))
 
     def test_data_limit_endpoint_preserves_usage_and_can_reset_it(self) -> None:
         status, _, body = self.server.write_response_for(
@@ -655,7 +934,11 @@ class ControlServerTests(unittest.TestCase):
         )
 
         self.assertEqual(status, 400)
-        self.assertEqual(json.loads(body), {"error": "invalid service quota configuration"})
+        self.assertEqual(
+            json.loads(body)["error"],
+            "invalid service quota configuration: "
+            "service quota domains must come from DNS observations",
+        )
 
     def test_time_quota_can_be_saved_started_stopped_and_reset(self) -> None:
         self.repository.save_domain_observations(
@@ -956,6 +1239,51 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(plan["mark_rules"][0]["mark"], 1)
         self.assertEqual(plan["queues"][0]["impairment"]["delay_ms"], 3_000)
 
+    def test_dashboard_keeps_javascript_escapes_intact(self) -> None:
+        self.assertIn('.join("\\n")', DASHBOARD_HTML)
+        self.assertIn("/^(\\d{1,2}):(\\d{2})$/", DASHBOARD_HTML)
+        # The HTML is a raw string, so an escape written for a regular Python
+        # string would reach the browser doubled.
+        self.assertNotIn("\\\\", DASHBOARD_HTML)
+
+    def test_dashboard_input_patterns_are_valid(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is required to compile the input patterns")
+        patterns = re.findall(r' pattern="([^"]*)"', DASHBOARD_HTML)
+        self.assertTrue(patterns)
+        # Browsers compile pattern attributes with the "v" flag and skip
+        # validation for any pattern it rejects.
+        script = (
+            "for (const pattern of JSON.parse(process.argv[1])) "
+            "new RegExp('^(?:' + pattern + ')$', 'v');"
+        )
+        result = subprocess.run(
+            [node, "-e", script, json.dumps(patterns)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_dashboard_script_is_valid_javascript(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is required to parse the dashboard script")
+        script = DASHBOARD_HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            script_path = Path(directory) / "dashboard.js"
+            script_path.write_text(script, encoding="utf-8")
+            result = subprocess.run(
+                [node, "--check", str(script_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_dashboard_contains_configuration_and_network_controls(self) -> None:
         status, content_type, body = self.server.response_for("/")
 
@@ -978,6 +1306,9 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("setButtonBusy(event.submitter, true)", DASHBOARD_HTML)
         self.assertIn("if (submitButton) setButtonBusy(submitButton, false);", DASHBOARD_HTML)
         self.assertIn("Dashboard refresh failed:", DASHBOARD_HTML)
+        self.assertIn("Settings changed since the last network action", DASHBOARD_HTML)
+        # Protected panels wait for a token instead of polling into 401 responses.
+        self.assertEqual(DASHBOARD_HTML.count("if (!hasAdminToken())"), 2)
         self.assertNotIn('element("admin-token").addEventListener("change"', DASHBOARD_HTML)
         self.assertIn(
             'element("check-admin-token").addEventListener("click", checkAdminToken)',
@@ -1202,6 +1533,165 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(json.loads(body)["timer_id"], "ten-minutes")
         self.assertEqual(json.loads(self.server.response_for("/api/timers")[2]), {"timers": []})
 
+    def test_live_changes_do_not_undo_an_explicit_reset(self) -> None:
+        helper = FakeHelper()
+        self.server.helper_client = helper
+        self.repository.update_runtime_state(
+            observed_state="reset",
+            last_action="reset",
+            last_result="success",
+            last_error=None,
+        )
+        self.server.write_response_for(
+            "/api/data-limits",
+            {"device_id": "alice", "profile_id": "slow", "limit_bytes": 1_000},
+        )
+
+        requests = (
+            ("/api/data-limits/reset", {"device_id": "alice"}),
+            (
+                "/api/timers",
+                {"id": "t", "device_id": "alice", "profile_id": "slow", "duration_minutes": 5},
+            ),
+            ("/api/timers/cancel", {"id": "t"}),
+        )
+        for path, payload in requests:
+            with self.subTest(path=path):
+                status, _, body = self.server.write_response_for(path, payload)
+                self.assertEqual(status, 200)
+                self.assertFalse(json.loads(body)["live_applied"])
+        self.assertIsNone(helper.applied_plan)
+        self.assertEqual(self.repository.get_runtime_state().last_action, "reset")
+
+    def test_manual_apply_runs_while_scheduled_applies_are_held(self) -> None:
+        events = []
+
+        class RecordingScheduler:
+            @contextlib.contextmanager
+            def exclusive(self):
+                events.append("hold")
+                yield
+                events.append("release")
+
+            def build_plan(self, *, repository):
+                return compile_stored_plan(repository=repository)
+
+            def sample_usage(self, *, repository):
+                events.append("sample")
+
+            def activate(self, *, applied_payload):
+                events.append("activate")
+
+        class RecordingHelper(FakeHelper):
+            def apply(self, *, plan):
+                events.append("apply")
+                return super().apply(plan=plan)
+
+        self.server.helper_client = RecordingHelper()
+        self.server.scheduler = RecordingScheduler()
+
+        status, _, _ = self.server.write_response_for("/api/apply", {})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(events, ["hold", "sample", "apply", "activate", "release"])
+
+    def test_apply_and_reset_record_usage_before_the_counters_restart(self) -> None:
+        for path in ("/api/apply", "/api/reset"):
+            with self.subTest(path=path):
+                self.repository.save_data_limit(
+                    DataLimit(
+                        device_id="alice",
+                        profile_id="slow",
+                        limit_bytes=10**9,
+                        used_bytes=1_000,
+                        counter_bytes=1_000,
+                        last_reset_at=100,
+                    )
+                )
+                helper = CountingHelper(devices={"alice": 1_600})
+                scheduler = RuntimeScheduler(
+                    database_path=":memory:",
+                    helper_client=helper,
+                    poll_seconds=3_600,
+                )
+                self.server.helper_client = helper
+                self.server.scheduler = scheduler
+                try:
+                    status, _, _ = self.server.write_response_for(path, {})
+                finally:
+                    scheduler.stop()
+
+                self.assertEqual(status, 200)
+                self.assertEqual(self.repository.get_data_limit("alice").used_bytes, 1_600)
+
+    def _serve_live(self, helper):
+        scheduler = RuntimeScheduler(
+            database_path=":memory:", helper_client=helper, poll_seconds=3_600
+        )
+        self.server.helper_client = helper
+        self.server.scheduler = scheduler
+        self.addCleanup(scheduler.stop)
+        return helper
+
+    def test_a_new_limit_counts_only_traffic_after_it_is_saved(self) -> None:
+        helper = self._serve_live(CountingHelper(devices={"alice": 0}))
+        self.server.write_response_for(
+            "/api/groups", {"id": "family", "name": "Family", "device_ids": ["alice"]}
+        )
+        helper.devices["alice"] = 3_000_000
+
+        self.server.write_response_for(
+            "/api/data-limits", {"device_id": "alice", "profile_id": "slow", "limit_bytes": 10**9}
+        )
+        helper.devices["alice"] = 2_000_000
+        self.server.write_response_for(
+            "/api/group-data-limits",
+            {"group_id": "family", "profile_id": "slow", "limit_bytes": 10**9},
+        )
+
+        self.assertEqual(self.repository.get_data_limit("alice").used_bytes, 2_000_000)
+        self.assertEqual(self.repository.get_group_data_limit("family").used_bytes, 0)
+
+    def test_a_reenabled_limit_skips_traffic_from_while_it_was_off(self) -> None:
+        self.repository.save_data_limit(
+            DataLimit(
+                device_id="alice",
+                profile_id="slow",
+                limit_bytes=10**9,
+                used_bytes=500,
+                counter_bytes=0,
+                last_reset_at=100,
+                enabled=False,
+            )
+        )
+        self._serve_live(CountingHelper(devices={"alice": 3_000_000}))
+
+        self.server.write_response_for(
+            "/api/data-limits",
+            {"device_id": "alice", "profile_id": "slow", "limit_bytes": 10**9, "enabled": True},
+        )
+
+        self.assertEqual(self.repository.get_data_limit("alice").used_bytes, 500)
+
+    def test_live_changes_apply_while_the_network_is_applied(self) -> None:
+        helper = FakeHelper()
+        self.server.helper_client = helper
+        self.repository.update_runtime_state(
+            observed_state="applied",
+            last_action="apply",
+            last_result="success",
+            last_error=None,
+        )
+
+        status, _, body = self.server.write_response_for(
+            "/api/timers",
+            {"id": "t", "device_id": "alice", "profile_id": "slow", "duration_minutes": 5},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["live_applied"])
+        self.assertIsNotNone(helper.applied_plan)
+
     def test_rejects_timer_duration_outside_the_supported_range(self) -> None:
         status, _, body = self.server.write_response_for(
             "/api/timers",
@@ -1213,7 +1703,10 @@ class ControlServerTests(unittest.TestCase):
         )
 
         self.assertEqual(status, 400)
-        self.assertEqual(json.loads(body), {"error": "invalid timer configuration"})
+        self.assertEqual(
+            json.loads(body)["error"],
+            "invalid timer configuration: duration_minutes must be between 1 and 10080",
+        )
 
     def test_starts_and_stops_a_profile_progression(self) -> None:
         status, _, body = self.server.write_response_for(
@@ -1264,7 +1757,10 @@ class ControlServerTests(unittest.TestCase):
         )
 
         self.assertEqual(status, 400)
-        self.assertEqual(json.loads(body), {"error": "invalid progression configuration"})
+        self.assertEqual(
+            json.loads(body)["error"],
+            "invalid progression configuration: traffic mode requires a positive query target",
+        )
 
     def test_starts_a_byte_progression(self) -> None:
         status, _, body = self.server.write_response_for(
@@ -1325,7 +1821,11 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(status, 400)
         self.assertEqual(content_type, "application/json")
-        self.assertEqual(json.loads(body), {"error": "invalid profile configuration"})
+        self.assertEqual(
+            json.loads(body)["error"],
+            "invalid profile configuration: id must contain 1 to 64 lowercase letters, "
+            "numbers, hyphens or underscores",
+        )
         self.assertIsNone(self.repository.get_profile("unsafe id"))
 
     def test_apply_and_reset_require_a_configured_helper(self) -> None:

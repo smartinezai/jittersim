@@ -3,9 +3,10 @@
 import logging
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from typing import Dict, Optional, Sequence, Union
+from typing import Dict, Iterator, Optional, Sequence, Union
 
 from jittersim.config.models import (
     DataLimit,
@@ -43,11 +44,14 @@ class _DeviceRollState:
     """Mutable scheduler state for one device between ticks."""
 
     profile_id: str
+    # The profile values this state was built from, so edits start a fresh roll.
+    source_profiles: object
     runtime_profile: Profile
     roll_number: int
     next_roll_at: float
     next_outage_check_at: float
     outage_until: float
+    outage_check_number: int = 0
 
 
 class RuntimeScheduler:
@@ -67,12 +71,16 @@ class RuntimeScheduler:
         self._current_payload = None
         self._paused = True
         self._lock = threading.RLock()
+        # Held while a plan is built and applied, so pause() and manual applies
+        # never interleave with a scheduled apply.
+        self._apply_lock = threading.RLock()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_traffic_sample_at = 0.0
         self._last_quota_sample_at = 0.0
         self._last_device_counters: Dict[str, int] = {}
         self._device_traffic_bytes: Dict[str, int] = {}
+        self._group_members: Dict[str, frozenset] = {}
 
     def start(self) -> None:
         """Start the scheduler loop when hardware control is available."""
@@ -105,8 +113,9 @@ class RuntimeScheduler:
         with self._lock:
             self._current_payload = applied_payload
             self._paused = False
-            self._last_device_counters.clear()
-            self._device_traffic_bytes.clear()
+            # The apply recreated the helper counters, so keep the device
+            # totals and count on from zero.
+            self._last_device_counters = dict.fromkeys(self._last_device_counters, 0)
         self.start()
 
     def build_plan(
@@ -118,17 +127,33 @@ class RuntimeScheduler:
         """Build the current runtime plan, including timers and schedules."""
 
         current_time = time.time() if now is None else now
-        return self._build_plan(repository=repository, now=current_time)
+        with self._apply_lock:
+            return self._build_plan(repository=repository, now=current_time)
+
+    @contextmanager
+    def exclusive(self) -> Iterator[None]:
+        """Hold off scheduled applies while a manual apply runs."""
+
+        with self._apply_lock:
+            yield
 
     def pause(self) -> None:
         """Pause scheduled reapplication after a manual network reset."""
 
-        with self._lock:
+        # Wait for an in-flight scheduled apply so a reset cannot be undone by it.
+        with self._apply_lock, self._lock:
             self._paused = True
             self._rolls.clear()
             self._current_payload = None
             self._last_device_counters.clear()
             self._device_traffic_bytes.clear()
+            self._group_members.clear()
+
+    def sample_usage(self, *, repository: ConfigRepository) -> None:
+        """Record quota and device traffic before the helper counters restart."""
+
+        with self._apply_lock:
+            self._sample_quota_usage(repository=repository, now=time.time())
 
     def device_traffic_bytes(self, *, device_id: str) -> int:
         """Return cumulative device bytes observed by the active scheduler."""
@@ -179,11 +204,6 @@ class RuntimeScheduler:
                 device_limits[field] = rate
             return limits
 
-    def control_operation(self):
-        """Share one lock with manual apply and reset operations."""
-
-        return self._lock
-
     def tick(
         self,
         *,
@@ -192,17 +212,13 @@ class RuntimeScheduler:
     ) -> bool:
         """Recompute and apply a changed runtime plan once."""
 
-        with self._lock:
-            return self._tick_under_lock(repository=repository, now=now)
+        with self._apply_lock:
+            with self._lock:
+                if self._paused or self._helper_client is None:
+                    return False
+            return self._tick(repository=repository, now=now)
 
-    def _tick_under_lock(
-        self,
-        *,
-        repository: Optional[ConfigRepository] = None,
-        now: Optional[float] = None,
-    ) -> bool:
-        if self._paused or self._helper_client is None:
-            return False
+    def _tick(self, *, repository: Optional[ConfigRepository], now: Optional[float]) -> bool:
         current_time = time.time() if now is None else now
         owned_repository = repository is None
         active_repository = repository or ConfigRepository(self._database_path)
@@ -211,10 +227,17 @@ class RuntimeScheduler:
             self._sample_quota_usage_if_needed(repository=active_repository, now=current_time)
             plan = self._build_plan(repository=active_repository, now=current_time)
             payload = plan_to_payload(plan)
-            if payload == self._current_payload:
-                return False
+            with self._lock:
+                if payload == self._current_payload:
+                    return False
+            # Applying recreates the helper's counters at zero, so record the
+            # traffic they hold first.
+            self._sample_quota_usage(repository=active_repository, now=current_time)
             self._helper_client.apply(plan=plan)
-            self._current_payload = payload
+            active_repository.restart_usage_counters()
+            with self._lock:
+                self._current_payload = payload
+                self._last_device_counters = dict.fromkeys(self._last_device_counters, 0)
             active_repository.update_runtime_state(
                 observed_state="applied",
                 last_action="schedule",
@@ -283,6 +306,7 @@ class RuntimeScheduler:
                 else schedule.profile_id
             )
             selected_profile = profiles.get(source_profile_id)
+            source_profiles = selected_profile
             source_key = (
                 f"group-profile:{group.id}"
                 if group is not None and group_profile_id is not None and schedule is None
@@ -291,6 +315,7 @@ class RuntimeScheduler:
             if timer is not None:
                 source_profile_id = timer.profile_id
                 selected_profile = profiles.get(source_profile_id)
+                source_profiles = selected_profile
                 source_key = f"timer:{timer.id}"
             elif progression is not None:
                 start_profile = profiles.get(progression.start_profile_id)
@@ -311,6 +336,9 @@ class RuntimeScheduler:
                     end=end_profile,
                     factor=factor,
                 )
+                # The interpolated profile changes as the progression advances,
+                # so only edits to its start or end profile restart the roll.
+                source_profiles = (start_profile, end_profile)
                 source_key = f"progression:{progression.id}"
                 domain_count = int(len(progression.website_domains) * factor)
                 if domain_count:
@@ -323,6 +351,7 @@ class RuntimeScheduler:
                         f"data limit for device {device.id} references a missing profile"
                     )
                 selected_profile = fallback_profile
+                source_profiles = fallback_profile
                 source_key = f"data-limit:{device.id}"
             elif group is not None:
                 group_data_limit = group_data_limits.get(group.id)
@@ -337,14 +366,20 @@ class RuntimeScheduler:
                             f"group data limit for {group.id} references a missing profile"
                         )
                     selected_profile = fallback_profile
+                    source_profiles = fallback_profile
                     source_key = f"group-data-limit:{group.id}"
             if selected_profile is None:
                 raise PlanError(f"device {device.id} references missing profile {source_profile_id}")
             active_device_ids.add(device.id)
             roll = self._rolls.get(device.id)
-            if roll is None or roll.profile_id != source_key:
+            if (
+                roll is None
+                or roll.profile_id != source_key
+                or roll.source_profiles != source_profiles
+            ):
                 roll = _DeviceRollState(
                     profile_id=source_key,
+                    source_profiles=source_profiles,
                     runtime_profile=selected_profile,
                     roll_number=0,
                     next_roll_at=now + max(1, selected_profile.reroll_interval_seconds),
@@ -387,11 +422,14 @@ class RuntimeScheduler:
 
             outage_interval = selected_profile.outage_interval_seconds or selected_profile.reroll_interval_seconds
             if outage_interval and now >= roll.next_outage_check_at:
+                # Count outage checks separately: the reroll number stays at 0
+                # when rerolls are off, which would repeat the same outcome.
                 generator = seeded_generator(
                     profile=selected_profile,
                     device_id=device.id,
-                    roll_number=100_000 + roll.roll_number,
+                    roll_number=100_000 + roll.outage_check_number,
                 )
+                roll.outage_check_number += 1
                 if outage_is_selected(profile=selected_profile, generator=generator):
                     duration = outage_duration_seconds(
                         profile=selected_profile,
@@ -405,7 +443,9 @@ class RuntimeScheduler:
             if roll.outage_until > now:
                 blocked_addresses.append(device.ipv4_address)
 
-            runtime_profile_id = f"runtime-{device.id}"
+            # Device ids may already use the full identifier length, so number
+            # the runtime profiles instead of prefixing the device id.
+            runtime_profile_id = f"runtime-{len(runtime_devices) + 1}"
             runtime_profiles[runtime_profile_id] = roll.runtime_profile
             runtime_devices.append(replace(device, profile_id=runtime_profile_id))
 
@@ -575,6 +615,9 @@ class RuntimeScheduler:
 
         if now - self._last_quota_sample_at < 5:
             return
+        self._sample_quota_usage(repository=repository, now=now)
+
+    def _sample_quota_usage(self, *, repository: ConfigRepository, now: float) -> None:
         data_limits = tuple(
             data_limit
             for data_limit in repository.list_data_limits()
@@ -632,6 +675,14 @@ class RuntimeScheduler:
                 aggregate_counter = sum(
                     device_counters[device_id] for device_id in group.device_ids
                 )
+                members = frozenset(group.device_ids)
+                previous_members = self._group_members.get(data_limit.group_id)
+                self._group_members[data_limit.group_id] = members
+                if previous_members is not None and previous_members != members:
+                    # New or removed members change the summed counter without
+                    # any new group traffic, so count on from the new sum.
+                    repository.rebaseline_group_data_usage(data_limit.group_id, aggregate_counter)
+                    continue
                 repository.record_group_data_usage(data_limit.group_id, aggregate_counter)
             for quota in service_quotas:
                 counter = service_counters.get(quota.id)
@@ -725,4 +776,9 @@ class RuntimeScheduler:
 
     def _run(self) -> None:
         while not self._stop_event.wait(self._poll_seconds):
-            self.tick()
+            try:
+                self.tick()
+            except Exception:
+                # Keep schedules, timers, outages and quotas running; the next
+                # tick retries with fresh state.
+                LOGGER.exception("scheduler tick failed unexpectedly")

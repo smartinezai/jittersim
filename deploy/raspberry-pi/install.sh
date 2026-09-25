@@ -30,6 +30,7 @@ fi
 python3 "$SOURCE_DIR/deploy/raspberry-pi/preflight.py" \
     --uplink "$JITTERSIM_UPLINK" --test-interface "$JITTERSIM_TEST_INTERFACE"
 
+apt-get update
 apt-get install -y dnsmasq-base iw nftables openssl python3-venv tcpdump
 
 install -d -m 0750 -o root -g jittersim "$CONFIG_DIR"
@@ -44,7 +45,9 @@ fi
 
 python3 -m venv "$INSTALL_DIR/.venv"
 "$INSTALL_DIR/.venv/bin/pip" install "$INSTALL_DIR"
+# jittersim-helper runs as root from this directory, so only root may change it.
 chown -R root:root "$INSTALL_DIR"
+chmod -R go-w "$INSTALL_DIR"
 
 if [ ! -s "$CONFIG_DIR/control.env" ]; then
     admin_token=$(openssl rand -hex 32)
@@ -150,7 +153,8 @@ install -m 0644 -o root -g root \
     /etc/systemd/system/jittersim-browser-proxy.service
 
 systemctl daemon-reload
-systemctl enable --now jittersim-control-firewall.service
+systemctl enable jittersim-control-firewall.service
+systemctl restart jittersim-control-firewall.service
 systemctl enable jittersim-helper.service jittersim-dashboard.service jittersim-browser-proxy.service
 systemctl restart jittersim-helper.service
 systemctl restart jittersim-dashboard.service

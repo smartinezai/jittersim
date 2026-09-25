@@ -147,7 +147,7 @@ class HelperServiceTests(unittest.TestCase):
             },
         )
         diagnostic = captured.records[0].getMessage()
-        self.assertIn("step 2", diagnostic)
+        self.assertIn("step 1", diagnostic)
         self.assertIn("exit code 1", diagnostic)
         self.assertIn("private-detail", diagnostic)
         self.assertLessEqual(len(diagnostic), 900)

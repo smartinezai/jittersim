@@ -95,8 +95,9 @@ def main() -> None:
             queues = json.loads(
                 subprocess.check_output(["tc", "-j", "qdisc", "show", "dev", interface])
             )
+            # The service assignment has mark 2, so it uses class 10:3.
             if not any(
-                queue.get("handle") == "12:" and queue.get("kind") == "fq_codel"
+                queue.get("parent") == "10:3" and queue.get("kind") == "fq_codel"
                 for queue in queues
             ):
                 raise AssertionError("ordinary service traffic did not regain a fair queue")

@@ -46,6 +46,32 @@ class BrowserProxyTests(unittest.TestCase):
         self.assertFalse(destination_allowed(plan, device.ipv4_address, "1.1.1.1"))
         self.assertTrue(destination_allowed(plan, device.ipv4_address, "9.9.9.9"))
 
+    def test_blocked_sites_without_an_allowlist_keep_other_sites_reachable(self) -> None:
+        device = Device("alice", "Alice", "192.168.50.10", "normal")
+
+        def plan_with(allowed_addresses):
+            return compile_plan(
+                devices=(device,),
+                profiles={"normal": Profile(id="normal", name="Normal")},
+                website_filters=(
+                    WebsiteFilter(
+                        device_ip=device.ipv4_address,
+                        allowed_addresses=allowed_addresses,
+                        blocked_addresses=(IPv4Address("203.0.113.9"),),
+                    ),
+                ),
+            )
+
+        no_allowlist = plan_with(None)
+        empty_allowlist = plan_with(())
+
+        self.assertFalse(destination_allowed(no_allowlist, device.ipv4_address, "203.0.113.9"))
+        self.assertTrue(destination_allowed(no_allowlist, device.ipv4_address, "198.51.100.7"))
+        # An allowlist whose domains resolved to nothing still allows nothing.
+        self.assertFalse(
+            destination_allowed(empty_allowlist, device.ipv4_address, "198.51.100.7")
+        )
+
     def test_hostnames_on_the_same_address_get_different_marks(self) -> None:
         device = Device("alice", "Alice", "192.168.50.10", "normal")
         plan = compile_plan(

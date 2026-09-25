@@ -311,6 +311,17 @@ class ConfigRepository:
             );
             CREATE INDEX IF NOT EXISTS domain_observations_last_seen_idx
                 ON domain_observations (last_seen);
+            -- Running query totals per client. Pruning old observations must
+            -- not lower them, because DNS-driven progressions measure from them.
+            CREATE TABLE IF NOT EXISTS domain_query_totals (
+                ipv4_address TEXT PRIMARY KEY,
+                query_count INTEGER NOT NULL
+            );
+            INSERT OR IGNORE INTO domain_query_totals (ipv4_address, query_count)
+                SELECT ipv4_address, SUM(query_count)
+                FROM domain_observations
+                WHERE NOT EXISTS (SELECT 1 FROM domain_query_totals)
+                GROUP BY ipv4_address;
             INSERT OR IGNORE INTO runtime_state (
                 id, configuration_version, observed_state
             ) VALUES (1, 0, 'unknown');
@@ -578,14 +589,13 @@ class ConfigRepository:
         }
 
     def _bump_configuration_version(self) -> None:
+        # Keep the last network action: startup recovery uses it to re-apply
+        # a plan or keep an explicit reset after later settings changes.
         self._connection.execute(
             """
             UPDATE runtime_state
             SET configuration_version = configuration_version + 1,
-                observed_state = 'unknown',
-                last_action = NULL,
-                last_result = NULL,
-                last_error = NULL
+                observed_state = 'unknown'
             WHERE id = 1
             """
         )
@@ -843,11 +853,15 @@ class ConfigRepository:
         return tuple(self._schedule_from_row(row) for row in rows)
 
     def save_timer(self, timer: Timer) -> None:
-        """Persist one temporary profile override."""
+        """Persist one timer and replace other active overrides for its device."""
 
         try:
             self._connection.execute(
                 "UPDATE timers SET enabled = 0 WHERE device_id = ? AND enabled = 1",
+                (timer.device_id,),
+            )
+            self._connection.execute(
+                "UPDATE progressions SET enabled = 0 WHERE device_id = ? AND enabled = 1",
                 (timer.device_id,),
             )
             self._connection.execute(
@@ -1017,16 +1031,13 @@ class ConfigRepository:
         return tuple(self._progression_from_row(row) for row in rows)
 
     def total_domain_queries(self, ipv4_address: str) -> int:
-        """Return the bounded DNS query total for one observed client."""
+        """Return the running DNS query total for one observed client."""
 
         row = self._connection.execute(
-            """
-            SELECT COALESCE(SUM(query_count), 0) AS total
-            FROM domain_observations WHERE ipv4_address = ?
-            """,
+            "SELECT query_count FROM domain_query_totals WHERE ipv4_address = ?",
             (ipv4_address,),
         ).fetchone()
-        return int(row["total"] if row is not None else 0)
+        return int(row["query_count"]) if row is not None else 0
 
     def get_data_limit(self, device_id: str) -> Optional[DataLimit]:
         """Return one device quota or `None` when it is not stored."""
@@ -1095,6 +1106,13 @@ class ConfigRepository:
         except sqlite3.IntegrityError as error:
             self._connection.rollback()
             raise StorageError(f"could not save data limit for {data_limit.device_id}") from error
+
+    def restart_usage_counters(self) -> None:
+        """Record that every helper traffic counter restarted at zero."""
+
+        for table in ("data_limits", "group_data_limits", "service_quotas", "time_quotas"):
+            self._connection.execute(f"UPDATE {table} SET counter_bytes = 0")
+        self._connection.commit()
 
     def reset_data_limit_usage(
         self,
@@ -1250,6 +1268,17 @@ class ConfigRepository:
             self._connection.commit()
             return True
         return False
+
+    def rebaseline_group_data_usage(self, group_id: str, counter_bytes: int) -> None:
+        """Start counting a group's traffic from a new aggregate without charging it."""
+
+        if not isinstance(counter_bytes, int) or counter_bytes < 0:
+            raise StorageError("group traffic counter is invalid")
+        self._connection.execute(
+            "UPDATE group_data_limits SET counter_bytes = ? WHERE group_id = ?",
+            (counter_bytes, group_id),
+        )
+        self._connection.commit()
 
     def record_group_data_usage(
         self,
@@ -1817,6 +1846,18 @@ class ConfigRepository:
                         observation.last_seen,
                         1_000_000_000,
                     ),
+                )
+                self._connection.execute(
+                    """
+                    INSERT INTO domain_query_totals (ipv4_address, query_count)
+                    VALUES (?, ?)
+                    ON CONFLICT(ipv4_address) DO UPDATE SET
+                        query_count = MIN(
+                            domain_query_totals.query_count + excluded.query_count,
+                            ?
+                        )
+                    """,
+                    (str(observation.ipv4_address), observation.query_count, 2**62),
                 )
             self._prune_domain_observations(now=current_time)
             self._connection.commit()

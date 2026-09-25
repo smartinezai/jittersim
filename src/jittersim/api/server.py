@@ -5,6 +5,7 @@ import hmac
 import json
 import logging
 import os
+import socket
 import ssl
 import time
 from contextlib import nullcontext
@@ -79,9 +80,6 @@ WRITE_PATHS = frozenset(
         "/api/service-assignments",
         "/api/service-assignments/delete",
         "/api/time-quotas",
-        "/api/action-history",
-        "/api/diagnostics",
-        "/api/backup",
         "/api/time-quotas/reset",
         "/api/time-quotas/start",
         "/api/time-quotas/stop",
@@ -104,7 +102,8 @@ ACTION_PATHS = frozenset(("/api/apply", "/api/reset", "/api/observations/scan"))
 PUBLIC_READ_PATHS = frozenset(("/", "/api/health"))
 
 
-DASHBOARD_HTML = """<!doctype html>
+# Raw string: JavaScript escapes such as "\n" must reach the browser unchanged.
+DASHBOARD_HTML = r"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -482,7 +481,7 @@ DASHBOARD_HTML = """<!doctype html>
       gap: 0.75rem;
       grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
     }
-    label { display: grid; gap: 0.3rem; color: #c7d7eb; font-size: 0.88rem; }
+    label { display: grid; align-content: start; gap: 0.3rem; color: #c7d7eb; font-size: 0.88rem; }
     input {
       width: 100%;
       max-width: 100%;
@@ -672,7 +671,7 @@ DASHBOARD_HTML = """<!doctype html>
       <form id="profile-form">
         <div class="fields">
           <label>Profile ID
-            <input id="profile-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}">
+            <input id="profile-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}">
           </label>
           <label>Name <input id="profile-name" required></label>
         </div>
@@ -862,7 +861,7 @@ DASHBOARD_HTML = """<!doctype html>
       <h2>Assign a device</h2>
       <form id="device-form">
         <div class="fields">
-          <label>Device ID <input id="device-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}"></label>
+          <label>Device ID <input id="device-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}"></label>
           <label>Name <input id="device-name" required></label>
           <label>Reserved IPv4 address
             <input id="device-ip" required placeholder="192.168.50.10">
@@ -880,7 +879,7 @@ DASHBOARD_HTML = """<!doctype html>
       <p class="form-note">Choose several assigned devices to give them one profile override or one shared data limit. A device can belong to one group.</p>
       <form id="group-form">
         <div class="fields">
-          <label>Group ID <input id="group-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="family"></label>
+          <label>Group ID <input id="group-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}" placeholder="family"></label>
           <label>Group name <input id="group-name" required placeholder="Family devices"></label>
           <label>Profile override
             <select id="group-profile"><option value="">Use each device profile</option></select>
@@ -943,7 +942,7 @@ DASHBOARD_HTML = """<!doctype html>
       <h2>Schedule a profile</h2>
       <form id="schedule-form">
         <div class="fields">
-          <label>Schedule ID <input id="schedule-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}"></label>
+          <label>Schedule ID <input id="schedule-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}"></label>
           <label>Device
             <select id="schedule-device" required></select>
           </label>
@@ -1142,7 +1141,7 @@ DASHBOARD_HTML = """<!doctype html>
     <form id="service-assignment-form">
       <div class="fields">
         <label>Service ID
-          <input id="service-assignment-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="alice-video">
+          <input id="service-assignment-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}" placeholder="alice-video">
         </label>
         <label>Service name
           <input id="service-assignment-name" required placeholder="Video sites">
@@ -1174,7 +1173,7 @@ DASHBOARD_HTML = """<!doctype html>
     <form id="service-quota-form">
       <div class="fields">
         <label>Service ID
-          <input id="service-quota-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="alice-netflix">
+          <input id="service-quota-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}" placeholder="alice-netflix">
         </label>
         <label>Service name
           <input id="service-quota-name" required placeholder="Netflix">
@@ -1231,7 +1230,7 @@ DASHBOARD_HTML = """<!doctype html>
     <form id="time-quota-form">
       <div class="fields">
         <label>Service ID
-          <input id="time-quota-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="alice-netflix-time">
+          <input id="time-quota-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}" placeholder="alice-netflix-time">
         </label>
         <label>Service name
           <input id="time-quota-name" required placeholder="Netflix time">
@@ -1878,7 +1877,9 @@ DASHBOARD_HTML = """<!doctype html>
         error: "The last network action failed"
       };
       const summary = element("runtime-summary");
-      summary.textContent = labels[state.observed_state] || "Runtime state unavailable";
+      summary.textContent = state.observed_state === "unknown" && state.last_action
+        ? "Settings changed since the last network action"
+        : labels[state.observed_state] || "Runtime state unavailable";
       summary.className = "runtime-summary " + state.observed_state;
     }
 
@@ -2334,11 +2335,21 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    function hasAdminToken() {
+      return Boolean(element("admin-token").value.trim());
+    }
+
     async function loadObservations() {
+      const tokenMessage = "Enter the admin token to view observed domains.";
+      if (!hasAdminToken()) {
+        renderObservations({ available: false, devices: [], message: tokenMessage });
+        return;
+      }
       try {
         renderObservations(await request("/api/observations", "GET"));
       } catch (error) {
-        renderObservations({ available: false, devices: [], message: error.message });
+        const message = error.status === 401 ? tokenMessage : error.message;
+        renderObservations({ available: false, devices: [], message: message });
       }
     }
 
@@ -2373,7 +2384,7 @@ DASHBOARD_HTML = """<!doctype html>
           .map((value) => value.trim())
           .filter(Boolean)
           .map((value) => {
-            const match = /^(\\d{1,2}):(\\d{2})$/.exec(value);
+            const match = /^(\d{1,2}):(\d{2})$/.exec(value);
             if (!match || Number(match[1]) > 23 || Number(match[2]) > 59) {
               throw new Error("Reset times must use HH:MM format.");
             }
@@ -2584,7 +2595,7 @@ DASHBOARD_HTML = """<!doctype html>
       element("service-assignment-name").value = assignment.name;
       element("service-assignment-device").value = assignment.device_id;
       element("service-assignment-profile").value = assignment.profile_id;
-      element("service-assignment-domains").value = assignment.domains.join("\\n");
+      element("service-assignment-domains").value = assignment.domains.join("\n");
       element("service-assignment-enabled").checked = assignment.enabled;
       element("service-assignment-form").scrollIntoView({ behavior: "smooth", block: "center" });
     }
@@ -2822,6 +2833,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     async function loadQuotas() {
       try {
+        if (!hasAdminToken()) throw new Error("admin token required");
         const [dataLimits, groupDataLimits, serviceQuotas, timeQuotas] = await Promise.all([
           request("/api/data-limits", "GET"),
           request("/api/group-data-limits", "GET"),
@@ -3155,7 +3167,7 @@ DASHBOARD_HTML = """<!doctype html>
         const data = await request("/api/action-history", "GET");
         element("action-history").textContent = data.actions.length
           ? data.actions.map((action) => new Date(action.happened_at * 1000).toLocaleString() +
-              " — " + action.action + " — " + action.status_code).join("\\n")
+              " — " + action.action + " — " + action.status_code).join("\n")
           : "No admin actions have been recorded.";
       } catch (error) {
         element("action-history").textContent = error.message;
@@ -3385,7 +3397,7 @@ DASHBOARD_HTML = """<!doctype html>
         refreshAfterSuccess(
           result.live_applied
             ? "Timer started and the profile is active now."
-            : "Timer saved. Apply the configuration in hardware mode to start it.",
+            : "Timer saved. Apply the configuration to start it.",
         );
       } catch (error) {
         showMessage(error.message, "error");
@@ -3416,7 +3428,7 @@ DASHBOARD_HTML = """<!doctype html>
         refreshAfterSuccess(
           result.live_applied
             ? "Progression started and is active now."
-            : "Progression saved. Apply the configuration in hardware mode to start it.",
+            : "Progression saved. Apply the configuration to start it.",
         );
       } catch (error) {
         showMessage(error.message, "error");
@@ -3589,7 +3601,7 @@ DASHBOARD_HTML = """<!doctype html>
     element("service-assignment-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
-        const domains = element("service-assignment-domains").value.split(/[\\s,]+/).filter(Boolean);
+        const domains = element("service-assignment-domains").value.split(/[\s,]+/).filter(Boolean);
         if (!domains.length) throw new Error("Enter at least one HTTPS hostname.");
         const result = await request("/api/service-assignments", "POST", {
           id: element("service-assignment-id").value,
@@ -3990,6 +4002,12 @@ class ControlServer(HTTPServer):
     """Serve configuration and plan data from one repository."""
 
     allow_reuse_address = True
+    # The server handles one connection at a time, so bound how long an idle or
+    # slow client (such as a browser preconnect) can hold it.
+    request_timeout_seconds = 5.0
+    # After a reboot the dashboard can start before the helper's socket exists.
+    helper_startup_wait_seconds = 30.0
+    helper_poll_seconds = 0.5
 
     def __init__(
         self,
@@ -4018,9 +4036,21 @@ class ControlServer(HTTPServer):
         self.helper_client = helper_client
         self.scheduler = scheduler
         self.secure_transport = tls_context is not None
+        self._tls_context = tls_context
         super().__init__(server_address, ControlRequestHandler)
-        if tls_context is not None:
-            self.socket = tls_context.wrap_socket(self.socket, server_side=True)
+
+    def get_request(self) -> Tuple[socket.socket, Any]:
+        """Accept one connection and finish its TLS handshake within the timeout."""
+
+        connection, address = super().get_request()
+        connection.settimeout(self.request_timeout_seconds)
+        if self._tls_context is None:
+            return connection, address
+        try:
+            return self._tls_context.wrap_socket(connection, server_side=True), address
+        except OSError:
+            connection.close()
+            raise
 
     def response_for(self, path: str) -> Tuple[int, str, bytes]:
         """Build the response body for a supported GET path."""
@@ -4413,10 +4443,8 @@ class ControlServer(HTTPServer):
         if path == "/api/profiles":
             try:
                 profile = _profile_from_payload(payload)
-            except (KeyError, TypeError, ValueError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid profile configuration"}
-                )
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid profile configuration", error)
             self.repository.save_profile(profile)
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {"profile": _profile_payload(profile)}
@@ -4425,10 +4453,8 @@ class ControlServer(HTTPServer):
         if path == "/api/devices":
             try:
                 device = _device_from_payload(payload)
-            except (KeyError, TypeError, ValueError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid device configuration"}
-                )
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid device configuration", error)
             self.repository.save_device(device)
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {"device": _device_payload(device)}
@@ -4443,10 +4469,8 @@ class ControlServer(HTTPServer):
                 if group.profile_id is not None and self.repository.get_profile(group.profile_id) is None:
                     raise ValueError("profile does not exist")
                 self.repository.save_device_group(group)
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid device group configuration"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid device group configuration", error)
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {"group": _device_group_payload(group, repository=self.repository)}
             )
@@ -4460,19 +4484,15 @@ class ControlServer(HTTPServer):
                     return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
                         {"error": "device group does not exist"}
                     )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid device group delete request"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid device group delete request", error)
             return self._apply_quota_change("group", {"id": group_id, "deleted": True})
 
         if path == "/api/schedules":
             try:
                 schedule = _schedule_from_payload(payload)
-            except (KeyError, TypeError, ValueError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid schedule configuration"}
-                )
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid schedule configuration", error)
             self.repository.save_schedule(schedule)
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {"schedule": _schedule_payload(schedule)}
@@ -4486,10 +4506,8 @@ class ControlServer(HTTPServer):
                 if self.repository.get_profile(timer.profile_id) is None:
                     raise ValueError("profile does not exist")
                 self.repository.save_timer(timer)
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid timer configuration"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid timer configuration", error)
             if self.helper_client is None:
                 return HTTPStatus.OK, "application/json", _json_bytes(
                     {
@@ -4498,10 +4516,10 @@ class ControlServer(HTTPServer):
                         "message": "timer saved; apply the configuration in hardware mode to start it",
                     }
                 )
-            status, content_type, body = self._apply_configuration()
+            status, content_type, body = self._apply_after_change()
             response = json.loads(body.decode("utf-8"))
             response["timer"] = _timer_payload(timer)
-            response["live_applied"] = status == HTTPStatus.OK
+            response.setdefault("live_applied", status == HTTPStatus.OK)
             return status, content_type, _json_bytes(response)
 
         if path == "/api/timers/cancel":
@@ -4513,18 +4531,16 @@ class ControlServer(HTTPServer):
                     return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
                         {"error": "timer does not exist or is already inactive"}
                     )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid timer cancellation"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid timer cancellation", error)
             if self.helper_client is None:
                 return HTTPStatus.OK, "application/json", _json_bytes(
                     {"timer_id": timer_id, "live_applied": False}
                 )
-            status, content_type, body = self._apply_configuration()
+            status, content_type, body = self._apply_after_change()
             response = json.loads(body.decode("utf-8"))
             response["timer_id"] = timer_id
-            response["live_applied"] = status == HTTPStatus.OK
+            response.setdefault("live_applied", status == HTTPStatus.OK)
             return status, content_type, _json_bytes(response)
 
         if path == "/api/progressions":
@@ -4537,10 +4553,8 @@ class ControlServer(HTTPServer):
                 if self.repository.get_profile(progression.end_profile_id) is None:
                     raise ValueError("end profile does not exist")
                 self.repository.save_progression(progression)
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid progression configuration"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid progression configuration", error)
             if self.helper_client is None:
                 return HTTPStatus.OK, "application/json", _json_bytes(
                     {
@@ -4553,14 +4567,14 @@ class ControlServer(HTTPServer):
                         "message": "progression saved; apply the configuration in hardware mode to start it",
                     }
                 )
-            status, content_type, body = self._apply_configuration()
+            status, content_type, body = self._apply_after_change()
             response = json.loads(body.decode("utf-8"))
             response["progression"] = _progression_payload(
                 progression,
                 repository=self.repository,
                 now=int(time.time()),
             )
-            response["live_applied"] = status == HTTPStatus.OK
+            response.setdefault("live_applied", status == HTTPStatus.OK)
             return status, content_type, _json_bytes(response)
 
         if path == "/api/progressions/stop":
@@ -4572,18 +4586,16 @@ class ControlServer(HTTPServer):
                     return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
                         {"error": "progression does not exist or is already inactive"}
                     )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid progression stop request"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid progression stop request", error)
             if self.helper_client is None:
                 return HTTPStatus.OK, "application/json", _json_bytes(
                     {"progression_id": progression_id, "live_applied": False}
                 )
-            status, content_type, body = self._apply_configuration()
+            status, content_type, body = self._apply_after_change()
             response = json.loads(body.decode("utf-8"))
             response["progression_id"] = progression_id
-            response["live_applied"] = status == HTTPStatus.OK
+            response.setdefault("live_applied", status == HTTPStatus.OK)
             return status, content_type, _json_bytes(response)
 
         if path == "/api/data-limits":
@@ -4593,11 +4605,16 @@ class ControlServer(HTTPServer):
                     raise ValueError("device does not exist")
                 if self.repository.get_profile(data_limit.profile_id) is None:
                     raise ValueError("profile does not exist")
+                existing = self.repository.get_data_limit(data_limit.device_id)
+                if data_limit.enabled and not (existing is not None and existing.enabled):
+                    # The device counter already holds traffic from before the limit.
+                    data_limit = replace(
+                        data_limit,
+                        counter_bytes=self._quota_counter("devices", data_limit.device_id) or 0,
+                    )
                 self.repository.save_data_limit(data_limit)
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid data limit configuration"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid data limit configuration", error)
             return self._apply_quota_change(
                 "data_limit",
                 _data_limit_payload(data_limit, repository=self.repository),
@@ -4618,10 +4635,8 @@ class ControlServer(HTTPServer):
                     counter_bytes=self._quota_counter("devices", device_id),
                     reset_at=int(time.time()),
                 )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid data limit reset request"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid data limit reset request", error)
             refreshed = self.repository.get_data_limit(device_id)
             return self._apply_quota_change(
                 "data_limit",
@@ -4638,11 +4653,16 @@ class ControlServer(HTTPServer):
                     raise ValueError("device group does not exist")
                 if self.repository.get_profile(data_limit.profile_id) is None:
                     raise ValueError("profile does not exist")
+                existing = self.repository.get_group_data_limit(data_limit.group_id)
+                if data_limit.enabled and not (existing is not None and existing.enabled):
+                    # The device counters already hold traffic from before the limit.
+                    data_limit = replace(
+                        data_limit,
+                        counter_bytes=self._group_quota_counter(data_limit.group_id) or 0,
+                    )
                 self.repository.save_group_data_limit(data_limit)
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid group data limit configuration"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid group data limit configuration", error)
             return self._apply_quota_change(
                 "group_data_limit",
                 _group_data_limit_payload(data_limit, repository=self.repository),
@@ -4663,10 +4683,8 @@ class ControlServer(HTTPServer):
                     counter_bytes=self._group_quota_counter(group_id),
                     reset_at=int(time.time()),
                 )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid group data limit reset request"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid group data limit reset request", error)
             refreshed = self.repository.get_group_data_limit(group_id)
             return self._apply_quota_change(
                 "group_data_limit",
@@ -4681,10 +4699,8 @@ class ControlServer(HTTPServer):
                 if self.repository.get_profile(quota.profile_id) is None:
                     raise ValueError("profile does not exist")
                 self.repository.save_service_quota(quota)
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid service quota configuration"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid service quota configuration", error)
             return self._apply_quota_change(
                 "service_quota",
                 _service_quota_payload(quota, repository=self.repository),
@@ -4738,10 +4754,8 @@ class ControlServer(HTTPServer):
                     ):
                         raise ValueError("service assignment domains overlap")
                 self.repository.save_service_assignment(assignment)
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid service assignment configuration"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid service assignment configuration", error)
             return self._apply_quota_change(
                 "service_assignment",
                 _service_assignment_payload(assignment, repository=self.repository),
@@ -4774,10 +4788,8 @@ class ControlServer(HTTPServer):
                     counter_bytes=self._quota_counter("services", quota_id),
                     reset_at=int(time.time()),
                 )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid service quota reset request"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid service quota reset request", error)
             refreshed = self.repository.get_service_quota(quota_id)
             return self._apply_quota_change(
                 "service_quota",
@@ -4792,10 +4804,8 @@ class ControlServer(HTTPServer):
                 if self.repository.get_profile(quota.profile_id) is None:
                     raise ValueError("profile does not exist")
                 self.repository.save_time_quota(quota)
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid time quota configuration"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid time quota configuration", error)
             return self._apply_quota_change(
                 "time_quota",
                 _time_quota_payload(quota, repository=self.repository),
@@ -4824,10 +4834,8 @@ class ControlServer(HTTPServer):
                     return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
                         {"error": "time quota does not exist"}
                     )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid time quota start request"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid time quota start request", error)
             return self._apply_quota_change(
                 "time_quota",
                 _time_quota_payload(refreshed, repository=self.repository),
@@ -4842,10 +4850,8 @@ class ControlServer(HTTPServer):
                     return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
                         {"error": "time quota does not exist"}
                     )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid time quota stop request"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid time quota stop request", error)
             refreshed = self.repository.get_time_quota(quota_id)
             return self._apply_quota_change(
                 "time_quota",
@@ -4869,10 +4875,8 @@ class ControlServer(HTTPServer):
                     ),
                     reset_at=int(time.time()),
                 )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid time quota reset request"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid time quota reset request", error)
             refreshed = self.repository.get_time_quota(quota_id)
             return self._apply_quota_change(
                 "time_quota",
@@ -4882,10 +4886,8 @@ class ControlServer(HTTPServer):
         if path == "/api/policies":
             try:
                 mac_policy, website_policy = _policies_from_payload(payload)
-            except (KeyError, TypeError, ValueError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid network policy configuration"}
-                )
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid network policy configuration", error)
             self.repository.save_mac_policy(mac_policy)
             self.repository.save_website_policy(website_policy)
             return HTTPStatus.OK, "application/json", _json_bytes(
@@ -4902,10 +4904,8 @@ class ControlServer(HTTPServer):
                     ssid=payload["ssid"],
                     password=payload["password"],
                 )
-            except (KeyError, TypeError, ValueError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid access point settings"}
-                )
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid access point settings", error)
             except HelperClientError:
                 LOGGER.exception("access point configuration failed")
                 return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
@@ -5037,10 +5037,8 @@ class ControlServer(HTTPServer):
                 website_domains=tuple(dict.fromkeys(profile.website_domains + (domain,))),
             )
             self.repository.save_profile(updated)
-        except (KeyError, TypeError, ValueError, StorageError):
-            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                {"error": "could not add domain to profile"}
-            )
+        except (KeyError, TypeError, ValueError, StorageError) as error:
+            return _bad_request("could not add domain to profile", error)
         return HTTPStatus.OK, "application/json", _json_bytes(
             {"profile": _profile_payload(updated)}
         )
@@ -5056,10 +5054,8 @@ class ControlServer(HTTPServer):
                 blocked_domains=tuple(dict.fromkeys(policy.blocked_domains + (domain,))),
             )
             self.repository.save_website_policy(updated)
-        except (KeyError, TypeError, ValueError, StorageError):
-            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                {"error": "could not add domain to global block list"}
-            )
+        except (KeyError, TypeError, ValueError, StorageError) as error:
+            return _bad_request("could not add domain to global block list", error)
         return HTTPStatus.OK, "application/json", _json_bytes(
             {"policies": _policies_payload(self.repository)}
         )
@@ -5073,10 +5069,8 @@ class ControlServer(HTTPServer):
             )
         try:
             device = _connected_device_from_payload(payload, self.repository)
-        except (KeyError, TypeError, ValueError):
-            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                {"error": "invalid connected-device profile assignment"}
-            )
+        except (KeyError, TypeError, ValueError) as error:
+            return _bad_request("invalid connected-device profile assignment", error)
         try:
             snapshot = self.helper_client.connected_device_snapshot()
         except HelperClientError:
@@ -5151,14 +5145,28 @@ class ControlServer(HTTPServer):
                     "message": "settings saved; apply the configuration in hardware mode to start them",
                 }
             )
-        status, content_type, body = self._apply_configuration()
+        status, content_type, body = self._apply_after_change()
         response = json.loads(body.decode("utf-8"))
         response[key] = value
-        response["live_applied"] = status == HTTPStatus.OK
+        response.setdefault("live_applied", status == HTTPStatus.OK)
         return status, content_type, _json_bytes(response)
 
+    def _apply_after_change(self) -> Tuple[int, str, bytes]:
+        """Re-apply the plan for a saved change unless the network was reset."""
+
+        if self.repository.get_runtime_state().last_action == "reset":
+            # Only an explicit Apply may undo a Reset.
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {
+                    "live_applied": False,
+                    "message": "saved; the network is reset, so apply the configuration to use it",
+                }
+            )
+        return self._apply_configuration()
+
     def _apply_configuration(self) -> Tuple[int, str, bytes]:
-        operation = self.scheduler.control_operation() if self.scheduler is not None else nullcontext()
+        # Scheduled applies, manual applies and resets never interleave.
+        operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
         with operation:
             return self._apply_configuration_locked()
 
@@ -5167,6 +5175,9 @@ class ControlServer(HTTPServer):
             return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
                 {"error": "network helper is not configured"}
             )
+        return self._apply_current_plan()
+
+    def _apply_current_plan(self) -> Tuple[int, str, bytes]:
         try:
             plan = (
                 self.scheduler.build_plan(repository=self.repository)
@@ -5183,6 +5194,9 @@ class ControlServer(HTTPServer):
             last_result=None,
             last_error=None,
         )
+        if self.scheduler is not None:
+            # Applying recreates the helper counters, so record their traffic first.
+            self.scheduler.sample_usage(repository=self.repository)
         try:
             result = self.helper_client.apply(plan=plan)
         except HelperClientError as error:
@@ -5204,6 +5218,7 @@ class ControlServer(HTTPServer):
                     "state": _runtime_state_payload(state),
                 }
             )
+        self.repository.restart_usage_counters()
         state = self.repository.update_runtime_state(
             observed_state="applied",
             last_action="apply",
@@ -5217,7 +5232,7 @@ class ControlServer(HTTPServer):
         )
 
     def _reset_network(self) -> Tuple[int, str, bytes]:
-        operation = self.scheduler.control_operation() if self.scheduler is not None else nullcontext()
+        operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
         with operation:
             return self._reset_network_locked()
 
@@ -5227,6 +5242,8 @@ class ControlServer(HTTPServer):
                 {"error": "network helper is not configured"}
             )
         if self.scheduler is not None:
+            # Resetting removes the helper counters, so record their traffic first.
+            self.scheduler.sample_usage(repository=self.repository)
             self.scheduler.pause()
         self.repository.update_runtime_state(
             observed_state="resetting",
@@ -5271,20 +5288,40 @@ class ControlServer(HTTPServer):
         if self.helper_client is None:
             return
         state = self.repository.get_runtime_state()
+        if state.last_action not in {"reset", "apply", "schedule"}:
+            return
+        if not self._wait_for_helper():
+            LOGGER.error("network helper did not answer, so network state was not recovered")
+            return
         if state.last_action == "reset":
             status, _, _ = self._reset_network()
-        elif state.last_action in {"apply", "schedule"}:
-            status, _, _ = self._apply_configuration()
         else:
-            return
+            status, _, _ = self._apply_configuration()
         if status != HTTPStatus.OK:
             LOGGER.error("network state recovery did not complete successfully")
+
+    def _wait_for_helper(self) -> bool:
+        """Return whether the helper answers before the startup wait ends."""
+
+        deadline = time.monotonic() + self.helper_startup_wait_seconds
+        while True:
+            try:
+                self.helper_client.ping()
+                return True
+            except HelperClientError:
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(self.helper_poll_seconds)
 
 
 class ControlRequestHandler(BaseHTTPRequestHandler):
     """Handle the control-plane routes."""
 
     server: ControlServer
+
+    @property
+    def timeout(self) -> float:
+        return self.server.request_timeout_seconds
 
     def do_GET(self) -> None:
         path = urlsplit(self.path).path
@@ -5311,6 +5348,11 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             status = HTTPStatus.INTERNAL_SERVER_ERROR
             content_type = "application/json"
             body = _json_bytes({"error": "stored configuration could not be read"})
+        except Exception:
+            LOGGER.exception("control-plane response for %s failed", path)
+            status = HTTPStatus.INTERNAL_SERVER_ERROR
+            content_type = "application/json"
+            body = _json_bytes({"error": "request could not be processed"})
         headers = (
             {"Content-Disposition": 'attachment; filename="jittersim-backup.db"'}
             if path == "/api/backup"
@@ -5371,6 +5413,11 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             status = HTTPStatus.CONFLICT
             content_type = "application/json"
             body = _json_bytes({"error": "configuration could not be saved"})
+        except Exception:
+            LOGGER.exception("control-plane request for %s failed", path)
+            status = HTTPStatus.INTERNAL_SERVER_ERROR
+            content_type = "application/json"
+            body = _json_bytes({"error": "request could not be processed"})
         try:
             self.server.repository.record_action(action=path, status_code=int(status))
         except StorageError:
@@ -5396,7 +5443,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             raise RequestError("request body is incomplete")
         try:
             payload = json.loads(raw_body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
             raise RequestError("request body must be valid JSON") from error
         if not isinstance(payload, dict):
             raise RequestError("request body must contain a JSON object")
@@ -5423,6 +5470,29 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
 
 class RequestError(ValueError):
     """Raised when an HTTP request body cannot be safely decoded."""
+
+
+def _bad_request(message: str, error: Exception) -> Tuple[int, str, bytes]:
+    """Reject a request, adding the validation reason when there is one."""
+
+    if isinstance(error, KeyError) and error.args:
+        message = f"{message}: missing {error.args[0]}"
+    elif isinstance(error, ValueError) and str(error):
+        message = f"{message}: {error}"
+    return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes({"error": message})
+
+
+def _list_field(payload: Dict[str, Any], key: str, *, required: bool = False) -> tuple:
+    """Read a JSON list; tuple() alone would split a string into characters."""
+
+    if key not in payload:
+        if required:
+            raise KeyError(key)
+        return ()
+    value = payload[key]
+    if not isinstance(value, list):
+        raise ValueError(f"{key} must be a list")
+    return tuple(value)
 
 
 def _impairment_from_payload(payload: Any) -> Impairment:
@@ -5475,7 +5545,7 @@ def _profile_from_payload(payload: Dict[str, Any]) -> Profile:
             payload.get("outage_interval_randomness")
         ),
         website_mode=payload.get("website_mode", "unrestricted"),
-        website_domains=tuple(payload.get("website_domains", ())),
+        website_domains=_list_field(payload, "website_domains"),
         website_randomness=_randomness_from_payload(payload.get("website_randomness")),
     )
 
@@ -5495,7 +5565,7 @@ def _schedule_from_payload(payload: Dict[str, Any]) -> Schedule:
         id=payload["id"],
         device_id=payload["device_id"],
         profile_id=payload["profile_id"],
-        days_of_week=tuple(payload["days_of_week"]),
+        days_of_week=_list_field(payload, "days_of_week", required=True),
         start_minute=payload["start_minute"],
         end_minute=payload["end_minute"],
         enabled=payload.get("enabled", True),
@@ -5523,7 +5593,7 @@ def _quota_schedule_from_payload(payload: Dict[str, Any]) -> Tuple[str, int, Tup
 
     reset_mode = payload.get("reset_mode", "manual")
     reset_interval_seconds = payload.get("reset_interval_seconds", 0)
-    reset_times = tuple(payload.get("reset_times", ()))
+    reset_times = _list_field(payload, "reset_times")
     return reset_mode, reset_interval_seconds, reset_times
 
 
@@ -5557,7 +5627,7 @@ def _device_group_from_payload(payload: Dict[str, Any]) -> DeviceGroup:
     return DeviceGroup(
         id=payload.get("id", f"group-{time.time_ns()}"),
         name=payload["name"],
-        device_ids=tuple(payload["device_ids"]),
+        device_ids=_list_field(payload, "device_ids", required=True),
         profile_id=payload.get("profile_id") or None,
     )
 
@@ -5595,7 +5665,9 @@ def _service_quota_from_payload(
 
     quota_id = payload.get("id", f"service-{time.time_ns()}")
     existing = repository.get_service_quota(quota_id)
-    normalized_domains = tuple(normalize_domain(domain) for domain in payload["domains"])
+    normalized_domains = tuple(
+        normalize_domain(domain) for domain in _list_field(payload, "domains", required=True)
+    )
     device = repository.get_device(payload["device_id"])
     if device is not None:
         observed_domains = {
@@ -5640,7 +5712,9 @@ def _time_quota_from_payload(
 
     quota_id = payload.get("id", f"time-{time.time_ns()}")
     existing = repository.get_time_quota(quota_id)
-    normalized_domains = tuple(normalize_domain(domain) for domain in payload["domains"])
+    normalized_domains = tuple(
+        normalize_domain(domain) for domain in _list_field(payload, "domains", required=True)
+    )
     device = repository.get_device(payload["device_id"])
     if device is not None:
         observed_domains = {
@@ -5708,7 +5782,7 @@ def _progression_from_payload(
         traffic_target_queries=traffic_target_queries,
         traffic_baseline_queries=repository.total_domain_queries(str(device.ipv4_address)),
         traffic_target_bytes=traffic_target_bytes,
-        website_domains=tuple(payload.get("website_domains", ())),
+        website_domains=_list_field(payload, "website_domains"),
     )
 
 
@@ -5720,13 +5794,13 @@ def _policies_from_payload(payload: Dict[str, Any]) -> Tuple[MacPolicy, WebsiteP
     return (
         MacPolicy(
             mode=mac_payload.get("mode", "disabled"),
-            allowlist=tuple(mac_payload.get("allowlist", ())),
-            denylist=tuple(mac_payload.get("denylist", ())),
+            allowlist=_list_field(mac_payload, "allowlist"),
+            denylist=_list_field(mac_payload, "denylist"),
         ),
         WebsitePolicy(
             mode=website_payload.get("mode", "unrestricted"),
-            allowed_domains=tuple(website_payload.get("allowed_domains", ())),
-            blocked_domains=tuple(website_payload.get("blocked_domains", ())),
+            allowed_domains=_list_field(website_payload, "allowed_domains"),
+            blocked_domains=_list_field(website_payload, "blocked_domains"),
         ),
     )
 
@@ -5777,10 +5851,11 @@ def _authorization_matches(
     if expected_token is None or authorization_header is None:
         return False
     scheme, separator, token = authorization_header.partition(" ")
+    # Compare bytes: compare_digest rejects str values with non-ASCII characters.
     return (
         separator == " "
         and scheme.lower() == "bearer"
-        and hmac.compare_digest(token, expected_token)
+        and hmac.compare_digest(token.encode("utf-8"), expected_token.encode("utf-8"))
     )
 
 

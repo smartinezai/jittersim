@@ -293,6 +293,72 @@ class ConfigRepositoryTests(unittest.TestCase):
         self.assertTrue(self.repository.delete_progression(progression.id))
         self.assertEqual(self.repository.list_active_progressions(now=200), ())
 
+    def test_timer_and_progression_replace_each_other_for_a_device(self) -> None:
+        self.repository.save_profile(Profile(id="normal", name="Normal"))
+        self.repository.save_profile(Profile(id="slow", name="Slow"))
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        progression = Progression(
+            id="degrade",
+            device_id="alice",
+            start_profile_id="normal",
+            end_profile_id="slow",
+            started_at=100,
+            duration_seconds=600,
+        )
+        timer = Timer(
+            id="offline",
+            device_id="alice",
+            profile_id="slow",
+            started_at=200,
+            expires_at=800,
+        )
+
+        self.repository.save_progression(progression)
+        self.repository.save_timer(timer)
+
+        # The newest override wins, so the timer listed as active is the one applied.
+        self.assertEqual(self.repository.list_active_progressions(now=300), ())
+        self.assertEqual(self.repository.list_active_timers(now=300), (timer,))
+
+        self.repository.save_progression(progression)
+
+        self.assertEqual(self.repository.list_active_progressions(now=300), (progression,))
+        self.assertEqual(self.repository.list_active_timers(now=300), ())
+
+    def test_query_totals_keep_counting_after_old_observations_are_pruned(self) -> None:
+        day = 24 * 60 * 60
+        self.repository.save_domain_observations(
+            (DomainObservation("192.168.50.10", "old.example", 7, 100, 100),),
+            now=100,
+        )
+        # Saving 31 days later prunes the first row.
+        later = 100 + 31 * day
+        self.repository.save_domain_observations(
+            (DomainObservation("192.168.50.10", "new.example", 3, later, later),),
+            now=later,
+        )
+
+        self.assertEqual(
+            [observation.domain for observation in self.repository.list_domain_observations()],
+            ["new.example"],
+        )
+        self.assertEqual(self.repository.total_domain_queries("192.168.50.10"), 10)
+
+    def test_query_totals_start_from_existing_observations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = f"{directory}/jittersim.db"
+            with ConfigRepository(path) as repository:
+                repository.save_domain_observations(
+                    (DomainObservation("192.168.50.10", "example.com", 7, 100, 100),),
+                    now=100,
+                )
+                # Simulate a database written before running totals existed.
+                repository._connection.execute("DROP TABLE domain_query_totals")
+                repository._connection.commit()
+
+            with ConfigRepository(path) as repository:
+                self.assertEqual(repository.total_domain_queries("192.168.50.10"), 7)
+
     def test_round_trips_byte_progression_targets(self) -> None:
         self.repository.save_profile(Profile(id="normal", name="Normal"))
         self.repository.save_profile(Profile(id="slow", name="Slow"))
@@ -505,7 +571,8 @@ class ConfigRepositoryTests(unittest.TestCase):
         updated = self.repository.get_runtime_state()
         self.assertEqual(updated.configuration_version, 2)
         self.assertEqual(updated.observed_state, "unknown")
-        self.assertIsNone(updated.last_action)
+        # Startup recovery relies on the last explicit network action.
+        self.assertEqual(updated.last_action, "apply")
 
     def test_merges_and_lists_domain_observations_without_bumping_configuration(self) -> None:
         self.repository.save_domain_observations(

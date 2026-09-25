@@ -108,9 +108,11 @@ def plan_to_payload(plan: NetworkPlan) -> Dict[str, Any]:
         "website_filters": [
             {
                 "device_ip": str(website_filter.device_ip),
-                "allowed_addresses": [
-                    str(address) for address in website_filter.allowed_addresses
-                ],
+                "allowed_addresses": (
+                    None
+                    if website_filter.allowed_addresses is None
+                    else [str(address) for address in website_filter.allowed_addresses]
+                ),
                 "blocked_addresses": [
                     str(address) for address in website_filter.blocked_addresses
                 ],
@@ -406,11 +408,16 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
         for index, raw_filter in enumerate(website_filters_data):
             filter_data = _as_mapping(raw_filter, f"website_filters[{index}]")
             device_ip = IPv4Address(filter_data["device_ip"])
-            allowed_addresses = tuple(
-                IPv4Address(value)
-                for value in _as_list(
-                    filter_data.get("allowed_addresses", []),
-                    f"website_filters[{index}].allowed_addresses",
+            allowed_data = filter_data.get("allowed_addresses", [])
+            allowed_addresses = (
+                None
+                if allowed_data is None
+                else tuple(
+                    IPv4Address(value)
+                    for value in _as_list(
+                        allowed_data,
+                        f"website_filters[{index}].allowed_addresses",
+                    )
                 )
             )
             blocked_filter_addresses = tuple(

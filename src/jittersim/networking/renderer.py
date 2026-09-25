@@ -10,6 +10,24 @@ from .topology import Topology
 
 PROJECT_TABLE = "jittersim"
 ROOT_HANDLE = "10:"
+# prio class minors start at 1, so band 0 is class 10:1. Band 0 keeps unmarked
+# traffic (the Pi itself, ARP, DHCP and unassigned clients) on a fair queue, and
+# mark N uses band N, which is class 10:N+1. tc reads minors and handles as hex.
+DEFAULT_CLASS = f"{ROOT_HANDLE}1"
+# Each child kind has its own handles. "tc qdisc replace" then changes a child
+# of the same kind in place, keeping the packets it holds, and swaps in a new
+# child when a band changes kind; tc cannot change a netem into an fq_codel.
+CHILD_HANDLE_BASES = {"netem": 0x40, "fq_codel": 0x60}
+
+
+def band_class(mark: int) -> str:
+    """Return the prio class that carries traffic with this mark."""
+
+    return f"{ROOT_HANDLE}{mark + 1:x}"
+
+
+def _child_handle(kind: str, mark: int) -> str:
+    return f"{CHILD_HANDLE_BASES[kind] + mark:x}:"
 
 
 def _render_set(values: Sequence[object]) -> str:
@@ -25,20 +43,27 @@ def _format_impairment_arguments(queue: QueueSpec) -> List[str]:
             arguments.append(f"{impairment.jitter_ms}ms")
     if impairment.loss_percent:
         arguments.extend(["loss", "random", f"{impairment.loss_percent}%"])
-    if impairment.reorder_percent:
+    # netem reorders by sending some packets without the configured delay, so tc
+    # rejects reordering without one. Randomness can also switch the delay off.
+    if impairment.reorder_percent and impairment.delay_ms:
         arguments.extend(["reorder", f"{impairment.reorder_percent}%"])
     if impairment.duplicate_percent:
         arguments.extend(["duplicate", f"{impairment.duplicate_percent}%"])
-    if impairment.corrupt_percent:
-        arguments.extend(["corrupt", f"{impairment.corrupt_percent}%"])
-    if impairment.bandwidth_kbit is not None:
-        arguments.extend(["rate", f"{impairment.bandwidth_kbit}kbit"])
+    # "tc qdisc replace" changes an existing netem in place and keeps any
+    # corrupt or rate setting it is not given, so always state both.
+    arguments.extend(["corrupt", f"{impairment.corrupt_percent}%"])
+    rate = "0bit" if impairment.bandwidth_kbit is None else f"{impairment.bandwidth_kbit}kbit"
+    arguments.extend(["rate", rate])
     return arguments
 
 
 def _render_nft_script(plan: NetworkPlan, topology: Topology) -> str:
     test_interface = topology.test_interface
     lines = [
+        # nft applies the script as one transaction: declaring, deleting and
+        # rebuilding the table replaces it without a moment with no rules.
+        f"add table inet {PROJECT_TABLE}",
+        f"delete table inet {PROJECT_TABLE}",
         f"add table inet {PROJECT_TABLE}",
         (
             f"add chain inet {PROJECT_TABLE} forward "
@@ -82,14 +107,14 @@ def _render_nft_script(plan: NetworkPlan, topology: Topology) -> str:
             "comment \"block global website destinations\""
         )
     for website_filter in plan.website_filters:
-        allowed = _render_set(website_filter.allowed_addresses)
         if website_filter.allowed_addresses:
+            allowed = _render_set(website_filter.allowed_addresses)
             lines.append(
                 f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
                 f"ip saddr {website_filter.device_ip} ip daddr != {allowed} drop "
                 "comment \"enforce profile website allowlist\""
             )
-        else:
+        elif website_filter.allowed_addresses is not None:
             lines.append(
                 f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
                 f"ip saddr {website_filter.device_ip} drop "
@@ -166,12 +191,7 @@ def _render_nft_script(plan: NetworkPlan, topology: Topology) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _render_tc_commands(
-    *,
-    queues: Sequence[QueueSpec],
-    interface: str,
-    device_count: int,
-) -> List[Command]:
+def _render_tc_commands(*, queues: Sequence[QueueSpec], interface: str) -> List[Command]:
     commands = [
         Command(
             executable="tc",
@@ -185,7 +205,7 @@ def _render_tc_commands(
                 ROOT_HANDLE,
                 "prio",
                 "bands",
-                str(device_count + 1),
+                str(max(queue.mark for queue in queues) + 1),
                 "priomap",
                 *("0" for _ in range(16)),
             ),
@@ -199,7 +219,7 @@ def _render_tc_commands(
                 "dev",
                 interface,
                 "parent",
-                f"{ROOT_HANDLE}1",
+                DEFAULT_CLASS,
                 "handle",
                 "100:",
                 "fq_codel",
@@ -208,67 +228,23 @@ def _render_tc_commands(
         ),
     ]
     for queue in queues:
-        band = str(queue.mark + 1)
-        child_handle = f"{queue.mark + 10}:"
+        band = band_class(queue.mark)
+        if queue.impairment != Impairment():
+            child = (_child_handle("netem", queue.mark), *_format_impairment_arguments(queue))
+            purpose = (
+                f"apply {queue.direction.value} impairment for "
+                f"device {queue.device_id} on {interface}"
+            )
+        else:
+            child = (_child_handle("fq_codel", queue.mark), "fq_codel")
+            purpose = f"preserve fair queuing for device {queue.device_id} on {interface}"
         commands.append(
             Command(
                 executable="tc",
-                arguments=(
-                    "qdisc",
-                    "del",
-                    "dev",
-                    interface,
-                    "parent",
-                    f"{ROOT_HANDLE}{band}",
-                    "handle",
-                    child_handle,
-                ),
-                purpose=f"clear the previous queue for device {queue.device_id} on {interface}",
-                ignore_failure=True,
+                arguments=("qdisc", "replace", "dev", interface, "parent", band, "handle", *child),
+                purpose=purpose,
             )
         )
-        if queue.impairment != Impairment():
-            commands.append(
-                Command(
-                    executable="tc",
-                    arguments=(
-                        "qdisc",
-                        "replace",
-                        "dev",
-                        interface,
-                        "parent",
-                        f"{ROOT_HANDLE}{band}",
-                        "handle",
-                        child_handle,
-                        *_format_impairment_arguments(queue),
-                    ),
-                    purpose=(
-                        f"apply {queue.direction.value} impairment for "
-                        f"device {queue.device_id} on {interface}"
-                    ),
-                )
-            )
-        else:
-            commands.append(
-                Command(
-                    executable="tc",
-                    arguments=(
-                        "qdisc",
-                        "replace",
-                        "dev",
-                        interface,
-                        "parent",
-                        f"{ROOT_HANDLE}{band}",
-                        "handle",
-                        child_handle,
-                        "fq_codel",
-                    ),
-                    purpose=(
-                        f"preserve fair queuing for device {queue.device_id} "
-                        f"on {interface}"
-                    ),
-                )
-            )
         for protocol in ("ip", "ipv6"):
             commands.append(
                 Command(
@@ -288,7 +264,7 @@ def _render_tc_commands(
                         str(queue.mark),
                         "fw",
                         "flowid",
-                        f"{ROOT_HANDLE}{band}",
+                        band,
                     ),
                     purpose=f"route {protocol} mark {queue.mark} on {interface}",
                 )
@@ -302,34 +278,21 @@ def render_command_plan(*, plan: NetworkPlan, topology: Topology) -> Sequence[Co
     commands = [
         Command(
             executable="nft",
-            arguments=("delete", "table", "inet", PROJECT_TABLE),
-            purpose="remove the previous project-owned nftables table",
-            ignore_failure=True,
-        ),
-        Command(
-            executable="nft",
             arguments=("-f", "-"),
-            purpose="install project-owned device mark rules",
+            purpose="replace the project-owned nftables rules",
             stdin=_render_nft_script(plan, topology),
         ),
     ]
     upload_queues = tuple(queue for queue in plan.queues if queue.direction == Direction.UPLOAD)
     download_queues = tuple(queue for queue in plan.queues if queue.direction == Direction.DOWNLOAD)
+    # A plan without queues is applied after a reset, which removes the roots.
     if upload_queues:
         commands.extend(
-            _render_tc_commands(
-                queues=upload_queues,
-                interface=topology.uplink_interface,
-                device_count=max(queue.mark for queue in upload_queues),
-            )
+            _render_tc_commands(queues=upload_queues, interface=topology.uplink_interface)
         )
     if download_queues:
         commands.extend(
-            _render_tc_commands(
-                queues=download_queues,
-                interface=topology.test_interface,
-                device_count=max(queue.mark for queue in download_queues),
-            )
+            _render_tc_commands(queues=download_queues, interface=topology.test_interface)
         )
     return tuple(commands)
 

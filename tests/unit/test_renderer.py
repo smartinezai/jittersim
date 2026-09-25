@@ -36,8 +36,8 @@ class RendererTests(unittest.TestCase):
             plan=plan,
             topology=Topology(uplink_interface="enp1s0", test_interface="wlp2s0"),
         )
-        self.assertEqual([command.executable for command in commands], ["nft", "nft"])
-        self.assertIn("add chain inet jittersim forward", commands[1].stdin)
+        self.assertEqual([command.executable for command in commands], ["nft"])
+        self.assertIn("add chain inet jittersim forward", commands[0].stdin)
 
     def test_renders_marks_and_direction_specific_queues(self) -> None:
         profiles = {
@@ -79,16 +79,14 @@ class RendererTests(unittest.TestCase):
             topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
         )
 
-        self.assertTrue(commands[0].ignore_failure)
-        self.assertEqual(commands[0].argv, ("nft", "delete", "table", "inet", "jittersim"))
-        self.assertEqual(commands[1].argv, ("nft", "-f", "-"))
-        self.assertIn("ip saddr 192.168.50.10 meta mark set 1", commands[1].stdin or "")
-        self.assertIn("ip daddr 192.168.50.11 meta mark set 2", commands[1].stdin or "")
-        self.assertIn("usage-service alice-video upload", commands[1].stdin or "")
-        self.assertIn("apply-service-quota alice-video download", commands[1].stdin or "")
-        self.assertIn("meta mark set 3", commands[1].stdin or "")
-        self.assertIn("add chain inet jittersim output", commands[1].stdin or "")
-        self.assertIn("oifname \"eth0\" meta mark 1 counter", commands[1].stdin or "")
+        self.assertEqual(commands[0].argv, ("nft", "-f", "-"))
+        self.assertIn("ip saddr 192.168.50.10 meta mark set 1", commands[0].stdin or "")
+        self.assertIn("ip daddr 192.168.50.11 meta mark set 2", commands[0].stdin or "")
+        self.assertIn("usage-service alice-video upload", commands[0].stdin or "")
+        self.assertIn("apply-service-quota alice-video download", commands[0].stdin or "")
+        self.assertIn("meta mark set 3", commands[0].stdin or "")
+        self.assertIn("add chain inet jittersim output", commands[0].stdin or "")
+        self.assertIn("oifname \"eth0\" meta mark 1 counter", commands[0].stdin or "")
 
         root_commands = [
             command for command in commands if "create project queue root" in command.purpose
@@ -136,6 +134,258 @@ class RendererTests(unittest.TestCase):
             if "upload impairment for device quota:alice-video" in command.purpose
         ]
         self.assertEqual(len(quota_upload), 1)
+
+    def test_unmarked_traffic_bypasses_device_impairments(self) -> None:
+        lossy = Impairment(loss_percent=100)
+        plan = compile_plan(
+            devices=(make_device("alice", "192.168.50.10", "lossy"),),
+            profiles={"lossy": Profile(id="lossy", name="Lossy", upload=lossy, download=lossy)},
+        )
+
+        commands = render_command_plan(
+            plan=plan,
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+        )
+
+        for interface in ("eth0", "wlan0"):
+            with self.subTest(interface=interface):
+                tc = [command.argv for command in commands if interface in command.argv]
+                root = next(argv for argv in tc if "root" in argv)
+                netem = [argv for argv in tc if "netem" in argv]
+                filters = [argv for argv in tc if argv[1] == "filter"]
+                # Unmarked traffic (the Pi itself, ARP, DHCP, unassigned clients)
+                # uses band 0, which is class 10:1.
+                self.assertEqual(root[root.index("priomap") + 1 :], ("0",) * 16)
+                # That band gets a fair queue, replacing any impairment an older
+                # layout attached to it.
+                self.assertIn(
+                    (
+                        "tc", "qdisc", "replace", "dev", interface,
+                        "parent", "10:1", "handle", "100:", "fq_codel",
+                    ),
+                    tc,
+                )
+                self.assertEqual([argv[argv.index("parent") + 1] for argv in netem], ["10:2"])
+                self.assertEqual({argv[argv.index("flowid") + 1] for argv in filters}, {"10:2"})
+
+    def test_filters_use_a_fixed_priority_so_reapplying_replaces_them(self) -> None:
+        plan = compile_plan(
+            devices=(
+                make_device("alice", "192.168.50.10", "normal"),
+                make_device("bob", "192.168.50.11", "normal"),
+            ),
+            profiles={"normal": Profile(id="normal", name="Normal")},
+        )
+
+        commands = render_command_plan(
+            plan=plan,
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+        )
+
+        filters = [command.argv for command in commands if command.argv[1] == "filter"]
+        # One fixed priority per mark and protocol; tc rejects two protocols
+        # at the same priority.
+        self.assertEqual(
+            sorted(
+                (
+                    argv[4],
+                    argv[argv.index("protocol") + 1],
+                    argv[argv.index("pref") + 1],
+                    argv[argv.index("handle") + 1],
+                )
+                for argv in filters
+            ),
+            sorted(
+                (interface, protocol, pref, mark)
+                for interface in ("eth0", "wlan0")
+                for protocol, pref, mark in (
+                    ("ip", "1", "1"),
+                    ("ip", "2", "2"),
+                    ("ipv6", "101", "1"),
+                    ("ipv6", "102", "2"),
+                )
+            ),
+        )
+
+    def test_reordering_is_only_rendered_with_a_delay(self) -> None:
+        profiles = {
+            "reorder": Profile(
+                id="reorder",
+                name="Reorder",
+                upload=Impairment(reorder_percent=10),
+                download=Impairment(delay_ms=50, reorder_percent=10),
+            )
+        }
+        plan = compile_plan(
+            devices=(make_device("alice", "192.168.50.10", "reorder"),),
+            profiles=profiles,
+        )
+
+        commands = render_command_plan(
+            plan=plan,
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+        )
+
+        upload = next(c for c in commands if "upload impairment for device alice" in c.purpose)
+        download = next(c for c in commands if "download impairment for device alice" in c.purpose)
+        # tc rejects "netem reorder" unless the queue also delays packets.
+        self.assertNotIn("reorder", upload.argv)
+        self.assertIn("reorder", download.argv)
+
+    def test_plans_without_queues_render_no_queue_commands(self) -> None:
+        plan = compile_plan(
+            devices=(),
+            profiles={},
+            mac_policy=MacPolicy(mode="denylist", denylist=("aa:bb:cc:dd:ee:ff",)),
+        )
+
+        commands = render_command_plan(
+            plan=plan,
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+        )
+
+        # prio needs at least two bands; the applier resets the roots instead.
+        self.assertEqual([command.executable for command in commands], ["nft"])
+
+    def test_each_child_kind_has_its_own_handle(self) -> None:
+        topology = Topology(uplink_interface="eth0", test_interface="wlan0")
+
+        def child(profile):
+            plan = compile_plan(
+                devices=(make_device("alice", "192.168.50.10", profile.id),),
+                profiles={profile.id: profile},
+            )
+            commands = render_command_plan(plan=plan, topology=topology)
+            self.assertFalse(any(command.argv[1:3] == ("qdisc", "del") for command in commands))
+            (argv,) = [
+                command.argv
+                for command in commands
+                if "eth0" in command.argv and "10:2" in command.argv and command.argv[1] == "qdisc"
+            ]
+            return argv[argv.index("handle") + 1 :]
+
+        normal = child(Profile(id="normal", name="Normal"))
+        slow = child(Profile(id="slow", name="Slow", upload=Impairment(delay_ms=50)))
+
+        # tc cannot change a netem into an fq_codel, so a band that switches kind
+        # gets a new child under another handle instead of a change.
+        self.assertEqual(normal, ("61:", "fq_codel"))
+        self.assertEqual(slow[:3], ("41:", "netem", "delay"))
+
+    def test_nftables_rules_are_replaced_in_one_transaction(self) -> None:
+        plan = compile_plan(
+            devices=(make_device("alice", "192.168.50.10", "normal"),),
+            profiles={"normal": Profile(id="normal", name="Normal")},
+        )
+
+        commands = render_command_plan(
+            plan=plan,
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+        )
+
+        nft = [command for command in commands if command.executable == "nft"]
+        self.assertEqual([command.argv for command in nft], [("nft", "-f", "-")])
+        self.assertTrue(
+            (nft[0].stdin or "").startswith(
+                "add table inet jittersim\n"
+                "delete table inet jittersim\n"
+                "add table inet jittersim\n"
+            )
+        )
+
+    def test_class_ids_are_hexadecimal(self) -> None:
+        slow = Profile(id="slow", name="Slow", upload=Impairment(delay_ms=20))
+        plan = compile_plan(
+            devices=tuple(
+                make_device(f"device-{index:02d}", f"192.168.50.{index + 10}", "slow")
+                for index in range(1, 16)
+            ),
+            profiles={"slow": slow},
+        )
+
+        commands = render_command_plan(
+            plan=plan,
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+        )
+
+        eth0 = [command.argv for command in commands if "eth0" in command.argv]
+        parents = [argv[argv.index("parent") + 1] for argv in eth0 if "netem" in argv]
+        flowids = [
+            argv[argv.index("flowid") + 1]
+            for argv in eth0
+            if argv[1] == "filter" and "ipv6" not in argv
+        ]
+        # tc reads the minor number as hex: mark 9 is band 9, class 10:a.
+        expected = [f"10:{mark + 1:x}" for mark in range(1, 16)]
+        self.assertEqual(parents, expected)
+        self.assertEqual(flowids, expected)
+        self.assertEqual(expected[-1], "10:10")
+
+    def test_blocked_sites_without_an_allowlist_keep_other_traffic(self) -> None:
+        plan = compile_plan(
+            devices=(
+                make_device("alice", "192.168.50.10", "normal"),
+                make_device("bob", "192.168.50.11", "normal"),
+            ),
+            profiles={"normal": Profile(id="normal", name="Normal")},
+            website_filters=(
+                WebsiteFilter(
+                    device_ip=IPv4Address("192.168.50.10"),
+                    allowed_addresses=None,
+                    blocked_addresses=(IPv4Address("203.0.113.30"),),
+                ),
+                WebsiteFilter(
+                    device_ip=IPv4Address("192.168.50.11"),
+                    allowed_addresses=(),
+                ),
+            ),
+        )
+
+        nft_script = render_command_plan(
+            plan=plan,
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+        )[0].stdin or ""
+
+        self.assertIn("ip saddr 192.168.50.10 ip daddr { 203.0.113.30 } drop", nft_script)
+        self.assertNotIn("ip saddr 192.168.50.10 drop", nft_script)
+        # An allow-only rule with no resolved addresses still blocks everything.
+        self.assertIn("ip saddr 192.168.50.11 drop", nft_script)
+
+    def test_netem_options_are_always_stated_so_old_values_do_not_linger(self) -> None:
+        profiles = {
+            "plain": Profile(id="plain", name="Plain", upload=Impairment(delay_ms=100)),
+            "limited": Profile(
+                id="limited",
+                name="Limited",
+                upload=Impairment(delay_ms=100, corrupt_percent=5, bandwidth_kbit=1_000),
+            ),
+        }
+        plan = compile_plan(
+            devices=(
+                make_device("alice", "192.168.50.10", "plain"),
+                make_device("bob", "192.168.50.11", "limited"),
+            ),
+            profiles=profiles,
+        )
+
+        commands = render_command_plan(
+            plan=plan,
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+        )
+
+        def netem_arguments(device_id):
+            purpose = f"upload impairment for device {device_id}"
+            command = next(c for c in commands if purpose in c.purpose)
+            return command.argv[command.argv.index("netem") :]
+
+        # "tc qdisc replace" changes an existing netem in place and keeps any
+        # corrupt or rate setting it is not given.
+        plain = netem_arguments("alice")
+        limited = netem_arguments("bob")
+        self.assertEqual(plain[plain.index("corrupt") + 1], "0%")
+        self.assertEqual(plain[plain.index("rate") + 1], "0bit")
+        self.assertEqual(limited[limited.index("corrupt") + 1], "5%")
+        self.assertEqual(limited[limited.index("rate") + 1], "1000kbit")
 
     def test_renders_jitter_even_without_a_base_delay(self) -> None:
         profile = Profile(
@@ -195,7 +445,7 @@ class RendererTests(unittest.TestCase):
         nft_script = render_command_plan(
             plan=plan,
             topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
-        )[1].stdin
+        )[0].stdin
 
         self.assertIn("ether saddr { aa:bb:cc:dd:ee:ff } drop", nft_script or "")
         self.assertNotIn("meta nfproto ipv6 drop", nft_script or "")

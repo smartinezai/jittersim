@@ -22,6 +22,8 @@ class PlanError(ValueError):
 
 MAX_DEVICES_PER_PLAN = 15
 MAX_SERVICE_QUOTAS_PER_PLAN = 15
+# The kernel's prio qdisc supports at most 16 bands and band 0 carries unmarked
+# traffic, so devices and service rules share 15 marks.
 MAX_SHAPED_MARKS_PER_PLAN = 15
 MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN = 200
 

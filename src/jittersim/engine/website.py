@@ -108,7 +108,11 @@ def build_website_filters(
             filters.append(
                 WebsiteFilter(
                     device_ip=device.ipv4_address,
-                    allowed_addresses=tuple(sorted(allowed_addresses or (), key=str)),
+                    allowed_addresses=(
+                        None
+                        if allowed_addresses is None
+                        else tuple(sorted(allowed_addresses, key=str))
+                    ),
                     blocked_addresses=tuple(sorted(profile_blocked, key=str)),
                 )
             )
