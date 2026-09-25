@@ -160,6 +160,31 @@ class RendererTests(unittest.TestCase):
             self.assertIn("pref", argv)
             self.assertEqual(argv[argv.index("pref") + 1], "1")
 
+    def test_reordering_is_only_rendered_with_a_delay(self) -> None:
+        profiles = {
+            "reorder": Profile(
+                id="reorder",
+                name="Reorder",
+                upload=Impairment(reorder_percent=10),
+                download=Impairment(delay_ms=50, reorder_percent=10),
+            )
+        }
+        plan = compile_plan(
+            devices=(make_device("alice", "192.168.50.10", "reorder"),),
+            profiles=profiles,
+        )
+
+        commands = render_command_plan(
+            plan=plan,
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+        )
+
+        upload = next(c for c in commands if "upload impairment for device alice" in c.purpose)
+        download = next(c for c in commands if "download impairment for device alice" in c.purpose)
+        # tc rejects "netem reorder" unless the queue also delays packets.
+        self.assertNotIn("reorder", upload.argv)
+        self.assertIn("reorder", download.argv)
+
     def test_renders_jitter_even_without_a_base_delay(self) -> None:
         profile = Profile(
             id="jitter-only",
