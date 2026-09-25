@@ -12,7 +12,6 @@ import shutil
 import subprocess
 import sys
 import unittest
-from dataclasses import replace
 from ipaddress import IPv4Address
 
 from jittersim.config.models import Device, Impairment, MacPolicy, Profile
@@ -20,9 +19,17 @@ from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import compile_plan
 from jittersim.engine.plan import ServiceAssignmentRule, ServiceQuotaRule
 from jittersim.networking.applier import ApplyError, NetworkApplier
-from jittersim.networking.executor import CommandExecutionError, SubprocessExecutor
 from jittersim.networking.helper import HelperService
-from jittersim.networking.topology import Topology
+
+from .lab import (
+    CLIENT,
+    PI,
+    TOPOLOGY,
+    NamespaceExecutor,
+    create_lab,
+    remove_lab,
+)
+from .lab import run_in as _in
 
 ENABLED = (
     sys.platform.startswith("linux")
@@ -30,39 +37,7 @@ ENABLED = (
     and os.geteuid() == 0
     and all(shutil.which(tool) for tool in ("ip", "tc", "nft", "ping"))
 )
-PI, ROUTER, CLIENT = (f"jt{os.getpid()}-{role}" for role in ("pi", "router", "client"))
-TOPOLOGY = Topology(uplink_interface="eth0", test_interface="wlan0")
 NORMAL = Profile(id="normal", name="Normal")
-
-
-def _run(*argv: str, check: bool = True, stdin: str = None) -> subprocess.CompletedProcess:
-    return subprocess.run(argv, input=stdin, capture_output=True, text=True, check=check)
-
-
-def _in(namespace: str, *argv: str, check: bool = True) -> subprocess.CompletedProcess:
-    return _run("ip", "netns", "exec", namespace, *argv, check=check)
-
-
-class NamespaceExecutor(SubprocessExecutor):
-    """Run every command inside the simulated Pi's network namespace."""
-
-    def __init__(self, namespace: str, *, fail_on_index: int = None) -> None:
-        super().__init__()
-        self.namespace = namespace
-        self.fail_on_index = fail_on_index
-        self.count = 0
-
-    def run(self, command):
-        index = self.count
-        self.count += 1
-        if index == self.fail_on_index:
-            raise CommandExecutionError(f"simulated failure: {command.purpose}")
-        wrapped = replace(
-            command,
-            executable="ip",
-            arguments=("netns", "exec", self.namespace, command.executable, *command.arguments),
-        )
-        return super().run(wrapped)
 
 
 def device(device_id: str, last_octet: int, profile_id: str) -> Device:
@@ -73,36 +48,11 @@ def device(device_id: str, last_octet: int, profile_id: str) -> Device:
 class LinuxDatapathTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        for namespace in (PI, ROUTER, CLIENT):
-            _run("ip", "netns", "add", namespace)
-        _run("ip", "-n", PI, "link", "add", "pi-up", "type", "veth", "peer", "name", "up0",
-             "netns", ROUTER)
-        _run("ip", "-n", PI, "link", "set", "pi-up", "name", "eth0")
-        _run("ip", "-n", PI, "link", "add", "pi-wl", "type", "veth", "peer", "name", "c0",
-             "netns", CLIENT)
-        _run("ip", "-n", PI, "link", "set", "pi-wl", "name", "wlan0")
-        _run("ip", "-n", ROUTER, "addr", "add", "192.168.0.1/24", "dev", "up0")
-        _run("ip", "-n", PI, "addr", "add", "192.168.0.2/24", "dev", "eth0")
-        _run("ip", "-n", PI, "addr", "add", "192.168.50.1/24", "dev", "wlan0")
-        for octet in [10, 11, 12] + list(range(100, 115)):
-            _run("ip", "-n", CLIENT, "addr", "add", f"192.168.50.{octet}/24", "dev", "c0")
-        for namespace, interface in (
-            (ROUTER, "up0"), (ROUTER, "lo"), (PI, "eth0"), (PI, "wlan0"), (PI, "lo"),
-            (CLIENT, "c0"), (CLIENT, "lo"),
-        ):
-            _run("ip", "-n", namespace, "link", "set", interface, "up")
-        _run("ip", "-n", CLIENT, "route", "add", "default", "via", "192.168.50.1")
-        _in(PI, "sh", "-c", "echo 1 > /proc/sys/net/ipv4/ip_forward")
-        # Like NetworkManager's shared mode on the Pi.
-        _in(PI, "nft", "add", "table", "ip", "nat")
-        _in(PI, "nft", "add", "chain", "ip", "nat", "post",
-            "{ type nat hook postrouting priority 100; }")
-        _in(PI, "nft", "add", "rule", "ip", "nat", "post", "oifname", "eth0", "masquerade")
+        create_lab()
 
     @classmethod
     def tearDownClass(cls) -> None:
-        for namespace in (PI, ROUTER, CLIENT):
-            _run("ip", "netns", "del", namespace, check=False)
+        remove_lab()
 
     def setUp(self) -> None:
         self.applier = NetworkApplier(executor=NamespaceExecutor(PI), topology=TOPOLOGY)
