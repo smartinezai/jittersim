@@ -4,21 +4,30 @@ table inet jittersim_control {
 
         # Test-network clients may use the Pi as a gateway, but never as an
         # administration endpoint.
-        iifname "wlan0" tcp dport 22 counter drop comment "deny SSH from test Wi-Fi"
-        iifname "wlan0" tcp dport 8080 counter drop comment "deny dashboard from test Wi-Fi"
+        iifname "@TEST_INTERFACE@" tcp dport 22 counter drop comment "deny SSH from test Wi-Fi"
+        iifname "@TEST_INTERFACE@" tcp dport 8080 counter drop comment "deny dashboard from test Wi-Fi"
+        iifname "lo" tcp dport 8080 accept
+        iifname "@UPLINK_INTERFACE@" ip saddr {
+            10.0.0.0/8,
+            172.16.0.0/12,
+            192.168.0.0/16
+        } tcp dport 8080 accept
+        tcp dport 8080 counter drop comment "keep dashboard on private management paths"
+        iifname "@TEST_INTERFACE@" ip saddr 192.168.50.0/24 tcp dport 3128 accept
+        tcp dport 3128 counter drop comment "keep browser proxy on test Wi-Fi"
     }
 
     chain forward {
         type filter hook forward priority -300; policy accept;
 
         # Test-network clients may use the Pi for public internet access, but
-        # must not reach the router or other private networks through eth0.
-        iifname "wlan0" oifname "eth0" ip daddr {
+        # must not reach the router or other private networks through uplink.
+        iifname "@TEST_INTERFACE@" oifname "@UPLINK_INTERFACE@" ip daddr {
             10.0.0.0/8,
             172.16.0.0/12,
             192.168.0.0/16
         } counter drop comment "deny test Wi-Fi access to private upstream networks"
-        iifname "wlan0" oifname "eth0" ip6 daddr {
+        iifname "@TEST_INTERFACE@" oifname "@UPLINK_INTERFACE@" ip6 daddr {
             fc00::/7,
             fe80::/10
         } counter drop comment "deny test Wi-Fi access to private IPv6 upstream networks"

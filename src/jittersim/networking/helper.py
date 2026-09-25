@@ -24,7 +24,14 @@ from .topology import Topology
 
 LOGGER = logging.getLogger(__name__)
 MAX_MESSAGE_BYTES = 256 * 1024
+MAX_LOG_DETAIL_CHARS = 512
+MAX_CONNECTED_CLIENTS = 256
 _MAC_ADDRESS_PATTERN = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
+_STATION_HEADER_PATTERN = re.compile(
+    r"^Station\s+(?P<mac>(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})\b"
+)
+_STATION_SIGNAL_PATTERN = re.compile(r"^signal:\s*(-?\d+)\s+dBm$")
+_STATION_CONNECTED_TIME_PATTERN = re.compile(r"^connected time:\s*(\d+)\s+seconds$")
 _DNS_QUERY_PATTERN = re.compile(
     r"\bIP\s+(?P<source>\d{1,3}(?:\.\d{1,3}){3})\.\d+\s+>\s+"
     r"\d{1,3}(?:\.\d{1,3}){3}\.53:.*?\b"
@@ -39,6 +46,13 @@ _PRIVATE_NETWORKS = (
     IPv4Network("172.16.0.0/12"),
     IPv4Network("192.168.0.0/16"),
 )
+
+
+def _log_detail(value: str) -> str:
+    """Keep helper error details on one bounded log line."""
+
+    normalized = " ".join(value[:MAX_LOG_DETAIL_CHARS].split())
+    return normalized or "none"
 
 
 class HelperError(RuntimeError):
@@ -56,8 +70,10 @@ class HelperService:
         self,
         applier: NetworkApplier,
         router_factory: Optional[Callable[[str, str], TG3442DERouter]] = None,
+        active_plan_path: Optional[Path] = None,
     ) -> None:
         self._applier = applier
+        self._active_plan_path = active_plan_path
         self._router_factory = router_factory or (
             lambda address, password: TG3442DERouter(address=address, password=password)
         )
@@ -91,15 +107,36 @@ class HelperService:
         return {"ok": False, "error": "unknown action"}
 
     def _handle_clients(self) -> Dict[str, Any]:
+        station_info_available = True
         try:
-            output = self._applier.list_connected_devices()
+            station_output = self._applier.list_connected_stations()
         except CommandExecutionError:
-            LOGGER.exception("connected-device inspection failed")
+            station_info_available = False
+            station_output = ""
+        neighbor_info_available = True
+        try:
+            neighbor_output = self._applier.list_connected_devices()
+        except CommandExecutionError:
+            neighbor_info_available = False
+            neighbor_output = ""
+        lease_output = self._applier.list_connected_leases()
+        if not station_info_available and not neighbor_info_available:
             return {"ok": False, "error": "connected-device inspection failed"}
+        devices = (
+            _merge_connected_device_output(
+                station_output,
+                neighbor_output,
+                lease_output,
+                observed_at=int(time.time()),
+            )
+            if station_info_available
+            else _fallback_neighbor_devices(neighbor_output)
+        )
         return {
             "ok": True,
             "action": "clients",
-            "devices": _parse_neighbor_output(output),
+            "association_status_available": station_info_available,
+            "devices": devices,
         }
 
     def _handle_uplink_info(self) -> Dict[str, Any]:
@@ -139,13 +176,66 @@ class HelperService:
         try:
             report = self._applier.apply(plan=plan)
         except ApplyError as error:
-            LOGGER.exception("network plan apply failed")
+            cause = error.cause
+            reset_error = error.reset_error
+            state_cleanup_failed = False
+            if error.cleanup_attempted and reset_error is None and self._active_plan_path is not None:
+                try:
+                    self._active_plan_path.unlink(missing_ok=True)
+                except OSError:
+                    state_cleanup_failed = True
+                    LOGGER.exception("could not clear the active plan after apply failure")
+            cleanup_result = "completed" if error.cleanup_attempted else "not started"
+            if reset_error is not None:
+                cleanup_result = (
+                    f"failed: {_log_detail(str(reset_error))}; "
+                    f"error output: {_log_detail(reset_error.stderr)}"
+                )
+            LOGGER.exception(
+                "network plan apply failed at step %d: %s; exit code %s; "
+                "timed out %s; error output: %s; cleanup: %s",
+                error.failed_command_index + 1,
+                _log_detail(str(cause)),
+                cause.return_code if cause.return_code is not None else "unknown",
+                cause.timed_out,
+                _log_detail(cause.stderr),
+                cleanup_result,
+            )
             return {
                 "ok": False,
                 "error": "network plan apply failed",
-                "cleanup_failed": error.reset_error is not None,
+                "cleanup_failed": reset_error is not None or state_cleanup_failed,
             }
+        if self._active_plan_path is not None:
+            try:
+                self._write_active_plan(plan)
+            except OSError:
+                LOGGER.exception("could not publish the active network plan")
+                try:
+                    self._applier.reset()
+                    self._active_plan_path.unlink(missing_ok=True)
+                except (CommandExecutionError, OSError):
+                    LOGGER.exception("network cleanup failed after plan publication error")
+                return {"ok": False, "error": "network plan state could not be published"}
         return {"ok": True, "action": "apply", "commands_run": report.commands_run}
+
+    def _write_active_plan(self, plan: NetworkPlan) -> None:
+        path = self._active_plan_path
+        if path is None:
+            raise RuntimeError("active plan path is not configured")
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}")
+        try:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+                json.dump(plan_to_payload(plan), output, sort_keys=True)
+                output.write("\n")
+            os.chmod(temporary, 0o640)
+            os.replace(temporary, path)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
     def _handle_configure_ap(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         try:
@@ -224,7 +314,9 @@ class HelperService:
     def _handle_reset(self) -> Dict[str, Any]:
         try:
             commands_run = self._applier.reset()
-        except CommandExecutionError:
+            if self._active_plan_path is not None:
+                self._active_plan_path.unlink(missing_ok=True)
+        except (CommandExecutionError, OSError):
             LOGGER.exception("network reset failed")
             return {"ok": False, "error": "network reset failed"}
         return {"ok": True, "action": "reset", "commands_run": commands_run}
@@ -345,16 +437,50 @@ class HelperClient:
             }
         )
 
-    def connected_devices(self) -> List[Dict[str, str]]:
-        """Return IPv4 clients currently visible on the test interface."""
+    def connected_device_snapshot(self) -> Dict[str, Any]:
+        """Return current client details and whether association status is known."""
 
         response = self._request({"action": "clients"})
         devices = response.get("devices")
-        if not isinstance(devices, list) or any(
-            not isinstance(device, dict) for device in devices
+        association_status_available = response.get("association_status_available")
+        if (
+            not isinstance(association_status_available, bool)
+            or not isinstance(devices, list)
+            or len(devices) > MAX_CONNECTED_CLIENTS
         ):
             raise HelperClientError("helper returned invalid connected-device data")
-        return devices
+        for device in devices:
+            if not isinstance(device, dict):
+                raise HelperClientError("helper returned invalid connected-device data")
+            mac_address = device.get("mac_address")
+            ipv4_address = device.get("ipv4_address")
+            hostname = device.get("hostname")
+            expected_state = (
+                "connected" if device.get("association_verified") else "unknown"
+            )
+            if (
+                not isinstance(mac_address, str)
+                or not _MAC_ADDRESS_PATTERN.fullmatch(mac_address)
+                or int(mac_address[:2], 16) & 1
+                or (ipv4_address is not None and not _valid_ipv4(ipv4_address))
+                or device.get("state") != expected_state
+                or device.get("association_verified") is not association_status_available
+                or (hostname is not None and (not isinstance(hostname, str) or len(hostname) > 64))
+                or not _optional_bounded_integer(device.get("signal_dbm"), minimum=-127, maximum=0)
+                or not _optional_bounded_integer(
+                    device.get("connected_seconds"), minimum=0, maximum=31_536_000
+                )
+            ):
+                raise HelperClientError("helper returned invalid connected-device data")
+        return {
+            "devices": devices,
+            "association_status_available": association_status_available,
+        }
+
+    def connected_devices(self) -> List[Dict[str, Any]]:
+        """Return clients currently associated with the test access point."""
+
+        return self.connected_device_snapshot()["devices"]
 
     def uplink_info(self) -> Dict[str, Optional[str]]:
         """Return the Pi's Ethernet connection details."""
@@ -486,12 +612,14 @@ def run_helper(
 
     if not enable_hardware:
         raise HelperError("hardware mode requires --enable-hardware")
+    active_plan_path = socket_path.parent / "active-plan.json"
     service = HelperService(
         NetworkApplier(
             executor=SubprocessExecutor(timeout_seconds=timeout_seconds),
             topology=topology,
         ),
         router_factory=router_factory,
+        active_plan_path=active_plan_path,
     )
     with UnixHelperServer(socket_path, service) as server:
         try:
@@ -526,6 +654,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     return 0
 
 
+def _valid_ipv4(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        IPv4Address(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _optional_bounded_integer(
+    value: object, *, minimum: int, maximum: int
+) -> bool:
+    return value is None or (
+        isinstance(value, int) and not isinstance(value, bool) and minimum <= value <= maximum
+    )
+
+
 def _parse_neighbor_output(output: str) -> List[Dict[str, str]]:
     """Convert Linux neighbor output into safe dashboard records."""
 
@@ -552,6 +698,146 @@ def _parse_neighbor_output(output: str) -> List[Dict[str, str]]:
             }
         )
     return sorted(devices, key=lambda device: int(IPv4Address(device["ipv4_address"])))
+
+
+def _parse_station_output(output: str) -> List[Dict[str, Any]]:
+    """Convert `iw` station output into bounded associated-client records."""
+
+    stations: Dict[str, Dict[str, Any]] = {}
+    current: Optional[Dict[str, Any]] = None
+    for line in output.splitlines():
+        match = _STATION_HEADER_PATTERN.match(line.strip())
+        if match is not None:
+            mac_address = match.group("mac").lower()
+            if not _MAC_ADDRESS_PATTERN.fullmatch(mac_address):
+                current = None
+                continue
+            if mac_address not in stations and len(stations) >= MAX_CONNECTED_CLIENTS:
+                current = None
+                continue
+            current = stations.setdefault(
+                mac_address,
+                {"mac_address": mac_address},
+            )
+            continue
+        if current is None:
+            continue
+        stripped = line.strip()
+        signal_match = _STATION_SIGNAL_PATTERN.fullmatch(stripped)
+        if signal_match is not None:
+            signal = int(signal_match.group(1))
+            if -127 <= signal <= 0:
+                current["signal_dbm"] = signal
+            continue
+        connected_match = _STATION_CONNECTED_TIME_PATTERN.fullmatch(stripped)
+        if connected_match is not None:
+            connected_seconds = int(connected_match.group(1))
+            if connected_seconds <= 31_536_000:
+                current["connected_seconds"] = connected_seconds
+    return [stations[mac] for mac in sorted(stations)[:MAX_CONNECTED_CLIENTS]]
+
+
+def _parse_dhcp_lease_output(
+    output: str, *, observed_at: int
+) -> Dict[str, Dict[str, Any]]:
+    """Read valid current leases without retaining expired or malformed rows."""
+
+    leases: Dict[str, Dict[str, Any]] = {}
+    for line in output.splitlines()[:MAX_CONNECTED_CLIENTS * 4]:
+        fields = line.split()
+        if len(fields) < 5:
+            continue
+        try:
+            expiry = int(fields[0])
+            address = str(IPv4Address(fields[2]))
+        except (ValueError, OverflowError):
+            continue
+        mac_address = fields[1].lower()
+        if (
+            not _MAC_ADDRESS_PATTERN.fullmatch(mac_address)
+            or int(mac_address[:2], 16) & 1
+            or (expiry != 0 and expiry <= observed_at)
+        ):
+            continue
+        hostname = fields[3]
+        if hostname == "*" or len(hostname) > 64 or any(ord(char) < 32 for char in hostname):
+            hostname = ""
+        previous = leases.get(mac_address)
+        expiry_rank = float("inf") if expiry == 0 else expiry
+        previous_expiry_rank = (
+            float("inf") if previous is not None and previous["expiry"] == 0
+            else previous["expiry"] if previous is not None else -1
+        )
+        if previous is None or expiry_rank > previous_expiry_rank:
+            leases[mac_address] = {
+                "ipv4_address": address,
+                "hostname": hostname,
+                "expiry": expiry,
+            }
+    return leases
+
+
+def _merge_connected_device_output(
+    station_output: str,
+    neighbor_output: str,
+    lease_output: str,
+    *,
+    observed_at: int,
+) -> List[Dict[str, Any]]:
+    """Join active Wi-Fi stations to local IPv4 and DHCP details by MAC."""
+
+    neighbors_by_mac: Dict[str, List[Dict[str, str]]] = {}
+    for neighbor in _parse_neighbor_output(neighbor_output):
+        neighbors_by_mac.setdefault(neighbor["mac_address"], []).append(neighbor)
+    leases_by_mac = _parse_dhcp_lease_output(lease_output, observed_at=observed_at)
+    devices = []
+    for station in _parse_station_output(station_output):
+        mac_address = station["mac_address"]
+        neighbors = sorted(
+            neighbors_by_mac.get(mac_address, []),
+            key=lambda neighbor: (
+                neighbor["state"] != "reachable",
+                int(IPv4Address(neighbor["ipv4_address"])),
+            ),
+        )
+        lease = leases_by_mac.get(mac_address, {})
+        reachable_neighbor = next(
+            (neighbor for neighbor in neighbors if neighbor["state"] == "reachable"),
+            None,
+        )
+        neighbor = reachable_neighbor or (neighbors[0] if neighbors else None)
+        ipv4_address = (
+            reachable_neighbor["ipv4_address"]
+            if reachable_neighbor is not None
+            else lease.get("ipv4_address")
+            or (neighbor["ipv4_address"] if neighbor is not None else None)
+        )
+        device: Dict[str, Any] = {
+            **station,
+            "ipv4_address": ipv4_address,
+            "state": "connected",
+            "association_verified": True,
+            "neighbor_state": neighbor["state"] if neighbor is not None else None,
+            "hostname": lease.get("hostname") or None,
+        }
+        devices.append(device)
+    return devices
+
+
+def _fallback_neighbor_devices(output: str) -> List[Dict[str, Any]]:
+    """Show available IP details without claiming stale neighbors are connected."""
+
+    return [
+        {
+            "mac_address": neighbor["mac_address"],
+            "ipv4_address": neighbor["ipv4_address"],
+            "state": "unknown",
+            "association_verified": False,
+            "neighbor_state": neighbor["state"],
+            "hostname": None,
+        }
+        for neighbor in _parse_neighbor_output(output)[:MAX_CONNECTED_CLIENTS]
+    ]
 
 
 def _parse_dns_query_output(output: str, *, observed_at: int) -> List[Dict[str, Any]]:

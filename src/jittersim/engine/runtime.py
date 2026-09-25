@@ -1,20 +1,18 @@
 """Background runtime for schedules, randomized rerolls and outages."""
 
-from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
 import logging
-from pathlib import Path
 import threading
 import time
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from typing import Dict, Optional, Sequence, Union
 
 from jittersim.config.models import (
     DataLimit,
     Device,
-    GroupDataLimit,
     DomainObservation,
+    GroupDataLimit,
     Profile,
-    Progression,
     ServiceQuota,
     TimeQuota,
     time_quota_counter_id,
@@ -24,6 +22,7 @@ from jittersim.networking.helper import HelperClient, HelperClientError
 
 from .codec import plan_to_payload
 from .compiler import PlanError, compile_plan
+from .plan import ServiceAssignmentRule, ServiceQuotaRule
 from .progression import interpolate_profile, progression_factor
 from .randomizer import (
     outage_duration_seconds,
@@ -34,9 +33,7 @@ from .randomizer import (
     seeded_generator,
 )
 from .schedules import active_schedule
-from .plan import ServiceQuotaRule
 from .website import build_website_filters, resolve_domains
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -139,6 +136,54 @@ class RuntimeScheduler:
         with self._lock:
             return self._device_traffic_bytes.get(device_id, 0)
 
+    def applied_queue_bandwidth_limits(
+        self,
+    ) -> Optional[Dict[str, Dict[str, Optional[int]]]]:
+        """Return bandwidth limits from the last successfully applied plan."""
+
+        with self._lock:
+            payload = self._current_payload
+            if not isinstance(payload, dict):
+                return None
+            queues = payload.get("queues")
+            if not isinstance(queues, list):
+                return None
+            limits: Dict[str, Dict[str, Optional[int]]] = {}
+            seen_directions = set()
+            for queue in queues:
+                if not isinstance(queue, dict):
+                    return None
+                device_id = queue.get("device_id")
+                direction = queue.get("direction")
+                impairment = queue.get("impairment")
+                if (
+                    not isinstance(device_id, str)
+                    or direction not in ("upload", "download")
+                    or not isinstance(impairment, dict)
+                ):
+                    return None
+                rate = impairment.get("bandwidth_kbit")
+                if rate is not None and (
+                    isinstance(rate, bool) or not isinstance(rate, int) or rate < 1
+                ):
+                    return None
+                queue_key = (device_id, direction)
+                if queue_key in seen_directions:
+                    return None
+                seen_directions.add(queue_key)
+                device_limits = limits.setdefault(
+                    device_id,
+                    {"upload_kbit": None, "download_kbit": None},
+                )
+                field = f"{direction}_kbit"
+                device_limits[field] = rate
+            return limits
+
+    def control_operation(self):
+        """Share one lock with manual apply and reset operations."""
+
+        return self._lock
+
     def tick(
         self,
         *,
@@ -148,8 +193,16 @@ class RuntimeScheduler:
         """Recompute and apply a changed runtime plan once."""
 
         with self._lock:
-            if self._paused or self._helper_client is None:
-                return False
+            return self._tick_under_lock(repository=repository, now=now)
+
+    def _tick_under_lock(
+        self,
+        *,
+        repository: Optional[ConfigRepository] = None,
+        now: Optional[float] = None,
+    ) -> bool:
+        if self._paused or self._helper_client is None:
+            return False
         current_time = time.time() if now is None else now
         owned_repository = repository is None
         active_repository = repository or ConfigRepository(self._database_path)
@@ -158,12 +211,10 @@ class RuntimeScheduler:
             self._sample_quota_usage_if_needed(repository=active_repository, now=current_time)
             plan = self._build_plan(repository=active_repository, now=current_time)
             payload = plan_to_payload(plan)
-            with self._lock:
-                if payload == self._current_payload:
-                    return False
+            if payload == self._current_payload:
+                return False
             self._helper_client.apply(plan=plan)
-            with self._lock:
-                self._current_payload = payload
+            self._current_payload = payload
             active_repository.update_runtime_state(
                 observed_state="applied",
                 last_action="schedule",
@@ -375,6 +426,26 @@ class RuntimeScheduler:
             profiles=profiles,
             now=now,
         )
+        service_assignment_rules = []
+        devices_by_id = {device.id: device for device in runtime_devices}
+        for assignment in repository.list_service_assignments():
+            if not assignment.enabled:
+                continue
+            device = devices_by_id.get(assignment.device_id)
+            profile = profiles.get(assignment.profile_id)
+            if device is None or profile is None:
+                raise PlanError(f"service assignment {assignment.id} has a missing reference")
+            service_assignment_rules.append(
+                ServiceAssignmentRule(
+                    assignment_id=assignment.id,
+                    device_id=device.id,
+                    device_ip=device.ipv4_address,
+                    domains=assignment.domains,
+                    mark=0,
+                    upload_impairment=profile.upload,
+                    download_impairment=profile.download,
+                )
+            )
         return compile_plan(
             devices=runtime_devices,
             profiles=runtime_profiles,
@@ -383,6 +454,7 @@ class RuntimeScheduler:
             website_filters=website_filters,
             blocked_device_addresses=blocked_addresses,
             service_quota_rules=service_quota_rules,
+            service_assignment_rules=service_assignment_rules,
         )
 
     def _build_service_quota_rules(

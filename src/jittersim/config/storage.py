@@ -6,8 +6,14 @@ import tempfile
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Optional, Sequence, Union
+from typing import Dict, Optional, Sequence, Union
 
+from .device_labels import (
+    MAX_SAVED_CONNECTED_DEVICE_LABELS,
+    normalize_device_display_name,
+    normalize_device_mac,
+    normalize_device_type,
+)
 from .models import (
     DataLimit,
     Device,
@@ -21,6 +27,7 @@ from .models import (
     Randomness,
     RuntimeState,
     Schedule,
+    ServiceAssignment,
     ServiceQuota,
     TimeQuota,
     Timer,
@@ -33,10 +40,18 @@ class StorageError(RuntimeError):
     """Raised when stored configuration cannot be read or written safely."""
 
 
+class TrafficRateSettingsError(StorageError):
+    """Raised when a graph-only ISP rate reference is invalid."""
+
+
 DatabasePath = Union[str, Path]
 _DOMAIN_RETENTION_SECONDS = 30 * 24 * 60 * 60
 _MAX_DOMAIN_OBSERVATIONS = 20_000
 _MAX_OBSERVATIONS_PER_DEVICE = 50
+MIN_TRAFFIC_RATE_KBIT = 100
+MAX_TRAFFIC_RATE_KBIT = 1_000_000
+TRAFFIC_RATE_STEP_KBIT = 100
+DEFAULT_ISP_DOWNLOAD_KBIT = 100_000
 
 
 def _serialize_impairment(impairment: Impairment) -> str:
@@ -131,6 +146,30 @@ class ConfigRepository:
                 profile_id TEXT NOT NULL REFERENCES profiles(id),
                 mac_address TEXT
             );
+            CREATE TABLE IF NOT EXISTS connected_device_labels (
+                mac_address TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                device_type TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS traffic_rate_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                upload_kbit INTEGER,
+                download_kbit INTEGER,
+                CHECK (
+                    upload_kbit IS NULL OR (
+                        typeof(upload_kbit) = 'integer'
+                        AND upload_kbit BETWEEN 100 AND 1000000
+                        AND upload_kbit % 100 = 0
+                    )
+                ),
+                CHECK (
+                    download_kbit IS NULL OR (
+                        typeof(download_kbit) = 'integer'
+                        AND download_kbit BETWEEN 100 AND 1000000
+                        AND download_kbit % 100 = 0
+                    )
+                )
+            );
             CREATE TABLE IF NOT EXISTS device_groups (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -212,6 +251,14 @@ class ConfigRepository:
                 last_reset_at INTEGER NOT NULL,
                 enabled INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS service_assignments (
+                id TEXT PRIMARY KEY,
+                device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                domains_json TEXT NOT NULL,
+                profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                enabled INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS time_quotas (
                 id TEXT PRIMARY KEY,
                 device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
@@ -267,6 +314,9 @@ class ConfigRepository:
             INSERT OR IGNORE INTO runtime_state (
                 id, configuration_version, observed_state
             ) VALUES (1, 0, 'unknown');
+            INSERT OR IGNORE INTO traffic_rate_settings (
+                id, upload_kbit, download_kbit
+            ) VALUES (1, NULL, 100000);
             INSERT OR IGNORE INTO network_policies (
                 id, mac_mode, mac_allowlist_json, mac_denylist_json,
                 website_mode, website_allowed_json, website_blocked_json
@@ -475,6 +525,58 @@ class ConfigRepository:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
 
+    def get_traffic_rate_settings(self) -> dict:
+        """Return the saved ISP rate references in integer kbit/s."""
+
+        try:
+            row = self._connection.execute(
+                "SELECT upload_kbit, download_kbit "
+                "FROM traffic_rate_settings WHERE id = 1"
+            ).fetchone()
+            if row is None:
+                raise StorageError("traffic rate settings are missing")
+            return {
+                "upload_kbit": row["upload_kbit"],
+                "download_kbit": row["download_kbit"],
+            }
+        except sqlite3.Error as error:
+            raise StorageError("could not read traffic rate settings") from error
+
+    def save_traffic_rate_settings(
+        self,
+        *,
+        upload_kbit: Optional[int],
+        download_kbit: Optional[int],
+    ) -> dict:
+        """Save graph-only ISP rate references without changing the network plan."""
+
+        for value in (upload_kbit, download_kbit):
+            if value is None:
+                continue
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not MIN_TRAFFIC_RATE_KBIT <= value <= MAX_TRAFFIC_RATE_KBIT
+                or value % TRAFFIC_RATE_STEP_KBIT
+            ):
+                raise TrafficRateSettingsError("traffic rate is invalid")
+        try:
+            cursor = self._connection.execute(
+                "UPDATE traffic_rate_settings "
+                "SET upload_kbit = ?, download_kbit = ? WHERE id = 1",
+                (upload_kbit, download_kbit),
+            )
+            if cursor.rowcount != 1:
+                raise StorageError("traffic rate settings are missing")
+            self._connection.commit()
+        except sqlite3.Error as error:
+            self._connection.rollback()
+            raise StorageError("could not save traffic rate settings") from error
+        return {
+            "upload_kbit": upload_kbit,
+            "download_kbit": download_kbit,
+        }
+
     def _bump_configuration_version(self) -> None:
         self._connection.execute(
             """
@@ -523,6 +625,76 @@ class ConfigRepository:
         if row is None:
             return None
         return self._device_from_row(row)
+
+    def list_connected_device_labels(self) -> Dict[str, Dict[str, str]]:
+        """Read locally saved names and types for Wi-Fi client addresses."""
+
+        try:
+            rows = self._connection.execute(
+                "SELECT mac_address, display_name, device_type "
+                "FROM connected_device_labels ORDER BY mac_address"
+            ).fetchall()
+            return {
+                row["mac_address"]: {
+                    "display_name": row["display_name"],
+                    "device_type": row["device_type"],
+                }
+                for row in rows
+            }
+        except sqlite3.Error as error:
+            raise StorageError("could not read connected-device labels") from error
+
+    def save_connected_device_label(
+        self, *, mac_address: str, display_name: str, device_type: str
+    ) -> None:
+        """Save a validated label without changing traffic configuration."""
+
+        try:
+            mac = normalize_device_mac(mac_address)
+            name = normalize_device_display_name(display_name)
+            kind = normalize_device_type(device_type)
+        except ValueError as error:
+            raise StorageError("connected-device label is invalid") from error
+        try:
+            exists = self._connection.execute(
+                "SELECT 1 FROM connected_device_labels WHERE mac_address = ?", (mac,)
+            ).fetchone()
+            count = self._connection.execute(
+                "SELECT COUNT(*) FROM connected_device_labels"
+            ).fetchone()[0]
+        except sqlite3.Error as error:
+            raise StorageError("could not check connected-device label limit") from error
+        if exists is None and count >= MAX_SAVED_CONNECTED_DEVICE_LABELS:
+            raise StorageError("saved device label limit reached; remove an older label")
+        try:
+            self._connection.execute(
+                "INSERT INTO connected_device_labels "
+                "(mac_address, display_name, device_type) VALUES (?, ?, ?) "
+                "ON CONFLICT(mac_address) DO UPDATE SET "
+                "display_name = excluded.display_name, "
+                "device_type = excluded.device_type",
+                (mac, name, kind),
+            )
+            self._connection.commit()
+        except sqlite3.Error as error:
+            self._connection.rollback()
+            raise StorageError("could not save connected-device label") from error
+
+    def delete_connected_device_label(self, *, mac_address: str) -> None:
+        """Remove a locally saved label for one Wi-Fi address."""
+
+        try:
+            mac = normalize_device_mac(mac_address)
+        except ValueError as error:
+            raise StorageError("connected-device address is invalid") from error
+        try:
+            self._connection.execute(
+                "DELETE FROM connected_device_labels WHERE mac_address = ?", (mac,)
+            )
+            self._connection.commit()
+        except sqlite3.Error as error:
+            self._connection.rollback()
+            raise StorageError("could not remove connected-device label") from error
 
     def list_profiles(self) -> tuple:
         """Return all stored profiles in stable identifier order."""
@@ -1190,6 +1362,60 @@ class ConfigRepository:
             self._connection.rollback()
             raise StorageError(f"could not save service quota {quota.id}") from error
 
+    def list_service_assignments(self) -> tuple:
+        """Return immediate service assignments in stable identifier order."""
+
+        rows = self._connection.execute(
+            """
+            SELECT id, device_id, name, domains_json, profile_id, enabled
+            FROM service_assignments ORDER BY id
+            """
+        ).fetchall()
+        return tuple(self._service_assignment_from_row(row) for row in rows)
+
+    def save_service_assignment(self, assignment: ServiceAssignment) -> None:
+        """Insert or update an immediate service assignment."""
+
+        try:
+            self._connection.execute(
+                """
+                INSERT INTO service_assignments (
+                    id, device_id, name, domains_json, profile_id, enabled
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    device_id = excluded.device_id,
+                    name = excluded.name,
+                    domains_json = excluded.domains_json,
+                    profile_id = excluded.profile_id,
+                    enabled = excluded.enabled
+                """,
+                (
+                    assignment.id,
+                    assignment.device_id,
+                    assignment.name,
+                    json.dumps(list(assignment.domains)),
+                    assignment.profile_id,
+                    int(assignment.enabled),
+                ),
+            )
+            self._bump_configuration_version()
+            self._connection.commit()
+        except sqlite3.IntegrityError as error:
+            self._connection.rollback()
+            raise StorageError(f"could not save service assignment {assignment.id}") from error
+
+    def delete_service_assignment(self, assignment_id: str) -> bool:
+        """Remove one assignment and its matching rules on the next apply."""
+
+        cursor = self._connection.execute(
+            "DELETE FROM service_assignments WHERE id = ?", (assignment_id,)
+        )
+        if not cursor.rowcount:
+            return False
+        self._bump_configuration_version()
+        self._connection.commit()
+        return True
+
     def reset_service_quota_usage(
         self,
         quota_id: str,
@@ -1774,6 +2000,20 @@ class ConfigRepository:
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
             raise StorageError("stored group data limit is malformed") from error
+
+    @staticmethod
+    def _service_assignment_from_row(row: sqlite3.Row) -> ServiceAssignment:
+        try:
+            return ServiceAssignment(
+                id=row["id"],
+                device_id=row["device_id"],
+                name=row["name"],
+                domains=tuple(json.loads(row["domains_json"])),
+                profile_id=row["profile_id"],
+                enabled=bool(row["enabled"]),
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
+            raise StorageError("stored service assignment is malformed") from error
 
     @staticmethod
     def _service_quota_from_row(row: sqlite3.Row) -> ServiceQuota:

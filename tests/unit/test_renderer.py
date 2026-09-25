@@ -30,6 +30,15 @@ class TopologyTests(unittest.TestCase):
 
 
 class RendererTests(unittest.TestCase):
+    def test_empty_plan_does_not_request_an_invalid_priority_queue(self) -> None:
+        plan = compile_plan(devices=(), profiles={})
+        commands = render_command_plan(
+            plan=plan,
+            topology=Topology(uplink_interface="enp1s0", test_interface="wlp2s0"),
+        )
+        self.assertEqual([command.executable for command in commands], ["nft", "nft"])
+        self.assertIn("add chain inet jittersim forward", commands[1].stdin)
+
     def test_renders_marks_and_direction_specific_queues(self) -> None:
         profiles = {
             "normal": Profile(id="normal", name="Normal"),
@@ -78,6 +87,8 @@ class RendererTests(unittest.TestCase):
         self.assertIn("usage-service alice-video upload", commands[1].stdin or "")
         self.assertIn("apply-service-quota alice-video download", commands[1].stdin or "")
         self.assertIn("meta mark set 3", commands[1].stdin or "")
+        self.assertIn("add chain inet jittersim output", commands[1].stdin or "")
+        self.assertIn("oifname \"eth0\" meta mark 1 counter", commands[1].stdin or "")
 
         root_commands = [
             command for command in commands if "create project queue root" in command.purpose
@@ -86,6 +97,15 @@ class RendererTests(unittest.TestCase):
         for command in root_commands:
             priomap_start = command.argv.index("priomap") + 1
         self.assertEqual(command.argv[priomap_start:], ("0",) * 16)
+        ordinary_queues = [
+            command for command in commands if "fair queuing for ordinary traffic" in command.purpose
+        ]
+        self.assertEqual([command.argv[-1] for command in ordinary_queues], ["fq_codel"] * 2)
+        self.assertEqual([command.argv[-4] for command in ordinary_queues], ["10:1"] * 2)
+        first_device_filter = next(
+            command for command in commands if command.purpose == "route ip mark 1 on eth0"
+        )
+        self.assertEqual(first_device_filter.argv[-1], "10:2")
 
         alice_upload = [
             command
@@ -99,14 +119,17 @@ class RendererTests(unittest.TestCase):
         self.assertIn("10%", alice_upload[0].argv)
         self.assertIn("rate", alice_upload[0].argv)
 
-        bob_filters = [command for command in commands if "route mark 2" in command.purpose]
+        bob_filters = [command for command in commands if "route ip mark 2" in command.purpose]
         self.assertEqual(len(bob_filters), 2)
-        bob_cleanup = [
+        ipv6_filters = [command for command in commands if "route ipv6 mark 2" in command.purpose]
+        self.assertEqual(len(ipv6_filters), 2)
+        bob_queues = [
             command
             for command in commands
-            if "remove stale impairment for device bob" in command.purpose
+            if "fair queuing for device bob" in command.purpose
         ]
-        self.assertEqual(len(bob_cleanup), 2)
+        self.assertEqual(len(bob_queues), 2)
+        self.assertTrue(all(command.argv[-1] == "fq_codel" for command in bob_queues))
         quota_upload = [
             command
             for command in commands
@@ -175,10 +198,7 @@ class RendererTests(unittest.TestCase):
         )[1].stdin
 
         self.assertIn("ether saddr { aa:bb:cc:dd:ee:ff } drop", nft_script or "")
-        self.assertIn(
-            'iifname "wlan0" oifname "eth0" meta nfproto ipv6 drop',
-            nft_script or "",
-        )
+        self.assertNotIn("meta nfproto ipv6 drop", nft_script or "")
         self.assertIn("ip daddr { 203.0.113.10 } drop", nft_script or "")
         self.assertIn("ip daddr != { 203.0.113.20 } drop", nft_script or "")
         self.assertIn("ip daddr { 203.0.113.30 } drop", nft_script or "")

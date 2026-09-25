@@ -36,7 +36,8 @@ def _format_impairment_arguments(queue: QueueSpec) -> List[str]:
     return arguments
 
 
-def _render_nft_script(plan: NetworkPlan) -> str:
+def _render_nft_script(plan: NetworkPlan, topology: Topology) -> str:
+    test_interface = topology.test_interface
     lines = [
         f"add table inet {PROJECT_TABLE}",
         (
@@ -44,26 +45,39 @@ def _render_nft_script(plan: NetworkPlan) -> str:
             "{ type filter hook forward priority -150; policy accept; }"
         ),
         (
-            f"add rule inet {PROJECT_TABLE} forward iifname \"wlan0\" "
-            "oifname \"eth0\" meta nfproto ipv6 drop "
-            'comment "disable IPv6 bypass while profiles are active"'
+            f"add chain inet {PROJECT_TABLE} input "
+            "{ type filter hook input priority -150; policy accept; }"
+        ),
+        (
+            f"add chain inet {PROJECT_TABLE} output "
+            "{ type filter hook output priority -150; policy accept; }"
         ),
     ]
     if plan.mac_policy.denylist:
         lines.append(
-            f"add rule inet {PROJECT_TABLE} forward iifname \"wlan0\" "
+            f"add rule inet {PROJECT_TABLE} input iifname \"{test_interface}\" "
+            f"ether saddr {_render_set(plan.mac_policy.denylist)} drop "
+            "comment \"deny listed test client\""
+        )
+        lines.append(
+            f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
             f"ether saddr {_render_set(plan.mac_policy.denylist)} drop "
             "comment \"deny listed test client\""
         )
     if plan.mac_policy.mode == "allowlist":
         lines.append(
-            f"add rule inet {PROJECT_TABLE} forward iifname \"wlan0\" "
+            f"add rule inet {PROJECT_TABLE} input iifname \"{test_interface}\" "
+            f"ether saddr != {_render_set(plan.mac_policy.allowlist)} drop "
+            "comment \"allow only listed test clients\""
+        )
+        lines.append(
+            f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
             f"ether saddr != {_render_set(plan.mac_policy.allowlist)} drop "
             "comment \"allow only listed test clients\""
         )
     if plan.global_blocked_addresses:
         lines.append(
-            f"add rule inet {PROJECT_TABLE} forward iifname \"wlan0\" "
+            f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
             f"ip daddr {_render_set(plan.global_blocked_addresses)} drop "
             "comment \"block global website destinations\""
         )
@@ -71,26 +85,31 @@ def _render_nft_script(plan: NetworkPlan) -> str:
         allowed = _render_set(website_filter.allowed_addresses)
         if website_filter.allowed_addresses:
             lines.append(
-                f"add rule inet {PROJECT_TABLE} forward iifname \"wlan0\" "
+                f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
                 f"ip saddr {website_filter.device_ip} ip daddr != {allowed} drop "
                 "comment \"enforce profile website allowlist\""
             )
         else:
             lines.append(
-                f"add rule inet {PROJECT_TABLE} forward iifname \"wlan0\" "
+                f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
                 f"ip saddr {website_filter.device_ip} drop "
                 "comment \"profile website allowlist has no resolved addresses\""
             )
         if website_filter.blocked_addresses:
             lines.append(
-                f"add rule inet {PROJECT_TABLE} forward iifname \"wlan0\" "
+                f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
                 f"ip saddr {website_filter.device_ip} "
                 f"ip daddr {_render_set(website_filter.blocked_addresses)} drop "
                 "comment \"block progression website destinations\""
             )
     if plan.blocked_device_addresses:
         lines.append(
-            f"add rule inet {PROJECT_TABLE} forward iifname \"wlan0\" "
+            f"add rule inet {PROJECT_TABLE} input iifname \"{test_interface}\" "
+            f"ip saddr {_render_set(plan.blocked_device_addresses)} drop "
+            "comment \"temporarily disconnect randomized clients\""
+        )
+        lines.append(
+            f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
             f"ip saddr {_render_set(plan.blocked_device_addresses)} drop "
             "comment \"temporarily disconnect randomized clients\""
         )
@@ -104,6 +123,20 @@ def _render_nft_script(plan: NetworkPlan) -> str:
             f"add rule inet {PROJECT_TABLE} forward "
             f"ip daddr {rule.ipv4_address} meta mark set {rule.mark} counter "
             f"comment \"usage-device {rule.device_id} download\""
+        )
+    for mark, device_id in (
+        [(rule.mark, rule.device_id) for rule in plan.mark_rules]
+        + [(rule.mark, rule.device_id) for rule in plan.service_assignment_rules]
+    ):
+        lines.append(
+            f"add rule inet {PROJECT_TABLE} output "
+            f"oifname \"{topology.uplink_interface}\" meta mark {mark} counter "
+            f"comment \"usage-device {device_id} upload\""
+        )
+        lines.append(
+            f"add rule inet {PROJECT_TABLE} output "
+            f"oifname \"{test_interface}\" meta mark {mark} counter "
+            f"comment \"usage-device {device_id} download\""
         )
     for quota_rule in plan.service_quota_rules:
         destinations = _render_set(quota_rule.destination_addresses)
@@ -157,11 +190,43 @@ def _render_tc_commands(
                 *("0" for _ in range(16)),
             ),
             purpose=f"create project queue root on {interface}",
-        )
+        ),
+        Command(
+            executable="tc",
+            arguments=(
+                "qdisc",
+                "replace",
+                "dev",
+                interface,
+                "parent",
+                f"{ROOT_HANDLE}1",
+                "handle",
+                "100:",
+                "fq_codel",
+            ),
+            purpose=f"preserve fair queuing for ordinary traffic on {interface}",
+        ),
     ]
     for queue in queues:
-        band = str(queue.mark)
+        band = str(queue.mark + 1)
         child_handle = f"{queue.mark + 10}:"
+        commands.append(
+            Command(
+                executable="tc",
+                arguments=(
+                    "qdisc",
+                    "del",
+                    "dev",
+                    interface,
+                    "parent",
+                    f"{ROOT_HANDLE}{band}",
+                    "handle",
+                    child_handle,
+                ),
+                purpose=f"clear the previous queue for device {queue.device_id} on {interface}",
+                ignore_failure=True,
+            )
+        )
         if queue.impairment != Impairment():
             commands.append(
                 Command(
@@ -189,42 +254,45 @@ def _render_tc_commands(
                     executable="tc",
                     arguments=(
                         "qdisc",
-                        "del",
+                        "replace",
                         "dev",
                         interface,
                         "parent",
                         f"{ROOT_HANDLE}{band}",
                         "handle",
                         child_handle,
+                        "fq_codel",
                     ),
                     purpose=(
-                        f"remove stale impairment for device {queue.device_id} "
+                        f"preserve fair queuing for device {queue.device_id} "
                         f"on {interface}"
                     ),
-                    ignore_failure=True,
                 )
             )
-        commands.append(
-            Command(
-                executable="tc",
-                arguments=(
-                    "filter",
-                    "replace",
-                    "dev",
-                    interface,
-                    "protocol",
-                    "ip",
-                    "parent",
-                    ROOT_HANDLE,
-                    "handle",
-                    str(queue.mark),
-                    "fw",
-                    "flowid",
-                    f"{ROOT_HANDLE}{band}",
-                ),
-                purpose=f"route mark {queue.mark} on {interface}",
+        for protocol in ("ip", "ipv6"):
+            commands.append(
+                Command(
+                    executable="tc",
+                    arguments=(
+                        "filter",
+                        "replace",
+                        "dev",
+                        interface,
+                        "protocol",
+                        protocol,
+                        "parent",
+                        ROOT_HANDLE,
+                        "pref",
+                        str(queue.mark if protocol == "ip" else queue.mark + 100),
+                        "handle",
+                        str(queue.mark),
+                        "fw",
+                        "flowid",
+                        f"{ROOT_HANDLE}{band}",
+                    ),
+                    purpose=f"route {protocol} mark {queue.mark} on {interface}",
+                )
             )
-        )
     return commands
 
 
@@ -242,25 +310,27 @@ def render_command_plan(*, plan: NetworkPlan, topology: Topology) -> Sequence[Co
             executable="nft",
             arguments=("-f", "-"),
             purpose="install project-owned device mark rules",
-            stdin=_render_nft_script(plan),
+            stdin=_render_nft_script(plan, topology),
         ),
     ]
     upload_queues = tuple(queue for queue in plan.queues if queue.direction == Direction.UPLOAD)
     download_queues = tuple(queue for queue in plan.queues if queue.direction == Direction.DOWNLOAD)
-    commands.extend(
-        _render_tc_commands(
-            queues=upload_queues,
-            interface=topology.uplink_interface,
-            device_count=max((queue.mark for queue in upload_queues), default=0),
+    if upload_queues:
+        commands.extend(
+            _render_tc_commands(
+                queues=upload_queues,
+                interface=topology.uplink_interface,
+                device_count=max(queue.mark for queue in upload_queues),
+            )
         )
-    )
-    commands.extend(
-        _render_tc_commands(
-            queues=download_queues,
-            interface=topology.test_interface,
-            device_count=max((queue.mark for queue in download_queues), default=0),
+    if download_queues:
+        commands.extend(
+            _render_tc_commands(
+                queues=download_queues,
+                interface=topology.test_interface,
+                device_count=max(queue.mark for queue in download_queues),
+            )
         )
-    )
     return tuple(commands)
 
 
