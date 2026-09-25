@@ -59,10 +59,17 @@ class NetworkApplier:
         """Apply a plan and attempt a bounded reset if any command fails."""
 
         try:
-            for interface in (self._topology.uplink_interface, self._topology.test_interface):
-                self._root_queue(interface, for_apply=True)
+            project_roots = {
+                interface: self._root_queue(interface, for_apply=True)
+                for interface in (self._topology.uplink_interface, self._topology.test_interface)
+            }
             if not plan.queues:
-                self.reset()
+                # prio needs at least two bands, so remove the project roots.
+                # The nft script replaces the table in one transaction, so its
+                # deny and block rules stay in place meanwhile.
+                for command in render_reset_commands(topology=self._topology):
+                    if command.executable == "tc" and project_roots[command.arguments[3]]:
+                        self._run_checked(command)
         except CommandExecutionError as error:
             raise ApplyError(
                 "network plan could not safely change the root queues",

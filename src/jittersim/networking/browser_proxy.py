@@ -95,7 +95,11 @@ def destination_allowed(plan: Optional[NetworkPlan], client_ip: IPv4Address, add
             return False
         if destination in website_filter.blocked_addresses:
             return False
-        if not website_filter.allowed_addresses or destination not in website_filter.allowed_addresses:
+        # None means no allowlist; an empty allowlist allows nothing.
+        if (
+            website_filter.allowed_addresses is not None
+            and destination not in website_filter.allowed_addresses
+        ):
             return False
     return True
 

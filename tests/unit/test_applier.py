@@ -88,6 +88,12 @@ class NetworkApplierTests(unittest.TestCase):
                 ("tc", "qdisc", "del", "dev", "wlan0", "root", "handle", "10:"),
             ],
         )
+        # The nft script replaces the table in one transaction, so deny and
+        # block rules never disappear, even for a moment.
+        self.assertEqual(
+            [command.argv for command in executor.commands if command.executable == "nft"],
+            [("nft", "-f", "-")],
+        )
 
     def test_apply_rejects_a_foreign_root_queue_before_mutation(self) -> None:
         executor = RootQueueExecutor(handle="20:", kind="htb")

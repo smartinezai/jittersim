@@ -5550,10 +5550,8 @@ class ControlServer(HTTPServer):
                     ):
                         raise ValueError("service assignment domains overlap")
                 self.repository.save_service_assignment(assignment)
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid service assignment configuration"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid service assignment configuration", error)
             return self._apply_saved_change(
                 "service_assignment",
                 _service_assignment_payload(assignment, repository=self.repository),
