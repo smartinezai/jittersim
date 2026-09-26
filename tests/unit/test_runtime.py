@@ -1345,7 +1345,7 @@ class ActivityRecordingTests(unittest.TestCase):
         self.assertEqual(failed, [])
         self.assertEqual(self.messages(), ["Alice: schedule work-hours started, now Slow"])
 
-    def test_a_change_the_dashboard_applied_is_recorded_on_the_next_tick(self) -> None:
+    def test_a_manual_apply_records_activity_without_waiting_for_a_tick(self) -> None:
         self.tick(self.BEFORE)
         self.repository.save_timer(
             Timer(
@@ -1353,10 +1353,11 @@ class ActivityRecordingTests(unittest.TestCase):
                 started_at=int(self.BEFORE), expires_at=int(self.BEFORE) + 600,
             )
         )
-        plan = self.scheduler.build_plan(repository=self.repository, now=self.BEFORE + 1)
-        # As the dashboard does after applying a saved change itself.
-        self.scheduler.activate(applied_payload=plan_to_payload(plan))
+        prepared = self.scheduler.prepare_plan(repository=self.repository, now=self.BEFORE + 1)
+        self.helper.apply(plan=prepared.plan)
+        self.scheduler.activate_plan(repository=self.repository, prepared=prepared)
         applied = len(self.helper.plans)
+        self.assertEqual(self.messages(), ["Alice: timer started, now Slow"])
 
         self.tick(self.BEFORE + 2)
 

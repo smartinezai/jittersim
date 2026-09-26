@@ -95,6 +95,14 @@ def plan_address_moves(
     return moves, blocked
 
 
+@dataclass(frozen=True)
+class PreparedRuntimePlan:
+    """Network rules and their source descriptions from one evaluation."""
+
+    plan: NetworkPlan
+    states: Dict[str, TargetState]
+
+
 @dataclass
 class _DeviceRollState:
     """Mutable scheduler state for one device between ticks."""
@@ -189,17 +197,34 @@ class RuntimeScheduler:
         with self._lock:
             self._current_payload = None
 
+    def activate_plan(
+        self, *, repository: ConfigRepository, prepared: PreparedRuntimePlan
+    ) -> None:
+        """Record a successful manual apply before starting background work."""
+
+        with self._apply_lock:
+            self._record_activity(repository=repository, states=prepared.states, now=time.time())
+            self.activate(applied_payload=plan_to_payload(prepared.plan))
+
     def build_plan(
         self,
         *,
         repository: ConfigRepository,
         now: Optional[float] = None,
-    ):
+    ) -> NetworkPlan:
         """Build the current runtime plan, including timers and schedules."""
+
+        return self.prepare_plan(repository=repository, now=now).plan
+
+    def prepare_plan(
+        self, *, repository: ConfigRepository, now: Optional[float] = None
+    ) -> PreparedRuntimePlan:
+        """Keep source descriptions paired with the exact plan being applied."""
 
         current_time = time.time() if now is None else now
         with self._apply_lock:
-            return self._build_plan(repository=repository, now=current_time)[0]
+            plan, states = self._build_plan(repository=repository, now=current_time)
+            return PreparedRuntimePlan(plan=plan, states=states)
 
     @contextmanager
     def exclusive(self) -> Iterator[None]:
@@ -439,7 +464,7 @@ class RuntimeScheduler:
         with self._lock:
             previous = self._applied_states
             self._applied_states = states
-        # The first plan after an apply, a reset or a restart is the starting point.
+        # The first successful plan after a reset or restart is the starting point.
         if previous is None:
             return
         self._record(repository, activity_events(previous, states), now)

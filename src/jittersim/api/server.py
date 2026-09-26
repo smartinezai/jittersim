@@ -7839,9 +7839,13 @@ class ControlServer(HTTPServer):
 
     def _apply_current_plan(self) -> Tuple[int, str, bytes]:
         try:
+            prepared = (
+                self.scheduler.prepare_plan(repository=self.repository)
+                if self.scheduler is not None else None
+            )
             plan = (
-                self.scheduler.build_plan(repository=self.repository)
-                if self.scheduler is not None
+                prepared.plan
+                if prepared is not None
                 else compile_stored_plan(repository=self.repository)
             )
         except (PlanError, StorageError):
@@ -7888,7 +7892,7 @@ class ControlServer(HTTPServer):
             last_error=None,
         )
         if self.scheduler is not None:
-            self.scheduler.activate(applied_payload=plan_to_payload(plan))
+            self.scheduler.activate_plan(repository=self.repository, prepared=prepared)
         return HTTPStatus.OK, "application/json", _json_bytes(
             {"result": result, "state": _runtime_state_payload(state)}
         )

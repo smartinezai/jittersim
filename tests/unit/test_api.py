@@ -40,7 +40,7 @@ from jittersim.config.models import (
     UnaffectedDevice,
 )
 from jittersim.config.storage import ConfigRepository, StorageError
-from jittersim.engine.runtime import RuntimeScheduler
+from jittersim.engine.runtime import PreparedRuntimePlan, RuntimeScheduler
 from jittersim.engine.service import compile_stored_plan
 from jittersim.measure import comparison_table
 from jittersim.networking.helper import HelperClientError
@@ -4295,13 +4295,13 @@ class ControlServerTests(unittest.TestCase):
                 yield
                 events.append("release")
 
-            def build_plan(self, *, repository):
-                return compile_stored_plan(repository=repository)
+            def prepare_plan(self, *, repository):
+                return PreparedRuntimePlan(plan=compile_stored_plan(repository=repository), states={})
 
             def sample_usage(self, *, repository):
                 events.append("sample")
 
-            def activate(self, *, applied_payload):
+            def activate_plan(self, *, repository, prepared):
                 events.append("activate")
 
         class RecordingHelper(FakeHelper):
