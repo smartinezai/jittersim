@@ -50,8 +50,13 @@ is a private lab tool, not a replacement for a home router.
 - Device groups that apply one profile override to several devices at once.
 - One profile for everyone else on the test Wi-Fi, with an Unaffected devices
   list whose members keep a normal connection.
-- A live upload and download graph with packet rates for assigned devices,
-  and the packets JitterSim dropped or is still delaying.
+- A live upload and download graph with packet rates for assigned devices or
+  everyone else, and the packets JitterSim dropped or is still delaying.
+- Saved devices follow their MAC address: when the Wi-Fi gives one a new IP
+  address, JitterSim moves its record within about 30 seconds of seeing the
+  device active there, while the network is applied. Devices that swap
+  addresses move together, and no device takes an address another saved
+  device keeps.
 - MAC address allowlists and denylists. The filtering mode decides which list
   applies.
 - A global blocked-site list.

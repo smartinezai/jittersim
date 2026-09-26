@@ -2279,6 +2279,9 @@ DASHBOARD_HTML = r"""<!doctype html>
     let lastRuntimeState = null;
     let dashboardLoaded = false;
     let gettingStartedKey = "";
+    // Device IDs can't start with an underscore, so this value is free.
+    const EVERYONE_ELSE_TRAFFIC = "__everyone_else__";
+    const EVERYONE_ELSE_QUEUE_ID = "rule:everyone-else";
     let lastConnectedDevices = null;
     let groups = [];
     let observedDomainsByDevice = {};
@@ -2384,8 +2387,11 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     function selectedTrafficTotals(deviceCounters) {
       const selectedDevice = element("traffic-device").value;
+      // "All assigned devices" means the saved devices; everyone else is its own choice.
       const counters = selectedDevice === "all"
-        ? Object.values(deviceCounters)
+        ? Object.keys(deviceCounters)
+          .filter((id) => id !== EVERYONE_ELSE_TRAFFIC)
+          .map((id) => deviceCounters[id])
         : deviceCounters[selectedDevice] ? [deviceCounters[selectedDevice]] : [];
       if (!counters.length) return null;
       return counters.reduce((totals, current) => {
@@ -2399,7 +2405,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     function selectedQueueTotals(queues) {
       const selectedDevice = element("traffic-device").value;
       const figures = selectedDevice === "all"
-        ? Object.values(queues)
+        ? Object.keys(queues).filter((id) => id !== EVERYONE_ELSE_TRAFFIC).map((id) => queues[id])
         : queues[selectedDevice] ? [queues[selectedDevice]] : [];
       return figures.reduce((totals, current) => ({
         dropped: totals.dropped + current.upload_dropped + current.download_dropped,
@@ -2421,9 +2427,16 @@ DASHBOARD_HTML = r"""<!doctype html>
         option.textContent = device.name + " (" + device.ipv4_address + ")";
         select.appendChild(option);
       });
-      select.value = Array.from(select.options).some((option) => option.value === selected)
-        ? selected
-        : "all";
+      if (everyoneElse.profile_id) {
+        const option = document.createElement("option");
+        option.value = EVERYONE_ELSE_TRAFFIC;
+        option.textContent = "Everyone else";
+        select.appendChild(option);
+      }
+      const kept = Array.from(select.options).some((option) => option.value === selected);
+      select.value = kept ? selected : "all";
+      // The last sample belongs to the choice that went, so start a fresh graph.
+      if (!kept && selected) resetTrafficHistory();
     }
 
     function drawTrafficChart() {
@@ -2783,9 +2796,12 @@ DASHBOARD_HTML = r"""<!doctype html>
         };
       }
       const selectedDevice = element("traffic-device").value;
+      const limitKey = selectedDevice === EVERYONE_ELSE_TRAFFIC
+        ? EVERYONE_ELSE_QUEUE_ID
+        : selectedDevice;
       const deviceLimits = selectedDevice === "all" || !data.profile_limits_available
         ? null
-        : (data.profile_limits || {})[selectedDevice];
+        : (data.profile_limits || {})[limitKey];
       const profileAvailable = selectedDevice !== "all" &&
         data.profile_limits_available === true && deviceLimits !== undefined;
       element("traffic-profile-status").textContent = selectedDevice === "all"
@@ -2805,6 +2821,15 @@ DASHBOARD_HTML = r"""<!doctype html>
       };
     }
 
+    function mergedTrafficCounters(data) {
+      // Everyone else is one more choice in the menu, under a reserved key.
+      const devices = Object.assign({}, data.devices || {});
+      const queues = Object.assign({}, data.queues || {});
+      if (data.everyone_else) devices[EVERYONE_ELSE_TRAFFIC] = data.everyone_else;
+      if (data.everyone_else_queue) queues[EVERYONE_ELSE_TRAFFIC] = data.everyone_else_queue;
+      return { devices: devices, queues: queues };
+    }
+
     async function pollTraffic() {
       if (trafficRequestInFlight || !trafficSamplingAllowed || document.hidden) return;
       trafficRequestInFlight = true;
@@ -2816,8 +2841,9 @@ DASHBOARD_HTML = r"""<!doctype html>
           return;
         }
         latestTrafficReferences = trafficReferencesFromResponse(data);
-        const totals = selectedTrafficTotals(data.devices || {});
-        const queueTotals = selectedQueueTotals(data.queues || {});
+        const counters = mergedTrafficCounters(data);
+        const totals = selectedTrafficTotals(counters.devices);
+        const queueTotals = selectedQueueTotals(counters.queues);
         if (!totals) {
           resetTrafficHistory();
           element("traffic-status").textContent = "No counters yet. Assign a profile and apply the configuration.";
@@ -3513,6 +3539,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       );
       renderDeviceTable();
       rerenderConnectedDevices();
+      updateTrafficDeviceOptions(devices);
     }
 
     async function applyProfileToDevice(device, profileId, button) {
@@ -6009,6 +6036,8 @@ class ControlServer(HTTPServer):
                 )
             queues = counters.get("queues")
             device_queues = queues.get("devices") if isinstance(queues, dict) else None
+            everyone_else = counters.get("everyone_else")
+            everyone_else_queue = queues.get("everyone_else") if isinstance(queues, dict) else None
             profile_limits = (
                 self.scheduler.applied_queue_bandwidth_limits()
                 if self.scheduler is not None
@@ -6020,6 +6049,10 @@ class ControlServer(HTTPServer):
                     "sampled_at": time.time(),
                     "devices": device_counters,
                     "queues": device_queues if isinstance(device_queues, dict) else {},
+                    "everyone_else": everyone_else if isinstance(everyone_else, dict) else None,
+                    "everyone_else_queue": (
+                        everyone_else_queue if isinstance(everyone_else_queue, dict) else None
+                    ),
                     "isp_limits": isp_limits,
                     "profile_limits_available": profile_limits is not None,
                     "profile_limits": profile_limits or {},

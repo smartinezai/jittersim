@@ -6,7 +6,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from typing import Dict, Iterator, Optional, Sequence, Union
+from typing import Dict, Iterator, Mapping, Optional, Sequence, Tuple, Union
 
 from jittersim.config.models import (
     DataLimit,
@@ -16,6 +16,7 @@ from jittersim.config.models import (
     Profile,
     ServiceQuota,
     TimeQuota,
+    ValidationError,
     time_quota_counter_id,
 )
 from jittersim.config.storage import ConfigRepository, DatabasePath, StorageError
@@ -45,6 +46,53 @@ from .website import build_website_filters, resolve_domains
 LOGGER = logging.getLogger(__name__)
 
 
+def plan_address_moves(
+    devices: Sequence[Device], seen: Mapping[str, str]
+) -> Tuple[Dict[str, Tuple[str, str]], Dict[str, Tuple[str, str]]]:
+    """Choose which saved devices move to the address their MAC address uses now.
+
+    `seen` maps MAC addresses to confirmed client addresses. Returns the moves
+    as device ID to (old, new) address, and the blocked moves as device ID to
+    (address, the device that keeps it). A device moves only when no saved
+    device keeps that address, so devices that swap or pass addresses on move
+    together.
+    """
+
+    current = {device.id: str(device.ipv4_address) for device in devices}
+    wanted = {}
+    for device in devices:
+        address = seen.get(device.mac_address) if device.mac_address else None
+        if address is None or address == current[device.id]:
+            continue
+        try:
+            replace(device, ipv4_address=address)
+        except ValidationError:
+            # For example a link-local address, which a saved device can't use.
+            continue
+        wanted[device.id] = address
+    blocked = {}
+    while True:
+        claims: Dict[str, list] = {}
+        for device_id, address in current.items():
+            claims.setdefault(wanted.get(device_id, address), []).append(device_id)
+        stopped = False
+        for address, claimants in claims.items():
+            if len(claimants) < 2:
+                continue
+            keepers = [device_id for device_id in claimants if device_id not in wanted]
+            for device_id in claimants:
+                if device_id in wanted:
+                    others = keepers or [other for other in claimants if other != device_id]
+                    blocked[device_id] = (address, others[0])
+                    del wanted[device_id]
+                    stopped = True
+        # A stopped device keeps its old address, which another move may want.
+        if not stopped:
+            break
+    moves = {device_id: (current[device_id], address) for device_id, address in wanted.items()}
+    return moves, blocked
+
+
 @dataclass
 class _DeviceRollState:
     """Mutable scheduler state for one device between ticks."""
@@ -62,6 +110,9 @@ class _DeviceRollState:
 
 class RuntimeScheduler:
     """Apply only changed scheduled plans while the dashboard is running."""
+
+    # How often saved devices are matched to the addresses their MAC addresses use.
+    address_check_seconds = 30.0
 
     def __init__(
         self,
@@ -83,6 +134,9 @@ class RuntimeScheduler:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_traffic_sample_at = 0.0
+        self._last_address_check_at = 0.0
+        # Blocked moves already logged, so each is logged once.
+        self._blocked_moves: Dict[str, Tuple[str, str]] = {}
         self._last_quota_sample_at = 0.0
         self._last_device_counters: Dict[str, int] = {}
         self._device_traffic_bytes: Dict[str, int] = {}
@@ -154,6 +208,7 @@ class RuntimeScheduler:
             self._last_device_counters.clear()
             self._device_traffic_bytes.clear()
             self._group_members.clear()
+            self._blocked_moves.clear()
 
     def sample_usage(self, *, repository: ConfigRepository) -> None:
         """Record quota and device traffic before the helper counters restart."""
@@ -245,6 +300,7 @@ class RuntimeScheduler:
             if active_repository.get_runtime_state().last_action == "reset":
                 self._honor_external_reset()
                 return False
+            self._follow_device_addresses(repository=active_repository, now=current_time)
             self._sample_traffic_if_needed(repository=active_repository, now=current_time)
             self._sample_quota_usage_if_needed(repository=active_repository, now=current_time)
             plan = self._build_plan(repository=active_repository, now=current_time)
@@ -275,6 +331,55 @@ class RuntimeScheduler:
         finally:
             if owned_repository:
                 active_repository.close()
+
+    def _follow_device_addresses(self, *, repository: ConfigRepository, now: float) -> None:
+        """Move saved devices to the addresses their MAC addresses use now.
+
+        DHCP can hand a device a new address, and a saved device is matched by
+        its address, so its profile would silently stop applying.
+        """
+
+        if now - self._last_address_check_at < self.address_check_seconds:
+            return
+        self._last_address_check_at = now
+        read_clients = getattr(self._helper_client, "connected_device_snapshot", None)
+        if read_clients is None:
+            return
+        try:
+            snapshot = read_clients()
+        except HelperClientError:
+            LOGGER.warning("could not check which addresses saved devices use", exc_info=True)
+            return
+        if not snapshot.get("association_status_available"):
+            return
+        # Only a reachable neighbour entry confirms an address. Otherwise the
+        # helper falls back to a DHCP lease or an old neighbour entry, which
+        # can be stale and would move a device back and forth.
+        seen = {
+            client["mac_address"]: client["ipv4_address"]
+            for client in snapshot.get("devices", [])
+            if client.get("association_verified")
+            and client.get("neighbor_state") == "reachable"
+            and client.get("mac_address")
+            and client.get("ipv4_address")
+        }
+        moves, blocked = plan_address_moves(repository.list_devices(), seen)
+        for device_id, (address, holder) in blocked.items():
+            if self._blocked_moves.get(device_id) != (address, holder):
+                LOGGER.warning(
+                    "device %s now uses %s, which saved device %s keeps; not moving it",
+                    device_id,
+                    address,
+                    holder,
+                )
+        self._blocked_moves = blocked
+        if not moves:
+            return
+        if not repository.move_device_addresses(moves):
+            LOGGER.warning("saved devices changed during the address check; checking again later")
+            return
+        for device_id, (old_address, new_address) in moves.items():
+            LOGGER.info("device %s moved from %s to %s", device_id, old_address, new_address)
 
     def _honor_external_reset(self) -> None:
         # Someone reset the network outside the dashboard, for example with
