@@ -166,6 +166,39 @@ class ConfigRepository:
     def _initialize_schema(self) -> None:
         self._connection.executescript(
             """
+            CREATE TABLE IF NOT EXISTS settings_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                happened_at INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                digest TEXT NOT NULL,
+                settings_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS settings_history_status (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                warning TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS test_sessions (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                target TEXT NOT NULL,
+                notes TEXT NOT NULL,
+                started_at INTEGER NOT NULL,
+                ended_at INTEGER,
+                settings_json TEXT NOT NULL,
+                measurements_json TEXT NOT NULL DEFAULT '[]',
+                events_truncated INTEGER NOT NULL DEFAULT 0,
+                revision INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS one_active_test_session
+                ON test_sessions ((1)) WHERE ended_at IS NULL;
+            CREATE TABLE IF NOT EXISTS test_session_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL REFERENCES test_sessions(id) ON DELETE CASCADE,
+                happened_at INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                message TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS session_event_order ON test_session_events (session_id, id);
             CREATE TABLE IF NOT EXISTS profiles (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -395,6 +428,9 @@ class ConfigRepository:
         )
         self._connection.execute(_SCHEDULES_TABLE_SQL.format(name="schedules"))
         self._upgrade_schedules_table()
+        self._add_column_if_missing("test_sessions", "captures_json", "TEXT NOT NULL DEFAULT '[]'")
+        self._add_column_if_missing("test_sessions", "captures_truncated", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_missing("activity_log", "device_ids_json", "TEXT NOT NULL DEFAULT '[]'")
         self._add_column_if_missing("profiles", "settings_json", "TEXT NOT NULL DEFAULT '{}'")
         self._add_column_if_missing("devices", "mac_address", "TEXT")
         self._add_column_if_missing("progressions", "traffic_target_bytes", "INTEGER NOT NULL DEFAULT 0")
@@ -654,7 +690,7 @@ class ConfigRepository:
 
         self.record_activities(((kind, message),), now=now)
 
-    def record_activities(self, events: Sequence[Tuple[str, str]], *, now: float) -> None:
+    def record_activities(self, events: Sequence[Tuple[str, str]], *, now: float, device_ids=None) -> None:
         """Add (kind, message) events in one transaction, keeping the newest ones."""
 
         for kind, message in events:
@@ -662,10 +698,33 @@ class ConfigRepository:
                 raise StorageError("activity kind is invalid")
             if not isinstance(message, str) or not message or len(message) > 500:
                 raise StorageError("activity message is invalid")
+        device_ids = device_ids if device_ids is not None else [()] * len(events)
+        if len(device_ids) != len(events) or any(
+            len(targets) > 256 or any(not isinstance(target, str) or len(target) > 64 for target in targets)
+            for targets in device_ids
+        ):
+            raise StorageError("activity targets are invalid")
         try:
+            session = self._connection.execute(
+                "SELECT id FROM test_sessions WHERE ended_at IS NULL"
+            ).fetchone()
+            if session is not None:
+                count = self._connection.execute(
+                    "SELECT COUNT(*) FROM test_session_events WHERE session_id = ?", (session[0],)
+                ).fetchone()[0]
+                available = max(0, 500 - count)
+                self._connection.executemany(
+                    "INSERT INTO test_session_events (session_id, happened_at, kind, message) "
+                    "VALUES (?, ?, ?, ?)",
+                    [(session[0], int(now), kind, message) for kind, message in events[:available]],
+                )
+                if len(events) > available:
+                    self._connection.execute(
+                        "UPDATE test_sessions SET events_truncated = 1 WHERE id = ?", (session[0],)
+                    )
             self._connection.executemany(
-                "INSERT INTO activity_log (happened_at, kind, message) VALUES (?, ?, ?)",
-                [(int(now), kind, message) for kind, message in events],
+                "INSERT INTO activity_log (happened_at, kind, message, device_ids_json) VALUES (?, ?, ?, ?)",
+                [(int(now), kind, message, json.dumps(targets)) for (kind, message), targets in zip(events, device_ids)],
             )
             self._connection.execute(
                 "DELETE FROM activity_log WHERE id NOT IN "
@@ -681,9 +740,16 @@ class ConfigRepository:
         """Return the activity log, newest first."""
 
         rows = self._connection.execute(
-            "SELECT id, happened_at, kind, message FROM activity_log ORDER BY id DESC"
+            "SELECT id, happened_at, kind, message, device_ids_json FROM activity_log ORDER BY id DESC"
         ).fetchall()
-        return tuple(dict(row) for row in rows)
+        result = []
+        for row in rows:
+            event = dict(row)
+            targets = json.loads(event.pop("device_ids_json"))
+            if targets:
+                event["device_ids"] = targets
+            result.append(event)
+        return tuple(result)
 
     def activity_summary(self) -> Dict[str, int]:
         """Return the newest event's ID and how many events the log holds."""
@@ -1112,7 +1178,7 @@ class ConfigRepository:
             scenarios=self.list_scenarios(),
         )
 
-    def replace_settings(self, settings: SavedSettings) -> None:
+    def replace_settings(self, settings: SavedSettings, *, expected_version: Optional[int] = None, preserve_usage: bool = False) -> None:
         """Replace every saved setting at once. On failure nothing changes.
 
         DNS observations, action history and the runtime state stay. Timers,
@@ -1120,6 +1186,22 @@ class ConfigRepository:
         replaced devices, groups and scenarios.
         """
 
+        usage = {}
+        if expected_version is not None:
+            self._connection.execute("BEGIN IMMEDIATE")
+            if self.get_runtime_state().configuration_version != expected_version:
+                self._connection.rollback()
+                raise StorageError("settings changed since the preview")
+        if preserve_usage:
+            for table, key, columns in (
+                ("data_limits", ("device_id",), ("used_bytes", "counter_bytes", "last_reset_at")),
+                ("group_data_limits", ("group_id",), ("used_bytes", "counter_bytes", "last_reset_at")),
+                ("service_quotas", ("id", "device_id"), ("used_bytes", "counter_bytes", "last_reset_at")),
+                ("time_quotas", ("id", "device_id"), ("used_seconds", "counter_bytes", "last_reset_at", "last_sample_at", "started_at", "expires_at")),
+            ):
+                usage[table] = (key, columns, self._connection.execute(
+                    "SELECT " + ", ".join(key + columns) + " FROM " + table
+                ).fetchall())
         self._deferring_commits = True
         try:
             # The everyone-else profile refers to a profile that is replaced below.
@@ -1166,6 +1248,13 @@ class ConfigRepository:
             for unaffected in settings.unaffected_devices:
                 self.save_unaffected_device(unaffected)
             self.save_everyone_else_profile_id(settings.everyone_else_profile_id)
+            for table, (key, columns, rows) in usage.items():
+                for row in rows:
+                    self._connection.execute(
+                        "UPDATE " + table + " SET " + ", ".join(column + " = ?" for column in columns)
+                        + " WHERE " + " AND ".join(column + " = ?" for column in key),
+                        tuple(row[column] for column in columns + key)
+                    )
         except BaseException as error:
             # Any error, not only a storage one, must not leave a half-replaced
             # configuration for the next save to commit.
