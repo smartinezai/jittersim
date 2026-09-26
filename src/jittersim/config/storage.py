@@ -387,28 +387,37 @@ class ConfigRepository:
     def _upgrade_schedules_table(self) -> None:
         """Let older schedules tables hold group and everyone-else schedules."""
 
-        columns = {
-            row["name"] for row in self._connection.execute("PRAGMA table_info(schedules)")
-        }
-        if "group_id" in columns:
+        def upgraded() -> bool:
+            columns = self._connection.execute("PRAGMA table_info(schedules)").fetchall()
+            return any(column["name"] == "group_id" for column in columns)
+
+        if upgraded():
             return
         # SQLite can't drop NOT NULL from device_id, so the rows move to a new
         # table. No other table refers to schedules.
         try:
-            self._connection.executescript(
-                "BEGIN;"
-                + _SCHEDULES_TABLE_SQL.format(name="schedules_upgrade")
-                + """;
-                INSERT INTO schedules_upgrade (
-                    id, device_id, profile_id, days_json, start_minute, end_minute, enabled
+            self._connection.commit()
+            # The write lock comes first, and the check again under it, so two
+            # processes that open an old database at once don't both copy it.
+            self._connection.execute("BEGIN IMMEDIATE")
+            if not upgraded():
+                self._connection.execute(_SCHEDULES_TABLE_SQL.format(name="schedules_upgrade"))
+                # A schedule whose device or profile is gone applies to nothing,
+                # and copying it would fail the foreign keys.
+                self._connection.execute(
+                    """
+                    INSERT INTO schedules_upgrade (
+                        id, device_id, profile_id, days_json, start_minute, end_minute, enabled
+                    )
+                    SELECT id, device_id, profile_id, days_json, start_minute, end_minute, enabled
+                    FROM schedules
+                    WHERE device_id IN (SELECT id FROM devices)
+                      AND profile_id IN (SELECT id FROM profiles)
+                    """
                 )
-                SELECT id, device_id, profile_id, days_json, start_minute, end_minute, enabled
-                FROM schedules;
-                DROP TABLE schedules;
-                ALTER TABLE schedules_upgrade RENAME TO schedules;
-                COMMIT;
-                """
-            )
+                self._connection.execute("DROP TABLE schedules")
+                self._connection.execute("ALTER TABLE schedules_upgrade RENAME TO schedules")
+            self._connection.commit()
         except sqlite3.Error as error:
             self._connection.rollback()
             raise StorageError("could not upgrade the saved schedules") from error

@@ -315,7 +315,7 @@ class DomainObservation:
 def _validate_target(
     device_id: Optional[str], group_id: Optional[str], everyone_else: bool, owner: str
 ) -> None:
-    """Check that a schedule or scenario run names exactly one target."""
+    """Check that exactly one of a device, a group or everyone else is named."""
 
     if device_id is not None:
         _validate_identifier(device_id, "device_id")
