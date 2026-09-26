@@ -481,7 +481,9 @@ class ConfigRepository:
             self._connection.rollback()
             raise StorageError(f"could not save profile {profile.id}") from error
 
-    def save_device(self, device: Device, *, expected: Optional[Device] = None) -> None:
+    def save_device(
+        self, device: Device, *, expected: Optional[Device] = None, create_only: bool = False
+    ) -> None:
         """Save an assignment without duplicating a MAC or overwriting a stale edit."""
 
         values = (device.id, device.name, str(device.ipv4_address), device.profile_id, device.mac_address)
@@ -498,10 +500,14 @@ class ConfigRepository:
                         ipv4_address = excluded.ipv4_address,
                         profile_id = excluded.profile_id,
                         mac_address = excluded.mac_address
+                    WHERE ? = 0
                     """,
-                    values + (device.mac_address, device.id),
+                    values + (device.mac_address, device.id, int(create_only)),
                 )
-                message = "Another saved device already uses this MAC address."
+                message = (
+                    "Saved device identity changed. Refresh connected clients before assigning a profile."
+                    if create_only else "Another saved device already uses this MAC address."
+                )
             else:
                 cursor = self._connection.execute(
                     """

@@ -3,6 +3,7 @@
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from dataclasses import replace
 from pathlib import Path
 
@@ -83,6 +84,37 @@ class DeviceIdentityTests(unittest.TestCase):
 
         self.assertEqual(status, 409, body)
         self.assertEqual(self.repository.list_devices(), (self.device,))
+
+    def test_connected_assignment_keeps_the_original_edit_snapshot(self):
+        original_list = self.repository.list_devices
+
+        def changed_after_read():
+            snapshot = original_list()
+            self.repository.save_device(replace(self.device, name="Changed elsewhere"))
+            return snapshot
+
+        with patch.object(self.repository, "list_devices", side_effect=changed_after_read):
+            status, response = self.assign()
+
+        self.assertEqual(status, 409, response)
+        self.assertEqual(self.repository.get_device("alice").name, "Changed elsewhere")
+        self.assertIsNone(self.server.helper_client.applied_plan)
+
+    def test_new_connected_assignment_cannot_replace_a_concurrently_claimed_id(self):
+        self.repository.delete_device("alice")
+        original_snapshot = self.server.helper_client.connected_device_snapshot
+        other = Device("client-192-168-50-178", "Other", "192.168.50.42", "normal", "aa:bb:cc:dd:ee:ff")
+
+        def claimed_during_discovery():
+            self.repository.save_device(other)
+            return original_snapshot()
+
+        with patch.object(self.server.helper_client, "connected_device_snapshot", side_effect=claimed_during_discovery):
+            status, response = self.assign()
+
+        self.assertEqual(status, 409, response)
+        self.assertEqual(self.repository.get_device(other.id), other)
+        self.assertIsNone(self.server.helper_client.applied_plan)
 
     def test_stale_form_cannot_restore_an_old_address(self):
         opened = json.loads(self.server.response_for("/api/devices")[2])["devices"][0]

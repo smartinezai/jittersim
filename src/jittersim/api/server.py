@@ -7621,8 +7621,7 @@ class ControlServer(HTTPServer):
                 {"error": "network helper is not configured"}
             )
         try:
-            device = _connected_device_from_payload(payload, self.repository)
-            expected = self.repository.get_device(device.id)
+            device, expected = _connected_device_from_payload(payload, self.repository)
         except DeviceConflictError as error:
             return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
         except (KeyError, TypeError, ValueError) as error:
@@ -7651,7 +7650,7 @@ class ControlServer(HTTPServer):
             if capacity_error is not None:
                 return capacity_error
         try:
-            self.repository.save_device(device, expected=expected)
+            self.repository.save_device(device, expected=expected, create_only=expected is None)
         except DeviceConflictError as error:
             return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
         status, content_type, body = self._apply_after_change()
@@ -8866,8 +8865,8 @@ def _settings_from_payload(payload: Dict[str, Any]) -> SavedSettings:
 
 def _connected_device_from_payload(
     payload: Dict[str, Any], repository: ConfigRepository
-) -> Device:
-    """Build an assignment for a visible client while preserving existing names and IDs."""
+) -> Tuple[Device, Optional[Device]]:
+    """Return an assignment and the saved identity it was based on."""
 
     ipv4_address = payload["ipv4_address"]
     profile_id = payload["profile_id"]
@@ -8894,7 +8893,7 @@ def _connected_device_from_payload(
         existing = matching[0]
         if existing_by_address is not None and existing_by_address.id != existing.id:
             raise DeviceConflictError("This address belongs to another saved device. Resolve it first.")
-        return replace(existing, ipv4_address=address_only.ipv4_address, profile_id=profile_id)
+        return replace(existing, ipv4_address=address_only.ipv4_address, profile_id=profile_id), existing
     if existing_by_address is not None:
         if existing_by_address.mac_address is not None and existing_by_address.mac_address != mac_address:
             raise DeviceConflictError("This address belongs to a different saved device. Resolve it first.")
@@ -8904,7 +8903,7 @@ def _connected_device_from_payload(
             ipv4_address=address_only.ipv4_address,
             profile_id=profile_id,
             mac_address=mac_address or existing_by_address.mac_address,
-        )
+        ), existing_by_address
 
     generated_id = "client-" + str(address_only.ipv4_address).replace(".", "-")
     existing_generated_id = repository.get_device(generated_id)
@@ -8916,7 +8915,7 @@ def _connected_device_from_payload(
         ipv4_address=address_only.ipv4_address,
         profile_id=profile_id,
         mac_address=mac_address,
-    )
+    ), None
 
 
 def _authorization_matches(
