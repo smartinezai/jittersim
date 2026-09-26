@@ -388,12 +388,21 @@ class RuntimeScheduler:
                 keeper = devices[holder].name if holder in devices else holder
                 self._record(
                     repository,
-                    "address",
-                    f"{device.name} now uses {address}, which {keeper} keeps, "
-                    f"so it stays at {device.ipv4_address}",
+                    [(
+                        "address",
+                        f"{device.name} now uses {address}, which {keeper} keeps, "
+                        f"so it stays at {device.ipv4_address}",
+                    )],
                     now,
                 )
-        self._blocked_moves = blocked
+        # An idle device drops out of the confirmed clients for a while; it keeps
+        # its entry until it is seen again, so its blocked move is logged once.
+        unconfirmed = {
+            device_id: entry
+            for device_id, entry in self._blocked_moves.items()
+            if device_id in devices and devices[device_id].mac_address not in seen
+        }
+        self._blocked_moves = {**unconfirmed, **blocked}
         if not moves:
             return
         if not repository.move_device_addresses(moves):
@@ -403,8 +412,10 @@ class RuntimeScheduler:
             LOGGER.info("device %s moved from %s to %s", device_id, old_address, new_address)
             self._record(
                 repository,
-                "address",
-                f"{devices[device_id].name} moved from {old_address} to {new_address}",
+                [(
+                    "address",
+                    f"{devices[device_id].name} moved from {old_address} to {new_address}",
+                )],
                 now,
             )
 
@@ -419,13 +430,16 @@ class RuntimeScheduler:
         # The first plan after an apply, a reset or a restart is the starting point.
         if previous is None:
             return
-        for kind, message in activity_events(previous, states):
-            self._record(repository, kind, message, now)
+        self._record(repository, activity_events(previous, states), now)
 
     @staticmethod
-    def _record(repository: ConfigRepository, kind: str, message: str, now: float) -> None:
+    def _record(
+        repository: ConfigRepository, events: Sequence[Tuple[str, str]], now: float
+    ) -> None:
+        if not events:
+            return
         try:
-            repository.record_activity(kind=kind, message=message, now=now)
+            repository.record_activities(events, now=now)
         except StorageError:
             LOGGER.warning("could not record activity", exc_info=True)
 
@@ -434,11 +448,14 @@ class RuntimeScheduler:
         # `jittersim reset`. Stop applying, and reset once more in case a
         # scheduled apply raced that reset.
         self.pause()
-        self._record(repository, "reset", "Network reset outside the dashboard", now)
         try:
             self._helper_client.reset()
         except HelperClientError:
             LOGGER.warning("could not repeat an external network reset", exc_info=True)
+            message = "Network reset requested outside the dashboard; repeating it failed"
+        else:
+            message = "Network reset outside the dashboard"
+        self._record(repository, [("reset", message)], now)
 
     def _build_plan(
         self, *, repository: ConfigRepository, now: float
@@ -506,13 +523,19 @@ class RuntimeScheduler:
                         schedules=schedules, group_id=group.id, moment=moment
                     )
             group_profile_id = group.profile_id if group is not None else None
-            # What the activity log calls this device's source: kind, label, step.
+            # How the activity log tells this device's source apart and names it:
+            # kind, identity, label, step and, for a group's source, the group.
             if schedule is not None:
-                described = ("schedule", schedule.id, "")
+                described = (
+                    "schedule", f"schedule:{schedule.id}", schedule.id, "",
+                    group.name if schedule.group_id is not None else "",
+                )
             elif group_profile_id is not None:
-                described = ("group-profile", group.name, "")
+                described = (
+                    "group-profile", f"group-profile:{group.id}", group.name, "", group.name
+                )
             else:
-                described = ("profile", "", "")
+                described = ("profile", "profile", "", "", "")
             source_profile_id = (
                 group_profile_id or device.profile_id
                 if schedule is None
@@ -530,7 +553,7 @@ class RuntimeScheduler:
                 selected_profile = profiles.get(source_profile_id)
                 source_profiles = selected_profile
                 source_key = f"timer:{timer.id}"
-                described = ("timer", "", "")
+                described = ("timer", f"timer:{timer.id}", "", "", "")
             elif running is not None:
                 run, scenario, position = running
                 source_profile_id = position.profile_id
@@ -542,8 +565,10 @@ class RuntimeScheduler:
                 source_key = f"scenario:{run.id}:{position.step_index}"
                 described = (
                     "scenario",
+                    source_key,
                     scenario.name,
                     f"step {position.step_index + 1} of {len(scenario.steps)}",
+                    group.name if run.group_id is not None else "",
                 )
             elif progression is not None:
                 start_profile = profiles.get(progression.start_profile_id)
@@ -568,7 +593,10 @@ class RuntimeScheduler:
                 # so only edits to its start or end profile restart the roll.
                 source_profiles = (start_profile, end_profile)
                 source_key = f"progression:{progression.id}"
-                described = ("progression", f"from {start_profile.name} to {end_profile.name}", "")
+                described = (
+                    "progression", source_key,
+                    f"from {start_profile.name} to {end_profile.name}", "", "",
+                )
                 domain_count = int(len(progression.website_domains) * factor)
                 if domain_count:
                     blocked_domains_by_device[device.id] = progression.website_domains[:domain_count]
@@ -582,7 +610,7 @@ class RuntimeScheduler:
                 selected_profile = fallback_profile
                 source_profiles = fallback_profile
                 source_key = f"data-limit:{device.id}"
-                described = ("data-limit", "", "")
+                described = ("data-limit", "data-limit", "", "", "")
             elif group is not None:
                 group_data_limit = group_data_limits.get(group.id)
                 if (
@@ -598,7 +626,7 @@ class RuntimeScheduler:
                     selected_profile = fallback_profile
                     source_profiles = fallback_profile
                     source_key = f"group-data-limit:{group.id}"
-                    described = ("group-data-limit", group.name, "")
+                    described = ("group-data-limit", source_key, group.name, "", group.name)
             if selected_profile is None:
                 raise PlanError(f"device {device.id} references missing profile {source_profile_id}")
             active_device_ids.add(device.id)
@@ -612,12 +640,12 @@ class RuntimeScheduler:
             )
             if roll.outage_until > now:
                 blocked_addresses.append(device.ipv4_address)
-            kind, label, step = described
+            kind, identity, label, step, group_name = described
             # A progression's profile changes as it goes, so its name is left out.
             profile_name = "" if kind == "progression" else selected_profile.name
             states[device.id] = TargetState(
                 name=device.name,
-                source=Source(kind, label, step, profile_name),
+                source=Source(kind, identity, label, step, profile_name, group_name),
                 outage=roll.outage_until > now,
             )
 
@@ -629,13 +657,14 @@ class RuntimeScheduler:
 
         everyone_else = None
         everyone_else_key = None
-        everyone_else_described = ("profile", "", "")
+        everyone_else_described = ("profile", "profile", "", "")
         if everyone_else_run is not None:
             run, scenario, position = everyone_else_run
             everyone_else_profile_id = position.profile_id
             everyone_else_key = f"scenario:{run.id}:{position.step_index}"
             everyone_else_described = (
                 "scenario",
+                everyone_else_key,
                 scenario.name,
                 f"step {position.step_index + 1} of {len(scenario.steps)}",
             )
@@ -651,7 +680,12 @@ class RuntimeScheduler:
                 else repository.get_everyone_else_profile_id()
             )
             if everyone_else_schedule is not None:
-                everyone_else_described = ("schedule", everyone_else_schedule.id, "")
+                everyone_else_described = (
+                    "schedule",
+                    f"schedule:{everyone_else_schedule.id}",
+                    everyone_else_schedule.id,
+                    "",
+                )
         if everyone_else_profile_id is not None:
             profile = profiles.get(everyone_else_profile_id)
             if profile is None:
@@ -675,15 +709,15 @@ class RuntimeScheduler:
                 ),
                 blocked=roll.outage_until > now,
             )
-            kind, label, step = everyone_else_described
+            kind, identity, label, step = everyone_else_described
             states[EVERYONE_ELSE_QUEUE_ID] = TargetState(
                 name="Everyone else",
-                source=Source(kind, label, step, profile.name),
+                source=Source(kind, identity, label, step, profile.name),
                 outage=roll.outage_until > now,
             )
         else:
             states[EVERYONE_ELSE_QUEUE_ID] = TargetState(
-                name="Everyone else", source=Source("none")
+                name="Everyone else", source=Source("none", "none")
             )
 
         self._rolls = {
@@ -703,15 +737,19 @@ class RuntimeScheduler:
             profiles=profiles,
             now=now,
         )
-        limit_names = {quota.id: quota.name for quota in repository.list_service_quotas()}
-        limit_names.update(
-            (time_quota_counter_id(quota.id), quota.name)
+        # Limits are told apart by ID, so a renamed limit is the same limit.
+        limit_labels = {
+            quota.id: f"service limit {quota.name}" for quota in repository.list_service_quotas()
+        }
+        limit_labels.update(
+            (time_quota_counter_id(quota.id), f"time limit {quota.name}")
             for quota in repository.list_time_quotas()
         )
         for rule in service_quota_rules:
             if rule.active and rule.device_id in states:
                 state = states[rule.device_id]
-                reached = state.limits + (limit_names.get(rule.quota_id, rule.quota_id),)
+                label = limit_labels.get(rule.quota_id, rule.quota_id)
+                reached = state.limits + ((rule.quota_id, label),)
                 states[rule.device_id] = replace(state, limits=tuple(sorted(reached)))
         service_assignment_rules = []
         devices_by_id = {device.id: device for device in runtime_devices}

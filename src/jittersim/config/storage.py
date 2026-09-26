@@ -611,14 +611,20 @@ class ConfigRepository:
     def record_activity(self, *, kind: str, message: str, now: float) -> None:
         """Add one network event to the activity log, keeping the newest ones."""
 
-        if kind not in ACTIVITY_KINDS:
-            raise StorageError("activity kind is invalid")
-        if not isinstance(message, str) or not message or len(message) > 500:
-            raise StorageError("activity message is invalid")
+        self.record_activities(((kind, message),), now=now)
+
+    def record_activities(self, events: Sequence[Tuple[str, str]], *, now: float) -> None:
+        """Add (kind, message) events in one transaction, keeping the newest ones."""
+
+        for kind, message in events:
+            if kind not in ACTIVITY_KINDS:
+                raise StorageError("activity kind is invalid")
+            if not isinstance(message, str) or not message or len(message) > 500:
+                raise StorageError("activity message is invalid")
         try:
-            self._connection.execute(
+            self._connection.executemany(
                 "INSERT INTO activity_log (happened_at, kind, message) VALUES (?, ?, ?)",
-                (int(now), kind, message),
+                [(int(now), kind, message) for kind, message in events],
             )
             self._connection.execute(
                 "DELETE FROM activity_log WHERE id NOT IN "

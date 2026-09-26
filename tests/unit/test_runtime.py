@@ -27,7 +27,7 @@ from jittersim.config.models import (
     UnaffectedDevice,
     time_quota_counter_id,
 )
-from jittersim.config.storage import ConfigRepository
+from jittersim.config.storage import ConfigRepository, StorageError
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.networking.helper import HelperClientError
@@ -1425,6 +1425,155 @@ class ActivityRecordingTests(unittest.TestCase):
         self.assertEqual(self.messages(), ["Network reset outside the dashboard"])
         self.assertEqual(self.repository.list_activity()[0]["kind"], "reset")
 
+    def test_an_outside_reset_that_cannot_be_repeated_says_so(self) -> None:
+        self.tick(self.BEFORE)
+        self.repository.update_runtime_state(
+            observed_state="reset", last_action="reset", last_result="success", last_error=None
+        )
+
+        def fail():
+            raise HelperClientError("helper is busy")
+
+        self.helper.reset = fail
+        with self.assertLogs("jittersim.engine.runtime", "WARNING"):
+            self.tick(self.BEFORE + 1)
+
+        self.assertEqual(
+            self.messages(), ["Network reset requested outside the dashboard; repeating it failed"]
+        )
+
+    def start_timer(self, timer_id: str, profile_id: str = "slow") -> None:
+        self.repository.save_timer(
+            Timer(
+                id=timer_id, device_id="alice", profile_id=profile_id,
+                started_at=int(self.BEFORE), expires_at=int(self.BEFORE) + 600,
+            )
+        )
+
+    def test_a_timer_that_replaces_a_timer_is_recorded(self) -> None:
+        self.start_timer("first")
+        self.tick(self.BEFORE)
+
+        # Same profile, so the plan doesn't even change.
+        self.start_timer("second")
+        self.tick(self.BEFORE + 1)
+
+        self.assertEqual(self.messages(), ["Alice: timer started, now Slow"])
+
+    def save_commute(self, name: str = "Commute") -> None:
+        self.repository.save_scenario(
+            Scenario(
+                id="commute", name=name,
+                steps=(ScenarioStep("slow", 60), ScenarioStep("normal", 60)),
+            ),
+            now=self.BEFORE,
+        )
+
+    def test_renaming_a_running_scenario_is_not_recorded(self) -> None:
+        self.save_commute()
+        self.repository.start_scenario_run(
+            ScenarioRun(id="run", scenario_id="commute", started_at=int(self.BEFORE),
+                        device_id="alice")
+        )
+        self.tick(self.BEFORE)
+
+        self.save_commute("Rush hour")
+        self.tick(self.BEFORE + 1)
+
+        self.assertEqual(self.messages(), [])
+
+    def test_a_group_scenario_step_is_one_event(self) -> None:
+        self.repository.save_device(Device("bob", "Bob", "192.168.50.11", "normal"))
+        self.repository.save_device_group(DeviceGroup("family", "Family", ("alice", "bob")))
+        self.save_commute()
+        self.repository.start_scenario_run(
+            ScenarioRun(id="run", scenario_id="commute", started_at=int(self.BEFORE),
+                        group_id="family")
+        )
+
+        self.tick(self.BEFORE)
+        self.tick(self.BEFORE + 61)
+
+        self.assertEqual(
+            self.messages(), ["Group Family: scenario Commute, step 2 of 2, now Normal"]
+        )
+
+    def test_an_everyone_else_scenario_is_recorded(self) -> None:
+        self.save_commute()
+        self.tick(self.BEFORE)
+        self.repository.start_scenario_run(
+            ScenarioRun(id="run", scenario_id="commute", started_at=int(self.BEFORE),
+                        everyone_else=True)
+        )
+
+        self.tick(self.BEFORE + 1)
+
+        self.assertEqual(
+            self.messages(), ["Everyone else: scenario Commute, step 1 of 2, now Slow"]
+        )
+
+    def test_a_progression_is_recorded_as_it_starts_and_ends(self) -> None:
+        self.tick(self.BEFORE)
+        self.repository.save_progression(
+            Progression(
+                id="degrade", device_id="alice", start_profile_id="normal",
+                end_profile_id="slow", started_at=int(self.BEFORE), duration_seconds=60,
+            )
+        )
+
+        for seconds in (1, 30, 59, 61):
+            self.tick(self.BEFORE + seconds)
+
+        self.assertEqual(
+            self.messages(),
+            [
+                "Alice: progression started, from Normal to Slow",
+                "Alice: progression ended, back to Normal",
+            ],
+        )
+
+    def test_a_shared_data_limit_is_one_event_for_the_group(self) -> None:
+        self.repository.save_device(Device("bob", "Bob", "192.168.50.11", "normal"))
+        self.repository.save_device_group(DeviceGroup("family", "Family", ("alice", "bob")))
+        self.tick(self.BEFORE)
+        self.repository.save_group_data_limit(
+            GroupDataLimit(group_id="family", profile_id="slow", limit_bytes=100, used_bytes=100)
+        )
+
+        self.tick(self.BEFORE + 1)
+
+        self.assertEqual(self.messages(), ["Group Family reached its shared data limit, now Slow"])
+
+    def test_service_limits_are_recorded(self) -> None:
+        self.repository.save_service_quota(
+            ServiceQuota(
+                id="alice-video", device_id="alice", name="Video", domains=("example.com",),
+                profile_id="slow", limit_bytes=100, used_bytes=100,
+            )
+        )
+        with patch(
+            "jittersim.engine.runtime.resolve_domains",
+            return_value=(IPv4Address("203.0.113.10"),),
+        ):
+            self.tick(self.BEFORE)
+            self.repository.reset_service_quota_usage("alice-video", counter_bytes=0, reset_at=1)
+            self.tick(self.BEFORE + 1)
+
+        self.assertEqual(self.messages(), ["Alice: service limit Video lifted"])
+
+    def test_a_storage_error_never_breaks_a_tick(self) -> None:
+        self.schedule()
+        self.tick(self.BEFORE)
+
+        with patch.object(
+            self.repository, "record_activities", side_effect=StorageError("disk full")
+        ):
+            with self.assertLogs("jittersim.engine.runtime", "WARNING"):
+                applied = self.scheduler.tick(repository=self.repository, now=self.DURING)
+
+        self.assertTrue(applied)
+        self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 300)
+
 
 class DeviceAddressTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -1499,6 +1648,16 @@ class DeviceAddressTests(unittest.TestCase):
             [event["message"] for event in self.repository.list_activity()],
             ["Phone now uses 192.168.50.23, which Tablet keeps, so it stays at 192.168.50.10"],
         )
+
+    def test_a_blocked_move_is_recorded_once_while_the_device_comes_and_goes(self) -> None:
+        self.repository.save_device(Device("tablet", "Tablet", "192.168.50.23", "slow"))
+
+        with self.assertLogs("jittersim.engine.runtime", "WARNING"):
+            for now, state in ((100, "reachable"), (131, "stale"), (162, "reachable")):
+                self.connect(("aa:aa:aa:aa:aa:01", "192.168.50.23"), neighbor_state=state)
+                self.check(now)
+
+        self.assertEqual(len(self.repository.list_activity()), 1)
 
     def test_a_move_is_recorded(self) -> None:
         self.connect(("aa:aa:aa:aa:aa:01", "192.168.50.23"))
