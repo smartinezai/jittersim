@@ -1232,6 +1232,21 @@ class ScenarioStorageTests(unittest.TestCase):
             [timer.id for timer in self.repository.list_active_timers(now=110)], ["t3"]
         )
 
+    def test_editing_a_scenario_never_restarts_a_finished_run(self) -> None:
+        self.start("finished", device_id="alice")
+        self.start("running", started_at=250, device_id="bob")
+
+        # At 300 the first run has passed its 90 seconds; the second hasn't.
+        self.repository.save_scenario(
+            Scenario(
+                id="commute", name="Commute", steps=(ScenarioStep("3g", 600),), loop=True
+            ),
+            now=300,
+        )
+
+        self.assertEqual(self.active(now=300), ["running"])
+        self.assertEqual(self.active(now=10_000), ["running"])
+
     def test_stopped_and_finished_runs_are_not_active(self) -> None:
         self.start("run-1", device_id="alice")
         self.start("run-2", device_id="bob")

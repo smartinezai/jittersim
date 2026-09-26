@@ -286,7 +286,9 @@ class PolicyAndScheduleTests(unittest.TestCase):
         self.assertEqual(scenario.total_seconds, 70)
         for duration in (9, 86_401, 1.5, True):
             with self.subTest(duration=duration):
-                with self.assertRaises(ValidationError):
+                with self.assertRaisesRegex(
+                    ValidationError, "a step must last 10 seconds to 24 hours"
+                ):
                     ScenarioStep("3g", duration)
         ScenarioStep("3g", 86_400)
         for bad_steps, message in (
