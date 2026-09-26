@@ -683,8 +683,11 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
       .action-message { flex: 1 1 100%; }
       .badge { display: inline-block; margin-top: 1rem; }
-      .action-buttons { display: flex; flex: 1 1 100%; gap: 0.5rem; }
-      .action-buttons button { flex: 1; margin-top: 0; padding: 0.5rem; font-size: 0.85rem; }
+      .action-buttons { display: flex; flex: 1 1 100%; gap: 0.5rem; min-width: 0; }
+      .action-buttons button {
+        flex: 1; min-width: 0; margin-top: 0; padding: 0.5rem;
+        font-size: 0.85rem; overflow-wrap: anywhere;
+      }
       /* minmax(0, 1fr): a plain 1fr column grows to its widest content. */
       .content-grid, .data-grid { grid-template-columns: minmax(0, 1fr); }
       .policy-grid { grid-template-columns: minmax(0, 1fr); }

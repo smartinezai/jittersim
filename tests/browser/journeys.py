@@ -64,7 +64,36 @@ def check_access_and_help(page):
     expect(page.locator("#" + button.get_attribute("aria-controls"))).to_be_visible()
     page.keyboard.press("Tab")
     expect(page.locator("#" + button.get_attribute("aria-controls"))).to_be_hidden()
-    assert page.evaluate("document.documentElement.scrollWidth <= 321")
+    layout = page.evaluate(
+        """() => {
+          const root = document.documentElement;
+          const overflow = [...document.querySelectorAll('body *')]
+            .map(node => {
+              const box = node.getBoundingClientRect();
+              const style = getComputedStyle(node);
+              return {
+                tag: node.tagName,
+                id: node.id,
+                className: typeof node.className === 'string' ? node.className : '',
+                left: Math.round(box.left),
+                right: Math.round(box.right),
+                width: Math.round(box.width),
+                overflowX: style.overflowX,
+                parent: node.parentElement?.className || ''
+              };
+            })
+            .filter(node => node.left < -1 || node.right > root.clientWidth + 1)
+            .sort((left, right) => right.right - left.right)
+            .slice(0, 12);
+          return {
+            viewport: innerWidth,
+            clientWidth: root.clientWidth,
+            scrollWidth: root.scrollWidth,
+            overflow
+          };
+        }"""
+    )
+    assert layout["scrollWidth"] <= 321, f"320px layout overflow: {layout}"
     page.screenshot(path="test-results/access-profiles-phone.png", full_page=True)
     page.set_viewport_size({"width": 1440, "height": 1000})
     page.screenshot(path="test-results/access-profiles-desktop.png", full_page=True)
