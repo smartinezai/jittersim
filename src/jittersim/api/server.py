@@ -1955,6 +1955,14 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
     }
 
+    function followEveryoneElseProfile(data) {
+      // A schedule can change everyone else's profile at any minute, and the
+      // connected-client list brings the current one with every poll.
+      if ("everyone_else_profile_id" in data) {
+        everyoneElse = { ...everyoneElse, active_profile_id: data.everyone_else_profile_id };
+      }
+    }
+
     function everyoneElseAssigned() {
       return Boolean(everyoneElse.profile_id) ||
         savedSchedules.some((schedule) => schedule.everyone_else && schedule.enabled);
@@ -3669,6 +3677,7 @@ DASHBOARD_HTML = r"""<!doctype html>
             message: connectedResult.reason.message
           });
         } else {
+          followEveryoneElseProfile(connectedResult.value);
           renderConnectedDevices({ ...connectedResult.value, saved_labels: savedLabels });
         }
       } catch (error) {
@@ -5672,19 +5681,29 @@ def _policies_payload(repository: ConfigRepository) -> Dict[str, Any]:
     }
 
 
-def _everyone_else_payload(repository: ConfigRepository) -> Dict[str, Any]:
-    profile_id = repository.get_everyone_else_profile_id()
-    # The settings' answer for this minute; the scheduler applies it while the
-    # network runs.
+def _everyone_else_now(repository: ConfigRepository) -> Tuple[Optional[str], Optional[str]]:
+    """Return the profile everyone else gets this minute and the schedule giving it.
+
+    This is the settings' answer in the Pi's local time; the scheduler applies
+    it while the network runs.
+    """
+
     schedule = active_schedule(
         schedules=repository.list_schedules(),
         everyone_else=True,
         moment=datetime.fromtimestamp(time.time()),
     )
+    if schedule is not None:
+        return schedule.profile_id, schedule.id
+    return repository.get_everyone_else_profile_id(), None
+
+
+def _everyone_else_payload(repository: ConfigRepository) -> Dict[str, Any]:
+    active_profile_id, active_schedule_id = _everyone_else_now(repository)
     return {
-        "profile_id": profile_id,
-        "active_profile_id": schedule.profile_id if schedule is not None else profile_id,
-        "active_schedule_id": schedule.id if schedule is not None else None,
+        "profile_id": repository.get_everyone_else_profile_id(),
+        "active_profile_id": active_profile_id,
+        "active_schedule_id": active_schedule_id,
         "unaffected_devices": [
             {"mac_address": device.mac_address, "name": device.name}
             for device in repository.list_unaffected_devices()
@@ -5996,6 +6015,8 @@ class ControlServer(HTTPServer):
                         "association_status_available"
                     ],
                     "devices": devices,
+                    # The list polls every 5 seconds, so its labels follow schedules.
+                    "everyone_else_profile_id": _everyone_else_now(self.repository)[0],
                 }
             )
         if path == "/api/observations":
@@ -6355,6 +6376,8 @@ class ControlServer(HTTPServer):
                     and self.repository.get_device_group(schedule.group_id) is None
                 ):
                     raise ValueError("group does not exist")
+                if self.repository.get_profile(schedule.profile_id) is None:
+                    raise ValueError("profile does not exist")
             except (KeyError, TypeError, ValueError) as error:
                 return _bad_request("invalid schedule configuration", error)
             if schedule.everyone_else and schedule.enabled and not self._everyone_else_counted():

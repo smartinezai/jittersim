@@ -153,6 +153,16 @@ class ScheduleTests(unittest.TestCase):
 
         self.assertEqual(selected.id, "overnight")
 
+    def test_a_turned_off_schedule_is_never_active(self) -> None:
+        off = Schedule(
+            id="overnight", device_id="alice", profile_id="slow", days_of_week=(0,),
+            start_minute=1_380, end_minute=60, enabled=False,
+        )
+
+        moment = datetime(2026, 9, 21, 23, 30)
+
+        self.assertIsNone(active_schedule(schedules=(off,), device_id="alice", moment=moment))
+
     def test_active_schedule_keeps_devices_groups_and_everyone_else_apart(self) -> None:
         window = {
             "profile_id": "slow", "days_of_week": (0,), "start_minute": 1_380, "end_minute": 60

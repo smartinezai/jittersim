@@ -75,6 +75,10 @@ After updating from a version before September 2026, choose **Reset network**
 once. Older versions left duplicate traffic filters behind, and a reset
 removes them.
 
+An update also upgrades the saved schedules so they can apply to a group or to
+everyone else. Older versions can't read those schedules, so before going back
+to one, delete them or restore a backup from before the update.
+
 Open the dashboard at `https://<pi-name>.local:8080`, where `<pi-name>` is the
 Pi's host name, or use the Pi's Ethernet address. Before trusting the local
 certificate in a browser, compare its SHA-256 fingerprint with the value
