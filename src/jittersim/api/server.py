@@ -7861,6 +7861,8 @@ class ControlServer(HTTPServer):
             result = self.helper_client.apply(plan=plan)
         except HelperClientError as error:
             LOGGER.error("network helper apply failed: %s", error)
+            if self.scheduler is not None:
+                self.scheduler.invalidate_applied_plan()
             state = self.repository.update_runtime_state(
                 observed_state="error",
                 last_action="apply",

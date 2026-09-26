@@ -183,6 +183,12 @@ class RuntimeScheduler:
             self._last_device_counters = dict.fromkeys(self._last_device_counters, 0)
         self.start()
 
+    def invalidate_applied_plan(self) -> None:
+        """Forget a plan the helper may have removed while handling a failure."""
+
+        with self._lock:
+            self._current_payload = None
+
     def build_plan(
         self,
         *,
@@ -321,7 +327,13 @@ class RuntimeScheduler:
             # Applying recreates the helper's counters at zero, so record the
             # traffic they hold first.
             self._sample_quota_usage(repository=active_repository, now=current_time)
-            self._helper_client.apply(plan=plan)
+            try:
+                self._helper_client.apply(plan=plan)
+            except HelperClientError:
+                # Cleanup may have removed the previous rules too. An active
+                # scheduler must retry even if the desired plan is unchanged.
+                self.invalidate_applied_plan()
+                raise
             active_repository.restart_usage_counters()
             with self._lock:
                 self._current_payload = payload

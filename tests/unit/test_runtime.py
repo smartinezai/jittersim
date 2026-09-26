@@ -29,6 +29,7 @@ from jittersim.config.models import (
 )
 from jittersim.config.storage import ConfigRepository, StorageError
 from jittersim.engine.codec import plan_to_payload
+from jittersim.engine.compiler import PlanError
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.networking.helper import HelperClientError
 
@@ -250,49 +251,46 @@ class RuntimeSchedulerTests(unittest.TestCase):
             20_000,
         )
 
-    def test_failed_profile_apply_keeps_last_successful_bandwidth_reference(self) -> None:
-        class FailingApplyHelper(RecordingHelper):
-            def apply(self, *, plan):
-                raise HelperClientError("simulated apply failure")
-
+    def test_failed_profile_apply_retries_even_after_reverting_to_the_previous_plan(self) -> None:
         original = Profile(
-            id="normal",
-            name="Normal",
-            download=Impairment(bandwidth_kbit=100_000),
+            id="normal", name="Normal", download=Impairment(bandwidth_kbit=100_000)
         )
         self._save_device(original)
-        scheduler = RuntimeScheduler(
-            database_path=":memory:",
-            helper_client=FailingApplyHelper(),
-        )
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
         scheduler._paused = False
-        scheduler._current_payload = {
-            "queues": [
-                {
-                    "device_id": "alice",
-                    "direction": "upload",
-                    "impairment": {"bandwidth_kbit": None},
-                },
-                {
-                    "device_id": "alice",
-                    "direction": "download",
-                    "impairment": {"bandwidth_kbit": 100_000},
-                },
-            ]
-        }
+        self.assertTrue(scheduler.tick(repository=self.repository, now=0))
+        original_plan = scheduler.applied_plan()
         self.repository.save_profile(
-            Profile(
-                id="normal",
-                name="Normal updated",
-                download=Impairment(bandwidth_kbit=20_000),
-            )
+            replace(original, download=Impairment(bandwidth_kbit=20_000))
         )
 
-        self.assertFalse(scheduler.tick(repository=self.repository))
+        with patch.object(self.helper, "apply", side_effect=HelperClientError("apply failed")):
+            with self.assertLogs("jittersim.engine.runtime", "ERROR"):
+                self.assertFalse(scheduler.tick(repository=self.repository, now=1))
+
+        self.assertIsNone(scheduler.applied_plan())
+        self.assertIsNone(scheduler.applied_queue_bandwidth_limits())
+        self.repository.save_profile(original)
+        self.assertTrue(scheduler.tick(repository=self.repository, now=2))
+        self.assertEqual(scheduler.applied_plan(), original_plan)
         self.assertEqual(
-            scheduler.applied_queue_bandwidth_limits()["alice"]["download_kbit"],
-            100_000,
+            scheduler.applied_queue_bandwidth_limits()["alice"]["download_kbit"], 100_000
         )
+
+    def test_build_failure_preserves_the_plan_that_is_still_applied(self) -> None:
+        self._save_device(Profile(id="normal", name="Normal"))
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler._paused = False
+        self.assertTrue(scheduler.tick(repository=self.repository, now=0))
+        original_plan = scheduler.applied_plan()
+
+        with patch.object(scheduler, "_build_plan", side_effect=PlanError("invalid plan")):
+            with self.assertLogs("jittersim.engine.runtime", "ERROR"):
+                self.assertFalse(scheduler.tick(repository=self.repository, now=1))
+
+        self.assertEqual(scheduler.applied_plan(), original_plan)
+        self.assertFalse(scheduler.tick(repository=self.repository, now=2))
+        self.assertEqual(len(self.helper.plans), 1)
 
     def test_schedule_switches_the_profile_for_its_device(self) -> None:
         normal = Profile(id="normal", name="Normal")
