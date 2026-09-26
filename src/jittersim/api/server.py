@@ -6025,12 +6025,15 @@ def _policies_payload(repository: ConfigRepository) -> Dict[str, Any]:
 
 
 def _everyone_else_now(repository: ConfigRepository) -> Tuple[Optional[str], Optional[str]]:
-    """Return the profile everyone else gets this minute and the schedule giving it.
+    """Return the profile everyone else gets now and the schedule giving it, if any.
 
     This is the settings' answer in the Pi's local time; the scheduler applies
-    it while the network runs.
+    it while the network runs. A running scenario wins over schedules.
     """
 
+    for run, _, position in active_scenario_runs(repository, now=time.time()):
+        if run.everyone_else:
+            return position.profile_id, None
     schedule = active_schedule(
         schedules=repository.list_schedules(),
         everyone_else=True,

@@ -3579,38 +3579,40 @@ class ControlServerTests(unittest.TestCase):
         # Live traffic offers Everyone else once an everyone-else schedule loads.
         self.assertEqual(result, {"saved": 1, "rendered": [1], "menus": [1]})
 
-    def test_the_schedule_target_menu_keeps_its_choice_when_rebuilt(self) -> None:
+    def test_the_target_menus_keep_their_choice_when_rebuilt(self) -> None:
         result = self._run_dashboard_functions(
-            ["deviceName", "scheduleTargetOptions", "renderScheduleTargets"],
+            ["deviceName", "scheduleTargetOptions", "renderTargetMenus"],
             "let devices = [{id: 'alice', name: 'Alice', ipv4_address: '192.168.50.10'}];\n"
             "let groups = [{id: 'family', name: 'Family'}];\n"
             "const node = (tag) => ({tag: tag, children: [], value: '', label: '',\n"
             "  appendChild(child) { this.children.push(child); }});\n"
             # Like a real menu, it shows its first option unless told otherwise.
-            "const select = {children: [], chosen: '',\n"
+            "const menu = () => ({children: [], chosen: '',\n"
             "  appendChild(child) { this.children.push(child); },\n"
             "  replaceChildren() { this.children = []; this.chosen = ''; },\n"
             "  get options() { return this.children.flatMap((child) =>\n"
             "    child.tag === 'optgroup' ? child.children : [child]); },\n"
             "  get value() { const values = this.options.map((option) => option.value);\n"
             "    return values.includes(this.chosen) ? this.chosen : values[0] || ''; },\n"
-            "  set value(value) { this.chosen = value; }};\n"
-            "const element = () => select;\n"
+            "  set value(value) { this.chosen = value; }});\n"
+            "const menus = {'schedule-target': menu(), 'scenario-start-target': menu()};\n"
+            "const element = (id) => menus[id];\n"
             "const document = {createElement: node};\n",
-            "renderScheduleTargets();\n"
-            "select.value = 'group:family';\n"
+            "renderTargetMenus();\n"
+            "menus['schedule-target'].value = 'group:family';\n"
+            "menus['scenario-start-target'].value = 'everyone-else';\n"
             "devices = devices.concat([{id: 'bob', name: 'Bob', ipv4_address: '192.168.50.11'}]);\n"
-            "renderScheduleTargets();\n"
-            "const kept = select.value;\n"
+            "renderTargetMenus();\n"
+            "const kept = [menus['schedule-target'].value, menus['scenario-start-target'].value];\n"
             "groups = [];\n"
-            "select.value = 'group:family';\n"
-            "renderScheduleTargets();\n"
+            "renderTargetMenus();\n"
+            "const schedule = menus['schedule-target'];\n"
             "console.log(JSON.stringify({kept: kept,\n"
-            "  labels: select.children.map((child) => child.label || child.value),\n"
-            "  gone: select.value}));\n",
+            "  labels: schedule.children.map((child) => child.label || child.value),\n"
+            "  gone: schedule.value}));\n",
         )
 
-        self.assertEqual(result["kept"], "group:family")
+        self.assertEqual(result["kept"], ["group:family", "everyone-else"])
         self.assertEqual(result["labels"], ["Devices", "everyone-else"])
         # A group that went can't stay chosen.
         self.assertEqual(result["gone"], "device:alice")
@@ -3722,6 +3724,22 @@ class ControlServerTests(unittest.TestCase):
         )
 
         self.assertEqual((full, started, profile), (409, 200, 200))
+
+    def test_everyone_elses_profile_this_minute_follows_its_scenario(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/scenarios", self.SCENARIO)
+        self.server.write_response_for(
+            "/api/scenarios/start", {"scenario_id": "commute", "everyone_else": True}
+        )
+
+        others = json.loads(self.server.response_for("/api/everyone-else")[2])
+        connected = json.loads(self.server.response_for("/api/connected-devices")[2])
+
+        self.assertEqual(
+            (others["active_profile_id"], others["active_schedule_id"], others["profile_id"]),
+            ("slow", None, None),
+        )
+        self.assertEqual(connected["everyone_else_profile_id"], "slow")
 
     def test_imports_scenarios(self) -> None:
         self.server.write_response_for("/api/scenarios", dict(self.SCENARIO, loop=True))
