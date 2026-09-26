@@ -23,6 +23,7 @@ from urllib.parse import urlencode
 
 from jittersim.api.server import (
     DASHBOARD_HTML,
+    WRITE_PATHS,
     ControlRequestHandler,
     ControlServer,
     _build_parser,
@@ -38,7 +39,7 @@ from jittersim.config.models import (
     Schedule,
     UnaffectedDevice,
 )
-from jittersim.config.storage import ConfigRepository
+from jittersim.config.storage import ConfigRepository, StorageError
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.service import compile_stored_plan
 from jittersim.measure import comparison_table
@@ -315,6 +316,34 @@ class ControlServerTests(unittest.TestCase):
             [event["message"] for event in self.repository.list_activity()],
             ["Configuration applied again after the dashboard restarted"],
         )
+
+    def test_the_activity_log_is_writable_over_http_and_summarised(self) -> None:
+        # The routes the browser posts to must be in WRITE_PATHS, or it gets 404.
+        self.assertIn("/api/activity/clear", WRITE_PATHS)
+        self.repository.record_activity(kind="apply", message="Configuration applied", now=100)
+        self.repository.record_activity(kind="reset", message="Network reset", now=200)
+
+        latest = json.loads(self.server.response_for("/api/activity/latest")[2])
+
+        self.assertEqual(latest, {"newest_id": 2, "count": 2})
+
+    def test_failed_actions_are_not_recorded_and_recording_never_breaks_them(self) -> None:
+        class FailingHelper(FakeHelper):
+            def apply(self, *, plan):
+                raise HelperClientError("apply failed")
+
+        self.server.helper_client = FailingHelper()
+        with self.assertLogs("jittersim.api.server", "ERROR"):
+            failed, _, _ = self.server.write_response_for("/api/apply", {})
+        self.server.helper_client = FakeHelper()
+        with patch.object(
+            self.repository, "record_activities", side_effect=StorageError("disk full")
+        ):
+            with self.assertLogs("jittersim.api.server", "WARNING"):
+                applied, _, _ = self.server.write_response_for("/api/apply", {})
+
+        self.assertEqual((failed, applied), (502, 200))
+        self.assertEqual(self.repository.list_activity(), ())
 
     def test_the_activity_log_lists_and_clears_events(self) -> None:
         self.repository.record_activity(kind="apply", message="Configuration applied", now=100)
@@ -2714,6 +2743,7 @@ class ControlServerTests(unittest.TestCase):
             ["formatActivityTime", "activityMarkdown"],
             "process.env.TZ = 'UTC';\n",
             "const events = [\n"
+            "  {id: 3, happened_at: 1790000130, message: '*Kid* <b>_tab_</b> [x] `y` ~z~'},\n"
             "  {id: 2, happened_at: 1790000125, message: 'Alice | test \\\\ path\\nsecond'},\n"
             "  {id: 1, happened_at: 1790000000, message: 'Configuration applied'},\n"
             "];\n"
@@ -2723,13 +2753,130 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(
             result.split("\n"),
             [
-                "| Time | Event |",
+                "| Time (UTC) | Event |",
                 "| --- | --- |",
                 # Oldest first, as a report reads.
                 "| 2026-09-21 14:13:20 | Configuration applied |",
                 "| 2026-09-21 14:15:25 | Alice \\| test \\\\ path second |",
+                # A device name can't format the report.
+                "| 2026-09-21 14:15:30 | \\*Kid\\* \\<b\\>\\_tab\\_\\</b\\> "
+                "\\[x\\] \\`y\\` \\~z\\~ |",
             ],
         )
+
+    def activity_page(self) -> str:
+        return (
+            "let latestActivity = [];\n"
+            "let activityKey = null;\n"
+            "const ACTIVITY_EMPTY_TEXT = 'No events yet.';\n"
+            "const node = (tag) => ({tag: tag, children: [], textContent: '', hidden: false,\n"
+            "  append(...children) { this.children.push(...children); },\n"
+            "  appendChild(child) { this.children.push(child); },\n"
+            "  replaceChildren() { this.children = []; },\n"
+            "  focus() {}, select() { this.selected = true; }});\n"
+            "const elements = {'activity-list': node('ol'), 'activity-empty': node('p'),\n"
+            "  'activity-markdown': Object.assign(node('textarea'), {hidden: true})};\n"
+            "const element = (id) => elements[id];\n"
+            "const document = {createElement: node};\n"
+            "const messages = [];\n"
+            "function showMessage(text, kind) { messages.push(kind); }\n"
+            "function setButtonBusy() {}\n"
+        )
+
+    def test_the_activity_list_fetches_only_when_something_changed(self) -> None:
+        result = self._run_dashboard_functions(
+            ["formatActivityTime", "renderActivity", "loadActivity"],
+            self.activity_page()
+            + "let latest = {newest_id: 1, count: 1};\n"
+            "const events = [{id: 1, happened_at: 1790000000,\n"
+            "  message: '<img src=x onerror=alert(1)>'}];\n"
+            "const fetched = [];\n"
+            "async function request(path) {\n"
+            "  fetched.push(path);\n"
+            "  return path === '/api/activity/latest' ? latest : {events: events};\n"
+            "}\n",
+            "(async () => {\n"
+            "  await loadActivity();\n"
+            "  await loadActivity();\n"
+            "  latest = {newest_id: 1, count: 0};\n"
+            "  events.length = 0;\n"
+            "  await loadActivity();\n"
+            "  console.log(JSON.stringify({fetched: fetched,\n"
+            "    empty: elements['activity-empty'].hidden,\n"
+            "    items: elements['activity-list'].children.length}));\n"
+            "})();\n",
+        )
+
+        self.assertEqual(
+            result["fetched"],
+            [
+                "/api/activity/latest", "/api/activity",
+                "/api/activity/latest",
+                "/api/activity/latest", "/api/activity",
+            ],
+        )
+        # After the clear, the list is empty and says so.
+        self.assertEqual((result["empty"], result["items"]), (False, 0))
+
+    def test_activity_messages_are_shown_as_text(self) -> None:
+        result = self._run_dashboard_functions(
+            ["formatActivityTime", "renderActivity"],
+            self.activity_page(),
+            "renderActivity([{id: 1, happened_at: 1790000000,\n"
+            "  message: '<img src=x onerror=alert(1)>'}]);\n"
+            "const item = elements['activity-list'].children[0];\n"
+            "console.log(JSON.stringify({text: item.children[1].textContent,\n"
+            "  html: 'innerHTML' in item.children[1]}));\n",
+        )
+
+        self.assertEqual(result, {"text": "<img src=x onerror=alert(1)>", "html": False})
+
+    def test_copying_falls_back_to_selected_text(self) -> None:
+        result = self._run_dashboard_functions(
+            ["formatActivityTime", "activityMarkdown", "copyActivity"],
+            self.activity_page()
+            + "latestActivity = [{id: 1, happened_at: 1790000000, message: 'Applied'}];\n"
+            "const navigator = {clipboard: {writeText: () => Promise.reject(new Error('no'))}};\n",
+            "copyActivity().then(() => {\n"
+            "  const box = elements['activity-markdown'];\n"
+            "  console.log(JSON.stringify({hidden: box.hidden, selected: box.selected === true,\n"
+            "    last: box.value.split('\\n').pop()}));\n"
+            "});\n",
+        )
+
+        self.assertEqual(result["hidden"], False)
+        self.assertTrue(result["selected"])
+        self.assertTrue(result["last"].endswith("| Applied |"))
+
+    def test_clearing_the_log_asks_first_then_reloads_it(self) -> None:
+        result = self._run_dashboard_functions(
+            ["clearActivity"],
+            self.activity_page()
+            + "let answer = false;\n"
+            "const window = {confirm: () => answer};\n"
+            "const posted = [];\n"
+            "async function request(path) { posted.push(path); return {}; }\n"
+            "let reloads = 0;\n"
+            "async function loadActivity() { reloads += 1; }\n",
+            "(async () => {\n"
+            "  await clearActivity({});\n"
+            "  answer = true;\n"
+            "  await clearActivity({});\n"
+            "  console.log(JSON.stringify({posted: posted, reloads: reloads}));\n"
+            "})();\n",
+        )
+
+        self.assertEqual(result, {"posted": ["/api/activity/clear"], "reloads": 1})
+
+    def test_the_activity_list_can_be_scrolled_by_keyboard(self) -> None:
+        overview = self._panel("overview")
+        list_tag = overview.split('id="activity-list"', 1)[0].rsplit("<ol", 1)[1]
+        list_tag += overview.split('id="activity-list"', 1)[1].split(">", 1)[0]
+
+        # Focusable, named, and not re-read in full whenever an event arrives.
+        self.assertIn('tabindex="0"', list_tag)
+        self.assertIn('aria-label="Activity log events"', list_tag)
+        self.assertNotIn("aria-live", list_tag)
 
     def test_an_everyone_else_schedule_counts_as_giving_it_a_profile(self) -> None:
         result = self._run_dashboard_functions(

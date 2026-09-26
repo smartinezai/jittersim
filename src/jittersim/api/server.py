@@ -831,7 +831,8 @@ DASHBOARD_HTML = r"""<!doctype html>
         <button type="button" id="activity-clear">Clear</button>
       </div>
     </div>
-    <ol id="activity-list" class="activity-list" aria-live="polite"></ol>
+    <ol id="activity-list" class="activity-list" tabindex="0"
+      aria-label="Activity log events"></ol>
     <p id="activity-empty" class="form-note">Loading...</p>
     <textarea id="activity-markdown" class="activity-markdown" readonly hidden
       aria-label="Activity log as Markdown"></textarea>
@@ -2455,7 +2456,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     let savedSchedules = [];
     let savedScenarios = [];
     let runningScenarios = [];
-    const ACTIVITY_EMPTY_TEXT = "No events yet. Applying the configuration starts the log.";
+    const ACTIVITY_EMPTY_TEXT = "No events yet. Network changes appear here as they happen.";
     let latestActivity = [];
     let activityKey = null;
     let scenarioRunKey = "";
@@ -4888,14 +4889,18 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function activityMarkdown(events) {
-      // Oldest first, as a report reads. A cell can't hold a pipe or a line
-      // break, and backslashes are escaped first so they can't undo a pipe's.
+      // Oldest first, as a report reads. A cell can't hold a line break, and a
+      // device name must not format the report: backslashes are escaped first,
+      // so they can't undo the escapes after them.
       const backslash = String.fromCharCode(92);
-      const cell = (text) => text.split(backslash).join(backslash + backslash)
-        .split("|").join(backslash + "|").replace(/\s+/g, " ");
+      const cell = (text) => ["|", "*", "_", "`", "~", "<", ">", "[", "]"].reduce(
+        (escaped, mark) => escaped.split(mark).join(backslash + mark),
+        text.split(backslash).join(backslash + backslash)
+      ).replace(/\s+/g, " ");
+      const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || "local time";
       const rows = events.slice().reverse().map((event) => "| " +
         formatActivityTime(event.happened_at) + " | " + cell(event.message) + " |");
-      return ["| Time | Event |", "| --- | --- |"].concat(rows).join("\n");
+      return ["| Time (" + zone + ") | Event |", "| --- | --- |"].concat(rows).join("\n");
     }
 
     function renderActivity(events) {
@@ -4903,10 +4908,6 @@ DASHBOARD_HTML = r"""<!doctype html>
       const empty = element("activity-empty");
       empty.textContent = ACTIVITY_EMPTY_TEXT;
       empty.hidden = events.length > 0;
-      // Polls without a new event leave the list, and where it is scrolled, alone.
-      const key = events.length ? events[0].id + ":" + events.length : "";
-      if (key === activityKey) return;
-      activityKey = key;
       const list = element("activity-list");
       list.replaceChildren();
       events.forEach((event) => {
@@ -4923,7 +4924,13 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     async function loadActivity() {
       try {
+        const latest = await request("/api/activity/latest", "GET");
+        const key = latest.newest_id + ":" + latest.count;
+        // Polls without a new event, or a clear, leave the list and where it is
+        // scrolled alone, and skip downloading it again.
+        if (key === activityKey) return;
         renderActivity((await request("/api/activity", "GET")).events);
+        activityKey = key;
       } catch (error) {
         activityKey = "";
         latestActivity = [];
@@ -4951,6 +4958,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     async function clearActivity(button) {
+      if (!window.confirm("Clear the activity log? This can't be undone.")) return;
       setButtonBusy(button, true);
       try {
         await request("/api/activity/clear", "POST", {});
@@ -6334,6 +6342,11 @@ class ControlServer(HTTPServer):
         if path == "/api/activity":
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {"events": list(self.repository.list_activity())}
+            )
+        if path == "/api/activity/latest":
+            # The dashboard polls this and fetches the whole log only when it changed.
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                self.repository.activity_summary()
             )
         if path == "/api/scenarios":
             runs = [

@@ -644,6 +644,14 @@ class ConfigRepository:
         ).fetchall()
         return tuple(dict(row) for row in rows)
 
+    def activity_summary(self) -> Dict[str, int]:
+        """Return the newest event's ID and how many events the log holds."""
+
+        row = self._connection.execute(
+            "SELECT COALESCE(MAX(id), 0) AS newest_id, COUNT(*) AS count FROM activity_log"
+        ).fetchone()
+        return {"newest_id": row["newest_id"], "count": row["count"]}
+
     def clear_activity(self) -> None:
         """Empty the activity log, for example before a demonstration."""
 
