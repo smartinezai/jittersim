@@ -1,7 +1,7 @@
-from pathlib import Path
 import tempfile
 import threading
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from jittersim.api.server import ControlServer

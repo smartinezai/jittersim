@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from jittersim.api.server import ControlServer
-from jittersim.config.models import Device, Impairment, Profile
+from jittersim.config.models import Device, Impairment, Profile, Scenario, ScenarioStep
 from jittersim.config.storage import ConfigRepository
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.networking.helper import HelperClientError
@@ -70,6 +70,114 @@ class ApiRuntimeIntegrationTests(unittest.TestCase):
             {"id": "short", "device_id": "alice", "profile_id": profile, "duration_minutes": 1},
             expected=expected,
         )
+
+    def save_scenario(self):
+        self.repository.save_scenario(
+            Scenario(id="brief", name="Brief", steps=(ScenarioStep("slow", 10),))
+        )
+
+    def start_scenario(self, expected=200):
+        return self.post(
+            "/api/scenarios/start", {"scenario_id": "brief", "device_id": "alice"},
+            expected=expected,
+        )
+
+    def test_scenario_cannot_start_before_the_first_apply(self):
+        self.save_scenario()
+
+        response = self.start_scenario(expected=409)
+
+        self.assertIn("Apply the configuration", response["error"])
+        self.assertEqual(self.repository.list_scenario_runs(), ())
+        self.assertEqual(self.helper.plans, [])
+
+    def test_rejected_start_after_reset_preserves_the_timer(self):
+        self.post("/api/apply", {})
+        self.start_timer()
+        self.post("/api/reset", {})
+        self.save_scenario()
+        timers = self.repository.list_timers()
+
+        self.start_scenario(expected=409)
+        self.clock.return_value = 1_011
+        self.post("/api/apply", {})
+
+        self.assertEqual(self.repository.list_scenario_runs(), ())
+        self.assertEqual(self.repository.list_timers(), timers)
+        self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 300)
+
+    def test_scenario_requires_hardware_playback(self):
+        self.save_scenario()
+        for missing in ("helper_client", "scheduler"):
+            with self.subTest(missing=missing), patch.object(self.server, missing, None):
+                response = self.start_scenario(expected=503)
+                self.assertIn("hardware mode", response["error"])
+                self.assertEqual(self.repository.list_scenario_runs(), ())
+
+    def test_external_reset_rejects_start_before_the_scheduler_notices(self):
+        self.post("/api/apply", {})
+        self.save_scenario()
+        self.repository.update_runtime_state(
+            observed_state="reset", last_action="reset", last_result="success", last_error=None,
+        )
+        self.assertIsNotNone(self.scheduler.applied_plan())
+
+        self.start_scenario(expected=409)
+
+        self.assertEqual(self.repository.list_scenario_runs(), ())
+        self.assertEqual(len(self.helper.plans), 1)
+        self.assertEqual(self.repository.get_runtime_state().last_action, "reset")
+
+    def test_failed_scenario_start_stops_the_run_before_recovery(self):
+        self.post("/api/apply", {})
+        self.save_scenario()
+        self.helper.fail = True
+
+        with self.assertLogs("jittersim.api.server", "ERROR"):
+            response = self.start_scenario(expected=502)
+
+        self.assertFalse(response["live_applied"])
+        self.assertEqual(self.repository.list_scenario_runs(), ())
+        self.assertEqual(self.messages(), ["Configuration applied"])
+        self.start_scenario(expected=409)
+        self.helper.fail = False
+        self.assertTrue(self.scheduler.tick(repository=self.repository, now=1_001))
+        self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 0)
+        self.clock.return_value = 1_020
+        response = self.start_scenario()
+        self.assertEqual(response["run"]["started_at"], 1_020)
+        self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 300)
+
+    def test_reset_recorded_during_start_stops_the_unapplied_run(self):
+        self.post("/api/apply", {})
+        self.save_scenario()
+        start = self.repository.start_scenario_run
+
+        def reset_after_saving(run):
+            start(run)
+            self.repository.update_runtime_state(
+                observed_state="reset", last_action="reset", last_result="success", last_error=None,
+            )
+
+        with patch.object(self.repository, "start_scenario_run", side_effect=reset_after_saving):
+            response = self.start_scenario(expected=409)
+
+        self.assertFalse(response["live_applied"])
+        self.assertEqual(self.repository.list_scenario_runs(), ())
+        self.assertEqual(len(self.helper.plans), 1)
+        self.assertEqual(self.repository.get_runtime_state().last_action, "reset")
+
+    def test_first_scenario_step_after_apply_is_recorded_immediately(self):
+        self.post("/api/apply", {})
+        self.save_scenario()
+
+        response = self.start_scenario()
+
+        self.assertTrue(response["live_applied"])
+        self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 300)
+        self.assertEqual(self.messages(), [
+            "Configuration applied", "Alice: scenario Brief, step 1 of 1, now Slow",
+        ])
 
     def test_start_and_cancel_between_ticks_record_both_applied_changes(self):
         self.post("/api/apply", {})

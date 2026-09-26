@@ -1294,8 +1294,9 @@ DASHBOARD_HTML = r"""<!doctype html>
         <label>Scenario <select id="scenario-start-scenario" required></select></label>
         <label>Applies to <select id="scenario-start-target" required></select></label>
       </div>
-      <p class="form-note">A running scenario takes over from schedules, as a timer does.
-        For a device, starting a timer or a scenario replaces the other, and a device's own
+      <p class="form-note">Apply the configuration before starting a scenario. Its clock starts
+        when you press Start. A running scenario takes over from schedules, as a timer does.
+        For a device, starting a timer or a scenario replaces the other and a device's own
         timer or scenario wins over its group's. Data limits still win.</p>
       <button class="primary" type="submit">Start scenario</button>
     </form>
@@ -6965,33 +6966,9 @@ class ControlServer(HTTPServer):
             return self._apply_saved_change("scenario", _scenario_payload(scenario))
 
         if path == "/api/scenarios/start":
-            try:
-                scenario = self.repository.get_scenario(_required_text(payload, "scenario_id"))
-                if scenario is None:
-                    raise ValueError("scenario does not exist")
-                run = ScenarioRun(
-                    id=f"run-{time.time_ns()}",
-                    scenario_id=scenario.id,
-                    started_at=int(time.time()),
-                    device_id=payload.get("device_id"),
-                    group_id=payload.get("group_id"),
-                    everyone_else=payload.get("everyone_else", False),
-                )
-                if run.device_id is not None and self.repository.get_device(run.device_id) is None:
-                    raise ValueError("device does not exist")
-                if (
-                    run.group_id is not None
-                    and self.repository.get_device_group(run.group_id) is None
-                ):
-                    raise ValueError("group does not exist")
-            except (KeyError, TypeError, ValueError) as error:
-                return _bad_request("invalid scenario start", error)
-            if run.everyone_else and not self._everyone_else_counted():
-                capacity_error = self._capacity_error(adding=1)
-                if capacity_error is not None:
-                    return capacity_error
-            self.repository.start_scenario_run(run)
-            return self._apply_saved_change("run", asdict(run))
+            operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
+            with operation:
+                return self._start_scenario(payload)
 
         if path == "/api/scenarios/stop":
             try:
@@ -7739,6 +7716,61 @@ class ControlServer(HTTPServer):
             return None
         values = [counters[device_id] for device_id in group.device_ids]
         return sum(values) if all(isinstance(value, int) and value >= 0 for value in values) else None
+
+    def _start_scenario(self, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
+        """Start playback only when the network is already applied."""
+
+        try:
+            scenario = self.repository.get_scenario(_required_text(payload, "scenario_id"))
+            if scenario is None:
+                raise ValueError("scenario does not exist")
+            run = ScenarioRun(
+                id=f"run-{time.time_ns()}",
+                scenario_id=scenario.id,
+                started_at=int(time.time()),
+                device_id=payload.get("device_id"),
+                group_id=payload.get("group_id"),
+                everyone_else=payload.get("everyone_else", False),
+            )
+            if run.device_id is not None and self.repository.get_device(run.device_id) is None:
+                raise ValueError("device does not exist")
+            if (
+                run.group_id is not None
+                and self.repository.get_device_group(run.group_id) is None
+            ):
+                raise ValueError("group does not exist")
+        except (KeyError, TypeError, ValueError) as error:
+            return _bad_request("invalid scenario start", error)
+        if self.helper_client is None or self.scheduler is None:
+            return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                {"error": "Starting a scenario requires hardware mode."}
+            )
+        if (
+            self.repository.get_runtime_state().last_action == "reset"
+            or self.scheduler.applied_plan() is None
+        ):
+            return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+                {"error": "Apply the configuration before starting a scenario."}
+            )
+        if run.everyone_else and not self._everyone_else_counted():
+            capacity_error = self._capacity_error(adding=1)
+            if capacity_error is not None:
+                return capacity_error
+        self.repository.start_scenario_run(run)
+        status, content_type, body = self._apply_after_change()
+        response = json.loads(body)
+        if status != HTTPStatus.OK or response.get("live_applied") is False:
+            # Do not let a failed Start count down or resume during recovery.
+            self.repository.stop_scenario_run(run.id)
+            response["live_applied"] = False
+            response["message"] = "Scenario did not start. Apply the configuration then start it again."
+            if status == HTTPStatus.OK:
+                status = HTTPStatus.CONFLICT
+                response["error"] = "Apply the configuration before starting a scenario."
+        else:
+            response["run"] = asdict(run)
+            response["live_applied"] = True
+        return status, content_type, _json_bytes(response)
 
     def _apply_saved_change(
         self,

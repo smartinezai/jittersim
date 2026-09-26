@@ -4052,7 +4052,16 @@ class ControlServerTests(unittest.TestCase):
         "loop": False,
     }
 
+    def _apply_scenario_network(self) -> None:
+        self._serve_live(FakeHelper())
+        background = patch.object(self.server.scheduler, "start")
+        background.start()
+        self.addCleanup(background.stop)
+        status, _, body = self.server.write_response_for("/api/apply", {})
+        self.assertEqual(status, 200, body)
+
     def test_saves_starts_and_stops_a_scenario(self) -> None:
+        self._apply_scenario_network()
         status, _, body = self.server.write_response_for("/api/scenarios", self.SCENARIO)
         start_status, _, start_body = self.server.write_response_for(
             "/api/scenarios/start", {"scenario_id": "commute", "device_id": "alice"}
@@ -4114,6 +4123,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("step 2: a step must last 10 seconds to 24 hours", json.loads(body)["error"])
 
     def test_a_repeating_scenario_reports_no_end(self) -> None:
+        self._apply_scenario_network()
         self.server.write_response_for("/api/scenarios", dict(self.SCENARIO, loop=True))
         self.server.write_response_for(
             "/api/scenarios/start", {"scenario_id": "commute", "device_id": "alice"}
@@ -4124,6 +4134,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual((run["loop"], run["total_remaining_seconds"]), (True, None))
 
     def test_a_running_everyone_else_scenario_holds_a_class_for_new_devices(self) -> None:
+        self._apply_scenario_network()
         self.server.write_response_for("/api/scenarios", self.SCENARIO)
         for index in range(1, 14):
             self.repository.save_device(
@@ -4141,6 +4152,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 409)
 
     def test_editing_a_finished_scenario_leaves_its_runs_finished(self) -> None:
+        self._apply_scenario_network()
         self.server.write_response_for("/api/scenarios", self.SCENARIO)
         self.server.write_response_for(
             "/api/scenarios/start", {"scenario_id": "commute", "everyone_else": True}
@@ -4161,6 +4173,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual((status, runs), (200, []))
 
     def test_a_timer_stops_the_devices_scenario(self) -> None:
+        self._apply_scenario_network()
         self.server.write_response_for("/api/scenarios", self.SCENARIO)
         self.server.write_response_for(
             "/api/scenarios/start", {"scenario_id": "commute", "device_id": "alice"}
@@ -4173,6 +4186,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(json.loads(self.server.response_for("/api/scenarios")[2])["runs"], [])
 
     def test_an_everyone_else_scenario_needs_a_free_traffic_class(self) -> None:
+        self._apply_scenario_network()
         self.server.write_response_for("/api/scenarios", self.SCENARIO)
         for index in range(1, 15):
             self.repository.save_device(
@@ -4191,7 +4205,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual((full, started, profile), (409, 200, 200))
 
     def test_everyone_elses_profile_this_minute_follows_its_scenario(self) -> None:
-        self.server.helper_client = FakeHelper()
+        self._apply_scenario_network()
         self.server.write_response_for("/api/scenarios", self.SCENARIO)
         self.server.write_response_for(
             "/api/scenarios/start", {"scenario_id": "commute", "everyone_else": True}
