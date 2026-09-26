@@ -756,11 +756,29 @@ class ControlServerTests(unittest.TestCase):
         self.assertIsNone(without["everyone_else"])
         self.assertIsNone(without["everyone_else_queue"])
 
+    def test_a_device_named_all_is_separate_from_aggregate_traffic(self) -> None:
+        result = self._run_dashboard_functions(
+            ["selectedTrafficTotals", "selectedQueueTotals"],
+            "const EVERYONE_ELSE_TRAFFIC = '__everyone_else__';\n"
+            "const picked = {value: 'all'}; const element = () => picked;\n",
+            "const counters = {all: {upload_bytes: 7, download_bytes: 9, upload_packets: 1, download_packets: 2},\n"
+            "  alice: {upload_bytes: 30, download_bytes: 40, upload_packets: 3, download_packets: 4}};\n"
+            "const queues = {all: {upload_dropped: 2, download_dropped: 0, upload_queued: 1, download_queued: 0},\n"
+            "  alice: {upload_dropped: 4, download_dropped: 0, upload_queued: 0, download_queued: 0}};\n"
+            "const device = [selectedTrafficTotals(counters), selectedQueueTotals(queues)];\n"
+            "picked.value = '@all';\n"
+            "console.log(JSON.stringify({device, total: [selectedTrafficTotals(counters), selectedQueueTotals(queues)]}));\n",
+        )
+        self.assertEqual(result["device"][0]["upload_bytes"], 7)
+        self.assertEqual(result["device"][1], {"dropped": 2, "queued": 1})
+        self.assertEqual(result["total"][0]["upload_bytes"], 37)
+        self.assertEqual(result["total"][1], {"dropped": 6, "queued": 1})
+
     def test_live_traffic_can_show_everyone_else(self) -> None:
         result = self._run_dashboard_functions(
             ["selectedTrafficTotals", "selectedQueueTotals"],
             "const EVERYONE_ELSE_TRAFFIC = '__everyone_else__';\n"
-            "const picked = {value: 'all'};\n"
+            "const picked = {value: '@all'};\n"
             "const element = () => picked;\n"
             "const flows = (bytes) => ({upload_bytes: bytes, download_bytes: bytes,\n"
             "  upload_packets: 1, download_packets: 1});\n"
@@ -834,12 +852,12 @@ class ControlServerTests(unittest.TestCase):
             "  scheduled: select.options.map((option) => option.value)}));\n",
         )
 
-        self.assertEqual(result["offered"], ["all", "alice", "__everyone_else__"])
+        self.assertEqual(result["offered"], ["@all", "alice", "__everyone_else__"])
         self.assertEqual(result["kept"], ["__everyone_else__", 0])
         # Without a profile the choice goes, and the graph starts again for "all".
-        self.assertEqual(result["after"], [["all", "alice"], "all", 1])
+        self.assertEqual(result["after"], [["@all", "alice"], "@all", 1])
         # An everyone-else schedule brings the choice back.
-        self.assertEqual(result["scheduled"], ["all", "alice", "__everyone_else__"])
+        self.assertEqual(result["scheduled"], ["@all", "alice", "__everyone_else__"])
 
     def test_everyone_else_shows_its_own_queue_limits(self) -> None:
         result = self._run_dashboard_functions(

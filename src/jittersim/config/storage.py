@@ -46,6 +46,10 @@ class StorageError(RuntimeError):
     """Raised when stored configuration cannot be read or written safely."""
 
 
+class DeviceConflictError(StorageError):
+    """Raised when an assignment would overwrite a changed or conflicting device."""
+
+
 class TrafficRateSettingsError(StorageError):
     """Raised when a graph-only ISP rate reference is invalid."""
 
@@ -477,33 +481,57 @@ class ConfigRepository:
             self._connection.rollback()
             raise StorageError(f"could not save profile {profile.id}") from error
 
-    def save_device(self, device: Device) -> None:
-        """Insert or update one validated device assignment."""
+    def save_device(self, device: Device, *, expected: Optional[Device] = None) -> None:
+        """Save an assignment without duplicating a MAC or overwriting a stale edit."""
 
+        values = (device.id, device.name, str(device.ipv4_address), device.profile_id, device.mac_address)
         try:
-            self._connection.execute(
-                """
-                INSERT INTO devices (id, name, ipv4_address, profile_id, mac_address)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    name = excluded.name,
-                    ipv4_address = excluded.ipv4_address,
-                    profile_id = excluded.profile_id,
-                    mac_address = excluded.mac_address
-                """,
-                (
-                    device.id,
-                    device.name,
-                    str(device.ipv4_address),
-                    device.profile_id,
-                    device.mac_address,
-                ),
-            )
+            if expected is None:
+                cursor = self._connection.execute(
+                    """
+                    INSERT INTO devices (id, name, ipv4_address, profile_id, mac_address)
+                    SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS (
+                        SELECT 1 FROM devices WHERE mac_address = ? AND id != ?
+                    )
+                    ON CONFLICT(id) DO UPDATE SET
+                        name = excluded.name,
+                        ipv4_address = excluded.ipv4_address,
+                        profile_id = excluded.profile_id,
+                        mac_address = excluded.mac_address
+                    """,
+                    values + (device.mac_address, device.id),
+                )
+                message = "Another saved device already uses this MAC address."
+            else:
+                cursor = self._connection.execute(
+                    """
+                    UPDATE devices SET name = ?, ipv4_address = ?, profile_id = ?, mac_address = ?
+                    WHERE id = ? AND id = ? AND name = ? AND ipv4_address = ?
+                        AND profile_id = ? AND mac_address IS ?
+                        AND NOT EXISTS (
+                            SELECT 1 FROM devices WHERE mac_address = ? AND id != ?
+                        )
+                    """,
+                    values[1:] + (device.id, expected.id, expected.name, str(expected.ipv4_address),
+                                  expected.profile_id, expected.mac_address,
+                                  device.mac_address, device.id),
+                )
+                message = (
+                    "Device changed or its MAC belongs to another saved device. "
+                    "Reload the device before saving."
+                )
+            if not cursor.rowcount:
+                raise DeviceConflictError(message)
             self._bump_configuration_version()
             self._commit()
+        except DeviceConflictError:
+            self._connection.rollback()
+            raise
         except sqlite3.IntegrityError as error:
             self._connection.rollback()
-            raise StorageError(f"could not save device {device.id}") from error
+            raise DeviceConflictError(
+                f"could not save device {device.id}: check its profile and address"
+            ) from error
 
     def get_runtime_state(self) -> RuntimeState:
         """Return the desired-configuration version and observed helper state."""

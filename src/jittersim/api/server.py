@@ -66,6 +66,7 @@ from jittersim.config.models import (
 )
 from jittersim.config.storage import (
     ConfigRepository,
+    DeviceConflictError,
     DatabasePath,
     StorageError,
     TrafficRateSettingsError,
@@ -776,7 +777,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="traffic-controls">
       <label>Device
         <select id="traffic-device">
-          <option value="all">All assigned devices</option>
+          <option value="@all">All assigned devices</option>
         </select>
       </label>
       <p id="traffic-status" class="traffic-status" role="status" aria-live="polite">Starting live traffic sampling...</p>
@@ -1855,6 +1856,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function stopEditing(prefix) {
+      if (prefix === "device") editingDeviceSnapshot = null;
       element(prefix + "-form").reset();
       element(prefix + "-id").readOnly = false;
       element(prefix + "-id").dataset.typed = "";
@@ -2315,6 +2317,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     function fillDeviceForm(device) {
       stopEditing("device");
+      editingDeviceSnapshot = { ...device };
       element("device-id").value = device.id;
       element("device-name").value = device.name;
       element("device-ip").value = device.ipv4_address;
@@ -2451,6 +2454,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     let helperConfigured = false;
     let profiles = [];
     let devices = [];
+    let editingDeviceSnapshot = null;
     let deviceConditions = { applied: false, devices: {} };
     let everyoneElse = { profile_id: null, unaffected_devices: [] };
     let lastRuntimeState = null;
@@ -2573,7 +2577,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     function selectedTrafficTotals(deviceCounters) {
       const selectedDevice = element("traffic-device").value;
       // "All assigned devices" means the saved devices; everyone else is its own choice.
-      const counters = selectedDevice === "all"
+      const counters = selectedDevice === "@all"
         ? Object.keys(deviceCounters)
           .filter((id) => id !== EVERYONE_ELSE_TRAFFIC)
           .map((id) => deviceCounters[id])
@@ -2589,7 +2593,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     function selectedQueueTotals(queues) {
       const selectedDevice = element("traffic-device").value;
-      const figures = selectedDevice === "all"
+      const figures = selectedDevice === "@all"
         ? Object.keys(queues).filter((id) => id !== EVERYONE_ELSE_TRAFFIC).map((id) => queues[id])
         : queues[selectedDevice] ? [queues[selectedDevice]] : [];
       return figures.reduce((totals, current) => ({
@@ -2603,7 +2607,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       const selected = select.value;
       select.replaceChildren();
       const allOption = document.createElement("option");
-      allOption.value = "all";
+      allOption.value = "@all";
       allOption.textContent = "All assigned devices";
       select.appendChild(allOption);
       devices.forEach((device) => {
@@ -2619,7 +2623,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         select.appendChild(option);
       }
       const kept = Array.from(select.options).some((option) => option.value === selected);
-      select.value = kept ? selected : "all";
+      select.value = kept ? selected : "@all";
       // The last sample belongs to the choice that went, so start a fresh graph.
       if (!kept && selected) resetTrafficHistory();
     }
@@ -2642,7 +2646,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       const now = performance.now();
       const visibleSamples = trafficSamples.filter((sample) => now - sample.time <= TRAFFIC_WINDOW_MS);
       const selectedDevice = element("traffic-device").value;
-      const profileSelected = selectedDevice !== "all";
+      const profileSelected = selectedDevice !== "@all";
       element("traffic-profile-upload-legend").hidden = !profileSelected;
       element("traffic-profile-download-legend").hidden = !profileSelected;
       const referenceFields = ["isp_upload", "isp_download", "profile_upload", "profile_download"];
@@ -2984,12 +2988,12 @@ DASHBOARD_HTML = r"""<!doctype html>
       const limitKey = selectedDevice === EVERYONE_ELSE_TRAFFIC
         ? EVERYONE_ELSE_QUEUE_ID
         : selectedDevice;
-      const deviceLimits = selectedDevice === "all" || !data.profile_limits_available
+      const deviceLimits = selectedDevice === "@all" || !data.profile_limits_available
         ? null
         : (data.profile_limits || {})[limitKey];
-      const profileAvailable = selectedDevice !== "all" &&
+      const profileAvailable = selectedDevice !== "@all" &&
         data.profile_limits_available === true && deviceLimits !== undefined;
-      element("traffic-profile-status").textContent = selectedDevice === "all"
+      element("traffic-profile-status").textContent = selectedDevice === "@all"
         ? "Select one device to see its applied default queue limit. Service-specific limits are not shown."
         : !data.profile_limits_available
           ? "No applied plan is available. Apply the configuration to see current default queue limits."
@@ -5244,7 +5248,8 @@ DASHBOARD_HTML = r"""<!doctype html>
           name: element("device-name").value,
           ipv4_address: element("device-ip").value,
           profile_id: element("device-profile").value,
-          mac_address: element("device-mac").value.trim() || null
+          mac_address: element("device-mac").value.trim() || null,
+          ...(editingDeviceSnapshot ? { expected: editingDeviceSnapshot } : {})
         });
         stopEditing("device");
         refreshAfterSuccess("Device saved.");
@@ -6862,6 +6867,12 @@ class ControlServer(HTTPServer):
         if path == "/api/devices":
             try:
                 device = _device_from_payload(payload)
+                expected = (
+                    _device_from_payload(payload["expected"])
+                    if "expected" in payload else None
+                )
+                if expected is not None and expected.id != device.id:
+                    raise ValueError("the original device ID must match")
             except (KeyError, TypeError, ValueError) as error:
                 return _bad_request("invalid device configuration", error)
             conflict = self._unaffected_conflict(device.mac_address)
@@ -6871,7 +6882,10 @@ class ControlServer(HTTPServer):
                 capacity_error = self._capacity_error(adding=1)
                 if capacity_error is not None:
                     return capacity_error
-            self.repository.save_device(device)
+            try:
+                self.repository.save_device(device, expected=expected)
+            except DeviceConflictError as error:
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {"device": _device_payload(device)}
             )
@@ -7608,6 +7622,9 @@ class ControlServer(HTTPServer):
             )
         try:
             device = _connected_device_from_payload(payload, self.repository)
+            expected = self.repository.get_device(device.id)
+        except DeviceConflictError as error:
+            return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
         except (KeyError, TypeError, ValueError) as error:
             return _bad_request("invalid connected-device profile assignment", error)
         conflict = self._unaffected_conflict(device.mac_address)
@@ -7633,7 +7650,10 @@ class ControlServer(HTTPServer):
             capacity_error = self._capacity_error(adding=1)
             if capacity_error is not None:
                 return capacity_error
-        self.repository.save_device(device)
+        try:
+            self.repository.save_device(device, expected=expected)
+        except DeviceConflictError as error:
+            return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
         status, content_type, body = self._apply_after_change()
         response = json.loads(body.decode("utf-8"))
         response["device"] = _device_payload(device)
@@ -8860,9 +8880,24 @@ def _connected_device_from_payload(
         name="Connected client",
         ipv4_address=ipv4_address,
         profile_id=profile_id,
+        mac_address=mac_address,
     )
+    mac_address = address_only.mac_address
     existing_by_address = repository.get_device_by_ipv4_address(str(address_only.ipv4_address))
+    matching = [device for device in repository.list_devices()
+                if mac_address is not None and device.mac_address == mac_address]
+    if len(matching) > 1:
+        raise DeviceConflictError(
+            "Several saved devices use this MAC address. Remove the duplicate before assigning a profile."
+        )
+    if matching:
+        existing = matching[0]
+        if existing_by_address is not None and existing_by_address.id != existing.id:
+            raise DeviceConflictError("This address belongs to another saved device. Resolve it first.")
+        return replace(existing, ipv4_address=address_only.ipv4_address, profile_id=profile_id)
     if existing_by_address is not None:
+        if existing_by_address.mac_address is not None and existing_by_address.mac_address != mac_address:
+            raise DeviceConflictError("This address belongs to a different saved device. Resolve it first.")
         return Device(
             id=existing_by_address.id,
             name=existing_by_address.name,
