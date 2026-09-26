@@ -106,6 +106,10 @@ bytes.
   change.
 - A visible status area for the current mode, connected devices, schedules,
   access rules, diagnostics and a short history of admin actions.
+- An activity log of the last 500 network events: applies and resets,
+  schedule, timer, scenario and progression switches, data, service and time
+  limits, outages and address moves. Copy it as a Markdown table for a report.
+  Rerolls are left out.
 - Download a point-in-time backup of settings and local DNS observations.
 - Export settings as JSON and import them on another Pi or to repeat a
   demonstration. Imports are checked first and replace all settings at once.
