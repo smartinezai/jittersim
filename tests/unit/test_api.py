@@ -285,6 +285,51 @@ class ControlServerTests(unittest.TestCase):
         self.assertIsNotNone(helper.applied_plan)
         self.assertEqual(self.repository.get_runtime_state().observed_state, "applied")
 
+    def test_the_activity_log_notes_a_restart_that_applies_again(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.repository.update_runtime_state(
+            observed_state="applied", last_action="apply", last_result="success", last_error=None
+        )
+
+        self.server.recover_saved_network_state()
+
+        self.assertEqual(
+            [event["message"] for event in self.repository.list_activity()],
+            ["Configuration applied again after the dashboard restarted"],
+        )
+
+    def test_the_activity_log_lists_and_clears_events(self) -> None:
+        self.repository.record_activity(kind="apply", message="Configuration applied", now=100)
+
+        listed = json.loads(self.server.response_for("/api/activity")[2])
+        status, _, _ = self.server.write_response_for("/api/activity/clear", {})
+
+        self.assertEqual(
+            listed["events"],
+            [{"id": 1, "happened_at": 100, "kind": "apply", "message": "Configuration applied"}],
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(self.server.response_for("/api/activity")[2])["events"], [])
+
+    def test_apply_and_reset_are_recorded_but_saved_changes_are_not(self) -> None:
+        self.server.helper_client = FakeHelper()
+
+        applied, _, _ = self.server.write_response_for("/api/apply", {})
+        # A saved change applies the plan again, which is not a new Apply.
+        self.server.write_response_for(
+            "/api/timers", {"device_id": "alice", "profile_id": "slow", "duration_minutes": 10}
+        )
+        reset, _, _ = self.server.write_response_for("/api/reset", {})
+
+        self.assertEqual((applied, reset), (200, 200))
+        self.assertEqual(
+            [
+                (event["kind"], event["message"])
+                for event in reversed(self.repository.list_activity())
+            ],
+            [("apply", "Configuration applied"), ("reset", "Network reset")],
+        )
+
     def test_startup_recovery_keeps_an_explicit_reset(self) -> None:
         helper = FakeHelper()
         self.server.helper_client = helper
@@ -2457,6 +2502,40 @@ class ControlServerTests(unittest.TestCase):
             ],
         )
 
+    def test_the_activity_log_sits_on_the_overview_and_polls(self) -> None:
+        overview = self._panel("overview")
+        for fragment in (
+            'id="activity-list"', 'id="activity-copy"', 'id="activity-clear"',
+            'id="activity-markdown"',
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, overview)
+        refresh = DASHBOARD_HTML.split("async function refresh() {", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("loadActivity()", refresh)
+        self.assertIn("window.setInterval(() => loadActivity(), 5000);", DASHBOARD_HTML)
+
+    def test_the_activity_log_copies_as_markdown(self) -> None:
+        result = self._run_dashboard_functions(
+            ["formatActivityTime", "activityMarkdown"],
+            "process.env.TZ = 'UTC';\n",
+            "const events = [\n"
+            "  {id: 2, happened_at: 1790000125, message: 'Alice | test \\\\ path\\nsecond'},\n"
+            "  {id: 1, happened_at: 1790000000, message: 'Configuration applied'},\n"
+            "];\n"
+            "console.log(JSON.stringify(activityMarkdown(events)));\n",
+        )
+
+        self.assertEqual(
+            result.split("\n"),
+            [
+                "| Time | Event |",
+                "| --- | --- |",
+                # Oldest first, as a report reads.
+                "| 2026-09-21 14:13:20 | Configuration applied |",
+                "| 2026-09-21 14:15:25 | Alice \\| test \\\\ path second |",
+            ],
+        )
+
     def test_an_everyone_else_schedule_counts_as_giving_it_a_profile(self) -> None:
         result = self._run_dashboard_functions(
             ["everyoneElseAssigned"],
@@ -2722,6 +2801,7 @@ class ControlServerTests(unittest.TestCase):
                 None: ["Network controls"],
                 "tab-overview": [
                     "Signed in", "Getting started", "Connected clients", "Live traffic",
+                    "Activity log",
                 ],
                 "tab-devices": ["Devices", "Assign a device", "Group devices", "Everyone else"],
                 "tab-profiles": ["Profiles", "Save profile"],

@@ -143,6 +143,7 @@ WRITE_PATHS = frozenset(
         "/api/observations/add-to-profile",
         "/api/observations/add-global-block",
         "/api/import",
+        "/api/activity/clear",
         "/api/apply",
         "/api/reset",
     )
@@ -380,6 +381,20 @@ DASHBOARD_HTML = r"""<!doctype html>
     .device-empty { margin: 0; color: #91a8c1; }
     .connected-card { margin-top: 1rem; }
     .traffic-card { margin-top: 1rem; }
+    .activity-card { margin-top: 1rem; }
+    .activity-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+    .activity-actions button { margin-top: 0; }
+    .activity-list {
+      display: grid; gap: 0.35rem; max-height: 24rem; margin: 0.75rem 0 0; padding: 0;
+      overflow-y: auto; list-style: none;
+    }
+    .activity-list li {
+      display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.75rem;
+      padding: 0.45rem 0.6rem; border-radius: 0.45rem; background: #0d1b2d;
+      color: #c7d7eb; font-size: 0.82rem;
+    }
+    .activity-list time { color: #91a8c1; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .activity-markdown { width: 100%; min-height: 10rem; margin-top: 0.75rem; font-size: 0.78rem; }
     .traffic-controls { display: grid; grid-template-columns: minmax(14rem, 0.75fr) minmax(0, 1.5fr); align-items: end; gap: 1rem; margin-top: 1rem; }
     .traffic-controls label { max-width: 24rem; }
     .traffic-status { margin: 0; color: #91a8c1; font-size: 0.82rem; }
@@ -672,6 +687,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       .timer-row { display: block; }
       .timer-row button { width: 100%; margin-top: 0.7rem; }
       .scenario-step { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+      .activity-card .section-heading { display: block; }
+      .activity-actions { margin-top: 0.6rem; }
+      .activity-list li { grid-template-columns: minmax(0, 1fr); gap: 0.15rem; }
       .scenario-step label:first-child, .scenario-step button { grid-column: 1 / -1; }
       .progression-row-heading { display: block; }
       .progression-row button { width: 100%; margin-top: 0.7rem; }
@@ -801,6 +819,22 @@ DASHBOARD_HTML = r"""<!doctype html>
     <p class="traffic-note">Dropped and waiting show packets JitterSim itself discarded or is still
       delaying, in both directions.</p>
     <p class="traffic-note">Traffic lines count bytes at JitterSim before its queues. They do not show the speed a device receives. Dashed lines show configured limits. The ISP plan line is shared with household traffic and is not a live measurement of spare capacity. Service-specific queues may use different limits. Only assigned devices are included. Sampling pauses when this tab is hidden.</p>
+  </section>
+  <section class="card activity-card">
+    <div class="section-heading">
+      <div>
+        <h2>Activity log</h2>
+        <p>The last 500 network events, newest first. Rerolls are left out.</p>
+      </div>
+      <div class="activity-actions">
+        <button type="button" id="activity-copy">Copy as Markdown</button>
+        <button type="button" id="activity-clear">Clear</button>
+      </div>
+    </div>
+    <ol id="activity-list" class="activity-list" aria-live="polite"></ol>
+    <p id="activity-empty" class="form-note">Loading...</p>
+    <textarea id="activity-markdown" class="activity-markdown" readonly hidden
+      aria-label="Activity log as Markdown"></textarea>
   </section>
   </div>
   <div class="tab-panel" id="tab-devices" tabindex="-1" hidden>
@@ -2406,6 +2440,9 @@ DASHBOARD_HTML = r"""<!doctype html>
     let lastRuntimeState = null;
     let savedSchedules = [];
     let savedScenarios = [];
+    const ACTIVITY_EMPTY_TEXT = "No events yet. Applying the configuration starts the log.";
+    let latestActivity = [];
+    let activityKey = null;
     let scenarioRunKey = "";
     let scenarioListKey = "";
     let dashboardLoaded = false;
@@ -4802,6 +4839,91 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
     }
 
+    function formatActivityTime(seconds) {
+      const moment = new Date(seconds * 1000);
+      const pad = (value) => String(value).padStart(2, "0");
+      return moment.getFullYear() + "-" + pad(moment.getMonth() + 1) + "-" +
+        pad(moment.getDate()) + " " + pad(moment.getHours()) + ":" +
+        pad(moment.getMinutes()) + ":" + pad(moment.getSeconds());
+    }
+
+    function activityMarkdown(events) {
+      // Oldest first, as a report reads. A cell can't hold a pipe or a line
+      // break, and backslashes are escaped first so they can't undo a pipe's.
+      const backslash = String.fromCharCode(92);
+      const cell = (text) => text.split(backslash).join(backslash + backslash)
+        .split("|").join(backslash + "|").replace(/\s+/g, " ");
+      const rows = events.slice().reverse().map((event) => "| " +
+        formatActivityTime(event.happened_at) + " | " + cell(event.message) + " |");
+      return ["| Time | Event |", "| --- | --- |"].concat(rows).join("\n");
+    }
+
+    function renderActivity(events) {
+      latestActivity = events;
+      const empty = element("activity-empty");
+      empty.textContent = ACTIVITY_EMPTY_TEXT;
+      empty.hidden = events.length > 0;
+      // Polls without a new event leave the list, and where it is scrolled, alone.
+      const key = events.length ? events[0].id + ":" + events.length : "";
+      if (key === activityKey) return;
+      activityKey = key;
+      const list = element("activity-list");
+      list.replaceChildren();
+      events.forEach((event) => {
+        const item = document.createElement("li");
+        const time = document.createElement("time");
+        time.dateTime = new Date(event.happened_at * 1000).toISOString();
+        time.textContent = formatActivityTime(event.happened_at);
+        const message = document.createElement("span");
+        message.textContent = event.message;
+        item.append(time, message);
+        list.appendChild(item);
+      });
+    }
+
+    async function loadActivity() {
+      try {
+        renderActivity((await request("/api/activity", "GET")).events);
+      } catch (error) {
+        activityKey = "";
+        latestActivity = [];
+        element("activity-list").replaceChildren();
+        element("activity-empty").textContent = error.message;
+        element("activity-empty").hidden = false;
+      }
+    }
+
+    async function copyActivity() {
+      const markdown = activityMarkdown(latestActivity);
+      const box = element("activity-markdown");
+      try {
+        await navigator.clipboard.writeText(markdown);
+        box.hidden = true;
+        showMessage("Copied the activity log as Markdown.", "success");
+      } catch (error) {
+        // Browsers open the clipboard only to secure pages, so offer the text.
+        box.value = markdown;
+        box.hidden = false;
+        box.focus();
+        box.select();
+        showMessage("The Markdown is selected below. Copy it with Ctrl+C or ⌘C.", "success");
+      }
+    }
+
+    async function clearActivity(button) {
+      setButtonBusy(button, true);
+      try {
+        await request("/api/activity/clear", "POST", {});
+        element("activity-markdown").hidden = true;
+        await loadActivity();
+        showMessage("Activity log cleared.", "success");
+      } catch (error) {
+        showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
+      }
+    }
+
     async function cancelTimer(timerId, button) {
       setButtonBusy(button, true);
       showMessage("Cancelling the timer...", "working");
@@ -4977,6 +5099,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         loadSchedules(),
         loadTimers(),
         loadScenarios(),
+        loadActivity(),
         loadProgressions(),
         loadPolicies(),
         loadConnectedDevices(),
@@ -5185,6 +5308,11 @@ DASHBOARD_HTML = r"""<!doctype html>
       } catch (error) {
         showMessage(error.message, "error");
       }
+    });
+
+    element("activity-copy").addEventListener("click", copyActivity);
+    element("activity-clear").addEventListener("click", (event) => {
+      clearActivity(event.currentTarget);
     });
 
     element("scenario-add-step").addEventListener("click", () => {
@@ -5613,6 +5741,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     window.setInterval(() => loadConnectedDevices(), 5000);
     window.setInterval(() => loadTimers(), 5000);
     window.setInterval(() => loadScenarios(), 5000);
+    window.setInterval(() => loadActivity(), 5000);
     window.setInterval(() => loadProgressions(), 5000);
     window.setInterval(() => loadQuotas(), 5000);
     window.setInterval(() => loadConditions(), 5000);
@@ -6148,6 +6277,10 @@ class ControlServer(HTTPServer):
         if path == "/api/schedules":
             schedules = [_schedule_payload(schedule) for schedule in self.repository.list_schedules()]
             return HTTPStatus.OK, "application/json", _json_bytes({"schedules": schedules})
+        if path == "/api/activity":
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {"events": list(self.repository.list_activity())}
+            )
         if path == "/api/scenarios":
             runs = [
                 _scenario_run_payload(run, scenario, position, repository=self.repository)
@@ -7323,11 +7456,23 @@ class ControlServer(HTTPServer):
         if path == "/api/observations/add-global-block":
             return self._add_observation_to_global_block(payload)
 
+        if path == "/api/activity/clear":
+            self.repository.clear_activity()
+            return HTTPStatus.OK, "application/json", _json_bytes({"cleared": True})
+
+        # Saved changes apply the plan too, but only these buttons count as
+        # an Apply or a Reset in the activity log.
         if path == "/api/apply":
-            return self._apply_configuration()
+            status, content_type, body = self._apply_configuration()
+            if status == HTTPStatus.OK:
+                self._record_activity("apply", "Configuration applied")
+            return status, content_type, body
 
         if path == "/api/reset":
-            return self._reset_network()
+            status, content_type, body = self._reset_network()
+            if status == HTTPStatus.OK:
+                self._record_activity("reset", "Network reset")
+            return status, content_type, body
 
         return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
 
@@ -7747,10 +7892,20 @@ class ControlServer(HTTPServer):
             return
         if state.last_action == "reset":
             status, _, _ = self._reset_network()
+            kind, message = "reset", "Network reset again after the dashboard restarted"
         else:
             status, _, _ = self._apply_configuration()
+            kind, message = "apply", "Configuration applied again after the dashboard restarted"
         if status != HTTPStatus.OK:
             LOGGER.error("network state recovery did not complete successfully")
+        else:
+            self._record_activity(kind, message)
+
+    def _record_activity(self, kind: str, message: str) -> None:
+        try:
+            self.repository.record_activity(kind=kind, message=message, now=time.time())
+        except StorageError:
+            LOGGER.warning("could not record activity", exc_info=True)
 
     def _wait_for_helper(self) -> bool:
         """Return whether the helper answers before the startup wait ends."""
