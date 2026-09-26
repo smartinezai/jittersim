@@ -33,6 +33,10 @@ is a private lab tool, not a replacement for a home router.
   schedule wins over its group's, and an everyone-else schedule works without
   an everyone-else profile.
 - One-shot timers that activate a profile for a chosen duration.
+- Scenarios: named lists of steps, each a profile for 10 seconds to 24 hours,
+  that can repeat. Start one for a device, a group or everyone else and stop it
+  at any time. A scenario takes over from schedules as a timer does, a device's
+  own timer or scenario wins over its group's, and data limits still win.
 - Progression sessions that move from a starting profile to an ending profile
   over time, after a DNS-query target or after a device-data target, then
   recover automatically.

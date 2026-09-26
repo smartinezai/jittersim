@@ -2382,6 +2382,81 @@ class ControlServerTests(unittest.TestCase):
         )
         self.assertEqual(result["withoutGroups"], ["device:alice", "everyone-else"])
 
+    def test_the_scenarios_card_sits_with_the_timers(self) -> None:
+        rules = self._panel("rules")
+        for fragment in (
+            'id="scenario-run-list"', 'id="scenario-start-form"', 'id="scenario-start-scenario"',
+            'id="scenario-start-target"', 'id="scenario-list"', 'id="scenario-form"',
+            'id="scenario-steps"', 'id="scenario-add-step"', 'id="scenario-loop"',
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, rules)
+        self.assertLess(rules.index("Run a profile timer"), rules.index("<h2>Scenarios</h2>"))
+        refresh = DASHBOARD_HTML.split("async function refresh() {", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("loadScenarios()", refresh)
+        self.assertIn("window.setInterval(() => loadScenarios(), 5000);", DASHBOARD_HTML)
+
+    def test_scenario_steps_durations_and_running_text(self) -> None:
+        result = self._run_dashboard_functions(
+            ["profileName", "formatDuration", "scenarioSummary", "scenarioRunText"],
+            "const profiles = [{id: 'slow', name: 'Slow'}, {id: '3g', name: '3G'}];\n",
+            "const steps = [{profile_id: 'slow', duration_seconds: 60},\n"
+            "  {profile_id: '3g', duration_seconds: 30}];\n"
+            "const run = {target_name: 'Alice', scenario_name: 'Commute', step_index: 1,\n"
+            "  step_count: 2, profile_name: '3G', step_remaining_seconds: 80,\n"
+            "  total_remaining_seconds: 80, loop: false};\n"
+            "console.log(JSON.stringify({\n"
+            "  durations: [45, 60, 90, 3600, 3601, 3660, 86400].map(formatDuration),\n"
+            "  summaries: [scenarioSummary({steps: steps, loop: false}),\n"
+            "    scenarioSummary({steps: steps, loop: true})],\n"
+            "  ending: scenarioRunText(run),\n"
+            "  repeating: scenarioRunText(Object.assign({}, run, {step_index: 0,\n"
+            "    profile_name: 'Slow', step_remaining_seconds: 45, total_remaining_seconds: null,\n"
+            "    loop: true})),\n"
+            "}));\n",
+        )
+
+        self.assertEqual(
+            result["durations"],
+            ["45 s", "1 min", "1 min 30 s", "1 h", "1 h 1 s", "1 h 1 min", "24 h"],
+        )
+        self.assertEqual(
+            result["summaries"],
+            ["Slow 1 min → 3G 30 s", "Slow 1 min → 3G 30 s, repeating"],
+        )
+        self.assertEqual(
+            result["ending"],
+            {
+                "title": "Alice · Commute",
+                "detail": "Step 2 of 2: 3G, 1 min 20 s left in this step; ends in 1 min 20 s",
+            },
+        )
+        self.assertEqual(
+            result["repeating"]["detail"],
+            "Step 1 of 2: Slow, 45 s left in this step; repeats until stopped",
+        )
+
+    def test_scenario_steps_come_from_the_form(self) -> None:
+        result = self._run_dashboard_functions(
+            ["scenarioStepsFromForm"],
+            "const row = (profile, minutes, seconds) => ({querySelector: (selector) => ({\n"
+            "  '.scenario-step-profile': {value: profile},\n"
+            "  '.scenario-step-minutes': {value: minutes},\n"
+            "  '.scenario-step-seconds': {value: seconds}}[selector])});\n"
+            "const rows = [row('slow', '1', '30'), row('3g', '', '45'), row('slow', '2', '')];\n"
+            "const element = () => ({querySelectorAll: () => rows});\n",
+            "console.log(JSON.stringify(scenarioStepsFromForm()));\n",
+        )
+
+        self.assertEqual(
+            result,
+            [
+                {"profile_id": "slow", "duration_seconds": 90},
+                {"profile_id": "3g", "duration_seconds": 45},
+                {"profile_id": "slow", "duration_seconds": 120},
+            ],
+        )
+
     def test_an_everyone_else_schedule_counts_as_giving_it_a_profile(self) -> None:
         result = self._run_dashboard_functions(
             ["everyoneElseAssigned"],
@@ -2443,7 +2518,9 @@ class ControlServerTests(unittest.TestCase):
             "async function request() {\n"
             "  return {profiles: [{id: 'normal', name: 'Normal'}, {id: '3g', name: '3G'}]};\n"
             "}\n"
-            "function renderProfileTable() {}\n",
+            "function renderProfileTable() {}\n"
+            "function scenarioStepsFromForm() { return []; }\n"
+            "function renderScenarioSteps() {}\n",
             "loadProfiles().then(() => {\n"
             "  console.log(JSON.stringify(elements['everyone-else-profile'].value));\n"
             "});\n",
@@ -2650,7 +2727,7 @@ class ControlServerTests(unittest.TestCase):
                 "tab-profiles": ["Profiles", "Save profile"],
                 "tab-rules": [
                     "Network access rules", "Schedule a profile", "Run a profile timer",
-                    "Progression mode", "Device data limit", "Shared group data limit",
+                    "Scenarios", "Progression mode", "Device data limit", "Shared group data limit",
                     "Browser service profile", "Service data limit", "Service time limit",
                     "Traffic discovery",
                 ],
