@@ -1230,5 +1230,45 @@ class ScenarioStorageTests(unittest.TestCase):
         self.assertEqual(self.active(), [])
 
 
+class ActivityLogStorageTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.repository = ConfigRepository(":memory:")
+        self.addCleanup(self.repository.close)
+
+    def test_records_events_newest_first(self) -> None:
+        self.repository.record_activity(kind="apply", message="Configuration applied", now=100)
+        self.repository.record_activity(kind="outage", message="Alice: outage started", now=160)
+
+        events = self.repository.list_activity()
+
+        self.assertEqual(
+            [(event["happened_at"], event["kind"], event["message"]) for event in events],
+            [(160, "outage", "Alice: outage started"), (100, "apply", "Configuration applied")],
+        )
+        self.assertGreater(events[0]["id"], events[1]["id"])
+
+    def test_keeps_the_newest_500_events(self) -> None:
+        for index in range(505):
+            self.repository.record_activity(kind="outage", message=f"event {index}", now=index)
+
+        events = self.repository.list_activity()
+
+        self.assertEqual(len(events), 500)
+        self.assertEqual((events[0]["message"], events[-1]["message"]), ("event 504", "event 5"))
+
+    def test_refuses_unknown_kinds_and_bad_messages(self) -> None:
+        for kind, message in (("reroll", "x"), ("apply", ""), ("apply", "x" * 501), ("apply", 5)):
+            with self.subTest(kind=kind, message=str(message)[:10]):
+                with self.assertRaises(StorageError):
+                    self.repository.record_activity(kind=kind, message=message, now=1)
+
+    def test_clearing_empties_the_log(self) -> None:
+        self.repository.record_activity(kind="reset", message="Network reset", now=1)
+
+        self.repository.clear_activity()
+
+        self.assertEqual(self.repository.list_activity(), ())
+
+
 if __name__ == "__main__":
     unittest.main()

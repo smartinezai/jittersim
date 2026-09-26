@@ -58,6 +58,14 @@ MIN_TRAFFIC_RATE_KBIT = 100
 MAX_TRAFFIC_RATE_KBIT = 1_000_000
 TRAFFIC_RATE_STEP_KBIT = 100
 DEFAULT_ISP_DOWNLOAD_KBIT = 100_000
+# The activity log keeps this many of the newest network events.
+MAX_ACTIVITY_EVENTS = 500
+ACTIVITY_KINDS = frozenset(
+    (
+        "apply", "reset", "outage", "schedule", "timer", "scenario", "progression", "limit",
+        "address",
+    )
+)
 # A schedule targets exactly one device, group or everyone else. Older
 # databases get this table through _upgrade_schedules_table.
 _SCHEDULES_TABLE_SQL = """
@@ -335,6 +343,12 @@ class ConfigRepository:
                 last_result TEXT,
                 last_error TEXT
             );
+            CREATE TABLE IF NOT EXISTS activity_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                happened_at INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                message TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS action_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 happened_at INTEGER NOT NULL,
@@ -584,6 +598,42 @@ class ConfigRepository:
             return tuple(dict(row) for row in rows)
         except sqlite3.Error as error:
             raise StorageError("could not read action history") from error
+
+    def record_activity(self, *, kind: str, message: str, now: float) -> None:
+        """Add one network event to the activity log, keeping the newest ones."""
+
+        if kind not in ACTIVITY_KINDS:
+            raise StorageError("activity kind is invalid")
+        if not isinstance(message, str) or not message or len(message) > 500:
+            raise StorageError("activity message is invalid")
+        try:
+            self._connection.execute(
+                "INSERT INTO activity_log (happened_at, kind, message) VALUES (?, ?, ?)",
+                (int(now), kind, message),
+            )
+            self._connection.execute(
+                "DELETE FROM activity_log WHERE id NOT IN "
+                "(SELECT id FROM activity_log ORDER BY id DESC LIMIT ?)",
+                (MAX_ACTIVITY_EVENTS,),
+            )
+            self._commit()
+        except sqlite3.Error as error:
+            self._connection.rollback()
+            raise StorageError("could not record activity") from error
+
+    def list_activity(self) -> tuple:
+        """Return the activity log, newest first."""
+
+        rows = self._connection.execute(
+            "SELECT id, happened_at, kind, message FROM activity_log ORDER BY id DESC"
+        ).fetchall()
+        return tuple(dict(row) for row in rows)
+
+    def clear_activity(self) -> None:
+        """Empty the activity log, for example before a demonstration."""
+
+        self._connection.execute("DELETE FROM activity_log")
+        self._commit()
 
     def backup_bytes(self) -> bytes:
         """Create a consistent SQLite snapshot for an administrator download."""
