@@ -3395,6 +3395,110 @@ class ControlServerTests(unittest.TestCase):
             [schedule.device_id for schedule in self.repository.list_schedules()], ["alice"]
         )
 
+    SCENARIO = {
+        "id": "commute",
+        "name": "Commute",
+        "steps": [{"profile_id": "slow", "duration_seconds": 60}],
+        "loop": False,
+    }
+
+    def test_saves_starts_and_stops_a_scenario(self) -> None:
+        status, _, body = self.server.write_response_for("/api/scenarios", self.SCENARIO)
+        start_status, _, start_body = self.server.write_response_for(
+            "/api/scenarios/start", {"scenario_id": "commute", "device_id": "alice"}
+        )
+        self.assertEqual((status, start_status), (200, 200), (body, start_body))
+        run_id = json.loads(start_body)["run"]["id"]
+
+        listing = json.loads(self.server.response_for("/api/scenarios")[2])
+        stopped, _, _ = self.server.write_response_for("/api/scenarios/stop", {"id": run_id})
+        stopped_again, _, _ = self.server.write_response_for("/api/scenarios/stop", {"id": run_id})
+        after_stop = json.loads(self.server.response_for("/api/scenarios")[2])["runs"]
+        deleted, _, _ = self.server.write_response_for("/api/scenarios/delete", {"id": "commute"})
+
+        self.assertEqual(listing["scenarios"][0]["total_seconds"], 60)
+        run = listing["runs"][0]
+        self.assertEqual(
+            (run["id"], run["scenario_name"], run["target_name"], run["step_index"],
+             run["step_count"], run["profile_name"]),
+            (run_id, "Commute", "Alice's laptop", 0, 1, "Slow"),
+        )
+        self.assertTrue(0 < run["step_remaining_seconds"] <= 60)
+        self.assertEqual((stopped, stopped_again, deleted), (200, 404, 200))
+        self.assertEqual(after_stop, [])
+        self.assertEqual(self.repository.list_scenarios(), ())
+
+    def test_scenarios_name_what_is_missing(self) -> None:
+        missing_profile = dict(
+            self.SCENARIO, steps=[{"profile_id": "ghost", "duration_seconds": 60}]
+        )
+        status, _, body = self.server.write_response_for("/api/scenarios", missing_profile)
+        self.assertEqual(status, 400)
+        self.assertIn("profile ghost does not exist", json.loads(body)["error"])
+        self.server.write_response_for("/api/scenarios", self.SCENARIO)
+        cases = {
+            "scenario does not exist": {"scenario_id": "ghost", "device_id": "alice"},
+            "device does not exist": {"scenario_id": "commute", "device_id": "ghost"},
+            "group does not exist": {"scenario_id": "commute", "group_id": "ghost"},
+            "exactly one of a device": {"scenario_id": "commute"},
+        }
+        for message, payload in cases.items():
+            with self.subTest(message=message):
+                status, _, body = self.server.write_response_for("/api/scenarios/start", payload)
+                self.assertEqual(status, 400)
+                self.assertIn(message, json.loads(body)["error"])
+
+    def test_a_timer_stops_the_devices_scenario(self) -> None:
+        self.server.write_response_for("/api/scenarios", self.SCENARIO)
+        self.server.write_response_for(
+            "/api/scenarios/start", {"scenario_id": "commute", "device_id": "alice"}
+        )
+
+        self.server.write_response_for(
+            "/api/timers", {"device_id": "alice", "profile_id": "slow", "duration_minutes": 10}
+        )
+
+        self.assertEqual(json.loads(self.server.response_for("/api/scenarios")[2])["runs"], [])
+
+    def test_an_everyone_else_scenario_needs_a_free_traffic_class(self) -> None:
+        self.server.write_response_for("/api/scenarios", self.SCENARIO)
+        for index in range(1, 15):
+            self.repository.save_device(
+                Device(f"d{index}", f"D{index}", f"192.168.50.{20 + index}", "slow")
+            )
+        others = {"scenario_id": "commute", "everyone_else": True}
+
+        full, _, _ = self.server.write_response_for("/api/scenarios/start", others)
+        self.repository.delete_device("d14")
+        started, _, _ = self.server.write_response_for("/api/scenarios/start", others)
+        # The running scenario holds everyone else's class, so a profile adds nothing.
+        profile, _, _ = self.server.write_response_for(
+            "/api/everyone-else", {"profile_id": "slow"}
+        )
+
+        self.assertEqual((full, started, profile), (409, 200, 200))
+
+    def test_imports_scenarios(self) -> None:
+        self.server.write_response_for("/api/scenarios", dict(self.SCENARIO, loop=True))
+        exported = self._export(self.server)
+        scenarios = self.repository.list_scenarios()
+        older = dict(exported)
+        del older["scenarios"]
+
+        with ConfigRepository(":memory:") as other_repository:
+            other = ControlServer(("127.0.0.1", 0), other_repository)
+            try:
+                status, _, body = other.write_response_for("/api/import", exported)
+                copied = other_repository.list_scenarios()
+            finally:
+                other.server_close()
+        older_status, _, older_body = self.server.write_response_for("/api/import", older)
+
+        self.assertEqual((status, older_status), (200, 200), (body, older_body))
+        self.assertEqual(copied, scenarios)
+        self.assertEqual(exported["scenarios"][0]["steps"], self.SCENARIO["steps"])
+        self.assertEqual(self.repository.list_scenarios(), ())
+
     def test_starts_and_cancels_a_profile_timer(self) -> None:
         status, _, body = self.server.write_response_for(
             "/api/timers",

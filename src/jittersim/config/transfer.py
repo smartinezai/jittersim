@@ -56,6 +56,18 @@ def settings_to_payload(settings: SavedSettings, *, exported_at: int) -> Dict[st
             for group in settings.groups
         ],
         "schedules": [_json_values(asdict(schedule)) for schedule in settings.schedules],
+        "scenarios": [
+            {
+                "id": scenario.id,
+                "name": scenario.name,
+                "steps": [
+                    {"profile_id": step.profile_id, "duration_seconds": step.duration_seconds}
+                    for step in scenario.steps
+                ],
+                "loop": scenario.loop,
+            }
+            for scenario in settings.scenarios
+        ],
         "policies": {
             "mac": _json_values(asdict(settings.mac_policy)),
             "websites": _json_values(asdict(settings.website_policy)),
@@ -133,6 +145,7 @@ def check_settings(
     _require_unique("device address", (str(device.ipv4_address) for device in settings.devices))
     _require_unique("group", (group.id for group in settings.groups))
     _require_unique("schedule", (schedule.id for schedule in settings.schedules))
+    _require_unique("scenario", (scenario.id for scenario in settings.scenarios))
     _require_unique("data limit for device", (limit.device_id for limit in settings.data_limits))
     _require_unique(
         "shared limit for group", (limit.group_id for limit in settings.group_data_limits)
@@ -178,6 +191,9 @@ def check_settings(
         if schedule.group_id is not None and schedule.group_id not in group_ids:
             raise ValueError(f"schedule {schedule.id} uses the missing group {schedule.group_id}")
         require_profile(f"schedule {schedule.id}", schedule.profile_id)
+    for scenario in settings.scenarios:
+        for step in scenario.steps:
+            require_profile(f"scenario {scenario.id}", step.profile_id)
     for limit in settings.data_limits:
         require_device(f"data limit for {limit.device_id}", limit.device_id)
         require_profile(f"data limit for {limit.device_id}", limit.profile_id)

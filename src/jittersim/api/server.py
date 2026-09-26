@@ -50,6 +50,9 @@ from jittersim.config.models import (
     Randomness,
     RuntimeState,
     SavedSettings,
+    Scenario,
+    ScenarioRun,
+    ScenarioStep,
     Schedule,
     ServiceAssignment,
     ServiceQuota,
@@ -82,6 +85,7 @@ from jittersim.engine.compiler import (
 from jittersim.engine.conditions import device_conditions, everyone_else_condition
 from jittersim.engine.progression import progression_factor
 from jittersim.engine.runtime import RuntimeScheduler
+from jittersim.engine.scenarios import active_scenario_runs
 from jittersim.engine.schedules import active_schedule
 from jittersim.engine.service import compile_stored_plan
 from jittersim.networking.helper import HelperClient, HelperClientError
@@ -102,6 +106,10 @@ WRITE_PATHS = frozenset(
         "/api/schedules/delete",
         "/api/timers",
         "/api/timers/cancel",
+        "/api/scenarios",
+        "/api/scenarios/delete",
+        "/api/scenarios/start",
+        "/api/scenarios/stop",
         "/api/progressions",
         "/api/progressions/stop",
         "/api/data-limits",
@@ -5525,6 +5533,47 @@ def _timer_payload(timer: Timer) -> Dict[str, Any]:
     return asdict(timer)
 
 
+def _scenario_payload(scenario: Scenario) -> Dict[str, Any]:
+    return {
+        "id": scenario.id,
+        "name": scenario.name,
+        "steps": [
+            {"profile_id": step.profile_id, "duration_seconds": step.duration_seconds}
+            for step in scenario.steps
+        ],
+        "loop": scenario.loop,
+        "total_seconds": scenario.total_seconds,
+    }
+
+
+def _scenario_run_payload(
+    run: ScenarioRun, scenario: Scenario, position: Any, *, repository: ConfigRepository
+) -> Dict[str, Any]:
+    """Describe one running scenario, its current step and the time left."""
+
+    if run.device_id is not None:
+        device = repository.get_device(run.device_id)
+        target_name = device.name if device is not None else run.device_id
+    elif run.group_id is not None:
+        group = repository.get_device_group(run.group_id)
+        target_name = "Group " + (group.name if group is not None else run.group_id)
+    else:
+        target_name = "Everyone else"
+    profile = repository.get_profile(position.profile_id)
+    return {
+        **asdict(run),
+        "scenario_name": scenario.name,
+        "target_name": target_name,
+        "loop": scenario.loop,
+        "step_index": position.step_index,
+        "step_count": len(scenario.steps),
+        "profile_id": position.profile_id,
+        "profile_name": profile.name if profile is not None else position.profile_id,
+        "step_remaining_seconds": position.step_remaining_seconds,
+        "total_remaining_seconds": position.total_remaining_seconds,
+    }
+
+
 def _data_limit_payload(
     data_limit: DataLimit,
     *,
@@ -5805,6 +5854,21 @@ class ControlServer(HTTPServer):
         if path == "/api/schedules":
             schedules = [_schedule_payload(schedule) for schedule in self.repository.list_schedules()]
             return HTTPStatus.OK, "application/json", _json_bytes({"schedules": schedules})
+        if path == "/api/scenarios":
+            runs = [
+                _scenario_run_payload(run, scenario, position, repository=self.repository)
+                for run, scenario, position in active_scenario_runs(
+                    self.repository, now=time.time()
+                )
+            ]
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {
+                    "scenarios": [
+                        _scenario_payload(scenario) for scenario in self.repository.list_scenarios()
+                    ],
+                    "runs": runs,
+                }
+            )
         if path == "/api/timers":
             now = int(time.time())
             timers = []
@@ -6218,6 +6282,7 @@ class ControlServer(HTTPServer):
         deletes = {
             "/api/devices/delete": ("id", "device", self.repository.delete_device),
             "/api/schedules/delete": ("id", "schedule", self.repository.delete_schedule),
+            "/api/scenarios/delete": ("id", "scenario", self.repository.delete_scenario),
             "/api/data-limits/delete": (
                 "device_id",
                 "data_limit",
@@ -6389,6 +6454,57 @@ class ControlServer(HTTPServer):
             response["timer"] = _timer_payload(timer)
             response.setdefault("live_applied", status == HTTPStatus.OK)
             return status, content_type, _json_bytes(response)
+
+        if path == "/api/scenarios":
+            try:
+                scenario = _scenario_from_payload(payload)
+                for step in scenario.steps:
+                    if self.repository.get_profile(step.profile_id) is None:
+                        raise ValueError(f"profile {step.profile_id} does not exist")
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid scenario", error)
+            self.repository.save_scenario(scenario)
+            return self._apply_saved_change("scenario", _scenario_payload(scenario))
+
+        if path == "/api/scenarios/start":
+            try:
+                scenario = self.repository.get_scenario(_required_text(payload, "scenario_id"))
+                if scenario is None:
+                    raise ValueError("scenario does not exist")
+                run = ScenarioRun(
+                    id=f"run-{time.time_ns()}",
+                    scenario_id=scenario.id,
+                    started_at=int(time.time()),
+                    device_id=payload.get("device_id"),
+                    group_id=payload.get("group_id"),
+                    everyone_else=payload.get("everyone_else", False),
+                )
+                if run.device_id is not None and self.repository.get_device(run.device_id) is None:
+                    raise ValueError("device does not exist")
+                if (
+                    run.group_id is not None
+                    and self.repository.get_device_group(run.group_id) is None
+                ):
+                    raise ValueError("group does not exist")
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid scenario start", error)
+            if run.everyone_else and not self._everyone_else_counted():
+                capacity_error = self._capacity_error(adding=1)
+                if capacity_error is not None:
+                    return capacity_error
+            self.repository.start_scenario_run(run)
+            return self._apply_saved_change("run", asdict(run))
+
+        if path == "/api/scenarios/stop":
+            try:
+                run_id = _required_text(payload, "id")
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid scenario stop", error)
+            if not self.repository.stop_scenario_run(run_id):
+                return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                    {"error": "scenario run does not exist or has already stopped"}
+                )
+            return self._apply_saved_change("run_id", run_id)
 
         if path == "/api/timers/cancel":
             try:
@@ -7150,10 +7266,18 @@ class ControlServer(HTTPServer):
     def _everyone_else_counted(self) -> bool:
         """Return whether everyone else already holds a traffic class."""
 
-        # One class serves the saved profile and every schedule, whichever applies.
-        return self.repository.get_everyone_else_profile_id() is not None or any(
-            schedule.everyone_else and schedule.enabled
-            for schedule in self.repository.list_schedules()
+        # One class serves the saved profile, every schedule and a running
+        # scenario, whichever applies.
+        return (
+            self.repository.get_everyone_else_profile_id() is not None
+            or any(
+                schedule.everyone_else and schedule.enabled
+                for schedule in self.repository.list_schedules()
+            )
+            or any(
+                run.everyone_else
+                for run, _, _ in active_scenario_runs(self.repository, now=time.time())
+            )
         )
 
     def _capacity_error(self, *, adding: int) -> Optional[Tuple[int, str, bytes]]:
@@ -7777,6 +7901,21 @@ def _schedule_from_payload(payload: Dict[str, Any]) -> Schedule:
     )
 
 
+def _scenario_from_payload(payload: Dict[str, Any]) -> Scenario:
+    steps = payload["steps"]
+    if not isinstance(steps, list):
+        raise ValueError("steps must be a list")
+    return Scenario(
+        id=payload["id"],
+        name=payload["name"],
+        steps=tuple(
+            ScenarioStep(profile_id=step["profile_id"], duration_seconds=step["duration_seconds"])
+            for step in steps
+        ),
+        loop=payload.get("loop", False),
+    )
+
+
 def _timer_from_payload(payload: Dict[str, Any]) -> Timer:
     duration_minutes = payload["duration_minutes"]
     if isinstance(duration_minutes, bool) or not isinstance(duration_minutes, int):
@@ -8069,6 +8208,8 @@ def _settings_from_payload(payload: Dict[str, Any]) -> SavedSettings:
         devices=items("devices", _device_from_payload),
         groups=items("groups", _device_group_from_payload),
         schedules=items("schedules", _schedule_from_payload),
+        # Exports from before scenarios have none.
+        scenarios=items("scenarios", _scenario_from_payload),
         mac_policy=mac_policy,
         website_policy=website_policy,
         data_limits=items(
