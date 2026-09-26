@@ -22,7 +22,7 @@ from jittersim.config.models import (
 from jittersim.config.storage import ConfigRepository, DatabasePath, StorageError
 from jittersim.networking.helper import HelperClient, HelperClientError
 
-from .activity import Source, TargetState, activity_events
+from .activity import Source, TargetState, activity_records
 from .codec import PlanCodecError, plan_from_payload, plan_to_payload
 from .compiler import PlanError, compile_plan
 from .plan import (
@@ -43,6 +43,7 @@ from .randomizer import (
 )
 from .scenarios import active_scenario_runs
 from .schedules import active_schedule, next_schedule_change
+from .selection import choose_automation, reached_limit
 from .website import build_website_filters, resolve_domains
 
 LOGGER = logging.getLogger(__name__)
@@ -481,6 +482,7 @@ class RuntimeScheduler:
                     f"{devices[device_id].name} moved from {old_address} to {new_address}",
                 )],
                 now,
+                device_ids=[(device_id,)],
             )
 
     def _record_activity(
@@ -494,16 +496,18 @@ class RuntimeScheduler:
         # The first successful plan after a reset or restart is the starting point.
         if previous is None:
             return
-        self._record(repository, activity_events(previous, states), now)
+        records = activity_records(previous, states)
+        self._record(repository, [(kind, message) for kind, message, _ in records], now,
+                     device_ids=[targets for _, _, targets in records])
 
     @staticmethod
     def _record(
-        repository: ConfigRepository, events: Sequence[Tuple[str, str]], now: float
+        repository: ConfigRepository, events: Sequence[Tuple[str, str]], now: float, *, device_ids=None
     ) -> None:
         if not events:
             return
         try:
-            repository.record_activities(events, now=now)
+            repository.record_activities(events, now=now, device_ids=device_ids)
         except StorageError:
             LOGGER.warning("could not record activity", exc_info=True)
 
@@ -569,23 +573,10 @@ class RuntimeScheduler:
 
         for device in repository.list_devices():
             group = groups_by_device.get(device.id)
-            progression = active_progressions.get(device.id)
-            timer = None if progression is not None else active_timers.get(device.id)
-            # A device's own timer or scenario wins over its group's scenario,
-            # and a scenario takes over from schedules as a timer does.
-            running = None
-            if progression is None and timer is None:
-                running = device_runs.get(device.id) or (
-                    group_runs.get(group.id) if group is not None else None
-                )
-            schedule = None
-            if timer is None and progression is None and running is None:
-                # A device's own schedule wins over its group's.
-                schedule = active_schedule(schedules=schedules, device_id=device.id, moment=moment)
-                if schedule is None and group is not None:
-                    schedule = active_schedule(
-                        schedules=schedules, group_id=group.id, moment=moment
-                    )
+            progression, timer, running, schedule = choose_automation(
+                device, group, moment, active_progressions, active_timers,
+                device_runs, group_runs, schedules,
+            )
             group_profile_id = group.profile_id if group is not None else None
             # How the activity log tells this device's source apart and names it:
             # kind, identity, label, step and, for a group's source, the group.
@@ -665,7 +656,7 @@ class RuntimeScheduler:
                 if domain_count:
                     blocked_domains_by_device[device.id] = progression.website_domains[:domain_count]
             data_limit = data_limits.get(device.id)
-            if data_limit is not None and data_limit.enabled and data_limit.used_bytes >= data_limit.limit_bytes:
+            if reached_limit(data_limit):
                 fallback_profile = profiles.get(data_limit.profile_id)
                 if fallback_profile is None:
                     raise PlanError(
@@ -678,9 +669,7 @@ class RuntimeScheduler:
             elif group is not None:
                 group_data_limit = group_data_limits.get(group.id)
                 if (
-                    group_data_limit is not None
-                    and group_data_limit.enabled
-                    and group_data_limit.used_bytes >= group_data_limit.limit_bytes
+                    reached_limit(group_data_limit)
                 ):
                     fallback_profile = profiles.get(group_data_limit.profile_id)
                     if fallback_profile is None:
