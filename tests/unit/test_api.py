@@ -2348,7 +2348,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("deviceConditionCell(device.id)", table)
         self.assertIn('request("/api/conditions", "GET")', DASHBOARD_HTML)
         self.assertIn('id="device-conditions-note"', DASHBOARD_HTML)
-        refresh = DASHBOARD_HTML.split("async function refresh() {", 1)[1].split("\n    }\n", 1)[0]
+        refresh = DASHBOARD_HTML.split("async function refreshDashboard() {", 1)[1].split("\n    }\n", 1)[0]
         self.assertIn("loadConditions()", refresh)
 
     def test_dashboard_condition_lookup_ignores_built_in_names(self) -> None:
@@ -2387,7 +2387,7 @@ class ControlServerTests(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, DASHBOARD_HTML)
-        refresh = DASHBOARD_HTML.split("async function refresh() {", 1)[1].split("\n    }\n", 1)[0]
+        refresh = DASHBOARD_HTML.split("async function refreshDashboard() {", 1)[1].split("\n    }\n", 1)[0]
         self.assertIn("loadEveryoneElse()", refresh)
 
     def _run_dashboard_functions(self, names, setup, calls):
@@ -2504,9 +2504,9 @@ class ControlServerTests(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, rules)
         self.assertLess(rules.index("Run a profile timer"), rules.index("<h2>Scenarios</h2>"))
-        refresh = DASHBOARD_HTML.split("async function refresh() {", 1)[1].split("\n    }\n", 1)[0]
+        refresh = DASHBOARD_HTML.split("async function refreshDashboard() {", 1)[1].split("\n    }\n", 1)[0]
         self.assertIn("loadScenarios()", refresh)
-        self.assertIn("window.setInterval(() => loadScenarios(), 5000);", DASHBOARD_HTML)
+        self.assertIn("window.setInterval(pollDashboard, 5000);", DASHBOARD_HTML)
 
     def test_scenario_steps_durations_and_running_text(self) -> None:
         result = self._run_dashboard_functions(
@@ -2658,9 +2658,11 @@ class ControlServerTests(unittest.TestCase):
     def test_the_step_editor_keeps_one_step_and_numbers_them(self) -> None:
         result = self._run_dashboard_functions(
             ["scenarioStepRow", "renumberScenarioSteps"],
+            "function updateScenarioDuration() {}\n"
             "const profiles = [{id: 'slow', name: 'Slow'}];\n"
             "const node = (tag) => ({tag: tag, children: [], className: '', value: '',\n"
-            "  textContent: '', attributes: {}, listeners: {},\n"
+            "  textContent: '', attributes: {}, listeners: {}, dataset: {},\n"
+            "  querySelectorAll() { return this.children[3].children; },\n"
             "  append(...children) { children.forEach((child) => this.appendChild(child)); },\n"
             "  appendChild(child) { child.parent = this; this.children.push(child); },\n"
             "  setAttribute(name, value) { this.attributes[name] = value; },\n"
@@ -2675,14 +2677,14 @@ class ControlServerTests(unittest.TestCase):
             "const document = {createElement: node};\n"
             "steps.querySelectorAll = () => steps.children;\n",
             "steps.appendChild(scenarioStepRow({profile_id: 'slow', duration_seconds: 60}));\n"
-            "steps.children[0].children[3].listeners.click();\n"
+            "steps.children[0].children[3].children[3].listeners.click();\n"
             "const lastKept = steps.children.length;\n"
             "steps.appendChild(scenarioStepRow({profile_id: 'slow', duration_seconds: 30}));\n"
             "renumberScenarioSteps();\n"
             "const second = steps.children[1];\n"
             "const labels = [second.children[0].children[0].attributes['aria-label'],\n"
-            "  second.children[3].attributes['aria-label']];\n"
-            "steps.children[0].children[3].listeners.click();\n"
+            "  second.children[3].children[3].attributes['aria-label']];\n"
+            "steps.children[0].children[3].children[3].listeners.click();\n"
             "const profileMenu = steps.children[0].children[0].children[0];\n"
             "console.log(JSON.stringify({lastKept: lastKept, labels: labels,\n"
             "  left: steps.children.length, focused: focused,\n"
@@ -2752,9 +2754,9 @@ class ControlServerTests(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, overview)
-        refresh = DASHBOARD_HTML.split("async function refresh() {", 1)[1].split("\n    }\n", 1)[0]
+        refresh = DASHBOARD_HTML.split("async function refreshDashboard() {", 1)[1].split("\n    }\n", 1)[0]
         self.assertIn("loadActivity()", refresh)
-        self.assertIn("window.setInterval(() => loadActivity(), 5000);", DASHBOARD_HTML)
+        self.assertIn("window.setInterval(pollDashboard, 5000);", DASHBOARD_HTML)
 
     def test_the_activity_log_copies_as_markdown(self) -> None:
         result = self._run_dashboard_functions(
@@ -2793,7 +2795,8 @@ class ControlServerTests(unittest.TestCase):
             "  replaceChildren() { this.children = []; },\n"
             "  focus() {}, select() { this.selected = true; }});\n"
             "const elements = {'activity-list': node('ol'), 'activity-empty': node('p'),\n"
-            "  'activity-markdown': Object.assign(node('textarea'), {hidden: true})};\n"
+            "  'activity-markdown': Object.assign(node('textarea'), {hidden: true}),\n"
+            "  'activity-count': node('p'), 'activity-kind': {value: ''}, 'activity-search': {value: ''}};\n"
             "const element = (id) => elements[id];\n"
             "const document = {createElement: node};\n"
             "const messages = [];\n"
@@ -2803,7 +2806,7 @@ class ControlServerTests(unittest.TestCase):
 
     def test_the_activity_list_fetches_only_when_something_changed(self) -> None:
         result = self._run_dashboard_functions(
-            ["formatActivityTime", "renderActivity", "loadActivity"],
+            ["formatActivityTime", "filteredActivity", "renderActivity", "loadActivity"],
             self.activity_page()
             + "let latest = {newest_id: 1, count: 1};\n"
             "const events = [{id: 1, happened_at: 1790000000,\n"
@@ -2838,7 +2841,7 @@ class ControlServerTests(unittest.TestCase):
 
     def test_activity_messages_are_shown_as_text(self) -> None:
         result = self._run_dashboard_functions(
-            ["formatActivityTime", "renderActivity"],
+            ["formatActivityTime", "filteredActivity", "renderActivity"],
             self.activity_page(),
             "renderActivity([{id: 1, happened_at: 1790000000,\n"
             "  message: '<img src=x onerror=alert(1)>'}]);\n"
@@ -2851,7 +2854,7 @@ class ControlServerTests(unittest.TestCase):
 
     def test_copying_falls_back_to_selected_text(self) -> None:
         result = self._run_dashboard_functions(
-            ["formatActivityTime", "activityMarkdown", "copyActivity"],
+            ["formatActivityTime", "activityMarkdown", "filteredActivity", "copyActivity"],
             self.activity_page()
             + "latestActivity = [{id: 1, happened_at: 1790000000, message: 'Applied'}];\n"
             "const navigator = {clipboard: {writeText: () => Promise.reject(new Error('no'))}};\n",
@@ -2977,7 +2980,7 @@ class ControlServerTests(unittest.TestCase):
 
     def test_dashboard_lists_everyone_else_with_the_devices(self) -> None:
         rows = self._run_dashboard_functions(
-            ["profileName", "conditionCell", "everyoneElseRow"],
+            ["profileName", "conditionCell", "appliedProfileCell", "everyoneElseRow"],
             "const CONDITION_LABELS = {normal: 'Normal', degraded: 'Degraded'};\n"
             "const profiles = [{id: '3g', name: '3G'}];\n"
             "let everyoneElse = {profile_id: null, unaffected_devices: []};\n"
@@ -2997,7 +3000,7 @@ class ControlServerTests(unittest.TestCase):
                 [
                     ["Everyone else", "Test Wi-Fi clients that aren't saved or unaffected"],
                     ["Any address", "1 unaffected"],
-                    "3G",
+                    ["3G", "Saved profile"],
                     ["Degraded", "upload: delay 100 ms"],
                 ],
             ],
@@ -3160,7 +3163,7 @@ class ControlServerTests(unittest.TestCase):
             {
                 None: ["Network controls"],
                 "tab-overview": [
-                    "Signed in", "Getting started", "Connected clients", "Live traffic",
+                    "Getting started", "Connected clients", "Live traffic",
                     "Activity log",
                 ],
                 "tab-devices": ["Devices", "Assign a device", "Group devices", "Everyone else"],
@@ -3185,10 +3188,67 @@ class ControlServerTests(unittest.TestCase):
         ids = set(re.findall(r'\bid="([^"]+)"', DASHBOARD_HTML))
         self.assertEqual(ids & set(self.TABS), set())
 
+    def test_background_polling_pauses_and_never_overlaps_refresh(self) -> None:
+        result = self._run_dashboard_functions(
+            ["pollDashboard", "refresh"],
+            "const document = {hidden: true}; const dashboardLoaded = true;\n"
+            "let dashboardPoll = null, dashboardRefresh = null, refreshAgain = false;\n"
+            "let currentDashboardTab = 'overview', currentRuleSection = 'runs';\n"
+            "const seen = []; let release; let hold = new Promise(resolve => {release = resolve;});\n"
+            "const loadState = async () => {seen.push('state'); await hold;};\n"
+            "const loadConnectedDevices = async () => {seen.push('clients');};\n"
+            "const loadActivity = async () => {seen.push('activity');};\n"
+            "const loadQuotas = async () => {seen.push('limits');};\n"
+            "const loadTimers = loadQuotas, loadScenarios = loadQuotas, loadProgressions = loadQuotas;\n"
+            "const loadSchedules = loadQuotas, loadDevicesForSchedule = loadQuotas, loadConditions = loadQuotas;\n"
+            "const loadObservations = loadQuotas; const element = () => ({});\n"
+            "const refreshDashboard = async () => {seen.push('refresh');};\n",
+            "(async () => {\n"
+            " await pollDashboard(); const hidden = seen.length; document.hidden = false;\n"
+            " const first = pollDashboard(); await pollDashboard();\n"
+            " const updating = refresh(); await pollDashboard(); const before = seen.slice();\n"
+            " release(); await first; await updating;\n"
+            " currentDashboardTab = 'rules'; currentRuleSection = 'limits'; await pollDashboard();\n"
+            " console.log(JSON.stringify({hidden, before, seen}));\n"
+            "})();\n",
+        )
+        self.assertEqual(result["hidden"], 0)
+        self.assertEqual(result["before"], ["state", "clients", "activity"])
+        self.assertEqual(result["seen"], ["state", "clients", "activity", "refresh", "state", "limits"])
+
+    def test_refresh_requested_during_a_refresh_reloads_after_it(self) -> None:
+        result = self._run_dashboard_functions(
+            ["refresh"],
+            "let dashboardPoll = null, dashboardRefresh = null, refreshAgain = false;\n"
+            "let release; const hold = new Promise(resolve => {release = resolve;});\n"
+            "let active = 0, peak = 0, calls = 0;\n"
+            "async function refreshDashboard() { calls++; active++; peak = Math.max(peak, active);\n"
+            " if (calls === 1) await hold; active--; }\n",
+            "(async () => { const first = refresh(); const second = refresh(); release();\n"
+            " await Promise.all([first, second]); console.log(JSON.stringify({calls, peak})); })();\n",
+        )
+        self.assertEqual(result, {"calls": 2, "peak": 1})
+
+    def test_activity_filters_are_combined_and_export_only_matches(self) -> None:
+        result = self._run_dashboard_functions(
+            ["filteredActivity", "activityMarkdown", "formatActivityTime"],
+            self.activity_page() + "latestActivity = [\n"
+            " {kind: 'scenario', happened_at: 100, message: 'Phone <x> started'},\n"
+            " {kind: 'timer', happened_at: 101, message: 'Phone timer'},\n"
+            " {kind: 'scenario', happened_at: 102, message: 'Tablet started'}];\n",
+            "elements['activity-kind'].value = 'scenario'; elements['activity-search'].value = ' PHONE ';\n"
+            "console.log(JSON.stringify(activityMarkdown(filteredActivity())));\n",
+        )
+        self.assertIn("Phone \\<x\\> started", result)
+        self.assertNotIn("Phone timer", result)
+        self.assertNotIn("Tablet", result)
+
     def test_dashboard_tabs_follow_the_address(self) -> None:
         result = self._run_dashboard_functions(
             ["tabFromHash", "showTab"],
             "const DASHBOARD_TABS = " + json.dumps(list(self.TABS)) + ";\n"
+            "const dashboardLoaded = false;\n"
+            "let currentDashboardTab = 'overview';\n"
             "const panels = {};\n"
             "const element = (id) => (panels[id] = panels[id] || {hidden: false});\n"
             "const links = DASHBOARD_TABS.map((tab) => ({\n"
@@ -3382,7 +3442,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertLess(
             overview.index('id="getting-started"'), overview.index('id="connected-devices"')
         )
-        refresh = DASHBOARD_HTML.split("async function refresh() {", 1)[1].split("\n    }\n", 1)[0]
+        refresh = DASHBOARD_HTML.split("async function refreshDashboard() {", 1)[1].split("\n    }\n", 1)[0]
         self.assertIn("renderGettingStarted()", refresh)
 
     def test_forms_offer_the_connected_devices(self) -> None:
@@ -3988,7 +4048,8 @@ class ControlServerTests(unittest.TestCase):
             "let savedSchedules = [];\n"
             "const devices = [];\n"
             "const schedules = [{id: 'others', everyone_else: true, enabled: true}];\n"
-            "async function request() { return {schedules: schedules}; }\n"
+            "const element = () => ({});\n"
+            "async function request() { return {schedules, local_time: '2026-09-26T12:00:00+02:00', time_zone: 'CEST'}; }\n"
             "const rendered = [];\n"
             "function renderSchedules(list) { rendered.push(list.length); }\n"
             "const menus = [];\n"
