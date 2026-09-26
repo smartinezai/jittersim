@@ -3124,7 +3124,8 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertIn('<p class="action-description">', DASHBOARD_HTML)
         self.assertIn(".action-description { display: none; }", small)
-        self.assertIn(".action-buttons button { flex: 1;", small)
+        self.assertIn(".action-buttons button {", small)
+        self.assertIn("flex: 1; min-width: 0;", small)
 
     TABS = ("overview", "devices", "profiles", "rules", "measurements", "setup", "diagnostics")
 
