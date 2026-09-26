@@ -30,8 +30,19 @@ fi
 python3 "$SOURCE_DIR/deploy/raspberry-pi/preflight.py" \
     --uplink "$JITTERSIM_UPLINK" --test-interface "$JITTERSIM_TEST_INTERFACE"
 
+existing_unbound=no
+if dpkg-query -W -f='${Status}' unbound 2>/dev/null | grep -q 'install ok installed'; then
+    existing_unbound=yes
+fi
+existing_hostapd=no
+if dpkg-query -W -f='${Status}' hostapd 2>/dev/null | grep -q 'install ok installed'; then
+    existing_hostapd=yes
+fi
 apt-get update
-apt-get install -y dnsmasq-base iw nftables openssl python3-venv tcpdump
+apt-get install -y dnsmasq-base iw nftables openssl python3-venv tcpdump unbound dnsutils hostapd conntrack
+# New package defaults must not take over existing DNS or Wi-Fi services.
+if [ "$existing_unbound" = no ]; then systemctl disable --now unbound.service; fi
+if [ "$existing_hostapd" = no ]; then systemctl disable --now hostapd.service; fi
 
 install -d -m 0750 -o root -g jittersim "$CONFIG_DIR"
 install -d -m 0750 -o jittersim -g jittersim "$DATA_DIR"
@@ -48,7 +59,7 @@ python3 -m venv "$INSTALL_DIR/.venv"
 # jittersim-helper runs as root from this directory, so only root may change it.
 chown -R root:root "$INSTALL_DIR"
 chmod -R go-w "$INSTALL_DIR"
-# `sudo jittersim reset` clears the network over SSH when the dashboard is down.
+# `sudo jittersim normal-access` clears restrictions when the dashboard is down.
 ln -sf "$INSTALL_DIR/.venv/bin/jittersim" /usr/local/bin/jittersim
 
 if [ ! -s "$CONFIG_DIR/control.env" ]; then
@@ -107,7 +118,7 @@ if ! nmcli -g ipv4.shared-dhcp-range connection show jittersim-ap >/dev/null 2>&
 fi
 nmcli connection modify jittersim-ap \
     connection.interface-name "$JITTERSIM_TEST_INTERFACE" \
-    connection.autoconnect yes \
+    connection.autoconnect no \
     802-11-wireless.mode ap \
     802-11-wireless.ap-isolation "$ap_isolation" \
     ipv4.method shared \
@@ -176,7 +187,14 @@ install -d -m 0755 -o root -g root /usr/local/lib
 install -m 0644 -o root -g root "$SOURCE_DIR/src/jittersim/updates.py" /usr/local/lib/jittersim-update.py
 systemctl enable jittersim-update.service
 
+for access_service in jittersim-dns jittersim-access-boot jittersim-ap; do
+    install -m 0644 -o root -g root "$SOURCE_DIR/deploy/raspberry-pi/$access_service.service" \
+        "/etc/systemd/system/$access_service.service"
+done
+install -d -m 0750 -o root -g jittersim /var/lib/jittersim-access
 systemctl daemon-reload
+systemctl enable jittersim-access-boot.service jittersim-ap.service
+systemctl restart jittersim-access-boot.service
 systemctl enable jittersim-control-firewall.service
 systemctl restart jittersim-control-firewall.service
 systemctl enable jittersim-helper.service jittersim-dashboard.service jittersim-browser-proxy.service
@@ -189,7 +207,7 @@ if [ "$ap_active_connection" = jittersim-ap ]; then
         echo "Test Wi-Fi devices reconnect after a few seconds. A reboot also works." >&2
     fi
 else
-    nmcli connection up jittersim-ap
+    systemctl start jittersim-ap.service
 fi
 systemctl restart jittersim-browser-proxy.service
 

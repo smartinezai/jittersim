@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable
 from .models import MAX_UNAFFECTED_DEVICES, SavedSettings
 
 SETTINGS_FORMAT = "jittersim-settings"
-SETTINGS_VERSION = 1
+SETTINGS_VERSION = 2
 
 
 def _json_values(value: Any) -> Any:
@@ -71,6 +71,8 @@ def settings_to_payload(settings: SavedSettings, *, exported_at: int) -> Dict[st
         "policies": {
             "mac": _json_values(asdict(settings.mac_policy)),
             "websites": _json_values(asdict(settings.website_policy)),
+            "options": _json_values(asdict(settings.access_options)),
+            "site_blocks": [_json_values(asdict(rule)) for rule in settings.site_blocks],
         },
         "data_limits": [
             {
@@ -165,6 +167,8 @@ def check_settings(
     profile_ids = {profile.id for profile in settings.profiles}
     device_ids = {device.id for device in settings.devices}
     group_ids = {group.id for group in settings.groups}
+    from jittersim.engine.access import validate_blocks
+    validate_blocks(settings.site_blocks, device_ids, group_ids)
 
     def require_profile(owner: str, profile_id: str) -> None:
         if profile_id not in profile_ids:

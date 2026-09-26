@@ -13,6 +13,7 @@ from jittersim.config.models import (
     normalize_service_hostname,
 )
 
+from .access import AccessPlan
 from .plan import (
     EVERYONE_ELSE_QUEUE_ID,
     Direction,
@@ -49,6 +50,7 @@ def compile_plan(
     service_quota_rules: Sequence[ServiceQuotaRule] = (),
     service_assignment_rules: Sequence[ServiceAssignmentRule] = (),
     everyone_else: Optional[EveryoneElseRule] = None,
+    access: Optional[AccessPlan] = None,
 ) -> NetworkPlan:
     """Compile device assignments into deterministic marks and directional queues."""
 
@@ -301,4 +303,5 @@ def compile_plan(
         service_quota_rules=normalized_service_rules,
         service_assignment_rules=tuple(normalized_assignments),
         everyone_else=normalized_everyone_else,
+        access=access,
     )

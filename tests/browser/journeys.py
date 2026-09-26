@@ -10,6 +10,82 @@ from pathlib import Path
 from playwright.sync_api import expect, sync_playwright
 
 
+def check_access_and_help(page):
+    if page.get_by_role("button", name="Discard unfinished edits", exact=True).is_visible():
+        page.get_by_role("button", name="Discard unfinished edits", exact=True).click()
+        page.get_by_role("dialog").get_by_role("button", name="Continue", exact=True).click()
+        expect(page.locator("#draft-notice")).to_be_hidden()
+    page.get_by_role("link", name="Devices", exact=True).click()
+    page.get_by_role("button", name="Manage device and site access", exact=True).click()
+    expect(page.locator("#site-rule-form")).to_be_visible()
+    page.get_by_label("Rule name", exact=True).fill("Video for the test phone")
+    page.get_by_label("Applies to", exact=True).select_option("device:alice")
+    page.get_by_label("Domains to block", exact=True).fill("video.example.com\nstream.example.com")
+    page.get_by_role("button", name="Save site rule", exact=True).click()
+    expect(page.locator("#site-rule-list")).to_contain_text("Video for the test phone")
+    expect(page.locator("#access-summary")).to_contain_text("Saved rules differ")
+    page.get_by_role("button", name="Apply access rules", exact=True).click()
+    expect(page.locator("#access-summary")).to_contain_text("Saved access rules are active")
+    page.get_by_role("button", name="Reset network", exact=True).click()
+    expect(page.locator("#message")).to_contain_text("reset")
+    expect(page.locator("#access-summary")).to_contain_text("Saved access rules are active")
+    page.get_by_role("link", name="Devices", exact=True).click()
+    expect(page.locator(".device-access-status").first).to_contain_text("Video for the test phone")
+    page.get_by_role("button", name="Manage device and site access", exact=True).click()
+    page.get_by_role("button", name="Block Test phone", exact=True).click()
+    page.get_by_role("dialog").get_by_role("button", name="Continue", exact=True).click()
+    expect(page.locator("#access-device-list")).to_contain_text("Network access blocked")
+    page.get_by_role("button", name="Allow Test phone", exact=True).click()
+    page.get_by_role("dialog").get_by_role("button", name="Continue", exact=True).click()
+    expect(page.locator("#access-device-list")).to_contain_text("Network access allowed")
+    page.get_by_role("button", name="Edit Video for the test phone", exact=True).click()
+    page.get_by_label("Domains to block", exact=True).fill("unfinished.example.com")
+    # Polling status must not overwrite an unfinished domain list.
+    page.get_by_role("button", name="Apply current configuration", exact=True).click()
+    expect(page.locator("#message")).to_contain_text("Configuration applied")
+    expect(page.get_by_label("Domains to block", exact=True)).to_have_value("unfinished.example.com")
+    page.set_viewport_size({"width": 320, "height": 740})
+    page.get_by_role("link", name="Profiles", exact=True).click()
+    page.get_by_text("Randomness, outages and website access", exact=True).click()
+    page.emulate_media(color_scheme="light", reduced_motion="reduce")
+    assert page.evaluate("getComputedStyle(document.documentElement).colorScheme") == "dark"
+    for direction in ("upload", "download"):
+        for field in ("delay", "jitter", "loss", "bandwidth", "reorder", "duplicate", "corrupt"):
+            button = page.get_by_role("button", name=f"{direction} {field} help", exact=True)
+            button.click()
+            tooltip = page.locator("#" + button.get_attribute("aria-controls"))
+            expect(tooltip).to_be_visible()
+            box = tooltip.bounding_box()
+            assert box['x'] >= 0 and box['x'] + box['width'] <= 320, field
+            page.keyboard.press("Escape")
+            expect(tooltip).to_be_hidden()
+    button = page.get_by_role("button", name="upload delay help", exact=True)
+    button.focus()
+    expect(page.locator("#" + button.get_attribute("aria-controls"))).to_be_visible()
+    page.keyboard.press("Tab")
+    expect(page.locator("#" + button.get_attribute("aria-controls"))).to_be_hidden()
+    assert page.evaluate("document.documentElement.scrollWidth <= 321")
+    page.screenshot(path="test-results/access-profiles-phone.png", full_page=True)
+    page.set_viewport_size({"width": 1440, "height": 1000})
+    page.screenshot(path="test-results/access-profiles-desktop.png", full_page=True)
+    page.get_by_role("link", name="Rules & limits", exact=True).click()
+    page.screenshot(path="test-results/access-rules-desktop.png", full_page=True)
+    # Panic works without discarding an unfinished form or another confirmation.
+    page.get_by_role("button", name="Normal access", exact=True).click()
+    expect(page.locator("#normal-access-notice")).to_be_visible()
+    expect(page.get_by_label("Domains to block", exact=True)).to_have_value("unfinished.example.com")
+    expect(page.locator("#access-summary")).to_contain_text("disabled")
+    page.reload()
+    expect(page.locator("#normal-access-notice")).to_be_visible()
+    expect(page.locator("#site-rule-list")).to_contain_text("Video for the test phone")
+    page.set_viewport_size({"width": 390, "height": 844})
+    page.get_by_role("link", name="Overview", exact=True).click()
+    page.evaluate("window.scrollTo(0, 0)")
+    page.screenshot(path="test-results/access-normal-phone.png")
+    page.set_viewport_size({"width": 1440, "height": 1000})
+    page.screenshot(path="test-results/access-normal-desktop.png")
+
+
 def run():
     process = subprocess.Popen(
         [sys.executable, "-m", "tests.browser.fixture"], stdout=subprocess.PIPE, text=True
@@ -132,6 +208,7 @@ def run():
                 expect(
                     page.get_by_role("row").filter(has_text="Slow connection copy")
                 ).to_have_count(0)
+                check_access_and_help(page)
                 page.set_viewport_size({"width": 320, "height": 740})
                 for tab in (
                     "Overview",

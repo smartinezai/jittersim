@@ -8,10 +8,12 @@ from jittersim.api.server import ControlServer
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.config.storage import ConfigRepository
 from jittersim.engine.runtime import RuntimeScheduler
+from jittersim.networking.access import AccessManager
 from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.executor import FakeExecutor
 from jittersim.networking.helper import HelperClient, HelperService, UnixHelperServer
 from jittersim.networking.topology import Topology
+from tests.access_support import AccessExecutor
 
 
 class ApiHelperIntegrationTests(unittest.TestCase):
@@ -20,12 +22,20 @@ class ApiHelperIntegrationTests(unittest.TestCase):
         socket_path = Path(self.temp_dir.name) / "helper.sock"
         self.active_plan_path = Path(self.temp_dir.name) / "active-plan.json"
         helper_executor = FakeExecutor()
+        access_directory = Path(self.temp_dir.name) / "access"
+        self.access_manager = AccessManager(
+            executor=AccessExecutor(access_directory),
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            directory=access_directory,
+            runtime_path=Path(self.temp_dir.name) / "access-policy.json",
+        )
         helper_service = HelperService(
             NetworkApplier(
                 executor=helper_executor,
                 topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
             ),
             active_plan_path=self.active_plan_path,
+            access_manager=self.access_manager,
         )
         self.helper_server = UnixHelperServer(socket_path, helper_service)
         self.helper_thread = threading.Thread(target=self.helper_server.serve_forever)

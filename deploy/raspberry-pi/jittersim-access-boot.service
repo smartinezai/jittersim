@@ -1,0 +1,19 @@
+[Unit]
+Description=Restore JitterSim household access rules
+Wants=NetworkManager.service
+After=local-fs.target NetworkManager.service
+Before=jittersim-ap.service
+
+[Service]
+Type=oneshot
+User=root
+Group=jittersim
+RuntimeDirectory=jittersim
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+EnvironmentFile=/etc/jittersim/runtime.env
+ExecStart=/opt/jittersim/.venv/bin/jittersim-access-restore --uplink ${JITTERSIM_UPLINK} --test-interface ${JITTERSIM_TEST_INTERFACE}
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -29,6 +29,7 @@ class UpdateTests(unittest.TestCase):
         self.root = self.base / "updates"
         self.manager = self.base / "manager.py"
         self.manager.write_text("old recovery manager")
+        self.access = self.base / "access"
         self.code, self.config, self.data, self.units = [
             self.base / item for item in ("code", "config", "data", "units")
         ]
@@ -73,6 +74,7 @@ class UpdateTests(unittest.TestCase):
             code=self.code,
             config=self.config,
             data=self.data,
+            access=self.access,
             units=self.units,
             manager=self.manager,
             run=run,
@@ -135,6 +137,36 @@ class UpdateTests(unittest.TestCase):
             with self.assertRaises(UpdateError):
                 self.apply(lambda *args: None, lambda: True)
         self.assertEqual((self.code / "old-file").read_text(), "previous installation")
+
+    def test_access_policy_is_restored_after_a_failed_install(self):
+        self.access.mkdir()
+        policy = self.access / 'policy.json'
+        policy.write_text('{"options":{"enabled":true}}')
+        policy.chmod(0o640)
+        self.stage()
+        request_update('v1', root=self.root, code=self.code, run=lambda *args: None)
+        def fail(command, timeout):
+            if 'pip' in command:
+                policy.write_text('damaged')
+                raise UpdateError('installation failed')
+        with self.assertRaises(UpdateError):
+            self.apply(fail, lambda: True)
+        self.assertTrue(json.loads(policy.read_text())['options']['enabled'])
+        self.assertEqual(policy.stat().st_mode & 0o777, 0o640)
+
+    def test_downgrade_cannot_silently_remove_active_access_controls(self):
+        self.stage()
+        request_update('v1', root=self.root, code=self.code, run=lambda *args: None)
+        self.apply(lambda *args: None, lambda: True)
+        self.access.mkdir()
+        (self.access / 'policy.json').write_text('{"options":{"enabled":true}}')
+        request_update('', rollback=True, root=self.root, code=self.code, run=lambda *args: None)
+        commands = []
+        with self.assertRaisesRegex(UpdateError, 'disable household'):
+            self.apply(lambda command, timeout: commands.append(command), lambda: True)
+        self.assertEqual(commands, [])
+        self.assertEqual(update_status(root=self.root, code=self.code)['phase'], 'failed')
+        self.assertFalse((self.root / 'request.json').exists())
 
     def test_successful_install_can_be_rolled_back(self):
         self.stage()

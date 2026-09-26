@@ -17,6 +17,8 @@ from jittersim.config.models import ValidationError, normalize_domain
 from jittersim.engine.codec import PlanCodecError, plan_from_payload
 from jittersim.engine.plan import NetworkPlan
 
+from .access import read_access
+
 LOGGER = logging.getLogger(__name__)
 MAX_PLAN_BYTES = 256 * 1024
 MAX_HEADER_BYTES = 8 * 1024
@@ -150,6 +152,8 @@ def _copy_stream(
     destination: socket.socket,
     plan_path: Path,
     generation: Optional[tuple],
+    access_path: Optional[Path] = None,
+    access_generation: Optional[tuple] = None,
 ) -> None:
     try:
         while True:
@@ -157,6 +161,8 @@ def _copy_stream(
             if not chunk:
                 break
             if _plan_generation(plan_path) != generation:
+                break
+            if access_path is not None and _plan_generation(access_path) != access_generation:
                 break
             destination.sendall(chunk)
     except (OSError, socket.timeout):
@@ -181,6 +187,13 @@ class _ProxyHandler(socketserver.BaseRequestHandler):
             client_ip = self.server.identify_client(peer_ip)
             host, first_bytes = _read_connect_request(client)
             plan, generation = _read_active_plan(self.server.active_plan_path)
+            access_path = self.server.access_policy_path
+            access_generation = _plan_generation(access_path)
+            if self.server.require_access_policy and access_generation is None:
+                raise ProxyError("access rules are unavailable")
+            policy = read_access(access_path)
+            if not policy.permits_host(str(client_ip), host):
+                raise ProxyError("this destination is blocked by an access rule")
             mark, assignment_id = select_mark(plan, client_ip=client_ip, host=host)
             try:
                 addresses = self.server.resolver.submit(self.server.resolve_addresses, host).result(
@@ -213,6 +226,8 @@ class _ProxyHandler(socketserver.BaseRequestHandler):
             with upstream:
                 if _plan_generation(self.server.active_plan_path) != generation:
                     raise ProxyError("network plan changed while opening the tunnel")
+                if _plan_generation(access_path) != access_generation:
+                    raise ProxyError("access rules changed while opening the tunnel")
                 self.server.mark_socket(client, mark)
                 client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                 tunnel_started = True
@@ -222,11 +237,13 @@ class _ProxyHandler(socketserver.BaseRequestHandler):
                     upstream.sendall(first_bytes)
                 upload = threading.Thread(
                     target=_copy_stream,
-                    args=(client, upstream, self.server.active_plan_path, generation),
+                    args=(client, upstream, self.server.active_plan_path, generation,
+                          access_path, access_generation),
                     daemon=True,
                 )
                 upload.start()
-                _copy_stream(upstream, client, self.server.active_plan_path, generation)
+                _copy_stream(upstream, client, self.server.active_plan_path, generation,
+                             access_path, access_generation)
                 upload.join(timeout=1)
             LOGGER.debug("browser tunnel closed for %s", assignment_id)
         except (OSError, ProxyError, ValueError) as error:
@@ -254,8 +271,12 @@ class BrowserProxyServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         mark_socket: Callable[[socket.socket, int], None] = _set_socket_mark,
         resolve_addresses: Callable[[str], list] = _resolve_public_addresses,
         identify_client: Callable[[IPv4Address], IPv4Address] = lambda address: address,
+        access_policy_path: Optional[Path] = None,
+        require_access_policy: bool = False,
     ) -> None:
         self.active_plan_path = active_plan_path
+        self.access_policy_path = access_policy_path or active_plan_path.with_name("access-policy.json")
+        self.require_access_policy = require_access_policy
         self.client_network = ip_network(client_network, strict=True)
         if self.client_network.version != 4:
             raise ValueError("browser proxy client network must use IPv4")
@@ -302,7 +323,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except (AttributeError, OSError) as error:
         LOGGER.error("socket marking is unavailable: %s", error)
         return 1
-    with BrowserProxyServer((arguments.host, arguments.port), active_plan_path=arguments.plan) as proxy:
+    with BrowserProxyServer((arguments.host, arguments.port), active_plan_path=arguments.plan,
+                            require_access_policy=True) as proxy:
         try:
             proxy.serve_forever()
         except KeyboardInterrupt:

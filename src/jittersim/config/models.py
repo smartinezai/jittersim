@@ -807,6 +807,51 @@ class WebsitePolicy:
 
 _OBSERVED_STATES = frozenset(("unknown", "applying", "resetting", "applied", "reset", "error"))
 
+MAX_SITE_BLOCKS = 32
+MAX_BLOCK_DOMAINS = 512
+
+
+@dataclass(frozen=True)
+class SiteBlock:
+    """One named set of domains blocked independently of traffic profiles."""
+
+    id: str
+    name: str
+    domains: Tuple[str, ...]
+    device_id: Optional[str] = None
+    group_id: Optional[str] = None
+    enabled: bool = True
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.id, "site block id")
+        object.__setattr__(self, "name", _validate_name(self.name, "site block name"))
+        if any(ord(character) < 32 for character in self.name):
+            raise ValidationError("site block name contains a control character")
+        if not isinstance(self.enabled, bool):
+            raise ValidationError("site block enabled must be true or false")
+        if self.device_id is not None:
+            _validate_identifier(self.device_id, "site block device")
+        if self.group_id is not None:
+            _validate_identifier(self.group_id, "site block group")
+        if self.device_id is not None and self.group_id is not None:
+            raise ValidationError("choose a device, a group or everyone for a site block")
+        values = _normalize_domain_list(self.domains, "blocked domains")
+        if not values or len(values) > 64:
+            raise ValidationError("a site block needs between 1 and 64 domains")
+        object.__setattr__(self, "domains", tuple(normalize_service_hostname(d) for d in values))
+
+
+@dataclass(frozen=True)
+class AccessOptions:
+    """Explicit controls for persistent household restrictions."""
+
+    enabled: bool = True
+    reject_wifi_joins: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool) or not isinstance(self.reject_wifi_joins, bool):
+            raise ValidationError("access options must be true or false")
+
 
 @dataclass(frozen=True)
 class RuntimeState:
@@ -849,3 +894,5 @@ class SavedSettings:
     everyone_else_profile_id: Optional[str] = None
     unaffected_devices: Tuple[UnaffectedDevice, ...] = ()
     scenarios: Tuple[Scenario, ...] = ()
+    site_blocks: Tuple[SiteBlock, ...] = ()
+    access_options: AccessOptions = AccessOptions()

@@ -51,11 +51,34 @@ class FakeHelper:
         self.fail_action = fail_action
         self.applied_plan = None
         self.reset_called = False
+        self.access_plan = None
+
+    def access_status(self):
+        return {"available": True, "wifi_admission_available": False,
+                "policy": self.access_plan.payload() if self.access_plan else None,
+                "enabled": bool(self.access_plan and self.access_plan.options.enabled), "error": None}
+
+    def apply_access(self, plan):
+        if self.fail_action == "access":
+            raise HelperClientError("simulated access failure")
+        self.access_plan = plan
+        return self.access_status()
+
+    def normal_access(self):
+        from dataclasses import replace
+
+        from jittersim.engine.access import AccessPlan
+        self.reset()
+        plan = self.access_plan or AccessPlan()
+        self.apply_access(replace(plan, options=replace(plan.options, enabled=False)))
+        return {"ok": True}
 
     def apply(self, *, plan):
         if self.fail_action == "apply":
             raise HelperClientError("simulated helper failure")
         self.applied_plan = plan
+        if plan.access is not None:
+            self.apply_access(plan.access)
         return {"ok": True, "action": "apply", "commands_run": 3}
 
     def reset(self):

@@ -84,6 +84,7 @@ def plan_to_payload(plan: NetworkPlan) -> Dict[str, Any]:
     """Convert a compiled plan into JSON-compatible values."""
 
     return {
+        "access": plan.access.payload() if plan.access is not None else None,
         "mark_rules": [
             {
                 "device_id": rule.device_id,
@@ -521,6 +522,11 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
             raise
         raise PlanCodecError("network policy is invalid") from error
 
+    from .access import access_from_payload
+    try:
+        access = access_from_payload(plan_data["access"]) if plan_data.get("access") is not None else None
+    except (TypeError, ValueError) as error:
+        raise PlanCodecError("access policy is invalid") from error
     return NetworkPlan(
         mark_rules=tuple(mark_rules),
         queues=tuple(queues),
@@ -531,4 +537,5 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
         service_quota_rules=tuple(service_quota_rules),
         service_assignment_rules=tuple(service_assignment_rules),
         everyone_else=everyone_else,
+        access=access,
     )

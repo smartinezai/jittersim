@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, urlsplit
 
+from jittersim.api.access import ACCESS_WRITES, read_access_api, write_access_api
 from jittersim.api.session import (
     SignInLimiter,
     cleared_session_cookie,
@@ -39,6 +40,7 @@ from jittersim.config.device_labels import (
     normalize_device_type,
 )
 from jittersim.config.models import (
+    AccessOptions,
     DataLimit,
     Device,
     DeviceGroup,
@@ -57,6 +59,7 @@ from jittersim.config.models import (
     Schedule,
     ServiceAssignment,
     ServiceQuota,
+    SiteBlock,
     TimeQuota,
     Timer,
     UnaffectedDevice,
@@ -153,7 +156,7 @@ WRITE_PATHS = frozenset(
         "/api/reset",
     )
 )
-WRITE_PATHS = WRITE_PATHS | WORKFLOW_WRITES | {"/api/schedules/preview"}
+WRITE_PATHS = WRITE_PATHS | WORKFLOW_WRITES | ACCESS_WRITES | {"/api/schedules/preview"}
 ACTION_PATHS = frozenset(("/api/apply", "/api/reset", "/api/observations/scan"))
 
 
@@ -1036,7 +1039,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         </div>
         <details>
           <summary>Randomness, outages and website access</summary>
-          <p class="form-note">Values are rerolled at each interval. Hover a question mark for an explanation. A 200 ms value with 30% variation can be rerolled anywhere from 140 to 260 ms. Enabled chance controls whether that feature is active for the interval.</p>
+          <p class="form-note">Values are rerolled at each interval. Tap or focus a question mark for an explanation. A 200 ms value with 30% variation can be rerolled anywhere from 140 to 260 ms. Enabled chance controls whether that feature is active for the interval.</p>
           <div class="fields">
             <label><span class="field-label">Reroll every (seconds)<span class="help-icon" tabindex="0" role="img" aria-label="Reroll interval help" data-help="The base time between new random values. Set this to 0 to keep the saved values fixed.">?</span></span>
               <input id="profile-reroll" type="number" min="0" value="0">
@@ -1917,7 +1920,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       element(prefix + "-form").reset();
       element(prefix + "-id").readOnly = false;
       element(prefix + "-id").dataset.typed = "";
-      element(prefix + "-edit-bar").hidden = true;
+      const editBar = element(prefix + "-edit-bar");
+      if (editBar) editBar.hidden = true;
     }
 
     const IMPAIRMENT_FEATURES = [
@@ -5245,12 +5249,16 @@ DASHBOARD_HTML = r"""<!doctype html>
     async function loadPolicies() {
       const data = await request("/api/policies", "GET");
       element("policies").textContent = JSON.stringify(data, null, 2);
+      if (!formDrafts.has("policy-form")) {
       element("mac-mode").value = data.mac.mode;
       element("mac-allowlist").value = data.mac.allowlist.join(", ");
       element("mac-denylist").value = data.mac.denylist.join(", ");
       element("website-mode").value = data.websites.mode;
       element("website-allowlist").value = data.websites.allowed_domains.join(", ");
       element("website-blocklist").value = data.websites.blocked_domains.join(", ");
+      }
+      updateAccessForms(data);
+      await loadAccessStatus();
     }
 
     async function loadState() {
@@ -5341,11 +5349,11 @@ DASHBOARD_HTML = r"""<!doctype html>
         // Only read changing data in the visible panel. Do not overwrite forms.
         let jobs = [loadState, loadHealth];
         if (currentDashboardTab === "overview") jobs.push(loadConnectedDevices, loadActivity, loadConditions);
-        if (currentDashboardTab === "devices") jobs.push(loadDevicesForSchedule, loadConditions, loadWorkspace);
+        if (currentDashboardTab === "devices") jobs.push(loadDevicesForSchedule, loadConditions, loadWorkspace, loadAccessStatus);
         if (currentDashboardTab === "rules") {
           if (currentRuleSection === "runs") jobs.push(loadTimers, loadScenarios, loadProgressions, loadSchedules);
           if (currentRuleSection === "limits") jobs.push(loadQuotas);
-          if (currentRuleSection === "access") jobs.push(loadObservations);
+          if (currentRuleSection === "access") jobs.push(loadObservations, loadAccessStatus);
         }
         if (currentDashboardTab === "measurements") jobs.push(loadTestSessions);
         if (currentDashboardTab === "setup") jobs.push(loadReleaseStatus);
@@ -5390,6 +5398,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       dashboardLoaded = true;
       renderGettingStarted();
       populateWorkflowMenus();
+      populateAccessTargets();
       await loadWorkspace();
     }
 
@@ -5532,6 +5541,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       event.preventDefault();
       try {
         await request("/api/policies", "POST", {
+          version: policyVersion,
+          options: {enabled: element("access-enabled").checked, reject_wifi_joins: element("access-admission").checked},
           mac: {
             mode: element("mac-mode").value,
             allowlist: commaList("mac-allowlist"),
@@ -5543,7 +5554,7 @@ DASHBOARD_HTML = r"""<!doctype html>
             blocked_domains: commaList("website-blocklist")
           }
         });
-        refreshAfterSuccess("Access rules saved. Apply the configuration to enforce them.");
+        refreshAfterSuccess("Access rules saved. Choose Apply access rules to enforce them.");
       } catch (error) {
         showMessage(error.message, "error");
       }
@@ -6076,6 +6087,8 @@ DASHBOARD_HTML = r"""<!doctype html>
 
 DASHBOARD_HTML = DASHBOARD_HTML.replace("</style>", Path(__file__).with_name("workflows.css").read_text(encoding="utf-8") + "</style>", 1)
 DASHBOARD_HTML = DASHBOARD_HTML.replace("    startDashboard();", Path(__file__).with_name("workflows.js").read_text(encoding="utf-8") + "\n    startDashboard();")
+DASHBOARD_HTML = DASHBOARD_HTML.replace("</style>", Path(__file__).with_name("access.css").read_text(encoding="utf-8") + "</style>", 1)
+DASHBOARD_HTML = DASHBOARD_HTML.replace("    startDashboard();", Path(__file__).with_name("access.js").read_text(encoding="utf-8") + "\n    startDashboard();")
 
 
 def _inline_source_hash(tag: str, page: str = DASHBOARD_HTML) -> str:
@@ -6442,6 +6455,9 @@ def _policies_payload(repository: ConfigRepository) -> Dict[str, Any]:
     return {
         "mac": asdict(mac_policy),
         "websites": asdict(website_policy),
+        "options": asdict(repository.get_access_options()),
+        "site_blocks": [asdict(rule) for rule in repository.list_site_blocks()],
+        "version": repository.get_runtime_state().configuration_version,
     }
 
 
@@ -6560,6 +6576,9 @@ class ControlServer(HTTPServer):
     def response_for(self, path: str) -> Tuple[int, str, bytes]:
         """Build the response body for a supported GET path."""
 
+        access_response = read_access_api(self, path)
+        if access_response is not None:
+            return access_response
         workflow = read_workflow(self, path)
         if workflow is not None:
             return workflow
@@ -7006,6 +7025,9 @@ class ControlServer(HTTPServer):
         with operation:
             before = self.repository.get_runtime_state().configuration_version
             try:
+                access_response = write_access_api(self, path, payload)
+                if access_response is not None:
+                    return access_response
                 workflow = write_workflow(self, path, payload, _settings_from_payload)
                 return workflow if workflow is not None else self._write_response_for(path, payload)
             finally:
@@ -7714,10 +7736,20 @@ class ControlServer(HTTPServer):
         if path == "/api/policies":
             try:
                 mac_policy, website_policy = _policies_from_payload(payload)
+                blocks = payload.get("site_blocks")
+                if blocks is not None:
+                    if not isinstance(blocks, list) or len(blocks) > 32:
+                        raise ValueError("site_blocks must be a list of at most 32 rules")
+                    blocks = tuple(SiteBlock(**rule) for rule in blocks)
+                options = AccessOptions(**payload["options"]) if "options" in payload else None
+                self.repository.save_access_policies(
+                    mac_policy, website_policy, blocks=blocks, options=options,
+                    expected_version=payload.get("version"),
+                )
+            except DeviceConflictError as error:
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
             except (KeyError, TypeError, ValueError) as error:
                 return _bad_request("invalid network policy configuration", error)
-            self.repository.save_mac_policy(mac_policy)
-            self.repository.save_website_policy(website_policy)
             return HTTPStatus.OK, "application/json", _json_bytes(
                 _policies_payload(self.repository)
             )
@@ -9036,7 +9068,8 @@ def _imported_reset_fields(value: Dict[str, Any]) -> Dict[str, Any]:
 def _settings_from_payload(payload: Dict[str, Any]) -> SavedSettings:
     """Read a settings export, naming the first item that is wrong."""
 
-    if payload.get("format") != SETTINGS_FORMAT or payload.get("version") != SETTINGS_VERSION:
+    if (payload.get("format") != SETTINGS_FORMAT or type(payload.get("version")) is not int
+            or payload.get("version") not in (1, SETTINGS_VERSION)):
         raise ValueError("the file is not a JitterSim settings export this version can read")
     now = int(time.time())
 
@@ -9086,6 +9119,9 @@ def _settings_from_payload(payload: Dict[str, Any]) -> SavedSettings:
         scenarios=items("scenarios", _scenario_from_payload),
         mac_policy=mac_policy,
         website_policy=website_policy,
+        site_blocks=parse_items("policies.site_blocks", policies.get("site_blocks", []),
+                                lambda value: SiteBlock(**value)),
+        access_options=AccessOptions(**policies.get("options", {})),
         data_limits=items(
             "data_limits",
             lambda value: DataLimit(

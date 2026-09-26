@@ -2,8 +2,10 @@
 
 from dataclasses import replace
 
+from jittersim.config.models import WebsitePolicy
 from jittersim.config.storage import ConfigRepository
 
+from .access import build_access_plan
 from .compiler import compile_plan
 from .plan import EveryoneElseRule, NetworkPlan, ServiceAssignmentRule, ServiceQuotaRule
 from .website import build_website_filters, resolve_domains
@@ -57,7 +59,7 @@ def compile_stored_plan(*, repository: ConfigRepository) -> NetworkPlan:
     global_blocked, website_filters = build_website_filters(
         devices=devices,
         profiles=profiles,
-        global_policy=repository.get_website_policy(),
+        global_policy=WebsitePolicy(),
     )
     devices_by_id = {device.id: device for device in devices}
     service_quota_rules = []
@@ -123,6 +125,7 @@ def compile_stored_plan(*, repository: ConfigRepository) -> NetworkPlan:
         devices=devices,
         profiles=profiles,
         mac_policy=repository.get_mac_policy(),
+        access=build_access_plan(repository.access_settings()),
         global_blocked_addresses=global_blocked,
         website_filters=website_filters,
         service_quota_rules=service_quota_rules,

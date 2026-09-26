@@ -16,6 +16,7 @@ from .device_labels import (
 )
 from .models import (
     MAX_UNAFFECTED_DEVICES,
+    AccessOptions,
     DataLimit,
     Device,
     DeviceGroup,
@@ -34,6 +35,7 @@ from .models import (
     Schedule,
     ServiceAssignment,
     ServiceQuota,
+    SiteBlock,
     TimeQuota,
     Timer,
     UnaffectedDevice,
@@ -67,7 +69,7 @@ MAX_ACTIVITY_EVENTS = 500
 ACTIVITY_KINDS = frozenset(
     (
         "apply", "reset", "outage", "schedule", "timer", "scenario", "progression", "limit",
-        "address",
+        "address", "access",
     )
 )
 # A schedule targets exactly one device, group or everyone else. Older
@@ -428,6 +430,18 @@ class ConfigRepository:
         )
         self._connection.execute(_SCHEDULES_TABLE_SQL.format(name="schedules"))
         self._upgrade_schedules_table()
+        self._connection.execute("""
+            CREATE TABLE IF NOT EXISTS site_blocks (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                domains_json TEXT NOT NULL,
+                device_id TEXT REFERENCES devices(id) ON DELETE RESTRICT,
+                group_id TEXT REFERENCES device_groups(id) ON DELETE RESTRICT,
+                enabled INTEGER NOT NULL,
+                CHECK (device_id IS NULL OR group_id IS NULL)
+            )
+        """)
+        self._add_column_if_missing("network_policies", "access_options_json", "TEXT NOT NULL DEFAULT '{}'")
         self._add_column_if_missing("test_sessions", "captures_json", "TEXT NOT NULL DEFAULT '[]'")
         self._add_column_if_missing("test_sessions", "captures_truncated", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing("activity_log", "device_ids_json", "TEXT NOT NULL DEFAULT '[]'")
@@ -1142,21 +1156,34 @@ class ConfigRepository:
         because a group must contain at least one device.
         """
 
-        cursor = self._connection.execute("DELETE FROM devices WHERE id = ?", (device_id,))
-        if not cursor.rowcount:
-            return False
-        self._connection.execute(
-            "DELETE FROM device_groups WHERE id NOT IN (SELECT group_id FROM device_group_members)"
-        )
-        self._bump_configuration_version()
-        self._commit()
-        return True
+        try:
+            cursor = self._connection.execute("DELETE FROM devices WHERE id = ?", (device_id,))
+            if not cursor.rowcount:
+                self._commit()
+                return False
+            self._connection.execute(
+                "DELETE FROM device_groups WHERE id NOT IN (SELECT group_id FROM device_group_members)"
+            )
+            self._bump_configuration_version()
+            self._commit()
+            return True
+        except sqlite3.IntegrityError as error:
+            self._connection.rollback()
+            raise StorageError("remove site rules for this device or its last group before deleting it") from error
 
     def _commit(self) -> None:
         # replace_settings defers the commits of the save methods it calls so
         # the whole replacement is one transaction.
         if not self._deferring_commits:
             self._connection.commit()
+
+    def access_settings(self) -> SavedSettings:
+        """Read only the settings needed by persistent access controls."""
+        return SavedSettings(
+            devices=self.list_devices(), groups=self.list_device_groups(),
+            mac_policy=self.get_mac_policy(), website_policy=self.get_website_policy(),
+            site_blocks=self.list_site_blocks(), access_options=self.get_access_options(),
+        )
 
     def saved_settings(self) -> SavedSettings:
         """Return every setting that an export includes."""
@@ -1176,6 +1203,8 @@ class ConfigRepository:
             everyone_else_profile_id=self.get_everyone_else_profile_id(),
             unaffected_devices=self.list_unaffected_devices(),
             scenarios=self.list_scenarios(),
+            site_blocks=self.list_site_blocks(),
+            access_options=self.get_access_options(),
         )
 
     def replace_settings(self, settings: SavedSettings, *, expected_version: Optional[int] = None, preserve_usage: bool = False) -> None:
@@ -1207,6 +1236,7 @@ class ConfigRepository:
             # The everyone-else profile refers to a profile that is replaced below.
             self._connection.execute("UPDATE everyone_else_settings SET profile_id = NULL")
             for table in (
+                "site_blocks",
                 "scenario_runs",
                 "scenarios",
                 "unaffected_devices",
@@ -1235,6 +1265,11 @@ class ConfigRepository:
                 self.save_scenario(scenario)
             self.save_mac_policy(settings.mac_policy)
             self.save_website_policy(settings.website_policy)
+            self._write_site_blocks(settings.site_blocks)
+            self._connection.execute(
+                "UPDATE network_policies SET access_options_json = ? WHERE id = 1",
+                (json.dumps(asdict(settings.access_options)),),
+            )
             for data_limit in settings.data_limits:
                 self.save_data_limit(data_limit)
             for group_data_limit in settings.group_data_limits:
@@ -1269,6 +1304,7 @@ class ConfigRepository:
     def _delete_row(self, table: str, key_column: str, key: str) -> bool:
         cursor = self._connection.execute(f"DELETE FROM {table} WHERE {key_column} = ?", (key,))
         if not cursor.rowcount:
+            self._commit()
             return False
         self._bump_configuration_version()
         self._commit()
@@ -1343,7 +1379,11 @@ class ConfigRepository:
     def delete_device_group(self, group_id: str) -> bool:
         """Delete one group and release its device members."""
 
-        return self._delete_row("device_groups", "id", group_id)
+        try:
+            return self._delete_row("device_groups", "id", group_id)
+        except sqlite3.IntegrityError as error:
+            self._connection.rollback()
+            raise StorageError("remove site rules for this group before deleting it") from error
 
     def save_schedule(self, schedule: Schedule) -> None:
         """Insert or update one repeating schedule."""
@@ -2221,6 +2261,7 @@ class ConfigRepository:
             "DELETE FROM service_assignments WHERE id = ?", (assignment_id,)
         )
         if not cursor.rowcount:
+            self._commit()
             return False
         self._bump_configuration_version()
         self._connection.commit()
@@ -2518,6 +2559,63 @@ class ConfigRepository:
             expires_at=quota.expires_at,
             enabled=quota.enabled,
         )
+
+    def list_site_blocks(self) -> Tuple[SiteBlock, ...]:
+        try:
+            return tuple(SiteBlock(
+                row["id"], row["name"], tuple(json.loads(row["domains_json"])),
+                row["device_id"], row["group_id"], bool(row["enabled"]),
+            ) for row in self._connection.execute("SELECT * FROM site_blocks ORDER BY id"))
+        except (ValueError, TypeError) as error:
+            raise StorageError("stored site rules are malformed") from error
+
+    def get_access_options(self) -> AccessOptions:
+        row = self._connection.execute(
+            "SELECT access_options_json FROM network_policies WHERE id = 1"
+        ).fetchone()
+        try:
+            return AccessOptions(**json.loads(row[0]))
+        except (ValueError, TypeError) as error:
+            raise StorageError("stored access options are malformed") from error
+
+    def _write_site_blocks(self, blocks: Sequence[SiteBlock]) -> None:
+        from jittersim.engine.access import validate_blocks
+
+        validate_blocks(blocks, {d.id for d in self.list_devices()},
+                        {g.id for g in self.list_device_groups()})
+        self._connection.execute("DELETE FROM site_blocks")
+        self._connection.executemany(
+            "INSERT INTO site_blocks VALUES (?, ?, ?, ?, ?, ?)",
+            ((r.id, r.name, json.dumps(r.domains), r.device_id, r.group_id, int(r.enabled))
+             for r in blocks),
+        )
+
+    def save_access_policies(self, mac: MacPolicy, websites: WebsitePolicy, *,
+                             blocks=None, options=None, expected_version=None) -> None:
+        """Replace all access rules together and reject an obsolete browser edit."""
+        self._connection.execute("BEGIN IMMEDIATE")
+        self._deferring_commits = True
+        try:
+            if expected_version is not None and (
+                isinstance(expected_version, bool) or not isinstance(expected_version, int)
+                or self.get_runtime_state().configuration_version != expected_version
+            ):
+                raise DeviceConflictError("settings changed since this form was loaded")
+            self.save_mac_policy(mac)
+            self.save_website_policy(websites)
+            if blocks is not None:
+                self._write_site_blocks(blocks)
+            if options is not None:
+                self._connection.execute(
+                    "UPDATE network_policies SET access_options_json = ? WHERE id = 1",
+                    (json.dumps(asdict(options)),),
+                )
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
+        finally:
+            self._deferring_commits = False
 
     def get_mac_policy(self) -> MacPolicy:
         """Return the saved MAC filtering policy."""
