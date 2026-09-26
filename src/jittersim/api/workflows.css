@@ -15,6 +15,8 @@ dialog { max-width: min(32rem, calc(100vw - 3rem)); color: #e5efff; background: 
 dialog::backdrop { background: #0009; }
 dialog button + button { margin-left: .6rem; }
 @media (max-width: 600px) {
+  .section-heading, .observation-actions { flex-wrap: wrap; }
+  .section-heading > * { min-width: 0; max-width: 100%; }
   #device-table { display: none; }
   #device-cards { display: block; }
   #device-workspace form { display: flex; flex-direction: column; }
