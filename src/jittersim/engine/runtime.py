@@ -40,6 +40,7 @@ from .randomizer import (
     reroll_profile,
     seeded_generator,
 )
+from .scenarios import active_scenario_runs
 from .schedules import active_schedule
 from .website import build_website_filters, resolve_domains
 
@@ -400,6 +401,18 @@ class RuntimeScheduler:
         active_timers = {}
         for timer in repository.list_active_timers(now=int(now)):
             active_timers.setdefault(timer.device_id, timer)
+        # Newest first, so the newest run wins if a target somehow has two.
+        device_runs = {}
+        group_runs = {}
+        everyone_else_run = None
+        for running in active_scenario_runs(repository, now=now):
+            run = running[0]
+            if run.device_id is not None:
+                device_runs.setdefault(run.device_id, running)
+            elif run.group_id is not None:
+                group_runs.setdefault(run.group_id, running)
+            elif everyone_else_run is None:
+                everyone_else_run = running
         moment = datetime.fromtimestamp(now).replace(second=0, microsecond=0)
         runtime_devices = []
         runtime_profiles = {}
@@ -424,8 +437,15 @@ class RuntimeScheduler:
             group = groups_by_device.get(device.id)
             progression = active_progressions.get(device.id)
             timer = None if progression is not None else active_timers.get(device.id)
+            # A device's own timer or scenario wins over its group's scenario,
+            # and a scenario takes over from schedules as a timer does.
+            running = None
+            if progression is None and timer is None:
+                running = device_runs.get(device.id) or (
+                    group_runs.get(group.id) if group is not None else None
+                )
             schedule = None
-            if timer is None and progression is None:
+            if timer is None and progression is None and running is None:
                 # A device's own schedule wins over its group's.
                 schedule = active_schedule(schedules=schedules, device_id=device.id, moment=moment)
                 if schedule is None and group is not None:
@@ -450,6 +470,15 @@ class RuntimeScheduler:
                 selected_profile = profiles.get(source_profile_id)
                 source_profiles = selected_profile
                 source_key = f"timer:{timer.id}"
+            elif running is not None:
+                run, scenario, position = running
+                source_profile_id = position.profile_id
+                selected_profile = profiles.get(source_profile_id)
+                if selected_profile is None:
+                    raise PlanError(f"scenario {scenario.id} references a missing profile")
+                source_profiles = selected_profile
+                # Each step starts a fresh roll, even when a loop returns to it.
+                source_key = f"scenario:{run.id}:{position.step_index}"
             elif progression is not None:
                 start_profile = profiles.get(progression.start_profile_id)
                 end_profile = profiles.get(progression.end_profile_id)
@@ -522,15 +551,22 @@ class RuntimeScheduler:
             runtime_devices.append(replace(device, profile_id=runtime_profile_id))
 
         everyone_else = None
-        everyone_else_schedule = active_schedule(
-            schedules=schedules, everyone_else=True, moment=moment
-        )
-        # A schedule can give everyone else a profile even when none is saved.
-        everyone_else_profile_id = (
-            everyone_else_schedule.profile_id
-            if everyone_else_schedule is not None
-            else repository.get_everyone_else_profile_id()
-        )
+        everyone_else_key = None
+        if everyone_else_run is not None:
+            run, _, position = everyone_else_run
+            everyone_else_profile_id = position.profile_id
+            everyone_else_key = f"scenario:{run.id}:{position.step_index}"
+        else:
+            everyone_else_schedule = active_schedule(
+                schedules=schedules, everyone_else=True, moment=moment
+            )
+            # A schedule or scenario can give everyone else a profile even when
+            # none is saved.
+            everyone_else_profile_id = (
+                everyone_else_schedule.profile_id
+                if everyone_else_schedule is not None
+                else repository.get_everyone_else_profile_id()
+            )
         if everyone_else_profile_id is not None:
             profile = profiles.get(everyone_else_profile_id)
             if profile is None:
@@ -541,7 +577,7 @@ class RuntimeScheduler:
             roll = self._roll(
                 key=EVERYONE_ELSE_QUEUE_ID,
                 selected_profile=profile,
-                source_key=profile.id,
+                source_key=everyone_else_key or profile.id,
                 source_profiles=profile,
                 now=now,
             )

@@ -17,6 +17,9 @@ from jittersim.config.models import (
     Profile,
     Progression,
     Randomness,
+    Scenario,
+    ScenarioRun,
+    ScenarioStep,
     Schedule,
     ServiceQuota,
     TimeQuota,
@@ -1141,6 +1144,138 @@ class TargetScheduleTests(unittest.TestCase):
 
         self.assertEqual(during.everyone_else.download_impairment.delay_ms, 300)
         self.assertEqual(after.everyone_else.download_impairment.delay_ms, 100)
+
+
+class ScenarioSchedulingTests(unittest.TestCase):
+    # 21 September 2026 is a Monday; the schedules below cover 09:00 to 17:00.
+    START = int(datetime(2026, 9, 21, 10, 0).timestamp())
+
+    def setUp(self) -> None:
+        self.repository = ConfigRepository(":memory:")
+        self.addCleanup(self.repository.close)
+        self.scheduler = RuntimeScheduler(database_path=":memory:", helper_client=None)
+        for profile_id, delay in (
+            ("normal", 0), ("group", 100), ("own", 200), ("scheduled", 300),
+            ("timed", 400), ("step-one", 500), ("step-two", 600),
+        ):
+            self.repository.save_profile(
+                Profile(id=profile_id, name=profile_id, download=Impairment(delay_ms=delay))
+            )
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "own"))
+        self.repository.save_device(Device("bob", "Bob", "192.168.50.11", "normal"))
+        self.repository.save_device(Device("carol", "Carol", "192.168.50.12", "own"))
+        self.repository.save_device_group(
+            DeviceGroup("family", "Family", ("alice", "bob"), profile_id="group")
+        )
+        self.save_scenario()
+
+    def save_scenario(self, loop: bool = False) -> None:
+        self.repository.save_scenario(
+            Scenario(
+                id="commute",
+                name="Commute",
+                steps=(ScenarioStep("step-one", 60), ScenarioStep("step-two", 30)),
+                loop=loop,
+            )
+        )
+
+    def start(self, **target) -> None:
+        self.repository.start_scenario_run(
+            ScenarioRun(id="run", scenario_id="commute", started_at=self.START, **target)
+        )
+
+    def delays(self, seconds: int) -> dict:
+        plan = self.scheduler.build_plan(repository=self.repository, now=self.START + seconds)
+        return {
+            queue.device_id: queue.impairment.delay_ms
+            for queue in plan.queues
+            if queue.direction == "download"
+        }
+
+    def test_a_device_scenario_moves_through_its_steps_then_ends(self) -> None:
+        self.start(device_id="carol")
+
+        self.assertEqual(
+            [self.delays(seconds)["carol"] for seconds in (10, 70, 100)], [500, 600, 200]
+        )
+
+    def test_a_repeating_scenario_starts_over(self) -> None:
+        self.save_scenario(loop=True)
+        self.start(device_id="carol")
+
+        self.assertEqual(
+            [self.delays(seconds)["carol"] for seconds in (10, 70, 95, 160)], [500, 600, 500, 600]
+        )
+
+    def test_a_group_scenario_reaches_its_members_over_their_schedules(self) -> None:
+        self.repository.save_schedule(
+            Schedule(
+                id="alice-day", device_id="alice", profile_id="scheduled",
+                days_of_week=(0,), start_minute=540, end_minute=1_020,
+            )
+        )
+        self.start(group_id="family")
+
+        self.assertEqual(self.delays(10), {"alice": 500, "bob": 500, "carol": 200})
+        # Once it ends, alice's own schedule applies again.
+        self.assertEqual(self.delays(100)["alice"], 300)
+
+    def test_a_device_timer_or_scenario_wins_over_its_group_scenario(self) -> None:
+        self.start(group_id="family")
+        self.repository.save_timer(
+            Timer(
+                id="short", device_id="bob", profile_id="timed",
+                started_at=self.START, expires_at=self.START + 600,
+            )
+        )
+        self.repository.start_scenario_run(
+            ScenarioRun(id="alice-run", scenario_id="commute", started_at=self.START + 60,
+                        device_id="alice")
+        )
+
+        # Alice's own run is at its first step while the group's is at its second.
+        self.assertEqual(self.delays(70), {"alice": 500, "bob": 400, "carol": 200})
+
+    def test_a_data_limit_wins_over_a_scenario(self) -> None:
+        self.start(device_id="alice")
+        self.repository.save_data_limit(
+            DataLimit(device_id="alice", profile_id="timed", limit_bytes=100, used_bytes=100)
+        )
+
+        self.assertEqual(self.delays(10)["alice"], 400)
+
+    def test_a_group_data_limit_wins_over_a_members_scenario(self) -> None:
+        self.start(device_id="alice")
+        self.repository.save_group_data_limit(
+            GroupDataLimit(group_id="family", profile_id="timed", limit_bytes=100, used_bytes=100)
+        )
+
+        self.assertEqual(self.delays(10)["alice"], 400)
+
+    def test_an_everyone_else_scenario_needs_no_saved_profile(self) -> None:
+        self.start(everyone_else=True)
+
+        during = self.scheduler.build_plan(repository=self.repository, now=self.START + 70)
+        after = self.scheduler.build_plan(repository=self.repository, now=self.START + 100)
+
+        self.assertEqual(during.everyone_else.download_impairment.delay_ms, 600)
+        self.assertIsNone(after.everyone_else)
+
+    def test_an_everyone_else_scenario_wins_over_its_schedule(self) -> None:
+        self.repository.save_everyone_else_profile_id("normal")
+        self.repository.save_schedule(
+            Schedule(
+                id="others-day", device_id=None, everyone_else=True, profile_id="scheduled",
+                days_of_week=(0,), start_minute=540, end_minute=1_020,
+            )
+        )
+        self.start(everyone_else=True)
+
+        during = self.scheduler.build_plan(repository=self.repository, now=self.START + 10)
+        after = self.scheduler.build_plan(repository=self.repository, now=self.START + 100)
+
+        self.assertEqual(during.everyone_else.download_impairment.delay_ms, 500)
+        self.assertEqual(after.everyone_else.download_impairment.delay_ms, 300)
 
 
 class DeviceAddressTests(unittest.TestCase):

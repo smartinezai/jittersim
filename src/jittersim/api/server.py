@@ -50,6 +50,9 @@ from jittersim.config.models import (
     Randomness,
     RuntimeState,
     SavedSettings,
+    Scenario,
+    ScenarioRun,
+    ScenarioStep,
     Schedule,
     ServiceAssignment,
     ServiceQuota,
@@ -82,6 +85,7 @@ from jittersim.engine.compiler import (
 from jittersim.engine.conditions import device_conditions, everyone_else_condition
 from jittersim.engine.progression import progression_factor
 from jittersim.engine.runtime import RuntimeScheduler
+from jittersim.engine.scenarios import active_scenario_runs
 from jittersim.engine.schedules import active_schedule
 from jittersim.engine.service import compile_stored_plan
 from jittersim.networking.helper import HelperClient, HelperClientError
@@ -102,6 +106,10 @@ WRITE_PATHS = frozenset(
         "/api/schedules/delete",
         "/api/timers",
         "/api/timers/cancel",
+        "/api/scenarios",
+        "/api/scenarios/delete",
+        "/api/scenarios/start",
+        "/api/scenarios/stop",
         "/api/progressions",
         "/api/progressions/stop",
         "/api/data-limits",
@@ -493,6 +501,14 @@ DASHBOARD_HTML = r"""<!doctype html>
     .schedule-row { display: flex; justify-content: space-between; gap: 1rem; padding: 0.6rem 0.7rem; border-radius: 0.45rem; background: #0d1b2d; color: #c7d7eb; font-size: 0.82rem; }
     .schedule-row span:last-child { color: #91a8c1; text-align: right; }
     .timer-card { margin-top: 1rem; }
+    .scenario-card { margin-top: 1rem; }
+    .scenario-card h3 { margin-top: 1.5rem; }
+    .scenario-steps { display: grid; gap: 0.5rem; margin: 0.75rem 0; }
+    .scenario-step {
+      display: grid; gap: 0.5rem; align-items: end;
+      grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr) auto;
+    }
+    .scenario-step button { margin-top: 0; }
     .timer-list { display: grid; gap: 0.5rem; margin-top: 1rem; }
     .timer-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.65rem 0.7rem; border-radius: 0.45rem; background: #0d1b2d; color: #c7d7eb; font-size: 0.82rem; }
     .timer-details { display: grid; gap: 0.15rem; }
@@ -655,6 +671,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       .randomness-inputs { grid-template-columns: minmax(0, 1fr); }
       .timer-row { display: block; }
       .timer-row button { width: 100%; margin-top: 0.7rem; }
+      .scenario-step { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+      .scenario-step label:first-child, .scenario-step button { grid-column: 1 / -1; }
       .progression-row-heading { display: block; }
       .progression-row button { width: 100%; margin-top: 0.7rem; }
       .quota-row-heading { display: block; }
@@ -1227,6 +1245,43 @@ DASHBOARD_HTML = r"""<!doctype html>
       <button class="primary" type="submit">Start timer</button>
     </form>
     <div id="timer-list" class="timer-list" aria-live="polite">No active timers.</div>
+  </section>
+  <section class="card scenario-card">
+    <div class="section-heading">
+      <div>
+        <h2>Scenarios</h2>
+        <p>Profiles that follow each other for a device, a group or everyone else</p>
+      </div>
+      <span id="scenario-count" class="count-badge">None running</span>
+    </div>
+    <form id="scenario-start-form">
+      <div class="fields">
+        <label>Scenario <select id="scenario-start-scenario" required></select></label>
+        <label>Applies to <select id="scenario-start-target" required></select></label>
+      </div>
+      <p class="form-note">A running scenario takes over from schedules, as a timer does.
+        For a device, starting a timer or a scenario replaces the other, and a device's own
+        timer or scenario wins over its group's. Data limits still win.</p>
+      <button class="primary" type="submit">Start scenario</button>
+    </form>
+    <div id="scenario-run-list" class="timer-list">No running scenarios.</div>
+    <h3>Saved scenarios</h3>
+    <div id="scenario-list" class="schedule-list">No scenarios yet.</div>
+    <form id="scenario-form">
+      <div class="fields">
+        <label>Scenario ID
+          <input id="scenario-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}">
+        </label>
+        <label>Name <input id="scenario-name" required></label>
+      </div>
+      <div id="scenario-steps" class="scenario-steps"></div>
+      <button type="button" id="scenario-add-step">Add step</button>
+      <label class="quota-check"><input id="scenario-loop" type="checkbox"> Repeat from the
+        first step until stopped</label>
+      <p class="form-note">Each step lasts 10 seconds to 24 hours. A scenario has up to 20
+        steps. Editing a running scenario changes it at once.</p>
+      <button type="submit">Save scenario</button>
+    </form>
   </section>
   <section class="card progression-card">
     <div class="section-heading">
@@ -1933,26 +1988,28 @@ DASHBOARD_HTML = r"""<!doctype html>
       );
     }
 
-    function renderScheduleTargets() {
-      const select = element("schedule-target");
-      const selected = select.value;
-      const optionGroups = {};
-      select.replaceChildren();
-      scheduleTargetOptions().forEach((choice) => {
-        const option = document.createElement("option");
-        option.value = choice.value;
-        option.textContent = choice.label;
-        if (choice.group && !optionGroups[choice.group]) {
-          optionGroups[choice.group] = document.createElement("optgroup");
-          optionGroups[choice.group].label = choice.group;
-          select.appendChild(optionGroups[choice.group]);
+    function renderTargetMenus() {
+      ["schedule-target", "scenario-start-target"].forEach((selectId) => {
+        const select = element(selectId);
+        const selected = select.value;
+        const optionGroups = {};
+        select.replaceChildren();
+        scheduleTargetOptions().forEach((choice) => {
+          const option = document.createElement("option");
+          option.value = choice.value;
+          option.textContent = choice.label;
+          if (choice.group && !optionGroups[choice.group]) {
+            optionGroups[choice.group] = document.createElement("optgroup");
+            optionGroups[choice.group].label = choice.group;
+            select.appendChild(optionGroups[choice.group]);
+          }
+          (choice.group ? optionGroups[choice.group] : select).appendChild(option);
+        });
+        // Rebuilding the menu must not change a choice being edited.
+        if (Array.from(select.options).some((option) => option.value === selected)) {
+          select.value = selected;
         }
-        (choice.group ? optionGroups[choice.group] : select).appendChild(option);
       });
-      // Rebuilding the menu must not change a choice being edited.
-      if (Array.from(select.options).some((option) => option.value === selected)) {
-        select.value = selected;
-      }
     }
 
     function followEveryoneElseProfile(data) {
@@ -1966,6 +2023,12 @@ DASHBOARD_HTML = r"""<!doctype html>
     function everyoneElseAssigned() {
       return Boolean(everyoneElse.profile_id) ||
         savedSchedules.some((schedule) => schedule.everyone_else && schedule.enabled);
+    }
+
+    function everyoneElseInLiveTraffic() {
+      // A running scenario shapes everyone else too, but only while it runs,
+      // so Getting started leaves it out.
+      return everyoneElseAssigned() || runningScenarios.some((run) => run.everyone_else);
     }
 
     function renderProfileTable() {
@@ -2356,6 +2419,10 @@ DASHBOARD_HTML = r"""<!doctype html>
     let everyoneElse = { profile_id: null, unaffected_devices: [] };
     let lastRuntimeState = null;
     let savedSchedules = [];
+    let savedScenarios = [];
+    let runningScenarios = [];
+    let scenarioRunKey = "";
+    let scenarioListKey = "";
     let dashboardLoaded = false;
     let gettingStartedKey = "";
     // Device IDs can't start with an underscore, so this value is free.
@@ -2506,7 +2573,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         option.textContent = device.name + " (" + device.ipv4_address + ")";
         select.appendChild(option);
       });
-      if (everyoneElseAssigned()) {
+      if (everyoneElseInLiveTraffic()) {
         const option = document.createElement("option");
         option.value = EVERYONE_ELSE_TRAFFIC;
         option.textContent = "Everyone else";
@@ -4404,6 +4471,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       });
       // Rebuilding a menu drops its choice, and saving None would clear the profile.
       element("everyone-else-profile").value = everyoneElse.profile_id || "";
+      // The step menus list the profiles too; keep the steps being edited.
+      const steps = scenarioStepsFromForm();
+      renderScenarioSteps(steps.length ? steps : [{ profile_id: "", duration_seconds: 60 }]);
     }
 
     async function loadDevicesForSchedule() {
@@ -4428,7 +4498,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           deviceSelect.appendChild(option);
         });
       });
-      renderScheduleTargets();
+      renderTargetMenus();
       updateTrafficDeviceOptions(data.devices);
       populateServiceQuotaDomains();
       populateTimeQuotaDomains();
@@ -4438,7 +4508,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       try {
         const data = await request("/api/groups", "GET");
         renderGroups(data);
-        renderScheduleTargets();
+        renderTargetMenus();
         const groupSelect = element("group-data-limit-group");
         const selectedGroup = groupSelect.value;
         groupSelect.replaceChildren();
@@ -4542,6 +4612,233 @@ DASHBOARD_HTML = r"""<!doctype html>
         renderTimers(await request("/api/timers", "GET"));
       } catch (error) {
         renderTimers({ timers: [] });
+      }
+    }
+
+    function formatDuration(seconds) {
+      const hours = Math.floor(seconds / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+      const rest = seconds % 60;
+      return [
+        hours ? hours + " h" : "",
+        minutes ? minutes + " min" : "",
+        rest ? rest + " s" : ""
+      ].filter(Boolean).join(" ") || "0 s";
+    }
+
+    function scenarioSummary(scenario) {
+      const steps = scenario.steps.map((step) =>
+        profileName(step.profile_id) + " " + formatDuration(step.duration_seconds)
+      ).join(" → ");
+      return scenario.loop ? steps + ", repeating" : steps;
+    }
+
+    function scenarioRunText(run) {
+      const ending = run.loop
+        ? "; repeats until stopped"
+        : "; ends in " + formatDuration(run.total_remaining_seconds);
+      return {
+        title: run.target_name + " · " + run.scenario_name,
+        detail: "Step " + (run.step_index + 1) + " of " + run.step_count + ": " +
+          run.profile_name + ", " + formatDuration(run.step_remaining_seconds) +
+          " left in this step" + ending
+      };
+    }
+
+    function scenarioStepRow(step) {
+      const row = document.createElement("div");
+      row.className = "scenario-step";
+      const profileLabel = document.createElement("label");
+      profileLabel.textContent = "Profile";
+      const profileSelect = document.createElement("select");
+      profileSelect.className = "scenario-step-profile";
+      profileSelect.required = true;
+      profiles.forEach((profile) => {
+        const option = document.createElement("option");
+        option.value = profile.id;
+        option.textContent = profile.name + " (" + profile.id + ")";
+        profileSelect.appendChild(option);
+      });
+      if (step.profile_id) profileSelect.value = step.profile_id;
+      profileLabel.appendChild(profileSelect);
+      const fields = [
+        ["Minutes", "minutes", 1440, Math.floor(step.duration_seconds / 60)],
+        ["Seconds", "seconds", 59, step.duration_seconds % 60]
+      ].map(([text, kind, max, value]) => {
+        const label = document.createElement("label");
+        label.textContent = text;
+        const input = document.createElement("input");
+        input.className = "scenario-step-" + kind;
+        input.type = "number";
+        input.min = "0";
+        input.max = String(max);
+        input.value = String(value);
+        label.appendChild(input);
+        return label;
+      });
+      const removeButton = document.createElement("button");
+      removeButton.type = "button";
+      removeButton.textContent = "Remove step";
+      removeButton.addEventListener("click", () => {
+        // A scenario needs at least one step.
+        if (element("scenario-steps").children.length < 2) return;
+        row.remove();
+        renumberScenarioSteps();
+        element("scenario-add-step").focus();
+      });
+      row.append(profileLabel, ...fields, removeButton);
+      return row;
+    }
+
+    function renumberScenarioSteps() {
+      // Every row repeats the same labels, so name each field after its step.
+      Array.from(element("scenario-steps").children).forEach((row, index) => {
+        const step = "Step " + (index + 1);
+        const [profileLabel, minutesLabel, secondsLabel, removeButton] = row.children;
+        profileLabel.children[0].setAttribute("aria-label", step + " profile");
+        minutesLabel.children[0].setAttribute("aria-label", step + " minutes");
+        secondsLabel.children[0].setAttribute("aria-label", step + " seconds");
+        removeButton.setAttribute("aria-label", "Remove step " + (index + 1));
+      });
+    }
+
+    function renderScenarioSteps(steps) {
+      element("scenario-steps").replaceChildren(...steps.map(scenarioStepRow));
+      renumberScenarioSteps();
+    }
+
+    function scenarioStepsFromForm() {
+      const rows = element("scenario-steps").querySelectorAll(".scenario-step");
+      return Array.from(rows).map((row) => ({
+        profile_id: row.querySelector(".scenario-step-profile").value,
+        duration_seconds: Number(row.querySelector(".scenario-step-minutes").value || 0) * 60 +
+          Number(row.querySelector(".scenario-step-seconds").value || 0)
+      }));
+    }
+
+    function editScenario(scenario) {
+      element("scenario-id").value = scenario.id;
+      element("scenario-name").value = scenario.name;
+      element("scenario-loop").checked = scenario.loop;
+      renderScenarioSteps(scenario.steps);
+      element("scenario-form").scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+
+    function renderScenarioRuns(runs) {
+      const list = element("scenario-run-list");
+      const key = runs.map((run) => run.id).join(",");
+      element("scenario-count").textContent = runs.length
+        ? runs.length + " running"
+        : "None running";
+      if (key && key === scenarioRunKey) {
+        // Update the text in place, so a focused Stop button keeps its focus.
+        runs.forEach((run, index) => {
+          const text = scenarioRunText(run);
+          const row = list.children[index];
+          row.querySelector(".timer-details strong").textContent = text.title;
+          row.querySelector(".timer-details span").textContent = text.detail;
+        });
+        return;
+      }
+      scenarioRunKey = key;
+      list.replaceChildren();
+      if (!runs.length) {
+        list.textContent = "No running scenarios.";
+        return;
+      }
+      runs.forEach((run) => {
+        const text = scenarioRunText(run);
+        const row = document.createElement("div");
+        row.className = "timer-row";
+        const details = document.createElement("div");
+        details.className = "timer-details";
+        const title = document.createElement("strong");
+        title.textContent = text.title;
+        const detail = document.createElement("span");
+        detail.textContent = text.detail;
+        details.append(title, detail);
+        const stopButton = document.createElement("button");
+        stopButton.type = "button";
+        stopButton.textContent = "Stop";
+        stopButton.addEventListener("click", () => stopScenario(run.id, stopButton));
+        row.append(details, stopButton);
+        list.appendChild(row);
+      });
+    }
+
+    function renderSavedScenarios() {
+      // Polls with the same scenarios leave the list and the open menu alone.
+      const key = JSON.stringify([savedScenarios, profiles.map((profile) => profile.name)]);
+      if (key === scenarioListKey) return;
+      scenarioListKey = key;
+      const list = element("scenario-list");
+      list.replaceChildren();
+      if (!savedScenarios.length) list.textContent = "No scenarios yet.";
+      savedScenarios.forEach((scenario) => {
+        const row = document.createElement("div");
+        row.className = "schedule-row";
+        const text = document.createElement("div");
+        const name = document.createElement("span");
+        name.textContent = scenario.name;
+        const summary = document.createElement("small");
+        summary.textContent = scenarioSummary(scenario) + " · " + scenario.id;
+        text.append(name, summary);
+        const actions = document.createElement("div");
+        actions.className = "row-actions";
+        const editButton = document.createElement("button");
+        editButton.type = "button";
+        editButton.textContent = "Edit";
+        editButton.addEventListener("click", () => editScenario(scenario));
+        const deleteButton = document.createElement("button");
+        deleteButton.type = "button";
+        deleteButton.textContent = "Delete";
+        deleteButton.addEventListener("click", () => deleteItem(
+          "/api/scenarios/delete", { id: scenario.id }, "Scenario deleted.", deleteButton
+        ));
+        actions.append(editButton, deleteButton);
+        row.append(text, actions);
+        list.appendChild(row);
+      });
+      const select = element("scenario-start-scenario");
+      const selected = select.value;
+      select.replaceChildren();
+      savedScenarios.forEach((scenario) => {
+        const option = document.createElement("option");
+        option.value = scenario.id;
+        option.textContent = scenario.name;
+        select.appendChild(option);
+      });
+      if (savedScenarios.some((scenario) => scenario.id === selected)) select.value = selected;
+    }
+
+    async function loadScenarios() {
+      try {
+        const data = await request("/api/scenarios", "GET");
+        const hadEveryoneElse = runningScenarios.some((run) => run.everyone_else);
+        savedScenarios = data.scenarios;
+        runningScenarios = data.runs;
+        renderSavedScenarios();
+        renderScenarioRuns(data.runs);
+        // Live traffic offers Everyone else while its scenario runs.
+        if (runningScenarios.some((run) => run.everyone_else) !== hadEveryoneElse) {
+          updateTrafficDeviceOptions(devices);
+        }
+      } catch (error) {
+        scenarioRunKey = "";
+        element("scenario-run-list").textContent = error.message;
+      }
+    }
+
+    async function stopScenario(runId, button) {
+      setButtonBusy(button, true);
+      showMessage("Stopping the scenario...", "working");
+      try {
+        const result = await request("/api/scenarios/stop", "POST", { id: runId });
+        refreshAfterSuccess(savedChangeMessage("Scenario stopped.", result));
+      } catch (error) {
+        showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
       }
     }
 
@@ -4719,6 +5016,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         loadGroups(),
         loadSchedules(),
         loadTimers(),
+        loadScenarios(),
         loadProgressions(),
         loadPolicies(),
         loadConnectedDevices(),
@@ -4924,6 +5222,41 @@ DASHBOARD_HTML = r"""<!doctype html>
             ? "Timer started and the profile is active now."
             : "Timer saved. Apply the configuration to start it.",
         );
+      } catch (error) {
+        showMessage(error.message, "error");
+      }
+    });
+
+    element("scenario-add-step").addEventListener("click", () => {
+      element("scenario-steps").appendChild(
+        scenarioStepRow({ profile_id: "", duration_seconds: 60 })
+      );
+      renumberScenarioSteps();
+    });
+
+    element("scenario-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const result = await request("/api/scenarios", "POST", {
+          id: element("scenario-id").value,
+          name: element("scenario-name").value,
+          steps: scenarioStepsFromForm(),
+          loop: element("scenario-loop").checked
+        });
+        refreshAfterSuccess(savedChangeMessage("Scenario saved.", result));
+      } catch (error) {
+        showMessage(error.message, "error");
+      }
+    });
+
+    element("scenario-start-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const result = await request("/api/scenarios/start", "POST", {
+          scenario_id: element("scenario-start-scenario").value,
+          ...scheduleTargetFields(element("scenario-start-target").value)
+        });
+        refreshAfterSuccess(savedChangeMessage("Scenario started.", result));
       } catch (error) {
         showMessage(error.message, "error");
       }
@@ -5320,6 +5653,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     window.setInterval(() => loadConnectedDevices(), 5000);
     window.setInterval(() => loadTimers(), 5000);
+    window.setInterval(() => loadScenarios(), 5000);
     window.setInterval(() => loadProgressions(), 5000);
     window.setInterval(() => loadQuotas(), 5000);
     window.setInterval(() => loadConditions(), 5000);
@@ -5534,6 +5868,47 @@ def _timer_payload(timer: Timer) -> Dict[str, Any]:
     return asdict(timer)
 
 
+def _scenario_payload(scenario: Scenario) -> Dict[str, Any]:
+    return {
+        "id": scenario.id,
+        "name": scenario.name,
+        "steps": [
+            {"profile_id": step.profile_id, "duration_seconds": step.duration_seconds}
+            for step in scenario.steps
+        ],
+        "loop": scenario.loop,
+        "total_seconds": scenario.total_seconds,
+    }
+
+
+def _scenario_run_payload(
+    run: ScenarioRun, scenario: Scenario, position: Any, *, repository: ConfigRepository
+) -> Dict[str, Any]:
+    """Describe one running scenario, its current step and the time left."""
+
+    if run.device_id is not None:
+        device = repository.get_device(run.device_id)
+        target_name = device.name if device is not None else run.device_id
+    elif run.group_id is not None:
+        group = repository.get_device_group(run.group_id)
+        target_name = "Group " + (group.name if group is not None else run.group_id)
+    else:
+        target_name = "Everyone else"
+    profile = repository.get_profile(position.profile_id)
+    return {
+        **asdict(run),
+        "scenario_name": scenario.name,
+        "target_name": target_name,
+        "loop": scenario.loop,
+        "step_index": position.step_index,
+        "step_count": len(scenario.steps),
+        "profile_id": position.profile_id,
+        "profile_name": profile.name if profile is not None else position.profile_id,
+        "step_remaining_seconds": position.step_remaining_seconds,
+        "total_remaining_seconds": position.total_remaining_seconds,
+    }
+
+
 def _data_limit_payload(
     data_limit: DataLimit,
     *,
@@ -5682,12 +6057,15 @@ def _policies_payload(repository: ConfigRepository) -> Dict[str, Any]:
 
 
 def _everyone_else_now(repository: ConfigRepository) -> Tuple[Optional[str], Optional[str]]:
-    """Return the profile everyone else gets this minute and the schedule giving it.
+    """Return the profile everyone else gets now and the schedule giving it, if any.
 
     This is the settings' answer in the Pi's local time; the scheduler applies
-    it while the network runs.
+    it while the network runs. A running scenario wins over schedules.
     """
 
+    for run, _, position in active_scenario_runs(repository, now=time.time()):
+        if run.everyone_else:
+            return position.profile_id, None
     schedule = active_schedule(
         schedules=repository.list_schedules(),
         everyone_else=True,
@@ -5824,6 +6202,21 @@ class ControlServer(HTTPServer):
         if path == "/api/schedules":
             schedules = [_schedule_payload(schedule) for schedule in self.repository.list_schedules()]
             return HTTPStatus.OK, "application/json", _json_bytes({"schedules": schedules})
+        if path == "/api/scenarios":
+            runs = [
+                _scenario_run_payload(run, scenario, position, repository=self.repository)
+                for run, scenario, position in active_scenario_runs(
+                    self.repository, now=time.time()
+                )
+            ]
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {
+                    "scenarios": [
+                        _scenario_payload(scenario) for scenario in self.repository.list_scenarios()
+                    ],
+                    "runs": runs,
+                }
+            )
         if path == "/api/timers":
             now = int(time.time())
             timers = []
@@ -6239,6 +6632,7 @@ class ControlServer(HTTPServer):
         deletes = {
             "/api/devices/delete": ("id", "device", self.repository.delete_device),
             "/api/schedules/delete": ("id", "schedule", self.repository.delete_schedule),
+            "/api/scenarios/delete": ("id", "scenario", self.repository.delete_scenario),
             "/api/data-limits/delete": (
                 "device_id",
                 "data_limit",
@@ -6412,6 +6806,57 @@ class ControlServer(HTTPServer):
             response["timer"] = _timer_payload(timer)
             response.setdefault("live_applied", status == HTTPStatus.OK)
             return status, content_type, _json_bytes(response)
+
+        if path == "/api/scenarios":
+            try:
+                scenario = _scenario_from_payload(payload)
+                for step in scenario.steps:
+                    if self.repository.get_profile(step.profile_id) is None:
+                        raise ValueError(f"profile {step.profile_id} does not exist")
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid scenario", error)
+            self.repository.save_scenario(scenario)
+            return self._apply_saved_change("scenario", _scenario_payload(scenario))
+
+        if path == "/api/scenarios/start":
+            try:
+                scenario = self.repository.get_scenario(_required_text(payload, "scenario_id"))
+                if scenario is None:
+                    raise ValueError("scenario does not exist")
+                run = ScenarioRun(
+                    id=f"run-{time.time_ns()}",
+                    scenario_id=scenario.id,
+                    started_at=int(time.time()),
+                    device_id=payload.get("device_id"),
+                    group_id=payload.get("group_id"),
+                    everyone_else=payload.get("everyone_else", False),
+                )
+                if run.device_id is not None and self.repository.get_device(run.device_id) is None:
+                    raise ValueError("device does not exist")
+                if (
+                    run.group_id is not None
+                    and self.repository.get_device_group(run.group_id) is None
+                ):
+                    raise ValueError("group does not exist")
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid scenario start", error)
+            if run.everyone_else and not self._everyone_else_counted():
+                capacity_error = self._capacity_error(adding=1)
+                if capacity_error is not None:
+                    return capacity_error
+            self.repository.start_scenario_run(run)
+            return self._apply_saved_change("run", asdict(run))
+
+        if path == "/api/scenarios/stop":
+            try:
+                run_id = _required_text(payload, "id")
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid scenario stop", error)
+            if not self.repository.stop_scenario_run(run_id):
+                return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                    {"error": "scenario run does not exist or has already stopped"}
+                )
+            return self._apply_saved_change("run_id", run_id)
 
         if path == "/api/timers/cancel":
             try:
@@ -7173,10 +7618,18 @@ class ControlServer(HTTPServer):
     def _everyone_else_counted(self) -> bool:
         """Return whether everyone else already holds a traffic class."""
 
-        # One class serves the saved profile and every schedule, whichever applies.
-        return self.repository.get_everyone_else_profile_id() is not None or any(
-            schedule.everyone_else and schedule.enabled
-            for schedule in self.repository.list_schedules()
+        # One class serves the saved profile, every schedule and a running
+        # scenario, whichever applies.
+        return (
+            self.repository.get_everyone_else_profile_id() is not None
+            or any(
+                schedule.everyone_else and schedule.enabled
+                for schedule in self.repository.list_schedules()
+            )
+            or any(
+                run.everyone_else
+                for run, _, _ in active_scenario_runs(self.repository, now=time.time())
+            )
         )
 
     def _capacity_error(self, *, adding: int) -> Optional[Tuple[int, str, bytes]]:
@@ -7800,6 +8253,31 @@ def _schedule_from_payload(payload: Dict[str, Any]) -> Schedule:
     )
 
 
+def _scenario_from_payload(payload: Dict[str, Any]) -> Scenario:
+    values = payload["steps"]
+    if not isinstance(values, list):
+        raise ValueError("steps must be a list")
+    steps = []
+    for number, step in enumerate(values, start=1):
+        # Name the step, so a long scenario says which one to fix.
+        try:
+            steps.append(
+                ScenarioStep(
+                    profile_id=step["profile_id"], duration_seconds=step["duration_seconds"]
+                )
+            )
+        except KeyError as error:
+            raise ValueError(f"step {number} is missing {error.args[0]}") from error
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"step {number}: {error}") from error
+    return Scenario(
+        id=payload["id"],
+        name=payload["name"],
+        steps=tuple(steps),
+        loop=payload.get("loop", False),
+    )
+
+
 def _timer_from_payload(payload: Dict[str, Any]) -> Timer:
     duration_minutes = payload["duration_minutes"]
     if isinstance(duration_minutes, bool) or not isinstance(duration_minutes, int):
@@ -8092,6 +8570,8 @@ def _settings_from_payload(payload: Dict[str, Any]) -> SavedSettings:
         devices=items("devices", _device_from_payload),
         groups=items("groups", _device_group_from_payload),
         schedules=items("schedules", _schedule_from_payload),
+        # Exports from before scenarios have none.
+        scenarios=items("scenarios", _scenario_from_payload),
         mac_policy=mac_policy,
         website_policy=website_policy,
         data_limits=items(

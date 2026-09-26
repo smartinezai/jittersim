@@ -380,6 +380,79 @@ class Timer:
             raise ValidationError("enabled must be a boolean")
 
 
+MAX_SCENARIO_STEPS = 20
+MIN_SCENARIO_STEP_SECONDS = 10
+MAX_SCENARIO_STEP_SECONDS = 86_400
+
+
+@dataclass(frozen=True)
+class ScenarioStep:
+    """One profile a scenario uses for a while."""
+
+    profile_id: str
+    duration_seconds: int
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.profile_id, "profile_id")
+        duration = self.duration_seconds
+        if (
+            isinstance(duration, bool)
+            or not isinstance(duration, int)
+            or not MIN_SCENARIO_STEP_SECONDS <= duration <= MAX_SCENARIO_STEP_SECONDS
+        ):
+            raise ValidationError("a step must last 10 seconds to 24 hours")
+
+
+@dataclass(frozen=True)
+class Scenario:
+    """A named list of profiles used one after another, optionally repeating."""
+
+    id: str
+    name: str
+    steps: Tuple[ScenarioStep, ...]
+    loop: bool = False
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.id, "scenario id")
+        object.__setattr__(self, "name", _validate_name(self.name, "scenario name"))
+        if not isinstance(self.steps, (list, tuple)) or not self.steps:
+            raise ValidationError("a scenario needs at least one step")
+        if len(self.steps) > MAX_SCENARIO_STEPS:
+            raise ValidationError(f"a scenario can have at most {MAX_SCENARIO_STEPS} steps")
+        if not all(isinstance(step, ScenarioStep) for step in self.steps):
+            raise ValidationError("each step must be a ScenarioStep")
+        object.__setattr__(self, "steps", tuple(self.steps))
+        if not isinstance(self.loop, bool):
+            raise ValidationError("loop must be a boolean")
+
+    @property
+    def total_seconds(self) -> int:
+        """Return how long one pass through the steps takes."""
+
+        return sum(step.duration_seconds for step in self.steps)
+
+
+@dataclass(frozen=True)
+class ScenarioRun:
+    """One scenario running for a device, a group or everyone else."""
+
+    id: str
+    scenario_id: str
+    started_at: int
+    device_id: Optional[str] = None
+    group_id: Optional[str] = None
+    everyone_else: bool = False
+    enabled: bool = True
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.id, "run id")
+        _validate_identifier(self.scenario_id, "scenario_id")
+        _validate_number(self.started_at, "started_at", 0, 2**63 - 1)
+        _validate_target(self.device_id, self.group_id, self.everyone_else, "scenario run")
+        if not isinstance(self.enabled, bool):
+            raise ValidationError("enabled must be a boolean")
+
+
 @dataclass(frozen=True)
 class Progression:
     """A bounded session that moves one device between two profiles."""
@@ -775,3 +848,4 @@ class SavedSettings:
     service_assignments: Tuple[ServiceAssignment, ...] = ()
     everyone_else_profile_id: Optional[str] = None
     unaffected_devices: Tuple[UnaffectedDevice, ...] = ()
+    scenarios: Tuple[Scenario, ...] = ()

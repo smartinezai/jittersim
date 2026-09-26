@@ -8,6 +8,8 @@ from jittersim.config.models import (
     Impairment,
     Profile,
     SavedSettings,
+    Scenario,
+    ScenarioStep,
     Schedule,
     ServiceAssignment,
     ServiceQuota,
@@ -272,6 +274,37 @@ class SettingsTransferTests(unittest.TestCase):
             max_traffic_classes=15,
             max_service_domains=200,
         )
+
+    def test_export_and_check_follow_scenarios(self) -> None:
+        commute = Scenario(
+            id="commute", name="Commute", steps=(ScenarioStep("slow", 60),), loop=True
+        )
+
+        payload = settings_to_payload(lab_settings(scenarios=(commute,)), exported_at=0)
+
+        self.assertEqual(
+            payload["scenarios"],
+            [
+                {
+                    "id": "commute",
+                    "name": "Commute",
+                    "steps": [{"profile_id": "slow", "duration_seconds": 60}],
+                    "loop": True,
+                }
+            ],
+        )
+        ghost = Scenario(id="commute", name="Commute", steps=(ScenarioStep("ghost", 60),))
+        for message, scenarios in (
+            ("scenario commute uses the missing profile ghost", (ghost,)),
+            ("scenario commute appears twice", (commute, commute)),
+        ):
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValueError, message):
+                    check_settings(
+                        lab_settings(scenarios=scenarios),
+                        max_traffic_classes=15,
+                        max_service_domains=200,
+                    )
 
     def test_export_carries_the_everyone_else_settings(self) -> None:
         payload = settings_to_payload(

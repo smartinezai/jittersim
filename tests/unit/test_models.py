@@ -12,6 +12,9 @@ from jittersim.config.models import (
     Progression,
     Randomness,
     RuntimeState,
+    Scenario,
+    ScenarioRun,
+    ScenarioStep,
     Schedule,
     ServiceQuota,
     Timer,
@@ -273,6 +276,43 @@ class PolicyAndScheduleTests(unittest.TestCase):
             Schedule(id="bad", device_id=None, everyone_else=1, **window)
         with self.assertRaises(ValidationError):
             Schedule(id="bad", device_id=None, group_id="Not An ID", **window)
+
+    def test_scenario_steps_and_their_limits(self) -> None:
+        steps = (ScenarioStep("3g", 60), ScenarioStep("offline", 10))
+        scenario = Scenario(id="commute", name=" Commute ", steps=list(steps), loop=True)
+
+        self.assertEqual(scenario.steps, steps)
+        self.assertEqual(scenario.name, "Commute")
+        self.assertEqual(scenario.total_seconds, 70)
+        for duration in (9, 86_401, 1.5, True):
+            with self.subTest(duration=duration):
+                with self.assertRaisesRegex(
+                    ValidationError, "a step must last 10 seconds to 24 hours"
+                ):
+                    ScenarioStep("3g", duration)
+        ScenarioStep("3g", 86_400)
+        for bad_steps, message in (
+            ((), "at least one step"),
+            ((ScenarioStep("3g", 60),) * 21, "at most 20 steps"),
+            (("3g",), "ScenarioStep"),
+        ):
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValidationError, message):
+                    Scenario(id="commute", name="Commute", steps=bad_steps)
+        with self.assertRaisesRegex(ValidationError, "loop must be a boolean"):
+            Scenario(id="commute", name="Commute", steps=steps, loop=1)
+
+    def test_a_scenario_run_has_exactly_one_target(self) -> None:
+        run = ScenarioRun(id="run-1", scenario_id="commute", started_at=100, group_id="family")
+
+        self.assertEqual((run.device_id, run.group_id, run.everyone_else), (None, "family", False))
+        with self.assertRaisesRegex(ValidationError, "exactly one of a device"):
+            ScenarioRun(id="run-1", scenario_id="commute", started_at=100)
+        with self.assertRaisesRegex(ValidationError, "exactly one of a device"):
+            ScenarioRun(
+                id="run-1", scenario_id="commute", started_at=100, device_id="alice",
+                everyone_else=True,
+            )
 
     def test_timer_requires_a_positive_window(self) -> None:
         with self.assertRaisesRegex(ValueError, "expires_at must be later"):

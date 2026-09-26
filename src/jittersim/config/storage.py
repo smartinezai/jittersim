@@ -28,6 +28,9 @@ from .models import (
     Randomness,
     RuntimeState,
     SavedSettings,
+    Scenario,
+    ScenarioRun,
+    ScenarioStep,
     Schedule,
     ServiceAssignment,
     ServiceQuota,
@@ -198,6 +201,22 @@ class ConfigRepository:
             CREATE TABLE IF NOT EXISTS device_group_members (
                 group_id TEXT NOT NULL REFERENCES device_groups(id) ON DELETE CASCADE,
                 device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS scenarios (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                steps_json TEXT NOT NULL,
+                loop INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS scenario_runs (
+                id TEXT PRIMARY KEY,
+                scenario_id TEXT NOT NULL REFERENCES scenarios(id) ON DELETE CASCADE,
+                device_id TEXT REFERENCES devices(id) ON DELETE CASCADE,
+                group_id TEXT REFERENCES device_groups(id) ON DELETE CASCADE,
+                everyone_else INTEGER NOT NULL DEFAULT 0,
+                started_at INTEGER NOT NULL,
+                enabled INTEGER NOT NULL,
+                CHECK ((device_id IS NOT NULL) + (group_id IS NOT NULL) + (everyone_else = 1) = 1)
             );
             CREATE TABLE IF NOT EXISTS timers (
                 id TEXT PRIMARY KEY,
@@ -927,6 +946,11 @@ class ConfigRepository:
             for quota in self.list_time_quotas()
             if quota.profile_id == profile_id
         )
+        references.extend(
+            f"scenario {scenario.name}"
+            for scenario in self.list_scenarios()
+            if any(step.profile_id == profile_id for step in scenario.steps)
+        )
         if self.get_everyone_else_profile_id() == profile_id:
             references.append("everyone else")
         return tuple(references)
@@ -980,13 +1004,15 @@ class ConfigRepository:
             service_assignments=self.list_service_assignments(),
             everyone_else_profile_id=self.get_everyone_else_profile_id(),
             unaffected_devices=self.list_unaffected_devices(),
+            scenarios=self.list_scenarios(),
         )
 
     def replace_settings(self, settings: SavedSettings) -> None:
         """Replace every saved setting at once. On failure nothing changes.
 
-        DNS observations, action history and the runtime state stay. Timers and
-        progressions are removed because they belong to the replaced devices.
+        DNS observations, action history and the runtime state stay. Timers,
+        progressions and scenario runs are removed because they belong to the
+        replaced devices, groups and scenarios.
         """
 
         self._deferring_commits = True
@@ -994,6 +1020,8 @@ class ConfigRepository:
             # The everyone-else profile refers to a profile that is replaced below.
             self._connection.execute("UPDATE everyone_else_settings SET profile_id = NULL")
             for table in (
+                "scenario_runs",
+                "scenarios",
                 "unaffected_devices",
                 "service_assignments",
                 "time_quotas",
@@ -1016,6 +1044,8 @@ class ConfigRepository:
                 self.save_device_group(group)
             for schedule in settings.schedules:
                 self.save_schedule(schedule)
+            for scenario in settings.scenarios:
+                self.save_scenario(scenario)
             self.save_mac_policy(settings.mac_policy)
             self.save_website_policy(settings.website_policy)
             for data_limit in settings.data_limits:
@@ -1185,6 +1215,10 @@ class ConfigRepository:
                 (timer.device_id,),
             )
             self._connection.execute(
+                "UPDATE scenario_runs SET enabled = 0 WHERE device_id = ? AND enabled = 1",
+                (timer.device_id,),
+            )
+            self._connection.execute(
                 "UPDATE progressions SET enabled = 0 WHERE device_id = ? AND enabled = 1",
                 (timer.device_id,),
             )
@@ -1214,6 +1248,150 @@ class ConfigRepository:
         except sqlite3.IntegrityError as error:
             self._connection.rollback()
             raise StorageError(f"could not save timer {timer.id}") from error
+
+    def save_scenario(self, scenario: Scenario, *, now: Optional[float] = None) -> None:
+        """Insert or update one scenario. Its running copies follow the new steps.
+
+        Runs that already finished stay finished, even when the steps get
+        longer or start repeating.
+        """
+
+        steps = [
+            {"profile_id": step.profile_id, "duration_seconds": step.duration_seconds}
+            for step in scenario.steps
+        ]
+        previous = self.get_scenario(scenario.id)
+        try:
+            if previous is not None and not previous.loop:
+                self._connection.execute(
+                    """
+                    UPDATE scenario_runs SET enabled = 0
+                    WHERE scenario_id = ? AND enabled = 1 AND started_at + ? <= ?
+                    """,
+                    (scenario.id, previous.total_seconds, time.time() if now is None else now),
+                )
+            self._connection.execute(
+                """
+                INSERT INTO scenarios (id, name, steps_json, loop) VALUES (?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    steps_json = excluded.steps_json,
+                    loop = excluded.loop
+                """,
+                (scenario.id, scenario.name, json.dumps(steps), int(scenario.loop)),
+            )
+            self._bump_configuration_version()
+            self._commit()
+        except sqlite3.IntegrityError as error:
+            self._connection.rollback()
+            raise StorageError(f"could not save scenario {scenario.id}") from error
+
+    def get_scenario(self, scenario_id: str) -> Optional[Scenario]:
+        """Return one scenario or `None` when it is not stored."""
+
+        row = self._connection.execute(
+            "SELECT id, name, steps_json, loop FROM scenarios WHERE id = ?", (scenario_id,)
+        ).fetchone()
+        return None if row is None else self._scenario_from_row(row)
+
+    def list_scenarios(self) -> tuple:
+        """Return scenarios in stable identifier order."""
+
+        rows = self._connection.execute(
+            "SELECT id, name, steps_json, loop FROM scenarios ORDER BY id"
+        ).fetchall()
+        return tuple(self._scenario_from_row(row) for row in rows)
+
+    def delete_scenario(self, scenario_id: str) -> bool:
+        """Delete one scenario, which also ends its runs."""
+
+        return self._delete_row("scenarios", "id", scenario_id)
+
+    def start_scenario_run(self, run: ScenarioRun) -> None:
+        """Start one run, replacing the other run for its target.
+
+        For a device it also replaces the device's timer and progression, as a
+        timer does.
+        """
+
+        try:
+            if run.device_id is not None:
+                target = ("device_id = ?", (run.device_id,))
+                for table in ("timers", "progressions"):
+                    self._connection.execute(
+                        f"UPDATE {table} SET enabled = 0 WHERE device_id = ? AND enabled = 1",
+                        (run.device_id,),
+                    )
+            elif run.group_id is not None:
+                target = ("group_id = ?", (run.group_id,))
+            else:
+                target = ("everyone_else = 1", ())
+            self._connection.execute(
+                f"UPDATE scenario_runs SET enabled = 0 WHERE {target[0]} AND enabled = 1",
+                target[1],
+            )
+            self._connection.execute(
+                """
+                INSERT INTO scenario_runs (
+                    id, scenario_id, device_id, group_id, everyone_else, started_at, enabled
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run.id,
+                    run.scenario_id,
+                    run.device_id,
+                    run.group_id,
+                    int(run.everyone_else),
+                    run.started_at,
+                    int(run.enabled),
+                ),
+            )
+            self._bump_configuration_version()
+            self._commit()
+        except sqlite3.IntegrityError as error:
+            self._connection.rollback()
+            raise StorageError(f"could not start scenario run {run.id}") from error
+
+    def stop_scenario_run(self, run_id: str) -> bool:
+        """Stop one running scenario when it is still enabled."""
+
+        cursor = self._connection.execute(
+            "UPDATE scenario_runs SET enabled = 0 WHERE id = ? AND enabled = 1", (run_id,)
+        )
+        if cursor.rowcount:
+            self._bump_configuration_version()
+            self._commit()
+            return True
+        return False
+
+    def list_scenario_runs(self) -> tuple:
+        """Return (run, scenario) for enabled runs, newest first, finished or not."""
+
+        rows = self._connection.execute(
+            """
+            SELECT scenario_runs.id AS run_id, scenario_id, device_id, group_id,
+                   everyone_else, started_at, enabled,
+                   scenarios.id, scenarios.name, scenarios.steps_json, scenarios.loop
+            FROM scenario_runs JOIN scenarios ON scenarios.id = scenario_runs.scenario_id
+            WHERE enabled = 1
+            ORDER BY started_at DESC, run_id DESC
+            """
+        ).fetchall()
+        runs = []
+        for row in rows:
+            try:
+                run = ScenarioRun(
+                    id=row["run_id"],
+                    scenario_id=row["scenario_id"],
+                    started_at=row["started_at"],
+                    device_id=row["device_id"],
+                    group_id=row["group_id"],
+                    everyone_else=bool(row["everyone_else"]),
+                )
+            except ValidationError as error:
+                raise StorageError("stored scenario run is malformed") from error
+            runs.append((run, self._scenario_from_row(row)))
+        return tuple(runs)
 
     def delete_timer(self, timer_id: str) -> bool:
         """Disable one temporary profile override when it exists."""
@@ -1263,6 +1441,10 @@ class ConfigRepository:
             )
             self._connection.execute(
                 "UPDATE timers SET enabled = 0 WHERE device_id = ? AND enabled = 1",
+                (progression.device_id,),
+            )
+            self._connection.execute(
+                "UPDATE scenario_runs SET enabled = 0 WHERE device_id = ? AND enabled = 1",
                 (progression.device_id,),
             )
             self._connection.execute(
@@ -2340,6 +2522,26 @@ class ConfigRepository:
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
             raise StorageError("stored device group is malformed") from error
+
+    @staticmethod
+    def _scenario_from_row(row: sqlite3.Row) -> Scenario:
+        try:
+            steps = json.loads(row["steps_json"])
+            if not isinstance(steps, list):
+                raise ValueError("scenario steps must be a list")
+            return Scenario(
+                id=row["id"],
+                name=row["name"],
+                steps=tuple(
+                    ScenarioStep(
+                        profile_id=step["profile_id"], duration_seconds=step["duration_seconds"]
+                    )
+                    for step in steps
+                ),
+                loop=bool(row["loop"]),
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
+            raise StorageError("stored scenario is malformed") from error
 
     @staticmethod
     def _schedule_from_row(row: sqlite3.Row) -> Schedule:
