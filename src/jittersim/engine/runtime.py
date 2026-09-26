@@ -17,11 +17,13 @@ from jittersim.config.models import (
     ServiceQuota,
     TimeQuota,
     ValidationError,
+    WebsitePolicy,
     time_quota_counter_id,
 )
 from jittersim.config.storage import ConfigRepository, DatabasePath, StorageError
 from jittersim.networking.helper import HelperClient, HelperClientError
 
+from .access import build_access_plan
 from .activity import Source, TargetState, activity_records
 from .codec import PlanCodecError, plan_from_payload, plan_to_payload
 from .compiler import PlanError, compile_plan
@@ -381,7 +383,8 @@ class RuntimeScheduler:
             # traffic they hold first.
             self._sample_quota_usage(repository=active_repository, now=current_time)
             try:
-                self._helper_client.apply(plan=plan)
+                apply = getattr(self._helper_client, "apply_experiment", self._helper_client.apply)
+                apply(plan=plan)
             except HelperClientError:
                 # Cleanup may have removed the previous rules too. An active
                 # scheduler must retry even if the desired plan is unchanged.
@@ -800,7 +803,7 @@ class RuntimeScheduler:
         global_blocked, website_filters = build_website_filters(
             devices=runtime_devices,
             profiles=runtime_profiles,
-            global_policy=repository.get_website_policy(),
+            global_policy=WebsitePolicy(),
             blocked_domains_by_device=blocked_domains_by_device,
         )
         service_quota_rules = self._build_service_quota_rules(
@@ -847,6 +850,7 @@ class RuntimeScheduler:
             devices=runtime_devices,
             profiles=runtime_profiles,
             mac_policy=repository.get_mac_policy(),
+            access=build_access_plan(repository.access_settings()),
             global_blocked_addresses=global_blocked,
             website_filters=website_filters,
             blocked_device_addresses=blocked_addresses,

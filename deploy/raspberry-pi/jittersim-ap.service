@@ -1,0 +1,13 @@
+[Unit]
+Description=JitterSim test Wi-Fi
+Requires=jittersim-access-boot.service jittersim-control-firewall.service
+After=NetworkManager.service jittersim-access-boot.service jittersim-control-firewall.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/nmcli connection up jittersim-ap
+ExecStop=/usr/bin/nmcli connection down jittersim-ap
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

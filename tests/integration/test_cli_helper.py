@@ -6,11 +6,15 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from jittersim.cli import main, reset_main
+from jittersim.config.models import MacPolicy, WebsitePolicy
 from jittersim.config.storage import ConfigRepository
+from jittersim.engine.access import build_access_plan
+from jittersim.networking.access import AccessManager
 from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.executor import FakeExecutor
 from jittersim.networking.helper import HelperService, UnixHelperServer
 from jittersim.networking.topology import Topology
+from tests.access_support import AccessExecutor
 
 
 class CliHelperTests(unittest.TestCase):
@@ -19,11 +23,15 @@ class CliHelperTests(unittest.TestCase):
         self.socket_path = Path(self.temp_dir.name) / "helper.sock"
         self.database = Path(self.temp_dir.name) / "jittersim.db"
         self.executor = FakeExecutor()
+        access_directory = Path(self.temp_dir.name) / 'access'
+        self.access = AccessManager(executor=AccessExecutor(access_directory),
+                                    topology=Topology('eth0', 'wlan0'), directory=access_directory,
+                                    runtime_path=Path(self.temp_dir.name) / 'access.json')
         service = HelperService(
             NetworkApplier(
                 executor=self.executor,
                 topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
-            )
+            ), access_manager=self.access,
         )
         self.helper_server = UnixHelperServer(self.socket_path, service)
         self.helper_thread = threading.Thread(target=self.helper_server.serve_forever)
@@ -92,6 +100,21 @@ class CliHelperTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("Network reset", output.getvalue())
         self.assertEqual(self._state().last_action, "reset")
+
+    def test_normal_access_disables_persistent_rules_while_reset_preserves_them(self):
+        with ConfigRepository(self.database) as repository:
+            repository.save_access_policies(MacPolicy(), WebsitePolicy(blocked_domains=('example.com',)))
+            self.access.apply(build_access_plan(repository.access_settings()))
+        self.assertEqual(self._run('reset')[0], 0)
+        self.assertTrue(self.access.applied.options.enabled)
+        code, output, errors = self._run('normal-access')
+        self.assertEqual(code, 0, errors)
+        self.assertIn('Normal access restored', output)
+        self.assertFalse(self.access.applied.options.enabled)
+        with ConfigRepository(self.database) as repository:
+            self.assertFalse(repository.get_access_options().enabled)
+            self.assertEqual(repository.get_website_policy().blocked_domains, ('example.com',))
+            self.assertEqual(repository.get_runtime_state().last_action, 'reset')
 
     def test_reset_still_clears_the_network_without_the_database(self) -> None:
         missing = Path(self.temp_dir.name) / "missing.db"

@@ -320,19 +320,19 @@ for current command behavior.
 ## Recover over SSH
 
 Keep SSH access through the Pi's management network. If the dashboard cannot
-be reached or misbehaves, clear every JitterSim network change:
+be reached or misbehaves, turn off all experiment effects and household restrictions:
 
 ```sh
-sudo jittersim reset
+sudo jittersim normal-access
 ```
 
-The command records the reset first, so the dashboard keeps the network reset
-after it restarts, then asks the helper to remove only JitterSim's rules and
-queues. A running dashboard notices the reset, stops scheduled changes and
-resets once more in case one of its changes raced the command, so it does not
-need to be stopped first. The older `sudo /opt/jittersim/.venv/bin/jittersim-reset`
-runs the same command. Choose **Apply current configuration** in the dashboard
-to start again.
+The command records the stopped state before asking the helper to remove
+JitterSim's effects and household restrictions. Saved lists remain available.
+A running dashboard notices the reset and stops scheduled changes. Use
+`sudo jittersim reset` to keep household restrictions active while stopping
+experiments. The older `jittersim-reset` command has the same limited scope.
+Choose **Apply current configuration** to resume experiments. Re-enable
+household access rules separately when ready.
 
 `sudo jittersim status` shows the last recorded network action and whether the
 helper answers. If reset reports an error, read the helper log as described
@@ -451,3 +451,57 @@ Automated tests exercise file validation and recovery with disposable files.
 They do not establish radio coverage, uninterrupted household service or actual
 Pi restart behavior. Complete the household and recovery trial on the Pi before
 relying on it for everyday access.
+
+## Persistent access rules and normal access
+
+Run the current installer once when upgrading to this release. It provisions
+Unbound, connection tracking and the new startup units. A code-only update
+from an older installation does not install those system dependencies.
+Subsequent release updates retain a recovery copy of both the database and
+`/var/lib/jittersim-access` alongside the service definitions.
+
+The installer turns off automatic activation of the NetworkManager AP profile.
+`jittersim-ap.service` starts it only after the management firewall and saved
+access rules have loaded. The privileged helper owns the applied access policy.
+The dashboard cannot write its files directly. DNS failures keep blocked
+traffic blocked. A failed policy recovery closes test-network traffic while
+leaving the Ethernet management path available.
+
+The DNS service checks names and all subdomains with separate views for clients
+that have different restrictions. Equivalent clients share a view. Limits are
+32 named rules, 64 domains per rule and 512 named domains in total. A further
+limit covers expanded device/domain combinations. Queries are not logged.
+Existing on-demand DNS observations remain a separate feature.
+
+**Reset network** and `sudo jittersim reset` now clear experiment effects while
+preserving household restrictions. Use the **Normal access** panic button or
+`sudo jittersim normal-access` to disable both. They pause automatic changes,
+remove profiles and disable access rules without deleting the saved lists.
+DNS connection mappings are cleared so a reused resolver connection follows
+the new setting. The emergency action does not depend on restarting Unbound.
+Management authentication, the private management firewall and Wi-Fi client
+isolation are still enabled. Device-side DNS caches can take time to expire.
+
+The standard installation uses NetworkManager. MAC rules block network traffic
+on that setup. Wi-Fi admission controls remain unavailable unless a supported
+hostapd control socket exists at `/run/jittersim-hostapd/<test-interface>`.
+Controller commands are tested with real hostapd. This does not establish
+compatibility with a particular Pi radio or prove refused Wi-Fi association.
+Changing AP backends requires hardware acceptance before enabling this option.
+
+If startup restoration fails, inspect `journalctl -u jittersim-access-boot`
+and `journalctl -u jittersim-helper` over Ethernet. Stop the dashboard and
+helper before restoring `/var/lib/jittersim-access` from the release recovery
+copy. Then restart `jittersim-access-boot.service`, `jittersim-ap.service` and
+the helper and dashboard. Do not remove the temporary firewall guard merely
+to hide a failed restoration.
+
+Settings exports use version 2 so an older reader cannot silently discard the
+new site rules. Restoring a release without access-control support is refused
+while household controls are enabled. Explicitly disable them first if the
+loss of protection is intended. Keep the database and applied access-policy
+backup from the same recovery point.
+
+Hardware acceptance still needs two Wi-Fi clients and the actual Pi: verify
+client isolation, DHCP and management access, a changed client address,
+startup restoration, normal access and any supported association rejection.

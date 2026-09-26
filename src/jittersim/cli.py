@@ -4,6 +4,7 @@ import argparse
 import shlex
 import sqlite3
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -16,7 +17,7 @@ from jittersim.networking.helper import HelperClient, HelperClientError
 from jittersim.networking.renderer import render_command_plan
 from jittersim.networking.topology import Topology
 
-CONTROL_COMMANDS = ("reset", "status")
+CONTROL_COMMANDS = ("reset", "normal-access", "status")
 MEASUREMENT_COMMANDS = ("measure", "compare")
 
 
@@ -45,7 +46,8 @@ def _format_command(command: Command) -> str:
 
 def _build_control_parser(command: str) -> argparse.ArgumentParser:
     descriptions = {
-        "reset": "Remove every JitterSim network change, even when the dashboard is down.",
+        "reset": "Remove experiment effects while preserving household access rules.",
+        "normal-access": "Stop all profiles and household restrictions while keeping saved settings.",
         "status": "Show the last recorded network action and whether the helper answers.",
     }
     parser = argparse.ArgumentParser(prog=f"jittersim {command}", description=descriptions[command])
@@ -85,7 +87,7 @@ def _record(
         print("warning: could not record the reset in the database", file=sys.stderr)
 
 
-def _reset(arguments: argparse.Namespace) -> int:
+def _reset(arguments: argparse.Namespace, *, all_restrictions: bool = False) -> int:
     repository = _open_repository(arguments.database)
     if repository is None:
         print(
@@ -97,11 +99,18 @@ def _reset(arguments: argparse.Namespace) -> int:
         # Record the reset first. A running dashboard sees it and stops
         # applying scheduled changes.
         _record(repository, "resetting", None)
+        if all_restrictions and repository is not None:
+            try:
+                settings = repository.access_settings()
+                repository.save_access_policies(settings.mac_policy, settings.website_policy,
+                                                 options=replace(settings.access_options, enabled=False))
+            except (StorageError, sqlite3.Error):
+                print("warning: the disabled state could not be saved. Retry before restarting the dashboard.", file=sys.stderr)
         client = HelperClient(
             socket_path=arguments.helper_socket, timeout_seconds=arguments.timeout_seconds
         )
         try:
-            client.reset()
+            client.normal_access() if all_restrictions else client.reset()
         except HelperClientError as error:
             _record(repository, "error", "failure")
             print(f"Reset failed: {error}", file=sys.stderr)
@@ -110,7 +119,8 @@ def _reset(arguments: argparse.Namespace) -> int:
     finally:
         if repository is not None:
             repository.close()
-    print("Network reset. Test devices use the network without JitterSim changes.")
+    print("Normal access restored. Profiles and household restrictions are off." if all_restrictions else
+          "Network reset. Experiment effects are off. Household access rules remain active.")
     return 0
 
 
@@ -149,7 +159,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if raw_arguments and raw_arguments[0] in CONTROL_COMMANDS:
         command = raw_arguments[0]
         arguments = _build_control_parser(command).parse_args(raw_arguments[1:])
-        return _reset(arguments) if command == "reset" else _status(arguments)
+        return (_reset(arguments, all_restrictions=command == "normal-access")
+                if command != "status" else _status(arguments))
     if raw_arguments and raw_arguments[0] == "simulate":
         raw_arguments = raw_arguments[1:]
     return _simulate(raw_arguments)

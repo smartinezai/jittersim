@@ -1,0 +1,54 @@
+:root { --surface: #121f31; --field: #0b1727; --border: #304861; --muted: #a8b8ce; --accent: #70b7ff; --radius: .6rem; color-scheme: dark; }
+.card { box-shadow: none; border-radius: .75rem; }
+.card h2 { font-size: 1.25rem; }
+.action-bar { padding: .8rem 1rem; gap: .5rem 1rem; }
+.action-copy h2 { margin: 0; font-size: 1rem; }
+.action-description { display: none; }
+.action-message.success { display: none; }
+.action-buttons button { margin-top: 0; }
+h3 { text-transform: none; letter-spacing: 0; }
+input, select, textarea { min-height: 2.75rem; background: var(--field); border-color: var(--border); border-radius: var(--radius); }
+select:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+button { min-height: 2.75rem; }
+.quota-check input { min-height: 1.25rem; width: 1.25rem; height: 1.25rem; }
+.access-options { display: grid; gap: .7rem; margin-bottom: 1.5rem; }
+.access-options .form-note { margin: 0; }
+.access-summary { padding: .9rem 1rem; background: #102238; border-radius: var(--radius); color: #c8d9ec; }
+.access-summary[data-state=applied] { background: #123b31; color: #8de2bc; }
+.access-summary[data-state=error] { background: #45222c; color: #ffb0b0; }
+.access-actions { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin: .8rem 0; }
+.access-actions button { margin: 0; }
+.access-rule-row { display: flex; gap: 1rem; align-items: center; justify-content: space-between; padding: 1rem 0; border-top: 1px solid var(--border); }
+.access-rule-row > div { min-width: 0; }
+.access-rule-row h3, .access-rule-row p { margin: 0 0 .35rem; }
+.access-rule-row button { margin: 0; }
+.access-domains, #access-device-list p { color: var(--muted); font-size: .9rem; overflow-wrap: anywhere; }
+.access-shortcut { margin: 0 0 1rem; }
+.panic-button { background: #714619; border-color: #c08b51; color: #fff3e0; font-weight: 700; }
+.normal-access-notice { background: #123b31; color: #a7f2ce; padding: 1rem; border-radius: var(--radius); }
+.device-access-status { color: #b9d8f4; overflow-wrap: anywhere; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+#site-rule-form { display: grid; gap: .8rem; }
+#site-rule-list { margin-top: 1.5rem; }
+#site-rule-domains { min-height: 7rem; }
+.help-icon { display: inline-grid; width: 1.8rem; height: 1.8rem; min-height: 1.8rem; flex: 0 0 auto; padding: 0; margin: 0; border-radius: 50%; background: #142338; color: #b9d8f4; cursor: pointer; }
+label > .help-icon { justify-self: start; }
+.help-icon::after, .help-icon:hover::after, .help-icon:focus-visible::after { display: none; content: none; }
+.field-tooltip { position: fixed; z-index: 120; max-width: min(24rem, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: auto; padding: .9rem 1rem; border: 1px solid #547392; border-radius: var(--radius); background: #08101c; color: #dcecff; font-size: .9rem; line-height: 1.55; box-shadow: 0 .5rem 1.5rem #0008; }
+#profile-form > .fields { margin-bottom: 1.5rem; }
+.profile-directions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.5rem; margin: 1rem 0; }
+.profile-direction h3 { font-size: 1.1rem; margin: 0; }
+.profile-direction > .form-note { margin: .3rem 0 1rem; }
+.profile-direction .fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.profile-direction label { min-width: 0; }
+.profile-direction .field-label { min-height: 2.75rem; align-items: center; }
+@media (max-width: 900px) { .profile-directions { grid-template-columns: minmax(0, 1fr); } }
+#profile-form > details { background: #0d1b2d; padding: 1rem; border: 1px solid var(--border); border-radius: var(--radius); }
+@media (max-width: 600px) {
+  .access-rule-row { align-items: flex-start; flex-direction: column; gap: .5rem; }
+  .access-actions button { flex: 1 1 auto; }
+  .help-icon { width: 2.75rem; height: 2.75rem; min-height: 2.75rem; }
+  .panic-button { grid-column: 1 / -1; }
+  .field-label { flex-wrap: wrap; }
+}
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }

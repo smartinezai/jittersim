@@ -1,0 +1,16 @@
+[Unit]
+Description=JitterSim filtered DNS
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/unbound -d -c /var/lib/jittersim-access/unbound.conf
+Restart=on-failure
+RestartSec=2
+ProtectHome=true
+PrivateTmp=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

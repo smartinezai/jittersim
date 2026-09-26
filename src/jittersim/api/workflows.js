@@ -117,6 +117,7 @@ function installDraftControls() {
     const forms = Array.from(formDrafts.keys());
     formDrafts.clear();
     forms.forEach(id => element(id).reset());
+    if (forms.includes('site-rule-form')) element('site-rule-id').value = '';
     ['profile', 'device', 'schedule', 'group', 'scenario'].forEach(prefix => {
       if (element(prefix + '-id')) stopEditing(prefix);
     });
@@ -135,7 +136,10 @@ function installDraftControls() {
     if (event.target.type === 'password') return;
     event.target.removeAttribute('aria-invalid');
     const error = event.target.parentElement.querySelector('.field-error');
-    if (error) error.remove();
+    if (error) {
+      event.target.setAttribute('aria-describedby', (event.target.getAttribute('aria-describedby') || '').split(' ').filter(id => id !== error.id).join(' '));
+      error.remove();
+    }
     rememberDraft(event.target.closest('form'));
   });
   document.addEventListener('change', event => rememberDraft(event.target.closest('form')));
@@ -154,7 +158,7 @@ function installDraftControls() {
       note.className = 'field-error';
       note.id = (field.id || 'field-' + ++draftSequence) + '-error';
       field.after(note);
-      field.setAttribute('aria-describedby', note.id);
+      field.setAttribute('aria-describedby', [field.getAttribute('aria-describedby'), note.id].filter(Boolean).join(' '));
     }
     note.textContent = field.validationMessage;
   }, true);
@@ -254,6 +258,7 @@ function renderDeviceCards() {
     card.className = 'device-card';
     const profile = appliedProfileCell(profileName(device.profile_id), state);
     card.append(textNode('h3', device.name), textNode('p', profile[0]), textNode('p', profile[1], 'form-note'),
+      textNode('p', deviceAccessText(device), 'device-access-status'),
       textNode('p', conditionCell(state).join ? conditionCell(state).join(' · ') : conditionCell(state)),
       actionButton('Open ' + device.name, () => openDevice(device.id)));
     container.append(card);
@@ -273,6 +278,7 @@ function renderWorkspaceState() {
   const state = Object.prototype.hasOwnProperty.call(deviceConditions.devices, device.id) ? deviceConditions.devices[device.id] : null;
   element('workspace-title').textContent = device.name;
   element('workspace-state').textContent = appliedProfileCell(profileName(device.profile_id), state).join(' · ');
+  element('workspace-access').textContent = deviceAccessText(device);
   element('workspace-address').textContent = device.ipv4_address + ' · ' + (device.mac_address || 'No saved MAC') + ' · Saved default: ' + profileName(device.profile_id);
 }
 async function openDevice(id) {
@@ -359,7 +365,7 @@ function installDeviceWorkflows() {
   const cards = document.createElement('div'); cards.id = 'device-cards';
   element('device-table').after(cards);
   const workspace = workflowCard('device-workspace', 'Device controls', 'devices', `
-    <h3 id="workspace-title" tabindex="-1"></h3><p id="workspace-state"></p><p id="workspace-address" class="form-note"></p>
+    <h3 id="workspace-title" tabindex="-1"></h3><p id="workspace-state"></p><p id="workspace-access" class="device-access-status"></p><p id="workspace-address" class="form-note"></p>
     <p id="workspace-traffic"></p><div id="workspace-runs"></div>
     <form id="workspace-timer-form"><label>Temporary profile<select id="workspace-profile"></select></label>
     <label>Minutes<input id="workspace-minutes" type="number" min="1" max="1440" value="10" required></label>

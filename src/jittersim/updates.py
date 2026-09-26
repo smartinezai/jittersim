@@ -26,6 +26,7 @@ UPDATE_ROOT = Path("/var/lib/jittersim-updates")
 CODE_ROOT = Path("/opt/jittersim")
 CONFIG_ROOT = Path("/etc/jittersim")
 DATA_ROOT = Path("/var/lib/jittersim")
+ACCESS_ROOT = Path("/var/lib/jittersim-access")
 UNITS_ROOT = Path("/etc/systemd/system")
 MANAGER_PATH = Path("/usr/local/lib/jittersim-update.py")
 MAX_ARCHIVE = 25 * 1024 * 1024
@@ -35,7 +36,10 @@ SERVICES = (
     "jittersim-dashboard.service",
     "jittersim-browser-proxy.service",
 )
-UNITS = SERVICES + ("jittersim-control-firewall.service", "jittersim-update.service")
+UNITS = SERVICES + (
+    "jittersim-control-firewall.service", "jittersim-update.service",
+    "jittersim-dns.service", "jittersim-access-boot.service", "jittersim-ap.service",
+)
 VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
 
@@ -296,6 +300,7 @@ def apply_update(
     code=CODE_ROOT,
     config=CONFIG_ROOT,
     data=DATA_ROOT,
+    access=ACCESS_ROOT,
     units=UNITS_ROOT,
     manager=MANAGER_PATH,
     run=run_command,
@@ -312,6 +317,22 @@ def apply_update(
             completed = read_json(backup / "complete.json")
             if completed.get("target_version") == request.get("version"):
                 request["rollback"] = True
+
+        if request.get("rollback") and (access / "policy.json").exists():
+            try:
+                with (access / "policy.json").open('rb') as stream:
+                    raw_policy = stream.read(256 * 1024 + 1)
+                if len(raw_policy) > 256 * 1024:
+                    raise ValueError('policy is too large')
+                policy = json.loads(raw_policy)
+                if (policy.get("options", {}).get("enabled", True)
+                        and not (backup / "code/src/jittersim/networking/access.py").exists()):
+                    raise UpdateError("disable household restrictions before restoring a release without access controls")
+            except (ValueError, OSError, AttributeError, UpdateError) as error:
+                message = str(error) if isinstance(error, UpdateError) else "Saved access rules could not be checked before rollback."
+                atomic_json(root / 'status.json', {'phase': 'failed', 'message': message})
+                (root / 'request.json').unlink(missing_ok=True)
+                raise UpdateError(message) from error
 
         def progress(phase, message):
             atomic_json(root / "status.json", {"phase": phase, "message": message})
@@ -334,6 +355,14 @@ def apply_update(
                     shutil.copy2(source, units / unit)
                 elif (units / unit).exists():
                     (units / unit).unlink()
+            if (backup / "access").exists():
+                if access.exists():
+                    shutil.rmtree(access)
+                shutil.copytree(backup / "access", access, symlinks=True)
+                if "access" in ownership:
+                    uid, gid = ownership["access"]
+                    for entry in [access, *access.rglob("*")]:
+                        os.chown(entry, uid, gid, follow_symlinks=False)
             if (backup / "manager.py").exists():
                 install_manager(backup / "manager.py", manager)
             run(["systemctl", "daemon-reload"], 30)
@@ -381,6 +410,8 @@ def apply_update(
                 raise UpdateError("not enough free space for update and recovery")
             for name, source in (("code", code), ("config", config), ("data", data)):
                 shutil.copytree(source, candidate / name, symlinks=True)
+            if access.exists():
+                shutil.copytree(access, candidate / "access", symlinks=True)
             (candidate / "units").mkdir()
             for unit in UNITS:
                 if (units / unit).exists():
@@ -394,7 +425,8 @@ def apply_update(
                     "target_version": request.get("version"),
                     "ownership": {
                         name: [source.stat().st_uid, source.stat().st_gid]
-                        for name, source in (("code", code), ("config", config), ("data", data))
+                        for name, source in (("code", code), ("config", config), ("data", data), ("access", access))
+                        if source.exists()
                     },
                 },
             )

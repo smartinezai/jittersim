@@ -8,16 +8,19 @@ import re
 import socket
 import socketserver
 import stat
+import threading
 import time
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from jittersim.config.models import ValidationError, normalize_domain
+from jittersim.engine.access import AccessPlan, access_from_payload
 from jittersim.engine.codec import PlanCodecError, plan_from_payload, plan_to_payload
 from jittersim.engine.plan import EVERYONE_ELSE_QUEUE_ID, NetworkPlan
 from jittersim.updates import UpdateError, request_update, update_status
 
+from .access import AccessManager
 from .applier import ApplyError, NetworkApplier
 from .executor import CommandExecutionError, SubprocessExecutor
 from .renderer import band_class
@@ -77,9 +80,11 @@ class HelperService:
         applier: NetworkApplier,
         router_factory: Optional[Callable[[str, str], TG3442DERouter]] = None,
         active_plan_path: Optional[Path] = None,
+        access_manager: Optional[AccessManager] = None,
     ) -> None:
         self._applier = applier
         self._active_plan_path = active_plan_path
+        self._access_manager = access_manager
         self._router_factory = router_factory or (
             lambda address, password: TG3442DERouter(address=address, password=password)
         )
@@ -90,6 +95,30 @@ class HelperService:
         if not isinstance(payload, dict):
             return {"ok": False, "error": "request must be an object"}
         action = payload.get("action")
+        if action == "normal-access":
+            reset = self._handle_reset()
+            access_ok = False
+            try:
+                if self._access_manager is None:
+                    raise ValueError("persistent access controls are unavailable")
+                self._access_manager.disable()
+                access_ok = True
+            except (OSError, ValueError, CommandExecutionError):
+                LOGGER.exception("could not disable household restrictions")
+            if not reset["ok"] or not access_ok:
+                return {"ok": False, "error": "normal access was not fully restored",
+                        "experiments_stopped": reset["ok"], "access_disabled": access_ok}
+            return {"ok": True, "action": action, "experiments_stopped": True, "access_disabled": True}
+        if action in ("access-status", "access-apply"):
+            if self._access_manager is None:
+                return {"ok": False, "error": "persistent access controls are unavailable"}
+            try:
+                result = (self._access_manager.status() if action == "access-status" else
+                          self._access_manager.apply(access_from_payload(payload.get("policy"))))
+                return {"ok": True, **result}
+            except (OSError, ValueError, CommandExecutionError):
+                LOGGER.exception("persistent access operation failed")
+                return {"ok": False, "error": "access rules could not be applied"}
         if action in ("update-status", "update-install", "update-rollback"):
             try:
                 if action != "update-status":
@@ -118,8 +147,8 @@ class HelperService:
             return self._handle_router_wifi(payload, read_only=True)
         if action == "router-wifi":
             return self._handle_router_wifi(payload)
-        if action == "apply":
-            return self._handle_apply(payload.get("plan"))
+        if action in ("apply", "apply-experiment"):
+            return self._handle_apply(payload.get("plan"), update_access=action == "apply")
         return {"ok": False, "error": "unknown action"}
 
     def _handle_clients(self) -> Dict[str, Any]:
@@ -193,11 +222,19 @@ class HelperService:
             counters["queues"] = {"devices": {}}
         return {"ok": True, "action": "traffic-counters", "counters": counters}
 
-    def _handle_apply(self, payload: Any) -> Dict[str, Any]:
+    def _handle_apply(self, payload: Any, *, update_access: bool = True) -> Dict[str, Any]:
         try:
             plan = plan_from_payload(payload)
         except PlanCodecError:
             return {"ok": False, "error": "invalid network plan"}
+        if plan.access is not None and update_access:
+            if self._access_manager is None:
+                return {"ok": False, "error": "persistent access controls are unavailable"}
+            try:
+                self._access_manager.apply(plan.access)
+            except (OSError, ValueError, CommandExecutionError):
+                LOGGER.exception("persistent access apply failed")
+                return {"ok": False, "error": "access rules could not be applied"}
         try:
             report = self._applier.apply(plan=plan)
         except ApplyError as error:
@@ -476,12 +513,31 @@ class HelperClient:
     def apply(self, *, plan: NetworkPlan) -> Dict[str, Any]:
         """Ask the helper to apply one validated network plan."""
 
-        return self._request({"action": "apply", "plan": plan_to_payload(plan)})
+        client = HelperClient(socket_path=self.socket_path, timeout_seconds=60)
+        return client._request({"action": "apply", "plan": plan_to_payload(plan)})
 
     def reset(self) -> Dict[str, Any]:
         """Ask the helper to remove project-owned network state."""
 
         return self._request({"action": "reset"})
+
+    def apply_experiment(self, *, plan: NetworkPlan) -> Dict[str, Any]:
+        """Change scheduled effects without activating pending access-rule edits."""
+
+        client = HelperClient(socket_path=self.socket_path, timeout_seconds=60)
+        return client._request({"action": "apply-experiment", "plan": plan_to_payload(plan)})
+
+    def normal_access(self) -> Dict[str, Any]:
+        client = HelperClient(socket_path=self.socket_path, timeout_seconds=60)
+        return client._request({"action": "normal-access"})
+
+    def access_status(self) -> Dict[str, Any]:
+        return self._request({"action": "access-status"})
+
+    def apply_access(self, policy: AccessPlan) -> Dict[str, Any]:
+        # DNS restart and recovery can take longer than a status read.
+        client = HelperClient(socket_path=self.socket_path, timeout_seconds=60)
+        return client._request({"action": "access-apply", "policy": policy.payload()})
 
     def configure_access_point(self, *, ssid: str, password: str) -> Dict[str, Any]:
         """Set the local test AP credentials through the privileged helper."""
@@ -701,6 +757,9 @@ def run_helper(
     if not enable_hardware:
         raise HelperError("hardware mode requires --enable-hardware")
     active_plan_path = socket_path.parent / "active-plan.json"
+    access = AccessManager(executor=SubprocessExecutor(timeout_seconds=20), topology=topology,
+                           runtime_path=socket_path.parent / "access-policy.json")
+    access.restore()
     service = HelperService(
         NetworkApplier(
             executor=SubprocessExecutor(timeout_seconds=timeout_seconds),
@@ -708,12 +767,31 @@ def run_helper(
         ),
         router_factory=router_factory,
         active_plan_path=active_plan_path,
+        access_manager=access,
     )
+    stopped = threading.Event()
+
+    def maintain_access():
+        while not stopped.wait(15):
+            try:
+                access.check_health()
+                if access.applied is not None and access.applied.has_dns_rules:
+                    clients = service._handle_clients()
+                    if clients.get("ok"):
+                        access.refresh_addresses(clients["devices"])
+            except Exception:
+                LOGGER.exception("could not refresh access device addresses")
+
+    worker = threading.Thread(target=maintain_access, daemon=True, name="access-addresses")
+    worker.start()
     with UnixHelperServer(socket_path, service) as server:
         try:
             server.serve_forever()
         except KeyboardInterrupt:
             pass
+        finally:
+            stopped.set()
+            worker.join(timeout=5)
 
 
 def _build_parser() -> argparse.ArgumentParser:

@@ -71,7 +71,7 @@ class SettingsTransferTests(unittest.TestCase):
         payload = settings_to_payload(lab_settings(), exported_at=1_000)
 
         self.assertEqual(payload["format"], "jittersim-settings")
-        self.assertEqual(payload["version"], 1)
+        self.assertEqual(payload["version"], 2)
         self.assertEqual(payload["exported_at"], 1_000)
         self.assertEqual([profile["id"] for profile in payload["profiles"]], ["normal", "slow"])
         self.assertEqual(payload["groups"][0]["device_ids"], ["alice", "bob"])

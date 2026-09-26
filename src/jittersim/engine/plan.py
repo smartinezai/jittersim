@@ -7,6 +7,8 @@ from typing import Optional, Tuple
 
 from jittersim.config.models import Impairment, MacPolicy
 
+from .access import AccessPlan
+
 
 class Direction(str, Enum):
     """A direction relative to the controlled test device."""
@@ -100,3 +102,4 @@ class NetworkPlan:
     service_quota_rules: Tuple[ServiceQuotaRule, ...] = ()
     service_assignment_rules: Tuple[ServiceAssignmentRule, ...] = ()
     everyone_else: Optional[EveryoneElseRule] = None
+    access: Optional[AccessPlan] = None
