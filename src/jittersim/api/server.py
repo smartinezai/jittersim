@@ -83,6 +83,7 @@ from jittersim.engine.compiler import (
     MAX_SHAPED_MARKS_PER_PLAN,
     PlanError,
 )
+from jittersim.engine.plan import EVERYONE_ELSE_QUEUE_ID
 from jittersim.engine.conditions import device_conditions, everyone_else_condition
 from jittersim.engine.progression import progression_factor
 from jittersim.engine.runtime import RuntimeScheduler
@@ -6344,7 +6345,11 @@ class ControlServer(HTTPServer):
             return HTTPStatus.OK, "application/json", _json_bytes({"groups": groups})
         if path == "/api/schedules":
             schedules = [_schedule_payload(schedule) for schedule in self.repository.list_schedules()]
-            return HTTPStatus.OK, "application/json", _json_bytes({"schedules": schedules})
+            return HTTPStatus.OK, "application/json", _json_bytes({
+                "schedules": schedules,
+                "local_time": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "time_zone": time.strftime("%Z"),
+            })
         if path == "/api/activity":
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {"events": list(self.repository.list_activity())}
@@ -6612,8 +6617,22 @@ class ControlServer(HTTPServer):
                 {"plan": plan_to_payload(plan)}
             )
         if path == "/api/conditions":
-            plan = self.scheduler.applied_plan() if self.scheduler is not None else None
+            operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
+            with operation:
+                plan = self.scheduler.applied_plan() if self.scheduler is not None else None
+                sources = self.scheduler.applied_target_states() if self.scheduler is not None else None
             applied = plan is not None
+
+            def described_condition(state, target_id):
+                payload = {"condition": state.condition, "reasons": list(state.reasons)}
+                target = (sources or {}).get(target_id)
+                if applied and target is not None:
+                    payload["source"] = asdict(target.source)
+                    payload["next_change_at"] = (
+                        datetime.fromtimestamp(target.next_change_at).astimezone().isoformat()
+                        if target.next_change_at is not None else None
+                    )
+                return payload
             if plan is None:
                 # Nothing runs on the network, so describe the saved settings.
                 # The scheduler's runtime plan would advance its rerolls.
@@ -6625,13 +6644,10 @@ class ControlServer(HTTPServer):
                     "everyone_else": (
                         None
                         if everyone_else is None
-                        else {
-                            "condition": everyone_else.condition,
-                            "reasons": list(everyone_else.reasons),
-                        }
+                        else described_condition(everyone_else, EVERYONE_ELSE_QUEUE_ID)
                     ),
                     "devices": {
-                        device_id: {"condition": state.condition, "reasons": list(state.reasons)}
+                        device_id: described_condition(state, device_id)
                         for device_id, state in device_conditions(
                             plan,
                             mac_addresses={

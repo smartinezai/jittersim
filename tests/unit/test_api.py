@@ -4706,7 +4706,7 @@ class ControlServerTests(unittest.TestCase):
     def test_conditions_describe_the_applied_plan(self) -> None:
         helper = self._serve_live(CountingHelper(devices={"alice": 0}))
         self.assertEqual(self.server.write_response_for("/api/apply", {})[0], 200)
-        self.repository.save_profile(Profile(id="slow", name="Slow"))
+        self.repository.save_profile(Profile(id="slow", name="Renamed after apply"))
 
         conditions = json.loads(self.server.response_for("/api/conditions")[2])
 
@@ -4714,6 +4714,9 @@ class ControlServerTests(unittest.TestCase):
         self.assertIsNotNone(helper.applied_plan)
         self.assertTrue(conditions["applied"])
         self.assertEqual(conditions["devices"]["alice"]["condition"], "degraded")
+        self.assertEqual(conditions["devices"]["alice"]["source"]["profile"], "Slow")
+        self.assertEqual(conditions["devices"]["alice"]["source"]["kind"], "profile")
+        self.assertIsNone(conditions["devices"]["alice"]["next_change_at"])
 
     def test_live_changes_apply_while_the_network_is_applied(self) -> None:
         helper = FakeHelper()

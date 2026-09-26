@@ -45,6 +45,8 @@ class TargetState:
     outage: bool = False
     # Reached service and time limits as (identity, label) pairs.
     limits: Tuple[Tuple[str, str], ...] = ()
+    # An estimate from the same settings that produced this applied state.
+    next_change_at: Optional[float] = None
 
 
 def _describe(source: Source) -> str:
