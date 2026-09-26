@@ -1051,6 +1051,98 @@ class EveryoneElseSchedulingTests(unittest.TestCase):
 
         self.assertFalse(plan.everyone_else.blocked)
 
+class TargetScheduleTests(unittest.TestCase):
+    """Schedules for groups and everyone else."""
+
+    # 21 September 2026 is a Monday.
+    IN_WINDOW = datetime(2026, 9, 21, 10, 0).timestamp()
+    OUT_OF_WINDOW = datetime(2026, 9, 21, 20, 0).timestamp()
+
+    def setUp(self) -> None:
+        self.repository = ConfigRepository(":memory:")
+        self.addCleanup(self.repository.close)
+        self.scheduler = RuntimeScheduler(database_path=":memory:", helper_client=None)
+        for profile_id, delay in (
+            ("normal", 0), ("group", 100), ("own", 200), ("scheduled", 300), ("timed", 400)
+        ):
+            self.repository.save_profile(
+                Profile(id=profile_id, name=profile_id, download=Impairment(delay_ms=delay))
+            )
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "own"))
+        self.repository.save_device(Device("bob", "Bob", "192.168.50.11", "normal"))
+        self.repository.save_device(Device("carol", "Carol", "192.168.50.12", "own"))
+        self.repository.save_device_group(
+            DeviceGroup("family", "Family", ("alice", "bob"), profile_id="group")
+        )
+
+    def _schedule(self, schedule_id: str, profile_id: str = "scheduled", **target) -> None:
+        self.repository.save_schedule(
+            Schedule(
+                id=schedule_id, profile_id=profile_id, days_of_week=(0,),
+                start_minute=540, end_minute=1_020, **target,
+            )
+        )
+
+    def _download_delays(self, now: float) -> dict:
+        plan = self.scheduler.build_plan(repository=self.repository, now=now)
+        return {
+            queue.device_id: queue.impairment.delay_ms
+            for queue in plan.queues
+            if queue.direction == "download"
+        }
+
+    def test_a_group_schedule_applies_to_its_members_in_its_window(self) -> None:
+        self._schedule("family-day", device_id=None, group_id="family")
+
+        self.assertEqual(
+            self._download_delays(self.IN_WINDOW), {"alice": 300, "bob": 300, "carol": 200}
+        )
+        # Outside the window the group profile applies again.
+        self.assertEqual(
+            self._download_delays(self.OUT_OF_WINDOW), {"alice": 100, "bob": 100, "carol": 200}
+        )
+
+    def test_a_device_schedule_wins_over_its_group_schedule(self) -> None:
+        self._schedule("family-day", device_id=None, group_id="family")
+        self._schedule("alice-day", profile_id="timed", device_id="alice")
+
+        delays = self._download_delays(self.IN_WINDOW)
+
+        self.assertEqual((delays["alice"], delays["bob"]), (400, 300))
+
+    def test_a_timer_wins_over_a_group_schedule(self) -> None:
+        self._schedule("family-day", device_id=None, group_id="family")
+        self.repository.save_timer(
+            Timer(
+                id="short", device_id="bob", profile_id="timed",
+                started_at=int(self.IN_WINDOW), expires_at=int(self.IN_WINDOW) + 600,
+            )
+        )
+
+        delays = self._download_delays(self.IN_WINDOW)
+
+        self.assertEqual((delays["alice"], delays["bob"]), (300, 400))
+
+    def test_an_everyone_else_schedule_needs_no_saved_profile(self) -> None:
+        self._schedule("others-day", device_id=None, everyone_else=True)
+
+        during = self.scheduler.build_plan(repository=self.repository, now=self.IN_WINDOW)
+        after = self.scheduler.build_plan(repository=self.repository, now=self.OUT_OF_WINDOW)
+
+        self.assertEqual(during.everyone_else.download_impairment.delay_ms, 300)
+        self.assertIsNone(after.everyone_else)
+
+    def test_an_everyone_else_schedule_overrides_its_profile(self) -> None:
+        self.repository.save_everyone_else_profile_id("group")
+        self._schedule("others-day", device_id=None, everyone_else=True)
+
+        during = self.scheduler.build_plan(repository=self.repository, now=self.IN_WINDOW)
+        after = self.scheduler.build_plan(repository=self.repository, now=self.OUT_OF_WINDOW)
+
+        self.assertEqual(during.everyone_else.download_impairment.delay_ms, 300)
+        self.assertEqual(after.everyone_else.download_impairment.delay_ms, 100)
+
+
 class DeviceAddressTests(unittest.TestCase):
     def setUp(self) -> None:
         self.repository = ConfigRepository(":memory:")

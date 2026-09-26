@@ -13,6 +13,7 @@ import ssl
 import time
 from contextlib import nullcontext
 from dataclasses import asdict, replace
+from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from ipaddress import IPv4Network
@@ -81,6 +82,7 @@ from jittersim.engine.compiler import (
 from jittersim.engine.conditions import device_conditions, everyone_else_condition
 from jittersim.engine.progression import progression_factor
 from jittersim.engine.runtime import RuntimeScheduler
+from jittersim.engine.schedules import active_schedule
 from jittersim.engine.service import compile_stored_plan
 from jittersim.networking.helper import HelperClient, HelperClientError
 
@@ -1171,8 +1173,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       <form id="schedule-form">
         <div class="fields">
           <label>Schedule ID <input id="schedule-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}"></label>
-          <label>Device
-            <select id="schedule-device" required></select>
+          <label>Applies to
+            <select id="schedule-target" required></select>
           </label>
           <label>Profile
             <select id="schedule-profile" required></select>
@@ -1194,6 +1196,8 @@ DASHBOARD_HTML = r"""<!doctype html>
           <label>Start <input id="schedule-start" type="time" value="09:00" required></label>
           <label>End <input id="schedule-end" type="time" value="17:00" required></label>
         </div>
+        <p class="form-note">A device's own schedule wins over its group's. Timers and
+          progressions win over schedules.</p>
         <button type="submit">Save schedule</button>
       </form>
       <div id="schedule-list" class="schedule-list" aria-live="polite">No schedules yet.</div>
@@ -1890,6 +1894,80 @@ DASHBOARD_HTML = r"""<!doctype html>
       return device ? device.name : deviceId;
     }
 
+    function scheduleTargetFields(value) {
+      if (value === "everyone-else") {
+        return { device_id: null, group_id: null, everyone_else: true };
+      }
+      const separator = value.indexOf(":");
+      const kind = value.slice(0, separator);
+      const id = value.slice(separator + 1);
+      return {
+        device_id: kind === "device" ? id : null,
+        group_id: kind === "group" ? id : null,
+        everyone_else: false
+      };
+    }
+
+    function scheduleTargetValue(target) {
+      if (target.everyone_else) return "everyone-else";
+      return target.group_id ? "group:" + target.group_id : "device:" + target.device_id;
+    }
+
+    function scheduleTargetName(target) {
+      if (target.everyone_else) return "Everyone else";
+      if (target.group_id) {
+        const group = groups.find((candidate) => candidate.id === target.group_id);
+        return "Group " + (group ? group.name : target.group_id);
+      }
+      return deviceName(target.device_id);
+    }
+
+    function scheduleTargetOptions() {
+      return devices.map((device) => ({
+        group: "Devices",
+        value: "device:" + device.id,
+        label: device.name + " (" + device.ipv4_address + ")"
+      })).concat(
+        groups.map((group) => ({ group: "Groups", value: "group:" + group.id, label: group.name })),
+        [{ group: null, value: "everyone-else", label: "Everyone else" }]
+      );
+    }
+
+    function renderScheduleTargets() {
+      const select = element("schedule-target");
+      const selected = select.value;
+      const optionGroups = {};
+      select.replaceChildren();
+      scheduleTargetOptions().forEach((choice) => {
+        const option = document.createElement("option");
+        option.value = choice.value;
+        option.textContent = choice.label;
+        if (choice.group && !optionGroups[choice.group]) {
+          optionGroups[choice.group] = document.createElement("optgroup");
+          optionGroups[choice.group].label = choice.group;
+          select.appendChild(optionGroups[choice.group]);
+        }
+        (choice.group ? optionGroups[choice.group] : select).appendChild(option);
+      });
+      // Rebuilding the menu must not change a choice being edited.
+      if (Array.from(select.options).some((option) => option.value === selected)) {
+        select.value = selected;
+      }
+    }
+
+    function followEveryoneElseProfile(data) {
+      // A schedule can change everyone else's profile at any minute, and the
+      // connected-client list brings the current one with every poll.
+      if ("everyone_else_profile_id" in data) {
+        everyoneElse = { ...everyoneElse, active_profile_id: data.everyone_else_profile_id };
+      }
+    }
+
+    function everyoneElseAssigned() {
+      return Boolean(everyoneElse.profile_id) ||
+        savedSchedules.some((schedule) => schedule.everyone_else && schedule.enabled);
+    }
+
     function renderProfileTable() {
       renderTable(
         "profile-table",
@@ -2194,7 +2272,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     function editSchedule(schedule) {
       element("schedule-id").value = schedule.id;
-      element("schedule-device").value = schedule.device_id;
+      element("schedule-target").value = scheduleTargetValue(schedule);
       element("schedule-profile").value = schedule.profile_id;
       document.querySelectorAll(".day-toggle").forEach((button) => {
         const selected = schedule.days_of_week.includes(Number(button.dataset.day));
@@ -2277,6 +2355,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     let deviceConditions = { applied: false, devices: {} };
     let everyoneElse = { profile_id: null, unaffected_devices: [] };
     let lastRuntimeState = null;
+    let savedSchedules = [];
     let dashboardLoaded = false;
     let gettingStartedKey = "";
     // Device IDs can't start with an underscore, so this value is free.
@@ -2427,7 +2506,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         option.textContent = device.name + " (" + device.ipv4_address + ")";
         select.appendChild(option);
       });
-      if (everyoneElse.profile_id) {
+      if (everyoneElseAssigned()) {
         const option = document.createElement("option");
         option.value = EVERYONE_ELSE_TRAFFIC;
         option.textContent = "Everyone else";
@@ -3344,7 +3423,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         profiles: profiles.length,
         devices: devices.length,
         connected: connected,
-        everyoneElseProfile: everyoneElse.profile_id,
+        everyoneElseProfile: everyoneElseAssigned(),
         lastAction: lastRuntimeState ? lastRuntimeState.last_action : null,
         canApply: helperConfigured
       });
@@ -3476,7 +3555,10 @@ DASHBOARD_HTML = r"""<!doctype html>
         return device.unaffected ? saved + " (also on the unaffected list)" : saved;
       }
       if (device.unaffected) return "Unaffected";
-      if (everyoneElse.profile_id) return "Everyone else: " + profileName(everyoneElse.profile_id);
+      // The profile everyone else gets this minute, which a schedule can set.
+      if (everyoneElse.active_profile_id) {
+        return "Everyone else: " + profileName(everyoneElse.active_profile_id);
+      }
       return "Normal connection";
     }
 
@@ -3595,6 +3677,7 @@ DASHBOARD_HTML = r"""<!doctype html>
             message: connectedResult.reason.message
           });
         } else {
+          followEveryoneElseProfile(connectedResult.value);
           renderConnectedDevices({ ...connectedResult.value, saved_labels: savedLabels });
         }
       } catch (error) {
@@ -4328,7 +4411,6 @@ DASHBOARD_HTML = r"""<!doctype html>
       devices = data.devices;
       renderDeviceTable();
       [
-        "schedule-device",
         "timer-device",
         "progression-device",
         "data-limit-device",
@@ -4346,6 +4428,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           deviceSelect.appendChild(option);
         });
       });
+      renderScheduleTargets();
       updateTrafficDeviceOptions(data.devices);
       populateServiceQuotaDomains();
       populateTimeQuotaDomains();
@@ -4355,6 +4438,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       try {
         const data = await request("/api/groups", "GET");
         renderGroups(data);
+        renderScheduleTargets();
         const groupSelect = element("group-data-limit-group");
         const selectedGroup = groupSelect.value;
         groupSelect.replaceChildren();
@@ -4384,7 +4468,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         const text = document.createElement("div");
         const name = document.createElement("span");
         name.textContent =
-          deviceName(schedule.device_id) + " → " + profileName(schedule.profile_id);
+          scheduleTargetName(schedule) + " → " + profileName(schedule.profile_id);
         const time = document.createElement("small");
         time.textContent = formatDays(schedule.days_of_week) + " · " +
           formatMinute(schedule.start_minute) + "–" + formatMinute(schedule.end_minute) +
@@ -4410,7 +4494,10 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     async function loadSchedules() {
       const data = await request("/api/schedules", "GET");
+      savedSchedules = data.schedules;
       renderSchedules(data.schedules);
+      // An everyone-else schedule adds Everyone else to Live traffic.
+      updateTrafficDeviceOptions(devices);
     }
 
     function formatTimerRemaining(seconds) {
@@ -4811,7 +4898,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       try {
         await request("/api/schedules", "POST", {
           id: element("schedule-id").value,
-          device_id: element("schedule-device").value,
+          ...scheduleTargetFields(element("schedule-target").value),
           profile_id: element("schedule-profile").value,
           days_of_week: days,
           start_minute: timeToMinute("schedule-start"),
@@ -5594,9 +5681,29 @@ def _policies_payload(repository: ConfigRepository) -> Dict[str, Any]:
     }
 
 
+def _everyone_else_now(repository: ConfigRepository) -> Tuple[Optional[str], Optional[str]]:
+    """Return the profile everyone else gets this minute and the schedule giving it.
+
+    This is the settings' answer in the Pi's local time; the scheduler applies
+    it while the network runs.
+    """
+
+    schedule = active_schedule(
+        schedules=repository.list_schedules(),
+        everyone_else=True,
+        moment=datetime.fromtimestamp(time.time()),
+    )
+    if schedule is not None:
+        return schedule.profile_id, schedule.id
+    return repository.get_everyone_else_profile_id(), None
+
+
 def _everyone_else_payload(repository: ConfigRepository) -> Dict[str, Any]:
+    active_profile_id, active_schedule_id = _everyone_else_now(repository)
     return {
         "profile_id": repository.get_everyone_else_profile_id(),
+        "active_profile_id": active_profile_id,
+        "active_schedule_id": active_schedule_id,
         "unaffected_devices": [
             {"mac_address": device.mac_address, "name": device.name}
             for device in repository.list_unaffected_devices()
@@ -5908,6 +6015,8 @@ class ControlServer(HTTPServer):
                         "association_status_available"
                     ],
                     "devices": devices,
+                    # The list polls every 5 seconds, so its labels follow schedules.
+                    "everyone_else_profile_id": _everyone_else_now(self.repository)[0],
                 }
             )
         if path == "/api/observations":
@@ -6257,8 +6366,24 @@ class ControlServer(HTTPServer):
         if path == "/api/schedules":
             try:
                 schedule = _schedule_from_payload(payload)
+                if (
+                    schedule.device_id is not None
+                    and self.repository.get_device(schedule.device_id) is None
+                ):
+                    raise ValueError("device does not exist")
+                if (
+                    schedule.group_id is not None
+                    and self.repository.get_device_group(schedule.group_id) is None
+                ):
+                    raise ValueError("group does not exist")
+                if self.repository.get_profile(schedule.profile_id) is None:
+                    raise ValueError("profile does not exist")
             except (KeyError, TypeError, ValueError) as error:
                 return _bad_request("invalid schedule configuration", error)
+            if schedule.everyone_else and schedule.enabled and not self._everyone_else_counted():
+                capacity_error = self._capacity_error(adding=1)
+                if capacity_error is not None:
+                    return capacity_error
             self.repository.save_schedule(schedule)
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {"schedule": _schedule_payload(schedule)}
@@ -6670,7 +6795,7 @@ class ControlServer(HTTPServer):
                 return _bad_request(
                     "invalid everyone-else profile", ValueError("profile does not exist")
                 )
-            if profile_id is not None and self.repository.get_everyone_else_profile_id() is None:
+            if profile_id is not None and not self._everyone_else_counted():
                 capacity_error = self._capacity_error(adding=1)
                 if capacity_error is not None:
                     return capacity_error
@@ -7045,6 +7170,15 @@ class ControlServer(HTTPServer):
             {"error": f"{mac_address} is on the unaffected list; remove it there first"}
         )
 
+    def _everyone_else_counted(self) -> bool:
+        """Return whether everyone else already holds a traffic class."""
+
+        # One class serves the saved profile and every schedule, whichever applies.
+        return self.repository.get_everyone_else_profile_id() is not None or any(
+            schedule.everyone_else and schedule.enabled
+            for schedule in self.repository.list_schedules()
+        )
+
     def _capacity_error(self, *, adding: int) -> Optional[Tuple[int, str, bytes]]:
         """Refuse a change that needs more traffic classes than the kernel allows."""
 
@@ -7053,7 +7187,7 @@ class ControlServer(HTTPServer):
             + sum(quota.enabled for quota in self.repository.list_service_quotas())
             + sum(quota.enabled for quota in self.repository.list_time_quotas())
             + sum(assignment.enabled for assignment in self.repository.list_service_assignments())
-            + (self.repository.get_everyone_else_profile_id() is not None)
+            + self._everyone_else_counted()
         )
         if in_use + adding <= MAX_SHAPED_MARKS_PER_PLAN:
             return None
@@ -7655,12 +7789,14 @@ def _device_from_payload(payload: Dict[str, Any]) -> Device:
 def _schedule_from_payload(payload: Dict[str, Any]) -> Schedule:
     return Schedule(
         id=payload["id"],
-        device_id=payload["device_id"],
+        device_id=payload.get("device_id"),
         profile_id=payload["profile_id"],
         days_of_week=_list_field(payload, "days_of_week", required=True),
         start_minute=payload["start_minute"],
         end_minute=payload["end_minute"],
         enabled=payload.get("enabled", True),
+        group_id=payload.get("group_id"),
+        everyone_else=payload.get("everyone_else", False),
     )
 
 

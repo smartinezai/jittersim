@@ -424,11 +424,14 @@ class RuntimeScheduler:
             group = groups_by_device.get(device.id)
             progression = active_progressions.get(device.id)
             timer = None if progression is not None else active_timers.get(device.id)
-            schedule = None if timer is not None or progression is not None else active_schedule(
-                schedules=schedules,
-                device_id=device.id,
-                moment=moment,
-            )
+            schedule = None
+            if timer is None and progression is None:
+                # A device's own schedule wins over its group's.
+                schedule = active_schedule(schedules=schedules, device_id=device.id, moment=moment)
+                if schedule is None and group is not None:
+                    schedule = active_schedule(
+                        schedules=schedules, group_id=group.id, moment=moment
+                    )
             group_profile_id = group.profile_id if group is not None else None
             source_profile_id = (
                 group_profile_id or device.profile_id
@@ -519,7 +522,15 @@ class RuntimeScheduler:
             runtime_devices.append(replace(device, profile_id=runtime_profile_id))
 
         everyone_else = None
-        everyone_else_profile_id = repository.get_everyone_else_profile_id()
+        everyone_else_schedule = active_schedule(
+            schedules=schedules, everyone_else=True, moment=moment
+        )
+        # A schedule can give everyone else a profile even when none is saved.
+        everyone_else_profile_id = (
+            everyone_else_schedule.profile_id
+            if everyone_else_schedule is not None
+            else repository.get_everyone_else_profile_id()
+        )
         if everyone_else_profile_id is not None:
             profile = profiles.get(everyone_else_profile_id)
             if profile is None:

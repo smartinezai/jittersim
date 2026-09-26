@@ -55,6 +55,22 @@ MIN_TRAFFIC_RATE_KBIT = 100
 MAX_TRAFFIC_RATE_KBIT = 1_000_000
 TRAFFIC_RATE_STEP_KBIT = 100
 DEFAULT_ISP_DOWNLOAD_KBIT = 100_000
+# A schedule targets exactly one device, group or everyone else. Older
+# databases get this table through _upgrade_schedules_table.
+_SCHEDULES_TABLE_SQL = """
+    CREATE TABLE IF NOT EXISTS {name} (
+        id TEXT PRIMARY KEY,
+        device_id TEXT REFERENCES devices(id) ON DELETE CASCADE,
+        group_id TEXT REFERENCES device_groups(id) ON DELETE CASCADE,
+        everyone_else INTEGER NOT NULL DEFAULT 0,
+        profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+        days_json TEXT NOT NULL,
+        start_minute INTEGER NOT NULL,
+        end_minute INTEGER NOT NULL,
+        enabled INTEGER NOT NULL,
+        CHECK ((device_id IS NOT NULL) + (group_id IS NOT NULL) + (everyone_else = 1) = 1)
+    )
+"""
 
 
 def _serialize_impairment(impairment: Impairment) -> str:
@@ -182,15 +198,6 @@ class ConfigRepository:
             CREATE TABLE IF NOT EXISTS device_group_members (
                 group_id TEXT NOT NULL REFERENCES device_groups(id) ON DELETE CASCADE,
                 device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS schedules (
-                id TEXT PRIMARY KEY,
-                device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
-                profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
-                days_json TEXT NOT NULL,
-                start_minute INTEGER NOT NULL,
-                end_minute INTEGER NOT NULL,
-                enabled INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS timers (
                 id TEXT PRIMARY KEY,
@@ -349,12 +356,52 @@ class ConfigRepository:
             INSERT OR IGNORE INTO everyone_else_settings (id, profile_id) VALUES (1, NULL);
             """
         )
+        self._connection.execute(_SCHEDULES_TABLE_SQL.format(name="schedules"))
+        self._upgrade_schedules_table()
         self._add_column_if_missing("profiles", "settings_json", "TEXT NOT NULL DEFAULT '{}'")
         self._add_column_if_missing("devices", "mac_address", "TEXT")
         self._add_column_if_missing("progressions", "traffic_target_bytes", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing("progressions", "traffic_baseline_bytes", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing("service_quotas", "weight_percent", "INTEGER NOT NULL DEFAULT 100")
         self._commit()
+
+    def _upgrade_schedules_table(self) -> None:
+        """Let older schedules tables hold group and everyone-else schedules."""
+
+        def upgraded() -> bool:
+            columns = self._connection.execute("PRAGMA table_info(schedules)").fetchall()
+            return any(column["name"] == "group_id" for column in columns)
+
+        if upgraded():
+            return
+        # SQLite can't drop NOT NULL from device_id, so the rows move to a new
+        # table. No other table refers to schedules.
+        try:
+            self._connection.commit()
+            # The write lock comes first, and the check again under it, so two
+            # processes that open an old database at once don't both copy it.
+            self._connection.execute("BEGIN IMMEDIATE")
+            if not upgraded():
+                self._connection.execute(_SCHEDULES_TABLE_SQL.format(name="schedules_upgrade"))
+                # A schedule whose device or profile is gone applies to nothing,
+                # and copying it would fail the foreign keys.
+                self._connection.execute(
+                    """
+                    INSERT INTO schedules_upgrade (
+                        id, device_id, profile_id, days_json, start_minute, end_minute, enabled
+                    )
+                    SELECT id, device_id, profile_id, days_json, start_minute, end_minute, enabled
+                    FROM schedules
+                    WHERE device_id IN (SELECT id FROM devices)
+                      AND profile_id IN (SELECT id FROM profiles)
+                    """
+                )
+                self._connection.execute("DROP TABLE schedules")
+                self._connection.execute("ALTER TABLE schedules_upgrade RENAME TO schedules")
+            self._connection.commit()
+        except sqlite3.Error as error:
+            self._connection.rollback()
+            raise StorageError("could not upgrade the saved schedules") from error
 
     def _add_column_if_missing(self, table_name: str, column_name: str, column_definition: str) -> None:
         columns = {
@@ -1081,10 +1128,13 @@ class ConfigRepository:
             self._connection.execute(
                 """
                 INSERT INTO schedules (
-                    id, device_id, profile_id, days_json, start_minute, end_minute, enabled
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    id, device_id, group_id, everyone_else, profile_id, days_json,
+                    start_minute, end_minute, enabled
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     device_id = excluded.device_id,
+                    group_id = excluded.group_id,
+                    everyone_else = excluded.everyone_else,
                     profile_id = excluded.profile_id,
                     days_json = excluded.days_json,
                     start_minute = excluded.start_minute,
@@ -1094,6 +1144,8 @@ class ConfigRepository:
                 (
                     schedule.id,
                     schedule.device_id,
+                    schedule.group_id,
+                    int(schedule.everyone_else),
                     schedule.profile_id,
                     json.dumps(list(schedule.days_of_week)),
                     schedule.start_minute,
@@ -1117,7 +1169,8 @@ class ConfigRepository:
 
         rows = self._connection.execute(
             """
-            SELECT id, device_id, profile_id, days_json, start_minute, end_minute, enabled
+            SELECT id, device_id, group_id, everyone_else, profile_id, days_json,
+                   start_minute, end_minute, enabled
             FROM schedules ORDER BY id
             """
         ).fetchall()
@@ -2302,6 +2355,8 @@ class ConfigRepository:
                 start_minute=row["start_minute"],
                 end_minute=row["end_minute"],
                 enabled=bool(row["enabled"]),
+                group_id=row["group_id"],
+                everyone_else=bool(row["everyone_else"]),
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
             raise StorageError("stored schedule is malformed") from error

@@ -3,6 +3,7 @@ import contextlib
 import hashlib
 import http.client
 import json
+import os
 import re
 import shutil
 import socket
@@ -12,10 +13,12 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime
 from email.message import Message
 from html.parser import HTMLParser
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import urlencode
 
 from jittersim.api.server import (
@@ -28,9 +31,11 @@ from jittersim.api.session import issue_session
 from jittersim.config.models import (
     DataLimit,
     Device,
+    DeviceGroup,
     DomainObservation,
     Impairment,
     Profile,
+    Schedule,
     UnaffectedDevice,
 )
 from jittersim.config.storage import ConfigRepository
@@ -192,6 +197,23 @@ def create_test_certificate(directory: Path):
         stderr=subprocess.DEVNULL,
     )
     return certificate, key
+
+
+@contextlib.contextmanager
+def local_time_zone(name: str):
+    """Run with the process's local time in another zone."""
+
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = name
+    time.tzset()
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
 
 
 class DashboardStructure(HTMLParser):
@@ -711,9 +733,10 @@ class ControlServerTests(unittest.TestCase):
 
     def test_the_traffic_menu_offers_everyone_else_while_it_has_a_profile(self) -> None:
         result = self._run_dashboard_functions(
-            ["updateTrafficDeviceOptions"],
+            ["updateTrafficDeviceOptions", "everyoneElseAssigned"],
             "const EVERYONE_ELSE_TRAFFIC = '__everyone_else__';\n"
             "let everyoneElse = {profile_id: 'slow'};\n"
+            "let savedSchedules = [];\n"
             "const select = {options: [], value: '',\n"
             "  replaceChildren() { this.options = []; },\n"
             "  appendChild(option) { this.options.push(option); }};\n"
@@ -729,14 +752,19 @@ class ControlServerTests(unittest.TestCase):
             "const kept = [select.value, resets];\n"
             "everyoneElse = {profile_id: null};\n"
             "updateTrafficDeviceOptions(devices);\n"
-            "console.log(JSON.stringify({offered: offered, kept: kept,\n"
-            "  after: [select.options.map((option) => option.value), select.value, resets]}));\n",
+            "const after = [select.options.map((option) => option.value), select.value, resets];\n"
+            "savedSchedules = [{everyone_else: true, enabled: true}];\n"
+            "updateTrafficDeviceOptions(devices);\n"
+            "console.log(JSON.stringify({offered: offered, kept: kept, after: after,\n"
+            "  scheduled: select.options.map((option) => option.value)}));\n",
         )
 
         self.assertEqual(result["offered"], ["all", "alice", "__everyone_else__"])
         self.assertEqual(result["kept"], ["__everyone_else__", 0])
         # Without a profile the choice goes, and the graph starts again for "all".
         self.assertEqual(result["after"], [["all", "alice"], "all", 1])
+        # An everyone-else schedule brings the choice back.
+        self.assertEqual(result["scheduled"], ["all", "alice", "__everyone_else__"])
 
     def test_everyone_else_shows_its_own_queue_limits(self) -> None:
         result = self._run_dashboard_functions(
@@ -1831,6 +1859,7 @@ class ControlServerTests(unittest.TestCase):
                         "unaffected": False,
                     }
                 ],
+                "everyone_else_profile_id": None,
             },
         )
 
@@ -2299,7 +2328,10 @@ class ControlServerTests(unittest.TestCase):
             # A saved device keeps its own profile even when its address is listed.
             "  connectedTreatment({unaffected: true, assigned_profile_id: 'slow'}),\n"
             "];\n"
-            "everyoneElse = {profile_id: '3g', unaffected_devices: []};\n"
+            "everyoneElse = {profile_id: '3g', active_profile_id: '3g'};\n"
+            "labels.push(connectedTreatment({unaffected: false, assigned_profile_id: null}));\n"
+            # A schedule can give everyone else a profile for now.
+            "everyoneElse = {profile_id: null, active_profile_id: 'slow'};\n"
             "labels.push(connectedTreatment({unaffected: false, assigned_profile_id: null}));\n"
             "console.log(JSON.stringify(labels));\n",
         )
@@ -2312,8 +2344,80 @@ class ControlServerTests(unittest.TestCase):
                 "Normal connection",
                 "Saved device: Slow (also on the unaffected list)",
                 "Everyone else: 3G",
+                "Everyone else: Slow",
             ],
         )
+
+    def test_schedules_can_target_devices_groups_and_everyone_else(self) -> None:
+        targets = (
+            "[{device_id: 'alice', group_id: null, everyone_else: false},\n"
+            " {device_id: null, group_id: 'family', everyone_else: false},\n"
+            " {device_id: null, group_id: null, everyone_else: true},\n"
+            " {device_id: null, group_id: 'gone', everyone_else: false}]"
+        )
+        result = self._run_dashboard_functions(
+            [
+                "deviceName", "scheduleTargetFields", "scheduleTargetValue",
+                "scheduleTargetName", "scheduleTargetOptions",
+            ],
+            "const devices = [{id: 'alice', name: 'Alice', ipv4_address: '192.168.50.10'}];\n"
+            "let groups = [{id: 'family', name: 'Family', device_ids: ['alice']}];\n",
+            f"const targets = {targets};\n"
+            "const fields = ['device:alice', 'group:family', 'everyone-else'].map(\n"
+            "  (value) => scheduleTargetFields(value));\n"
+            "const options = scheduleTargetOptions();\n"
+            "const names = targets.map(scheduleTargetName);\n"
+            "groups = [];\n"
+            "console.log(JSON.stringify({\n"
+            "  fields: fields,\n"
+            "  values: targets.map(scheduleTargetValue),\n"
+            "  names: names,\n"
+            "  options: options,\n"
+            "  withoutGroups: scheduleTargetOptions().map((option) => option.value),\n"
+            "}));\n",
+        )
+
+        self.assertEqual(
+            result["fields"],
+            [
+                {"device_id": "alice", "group_id": None, "everyone_else": False},
+                {"device_id": None, "group_id": "family", "everyone_else": False},
+                {"device_id": None, "group_id": None, "everyone_else": True},
+            ],
+        )
+        self.assertEqual(
+            result["values"], ["device:alice", "group:family", "everyone-else", "group:gone"]
+        )
+        self.assertEqual(
+            result["names"], ["Alice", "Group Family", "Everyone else", "Group gone"]
+        )
+        self.assertEqual(
+            result["options"],
+            [
+                {"group": "Devices", "value": "device:alice", "label": "Alice (192.168.50.10)"},
+                {"group": "Groups", "value": "group:family", "label": "Family"},
+                {"group": None, "value": "everyone-else", "label": "Everyone else"},
+            ],
+        )
+        self.assertEqual(result["withoutGroups"], ["device:alice", "everyone-else"])
+
+    def test_an_everyone_else_schedule_counts_as_giving_it_a_profile(self) -> None:
+        result = self._run_dashboard_functions(
+            ["everyoneElseAssigned"],
+            "let everyoneElse = {profile_id: null};\n"
+            "let savedSchedules = [{everyone_else: false, enabled: true}];\n",
+            "const answers = [everyoneElseAssigned()];\n"
+            "savedSchedules.push({everyone_else: true, enabled: false});\n"
+            "answers.push(everyoneElseAssigned());\n"
+            "savedSchedules.push({everyone_else: true, enabled: true});\n"
+            "answers.push(everyoneElseAssigned());\n"
+            "savedSchedules = [];\n"
+            "everyoneElse = {profile_id: 'slow'};\n"
+            "answers.push(everyoneElseAssigned());\n"
+            "console.log(JSON.stringify(answers));\n",
+        )
+
+        self.assertEqual(result, [False, False, True, True])
 
     def test_dashboard_messages_say_when_a_change_takes_effect(self) -> None:
         messages = self._run_dashboard_functions(
@@ -2697,7 +2801,8 @@ class ControlServerTests(unittest.TestCase):
 
     def test_getting_started_waits_for_the_dashboard_and_keeps_focus(self) -> None:
         result = self._run_dashboard_functions(
-            ["gettingStartedSteps", "renderGettingStarted"],
+            ["gettingStartedSteps", "renderGettingStarted", "everyoneElseAssigned"],
+            "let savedSchedules = [];\n"
             "let dashboardLoaded = false;\n"
             "let gettingStartedKey = '';\n"
             "let helperConfigured = true;\n"
@@ -3187,6 +3292,277 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(policies["mac"]["mode"], "denylist")
         self.assertEqual(policies["websites"]["blocked_domains"], ["ads.example.com"])
 
+    SCHEDULE_WINDOW = {
+        "profile_id": "slow", "days_of_week": [0], "start_minute": 540, "end_minute": 1020
+    }
+
+    def test_saves_group_and_everyone_else_schedules(self) -> None:
+        self.repository.save_device_group(DeviceGroup("family", "Family", ("alice",)))
+
+        group_status, _, group_body = self.server.write_response_for(
+            "/api/schedules", {"id": "family-day", "group_id": "family", **self.SCHEDULE_WINDOW}
+        )
+        others_status, _, others_body = self.server.write_response_for(
+            "/api/schedules", {"id": "others-day", "everyone_else": True, **self.SCHEDULE_WINDOW}
+        )
+
+        self.assertEqual((group_status, others_status), (200, 200), (group_body, others_body))
+        self.assertEqual(json.loads(group_body)["schedule"]["group_id"], "family")
+        self.assertTrue(json.loads(others_body)["schedule"]["everyone_else"])
+        _, _, body = self.server.response_for("/api/schedules")
+        self.assertEqual(
+            [
+                (schedule["id"], schedule["device_id"], schedule["group_id"])
+                for schedule in json.loads(body)["schedules"]
+            ],
+            [("family-day", None, "family"), ("others-day", None, None)],
+        )
+
+    def test_a_schedule_must_name_one_existing_target(self) -> None:
+        cases = {
+            "device does not exist": {"device_id": "ghost"},
+            "group does not exist": {"group_id": "ghost"},
+            "exactly one of a device": {},
+        }
+        for message, target in cases.items():
+            with self.subTest(message=message):
+                status, _, body = self.server.write_response_for(
+                    "/api/schedules", {"id": "bad", **target, **self.SCHEDULE_WINDOW}
+                )
+                self.assertEqual(status, 400)
+                self.assertIn(message, json.loads(body)["error"])
+
+    def test_everyone_else_schedules_use_one_traffic_class(self) -> None:
+        for index in range(1, 14):
+            self.repository.save_device(
+                Device(f"d{index}", f"D{index}", f"192.168.50.{20 + index}", "slow")
+            )
+        others = {"everyone_else": True, **self.SCHEDULE_WINDOW}
+
+        # 14 devices: the first everyone-else schedule takes the last class.
+        first, _, _ = self.server.write_response_for("/api/schedules", {"id": "a", **others})
+        self.repository.save_device(Device("d14", "D14", "192.168.50.34", "slow"))
+        # A second schedule or a profile for everyone else needs no new class...
+        second, _, _ = self.server.write_response_for("/api/schedules", {"id": "b", **others})
+        profile, _, _ = self.server.write_response_for(
+            "/api/everyone-else", {"profile_id": "slow"}
+        )
+        # ...but a new device does.
+        device, _, _ = self.server.write_response_for(
+            "/api/devices",
+            {"id": "d15", "name": "D15", "ipv4_address": "192.168.50.35", "profile_id": "slow"},
+        )
+
+        self.assertEqual((first, second, profile, device), (200, 200, 200, 409))
+
+    def test_the_first_everyone_else_schedule_needs_a_free_traffic_class(self) -> None:
+        for index in range(1, 15):
+            self.repository.save_device(
+                Device(f"d{index}", f"D{index}", f"192.168.50.{20 + index}", "slow")
+            )
+
+        status, _, body = self.server.write_response_for(
+            "/api/schedules", {"id": "others", "everyone_else": True, **self.SCHEDULE_WINDOW}
+        )
+
+        self.assertEqual(status, 409, body)
+        self.assertEqual(self.repository.list_schedules(), ())
+
+    def test_everyone_else_reports_the_profile_it_gets_now(self) -> None:
+        self.repository.save_schedule(
+            Schedule(
+                id="others-day", device_id=None, everyone_else=True, profile_id="slow",
+                days_of_week=(0,), start_minute=540, end_minute=1_020,
+            )
+        )
+        # 21 September 2026 is a Monday. The Pi's local time decides, so run in
+        # a zone away from UTC, where the CI runs.
+        answers = []
+        with local_time_zone("America/New_York"):
+            for hour in (10, 20):
+                moment = datetime(2026, 9, 21, hour, 0).timestamp()
+                with patch("time.time", return_value=moment):
+                    _, _, body = self.server.response_for("/api/everyone-else")
+                    _, _, connected = self.server.response_for("/api/connected-devices")
+                answers.append(json.loads(body))
+
+        self.assertEqual(
+            [(answer["active_profile_id"], answer["active_schedule_id"]) for answer in answers],
+            [("slow", "others-day"), (None, None)],
+        )
+        self.assertEqual([answer["profile_id"] for answer in answers], [None, None])
+
+    def test_connected_clients_carry_everyone_elses_profile_this_minute(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.repository.save_schedule(
+            Schedule(
+                id="others-day", device_id=None, everyone_else=True, profile_id="slow",
+                days_of_week=(0,), start_minute=540, end_minute=1_020,
+            )
+        )
+        answers = []
+        for hour in (10, 20):
+            moment = datetime(2026, 9, 21, hour, 0).timestamp()
+            with patch("time.time", return_value=moment):
+                _, _, body = self.server.response_for("/api/connected-devices")
+            answers.append(json.loads(body)["everyone_else_profile_id"])
+
+        # The connected-client list polls every 5 seconds, so its labels follow schedules.
+        self.assertEqual(answers, ["slow", None])
+
+    def test_a_schedule_names_a_missing_profile(self) -> None:
+        status, _, body = self.server.write_response_for(
+            "/api/schedules",
+            {"id": "work", "device_id": "alice", **dict(self.SCHEDULE_WINDOW, profile_id="ghost")},
+        )
+
+        self.assertEqual(status, 400)
+        self.assertIn("profile does not exist", json.loads(body)["error"])
+
+    def test_an_everyone_else_schedule_holds_a_traffic_class_for_new_devices(self) -> None:
+        for index in range(1, 14):
+            self.repository.save_device(
+                Device(f"d{index}", f"D{index}", f"192.168.50.{20 + index}", "slow")
+            )
+        self.server.write_response_for(
+            "/api/schedules", {"id": "others", "everyone_else": True, **self.SCHEDULE_WINDOW}
+        )
+        new_device = {"id": "d14", "name": "D14", "ipv4_address": "192.168.50.34",
+                      "profile_id": "slow"}
+
+        # 14 devices and everyone else fill the 15 classes.
+        full, _, _ = self.server.write_response_for("/api/devices", new_device)
+        self.server.write_response_for("/api/schedules/delete", {"id": "others"})
+        freed, _, _ = self.server.write_response_for("/api/devices", new_device)
+
+        self.assertEqual((full, freed), (409, 200))
+
+    def test_a_turned_off_everyone_else_schedule_holds_no_traffic_class(self) -> None:
+        for index in range(1, 15):
+            self.repository.save_device(
+                Device(f"d{index}", f"D{index}", f"192.168.50.{20 + index}", "slow")
+            )
+        self.repository.save_schedule(
+            Schedule(
+                id="others", device_id=None, everyone_else=True, profile_id="slow",
+                days_of_week=(0,), start_minute=540, end_minute=1_020, enabled=False,
+            )
+        )
+
+        status, _, _ = self.server.write_response_for("/api/everyone-else", {"profile_id": "slow"})
+
+        self.assertEqual(status, 409)
+
+    def test_each_client_poll_brings_everyone_elses_profile(self) -> None:
+        result = self._run_dashboard_functions(
+            ["followEveryoneElseProfile"],
+            "let everyoneElse = {profile_id: null, active_profile_id: 'slow'};\n",
+            "followEveryoneElseProfile({devices: [], everyone_else_profile_id: null});\n"
+            "const afterWindow = everyoneElse.active_profile_id;\n"
+            # Configuration-only mode lists no clients and says nothing about it.
+            "followEveryoneElseProfile({available: false, devices: []});\n"
+            "console.log(JSON.stringify([afterWindow, everyoneElse.active_profile_id,\n"
+            "  everyoneElse.profile_id]));\n",
+        )
+
+        self.assertEqual(result, [None, None, None])
+
+    def test_editing_a_schedule_keeps_its_target(self) -> None:
+        result = self._run_dashboard_functions(
+            ["scheduleTargetValue", "editSchedule"],
+            "const fields = {};\n"
+            "const element = (id) => (fields[id] = fields[id] ||\n"
+            "  {value: '', scrollIntoView() {}});\n"
+            "const document = {querySelectorAll: () => []};\n"
+            "function syncScheduleDays() {}\n"
+            "function formatMinute(minute) { return String(minute); }\n",
+            "editSchedule({id: 'family-day', device_id: null, group_id: 'family',\n"
+            "  everyone_else: false, profile_id: 'slow', days_of_week: [0],\n"
+            "  start_minute: 540, end_minute: 1020});\n"
+            "console.log(JSON.stringify(fields['schedule-target'].value));\n",
+        )
+
+        self.assertEqual(result, "group:family")
+
+    def test_loading_schedules_updates_what_depends_on_them(self) -> None:
+        result = self._run_dashboard_functions(
+            ["loadSchedules"],
+            "let savedSchedules = [];\n"
+            "const devices = [];\n"
+            "const schedules = [{id: 'others', everyone_else: true, enabled: true}];\n"
+            "async function request() { return {schedules: schedules}; }\n"
+            "const rendered = [];\n"
+            "function renderSchedules(list) { rendered.push(list.length); }\n"
+            "const menus = [];\n"
+            "function updateTrafficDeviceOptions() { menus.push(savedSchedules.length); }\n",
+            "loadSchedules().then(() => console.log(JSON.stringify({\n"
+            "  saved: savedSchedules.length, rendered: rendered, menus: menus})));\n",
+        )
+
+        # Live traffic offers Everyone else once an everyone-else schedule loads.
+        self.assertEqual(result, {"saved": 1, "rendered": [1], "menus": [1]})
+
+    def test_the_schedule_target_menu_keeps_its_choice_when_rebuilt(self) -> None:
+        result = self._run_dashboard_functions(
+            ["deviceName", "scheduleTargetOptions", "renderScheduleTargets"],
+            "let devices = [{id: 'alice', name: 'Alice', ipv4_address: '192.168.50.10'}];\n"
+            "let groups = [{id: 'family', name: 'Family'}];\n"
+            "const node = (tag) => ({tag: tag, children: [], value: '', label: '',\n"
+            "  appendChild(child) { this.children.push(child); }});\n"
+            # Like a real menu, it shows its first option unless told otherwise.
+            "const select = {children: [], chosen: '',\n"
+            "  appendChild(child) { this.children.push(child); },\n"
+            "  replaceChildren() { this.children = []; this.chosen = ''; },\n"
+            "  get options() { return this.children.flatMap((child) =>\n"
+            "    child.tag === 'optgroup' ? child.children : [child]); },\n"
+            "  get value() { const values = this.options.map((option) => option.value);\n"
+            "    return values.includes(this.chosen) ? this.chosen : values[0] || ''; },\n"
+            "  set value(value) { this.chosen = value; }};\n"
+            "const element = () => select;\n"
+            "const document = {createElement: node};\n",
+            "renderScheduleTargets();\n"
+            "select.value = 'group:family';\n"
+            "devices = devices.concat([{id: 'bob', name: 'Bob', ipv4_address: '192.168.50.11'}]);\n"
+            "renderScheduleTargets();\n"
+            "const kept = select.value;\n"
+            "groups = [];\n"
+            "select.value = 'group:family';\n"
+            "renderScheduleTargets();\n"
+            "console.log(JSON.stringify({kept: kept,\n"
+            "  labels: select.children.map((child) => child.label || child.value),\n"
+            "  gone: select.value}));\n",
+        )
+
+        self.assertEqual(result["kept"], "group:family")
+        self.assertEqual(result["labels"], ["Devices", "everyone-else"])
+        # A group that went can't stay chosen.
+        self.assertEqual(result["gone"], "device:alice")
+
+    def test_imports_group_and_everyone_else_schedules(self) -> None:
+        self.repository.save_device_group(DeviceGroup("family", "Family", ("alice",)))
+        for payload in (
+            {"id": "family-day", "group_id": "family", **self.SCHEDULE_WINDOW},
+            {"id": "others-day", "everyone_else": True, **self.SCHEDULE_WINDOW},
+        ):
+            saved, _, _ = self.server.write_response_for("/api/schedules", payload)
+            self.assertEqual(saved, 200)
+        exported = self._export(self.server)
+        schedules = self.repository.list_schedules()
+        # Exports from before group schedules have no target fields but a device.
+        older = dict(exported, schedules=[
+            {"id": "work", "device_id": "alice", **self.SCHEDULE_WINDOW}
+        ])
+
+        status, _, body = self.server.write_response_for("/api/import", exported)
+        imported = self.repository.list_schedules()
+        older_status, _, older_body = self.server.write_response_for("/api/import", older)
+
+        self.assertEqual((status, older_status), (200, 200), (body, older_body))
+        self.assertEqual(imported, schedules)
+        self.assertEqual(
+            [schedule.device_id for schedule in self.repository.list_schedules()], ["alice"]
+        )
+
     def test_starts_and_cancels_a_profile_timer(self) -> None:
         status, _, body = self.server.write_response_for(
             "/api/timers",
@@ -3460,7 +3836,12 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertEqual(
             json.loads(self.server.response_for("/api/everyone-else")[2]),
-            {"profile_id": "slow", "unaffected_devices": []},
+            {
+                "profile_id": "slow",
+                "active_profile_id": "slow",
+                "active_schedule_id": None,
+                "unaffected_devices": [],
+            },
         )
         self.server.write_response_for("/api/everyone-else", {"profile_id": None})
         self.assertIsNone(self.repository.get_everyone_else_profile_id())

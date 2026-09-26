@@ -1011,5 +1011,155 @@ class EveryoneElseStorageTests(unittest.TestCase):
         self.assertIsNone(self.repository.get_device_by_mac_address("bb:bb:bb:bb:bb:bb"))
 
 
+class TargetScheduleStorageTests(unittest.TestCase):
+    WINDOW = {
+        "profile_id": "slow", "days_of_week": (0, 1), "start_minute": 540, "end_minute": 1_020
+    }
+    OLD_SCHEDULES_TABLE = """
+        DROP TABLE schedules;
+        CREATE TABLE schedules (
+            id TEXT PRIMARY KEY,
+            device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+            profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+            days_json TEXT NOT NULL,
+            start_minute INTEGER NOT NULL,
+            end_minute INTEGER NOT NULL,
+            enabled INTEGER NOT NULL
+        );
+        INSERT INTO schedules VALUES ('work-hours', 'alice', 'slow', '[0, 1]', 540, 1020, 1);
+    """
+
+    def setUp(self) -> None:
+        self.repository = ConfigRepository(":memory:")
+        self._save_family(self.repository)
+
+    def tearDown(self) -> None:
+        self.repository.close()
+
+    @staticmethod
+    def _save_family(repository: ConfigRepository) -> None:
+        repository.save_profile(Profile(id="slow", name="Slow"))
+        repository.save_device(Device("alice", "Alice", "192.168.50.10", "slow"))
+        repository.save_device_group(DeviceGroup("family", "Family", ("alice",)))
+
+    def test_round_trips_group_and_everyone_else_schedules(self) -> None:
+        device = Schedule(id="device-evening", device_id="alice", **self.WINDOW)
+        everyone = Schedule(
+            id="everyone-evening", device_id=None, everyone_else=True, **self.WINDOW
+        )
+        group = Schedule(id="group-evening", device_id=None, group_id="family", **self.WINDOW)
+        for schedule in (group, everyone, device):
+            self.repository.save_schedule(schedule)
+
+        self.assertEqual(self.repository.list_schedules(), (device, everyone, group))
+
+    def test_deleting_a_group_removes_its_schedules(self) -> None:
+        self.repository.save_schedule(
+            Schedule(id="group-evening", device_id=None, group_id="family", **self.WINDOW)
+        )
+        self.repository.save_schedule(
+            Schedule(id="everyone-evening", device_id=None, everyone_else=True, **self.WINDOW)
+        )
+
+        self.assertTrue(self.repository.delete_device_group("family"))
+
+        self.assertEqual(
+            [schedule.id for schedule in self.repository.list_schedules()], ["everyone-evening"]
+        )
+
+    def test_a_schedule_for_a_missing_group_is_refused(self) -> None:
+        with self.assertRaises(StorageError):
+            self.repository.save_schedule(
+                Schedule(id="nobody", device_id=None, group_id="nobody", **self.WINDOW)
+            )
+
+    def test_the_database_requires_exactly_one_target(self) -> None:
+        for schedule_id, device_id, group_id, everyone_else in (
+            ("none", None, None, 0),
+            ("two", "alice", "family", 0),
+            ("three", "alice", None, 1),
+        ):
+            with self.subTest(schedule_id=schedule_id):
+                with self.assertRaises(sqlite3.IntegrityError):
+                    self.repository._connection.execute(
+                        "INSERT INTO schedules (id, device_id, group_id, everyone_else, "
+                        "profile_id, days_json, start_minute, end_minute, enabled) "
+                        "VALUES (?, ?, ?, ?, 'slow', '[0]', 0, 60, 1)",
+                        (schedule_id, device_id, group_id, everyone_else),
+                    )
+
+    def test_a_schedule_can_switch_targets(self) -> None:
+        self.repository.save_schedule(Schedule(id="evening", device_id="alice", **self.WINDOW))
+        switched = Schedule(id="evening", device_id=None, group_id="family", **self.WINDOW)
+
+        self.repository.save_schedule(switched)
+
+        self.assertEqual(self.repository.list_schedules(), (switched,))
+
+    def test_profiles_group_and_everyone_else_schedules_use_are_named(self) -> None:
+        self.repository.save_schedule(
+            Schedule(id="group-evening", device_id=None, group_id="family", **self.WINDOW)
+        )
+        self.repository.save_schedule(
+            Schedule(id="everyone-evening", device_id=None, everyone_else=True, **self.WINDOW)
+        )
+
+        references = self.repository.profile_references("slow", now=0)
+
+        self.assertIn("schedule group-evening", references)
+        self.assertIn("schedule everyone-evening", references)
+
+    def test_the_upgrade_drops_schedules_whose_device_or_profile_is_gone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "jittersim.db"
+            with ConfigRepository(path) as repository:
+                self._save_family(repository)
+            connection = sqlite3.connect(path)
+            # The sqlite3 shell leaves foreign keys off, so such rows can exist.
+            connection.executescript(
+                self.OLD_SCHEDULES_TABLE
+                + "INSERT INTO schedules VALUES ('orphan', 'ghost', 'slow', '[0]', 0, 60, 1);"
+                + "INSERT INTO schedules VALUES ('lost', 'alice', 'gone', '[0]', 0, 60, 1);"
+            )
+            connection.close()
+
+            with ConfigRepository(path) as repository:
+                self.assertEqual(
+                    [schedule.id for schedule in repository.list_schedules()], ["work-hours"]
+                )
+
+    def test_existing_schedules_survive_the_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "jittersim.db"
+            with ConfigRepository(path) as repository:
+                self._save_family(repository)
+            connection = sqlite3.connect(path)
+            connection.executescript(self.OLD_SCHEDULES_TABLE)
+            connection.close()
+
+            with ConfigRepository(path) as repository:
+                self.assertEqual(
+                    repository.list_schedules(),
+                    (
+                        Schedule(
+                            id="work-hours", device_id="alice", profile_id="slow",
+                            days_of_week=(0, 1), start_minute=540, end_minute=1_020,
+                        ),
+                    ),
+                )
+                repository.save_schedule(
+                    Schedule(id="group-evening", device_id=None, group_id="family", **self.WINDOW)
+                )
+                self.assertEqual(
+                    repository._connection.execute("PRAGMA foreign_keys").fetchone()[0], 1
+                )
+            # Opening an upgraded database changes nothing.
+            with ConfigRepository(path) as repository:
+                self.assertEqual(len(repository.list_schedules()), 2)
+                # Deleting the only member deletes the group, and both cascades still work.
+                self.assertTrue(repository.delete_device("alice"))
+                self.assertEqual(repository.list_schedules(), ())
+
+
 if __name__ == "__main__":
     unittest.main()

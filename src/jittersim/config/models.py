@@ -312,21 +312,38 @@ class DomainObservation:
             raise ValidationError("first_seen must not be later than last_seen")
 
 
+def _validate_target(
+    device_id: Optional[str], group_id: Optional[str], everyone_else: bool, owner: str
+) -> None:
+    """Check that exactly one of a device, a group or everyone else is named."""
+
+    if device_id is not None:
+        _validate_identifier(device_id, "device_id")
+    if group_id is not None:
+        _validate_identifier(group_id, "group_id")
+    if not isinstance(everyone_else, bool):
+        raise ValidationError("everyone_else must be a boolean")
+    if (device_id is not None) + (group_id is not None) + everyone_else != 1:
+        raise ValidationError(f"a {owner} needs exactly one of a device, a group or everyone else")
+
+
 @dataclass(frozen=True)
 class Schedule:
-    """One repeating daily or weekly window for a device profile."""
+    """One repeating daily or weekly window for a device, a group or everyone else."""
 
     id: str
-    device_id: str
+    device_id: Optional[str]
     profile_id: str
     days_of_week: Tuple[int, ...]
     start_minute: int
     end_minute: int
     enabled: bool = True
+    group_id: Optional[str] = None
+    everyone_else: bool = False
 
     def __post_init__(self) -> None:
         _validate_identifier(self.id, "id")
-        _validate_identifier(self.device_id, "device_id")
+        _validate_target(self.device_id, self.group_id, self.everyone_else, "schedule")
         _validate_identifier(self.profile_id, "profile_id")
         if not isinstance(self.days_of_week, (list, tuple)) or not self.days_of_week:
             raise ValidationError("days_of_week must contain at least one day")
