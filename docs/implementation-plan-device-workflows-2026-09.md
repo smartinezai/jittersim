@@ -34,3 +34,24 @@ The product review and its proposed order were reviewed and approved on 26 Septe
 - Sessions: edited profiles do not rewrite completed results, malformed or excessive measurements are rejected and exported reports remain bounded.
 - Router and updates: authentication failures, unknown state, verified result, invalid bundle, interrupted staging, unsuccessful restart and successful rollback.
 - Run appropriate local tests before each focused commit. Review the combined change before the final authorized push. Pi deployment and radio/network acceptance remain unverified until hardware access is available.
+
+## Completed verification
+
+The completed changes passed 664 local tests plus 21 Linux network tests and
+the network smoke check. A clean Python 3.9 package build passed the supported
+suite. A clean Python 3.13 package build passed the real Chromium journeys.
+The journeys cover unfinished edits across Apply and unrelated saves, profile
+copy values, cancelling draft replacement, phone timer controls, stale reads,
+measurement attachments, session reports and settings restoration. Every tab
+fits a 320-pixel viewport. Lint, JavaScript syntax and shell syntax checks pass.
+
+Release tests cover unsafe archives, checksum rejection, duplicate requests,
+installation failures, unhealthy services, interrupted installation, recovery
+retry, private-file permissions and restoration of the independent recovery
+program. An HTTPS test verifies the installed certificate name and rejects a
+wrong name or a stopped service. Settings tests verify bounded retention,
+concurrent edits, preserved usage and immutable reports.
+
+Hardware acceptance remains open. This change has not been deployed to the Pi.
+The radio switch, actual service restart and recovery after power loss still
+need a trial on the target Pi with a wired management connection.

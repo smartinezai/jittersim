@@ -271,6 +271,24 @@ verified on the target Pi under normal household load.
 
 See the [household plan](docs/implementation-plan-household-access-point-2026-09.md).
 
+## Milestone 12: device workflows and repeatable tests
+
+- [x] Preserve unfinished forms across Apply, saves and background updates.
+- [x] Add phone device cards and controls shared by Overview and activity events.
+- [x] Preview upcoming rules with the scheduler's precedence and warn about overlaps.
+- [x] Retain stale readings with clear connection and Pi health information.
+- [x] Keep bounded settings history with preview and concurrent-edit protection.
+- [x] Record named test sessions with settings, events, notes and measurement reports.
+- [x] Duplicate profiles and provide manual copying when clipboard access fails.
+- [x] Read router Wi-Fi state before presenting one verified switch.
+- [x] Install administrator-approved releases with progress, health checks and recovery.
+- [x] Exercise complete browser journeys in CI against an installed package.
+- [ ] Verify radio changes, release installation and recovery on the actual Pi.
+- [ ] Design a separate client measurement page if phone setup needs to be simpler.
+
+The dashboard remains inaccessible from the test Wi-Fi. Release delivery uses
+locally staged bundles without storing GitHub credentials on the Pi.
+
 ## Deliberate non-goals
 
 These should remain outside the first class-project scope:
