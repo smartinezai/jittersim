@@ -1092,6 +1092,46 @@ class TargetScheduleStorageTests(unittest.TestCase):
                         (schedule_id, device_id, group_id, everyone_else),
                     )
 
+    def test_a_schedule_can_switch_targets(self) -> None:
+        self.repository.save_schedule(Schedule(id="evening", device_id="alice", **self.WINDOW))
+        switched = Schedule(id="evening", device_id=None, group_id="family", **self.WINDOW)
+
+        self.repository.save_schedule(switched)
+
+        self.assertEqual(self.repository.list_schedules(), (switched,))
+
+    def test_profiles_group_and_everyone_else_schedules_use_are_named(self) -> None:
+        self.repository.save_schedule(
+            Schedule(id="group-evening", device_id=None, group_id="family", **self.WINDOW)
+        )
+        self.repository.save_schedule(
+            Schedule(id="everyone-evening", device_id=None, everyone_else=True, **self.WINDOW)
+        )
+
+        references = self.repository.profile_references("slow", now=0)
+
+        self.assertIn("schedule group-evening", references)
+        self.assertIn("schedule everyone-evening", references)
+
+    def test_the_upgrade_drops_schedules_whose_device_or_profile_is_gone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "jittersim.db"
+            with ConfigRepository(path) as repository:
+                self._save_family(repository)
+            connection = sqlite3.connect(path)
+            # The sqlite3 shell leaves foreign keys off, so such rows can exist.
+            connection.executescript(
+                self.OLD_SCHEDULES_TABLE
+                + "INSERT INTO schedules VALUES ('orphan', 'ghost', 'slow', '[0]', 0, 60, 1);"
+                + "INSERT INTO schedules VALUES ('lost', 'alice', 'gone', '[0]', 0, 60, 1);"
+            )
+            connection.close()
+
+            with ConfigRepository(path) as repository:
+                self.assertEqual(
+                    [schedule.id for schedule in repository.list_schedules()], ["work-hours"]
+                )
+
     def test_existing_schedules_survive_the_upgrade(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "jittersim.db"
