@@ -96,6 +96,12 @@ def _ended(source: Source) -> Tuple[str, str, str]:
 def activity_events(
     old: Mapping[str, TargetState], new: Mapping[str, TargetState]
 ) -> List[Tuple[str, str]]:
+    return [(kind, message) for kind, message, _ in activity_records(old, new)]
+
+
+def activity_records(
+    old: Mapping[str, TargetState], new: Mapping[str, TargetState]
+) -> List[Tuple[str, str, Tuple[str, ...]]]:
     """Return (kind, message) for each change between two applied states.
 
     Rerolls are left out: a profile's values change, but its source doesn't.
@@ -104,10 +110,12 @@ def activity_events(
 
     # (subject, kind, separator, text) -> what each target went back to, if anything.
     entries: Dict[Tuple[str, str, str, str], List[Optional[str]]] = {}
+    targets: Dict[Tuple[str, str, str, str], List[str]] = {}
 
     def add(subject: str, event: Tuple[str, str, str], back: Optional[str] = None) -> None:
         kind, separator, text = event
         entries.setdefault((subject, kind, separator, text), []).append(back)
+        targets.setdefault((subject, kind, separator, text), []).append(key)
 
     for key, state in new.items():
         before = old.get(key)
@@ -139,5 +147,7 @@ def activity_events(
             # A group's members can go back to different settings.
             shared = backs[0] if len(set(backs)) == 1 else "each device's own settings"
             message += f", back to {shared}"
-        events.append((kind, message))
+        events.append(
+            (kind, message, tuple(dict.fromkeys(targets[(subject, kind, separator, text)])))
+        )
     return events

@@ -30,6 +30,7 @@ from jittersim.api.session import (
     session_from_cookie_header,
     session_is_valid,
 )
+from jittersim.api.workflows import WORKFLOW_WRITES, machine_health, read_workflow, write_workflow
 from jittersim.config.device_labels import (
     DeviceLabelError,
     guess_device_type,
@@ -66,8 +67,8 @@ from jittersim.config.models import (
 )
 from jittersim.config.storage import (
     ConfigRepository,
-    DeviceConflictError,
     DatabasePath,
+    DeviceConflictError,
     StorageError,
     TrafficRateSettingsError,
 )
@@ -77,19 +78,21 @@ from jittersim.config.transfer import (
     check_settings,
     settings_to_payload,
 )
+from jittersim.config.workflows import WorkflowStore
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import (
     MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN,
     MAX_SHAPED_MARKS_PER_PLAN,
     PlanError,
 )
-from jittersim.engine.plan import EVERYONE_ELSE_QUEUE_ID
 from jittersim.engine.conditions import device_conditions, everyone_else_condition
+from jittersim.engine.plan import EVERYONE_ELSE_QUEUE_ID
 from jittersim.engine.progression import progression_factor
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.scenarios import active_scenario_runs
 from jittersim.engine.schedules import active_schedule
 from jittersim.engine.service import compile_stored_plan
+from jittersim.engine.timeline import overlapping_schedules
 from jittersim.networking.helper import HelperClient, HelperClientError
 
 LOGGER = logging.getLogger(__name__)
@@ -150,6 +153,7 @@ WRITE_PATHS = frozenset(
         "/api/reset",
     )
 )
+WRITE_PATHS = WRITE_PATHS | WORKFLOW_WRITES | {"/api/schedules/preview"}
 ACTION_PATHS = frozenset(("/api/apply", "/api/reset", "/api/observations/scan"))
 
 
@@ -734,8 +738,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   <section class="card action-bar" aria-label="Network actions">
     <div class="action-copy">
       <h2>Network controls</h2>
-      <p class="action-description">Apply the saved configuration or return the test network
-        to its normal state.</p>
+      <p class="action-description">Apply saved settings or reset the network. Once applied, saved rule changes can take effect automatically.</p>
       <p id="runtime-summary" class="runtime-summary unknown">Checking runtime state...</p>
     </div>
     <div class="action-buttons">
@@ -1666,7 +1669,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       Round-trip chart of the added runs.</canvas>
     <p class="traffic-note">On a device connected to the test Wi-Fi, run
       <code>jittersim measure --label normal</code>, change the device's profile here, run it again
-      with another label, then add both files. The files stay in this browser.</p>
+      with another label, then add both files. Comparison files stay in this browser. Attaching them to a test session saves a copy on the Pi.</p>
   </section>
   </div>
   <div class="tab-panel" id="tab-setup" tabindex="-1" hidden>
@@ -1908,6 +1911,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function stopEditing(prefix) {
+      formDrafts.delete(prefix + "-form");
+      renderDraftNotice();
       if (prefix === "device") editingDeviceSnapshot = null;
       element(prefix + "-form").reset();
       element(prefix + "-id").readOnly = false;
@@ -2135,6 +2140,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           ],
           actions: [
             ["Edit", () => fillProfileForm(profile)],
+            ["Duplicate", () => duplicateProfile(profile)],
             ["Delete", (button) => deleteProfile(profile, button)]
           ]
         }))
@@ -2202,6 +2208,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           deviceConditionCell(device.id)
         ],
         actions: [
+          ["Open controls", () => openDevice(device.id)],
           ["Edit", () => fillDeviceForm(device)],
           ["Delete", (button) => deleteDevice(device, button)]
         ]
@@ -2214,6 +2221,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         ["Device", "Address", "Profile", "Condition"],
         rows
       );
+      renderDeviceCards();
     }
 
     function fillImpairment(prefix, values) {
@@ -2243,6 +2251,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     let savedProfileRandomness = DEFAULT_PROFILE_RANDOMNESS;
 
     function fillProfileForm(profile) {
+      if (guardDraft("profile-form", () => fillProfileForm(profile))) return;
       stopEditing("profile");
       element("profile-id").value = profile.id;
       element("profile-name").value = profile.name;
@@ -2391,6 +2400,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     });
 
     function fillDeviceForm(device) {
+      if (guardDraft("device-form", () => fillDeviceForm(device))) return;
       stopEditing("device");
       editingDeviceSnapshot = { ...device };
       element("device-id").value = device.id;
@@ -2448,6 +2458,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function editSchedule(schedule) {
+      if (guardDraft("schedule-form", () => editSchedule(schedule))) return;
       element("schedule-id").value = schedule.id;
       element("schedule-target").value = scheduleTargetValue(schedule);
       element("schedule-profile").value = schedule.profile_id;
@@ -2491,6 +2502,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       const headers = {};
       if (body !== undefined) headers["Content-Type"] = "application/json";
       const submitButton = pendingFormSubmitButton;
+      const submitForm = submitButton && submitButton.form;
+      const submittedDraft = submitForm && formDrafts.get(submitForm.id);
       pendingFormSubmitButton = null;
       try {
         const response = await fetch(path, {
@@ -2516,7 +2529,18 @@ DASHBOARD_HTML = r"""<!doctype html>
           error.status = response.status;
           throw error;
         }
+        if (submitForm && formDrafts.get(submitForm.id) === submittedDraft) {
+          formDrafts.delete(submitForm.id);
+          const error = submitForm.querySelector('.form-error');
+          if (error) error.remove();
+          renderDraftNotice();
+        }
+        if (method === "GET") recordRead(path, null);
         return data;
+      } catch (error) {
+        if (method === "GET") recordRead(path, error);
+        formError(submitForm, error.message);
+        throw error;
       } finally {
         if (submitButton) setButtonBusy(submitButton, false);
       }
@@ -3336,8 +3360,10 @@ DASHBOARD_HTML = r"""<!doctype html>
           device.device_type_source === "hostname suggestion" ? " (suggested)" : ""
         );
         details.append(address, metadata, deviceType);
+        if (device.assigned_device_id) details.append(actionButton("Open device controls", () => openDevice(device.assigned_device_id)));
         const treatment = document.createElement("p");
-        treatment.className = "connected-meta";
+        treatment.className = "connected-meta connected-treatment";
+        treatment.dataset.mac = device.mac_address;
         treatment.textContent = connectedTreatment(device);
         details.appendChild(treatment);
         if (device.hostname) {
@@ -3736,6 +3762,10 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function connectedTreatment(device) {
+      const id = device.assigned_device_id;
+      if (typeof deviceConditions !== "undefined" && deviceConditions.applied && id && Object.prototype.hasOwnProperty.call(deviceConditions.devices, id)) {
+        return "Active: " + appliedProfileCell(profileName(device.assigned_profile_id), deviceConditions.devices[id]).join(" · ");
+      }
       if (device.assigned_profile_id) {
         const saved = "Saved device: " + profileName(device.assigned_profile_id);
         // A saved device keeps its own profile even when its address is listed.
@@ -3857,18 +3887,13 @@ DASHBOARD_HTML = r"""<!doctype html>
           ? labelsResult.value.labels || []
           : [];
         if (connectedResult.status === "rejected") {
-          renderConnectedDevices({
-            available: false,
-            devices: [],
-            saved_labels: savedLabels,
-            message: connectedResult.reason.message
-          });
+          recordRead("/api/connected-devices", connectedResult.reason);
         } else {
           followEveryoneElseProfile(connectedResult.value);
           renderConnectedDevices({ ...connectedResult.value, saved_labels: savedLabels });
         }
       } catch (error) {
-        renderConnectedDevices({ available: false, devices: [], message: error.message });
+        recordRead("/api/connected-devices", error);
       } finally {
         connectedDevicesRequestInFlight = false;
       }
@@ -3878,7 +3903,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       try {
         renderUplink(await request("/api/uplink", "GET"));
       } catch (error) {
-        renderUplink({ available: false, message: error.message });
+        recordRead("/api/uplink", error);
       }
     }
 
@@ -4256,6 +4281,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function editServiceAssignment(assignment) {
+      if (guardDraft("service-assignment-form", () => editServiceAssignment(assignment))) return;
       element("service-assignment-id").value = assignment.id;
       element("service-assignment-name").value = assignment.name;
       element("service-assignment-device").value = assignment.device_id;
@@ -4306,6 +4332,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function editDataLimit(quota) {
+      if (guardDraft("data-limit-form", () => editDataLimit(quota))) return;
       element("data-limit-device").value = quota.device_id;
       element("data-limit-profile").value = quota.profile_id;
       setQuotaAmount("data-limit", quota.limit_bytes);
@@ -4320,6 +4347,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function editGroup(group) {
+      if (guardDraft("group-form", () => editGroup(group))) return;
       element("group-id").value = group.id;
       element("group-id").dataset.typed = "true";
       element("group-name").value = group.name;
@@ -4335,6 +4363,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function editGroupDataLimit(quota) {
+      if (guardDraft("group-data-limit-form", () => editGroupDataLimit(quota))) return;
       element("group-data-limit-group").value = quota.group_id;
       element("group-data-limit-profile").value = quota.profile_id;
       setQuotaAmount("group-data-limit", quota.limit_bytes);
@@ -4350,6 +4379,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function editServiceQuota(quota) {
+      if (guardDraft("service-quota-form", () => editServiceQuota(quota))) return;
       element("service-quota-id").value = quota.id;
       element("service-quota-id").dataset.typed = "true";
       element("service-quota-name").value = quota.name;
@@ -4375,6 +4405,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function editTimeQuota(quota) {
+      if (guardDraft("time-quota-form", () => editTimeQuota(quota))) return;
       element("time-quota-id").value = quota.id;
       element("time-quota-id").dataset.typed = "true";
       element("time-quota-name").value = quota.name;
@@ -4509,10 +4540,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         renderServiceQuotas(serviceQuotas);
         renderTimeQuotas(timeQuotas);
       } catch (error) {
-        renderDataLimits({ data_limits: [], error: error.message });
-        renderGroupDataLimits({ group_data_limits: [], error: error.message });
-        renderServiceQuotas({ service_quotas: [], error: error.message });
-        renderTimeQuotas({ time_quotas: [], error: error.message });
+        recordRead("/api/data-limits", error);
       }
     }
 
@@ -4520,7 +4548,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       try {
         renderServiceAssignments(await request("/api/service-assignments", "GET"));
       } catch (error) {
-        renderServiceAssignments({ service_assignments: [], error: error.message });
+        recordRead("/api/service-assignments", error);
       }
     }
 
@@ -4549,7 +4577,9 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     async function loadHealth() {
-      renderMode(await request("/api/health", "GET"));
+      const data = await request("/api/health", "GET");
+      renderMode(data);
+      renderSystemHealth(data);
     }
 
     async function loadProfiles() {
@@ -4571,6 +4601,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         "everyone-else-profile"
       ].forEach((selectId) => {
         const profileSelect = element(selectId);
+        const previousChoice = profileSelect.value;
         profileSelect.replaceChildren();
         const emptyLabels = {
           "group-profile": "Use each device profile",
@@ -4588,6 +4619,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           option.textContent = profile.name + " (" + profile.id + ")";
           profileSelect.appendChild(option);
         });
+        if (Array.from(profileSelect.options).some(option => option.value === previousChoice)) profileSelect.value = previousChoice;
       });
       // Rebuilding a menu drops its choice, and saving None would clear the profile.
       element("everyone-else-profile").value = everyoneElse.profile_id || "";
@@ -4735,7 +4767,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       try {
         renderTimers(await request("/api/timers", "GET"));
       } catch (error) {
-        renderTimers({ timers: [] });
+        recordRead("/api/timers", error);
       }
     }
 
@@ -4881,6 +4913,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function editScenario(scenario) {
+      if (guardDraft("scenario-form", () => editScenario(scenario))) return;
       element("scenario-id").value = scenario.id;
       element("scenario-name").value = scenario.name;
       element("scenario-loop").checked = scenario.loop;
@@ -4988,8 +5021,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           updateTrafficDeviceOptions(devices);
         }
       } catch (error) {
-        scenarioRunKey = "";
-        element("scenario-run-list").textContent = error.message;
+        recordRead("/api/scenarios", error);
       }
     }
 
@@ -5053,6 +5085,10 @@ DASHBOARD_HTML = r"""<!doctype html>
         const message = document.createElement("span");
         message.textContent = event.message;
         item.append(time, message);
+        (event.device_ids || []).forEach(id => {
+          const device = devices.find(candidate => candidate.id === id);
+          if (device) item.append(actionButton("Open " + device.name, () => openDevice(id)));
+        });
         list.appendChild(item);
       });
     }
@@ -5067,11 +5103,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         renderActivity((await request("/api/activity", "GET")).events);
         activityKey = key;
       } catch (error) {
-        activityKey = "";
-        latestActivity = [];
-        element("activity-list").replaceChildren();
-        element("activity-empty").textContent = error.message;
-        element("activity-empty").hidden = false;
+        recordRead("/api/activity/latest", error);
       }
     }
 
@@ -5180,7 +5212,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       try {
         renderProgressions(await request("/api/progressions", "GET"));
       } catch (error) {
-        renderProgressions({ progressions: [] });
+        recordRead("/api/progressions", error);
       }
     }
 
@@ -5274,10 +5306,11 @@ DASHBOARD_HTML = r"""<!doctype html>
           ? "Profiles and conditions show what the network applies now. Planned times use your browser clock. Traffic limits and outages may change conditions sooner."
           : "Conditions show the saved settings. The network does not apply them yet.";
       } catch (error) {
-        deviceConditions = { applied: false, devices: {} };
-        element("device-conditions-note").textContent = error.message;
+        recordRead("/api/conditions", error);
+        element("device-conditions-note").textContent = "Out of date: " + error.message;
       }
       renderDeviceTable();
+      refreshConnectedTreatments();
     }
 
     let dashboardRefresh = null;
@@ -5291,7 +5324,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         if (dashboardPoll) await dashboardPoll;
         do {
           refreshAgain = false;
-          await refreshDashboard();
+          try { await refreshDashboard(); } finally { restoreDrafts(); }
         } while (refreshAgain);
       })();
       try {
@@ -5302,17 +5335,20 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     async function pollDashboard() {
-      if (document.hidden || !dashboardLoaded || dashboardRefresh || dashboardPoll) return;
+      if (document.hidden || dashboardRefresh || dashboardPoll) return;
+      if (!dashboardLoaded) { await startDashboard(); return; }
       dashboardPoll = (async () => {
         // Only read changing data in the visible panel. Do not overwrite forms.
-        let jobs = [loadState];
-        if (currentDashboardTab === "overview") jobs.push(loadConnectedDevices, loadActivity);
-        if (currentDashboardTab === "devices") jobs.push(loadDevicesForSchedule, loadConditions);
+        let jobs = [loadState, loadHealth];
+        if (currentDashboardTab === "overview") jobs.push(loadConnectedDevices, loadActivity, loadConditions);
+        if (currentDashboardTab === "devices") jobs.push(loadDevicesForSchedule, loadConditions, loadWorkspace);
         if (currentDashboardTab === "rules") {
           if (currentRuleSection === "runs") jobs.push(loadTimers, loadScenarios, loadProgressions, loadSchedules);
           if (currentRuleSection === "limits") jobs.push(loadQuotas);
           if (currentRuleSection === "access") jobs.push(loadObservations);
         }
+        if (currentDashboardTab === "measurements") jobs.push(loadTestSessions);
+        if (currentDashboardTab === "setup") jobs.push(loadReleaseStatus);
         const results = await Promise.allSettled(jobs.map((job) => job()));
         if (results.some((result) => result.status === "rejected")) {
           element("runtime-summary").textContent = "Some status updates could not load. Retrying shortly.";
@@ -5347,12 +5383,14 @@ DASHBOARD_HTML = r"""<!doctype html>
         loadServiceAssignments(),
         loadConditions(),
         loadEveryoneElse(),
-        loadAdminTools()
+        loadAdminTools(), loadTestSessions(), loadSettingsHistory()
       ]);
       const failed = results.find((result) => result.status === "rejected");
       if (failed) throw failed.reason;
       dashboardLoaded = true;
       renderGettingStarted();
+      populateWorkflowMenus();
+      await loadWorkspace();
     }
 
     function setActionBusy(busy, path) {
@@ -5421,7 +5459,7 @@ DASHBOARD_HTML = r"""<!doctype html>
             enabled_probability: Number(element("profile-website-enabled").value)
           }
         });
-        stopEditing("profile");
+        if (!formDrafts.has("profile-form")) stopEditing("profile");
         refreshAfterSuccess("Profile saved.");
       } catch (error) {
         showMessage(error.message, "error");
@@ -5439,7 +5477,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           mac_address: element("device-mac").value.trim() || null,
           ...(editingDeviceSnapshot ? { expected: editingDeviceSnapshot } : {})
         });
-        stopEditing("device");
+        if (!formDrafts.has("device-form")) stopEditing("device");
         refreshAfterSuccess("Device saved.");
       } catch (error) {
         showMessage(error.message, "error");
@@ -5519,7 +5557,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         return;
       }
       try {
-        await request("/api/schedules", "POST", {
+        const payload = {
           id: element("schedule-id").value,
           ...scheduleTargetFields(element("schedule-target").value),
           profile_id: element("schedule-profile").value,
@@ -5527,12 +5565,25 @@ DASHBOARD_HTML = r"""<!doctype html>
           start_minute: timeToMinute("schedule-start"),
           end_minute: timeToMinute("schedule-end"),
           enabled: element("schedule-enabled").checked
-        });
+        };
+        const submitter = pendingFormSubmitButton;
+        const previewedDraft = formDrafts.get("schedule-form");
+        pendingFormSubmitButton = null;
+        const preview = await request("/api/schedules/preview", "POST", payload);
+        if (preview.overlaps.length && !await confirmWorkflow("Overlapping schedules: " + preview.overlaps.join(", ") + ". " + preview.message + " Save anyway?")) {
+          if (submitter) setButtonBusy(submitter, false);
+          return;
+        }
+        if (formDrafts.get("schedule-form") !== previewedDraft) throw new Error("The form changed during the preview. Review it and save again.");
+        pendingFormSubmitButton = submitter;
+        await request("/api/schedules", "POST", payload);
         refreshAfterSuccess(element("schedule-enabled").checked
           ? "Schedule saved. It follows the Pi clock while the configuration is applied."
           : "Schedule saved as disabled.");
       } catch (error) {
         showMessage(error.message, "error");
+      } finally {
+        if (event.submitter) setButtonBusy(event.submitter, false);
       }
     });
 
@@ -5748,13 +5799,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       input.value = "";
       if (files.length) await loadMeasurementFiles(files);
     });
-    element("copy-measurements").addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(measurementMarkdown(measurementRuns));
-        showMessage("Measurement table copied as Markdown.", "success");
-      } catch (error) {
-        showMessage("Could not copy the table: " + error.message, "error");
-      }
+    element("copy-measurements").addEventListener("click", () => {
+      copyReport(measurementMarkdown(measurementRuns), "Measurement table");
     });
     element("clear-measurements").addEventListener("click", () => {
       measurementRuns = [];
@@ -5958,16 +6004,19 @@ DASHBOARD_HTML = r"""<!doctype html>
       try {
         const response = await request(path, "POST", { admin_password: password, ...body });
         const result = response.result || response;
+        showRouterState(result.enabled === undefined ? result.router_wifi_enabled : result.enabled);
         status.textContent = result.ssid
           ? "Copied " + result.ssid + " to the Pi. Reconnect test devices if needed."
           : (result.enabled ? "Router Wi-Fi is on." : "Router Wi-Fi is off.");
         showMessage(status.textContent, "success");
       } catch (error) {
+        showRouterState(null);
         status.textContent = error.message;
         showMessage(error.message, "error");
       } finally {
         element("router-admin-password").value = "";
         setButtonBusy(button, false);
+        element("router-wifi-toggle").disabled = routerWifiState === null;
       }
     }
 
@@ -6023,6 +6072,10 @@ DASHBOARD_HTML = r"""<!doctype html>
 </body>
 </html>
 """
+
+
+DASHBOARD_HTML = DASHBOARD_HTML.replace("</style>", Path(__file__).with_name("workflows.css").read_text(encoding="utf-8") + "</style>", 1)
+DASHBOARD_HTML = DASHBOARD_HTML.replace("    startDashboard();", Path(__file__).with_name("workflows.js").read_text(encoding="utf-8") + "\n    startDashboard();")
 
 
 def _inline_source_hash(tag: str, page: str = DASHBOARD_HTML) -> str:
@@ -6482,6 +6535,7 @@ class ControlServer(HTTPServer):
         if tls_context is None and bind_host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValueError("TLS is required when the dashboard listens beyond this device")
         self.repository = repository
+        WorkflowStore(repository).checkpoint("Initial settings")
         self.admin_token = admin_token
         self.helper_client = helper_client
         self.scheduler = scheduler
@@ -6506,6 +6560,9 @@ class ControlServer(HTTPServer):
     def response_for(self, path: str) -> Tuple[int, str, bytes]:
         """Build the response body for a supported GET path."""
 
+        workflow = read_workflow(self, path)
+        if workflow is not None:
+            return workflow
         if path == "/":
             return HTTPStatus.OK, "text/html; charset=utf-8", DASHBOARD_HTML.encode("utf-8")
         if path == "/api/health":
@@ -6521,6 +6578,7 @@ class ControlServer(HTTPServer):
                     "mode": "hardware" if self.helper_client is not None else "configuration-only",
                     "helper_configured": self.helper_client is not None,
                     "helper_reachable": helper_reachable,
+                    "system": machine_health(),
                 }
             )
         if path == "/api/profiles":
@@ -6944,6 +7002,17 @@ class ControlServer(HTTPServer):
         return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
 
     def write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
+        operation = self.scheduler.exclusive() if self.scheduler is not None and path not in ACTION_PATHS else nullcontext()
+        with operation:
+            before = self.repository.get_runtime_state().configuration_version
+            try:
+                workflow = write_workflow(self, path, payload, _settings_from_payload)
+                return workflow if workflow is not None else self._write_response_for(path, payload)
+            finally:
+                if self.repository.get_runtime_state().configuration_version != before:
+                    WorkflowStore(self.repository).checkpoint(path.removeprefix("/api/").replace("/", " "))
+
+    def _write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
         """Handle one supported configuration or network action request."""
 
         if path == "/api/import":
@@ -7125,6 +7194,16 @@ class ControlServer(HTTPServer):
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return _bad_request("invalid device group delete request", error)
             return self._apply_saved_change("group", {"id": group_id, "deleted": True})
+
+        if path == "/api/schedules/preview":
+            try:
+                schedule = _schedule_from_payload(payload)
+                return HTTPStatus.OK, "application/json", _json_bytes({
+                    "overlaps": overlapping_schedules(schedule, self.repository.list_schedules()),
+                    "message": "For the same target, the active schedule with the first ID alphabetically wins.",
+                })
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid schedule configuration", error)
 
         if path == "/api/schedules":
             try:
@@ -8494,7 +8573,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json_body(
                 required=path not in ACTION_PATHS,
-                max_bytes=MAX_IMPORT_BODY_BYTES if path == "/api/import" else MAX_JSON_BODY_BYTES,
+                max_bytes=MAX_IMPORT_BODY_BYTES if path in ("/api/import", "/api/test-sessions/save") else MAX_JSON_BODY_BYTES,
             )
             status, content_type, body = self.server.write_response_for(path, payload)
         except RequestError as error:

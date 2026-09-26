@@ -167,7 +167,7 @@ class CountingHelper(FakeHelper):
         return {"devices": dict(self.devices), "services": dict(self.services)}
 
 
-def create_test_certificate(directory: Path):
+def create_test_certificate(directory: Path, hostname="127.0.0.1"):
     """Create a throwaway self-signed certificate, or return None without OpenSSL."""
 
     openssl = shutil.which("openssl")
@@ -191,7 +191,9 @@ def create_test_certificate(directory: Path):
             "-out",
             str(certificate),
             "-subj",
-            "/CN=127.0.0.1",
+            "/CN=" + hostname,
+            "-addext",
+            "subjectAltName=" + ("IP:" if hostname == "127.0.0.1" else "DNS:") + hostname,
         ],
         check=True,
         stdout=subprocess.DEVNULL,
@@ -494,7 +496,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(content_type, "application/json")
         self.assertEqual(
-            json.loads(body),
+            {key: value for key, value in json.loads(body).items() if key != "system"},
             {
                 "helper_configured": False,
                 "helper_reachable": False,
@@ -1797,7 +1799,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(content_type, "application/json")
         self.assertEqual(
-            json.loads(body),
+            {key: value for key, value in json.loads(body).items() if key != "system"},
             {
                 "helper_configured": True,
                 "helper_reachable": True,
@@ -2404,7 +2406,7 @@ class ControlServerTests(unittest.TestCase):
                     return f"{kind} {name}({body}\n}}\n"
             raise AssertionError(f"{name} is not in the dashboard script")
 
-        harness = setup + "".join(function(name) for name in names) + calls
+        harness = "const restoreDrafts = () => {}; const loadHealth = async () => {}; const loadWorkspace = async () => {};\n" + setup + "".join(function(name) for name in names) + calls
         result = subprocess.run([node, "-e", harness], capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
@@ -2704,7 +2706,7 @@ class ControlServerTests(unittest.TestCase):
             ["loadProfiles"],
             "let profiles = [];\n"
             "const everyoneElse = {profile_id: null};\n"
-            "const element = () => ({value: '', replaceChildren() {}, appendChild() {}});\n"
+            "const element = () => ({value: '', options: [], replaceChildren() {this.options=[];}, appendChild(option) {this.options.push(option);}});\n"
             "const document = {createElement: () => ({})};\n"
             "async function request() { return {profiles: [{id: 'slow', name: 'Slow'}]}; }\n"
             "function renderProfileTable() {}\n"
@@ -3213,8 +3215,8 @@ class ControlServerTests(unittest.TestCase):
             "})();\n",
         )
         self.assertEqual(result["hidden"], 0)
-        self.assertEqual(result["before"], ["state", "clients", "activity"])
-        self.assertEqual(result["seen"], ["state", "clients", "activity", "refresh", "state", "limits"])
+        self.assertEqual(result["before"], ["state", "clients", "activity", "limits"])
+        self.assertEqual(result["seen"], ["state", "clients", "activity", "limits", "refresh", "state", "limits"])
 
     def test_refresh_requested_during_a_refresh_reloads_after_it(self) -> None:
         result = self._run_dashboard_functions(
@@ -4033,6 +4035,7 @@ class ControlServerTests(unittest.TestCase):
             "  {value: '', scrollIntoView() {}});\n"
             "const document = {querySelectorAll: () => []};\n"
             "function syncScheduleDays() {}\n"
+            "function guardDraft() { return false; }\n"
             "function formatMinute(minute) { return String(minute); }\n",
             "editSchedule({id: 'family-day', device_id: null, group_id: 'family',\n"
             "  everyone_else: false, profile_id: 'slow', days_of_week: [0],\n"

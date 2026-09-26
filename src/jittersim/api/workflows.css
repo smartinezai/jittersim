@@ -1,0 +1,24 @@
+.workflow-notice { padding: 1rem; margin: 1rem 0; border: 1px solid #e9ba63; border-radius: 12px; background: #302d25; }
+.workflow-notice button { margin: .5rem 0 0; }
+.field-error, .form-error { color: #ffb2b2; display: block; }
+[aria-invalid=true] { outline: 2px solid #ffb2b2; }
+#report-copy-fallback { width: 100%; min-height: 14rem; }
+#device-cards { display: none; }
+.device-card { border: 1px solid #395271; border-radius: 12px; padding: 1rem; margin: .75rem 0; overflow-wrap: anywhere; }
+.device-card h3 { margin: 0; }
+#device-workspace { scroll-margin-top: 1rem; }
+#workspace-runs button { margin: 0 .5rem .5rem 0; }
+#workspace-timeline li { padding: .5rem 0; overflow-wrap: anywhere; }
+#settings-versions, #test-sessions select, #device-workspace select { min-width: 0; width: 100%; max-width: 100%; }
+#health-details { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: .4rem; }
+dialog { max-width: min(32rem, calc(100vw - 3rem)); color: #e5efff; background: #172335; border: 1px solid #6484af; border-radius: 12px; padding: 1.2rem; }
+dialog::backdrop { background: #0009; }
+dialog button + button { margin-left: .6rem; }
+@media (max-width: 600px) {
+  .section-heading, .observation-actions { flex-wrap: wrap; }
+  .section-heading > * { min-width: 0; max-width: 100%; }
+  #device-table { display: none; }
+  #device-cards { display: block; }
+  #device-workspace form { display: flex; flex-direction: column; }
+  .workflow-notice { overflow-wrap: anywhere; }
+}

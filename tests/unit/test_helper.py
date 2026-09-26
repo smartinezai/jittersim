@@ -296,6 +296,20 @@ class HelperServiceTests(unittest.TestCase):
         self.assertEqual(response, {"ok": False, "error": "invalid access point settings"})
         self.assertEqual(self.executor.commands, [])
 
+    def test_reading_router_state_never_changes_wifi_or_returns_credentials(self) -> None:
+        from unittest.mock import patch
+
+        router = FakeRouter("192.168.0.1", "router-secret")
+        service = HelperService(
+            NetworkApplier(executor=UplinkOutputExecutor(),
+                           topology=Topology(uplink_interface="eth0", test_interface="wlan0")),
+            router_factory=lambda address, password: router,
+        )
+        with patch.object(router, "set_wifi_enabled", side_effect=AssertionError("unexpected write")):
+            response = service.handle_payload({"action": "router-status", "admin_password": "router-secret"})
+        self.assertEqual(response, {"ok": True, "action": "router-wifi", "enabled": True})
+        self.assertTrue(router.closed)
+
     def test_lists_associated_wifi_clients_and_joins_local_details(self) -> None:
         station_output = (
             "Station dc:1e:d5:3e:97:4c (on wlan0)\n"

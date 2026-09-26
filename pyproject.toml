@@ -43,3 +43,6 @@ target-version = "py39"
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
+
+[tool.setuptools.package-data]
+"jittersim.api" = ["*.js", "*.css"]

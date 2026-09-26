@@ -355,7 +355,9 @@ tests/kernel/run-in-docker.sh
 ```
 
 GitHub Actions runs the unit tests on Python 3.9, 3.11 and 3.13, a lint check
-for errors that break code, and these Linux checks on every pull request.
+for errors that break code, these Linux checks and complete browser journeys
+on every pull request. Browser failures retain a screenshot and trace for seven
+days. Run them locally with the Dockerfile in `tests/browser`.
 
 ## Project layout
 
@@ -363,3 +365,48 @@ for errors that break code, and these Linux checks on every pull request.
 - `deploy/raspberry-pi/` — Pi services and installation files
 - `tests/` — automated checks
 - [`ROADMAP.md`](ROADMAP.md) — future work and known limits
+
+## Device workflows and test records
+
+Open a device from Overview, Devices or a new activity event to see its active profile, temporary
+runs, current usage and the next 24 hours of predictable rule changes. On a
+phone the Devices list uses cards. The preview shares the scheduler's rule
+choices and shows up to 32 changes. Traffic thresholds, random outages and
+later edits can change the result.
+
+Connection warnings keep the last known values visible as out of date.
+Overview shows helper reachability, Ethernet information, installed version,
+free disk space and supported Pi temperature and uptime readings.
+
+Unfinished forms survive dashboard refreshes and Apply. A notice distinguishes
+those edits from saved settings. Save can affect an already running
+configuration automatically. Apply uses saved settings. Leaving the page warns
+about unfinished edits. Saved profiles can be duplicated before making a variant.
+
+In Measurements, start a named test session before changing conditions. Attach
+the displayed measurement files and add notes. Finish the session then download
+one report with settings, temporary runs, network events and measurements.
+The report records the whole network's events and identifies the chosen target.
+Export its starting settings to repeat the setup later. Importing that export
+replaces saved settings. It does not restart the old run clocks. Use a saved
+scenario or start a new timer to repeat its sequence from the beginning.
+
+The Pi keeps the newest 50 test sessions. Each holds up to 20 measurements with
+2000 samples each, 500 events and 20 settings/run snapshots. Measurements are
+limited to 1 MiB per session and successive snapshots to 2 MiB. A report says
+when capture limits were reached. Completed settings and events do not follow
+later profile edits or activity-log clearing. Measurement files stay in the
+browser until explicitly attached to a session.
+
+Diagnostics keeps the latest 20 settings versions of up to 1 MiB each. Preview
+before restoring. A restore rejects a preview made before another settings
+change, stops temporary runs and preserves current usage for matching limits.
+Activity stays intact. A failed Apply leaves the restored settings available
+for recovery. This is separate from restoring the entire database backup.
+Oversized settings still save. The history panel explains when it cannot retain
+a new snapshot and recommends exporting a backup.
+
+Setup shows verified router Wi-Fi state after a password-authenticated check.
+The password is cleared after each request. Update controls install only a
+release that an administrator has approved and staged locally. See the
+[release and recovery instructions](deploy/raspberry-pi/README.md#approved-release-updates).
