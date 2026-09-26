@@ -121,6 +121,8 @@ Goal: control the emulator from a Mac without a screen or keyboard attached to t
 - [x] Keep the dashboard exempt from impairment.
 - [x] Show anyone without the admin token only a neutral sign-in page, and keep
   signed-in browsers signed in for 7 days.
+- [x] Split the dashboard into tabs, fit it on a phone and guide a first setup.
+- [x] Offer the connected devices in forms instead of typed addresses.
 
 Suggested commits:
 
@@ -139,6 +141,9 @@ Goal: create realistic changing conditions without making tests irreproducible.
 - [x] Define normal, degraded and offline states.
 - [x] Add fixed-duration outages.
 - [x] Add repeating schedules.
+- [x] Let schedules apply to a group or to everyone else.
+- [x] Add timed scenarios for a device, a group or everyone else.
+- [x] Move saved devices to the address their MAC address uses.
 - [x] Add seeded random choices.
 - [x] Reroll values and feature enablement at separate intervals.
 - [x] Vary reroll timing and outage timing.
@@ -184,6 +189,8 @@ Goal: produce evidence that the selected profile changes observed network behavi
 
 - [x] Add counters for packets, bytes, drops and active state.
 - [x] Show per-device upload and download rates in a live dashboard graph.
+- [x] Show everyone else in the live graph.
+- [x] Keep an activity log of network events that copies as Markdown.
 - [x] Add a latency measurement page.
 - [x] Add a small scripted test client.
 - [x] Compare normal and impaired runs.

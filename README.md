@@ -34,9 +34,11 @@ is a private lab tool, not a replacement for a home router.
   an everyone-else profile.
 - One-shot timers that activate a profile for a chosen duration.
 - Scenarios: named lists of steps, each a profile for 10 seconds to 24 hours,
-  that can repeat. Start one for a device, a group or everyone else and stop it
-  at any time. A scenario takes over from schedules as a timer does, a device's
-  own timer or scenario wins over its group's, and data limits still win.
+  that can repeat. Apply the configuration in hardware mode first then start
+  one for a device, a group or everyone else. Its clock starts with Start.
+  You can stop it at any time. A failed Start stops the new run so recovery
+  cannot start it later. A scenario takes over from schedules as a timer does.
+  A device's own timer or scenario wins over its group's and data limits still win.
 - Progression sessions that move from a starting profile to an ending profile
   over time, after a DNS-query target or after a device-data target, then
   recover automatically.
@@ -106,6 +108,10 @@ bytes.
   change.
 - A visible status area for the current mode, connected devices, schedules,
   access rules, diagnostics and a short history of admin actions.
+- An activity log of the last 500 network events: applies and resets,
+  schedule, timer, scenario and progression switches, data, service and time
+  limits, outages and address moves. Copy it as a Markdown table for a report.
+  Rerolls are left out.
 - Download a point-in-time backup of settings and local DNS observations.
 - Export settings as JSON and import them on another Pi or to repeat a
   demonstration. Imports are checked first and replace all settings at once.

@@ -61,7 +61,7 @@ def _as_integer(value: Any, field_name: str) -> int:
 
 
 def _impairment_from_payload(value: Any) -> Impairment:
-    impairment_data = _as_mapping(value, "impairment")
+    impairment_data = dict(_as_mapping(value, "impairment"))
     try:
         for field_name in (
             "delay_randomness",

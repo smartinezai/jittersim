@@ -1,4 +1,5 @@
 import unittest
+from copy import deepcopy
 from ipaddress import IPv4Address
 
 from jittersim.config.models import Device, Impairment, MacPolicy, Profile
@@ -28,8 +29,10 @@ class PlanCodecTests(unittest.TestCase):
 
     def test_round_trips_a_compiled_plan(self) -> None:
         payload = plan_to_payload(self.plan)
+        original = deepcopy(payload)
 
         self.assertEqual(plan_from_payload(payload), self.plan)
+        self.assertEqual(payload, original)
 
     def test_round_trips_network_access_rules(self) -> None:
         plan = compile_plan(

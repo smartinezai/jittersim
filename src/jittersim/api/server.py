@@ -143,6 +143,7 @@ WRITE_PATHS = frozenset(
         "/api/observations/add-to-profile",
         "/api/observations/add-global-block",
         "/api/import",
+        "/api/activity/clear",
         "/api/apply",
         "/api/reset",
     )
@@ -380,6 +381,20 @@ DASHBOARD_HTML = r"""<!doctype html>
     .device-empty { margin: 0; color: #91a8c1; }
     .connected-card { margin-top: 1rem; }
     .traffic-card { margin-top: 1rem; }
+    .activity-card { margin-top: 1rem; }
+    .activity-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+    .activity-actions button { margin-top: 0; }
+    .activity-list {
+      display: grid; gap: 0.35rem; max-height: 24rem; margin: 0.75rem 0 0; padding: 0;
+      overflow-y: auto; list-style: none;
+    }
+    .activity-list li {
+      display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.75rem;
+      padding: 0.45rem 0.6rem; border-radius: 0.45rem; background: #0d1b2d;
+      color: #c7d7eb; font-size: 0.82rem;
+    }
+    .activity-list time { color: #91a8c1; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .activity-markdown { width: 100%; min-height: 10rem; margin-top: 0.75rem; font-size: 0.78rem; }
     .traffic-controls { display: grid; grid-template-columns: minmax(14rem, 0.75fr) minmax(0, 1.5fr); align-items: end; gap: 1rem; margin-top: 1rem; }
     .traffic-controls label { max-width: 24rem; }
     .traffic-status { margin: 0; color: #91a8c1; font-size: 0.82rem; }
@@ -672,6 +687,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       .timer-row { display: block; }
       .timer-row button { width: 100%; margin-top: 0.7rem; }
       .scenario-step { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+      .activity-card .section-heading { display: block; }
+      .activity-actions { margin-top: 0.6rem; }
+      .activity-list li { grid-template-columns: minmax(0, 1fr); gap: 0.15rem; }
       .scenario-step label:first-child, .scenario-step button { grid-column: 1 / -1; }
       .progression-row-heading { display: block; }
       .progression-row button { width: 100%; margin-top: 0.7rem; }
@@ -801,6 +819,23 @@ DASHBOARD_HTML = r"""<!doctype html>
     <p class="traffic-note">Dropped and waiting show packets JitterSim itself discarded or is still
       delaying, in both directions.</p>
     <p class="traffic-note">Traffic lines count bytes at JitterSim before its queues. They do not show the speed a device receives. Dashed lines show configured limits. The ISP plan line is shared with household traffic and is not a live measurement of spare capacity. Service-specific queues may use different limits. Only assigned devices are included. Sampling pauses when this tab is hidden.</p>
+  </section>
+  <section class="card activity-card">
+    <div class="section-heading">
+      <div>
+        <h2>Activity log</h2>
+        <p>The last 500 network events, newest first. Rerolls are left out.</p>
+      </div>
+      <div class="activity-actions">
+        <button type="button" id="activity-copy">Copy as Markdown</button>
+        <button type="button" id="activity-clear">Clear</button>
+      </div>
+    </div>
+    <ol id="activity-list" class="activity-list" tabindex="0"
+      aria-label="Activity log events"></ol>
+    <p id="activity-empty" class="form-note">Loading...</p>
+    <textarea id="activity-markdown" class="activity-markdown" readonly hidden
+      aria-label="Activity log as Markdown"></textarea>
   </section>
   </div>
   <div class="tab-panel" id="tab-devices" tabindex="-1" hidden>
@@ -1259,8 +1294,9 @@ DASHBOARD_HTML = r"""<!doctype html>
         <label>Scenario <select id="scenario-start-scenario" required></select></label>
         <label>Applies to <select id="scenario-start-target" required></select></label>
       </div>
-      <p class="form-note">A running scenario takes over from schedules, as a timer does.
-        For a device, starting a timer or a scenario replaces the other, and a device's own
+      <p class="form-note">Apply the configuration before starting a scenario. Its clock starts
+        when you press Start. A running scenario takes over from schedules, as a timer does.
+        For a device, starting a timer or a scenario replaces the other and a device's own
         timer or scenario wins over its group's. Data limits still win.</p>
       <button class="primary" type="submit">Start scenario</button>
     </form>
@@ -2421,6 +2457,9 @@ DASHBOARD_HTML = r"""<!doctype html>
     let savedSchedules = [];
     let savedScenarios = [];
     let runningScenarios = [];
+    const ACTIVITY_EMPTY_TEXT = "No events yet. Network changes appear here as they happen.";
+    let latestActivity = [];
+    let activityKey = null;
     let scenarioRunKey = "";
     let scenarioListKey = "";
     let dashboardLoaded = false;
@@ -4842,6 +4881,98 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
     }
 
+    function formatActivityTime(seconds) {
+      const moment = new Date(seconds * 1000);
+      const pad = (value) => String(value).padStart(2, "0");
+      return moment.getFullYear() + "-" + pad(moment.getMonth() + 1) + "-" +
+        pad(moment.getDate()) + " " + pad(moment.getHours()) + ":" +
+        pad(moment.getMinutes()) + ":" + pad(moment.getSeconds());
+    }
+
+    function activityMarkdown(events) {
+      // Oldest first, as a report reads. A cell can't hold a line break, and a
+      // device name must not format the report: backslashes are escaped first,
+      // so they can't undo the escapes after them.
+      const backslash = String.fromCharCode(92);
+      const cell = (text) => ["|", "*", "_", "`", "~", "<", ">", "[", "]"].reduce(
+        (escaped, mark) => escaped.split(mark).join(backslash + mark),
+        text.split(backslash).join(backslash + backslash)
+      ).replace(/\s+/g, " ");
+      const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || "local time";
+      const rows = events.slice().reverse().map((event) => "| " +
+        formatActivityTime(event.happened_at) + " | " + cell(event.message) + " |");
+      return ["| Time (" + zone + ") | Event |", "| --- | --- |"].concat(rows).join("\n");
+    }
+
+    function renderActivity(events) {
+      latestActivity = events;
+      const empty = element("activity-empty");
+      empty.textContent = ACTIVITY_EMPTY_TEXT;
+      empty.hidden = events.length > 0;
+      const list = element("activity-list");
+      list.replaceChildren();
+      events.forEach((event) => {
+        const item = document.createElement("li");
+        const time = document.createElement("time");
+        time.dateTime = new Date(event.happened_at * 1000).toISOString();
+        time.textContent = formatActivityTime(event.happened_at);
+        const message = document.createElement("span");
+        message.textContent = event.message;
+        item.append(time, message);
+        list.appendChild(item);
+      });
+    }
+
+    async function loadActivity() {
+      try {
+        const latest = await request("/api/activity/latest", "GET");
+        const key = latest.newest_id + ":" + latest.count;
+        // Polls without a new event, or a clear, leave the list and where it is
+        // scrolled alone, and skip downloading it again.
+        if (key === activityKey) return;
+        renderActivity((await request("/api/activity", "GET")).events);
+        activityKey = key;
+      } catch (error) {
+        activityKey = "";
+        latestActivity = [];
+        element("activity-list").replaceChildren();
+        element("activity-empty").textContent = error.message;
+        element("activity-empty").hidden = false;
+      }
+    }
+
+    async function copyActivity() {
+      const markdown = activityMarkdown(latestActivity);
+      const box = element("activity-markdown");
+      try {
+        await navigator.clipboard.writeText(markdown);
+        box.hidden = true;
+        showMessage("Copied the activity log as Markdown.", "success");
+      } catch (error) {
+        // Browsers open the clipboard only to secure pages, so offer the text.
+        box.value = markdown;
+        box.hidden = false;
+        box.focus();
+        box.select();
+        showMessage("The Markdown is selected below. Copy it with Ctrl+C or ⌘C.", "success");
+      }
+    }
+
+    async function clearActivity(button) {
+      if (!window.confirm("Clear the activity log? This can't be undone.")) return;
+      setButtonBusy(button, true);
+      try {
+        await request("/api/activity/clear", "POST", {});
+        element("activity-markdown").hidden = true;
+        await loadActivity();
+        showMessage("Activity log cleared.", "success");
+      } catch (error) {
+        showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
+      }
+    }
+
     async function cancelTimer(timerId, button) {
       setButtonBusy(button, true);
       showMessage("Cancelling the timer...", "working");
@@ -5017,6 +5148,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         loadSchedules(),
         loadTimers(),
         loadScenarios(),
+        loadActivity(),
         loadProgressions(),
         loadPolicies(),
         loadConnectedDevices(),
@@ -5225,6 +5357,11 @@ DASHBOARD_HTML = r"""<!doctype html>
       } catch (error) {
         showMessage(error.message, "error");
       }
+    });
+
+    element("activity-copy").addEventListener("click", copyActivity);
+    element("activity-clear").addEventListener("click", (event) => {
+      clearActivity(event.currentTarget);
     });
 
     element("scenario-add-step").addEventListener("click", () => {
@@ -5654,6 +5791,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     window.setInterval(() => loadConnectedDevices(), 5000);
     window.setInterval(() => loadTimers(), 5000);
     window.setInterval(() => loadScenarios(), 5000);
+    window.setInterval(() => loadActivity(), 5000);
     window.setInterval(() => loadProgressions(), 5000);
     window.setInterval(() => loadQuotas(), 5000);
     window.setInterval(() => loadConditions(), 5000);
@@ -6202,6 +6340,15 @@ class ControlServer(HTTPServer):
         if path == "/api/schedules":
             schedules = [_schedule_payload(schedule) for schedule in self.repository.list_schedules()]
             return HTTPStatus.OK, "application/json", _json_bytes({"schedules": schedules})
+        if path == "/api/activity":
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {"events": list(self.repository.list_activity())}
+            )
+        if path == "/api/activity/latest":
+            # The dashboard polls this and fetches the whole log only when it changed.
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                self.repository.activity_summary()
+            )
         if path == "/api/scenarios":
             runs = [
                 _scenario_run_payload(run, scenario, position, repository=self.repository)
@@ -6819,33 +6966,9 @@ class ControlServer(HTTPServer):
             return self._apply_saved_change("scenario", _scenario_payload(scenario))
 
         if path == "/api/scenarios/start":
-            try:
-                scenario = self.repository.get_scenario(_required_text(payload, "scenario_id"))
-                if scenario is None:
-                    raise ValueError("scenario does not exist")
-                run = ScenarioRun(
-                    id=f"run-{time.time_ns()}",
-                    scenario_id=scenario.id,
-                    started_at=int(time.time()),
-                    device_id=payload.get("device_id"),
-                    group_id=payload.get("group_id"),
-                    everyone_else=payload.get("everyone_else", False),
-                )
-                if run.device_id is not None and self.repository.get_device(run.device_id) is None:
-                    raise ValueError("device does not exist")
-                if (
-                    run.group_id is not None
-                    and self.repository.get_device_group(run.group_id) is None
-                ):
-                    raise ValueError("group does not exist")
-            except (KeyError, TypeError, ValueError) as error:
-                return _bad_request("invalid scenario start", error)
-            if run.everyone_else and not self._everyone_else_counted():
-                capacity_error = self._capacity_error(adding=1)
-                if capacity_error is not None:
-                    return capacity_error
-            self.repository.start_scenario_run(run)
-            return self._apply_saved_change("run", asdict(run))
+            operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
+            with operation:
+                return self._start_scenario(payload)
 
         if path == "/api/scenarios/stop":
             try:
@@ -7381,11 +7504,23 @@ class ControlServer(HTTPServer):
         if path == "/api/observations/add-global-block":
             return self._add_observation_to_global_block(payload)
 
+        if path == "/api/activity/clear":
+            self.repository.clear_activity()
+            return HTTPStatus.OK, "application/json", _json_bytes({"cleared": True})
+
+        # Saved changes apply the plan too, but only these buttons count as
+        # an Apply or a Reset in the activity log.
         if path == "/api/apply":
-            return self._apply_configuration()
+            status, content_type, body = self._apply_configuration()
+            if status == HTTPStatus.OK:
+                self._record_activity("apply", "Configuration applied")
+            return status, content_type, body
 
         if path == "/api/reset":
-            return self._reset_network()
+            status, content_type, body = self._reset_network()
+            if status == HTTPStatus.OK:
+                self._record_activity("reset", "Network reset")
+            return status, content_type, body
 
         return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
 
@@ -7582,6 +7717,61 @@ class ControlServer(HTTPServer):
         values = [counters[device_id] for device_id in group.device_ids]
         return sum(values) if all(isinstance(value, int) and value >= 0 for value in values) else None
 
+    def _start_scenario(self, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
+        """Start playback only when the network is already applied."""
+
+        try:
+            scenario = self.repository.get_scenario(_required_text(payload, "scenario_id"))
+            if scenario is None:
+                raise ValueError("scenario does not exist")
+            run = ScenarioRun(
+                id=f"run-{time.time_ns()}",
+                scenario_id=scenario.id,
+                started_at=int(time.time()),
+                device_id=payload.get("device_id"),
+                group_id=payload.get("group_id"),
+                everyone_else=payload.get("everyone_else", False),
+            )
+            if run.device_id is not None and self.repository.get_device(run.device_id) is None:
+                raise ValueError("device does not exist")
+            if (
+                run.group_id is not None
+                and self.repository.get_device_group(run.group_id) is None
+            ):
+                raise ValueError("group does not exist")
+        except (KeyError, TypeError, ValueError) as error:
+            return _bad_request("invalid scenario start", error)
+        if self.helper_client is None or self.scheduler is None:
+            return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                {"error": "Starting a scenario requires hardware mode."}
+            )
+        if (
+            self.repository.get_runtime_state().last_action == "reset"
+            or self.scheduler.applied_plan() is None
+        ):
+            return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+                {"error": "Apply the configuration before starting a scenario."}
+            )
+        if run.everyone_else and not self._everyone_else_counted():
+            capacity_error = self._capacity_error(adding=1)
+            if capacity_error is not None:
+                return capacity_error
+        self.repository.start_scenario_run(run)
+        status, content_type, body = self._apply_after_change()
+        response = json.loads(body)
+        if status != HTTPStatus.OK or response.get("live_applied") is False:
+            # Do not let a failed Start count down or resume during recovery.
+            self.repository.stop_scenario_run(run.id)
+            response["live_applied"] = False
+            response["message"] = "Scenario did not start. Apply the configuration then start it again."
+            if status == HTTPStatus.OK:
+                status = HTTPStatus.CONFLICT
+                response["error"] = "Apply the configuration before starting a scenario."
+        else:
+            response["run"] = asdict(run)
+            response["live_applied"] = True
+        return status, content_type, _json_bytes(response)
+
     def _apply_saved_change(
         self,
         key: str,
@@ -7681,9 +7871,13 @@ class ControlServer(HTTPServer):
 
     def _apply_current_plan(self) -> Tuple[int, str, bytes]:
         try:
+            prepared = (
+                self.scheduler.prepare_plan(repository=self.repository)
+                if self.scheduler is not None else None
+            )
             plan = (
-                self.scheduler.build_plan(repository=self.repository)
-                if self.scheduler is not None
+                prepared.plan
+                if prepared is not None
                 else compile_stored_plan(repository=self.repository)
             )
         except (PlanError, StorageError):
@@ -7703,6 +7897,8 @@ class ControlServer(HTTPServer):
             result = self.helper_client.apply(plan=plan)
         except HelperClientError as error:
             LOGGER.error("network helper apply failed: %s", error)
+            if self.scheduler is not None:
+                self.scheduler.invalidate_applied_plan()
             state = self.repository.update_runtime_state(
                 observed_state="error",
                 last_action="apply",
@@ -7728,7 +7924,7 @@ class ControlServer(HTTPServer):
             last_error=None,
         )
         if self.scheduler is not None:
-            self.scheduler.activate(applied_payload=plan_to_payload(plan))
+            self.scheduler.activate_plan(repository=self.repository, prepared=prepared)
         return HTTPStatus.OK, "application/json", _json_bytes(
             {"result": result, "state": _runtime_state_payload(state)}
         )
@@ -7805,10 +8001,20 @@ class ControlServer(HTTPServer):
             return
         if state.last_action == "reset":
             status, _, _ = self._reset_network()
+            kind, message = "reset", "Network reset again after the dashboard restarted"
         else:
             status, _, _ = self._apply_configuration()
+            kind, message = "apply", "Configuration applied again after the dashboard restarted"
         if status != HTTPStatus.OK:
             LOGGER.error("network state recovery did not complete successfully")
+        else:
+            self._record_activity(kind, message)
+
+    def _record_activity(self, kind: str, message: str) -> None:
+        try:
+            self.repository.record_activity(kind=kind, message=message, now=time.time())
+        except StorageError:
+            LOGGER.warning("could not record activity", exc_info=True)
 
     def _wait_for_helper(self) -> bool:
         """Return whether the helper answers before the startup wait ends."""
