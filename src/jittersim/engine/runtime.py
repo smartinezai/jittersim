@@ -22,6 +22,7 @@ from jittersim.config.models import (
 from jittersim.config.storage import ConfigRepository, DatabasePath, StorageError
 from jittersim.networking.helper import HelperClient, HelperClientError
 
+from .activity import Source, TargetState, activity_events
 from .codec import PlanCodecError, plan_from_payload, plan_to_payload
 from .compiler import PlanError, compile_plan
 from .plan import (
@@ -138,6 +139,9 @@ class RuntimeScheduler:
         self._last_address_check_at = 0.0
         # Blocked moves already logged, so each is logged once.
         self._blocked_moves: Dict[str, Tuple[str, str]] = {}
+        # What applied to each device and to everyone else at the last applied
+        # plan, for the activity log. None until a plan applies after a reset.
+        self._applied_states: Optional[Dict[str, TargetState]] = None
         self._last_quota_sample_at = 0.0
         self._last_device_counters: Dict[str, int] = {}
         self._device_traffic_bytes: Dict[str, int] = {}
@@ -189,7 +193,7 @@ class RuntimeScheduler:
 
         current_time = time.time() if now is None else now
         with self._apply_lock:
-            return self._build_plan(repository=repository, now=current_time)
+            return self._build_plan(repository=repository, now=current_time)[0]
 
     @contextmanager
     def exclusive(self) -> Iterator[None]:
@@ -210,6 +214,7 @@ class RuntimeScheduler:
             self._device_traffic_bytes.clear()
             self._group_members.clear()
             self._blocked_moves.clear()
+            self._applied_states = None
 
     def sample_usage(self, *, repository: ConfigRepository) -> None:
         """Record quota and device traffic before the helper counters restart."""
@@ -299,16 +304,20 @@ class RuntimeScheduler:
         active_repository = repository or ConfigRepository(self._database_path)
         try:
             if active_repository.get_runtime_state().last_action == "reset":
-                self._honor_external_reset()
+                self._honor_external_reset(repository=active_repository, now=current_time)
                 return False
             self._follow_device_addresses(repository=active_repository, now=current_time)
             self._sample_traffic_if_needed(repository=active_repository, now=current_time)
             self._sample_quota_usage_if_needed(repository=active_repository, now=current_time)
-            plan = self._build_plan(repository=active_repository, now=current_time)
+            plan, states = self._build_plan(repository=active_repository, now=current_time)
             payload = plan_to_payload(plan)
             with self._lock:
-                if payload == self._current_payload:
-                    return False
+                unchanged = payload == self._current_payload
+            if unchanged:
+                # The network already runs this plan, for example one the
+                # dashboard applied after a saved change.
+                self._record_activity(repository=active_repository, states=states, now=current_time)
+                return False
             # Applying recreates the helper's counters at zero, so record the
             # traffic they hold first.
             self._sample_quota_usage(repository=active_repository, now=current_time)
@@ -319,8 +328,9 @@ class RuntimeScheduler:
                 self._last_device_counters = dict.fromkeys(self._last_device_counters, 0)
             if not active_repository.record_schedule_result(success=True):
                 # A reset was recorded while this plan was being applied.
-                self._honor_external_reset()
+                self._honor_external_reset(repository=active_repository, now=current_time)
                 return False
+            self._record_activity(repository=active_repository, states=states, now=current_time)
             return True
         except (HelperClientError, PlanError, StorageError, OSError):
             LOGGER.exception("scheduled network plan failed")
@@ -364,7 +374,8 @@ class RuntimeScheduler:
             and client.get("mac_address")
             and client.get("ipv4_address")
         }
-        moves, blocked = plan_address_moves(repository.list_devices(), seen)
+        devices = {device.id: device for device in repository.list_devices()}
+        moves, blocked = plan_address_moves(tuple(devices.values()), seen)
         for device_id, (address, holder) in blocked.items():
             if self._blocked_moves.get(device_id) != (address, holder):
                 LOGGER.warning(
@@ -372,6 +383,15 @@ class RuntimeScheduler:
                     device_id,
                     address,
                     holder,
+                )
+                device = devices[device_id]
+                keeper = devices[holder].name if holder in devices else holder
+                self._record(
+                    repository,
+                    "address",
+                    f"{device.name} now uses {address}, which {keeper} keeps, "
+                    f"so it stays at {device.ipv4_address}",
+                    now,
                 )
         self._blocked_moves = blocked
         if not moves:
@@ -381,18 +401,50 @@ class RuntimeScheduler:
             return
         for device_id, (old_address, new_address) in moves.items():
             LOGGER.info("device %s moved from %s to %s", device_id, old_address, new_address)
+            self._record(
+                repository,
+                "address",
+                f"{devices[device_id].name} moved from {old_address} to {new_address}",
+                now,
+            )
 
-    def _honor_external_reset(self) -> None:
+    def _record_activity(
+        self, *, repository: ConfigRepository, states: Dict[str, TargetState], now: float
+    ) -> None:
+        """Record what changed on the network since the last applied plan."""
+
+        with self._lock:
+            previous = self._applied_states
+            self._applied_states = states
+        # The first plan after an apply, a reset or a restart is the starting point.
+        if previous is None:
+            return
+        for kind, message in activity_events(previous, states):
+            self._record(repository, kind, message, now)
+
+    @staticmethod
+    def _record(repository: ConfigRepository, kind: str, message: str, now: float) -> None:
+        try:
+            repository.record_activity(kind=kind, message=message, now=now)
+        except StorageError:
+            LOGGER.warning("could not record activity", exc_info=True)
+
+    def _honor_external_reset(self, *, repository: ConfigRepository, now: float) -> None:
         # Someone reset the network outside the dashboard, for example with
         # `jittersim reset`. Stop applying, and reset once more in case a
         # scheduled apply raced that reset.
         self.pause()
+        self._record(repository, "reset", "Network reset outside the dashboard", now)
         try:
             self._helper_client.reset()
         except HelperClientError:
             LOGGER.warning("could not repeat an external network reset", exc_info=True)
 
-    def _build_plan(self, *, repository: ConfigRepository, now: float):
+    def _build_plan(
+        self, *, repository: ConfigRepository, now: float
+    ) -> Tuple[NetworkPlan, Dict[str, TargetState]]:
+        """Build the runtime plan and what applies to each target, for the activity log."""
+
         profiles = {profile.id: profile for profile in repository.list_profiles()}
         schedules = repository.list_schedules()
         active_progressions = {}
@@ -416,6 +468,7 @@ class RuntimeScheduler:
         moment = datetime.fromtimestamp(now).replace(second=0, microsecond=0)
         runtime_devices = []
         runtime_profiles = {}
+        states: Dict[str, TargetState] = {}
         blocked_addresses = []
         blocked_domains_by_device = {}
         active_device_ids = set()
@@ -453,6 +506,13 @@ class RuntimeScheduler:
                         schedules=schedules, group_id=group.id, moment=moment
                     )
             group_profile_id = group.profile_id if group is not None else None
+            # What the activity log calls this device's source: kind, label, step.
+            if schedule is not None:
+                described = ("schedule", schedule.id, "")
+            elif group_profile_id is not None:
+                described = ("group-profile", group.name, "")
+            else:
+                described = ("profile", "", "")
             source_profile_id = (
                 group_profile_id or device.profile_id
                 if schedule is None
@@ -470,6 +530,7 @@ class RuntimeScheduler:
                 selected_profile = profiles.get(source_profile_id)
                 source_profiles = selected_profile
                 source_key = f"timer:{timer.id}"
+                described = ("timer", "", "")
             elif running is not None:
                 run, scenario, position = running
                 source_profile_id = position.profile_id
@@ -479,6 +540,11 @@ class RuntimeScheduler:
                 source_profiles = selected_profile
                 # Each step starts a fresh roll, even when a loop returns to it.
                 source_key = f"scenario:{run.id}:{position.step_index}"
+                described = (
+                    "scenario",
+                    scenario.name,
+                    f"step {position.step_index + 1} of {len(scenario.steps)}",
+                )
             elif progression is not None:
                 start_profile = profiles.get(progression.start_profile_id)
                 end_profile = profiles.get(progression.end_profile_id)
@@ -502,6 +568,7 @@ class RuntimeScheduler:
                 # so only edits to its start or end profile restart the roll.
                 source_profiles = (start_profile, end_profile)
                 source_key = f"progression:{progression.id}"
+                described = ("progression", f"from {start_profile.name} to {end_profile.name}", "")
                 domain_count = int(len(progression.website_domains) * factor)
                 if domain_count:
                     blocked_domains_by_device[device.id] = progression.website_domains[:domain_count]
@@ -515,6 +582,7 @@ class RuntimeScheduler:
                 selected_profile = fallback_profile
                 source_profiles = fallback_profile
                 source_key = f"data-limit:{device.id}"
+                described = ("data-limit", "", "")
             elif group is not None:
                 group_data_limit = group_data_limits.get(group.id)
                 if (
@@ -530,6 +598,7 @@ class RuntimeScheduler:
                     selected_profile = fallback_profile
                     source_profiles = fallback_profile
                     source_key = f"group-data-limit:{group.id}"
+                    described = ("group-data-limit", group.name, "")
             if selected_profile is None:
                 raise PlanError(f"device {device.id} references missing profile {source_profile_id}")
             active_device_ids.add(device.id)
@@ -543,6 +612,14 @@ class RuntimeScheduler:
             )
             if roll.outage_until > now:
                 blocked_addresses.append(device.ipv4_address)
+            kind, label, step = described
+            # A progression's profile changes as it goes, so its name is left out.
+            profile_name = "" if kind == "progression" else selected_profile.name
+            states[device.id] = TargetState(
+                name=device.name,
+                source=Source(kind, label, step, profile_name),
+                outage=roll.outage_until > now,
+            )
 
             # Device ids may already use the full identifier length, so number
             # the runtime profiles instead of prefixing the device id.
@@ -552,10 +629,16 @@ class RuntimeScheduler:
 
         everyone_else = None
         everyone_else_key = None
+        everyone_else_described = ("profile", "", "")
         if everyone_else_run is not None:
-            run, _, position = everyone_else_run
+            run, scenario, position = everyone_else_run
             everyone_else_profile_id = position.profile_id
             everyone_else_key = f"scenario:{run.id}:{position.step_index}"
+            everyone_else_described = (
+                "scenario",
+                scenario.name,
+                f"step {position.step_index + 1} of {len(scenario.steps)}",
+            )
         else:
             everyone_else_schedule = active_schedule(
                 schedules=schedules, everyone_else=True, moment=moment
@@ -567,6 +650,8 @@ class RuntimeScheduler:
                 if everyone_else_schedule is not None
                 else repository.get_everyone_else_profile_id()
             )
+            if everyone_else_schedule is not None:
+                everyone_else_described = ("schedule", everyone_else_schedule.id, "")
         if everyone_else_profile_id is not None:
             profile = profiles.get(everyone_else_profile_id)
             if profile is None:
@@ -590,6 +675,16 @@ class RuntimeScheduler:
                 ),
                 blocked=roll.outage_until > now,
             )
+            kind, label, step = everyone_else_described
+            states[EVERYONE_ELSE_QUEUE_ID] = TargetState(
+                name="Everyone else",
+                source=Source(kind, label, step, profile.name),
+                outage=roll.outage_until > now,
+            )
+        else:
+            states[EVERYONE_ELSE_QUEUE_ID] = TargetState(
+                name="Everyone else", source=Source("none")
+            )
 
         self._rolls = {
             device_id: roll
@@ -608,6 +703,16 @@ class RuntimeScheduler:
             profiles=profiles,
             now=now,
         )
+        limit_names = {quota.id: quota.name for quota in repository.list_service_quotas()}
+        limit_names.update(
+            (time_quota_counter_id(quota.id), quota.name)
+            for quota in repository.list_time_quotas()
+        )
+        for rule in service_quota_rules:
+            if rule.active and rule.device_id in states:
+                state = states[rule.device_id]
+                reached = state.limits + (limit_names.get(rule.quota_id, rule.quota_id),)
+                states[rule.device_id] = replace(state, limits=tuple(sorted(reached)))
         service_assignment_rules = []
         devices_by_id = {device.id: device for device in runtime_devices}
         for assignment in repository.list_service_assignments():
@@ -628,7 +733,7 @@ class RuntimeScheduler:
                     download_impairment=profile.download,
                 )
             )
-        return compile_plan(
+        plan = compile_plan(
             devices=runtime_devices,
             profiles=runtime_profiles,
             mac_policy=repository.get_mac_policy(),
@@ -639,6 +744,7 @@ class RuntimeScheduler:
             service_assignment_rules=service_assignment_rules,
             everyone_else=everyone_else,
         )
+        return plan, states
 
     def _roll(
         self,
