@@ -167,6 +167,15 @@ install -m 0644 -o root -g root \
     "$SOURCE_DIR/deploy/raspberry-pi/jittersim-browser-proxy.service" \
     /etc/systemd/system/jittersim-browser-proxy.service
 
+install -m 0644 -o root -g root \
+    "$SOURCE_DIR/deploy/raspberry-pi/jittersim-update.service" \
+    /etc/systemd/system/jittersim-update.service
+
+# Recovery must run even if an interrupted package install damages the venv.
+install -d -m 0755 -o root -g root /usr/local/lib
+install -m 0644 -o root -g root "$SOURCE_DIR/src/jittersim/updates.py" /usr/local/lib/jittersim-update.py
+systemctl enable jittersim-update.service
+
 systemctl daemon-reload
 systemctl enable jittersim-control-firewall.service
 systemctl restart jittersim-control-firewall.service

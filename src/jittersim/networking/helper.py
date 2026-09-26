@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 from jittersim.config.models import ValidationError, normalize_domain
 from jittersim.engine.codec import PlanCodecError, plan_from_payload, plan_to_payload
 from jittersim.engine.plan import EVERYONE_ELSE_QUEUE_ID, NetworkPlan
+from jittersim.updates import UpdateError, request_update, update_status
 
 from .applier import ApplyError, NetworkApplier
 from .executor import CommandExecutionError, SubprocessExecutor
@@ -89,6 +90,14 @@ class HelperService:
         if not isinstance(payload, dict):
             return {"ok": False, "error": "request must be an object"}
         action = payload.get("action")
+        if action in ("update-status", "update-install", "update-rollback"):
+            try:
+                if action != "update-status":
+                    request_update(payload.get("version"), rollback=action == "update-rollback")
+                return {"ok": True, **update_status()}
+            except (OSError, ValueError, UpdateError):
+                LOGGER.exception("release operation failed")
+                return {"ok": False, "error": "release operation could not be completed"}
         if action == "ping":
             return {"ok": True, "action": "ping"}
         if action == "reset":
@@ -105,6 +114,8 @@ class HelperService:
             return self._handle_configure_ap(payload)
         if action == "router-sync-ap":
             return self._handle_router_sync_ap(payload)
+        if action == "router-status":
+            return self._handle_router_wifi(payload, read_only=True)
         if action == "router-wifi":
             return self._handle_router_wifi(payload)
         if action == "apply":
@@ -296,11 +307,11 @@ class HelperService:
             "commands_run": commands_run,
         }
 
-    def _handle_router_wifi(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _handle_router_wifi(self, payload: Dict[str, Any], *, read_only: bool = False) -> Dict[str, Any]:
         router = None
         try:
             admin_password = payload["admin_password"]
-            enabled = payload["enabled"]
+            enabled = False if read_only else payload["enabled"]
             if not isinstance(admin_password, str) or not admin_password:
                 raise ValueError("router admin password is invalid")
             if not isinstance(enabled, bool):
@@ -310,7 +321,7 @@ class HelperService:
                 raise RouterError("the router gateway could not be determined")
             router = self._router_factory(gateway, admin_password)
             router.login()
-            settings = router.set_wifi_enabled(enabled=enabled)
+            settings = router.read_wifi_settings() if read_only else router.set_wifi_enabled(enabled=enabled)
         except (KeyError, TypeError, ValueError):
             return {"ok": False, "error": "invalid router Wi-Fi request"}
         except (CommandExecutionError, RouterError):
@@ -485,6 +496,17 @@ class HelperClient:
         return self._request(
             {"action": "router-sync-ap", "admin_password": admin_password}
         )
+
+    def release_status(self) -> Dict[str, Any]:
+        return self._request({"action": "update-status"})
+
+    def install_release(self, *, version: str, rollback: bool = False) -> Dict[str, Any]:
+        return self._request({"action": "update-rollback" if rollback else "update-install", "version": version})
+
+    def router_wifi_status(self, *, admin_password: str) -> Dict[str, Any]:
+        """Read radio state without returning the router Wi-Fi password."""
+
+        return self._request({"action": "router-status", "admin_password": admin_password})
 
     def set_router_wifi(self, *, admin_password: str, enabled: bool) -> Dict[str, Any]:
         """Enable or disable the upstream router's primary Wi-Fi radios."""

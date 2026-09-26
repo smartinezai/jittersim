@@ -1,0 +1,17 @@
+[Unit]
+Description=Install an approved JitterSim release
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/var/lib/jittersim-updates/request.json
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/python3 /usr/local/lib/jittersim-update.py apply
+TimeoutStartSec=15min
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

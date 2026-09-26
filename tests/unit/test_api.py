@@ -167,7 +167,7 @@ class CountingHelper(FakeHelper):
         return {"devices": dict(self.devices), "services": dict(self.services)}
 
 
-def create_test_certificate(directory: Path):
+def create_test_certificate(directory: Path, hostname="127.0.0.1"):
     """Create a throwaway self-signed certificate, or return None without OpenSSL."""
 
     openssl = shutil.which("openssl")
@@ -191,7 +191,9 @@ def create_test_certificate(directory: Path):
             "-out",
             str(certificate),
             "-subj",
-            "/CN=127.0.0.1",
+            "/CN=" + hostname,
+            "-addext",
+            "subjectAltName=" + ("IP:" if hostname == "127.0.0.1" else "DNS:") + hostname,
         ],
         check=True,
         stdout=subprocess.DEVNULL,

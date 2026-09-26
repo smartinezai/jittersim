@@ -393,3 +393,61 @@ controls use the gateway to open the TG3442DE local web interface.
 The dashboard can change the Pi's own test SSID and password. This does not
 change the upstream router and the new test password is not stored in the
 JitterSim database.
+
+## Approved release updates
+
+Install this version once using the normal installer to add the update service.
+After that, Setup can check the installed version, install an approved staged
+release and restore the previous installation. The Pi stores no GitHub
+credentials. An administrator transfers the release over the existing SSH path.
+
+Build a bundle from a reviewed tag or commit on the development machine:
+
+```sh
+./deploy/raspberry-pi/build-release.sh RELEASE_REF /tmp/jittersim-release.tar.gz
+```
+
+Save the printed SHA-256 checksum with the release record. Transfer that exact
+bundle to the Pi using the existing SSH account then stage it as root:
+
+```sh
+sudo /opt/jittersim/.venv/bin/python -m jittersim.updates stage /tmp/jittersim-release.tar.gz --version RELEASE_VERSION --sha256 APPROVED_SHA256
+```
+
+The checksum must come from the trusted release record. Staging an archive is
+approval to run its code as root. Staging rejects unsafe archive paths, links,
+wrong checksums, more than 5000 files and excessive compressed or expanded size.
+Only the administrator can write the staged files. The dashboard can select
+only that staged release and cannot submit a URL, path or shell command.
+
+In Setup, press Check for updates then Install staged release. The operation
+stops the dashboard, helper and browser proxy. It backs up the installation,
+configuration, database and service definitions before installing the package.
+It restarts services then checks the authenticated HTTPS health response and
+helper connection. A failure after installation begins restores that backup.
+Allow a brief test-network interruption and keep the Ethernet or SSH recovery
+path available. A staged release updates the Python package and service files.
+OS packages and Wi-Fi topology changes still use the normal installer.
+
+The recovery program uses system Python and is stored outside the app's virtual
+environment. A queued operation runs again after reboot. An interrupted install
+with a complete recovery copy restores the old installation before another
+attempt. Recovery failures remain visible in Setup when the dashboard can run.
+Inspect a failure over SSH with:
+
+```sh
+sudo systemctl status jittersim-update.service
+sudo journalctl -u jittersim-update.service -n 80 --no-pager
+```
+
+Restore previous installation replaces settings and usage with the backup made
+before that update. This differs from Diagnostics' settings-version restore,
+which retains current usage for matching limits. One previous installation and
+one staged release are retained. A new successful backup replaces the previous
+recovery copy. Ensure enough free disk space for two installation copies plus
+100 MiB of working space.
+
+Automated tests exercise file validation and recovery with disposable files.
+They do not establish radio coverage, uninterrupted household service or actual
+Pi restart behavior. Complete the household and recovery trial on the Pi before
+relying on it for everyday access.
