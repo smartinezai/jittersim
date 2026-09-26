@@ -45,3 +45,23 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: ./tests/kernel/run-in-docker.sh
+
+  browser:
+    name: Browser journeys
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      # Install a wheel so missing dashboard assets fail this check.
+      - run: pip install . 'playwright==1.63.0'
+      - run: python -m playwright install --with-deps chromium
+      - run: python -m tests.browser.journeys
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: browser-results
+          path: test-results/
+          retention-days: 7
