@@ -394,12 +394,13 @@ class ScenarioStep:
 
     def __post_init__(self) -> None:
         _validate_identifier(self.profile_id, "profile_id")
-        _validate_number(
-            self.duration_seconds,
-            "duration_seconds",
-            MIN_SCENARIO_STEP_SECONDS,
-            MAX_SCENARIO_STEP_SECONDS,
-        )
+        duration = self.duration_seconds
+        if (
+            isinstance(duration, bool)
+            or not isinstance(duration, int)
+            or not MIN_SCENARIO_STEP_SECONDS <= duration <= MAX_SCENARIO_STEP_SECONDS
+        ):
+            raise ValidationError("a step must last 10 seconds to 24 hours")
 
 
 @dataclass(frozen=True)

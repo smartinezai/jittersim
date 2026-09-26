@@ -1245,6 +1245,14 @@ class ScenarioSchedulingTests(unittest.TestCase):
 
         self.assertEqual(self.delays(10)["alice"], 400)
 
+    def test_a_group_data_limit_wins_over_a_members_scenario(self) -> None:
+        self.start(device_id="alice")
+        self.repository.save_group_data_limit(
+            GroupDataLimit(group_id="family", profile_id="timed", limit_bytes=100, used_bytes=100)
+        )
+
+        self.assertEqual(self.delays(10)["alice"], 400)
+
     def test_an_everyone_else_scenario_needs_no_saved_profile(self) -> None:
         self.start(everyone_else=True)
 

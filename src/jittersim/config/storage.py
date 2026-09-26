@@ -1060,8 +1060,9 @@ class ConfigRepository:
     def replace_settings(self, settings: SavedSettings) -> None:
         """Replace every saved setting at once. On failure nothing changes.
 
-        DNS observations, action history and the runtime state stay. Timers and
-        progressions are removed because they belong to the replaced devices.
+        DNS observations, action history and the runtime state stay. Timers,
+        progressions and scenario runs are removed because they belong to the
+        replaced devices, groups and scenarios.
         """
 
         self._deferring_commits = True
@@ -1298,14 +1299,27 @@ class ConfigRepository:
             self._connection.rollback()
             raise StorageError(f"could not save timer {timer.id}") from error
 
-    def save_scenario(self, scenario: Scenario) -> None:
-        """Insert or update one scenario. Its running copies follow the new steps."""
+    def save_scenario(self, scenario: Scenario, *, now: Optional[float] = None) -> None:
+        """Insert or update one scenario. Its running copies follow the new steps.
+
+        Runs that already finished stay finished, even when the steps get
+        longer or start repeating.
+        """
 
         steps = [
             {"profile_id": step.profile_id, "duration_seconds": step.duration_seconds}
             for step in scenario.steps
         ]
+        previous = self.get_scenario(scenario.id)
         try:
+            if previous is not None and not previous.loop:
+                self._connection.execute(
+                    """
+                    UPDATE scenario_runs SET enabled = 0
+                    WHERE scenario_id = ? AND enabled = 1 AND started_at + ? <= ?
+                    """,
+                    (scenario.id, previous.total_seconds, time.time() if now is None else now),
+                )
             self._connection.execute(
                 """
                 INSERT INTO scenarios (id, name, steps_json, loop) VALUES (?, ?, ?, ?)

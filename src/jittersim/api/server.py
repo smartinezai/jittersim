@@ -1298,7 +1298,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         timer or scenario wins over its group's. Data limits still win.</p>
       <button class="primary" type="submit">Start scenario</button>
     </form>
-    <div id="scenario-run-list" class="timer-list" aria-live="polite">No running scenarios.</div>
+    <div id="scenario-run-list" class="timer-list">No running scenarios.</div>
     <h3>Saved scenarios</h3>
     <div id="scenario-list" class="schedule-list">No scenarios yet.</div>
     <form id="scenario-form">
@@ -2059,6 +2059,12 @@ DASHBOARD_HTML = r"""<!doctype html>
         savedSchedules.some((schedule) => schedule.everyone_else && schedule.enabled);
     }
 
+    function everyoneElseInLiveTraffic() {
+      // A running scenario shapes everyone else too, but only while it runs,
+      // so Getting started leaves it out.
+      return everyoneElseAssigned() || runningScenarios.some((run) => run.everyone_else);
+    }
+
     function renderProfileTable() {
       renderTable(
         "profile-table",
@@ -2448,6 +2454,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     let lastRuntimeState = null;
     let savedSchedules = [];
     let savedScenarios = [];
+    let runningScenarios = [];
     const ACTIVITY_EMPTY_TEXT = "No events yet. Applying the configuration starts the log.";
     let latestActivity = [];
     let activityKey = null;
@@ -2603,7 +2610,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         option.textContent = device.name + " (" + device.ipv4_address + ")";
         select.appendChild(option);
       });
-      if (everyoneElseAssigned()) {
+      if (everyoneElseInLiveTraffic()) {
         const option = document.createElement("option");
         option.value = EVERYONE_ELSE_TRAFFIC;
         option.textContent = "Everyone else";
@@ -4711,14 +4718,30 @@ DASHBOARD_HTML = r"""<!doctype html>
       removeButton.textContent = "Remove step";
       removeButton.addEventListener("click", () => {
         // A scenario needs at least one step.
-        if (element("scenario-steps").children.length > 1) row.remove();
+        if (element("scenario-steps").children.length < 2) return;
+        row.remove();
+        renumberScenarioSteps();
+        element("scenario-add-step").focus();
       });
       row.append(profileLabel, ...fields, removeButton);
       return row;
     }
 
+    function renumberScenarioSteps() {
+      // Every row repeats the same labels, so name each field after its step.
+      Array.from(element("scenario-steps").children).forEach((row, index) => {
+        const step = "Step " + (index + 1);
+        const [profileLabel, minutesLabel, secondsLabel, removeButton] = row.children;
+        profileLabel.children[0].setAttribute("aria-label", step + " profile");
+        minutesLabel.children[0].setAttribute("aria-label", step + " minutes");
+        secondsLabel.children[0].setAttribute("aria-label", step + " seconds");
+        removeButton.setAttribute("aria-label", "Remove step " + (index + 1));
+      });
+    }
+
     function renderScenarioSteps(steps) {
       element("scenario-steps").replaceChildren(...steps.map(scenarioStepRow));
+      renumberScenarioSteps();
     }
 
     function scenarioStepsFromForm() {
@@ -4745,10 +4768,12 @@ DASHBOARD_HTML = r"""<!doctype html>
         ? runs.length + " running"
         : "None running";
       if (key && key === scenarioRunKey) {
-        // Update the countdowns in place, so a focused Stop button keeps its focus.
+        // Update the text in place, so a focused Stop button keeps its focus.
         runs.forEach((run, index) => {
-          list.children[index].querySelector(".timer-details span").textContent =
-            scenarioRunText(run).detail;
+          const text = scenarioRunText(run);
+          const row = list.children[index];
+          row.querySelector(".timer-details strong").textContent = text.title;
+          row.querySelector(".timer-details span").textContent = text.detail;
         });
         return;
       }
@@ -4826,9 +4851,15 @@ DASHBOARD_HTML = r"""<!doctype html>
     async function loadScenarios() {
       try {
         const data = await request("/api/scenarios", "GET");
+        const hadEveryoneElse = runningScenarios.some((run) => run.everyone_else);
         savedScenarios = data.scenarios;
+        runningScenarios = data.runs;
         renderSavedScenarios();
         renderScenarioRuns(data.runs);
+        // Live traffic offers Everyone else while its scenario runs.
+        if (runningScenarios.some((run) => run.everyone_else) !== hadEveryoneElse) {
+          updateTrafficDeviceOptions(devices);
+        }
       } catch (error) {
         scenarioRunKey = "";
         element("scenario-run-list").textContent = error.message;
@@ -5328,6 +5359,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       element("scenario-steps").appendChild(
         scenarioStepRow({ profile_id: "", duration_seconds: 60 })
       );
+      renumberScenarioSteps();
     });
 
     element("scenario-form").addEventListener("submit", async (event) => {
@@ -8377,16 +8409,26 @@ def _schedule_from_payload(payload: Dict[str, Any]) -> Schedule:
 
 
 def _scenario_from_payload(payload: Dict[str, Any]) -> Scenario:
-    steps = payload["steps"]
-    if not isinstance(steps, list):
+    values = payload["steps"]
+    if not isinstance(values, list):
         raise ValueError("steps must be a list")
+    steps = []
+    for number, step in enumerate(values, start=1):
+        # Name the step, so a long scenario says which one to fix.
+        try:
+            steps.append(
+                ScenarioStep(
+                    profile_id=step["profile_id"], duration_seconds=step["duration_seconds"]
+                )
+            )
+        except KeyError as error:
+            raise ValueError(f"step {number} is missing {error.args[0]}") from error
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"step {number}: {error}") from error
     return Scenario(
         id=payload["id"],
         name=payload["name"],
-        steps=tuple(
-            ScenarioStep(profile_id=step["profile_id"], duration_seconds=step["duration_seconds"])
-            for step in steps
-        ),
+        steps=tuple(steps),
         loop=payload.get("loop", False),
     )
 

@@ -778,10 +778,11 @@ class ControlServerTests(unittest.TestCase):
 
     def test_the_traffic_menu_offers_everyone_else_while_it_has_a_profile(self) -> None:
         result = self._run_dashboard_functions(
-            ["updateTrafficDeviceOptions", "everyoneElseAssigned"],
+            ["updateTrafficDeviceOptions", "everyoneElseAssigned", "everyoneElseInLiveTraffic"],
             "const EVERYONE_ELSE_TRAFFIC = '__everyone_else__';\n"
             "let everyoneElse = {profile_id: 'slow'};\n"
             "let savedSchedules = [];\n"
+            "let runningScenarios = [];\n"
             "const select = {options: [], value: '',\n"
             "  replaceChildren() { this.options = []; },\n"
             "  appendChild(option) { this.options.push(option); }};\n"
@@ -2500,6 +2501,181 @@ class ControlServerTests(unittest.TestCase):
             "Step 1 of 2: Slow, 45 s left in this step; repeats until stopped",
         )
 
+    def test_running_scenarios_update_in_place_and_rebuild_when_they_change(self) -> None:
+        result = self._run_dashboard_functions(
+            ["formatDuration", "scenarioRunText", "renderScenarioRuns"],
+            "let scenarioRunKey = '';\n"
+            "const node = () => ({children: [], textContent: '', listeners: {},\n"
+            "  append(...children) { this.children.push(...children); },\n"
+            "  appendChild(child) { this.children.push(child); },\n"
+            "  addEventListener(type, listener) { this.listeners[type] = listener; },\n"
+            "  querySelector(selector) {\n"
+            "    const details = this.children[0];\n"
+            "    return selector.endsWith('strong') ? details.children[0] : details.children[1];\n"
+            "  }});\n"
+            "let rebuilds = 0;\n"
+            "const list = Object.assign(node(), {replaceChildren() {\n"
+            "  rebuilds += 1; this.children = []; }});\n"
+            "const elements = {'scenario-run-list': list, 'scenario-count': node()};\n"
+            "const element = (id) => elements[id];\n"
+            "const document = {createElement: node};\n"
+            "function stopScenario() {}\n",
+            "const run = {id: 'run-1', target_name: 'Alice', scenario_name: 'Commute',\n"
+            "  step_index: 0, step_count: 2, profile_name: 'Slow', step_remaining_seconds: 50,\n"
+            "  total_remaining_seconds: 80, loop: false};\n"
+            "renderScenarioRuns([run]);\n"
+            "const row = list.children[0];\n"
+            "renderScenarioRuns([Object.assign({}, run, {scenario_name: 'Rush hour',\n"
+            "  step_remaining_seconds: 45, total_remaining_seconds: 75})]);\n"
+            "const sameRow = list.children[0] === row;\n"
+            "const texts = [row.children[0].children[0].textContent,\n"
+            "  row.children[0].children[1].textContent];\n"
+            "renderScenarioRuns([Object.assign({}, run, {id: 'run-2'})]);\n"
+            "console.log(JSON.stringify({sameRow: sameRow, texts: texts, rebuilds: rebuilds,\n"
+            "  count: elements['scenario-count'].textContent}));\n",
+        )
+
+        # A renamed scenario shows its new name without a rebuild; a new run rebuilds.
+        self.assertTrue(result["sameRow"])
+        self.assertEqual(
+            result["texts"],
+            [
+                "Alice · Rush hour",
+                "Step 1 of 2: Slow, 45 s left in this step; ends in 1 min 15 s",
+            ],
+        )
+        self.assertEqual((result["rebuilds"], result["count"]), (2, "1 running"))
+
+    def test_live_traffic_offers_everyone_else_while_its_scenario_runs(self) -> None:
+        result = self._run_dashboard_functions(
+            ["everyoneElseAssigned", "everyoneElseInLiveTraffic", "loadScenarios"],
+            "let everyoneElse = {profile_id: null};\n"
+            "let savedSchedules = [];\n"
+            "let savedScenarios = [];\n"
+            "let runningScenarios = [];\n"
+            "let scenarioRunKey = '';\n"
+            "const devices = [];\n"
+            "let runs = [{id: 'run-1', everyone_else: true}];\n"
+            "async function request() { return {scenarios: [], runs: runs}; }\n"
+            "function renderSavedScenarios() {}\n"
+            "function renderScenarioRuns() {}\n"
+            "const menus = [];\n"
+            "function updateTrafficDeviceOptions() { menus.push(everyoneElseInLiveTraffic()); }\n",
+            "(async () => {\n"
+            "  const before = everyoneElseInLiveTraffic();\n"
+            "  await loadScenarios();\n"
+            "  await loadScenarios();\n"
+            "  runs = [];\n"
+            "  await loadScenarios();\n"
+            "  console.log(JSON.stringify({before: before, menus: menus,\n"
+            "    assigned: everyoneElseAssigned()}));\n"
+            "})();\n",
+        )
+
+        # The menu is rebuilt only when the running scenario starts or ends.
+        self.assertEqual(result["before"], False)
+        self.assertEqual(result["menus"], [True, False])
+        # A run is temporary, so Getting started doesn't count it.
+        self.assertFalse(result["assigned"])
+
+    def test_the_saved_scenario_list_rebuilds_only_when_it_changes(self) -> None:
+        result = self._run_dashboard_functions(
+            ["profileName", "formatDuration", "scenarioSummary", "renderSavedScenarios"],
+            "let profiles = [{id: 'slow', name: 'Slow'}];\n"
+            "let savedScenarios = [{id: 'commute', name: 'Commute', loop: false,\n"
+            "  steps: [{profile_id: 'slow', duration_seconds: 60}]}];\n"
+            "let scenarioListKey = '';\n"
+            "let rebuilds = 0;\n"
+            "const node = () => ({children: [], value: '', options: [],\n"
+            "  append(...children) { this.children.push(...children); },\n"
+            "  appendChild(child) { this.children.push(child); },\n"
+            "  addEventListener() {},\n"
+            "  replaceChildren() { rebuilds += 1; this.children = []; }});\n"
+            "const elements = {'scenario-list': node(), 'scenario-start-scenario': node()};\n"
+            "const element = (id) => elements[id];\n"
+            "const document = {createElement: node};\n",
+            "renderSavedScenarios();\n"
+            "renderSavedScenarios();\n"
+            "const same = rebuilds;\n"
+            "profiles = [{id: 'slow', name: 'Crawl'}];\n"
+            "renderSavedScenarios();\n"
+            "const text = elements['scenario-list'].children[0].children[0];\n"
+            "console.log(JSON.stringify({same: same, renamed: rebuilds,\n"
+            "  summary: text.children[1].textContent}));\n",
+        )
+
+        # Each render rebuilds the list and the start menu, so 2 per change.
+        self.assertEqual((result["same"], result["renamed"]), (2, 4))
+        self.assertEqual(result["summary"], "Crawl 1 min · commute")
+
+    def test_the_step_editor_keeps_one_step_and_numbers_them(self) -> None:
+        result = self._run_dashboard_functions(
+            ["scenarioStepRow", "renumberScenarioSteps"],
+            "const profiles = [{id: 'slow', name: 'Slow'}];\n"
+            "const node = (tag) => ({tag: tag, children: [], className: '', value: '',\n"
+            "  textContent: '', attributes: {}, listeners: {},\n"
+            "  append(...children) { children.forEach((child) => this.appendChild(child)); },\n"
+            "  appendChild(child) { child.parent = this; this.children.push(child); },\n"
+            "  setAttribute(name, value) { this.attributes[name] = value; },\n"
+            "  addEventListener(type, listener) { this.listeners[type] = listener; },\n"
+            "  remove() { const siblings = this.parent.children;\n"
+            "    siblings.splice(siblings.indexOf(this), 1); },\n"
+            "  focus() { focused.push(this.id); }});\n"
+            "const focused = [];\n"
+            "const steps = node('div');\n"
+            "const addStep = Object.assign(node('button'), {id: 'scenario-add-step'});\n"
+            "const element = (id) => (id === 'scenario-steps' ? steps : addStep);\n"
+            "const document = {createElement: node};\n"
+            "steps.querySelectorAll = () => steps.children;\n",
+            "steps.appendChild(scenarioStepRow({profile_id: 'slow', duration_seconds: 60}));\n"
+            "steps.children[0].children[3].listeners.click();\n"
+            "const lastKept = steps.children.length;\n"
+            "steps.appendChild(scenarioStepRow({profile_id: 'slow', duration_seconds: 30}));\n"
+            "renumberScenarioSteps();\n"
+            "const second = steps.children[1];\n"
+            "const labels = [second.children[0].children[0].attributes['aria-label'],\n"
+            "  second.children[3].attributes['aria-label']];\n"
+            "steps.children[0].children[3].listeners.click();\n"
+            "const profileMenu = steps.children[0].children[0].children[0];\n"
+            "console.log(JSON.stringify({lastKept: lastKept, labels: labels,\n"
+            "  left: steps.children.length, focused: focused,\n"
+            "  renumbered: profileMenu.attributes['aria-label']}));\n",
+        )
+
+        self.assertEqual(result["lastKept"], 1)
+        self.assertEqual(result["labels"], ["Step 2 profile", "Remove step 2"])
+        # Removing a step moves focus to Add step and renumbers the rest.
+        self.assertEqual(
+            (result["left"], result["focused"], result["renumbered"]),
+            (1, ["scenario-add-step"], "Step 1 profile"),
+        )
+
+    def test_rebuilt_profile_menus_keep_the_steps_being_edited(self) -> None:
+        result = self._run_dashboard_functions(
+            ["loadProfiles"],
+            "let profiles = [];\n"
+            "const everyoneElse = {profile_id: null};\n"
+            "const element = () => ({value: '', replaceChildren() {}, appendChild() {}});\n"
+            "const document = {createElement: () => ({})};\n"
+            "async function request() { return {profiles: [{id: 'slow', name: 'Slow'}]}; }\n"
+            "function renderProfileTable() {}\n"
+            "let editing = [{profile_id: 'slow', duration_seconds: 90}];\n"
+            "function scenarioStepsFromForm() { return editing; }\n"
+            "const rendered = [];\n"
+            "function renderScenarioSteps(steps) { rendered.push(steps); }\n",
+            "loadProfiles().then(() => { editing = []; return loadProfiles(); })\n"
+            "  .then(() => console.log(JSON.stringify(rendered)));\n",
+        )
+
+        self.assertEqual(
+            result,
+            [
+                [{"profile_id": "slow", "duration_seconds": 90}],
+                # An empty editor starts with one one-minute step.
+                [{"profile_id": "", "duration_seconds": 60}],
+            ],
+        )
+
     def test_scenario_steps_come_from_the_form(self) -> None:
         result = self._run_dashboard_functions(
             ["scenarioStepsFromForm"],
@@ -3745,6 +3921,8 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(listing["scenarios"][0]["total_seconds"], 60)
         run = listing["runs"][0]
+        self.assertFalse(run["loop"])
+        self.assertTrue(0 < run["total_remaining_seconds"] <= 60)
         self.assertEqual(
             (run["id"], run["scenario_name"], run["target_name"], run["step_index"],
              run["step_count"], run["profile_name"]),
@@ -3774,6 +3952,66 @@ class ControlServerTests(unittest.TestCase):
                 status, _, body = self.server.write_response_for("/api/scenarios/start", payload)
                 self.assertEqual(status, 400)
                 self.assertIn(message, json.loads(body)["error"])
+
+    def test_a_scenario_step_names_its_problem(self) -> None:
+        steps = [
+            {"profile_id": "slow", "duration_seconds": 60},
+            {"profile_id": "slow", "duration_seconds": 0},
+        ]
+
+        status, _, body = self.server.write_response_for(
+            "/api/scenarios", dict(self.SCENARIO, steps=steps)
+        )
+
+        self.assertEqual(status, 400)
+        self.assertIn("step 2: a step must last 10 seconds to 24 hours", json.loads(body)["error"])
+
+    def test_a_repeating_scenario_reports_no_end(self) -> None:
+        self.server.write_response_for("/api/scenarios", dict(self.SCENARIO, loop=True))
+        self.server.write_response_for(
+            "/api/scenarios/start", {"scenario_id": "commute", "device_id": "alice"}
+        )
+
+        run = json.loads(self.server.response_for("/api/scenarios")[2])["runs"][0]
+
+        self.assertEqual((run["loop"], run["total_remaining_seconds"]), (True, None))
+
+    def test_a_running_everyone_else_scenario_holds_a_class_for_new_devices(self) -> None:
+        self.server.write_response_for("/api/scenarios", self.SCENARIO)
+        for index in range(1, 14):
+            self.repository.save_device(
+                Device(f"d{index}", f"D{index}", f"192.168.50.{20 + index}", "slow")
+            )
+        self.server.write_response_for(
+            "/api/scenarios/start", {"scenario_id": "commute", "everyone_else": True}
+        )
+
+        status, _, _ = self.server.write_response_for(
+            "/api/devices",
+            {"id": "d14", "name": "D14", "ipv4_address": "192.168.50.34", "profile_id": "slow"},
+        )
+
+        self.assertEqual(status, 409)
+
+    def test_editing_a_finished_scenario_leaves_its_runs_finished(self) -> None:
+        self.server.write_response_for("/api/scenarios", self.SCENARIO)
+        self.server.write_response_for(
+            "/api/scenarios/start", {"scenario_id": "commute", "everyone_else": True}
+        )
+        for index in range(1, 15):
+            self.repository.save_device(
+                Device(f"d{index}", f"D{index}", f"192.168.50.{20 + index}", "slow")
+            )
+
+        # Two minutes later the 60-second scenario has ended, and the devices
+        # use every class.
+        with patch("time.time", return_value=time.time() + 120):
+            status, _, _ = self.server.write_response_for(
+                "/api/scenarios", dict(self.SCENARIO, loop=True)
+            )
+            runs = json.loads(self.server.response_for("/api/scenarios")[2])["runs"]
+
+        self.assertEqual((status, runs), (200, []))
 
     def test_a_timer_stops_the_devices_scenario(self) -> None:
         self.server.write_response_for("/api/scenarios", self.SCENARIO)
