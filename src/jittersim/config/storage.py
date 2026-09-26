@@ -400,6 +400,13 @@ class ConfigRepository:
         self._add_column_if_missing("progressions", "traffic_target_bytes", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing("progressions", "traffic_baseline_bytes", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing("service_quotas", "weight_percent", "INTEGER NOT NULL DEFAULT 100")
+        self._connection.execute("CREATE INDEX IF NOT EXISTS devices_mac_idx ON devices(mac_address)")
+        for table in ("timers", "progressions", "scenario_runs"):
+            self._connection.execute(
+                f"CREATE INDEX IF NOT EXISTS {table}_history_idx "
+                f"ON {table}(enabled, started_at DESC, id DESC)"
+            )
+        self._prune_run_history()
         self._commit()
 
     def _upgrade_schedules_table(self) -> None:
@@ -1304,6 +1311,16 @@ class ConfigRepository:
         ).fetchall()
         return tuple(self._schedule_from_row(row) for row in rows)
 
+    def _prune_run_history(self) -> None:
+        """Keep 500 inactive runs per type with at most 1000 deletions each."""
+
+        for table in ("timers", "progressions", "scenario_runs"):
+            self._connection.execute(
+                f"DELETE FROM {table} WHERE id IN ("
+                f"SELECT id FROM {table} WHERE enabled = 0 "
+                "ORDER BY started_at DESC, id DESC LIMIT 1000 OFFSET 500)"
+            )
+
     def save_timer(self, timer: Timer) -> None:
         """Persist one timer and replace other active overrides for its device."""
 
@@ -1342,6 +1359,7 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
+            self._prune_run_history()
             self._commit()
         except sqlite3.IntegrityError as error:
             self._connection.rollback()
@@ -1379,6 +1397,7 @@ class ConfigRepository:
                 (scenario.id, scenario.name, json.dumps(steps), int(scenario.loop)),
             )
             self._bump_configuration_version()
+            self._prune_run_history()
             self._commit()
         except sqlite3.IntegrityError as error:
             self._connection.rollback()
@@ -1445,6 +1464,7 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
+            self._prune_run_history()
             self._commit()
         except sqlite3.IntegrityError as error:
             self._connection.rollback()
@@ -1458,6 +1478,7 @@ class ConfigRepository:
         )
         if cursor.rowcount:
             self._bump_configuration_version()
+            self._prune_run_history()
             self._commit()
             return True
         return False
@@ -1500,6 +1521,7 @@ class ConfigRepository:
         )
         if cursor.rowcount:
             self._bump_configuration_version()
+            self._prune_run_history()
             self._commit()
             return True
         return False
@@ -1584,6 +1606,7 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
+            self._prune_run_history()
             self._commit()
         except sqlite3.IntegrityError as error:
             self._connection.rollback()
@@ -1598,6 +1621,7 @@ class ConfigRepository:
         )
         if cursor.rowcount:
             self._bump_configuration_version()
+            self._prune_run_history()
             self._commit()
             return True
         return False
