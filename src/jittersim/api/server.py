@@ -66,6 +66,7 @@ from jittersim.config.models import (
 )
 from jittersim.config.storage import (
     ConfigRepository,
+    DeviceConflictError,
     DatabasePath,
     StorageError,
     TrafficRateSettingsError,
@@ -82,6 +83,7 @@ from jittersim.engine.compiler import (
     MAX_SHAPED_MARKS_PER_PLAN,
     PlanError,
 )
+from jittersim.engine.plan import EVERYONE_ELSE_QUEUE_ID
 from jittersim.engine.conditions import device_conditions, everyone_else_condition
 from jittersim.engine.progression import progression_factor
 from jittersim.engine.runtime import RuntimeScheduler
@@ -281,7 +283,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     .action-message.working { background: #3b2d15; color: #f5ca78; }
     .toast {
       position: fixed;
-      top: 1rem;
+      bottom: 1rem;
       right: 1rem;
       z-index: 100;
       display: grid;
@@ -382,6 +384,13 @@ DASHBOARD_HTML = r"""<!doctype html>
     .connected-card { margin-top: 1rem; }
     .traffic-card { margin-top: 1rem; }
     .activity-card { margin-top: 1rem; }
+    .rule-sections { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1rem; }
+    .rule-sections button { margin: 0; }
+    .rule-sections [aria-pressed="true"] { background: #245685; border-color: #70b7ff; }
+    .rule-section-grid { display: contents; }
+    .token-card { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem; padding: 0.65rem 1rem; }
+    .token-card p, .token-card button { margin: 0; }
+    .token-card .token-controls { flex: 1; }
     .activity-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
     .activity-actions button { margin-top: 0; }
     .activity-list {
@@ -521,9 +530,11 @@ DASHBOARD_HTML = r"""<!doctype html>
     .scenario-steps { display: grid; gap: 0.5rem; margin: 0.75rem 0; }
     .scenario-step {
       display: grid; gap: 0.5rem; align-items: end;
-      grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr) auto;
+      grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr);
     }
     .scenario-step button { margin-top: 0; }
+    .scenario-step-actions { display: flex; flex-wrap: wrap; gap: 0.35rem; grid-column: 1 / -1; }
+    .scenario-step { border-bottom: 1px solid #2b435f; padding-bottom: 0.75rem; }
     .timer-list { display: grid; gap: 0.5rem; margin-top: 1rem; }
     .timer-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.65rem 0.7rem; border-radius: 0.45rem; background: #0d1b2d; color: #c7d7eb; font-size: 0.82rem; }
     .timer-details { display: grid; gap: 0.15rem; }
@@ -744,9 +755,8 @@ DASHBOARD_HTML = r"""<!doctype html>
   </nav>
   <div class="tab-panel" id="tab-overview" tabindex="-1">
   <section class="card token-card">
-    <h2>Signed in</h2>
     <form class="token-controls" method="post" action="/sign-out">
-      <p>This browser stays signed in for 7 days, or until you sign out.</p>
+      <p>Signed in for up to 7 days.</p>
       <button type="submit">Sign out</button>
     </form>
     <p id="token-check-status" class="token-check-status" role="status" aria-live="polite">Loading the dashboard...</p>
@@ -776,7 +786,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="traffic-controls">
       <label>Device
         <select id="traffic-device">
-          <option value="all">All assigned devices</option>
+          <option value="@all">All assigned devices</option>
         </select>
       </label>
       <p id="traffic-status" class="traffic-status" role="status" aria-live="polite">Starting live traffic sampling...</p>
@@ -828,9 +838,22 @@ DASHBOARD_HTML = r"""<!doctype html>
       </div>
       <div class="activity-actions">
         <button type="button" id="activity-copy">Copy as Markdown</button>
-        <button type="button" id="activity-clear">Clear</button>
+        <button type="button" id="activity-download">Download Markdown</button>
+        <button type="button" id="activity-clear">Clear all</button>
       </div>
     </div>
+    <div class="fields">
+      <label>Event type <select id="activity-kind">
+        <option value="">All events</option>
+        <option value="apply">Apply</option><option value="reset">Reset</option>
+        <option value="schedule">Schedule</option><option value="timer">Timer</option>
+        <option value="scenario">Scenario</option><option value="progression">Progression</option>
+        <option value="limit">Limit</option><option value="outage">Outage</option>
+        <option value="address">Address change</option>
+      </select></label>
+      <label>Search events <input id="activity-search" type="search" placeholder="Device, group or event text"></label>
+    </div>
+    <p id="activity-count" class="form-note"></p>
     <ol id="activity-list" class="activity-list" tabindex="0"
       aria-label="Activity log events"></ol>
     <p id="activity-empty" class="form-note">Loading...</p>
@@ -1164,8 +1187,13 @@ DASHBOARD_HTML = r"""<!doctype html>
     </section>
   </div>
   <div class="tab-panel" id="tab-rules" tabindex="-1" hidden>
-  <div class="content-grid">
-    <section class="card">
+  <nav class="rule-sections" aria-label="Rule sections">
+    <button type="button" data-rule-tab="runs" aria-pressed="true">Runs &amp; schedules</button>
+    <button type="button" data-rule-tab="limits" aria-pressed="false">Usage limits</button>
+    <button type="button" data-rule-tab="access" aria-pressed="false">Access rules</button>
+  </nav>
+  <div class="rule-section-grid">
+    <section class="card" data-rule-section="access" hidden>
       <h2>Network access rules</h2>
       <form id="policy-form">
         <div class="policy-grid">
@@ -1221,7 +1249,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         <button id="save-policies" type="submit">Save access rules</button>
       </form>
     </section>
-    <section class="card">
+    <section class="card" data-rule-section="runs">
       <h2>Schedule a profile</h2>
       <form id="schedule-form">
         <div class="fields">
@@ -1249,6 +1277,8 @@ DASHBOARD_HTML = r"""<!doctype html>
           <label>Start <input id="schedule-start" type="time" value="09:00" required></label>
           <label>End <input id="schedule-end" type="time" value="17:00" required></label>
         </div>
+        <label class="quota-check"><input id="schedule-enabled" type="checkbox" checked> Enabled</label>
+        <p id="schedule-clock" class="form-note"></p>
         <p class="form-note">A device's own schedule wins over its group's. Timers and
           progressions win over schedules.</p>
         <button type="submit">Save schedule</button>
@@ -1256,7 +1286,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div id="schedule-list" class="schedule-list" aria-live="polite">No schedules yet.</div>
     </section>
   </div>
-  <section class="card timer-card">
+  <section class="card timer-card" data-rule-section="runs">
     <div class="section-heading">
       <div>
         <h2>Run a profile timer</h2>
@@ -1281,7 +1311,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     </form>
     <div id="timer-list" class="timer-list" aria-live="polite">No active timers.</div>
   </section>
-  <section class="card scenario-card">
+  <section class="card scenario-card" data-rule-section="runs">
     <div class="section-heading">
       <div>
         <h2>Scenarios</h2>
@@ -1312,6 +1342,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       </div>
       <div id="scenario-steps" class="scenario-steps"></div>
       <button type="button" id="scenario-add-step">Add step</button>
+      <p id="scenario-duration" class="form-note" aria-live="polite"></p>
       <label class="quota-check"><input id="scenario-loop" type="checkbox"> Repeat from the
         first step until stopped</label>
       <p class="form-note">Each step lasts 10 seconds to 24 hours. A scenario has up to 20
@@ -1319,7 +1350,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <button type="submit">Save scenario</button>
     </form>
   </section>
-  <section class="card progression-card">
+  <section class="card progression-card" data-rule-section="runs">
     <div class="section-heading">
       <div>
         <h2>Progression mode</h2>
@@ -1363,7 +1394,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     </form>
     <div id="progression-list" class="progression-list" aria-live="polite">No active progressions.</div>
   </section>
-  <section class="card quota-card">
+  <section class="card quota-card" data-rule-section="limits" hidden>
     <div class="section-heading">
       <div>
         <h2>Device data limit</h2>
@@ -1408,7 +1439,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     </form>
     <div id="data-limit-list" class="quota-list" aria-live="polite">Loading...</div>
   </section>
-  <section class="card quota-card">
+  <section class="card quota-card" data-rule-section="limits" hidden>
     <div class="section-heading">
       <div>
         <h2>Shared group data limit</h2>
@@ -1453,7 +1484,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     </form>
     <div id="group-data-limit-list" class="quota-list" aria-live="polite">Loading...</div>
   </section>
-  <section class="card quota-card">
+  <section class="card quota-card" data-rule-section="limits" hidden>
     <div class="section-heading">
       <div>
         <h2>Browser service profile</h2>
@@ -1485,7 +1516,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     </form>
     <div id="service-assignment-list" class="quota-list" aria-live="polite">Loading...</div>
   </section>
-  <section class="card quota-card">
+  <section class="card quota-card" data-rule-section="limits" hidden>
     <div class="section-heading">
       <div>
         <h2>Service data limit</h2>
@@ -1542,7 +1573,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     </form>
     <div id="service-quota-list" class="quota-list" aria-live="polite">Loading...</div>
   </section>
-  <section class="card quota-card">
+  <section class="card quota-card" data-rule-section="limits" hidden>
     <div class="section-heading">
       <div>
         <h2>Service time limit</h2>
@@ -1599,7 +1630,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     </form>
     <div id="time-quota-list" class="quota-list" aria-live="polite">Loading...</div>
   </section>
-  <section class="card observations-card">
+  <section class="card observations-card" data-rule-section="access" hidden>
     <div class="section-heading">
       <div>
         <h2>Traffic discovery</h2>
@@ -1737,7 +1768,11 @@ DASHBOARD_HTML = r"""<!doctype html>
       return DASHBOARD_TABS.includes(name) ? name : "overview";
     }
 
+    let currentDashboardTab = "overview";
+    let currentRuleSection = "runs";
+
     function showTab(name) {
+      currentDashboardTab = name;
       DASHBOARD_TABS.forEach((tab) => {
         element("tab-" + tab).hidden = tab !== name;
       });
@@ -1752,6 +1787,24 @@ DASHBOARD_HTML = r"""<!doctype html>
       // A chart drawn while its tab was hidden has no size, so draw it again.
       if (name === "overview") drawTrafficChart();
       if (name === "measurements") drawMeasurementChart();
+      if (dashboardLoaded) {
+        pollDashboard();
+        if (name === "overview") {
+          resetTrafficHistory();
+          pollTraffic();
+        }
+      }
+    }
+
+    function showRuleSection(name) {
+      currentRuleSection = name;
+      document.querySelectorAll("[data-rule-section]").forEach((section) => {
+        section.hidden = section.dataset.ruleSection !== name;
+      });
+      document.querySelectorAll("[data-rule-tab]").forEach((button) => {
+        button.setAttribute("aria-pressed", String(button.dataset.ruleTab === name));
+      });
+      pollDashboard();
     }
 
     function revealTab(link) {
@@ -1855,6 +1908,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function stopEditing(prefix) {
+      if (prefix === "device") editingDeviceSnapshot = null;
       element(prefix + "-form").reset();
       element(prefix + "-id").readOnly = false;
       element(prefix + "-id").dataset.typed = "";
@@ -2102,6 +2156,25 @@ DASHBOARD_HTML = r"""<!doctype html>
       return conditionCell(known ? deviceConditions.devices[deviceId] : null);
     }
 
+    function appliedProfileCell(savedProfile, state) {
+      if (!deviceConditions.applied || !state || !state.source) {
+        return [savedProfile, "Saved profile"];
+      }
+      const source = state.source;
+      const names = {
+        profile: "Device profile", "group-profile": "Group profile",
+        schedule: "Schedule", timer: "Timer", scenario: "Scenario",
+        progression: "Progression", "data-limit": "Data limit",
+        "group-data-limit": "Shared data limit", none: "Normal connection"
+      };
+      const details = [names[source.kind] || source.kind, source.label, source.step]
+        .filter(Boolean).join(" · ");
+      const next = state.next_change_at
+        ? " · Next planned change: " + new Date(state.next_change_at).toLocaleString()
+        : "";
+      return [source.profile || source.label || "Normal connection", details + next];
+    }
+
     function everyoneElseRow() {
       const condition = deviceConditions.everyone_else || null;
       if (!everyoneElse.profile_id && !condition) return null;
@@ -2109,7 +2182,9 @@ DASHBOARD_HTML = r"""<!doctype html>
         cells: [
           ["Everyone else", "Test Wi-Fi clients that aren't saved or unaffected"],
           ["Any address", everyoneElse.unaffected_devices.length + " unaffected"],
-          everyoneElse.profile_id ? profileName(everyoneElse.profile_id) : "None",
+          appliedProfileCell(
+            everyoneElse.profile_id ? profileName(everyoneElse.profile_id) : "None", condition
+          ),
           conditionCell(condition)
         ],
         actions: []
@@ -2121,7 +2196,9 @@ DASHBOARD_HTML = r"""<!doctype html>
         cells: [
           [device.name, device.id],
           [device.ipv4_address, device.mac_address || "No MAC address"],
-          profileName(device.profile_id),
+          appliedProfileCell(profileName(device.profile_id),
+            Object.prototype.hasOwnProperty.call(deviceConditions.devices, device.id)
+              ? deviceConditions.devices[device.id] : null),
           deviceConditionCell(device.id)
         ],
         actions: [
@@ -2315,6 +2392,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     function fillDeviceForm(device) {
       stopEditing("device");
+      editingDeviceSnapshot = { ...device };
       element("device-id").value = device.id;
       element("device-name").value = device.name;
       element("device-ip").value = device.ipv4_address;
@@ -2380,6 +2458,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       syncScheduleDays();
       element("schedule-start").value = formatMinute(schedule.start_minute);
       element("schedule-end").value = formatMinute(schedule.end_minute);
+      element("schedule-enabled").checked = schedule.enabled;
       element("schedule-form").scrollIntoView({ behavior: "smooth", block: "center" });
     }
 
@@ -2451,6 +2530,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     let helperConfigured = false;
     let profiles = [];
     let devices = [];
+    let editingDeviceSnapshot = null;
     let deviceConditions = { applied: false, devices: {} };
     let everyoneElse = { profile_id: null, unaffected_devices: [] };
     let lastRuntimeState = null;
@@ -2573,7 +2653,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     function selectedTrafficTotals(deviceCounters) {
       const selectedDevice = element("traffic-device").value;
       // "All assigned devices" means the saved devices; everyone else is its own choice.
-      const counters = selectedDevice === "all"
+      const counters = selectedDevice === "@all"
         ? Object.keys(deviceCounters)
           .filter((id) => id !== EVERYONE_ELSE_TRAFFIC)
           .map((id) => deviceCounters[id])
@@ -2589,7 +2669,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     function selectedQueueTotals(queues) {
       const selectedDevice = element("traffic-device").value;
-      const figures = selectedDevice === "all"
+      const figures = selectedDevice === "@all"
         ? Object.keys(queues).filter((id) => id !== EVERYONE_ELSE_TRAFFIC).map((id) => queues[id])
         : queues[selectedDevice] ? [queues[selectedDevice]] : [];
       return figures.reduce((totals, current) => ({
@@ -2603,7 +2683,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       const selected = select.value;
       select.replaceChildren();
       const allOption = document.createElement("option");
-      allOption.value = "all";
+      allOption.value = "@all";
       allOption.textContent = "All assigned devices";
       select.appendChild(allOption);
       devices.forEach((device) => {
@@ -2619,7 +2699,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         select.appendChild(option);
       }
       const kept = Array.from(select.options).some((option) => option.value === selected);
-      select.value = kept ? selected : "all";
+      select.value = kept ? selected : "@all";
       // The last sample belongs to the choice that went, so start a fresh graph.
       if (!kept && selected) resetTrafficHistory();
     }
@@ -2642,7 +2722,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       const now = performance.now();
       const visibleSamples = trafficSamples.filter((sample) => now - sample.time <= TRAFFIC_WINDOW_MS);
       const selectedDevice = element("traffic-device").value;
-      const profileSelected = selectedDevice !== "all";
+      const profileSelected = selectedDevice !== "@all";
       element("traffic-profile-upload-legend").hidden = !profileSelected;
       element("traffic-profile-download-legend").hidden = !profileSelected;
       const referenceFields = ["isp_upload", "isp_download", "profile_upload", "profile_download"];
@@ -2984,12 +3064,12 @@ DASHBOARD_HTML = r"""<!doctype html>
       const limitKey = selectedDevice === EVERYONE_ELSE_TRAFFIC
         ? EVERYONE_ELSE_QUEUE_ID
         : selectedDevice;
-      const deviceLimits = selectedDevice === "all" || !data.profile_limits_available
+      const deviceLimits = selectedDevice === "@all" || !data.profile_limits_available
         ? null
         : (data.profile_limits || {})[limitKey];
-      const profileAvailable = selectedDevice !== "all" &&
+      const profileAvailable = selectedDevice !== "@all" &&
         data.profile_limits_available === true && deviceLimits !== undefined;
-      element("traffic-profile-status").textContent = selectedDevice === "all"
+      element("traffic-profile-status").textContent = selectedDevice === "@all"
         ? "Select one device to see its applied default queue limit. Service-specific limits are not shown."
         : !data.profile_limits_available
           ? "No applied plan is available. Apply the configuration to see current default queue limits."
@@ -3016,7 +3096,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     async function pollTraffic() {
-      if (trafficRequestInFlight || !trafficSamplingAllowed || document.hidden) return;
+      if (trafficRequestInFlight || !trafficSamplingAllowed || document.hidden ||
+          currentDashboardTab !== "overview") return;
       trafficRequestInFlight = true;
       try {
         const data = await request("/api/traffic", "GET");
@@ -4529,12 +4610,14 @@ DASHBOARD_HTML = r"""<!doctype html>
         "group-devices"
       ].forEach((selectId) => {
         const deviceSelect = element(selectId);
+        const selected = new Set(Array.from(deviceSelect.selectedOptions, (option) => option.value));
         deviceSelect.replaceChildren();
-      data.devices.forEach((device) => {
+        data.devices.forEach((device) => {
           const option = document.createElement("option");
           option.value = device.id;
           option.textContent = device.name + " (" + device.ipv4_address + ")";
           deviceSelect.appendChild(option);
+          if (selected.size || deviceSelect.multiple) option.selected = selected.has(device.id);
         });
       });
       renderTargetMenus();
@@ -4581,7 +4664,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         const time = document.createElement("small");
         time.textContent = formatDays(schedule.days_of_week) + " · " +
           formatMinute(schedule.start_minute) + "–" + formatMinute(schedule.end_minute) +
-          " · " + schedule.id;
+          " · " + schedule.id + " · " + (schedule.enabled ? "Enabled" : "Disabled");
         text.append(name, time);
         const actions = document.createElement("div");
         actions.className = "row-actions";
@@ -4604,6 +4687,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     async function loadSchedules() {
       const data = await request("/api/schedules", "GET");
       savedSchedules = data.schedules;
+      element("schedule-clock").textContent = "Schedule times use the Pi clock: " +
+        data.local_time.replace("T", " ") + " (" + data.time_zone + ").";
       renderSchedules(data.schedules);
       // An everyone-else schedule adds Everyone else to Live traffic.
       updateTrafficDeviceOptions(devices);
@@ -4725,7 +4810,30 @@ DASHBOARD_HTML = r"""<!doctype html>
         renumberScenarioSteps();
         element("scenario-add-step").focus();
       });
-      row.append(profileLabel, ...fields, removeButton);
+      const actions = document.createElement("div");
+      actions.className = "scenario-step-actions";
+      [["up", "Move up"], ["down", "Move down"], ["duplicate", "Duplicate"]].forEach(([action, label]) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.stepAction = action;
+        button.textContent = label;
+        button.addEventListener("click", () => {
+          const container = element("scenario-steps");
+          if (action === "up" && row.previousElementSibling) container.insertBefore(row, row.previousElementSibling);
+          if (action === "down" && row.nextElementSibling) container.insertBefore(row.nextElementSibling, row);
+          if (action === "duplicate" && container.children.length < 20) {
+            const index = Array.from(container.children).indexOf(row);
+            const copy = scenarioStepRow(scenarioStepsFromForm()[index]);
+            row.after(copy);
+            copy.querySelector("select").focus();
+          }
+          renumberScenarioSteps();
+        });
+        actions.appendChild(button);
+      });
+      removeButton.dataset.stepAction = "remove";
+      actions.appendChild(removeButton);
+      row.append(profileLabel, ...fields, actions);
       return row;
     }
 
@@ -4733,12 +4841,29 @@ DASHBOARD_HTML = r"""<!doctype html>
       // Every row repeats the same labels, so name each field after its step.
       Array.from(element("scenario-steps").children).forEach((row, index) => {
         const step = "Step " + (index + 1);
-        const [profileLabel, minutesLabel, secondsLabel, removeButton] = row.children;
+        const [profileLabel, minutesLabel, secondsLabel] = row.children;
         profileLabel.children[0].setAttribute("aria-label", step + " profile");
         minutesLabel.children[0].setAttribute("aria-label", step + " minutes");
         secondsLabel.children[0].setAttribute("aria-label", step + " seconds");
-        removeButton.setAttribute("aria-label", "Remove step " + (index + 1));
+        row.querySelectorAll("[data-step-action]").forEach((button) => {
+          const action = button.dataset.stepAction;
+          button.setAttribute("aria-label", (action === "remove" ? "Remove" : button.textContent) + " step " + (index + 1));
+          const count = element("scenario-steps").children.length;
+          button.disabled = (action === "up" && index === 0) ||
+            (action === "down" && index === count - 1) ||
+            (action === "remove" && count === 1) || (action === "duplicate" && count >= 20);
+        });
       });
+      element("scenario-add-step").disabled = element("scenario-steps").children.length >= 20;
+      updateScenarioDuration();
+    }
+
+    function updateScenarioDuration() {
+      const steps = scenarioStepsFromForm();
+      const total = steps.reduce((seconds, step) => seconds + step.duration_seconds, 0);
+      element("scenario-duration").textContent = steps.length + (steps.length === 1 ? " step · " : " steps · ") +
+        (Number.isFinite(total) ? formatDuration(total) : "Check step durations") +
+        (element("scenario-loop").checked ? " per repeat" : " total");
     }
 
     function renderScenarioSteps(steps) {
@@ -4904,10 +5029,19 @@ DASHBOARD_HTML = r"""<!doctype html>
       return ["| Time (" + zone + ") | Event |", "| --- | --- |"].concat(rows).join("\n");
     }
 
+    function filteredActivity() {
+      const kind = element("activity-kind").value;
+      const search = element("activity-search").value.trim().toLocaleLowerCase();
+      return latestActivity.filter((event) => (!kind || event.kind === kind) &&
+        (!search || event.message.toLocaleLowerCase().includes(search)));
+    }
+
     function renderActivity(events) {
       latestActivity = events;
+      events = filteredActivity();
+      element("activity-count").textContent = events.length + " of " + latestActivity.length + " events";
       const empty = element("activity-empty");
-      empty.textContent = ACTIVITY_EMPTY_TEXT;
+      empty.textContent = latestActivity.length ? "No events match these filters." : ACTIVITY_EMPTY_TEXT;
       empty.hidden = events.length > 0;
       const list = element("activity-list");
       list.replaceChildren();
@@ -4942,7 +5076,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     async function copyActivity() {
-      const markdown = activityMarkdown(latestActivity);
+      const markdown = activityMarkdown(filteredActivity());
       const box = element("activity-markdown");
       try {
         await navigator.clipboard.writeText(markdown);
@@ -4958,8 +5092,19 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
     }
 
+    function downloadActivity() {
+      const url = URL.createObjectURL(new Blob([activityMarkdown(filteredActivity())], { type: "text/markdown;charset=utf-8" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "jittersim-activity.md";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
     async function clearActivity(button) {
-      if (!window.confirm("Clear the activity log? This can't be undone.")) return;
+      if (!window.confirm("Clear every event, including those hidden by filters? This can't be undone.")) return;
       setButtonBusy(button, true);
       try {
         await request("/api/activity/clear", "POST", {});
@@ -5126,7 +5271,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       try {
         deviceConditions = await request("/api/conditions", "GET");
         element("device-conditions-note").textContent = deviceConditions.applied
-          ? "Conditions show what the network applies now."
+          ? "Profiles and conditions show what the network applies now. Planned times use your browser clock. Traffic limits and outages may change conditions sooner."
           : "Conditions show the saved settings. The network does not apply them yet.";
       } catch (error) {
         deviceConditions = { applied: false, devices: {} };
@@ -5135,13 +5280,58 @@ DASHBOARD_HTML = r"""<!doctype html>
       renderDeviceTable();
     }
 
+    let dashboardRefresh = null;
+    let dashboardPoll = null;
+    let refreshAgain = false;
+
     async function refresh() {
+      refreshAgain = true;
+      if (dashboardRefresh) return dashboardRefresh;
+      dashboardRefresh = (async () => {
+        if (dashboardPoll) await dashboardPoll;
+        do {
+          refreshAgain = false;
+          await refreshDashboard();
+        } while (refreshAgain);
+      })();
+      try {
+        await dashboardRefresh;
+      } finally {
+        dashboardRefresh = null;
+      }
+    }
+
+    async function pollDashboard() {
+      if (document.hidden || !dashboardLoaded || dashboardRefresh || dashboardPoll) return;
+      dashboardPoll = (async () => {
+        // Only read changing data in the visible panel. Do not overwrite forms.
+        let jobs = [loadState];
+        if (currentDashboardTab === "overview") jobs.push(loadConnectedDevices, loadActivity);
+        if (currentDashboardTab === "devices") jobs.push(loadDevicesForSchedule, loadConditions);
+        if (currentDashboardTab === "rules") {
+          if (currentRuleSection === "runs") jobs.push(loadTimers, loadScenarios, loadProgressions, loadSchedules);
+          if (currentRuleSection === "limits") jobs.push(loadQuotas);
+          if (currentRuleSection === "access") jobs.push(loadObservations);
+        }
+        const results = await Promise.allSettled(jobs.map((job) => job()));
+        if (results.some((result) => result.status === "rejected")) {
+          element("runtime-summary").textContent = "Some status updates could not load. Retrying shortly.";
+        }
+      })();
+      try {
+        await dashboardPoll;
+      } finally {
+        dashboardPoll = null;
+      }
+    }
+
+    async function refreshDashboard() {
       await loadProfiles();
       await loadHealth();
       await loadObservations();
       // Device names are needed by the schedule list and the device table.
       await loadDevicesForSchedule();
-      await Promise.all([
+      const results = await Promise.allSettled([
         show("/api/plan", "plan", "plan"),
         loadState(),
         loadGroups(),
@@ -5159,6 +5349,8 @@ DASHBOARD_HTML = r"""<!doctype html>
         loadEveryoneElse(),
         loadAdminTools()
       ]);
+      const failed = results.find((result) => result.status === "rejected");
+      if (failed) throw failed.reason;
       dashboardLoaded = true;
       renderGettingStarted();
     }
@@ -5244,7 +5436,8 @@ DASHBOARD_HTML = r"""<!doctype html>
           name: element("device-name").value,
           ipv4_address: element("device-ip").value,
           profile_id: element("device-profile").value,
-          mac_address: element("device-mac").value.trim() || null
+          mac_address: element("device-mac").value.trim() || null,
+          ...(editingDeviceSnapshot ? { expected: editingDeviceSnapshot } : {})
         });
         stopEditing("device");
         refreshAfterSuccess("Device saved.");
@@ -5333,9 +5526,11 @@ DASHBOARD_HTML = r"""<!doctype html>
           days_of_week: days,
           start_minute: timeToMinute("schedule-start"),
           end_minute: timeToMinute("schedule-end"),
-          enabled: true
+          enabled: element("schedule-enabled").checked
         });
-        refreshAfterSuccess("Schedule saved. Apply the configuration to start it.");
+        refreshAfterSuccess(element("schedule-enabled").checked
+          ? "Schedule saved. It follows the Pi clock while the configuration is applied."
+          : "Schedule saved as disabled.");
       } catch (error) {
         showMessage(error.message, "error");
       }
@@ -5364,7 +5559,13 @@ DASHBOARD_HTML = r"""<!doctype html>
       clearActivity(event.currentTarget);
     });
 
+    element("activity-kind").addEventListener("change", () => renderActivity(latestActivity));
+    element("activity-search").addEventListener("input", () => renderActivity(latestActivity));
+    element("activity-download").addEventListener("click", downloadActivity);
+    element("scenario-steps").addEventListener("input", updateScenarioDuration);
+    element("scenario-loop").addEventListener("change", updateScenarioDuration);
     element("scenario-add-step").addEventListener("click", () => {
+      if (element("scenario-steps").children.length >= 20) return;
       element("scenario-steps").appendChild(
         scenarioStepRow({ profile_id: "", duration_seconds: 60 })
       );
@@ -5788,14 +5989,11 @@ DASHBOARD_HTML = r"""<!doctype html>
       routerAction("/api/router/wifi", { enabled: true }, "Turning on router Wi-Fi...", event.currentTarget);
     });
 
-    window.setInterval(() => loadConnectedDevices(), 5000);
-    window.setInterval(() => loadTimers(), 5000);
-    window.setInterval(() => loadScenarios(), 5000);
-    window.setInterval(() => loadActivity(), 5000);
-    window.setInterval(() => loadProgressions(), 5000);
-    window.setInterval(() => loadQuotas(), 5000);
-    window.setInterval(() => loadConditions(), 5000);
-    window.setInterval(() => loadObservations(), 15000);
+    window.setInterval(pollDashboard, 5000);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) pollDashboard(); });
+    document.querySelectorAll("[data-rule-tab]").forEach((button) => {
+      button.addEventListener("click", () => showRuleSection(button.dataset.ruleTab));
+    });
 
     element("unaffected-picker").addEventListener("change", fillUnaffectedFromPicker);
     element("device-picker").addEventListener("change", fillDeviceFromPicker);
@@ -6339,7 +6537,11 @@ class ControlServer(HTTPServer):
             return HTTPStatus.OK, "application/json", _json_bytes({"groups": groups})
         if path == "/api/schedules":
             schedules = [_schedule_payload(schedule) for schedule in self.repository.list_schedules()]
-            return HTTPStatus.OK, "application/json", _json_bytes({"schedules": schedules})
+            return HTTPStatus.OK, "application/json", _json_bytes({
+                "schedules": schedules,
+                "local_time": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "time_zone": time.strftime("%Z"),
+            })
         if path == "/api/activity":
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {"events": list(self.repository.list_activity())}
@@ -6607,8 +6809,22 @@ class ControlServer(HTTPServer):
                 {"plan": plan_to_payload(plan)}
             )
         if path == "/api/conditions":
-            plan = self.scheduler.applied_plan() if self.scheduler is not None else None
+            operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
+            with operation:
+                plan = self.scheduler.applied_plan() if self.scheduler is not None else None
+                sources = self.scheduler.applied_target_states() if self.scheduler is not None else None
             applied = plan is not None
+
+            def described_condition(state, target_id):
+                payload = {"condition": state.condition, "reasons": list(state.reasons)}
+                target = (sources or {}).get(target_id)
+                if applied and target is not None:
+                    payload["source"] = asdict(target.source)
+                    payload["next_change_at"] = (
+                        datetime.fromtimestamp(target.next_change_at).astimezone().isoformat()
+                        if target.next_change_at is not None else None
+                    )
+                return payload
             if plan is None:
                 # Nothing runs on the network, so describe the saved settings.
                 # The scheduler's runtime plan would advance its rerolls.
@@ -6620,13 +6836,10 @@ class ControlServer(HTTPServer):
                     "everyone_else": (
                         None
                         if everyone_else is None
-                        else {
-                            "condition": everyone_else.condition,
-                            "reasons": list(everyone_else.reasons),
-                        }
+                        else described_condition(everyone_else, EVERYONE_ELSE_QUEUE_ID)
                     ),
                     "devices": {
-                        device_id: {"condition": state.condition, "reasons": list(state.reasons)}
+                        device_id: described_condition(state, device_id)
                         for device_id, state in device_conditions(
                             plan,
                             mac_addresses={
@@ -6862,6 +7075,12 @@ class ControlServer(HTTPServer):
         if path == "/api/devices":
             try:
                 device = _device_from_payload(payload)
+                expected = (
+                    _device_from_payload(payload["expected"])
+                    if "expected" in payload else None
+                )
+                if expected is not None and expected.id != device.id:
+                    raise ValueError("the original device ID must match")
             except (KeyError, TypeError, ValueError) as error:
                 return _bad_request("invalid device configuration", error)
             conflict = self._unaffected_conflict(device.mac_address)
@@ -6871,7 +7090,10 @@ class ControlServer(HTTPServer):
                 capacity_error = self._capacity_error(adding=1)
                 if capacity_error is not None:
                     return capacity_error
-            self.repository.save_device(device)
+            try:
+                self.repository.save_device(device, expected=expected)
+            except DeviceConflictError as error:
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {"device": _device_payload(device)}
             )
@@ -7607,7 +7829,9 @@ class ControlServer(HTTPServer):
                 {"error": "network helper is not configured"}
             )
         try:
-            device = _connected_device_from_payload(payload, self.repository)
+            device, expected = _connected_device_from_payload(payload, self.repository)
+        except DeviceConflictError as error:
+            return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
         except (KeyError, TypeError, ValueError) as error:
             return _bad_request("invalid connected-device profile assignment", error)
         conflict = self._unaffected_conflict(device.mac_address)
@@ -7633,7 +7857,10 @@ class ControlServer(HTTPServer):
             capacity_error = self._capacity_error(adding=1)
             if capacity_error is not None:
                 return capacity_error
-        self.repository.save_device(device)
+        try:
+            self.repository.save_device(device, expected=expected, create_only=expected is None)
+        except DeviceConflictError as error:
+            return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
         status, content_type, body = self._apply_after_change()
         response = json.loads(body.decode("utf-8"))
         response["device"] = _device_payload(device)
@@ -8846,8 +9073,8 @@ def _settings_from_payload(payload: Dict[str, Any]) -> SavedSettings:
 
 def _connected_device_from_payload(
     payload: Dict[str, Any], repository: ConfigRepository
-) -> Device:
-    """Build an assignment for a visible client while preserving existing names and IDs."""
+) -> Tuple[Device, Optional[Device]]:
+    """Return an assignment and the saved identity it was based on."""
 
     ipv4_address = payload["ipv4_address"]
     profile_id = payload["profile_id"]
@@ -8860,16 +9087,31 @@ def _connected_device_from_payload(
         name="Connected client",
         ipv4_address=ipv4_address,
         profile_id=profile_id,
+        mac_address=mac_address,
     )
+    mac_address = address_only.mac_address
     existing_by_address = repository.get_device_by_ipv4_address(str(address_only.ipv4_address))
+    matching = [device for device in repository.list_devices()
+                if mac_address is not None and device.mac_address == mac_address]
+    if len(matching) > 1:
+        raise DeviceConflictError(
+            "Several saved devices use this MAC address. Remove the duplicate before assigning a profile."
+        )
+    if matching:
+        existing = matching[0]
+        if existing_by_address is not None and existing_by_address.id != existing.id:
+            raise DeviceConflictError("This address belongs to another saved device. Resolve it first.")
+        return replace(existing, ipv4_address=address_only.ipv4_address, profile_id=profile_id), existing
     if existing_by_address is not None:
+        if existing_by_address.mac_address is not None and existing_by_address.mac_address != mac_address:
+            raise DeviceConflictError("This address belongs to a different saved device. Resolve it first.")
         return Device(
             id=existing_by_address.id,
             name=existing_by_address.name,
             ipv4_address=address_only.ipv4_address,
             profile_id=profile_id,
             mac_address=mac_address or existing_by_address.mac_address,
-        )
+        ), existing_by_address
 
     generated_id = "client-" + str(address_only.ipv4_address).replace(".", "-")
     existing_generated_id = repository.get_device(generated_id)
@@ -8881,7 +9123,7 @@ def _connected_device_from_payload(
         ipv4_address=address_only.ipv4_address,
         profile_id=profile_id,
         mac_address=mac_address,
-    )
+    ), None
 
 
 def _authorization_matches(

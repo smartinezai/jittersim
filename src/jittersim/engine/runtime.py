@@ -42,7 +42,7 @@ from .randomizer import (
     seeded_generator,
 )
 from .scenarios import active_scenario_runs
-from .schedules import active_schedule
+from .schedules import active_schedule, next_schedule_change
 from .website import build_website_filters, resolve_domains
 
 LOGGER = logging.getLogger(__name__)
@@ -150,6 +150,8 @@ class RuntimeScheduler:
         # What applied to each device and to everyone else at the last applied
         # plan, for the activity log. None until a plan applies after a reset.
         self._applied_states: Optional[Dict[str, TargetState]] = None
+        self._schedule_hint_settings = None
+        self._schedule_hints = {}
         self._last_quota_sample_at = 0.0
         self._last_device_counters: Dict[str, int] = {}
         self._device_traffic_bytes: Dict[str, int] = {}
@@ -271,6 +273,31 @@ class RuntimeScheduler:
         except PlanCodecError:
             LOGGER.warning("the applied plan could not be read back", exc_info=True)
             return None
+
+    def applied_target_states(self) -> Optional[Dict[str, TargetState]]:
+        """Return confirmed source descriptions without rebuilding a plan."""
+
+        with self._lock:
+            if self._current_payload is None or self._applied_states is None:
+                return None
+            return dict(self._applied_states)
+
+    def _next_schedule_change(self, schedules, now, **target) -> Optional[float]:
+        settings = (schedules, time.tzname, time.timezone, time.altzone)
+        if settings != self._schedule_hint_settings:
+            self._schedule_hint_settings = settings
+            self._schedule_hints.clear()
+        key = tuple(sorted(target.items()))
+        cached = self._schedule_hints.get(key)
+        if cached is not None:
+            checked_at, next_at = cached
+            if now >= checked_at and (next_at is None or now < next_at):
+                return next_at
+        next_at = next_schedule_change(schedules=schedules, now=now, **target)
+        if len(self._schedule_hints) >= 64:
+            self._schedule_hints.clear()
+        self._schedule_hints[key] = (now, next_at)
+        return next_at
 
     def applied_queue_bandwidth_limits(
         self,
@@ -680,8 +707,21 @@ class RuntimeScheduler:
             kind, identity, label, step, group_name = described
             # A progression's profile changes as it goes, so its name is left out.
             profile_name = "" if kind == "progression" else selected_profile.name
+            next_change = None
+            if kind == "timer":
+                next_change = timer.expires_at
+            elif kind == "scenario":
+                next_change = int(now) + position.step_remaining_seconds
+            elif kind == "progression" and progression.mode == "time":
+                next_change = progression.started_at + progression.duration_seconds
+            elif kind in ("profile", "group-profile", "schedule"):
+                next_change = self._next_schedule_change(
+                    schedules, now, device_id=device.id,
+                    group_id=group.id if group is not None else None,
+                )
             states[device.id] = TargetState(
                 name=device.name,
+                next_change_at=next_change,
                 source=Source(kind, identity, label, step, profile_name, group_name),
                 outage=roll.outage_until > now,
             )
@@ -747,14 +787,20 @@ class RuntimeScheduler:
                 blocked=roll.outage_until > now,
             )
             kind, identity, label, step = everyone_else_described
+            next_change = (
+                int(now) + position.step_remaining_seconds if everyone_else_run is not None
+                else self._next_schedule_change(schedules, now, everyone_else=True)
+            )
             states[EVERYONE_ELSE_QUEUE_ID] = TargetState(
                 name="Everyone else",
+                next_change_at=next_change,
                 source=Source(kind, identity, label, step, profile.name),
                 outage=roll.outage_until > now,
             )
         else:
             states[EVERYONE_ELSE_QUEUE_ID] = TargetState(
-                name="Everyone else", source=Source("none", "none")
+                name="Everyone else", source=Source("none", "none"),
+                next_change_at=self._next_schedule_change(schedules, now, everyone_else=True),
             )
 
         self._rolls = {

@@ -95,6 +95,26 @@ class RuntimeSchedulerTests(unittest.TestCase):
             Device("alice", "Alice", "192.168.50.10", profile.id)
         )
 
+    def test_confirmed_source_and_next_step_survive_unsaved_preview(self) -> None:
+        self._save_device(Profile("normal", "Normal"))
+        self.repository.save_profile(Profile("slow", "Slow"))
+        scenario = Scenario("steps", "Steps", (ScenarioStep("slow", 10), ScenarioStep("normal", 20)), loop=True)
+        self.repository.save_scenario(scenario)
+        self.repository.start_scenario_run(ScenarioRun("run", "steps", 100, device_id="alice"))
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        prepared = scheduler.prepare_plan(repository=self.repository, now=105.25)
+        with patch.object(scheduler, "start"):
+            scheduler.activate_plan(repository=self.repository, prepared=prepared)
+        scheduler.build_plan(repository=self.repository, now=115)
+        states = scheduler.applied_target_states()
+        self.assertEqual(states["alice"].source.kind, "scenario")
+        self.assertEqual(states["alice"].source.profile, "Slow")
+        self.assertEqual(states["alice"].next_change_at, 110)
+        states.clear()
+        self.assertIn("alice", scheduler.applied_target_states())
+        scheduler.invalidate_applied_plan()
+        self.assertIsNone(scheduler.applied_target_states())
+
     def test_pause_waits_for_an_inflight_apply(self) -> None:
         class BlockingHelper(RecordingHelper):
             def __init__(self) -> None:

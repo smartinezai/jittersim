@@ -46,6 +46,10 @@ class StorageError(RuntimeError):
     """Raised when stored configuration cannot be read or written safely."""
 
 
+class DeviceConflictError(StorageError):
+    """Raised when an assignment would overwrite a changed or conflicting device."""
+
+
 class TrafficRateSettingsError(StorageError):
     """Raised when a graph-only ISP rate reference is invalid."""
 
@@ -396,6 +400,13 @@ class ConfigRepository:
         self._add_column_if_missing("progressions", "traffic_target_bytes", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing("progressions", "traffic_baseline_bytes", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing("service_quotas", "weight_percent", "INTEGER NOT NULL DEFAULT 100")
+        self._connection.execute("CREATE INDEX IF NOT EXISTS devices_mac_idx ON devices(mac_address)")
+        for table in ("timers", "progressions", "scenario_runs"):
+            self._connection.execute(
+                f"CREATE INDEX IF NOT EXISTS {table}_history_idx "
+                f"ON {table}(enabled, started_at DESC, id DESC)"
+            )
+        self._prune_run_history()
         self._commit()
 
     def _upgrade_schedules_table(self) -> None:
@@ -477,33 +488,63 @@ class ConfigRepository:
             self._connection.rollback()
             raise StorageError(f"could not save profile {profile.id}") from error
 
-    def save_device(self, device: Device) -> None:
-        """Insert or update one validated device assignment."""
+    def save_device(
+        self, device: Device, *, expected: Optional[Device] = None, create_only: bool = False
+    ) -> None:
+        """Save an assignment without duplicating a MAC or overwriting a stale edit."""
 
+        values = (device.id, device.name, str(device.ipv4_address), device.profile_id, device.mac_address)
         try:
-            self._connection.execute(
-                """
-                INSERT INTO devices (id, name, ipv4_address, profile_id, mac_address)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    name = excluded.name,
-                    ipv4_address = excluded.ipv4_address,
-                    profile_id = excluded.profile_id,
-                    mac_address = excluded.mac_address
-                """,
-                (
-                    device.id,
-                    device.name,
-                    str(device.ipv4_address),
-                    device.profile_id,
-                    device.mac_address,
-                ),
-            )
+            if expected is None:
+                cursor = self._connection.execute(
+                    """
+                    INSERT INTO devices (id, name, ipv4_address, profile_id, mac_address)
+                    SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS (
+                        SELECT 1 FROM devices WHERE mac_address = ? AND id != ?
+                    )
+                    ON CONFLICT(id) DO UPDATE SET
+                        name = excluded.name,
+                        ipv4_address = excluded.ipv4_address,
+                        profile_id = excluded.profile_id,
+                        mac_address = excluded.mac_address
+                    WHERE ? = 0
+                    """,
+                    values + (device.mac_address, device.id, int(create_only)),
+                )
+                message = (
+                    "Saved device identity changed. Refresh connected clients before assigning a profile."
+                    if create_only else "Another saved device already uses this MAC address."
+                )
+            else:
+                cursor = self._connection.execute(
+                    """
+                    UPDATE devices SET name = ?, ipv4_address = ?, profile_id = ?, mac_address = ?
+                    WHERE id = ? AND id = ? AND name = ? AND ipv4_address = ?
+                        AND profile_id = ? AND mac_address IS ?
+                        AND NOT EXISTS (
+                            SELECT 1 FROM devices WHERE mac_address = ? AND id != ?
+                        )
+                    """,
+                    values[1:] + (device.id, expected.id, expected.name, str(expected.ipv4_address),
+                                  expected.profile_id, expected.mac_address,
+                                  device.mac_address, device.id),
+                )
+                message = (
+                    "Device changed or its MAC belongs to another saved device. "
+                    "Reload the device before saving."
+                )
+            if not cursor.rowcount:
+                raise DeviceConflictError(message)
             self._bump_configuration_version()
             self._commit()
+        except DeviceConflictError:
+            self._connection.rollback()
+            raise
         except sqlite3.IntegrityError as error:
             self._connection.rollback()
-            raise StorageError(f"could not save device {device.id}") from error
+            raise DeviceConflictError(
+                f"could not save device {device.id}: check its profile and address"
+            ) from error
 
     def get_runtime_state(self) -> RuntimeState:
         """Return the desired-configuration version and observed helper state."""
@@ -1270,6 +1311,16 @@ class ConfigRepository:
         ).fetchall()
         return tuple(self._schedule_from_row(row) for row in rows)
 
+    def _prune_run_history(self) -> None:
+        """Keep 500 inactive runs per type with at most 1000 deletions each."""
+
+        for table in ("timers", "progressions", "scenario_runs"):
+            self._connection.execute(
+                f"DELETE FROM {table} WHERE id IN ("
+                f"SELECT id FROM {table} WHERE enabled = 0 "
+                "ORDER BY started_at DESC, id DESC LIMIT 1000 OFFSET 500)"
+            )
+
     def save_timer(self, timer: Timer) -> None:
         """Persist one timer and replace other active overrides for its device."""
 
@@ -1308,6 +1359,7 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
+            self._prune_run_history()
             self._commit()
         except sqlite3.IntegrityError as error:
             self._connection.rollback()
@@ -1345,6 +1397,7 @@ class ConfigRepository:
                 (scenario.id, scenario.name, json.dumps(steps), int(scenario.loop)),
             )
             self._bump_configuration_version()
+            self._prune_run_history()
             self._commit()
         except sqlite3.IntegrityError as error:
             self._connection.rollback()
@@ -1411,6 +1464,7 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
+            self._prune_run_history()
             self._commit()
         except sqlite3.IntegrityError as error:
             self._connection.rollback()
@@ -1424,6 +1478,7 @@ class ConfigRepository:
         )
         if cursor.rowcount:
             self._bump_configuration_version()
+            self._prune_run_history()
             self._commit()
             return True
         return False
@@ -1466,6 +1521,7 @@ class ConfigRepository:
         )
         if cursor.rowcount:
             self._bump_configuration_version()
+            self._prune_run_history()
             self._commit()
             return True
         return False
@@ -1550,6 +1606,7 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
+            self._prune_run_history()
             self._commit()
         except sqlite3.IntegrityError as error:
             self._connection.rollback()
@@ -1564,6 +1621,7 @@ class ConfigRepository:
         )
         if cursor.rowcount:
             self._bump_configuration_version()
+            self._prune_run_history()
             self._commit()
             return True
         return False

@@ -32,10 +32,12 @@ is a private lab tool, not a replacement for a home router.
   A schedule applies to one device, a group or everyone else. A device's own
   schedule wins over its group's, and an everyone-else schedule works without
   an everyone-else profile.
+- Enable or disable a schedule without deleting it. The form shows the Pi clock.
 - One-shot timers that activate a profile for a chosen duration.
 - Scenarios: named lists of steps, each a profile for 10 seconds to 24 hours,
   that can repeat. Apply the configuration in hardware mode first then start
   one for a device, a group or everyone else. Its clock starts with Start.
+  Duplicate or reorder steps in the editor and see the total duration.
   You can stop it at any time. A failed Start stops the new run so recovery
   cannot start it later. A scenario takes over from schedules as a timer does.
   A device's own timer or scenario wins over its group's and data limits still win.
@@ -65,7 +67,11 @@ is a private lab tool, not a replacement for a home router.
   address, JitterSim moves its record within about 30 seconds of seeing the
   device active there, while the network is applied. Devices that swap
   addresses move together, and no device takes an address another saved
-  device keeps.
+  device keeps. Assigning a profile after an address move reuses the saved
+  identity. An edit opened before another change must be reloaded before saving.
+- The Devices tab shows the applied profile, its source and the next planned
+  timer, scenario or schedule change. Limits and outages may change conditions
+  sooner. Before Apply it labels saved settings clearly.
 - MAC address allowlists and denylists. The filtering mode decides which list
   applies.
 - A global blocked-site list.
@@ -111,7 +117,13 @@ bytes.
 - An activity log of the last 500 network events: applies and resets,
   schedule, timer, scenario and progression switches, data, service and time
   limits, outages and address moves. Copy it as a Markdown table for a report.
+  Filter by event type or search text then copy or download only the matches.
   Rerolls are left out.
+- Rules are grouped into runs and schedules, usage limits and access rules.
+  Background updates pause for hidden pages and read only the visible panel.
+- Keep the newest 500 inactive timers, progressions and scenario runs per type.
+  Older databases are cleaned in batches of up to 1000 rows per type when opened
+  or when a run is changed. Active runs and saved scenarios are kept.
 - Download a point-in-time backup of settings and local DNS observations.
 - Export settings as JSON and import them on another Pi or to repeat a
   demonstration. Imports are checked first and replace all settings at once.
