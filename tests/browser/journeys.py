@@ -31,7 +31,9 @@ def check_access_and_help(page):
     expect(page.locator("#access-summary")).to_contain_text("Saved rules differ")
     page.locator("#dns-failure-percent").fill("20")
     page.get_by_role("button", name="Save access rules", exact=True).click()
-    expect(page.locator("#dns-failure-status")).to_contain_text("Saved DNS failure chance: 20%")
+    expect(page.locator("#dns-failure-status")).to_contain_text(
+        re.compile(r"(?:Saved|Applied) DNS failure chance: 20%")
+    )
     page.get_by_role("button", name="Apply access rules", exact=True).click()
     expect(page.locator("#dns-failure-status")).to_contain_text("Applied DNS failure chance: 20%")
     expect(page.locator("#access-summary")).to_contain_text("Saved access rules are active")
@@ -148,13 +150,101 @@ def run():
             context.tracing.start(screenshots=True, snapshots=True, sources=True)
             page = context.new_page()
             errors = []
+            release_checks = []
+            release_installs = []
             page.on("pageerror", lambda error: errors.append(str(error)))
+            page.on(
+                "request",
+                lambda request: release_checks.append(request.url)
+                if request.method == "GET" and request.url.endswith("/api/updates")
+                else None,
+            )
+            page.on(
+                "request",
+                lambda request: release_installs.append(request.url)
+                if request.method == "POST" and request.url.endswith("/api/updates/install")
+                else None,
+            )
             Path("test-results").mkdir(exist_ok=True)
             try:
                 page.goto(f"http://127.0.0.1:{port}")
                 page.get_by_label("Token", exact=True).fill("browser-test")
                 page.get_by_role("button", name="Sign in", exact=True).click()
                 expect(page.get_by_text("Signed in.", exact=True)).to_be_visible()
+                expect(page.locator("#update-preference-status")).to_contain_text(
+                    "Automatic checking is on."
+                )
+                expect(page.locator("#release-status")).to_contain_text("candidate-release")
+                expect(
+                    page.get_by_role("link", name="Setup, release staged", exact=True)
+                ).to_be_visible()
+                assert len(release_checks) == 1, release_checks
+                assert not release_installs, release_installs
+                page.get_by_role("link", name="Setup, release staged", exact=True).click()
+                automatic_check = page.locator("#check-staged-updates-on-open")
+                expect(automatic_check).to_be_checked()
+                automatic_check.uncheck()
+                expect(page.locator("#update-preference-status")).to_contain_text(
+                    "Automatic checking is off."
+                )
+                page.reload()
+                expect(page.locator("#update-preference-status")).to_contain_text(
+                    "Automatic checking is off."
+                )
+                assert len(release_checks) == 1, release_checks
+                page.get_by_role("link", name="Setup", exact=True).click()
+                page.get_by_role("button", name="Check for updates", exact=True).click()
+                expect(page.locator("#release-status")).to_contain_text("candidate-release")
+                assert len(release_checks) == 2, release_checks
+                automatic_check = page.locator("#check-staged-updates-on-open")
+                automatic_check.check()
+                expect(page.locator("#update-preference-status")).to_contain_text(
+                    "Automatic checking is on."
+                )
+                expect(page.locator("#staged-release-badge")).to_be_visible()
+                assert len(release_checks) == 3, release_checks
+                page.route(
+                    "**/api/update-preferences",
+                    lambda route: route.fulfill(
+                        status=503,
+                        content_type="application/json",
+                        body=json.dumps({"error": "preference save unavailable"}),
+                    )
+                    if route.request.method == "POST"
+                    else route.continue_(),
+                )
+                automatic_check.uncheck()
+                expect(automatic_check).to_be_checked()
+                expect(page.locator("#update-preference-status")).to_contain_text(
+                    "The preference was not saved."
+                )
+                page.unroute("**/api/update-preferences")
+                preference_read_count = len(release_checks)
+                page.route(
+                    "**/api/update-preferences",
+                    lambda route: route.fulfill(
+                        status=503,
+                        content_type="application/json",
+                        body=json.dumps({"error": "preference read unavailable"}),
+                    ),
+                )
+                page.reload()
+                expect(page.locator("#check-staged-updates-on-open")).to_be_disabled()
+                expect(page.locator("#update-preference-status")).to_contain_text(
+                    "The saved preference could not be read."
+                )
+                assert len(release_checks) == preference_read_count, release_checks
+                page.get_by_role("button", name="Check for updates", exact=True).click()
+                expect(page.locator("#release-status")).to_contain_text("candidate-release")
+                assert len(release_checks) == preference_read_count + 1, release_checks
+                page.unroute("**/api/update-preferences")
+                page.reload()
+                expect(page.locator("#update-preference-status")).to_contain_text(
+                    "Automatic checking is on."
+                )
+                expect(page.locator("#check-staged-updates-on-open")).to_be_checked()
+                expect(page.locator("#release-status")).to_contain_text("candidate-release")
+                assert len(release_checks) == preference_read_count + 2, release_checks
                 page.get_by_role("link", name="Rules & limits", exact=True).click()
                 page.get_by_role("button", name="Access rules", exact=True).click()
                 draft = page.get_by_label("Global blocked domains (comma separated)", exact=True)
@@ -256,7 +346,7 @@ def run():
                 ).to_have_count(0)
                 check_access_and_help(page)
                 page.set_viewport_size({"width": 1440, "height": 1000})
-                page.get_by_role("link", name="Setup", exact=True).click()
+                page.get_by_role("link", name=re.compile("^Setup")).click()
                 expect(page.locator("#gateway-persistence-state")).to_contain_text(
                     "Router reachable."
                 )
@@ -272,12 +362,97 @@ def run():
                 page.get_by_role("button", name="Check for updates", exact=True).click()
                 expect(page.locator("#release-status")).to_contain_text("test-release")
                 expect(page.locator("#release-status")).to_contain_text(
-                    "No newer approved release is staged."
+                    "candidate-release"
                 )
                 dismiss_toasts(page)
                 page.locator("#release-controls").screenshot(
                     path="test-results/staged-update-check-desktop.png"
                 )
+                page.route(
+                    "**/api/updates",
+                    lambda route: route.fulfill(
+                        status=200,
+                        content_type="application/json",
+                        body=json.dumps(
+                            {
+                                "phase": "idle",
+                                "installed": "test-release",
+                                "available": "test-release",
+                                "rollback_available": False,
+                                "message": "No different release is staged.",
+                            }
+                        ),
+                    ),
+                )
+                page.get_by_role("button", name="Check for updates", exact=True).click()
+                expect(page.locator("#staged-release-badge")).to_be_hidden()
+                expect(page.locator("#release-install")).to_be_disabled()
+                page.unroute("**/api/updates")
+                page.route(
+                    "**/api/updates",
+                    lambda route: route.fulfill(
+                        status=503,
+                        content_type="application/json",
+                        body=json.dumps({"error": "release status unavailable"}),
+                    ),
+                )
+                page.get_by_role("button", name="Check for updates", exact=True).click()
+                expect(page.locator("#release-status")).to_contain_text(
+                    "Could not check for a staged release."
+                )
+                expect(page.get_by_role("button", name="Check for updates")).to_be_enabled()
+                page.unroute("**/api/updates")
+                page.route(
+                    "**/api/updates",
+                    lambda route: route.fulfill(
+                        status=200,
+                        content_type="application/json",
+                        body=json.dumps(
+                            {
+                                "phase": "idle",
+                                "installed": None,
+                                "available": None,
+                                "rollback_available": False,
+                                "message": "No release is staged.",
+                            }
+                        ),
+                    ),
+                )
+                page.get_by_role("button", name="Check for updates", exact=True).click()
+                expect(page.locator("#release-status")).to_contain_text(
+                    "Installed: Unknown · Available: None staged"
+                )
+                expect(page.locator("#staged-release-badge")).to_be_hidden()
+                expect(page.locator("#release-install")).to_be_disabled()
+                page.unroute("**/api/updates")
+                release_phases = ["installing", "done"]
+
+                def release_progress(route):
+                    phase = release_phases.pop(0) if len(release_phases) > 1 else release_phases[0]
+                    route.fulfill(
+                        status=200,
+                        content_type="application/json",
+                        body=json.dumps(
+                            {
+                                "phase": phase,
+                                "installed": "test-release",
+                                "available": "candidate-release",
+                                "rollback_available": True,
+                                "message": "Update " + phase + ".",
+                            }
+                        ),
+                    )
+
+                page.route("**/api/updates", release_progress)
+                page.get_by_role("button", name="Check for updates", exact=True).click()
+                expect(page.locator("#release-status")).to_contain_text("Update installing.")
+                expect(page.locator("#release-install")).to_be_disabled()
+                # The Setup poll follows the install without another click.
+                expect(page.locator("#release-status")).to_contain_text(
+                    "Update done.", timeout=15000
+                )
+                expect(page.locator("#release-rollback")).to_be_enabled()
+                page.unroute("**/api/updates")
                 page.set_viewport_size({"width": 320, "height": 740})
                 for tab in (
                     "Overview",
@@ -288,7 +463,8 @@ def run():
                     "Setup",
                     "Diagnostics",
                 ):
-                    page.get_by_role("link", name=tab, exact=True).click()
+                    tab_name = re.compile("^Setup") if tab == "Setup" else tab
+                    page.get_by_role("link", name=tab_name, exact=tab != "Setup").click()
                     assert page.evaluate(
                         "document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1"
                     ), tab

@@ -11,6 +11,16 @@ from tests.unit.test_api import FakeHelper
 
 
 class DemoHelper(FakeHelper):
+    def release_status(self):
+        self.release_status_calls += 1
+        return {
+            "phase": "idle",
+            "installed": "test-release",
+            "available": "candidate-release",
+            "rollback_available": False,
+            "message": "A verified release is staged and ready.",
+        }
+
     def connected_devices(self):
         devices = super().connected_devices()
         devices[0]["hostname"] = "Test phone"

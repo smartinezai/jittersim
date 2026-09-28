@@ -560,33 +560,133 @@ async function confirmWorkflow(message) {
 
 let releaseState = null;
 let releasePollAt = 0;
-async function loadReleaseStatus() {
-  if (Date.now() - releasePollAt < 5000) return;
+let releaseStatusRequest = null;
+let autoCheckStagedUpdates = null;
+const RELEASE_BUSY_PHASES = ['queued','stopping','backing-up','installing','checking','rolling-back'];
+function releaseOperationBusy() {
+  return Boolean(releaseState && RELEASE_BUSY_PHASES.includes(releaseState.phase));
+}
+// The Setup poll follows an install or restore until it finishes.
+function pollReleaseProgress() {
+  return releaseOperationBusy() ? loadReleaseStatus() : Promise.resolve(releaseState);
+}
+function showStagedReleaseBadge(available) {
+  element('staged-release-badge').hidden = !available;
+  const setupLink = element('setup-tab-link');
+  if (available) setupLink.setAttribute('aria-label', 'Setup, release staged');
+  else setupLink.removeAttribute('aria-label');
+}
+async function loadReleaseStatus({force = false} = {}) {
+  if (releaseStatusRequest) return releaseStatusRequest;
+  if (!force && Date.now() - releasePollAt < 5000) return releaseState;
   releasePollAt = Date.now();
-  releaseState = await request('/api/updates', 'GET');
-  element('release-status').textContent = 'Installed: ' + (releaseState.installed || 'Unknown') +
-    ' · Available: ' + (releaseState.available || 'None staged') + ' · ' + releaseState.message;
-  const busy = ['queued','stopping','backing-up','installing','checking','rolling-back'].includes(releaseState.phase);
-  element('release-install').disabled = busy || !releaseState.available || releaseState.available === releaseState.installed;
-  element('release-rollback').disabled = busy || !releaseState.rollback_available;
+  element('release-status').textContent = 'Checking for a staged release on this Pi…';
+  releaseStatusRequest = (async () => {
+    try {
+      releaseState = await request('/api/updates', 'GET');
+      const stagedReleaseReady = Boolean(
+        releaseState.available && releaseState.available !== releaseState.installed
+      );
+      element('release-status').textContent = 'Installed: ' + (releaseState.installed || 'Unknown') +
+        ' · Available: ' + (releaseState.available || 'None staged') + ' · ' + releaseState.message;
+      showStagedReleaseBadge(stagedReleaseReady);
+      const busy = releaseOperationBusy();
+      element('release-install').disabled = busy || !stagedReleaseReady;
+      element('release-install').classList.toggle('primary', stagedReleaseReady && !busy);
+      element('release-rollback').disabled = busy || !releaseState.rollback_available;
+      return releaseState;
+    } catch (error) {
+      if (releaseOperationBusy()) {
+        // Services restart during an install, so this page waits for them.
+        element('release-status').textContent = 'Waiting for the dashboard to restart. This page checks again shortly.';
+        throw error;
+      }
+      element('release-status').textContent = 'Could not check for a staged release. Use Check for updates to try again.';
+      showStagedReleaseBadge(false);
+      throw error;
+    } finally {
+      releaseStatusRequest = null;
+    }
+  })();
+  return releaseStatusRequest;
+}
+async function loadUpdateCheckPreference() {
+  const toggle = element('check-staged-updates-on-open');
+  const state = element('update-preference-status');
+  try {
+    const preference = await request('/api/update-preferences', 'GET');
+    if (typeof preference.check_staged_updates_on_open !== 'boolean') {
+      throw new Error('The saved update preference is invalid.');
+    }
+    autoCheckStagedUpdates = preference.check_staged_updates_on_open;
+    toggle.checked = autoCheckStagedUpdates;
+    toggle.disabled = false;
+    state.textContent = autoCheckStagedUpdates
+      ? 'Automatic checking is on.'
+      : 'Automatic checking is off. Use Check for updates whenever you want.';
+    if (autoCheckStagedUpdates) loadReleaseStatus().catch(() => {});
+    else if (releaseState === null && !releaseStatusRequest) {
+      element('release-status').textContent = 'Automatic checking is off. Use Check for updates to check now.';
+    }
+  } catch (error) {
+    autoCheckStagedUpdates = null;
+    toggle.disabled = true;
+    state.textContent = 'The saved preference could not be read. Automatic checking did not run. Manual checking is still available.';
+    element('release-status').textContent = 'Automatic checking did not run because its saved preference is unavailable.';
+  }
+}
+function installUpdateCheckPreference() {
+  const toggle = element('check-staged-updates-on-open');
+  const state = element('update-preference-status');
+  toggle.addEventListener('change', async () => {
+    if (autoCheckStagedUpdates === null) return;
+    const previousValue = autoCheckStagedUpdates;
+    const nextValue = toggle.checked;
+    toggle.disabled = true;
+    state.textContent = 'Saving automatic-check preference…';
+    try {
+      const result = await request('/api/update-preferences', 'POST', {
+        check_staged_updates_on_open: nextValue,
+      });
+      if (!result.saved || result.check_staged_updates_on_open !== nextValue) {
+        throw new Error('The saved update preference could not be confirmed.');
+      }
+      autoCheckStagedUpdates = nextValue;
+      state.textContent = nextValue
+        ? 'Automatic checking is on. Checking for a staged release now.'
+        : 'Automatic checking is off. Use Check for updates whenever you want.';
+      if (nextValue) loadReleaseStatus({force: true}).catch(() => {});
+    } catch (error) {
+      toggle.checked = previousValue;
+      state.textContent = 'The preference was not saved. The previous setting is still in place.';
+      showMessage(error.message, 'error');
+    } finally {
+      toggle.disabled = false;
+    }
+  });
 }
 function installReleaseControls() {
   workflowCard('release-controls', 'Updates and recovery', 'setup', `
     <p>Install a verified release staged by an administrator. An update briefly interrupts the dashboard and test network. The previous installation and settings are backed up before installation.</p>
+    <label class="update-auto-check"><input id="check-staged-updates-on-open" type="checkbox" disabled><span>Check for staged updates when the dashboard opens</span></label>
+    <p class="form-note">Checks only for a verified release already staged on this Pi. Downloads and installation stay manual.</p>
+    <p id="update-preference-status" class="form-note update-preference-status" role="status" aria-live="polite">Loading the saved preference…</p>
     <p id="release-status" role="status">Check for an approved release on this Pi.</p><div id="release-actions"></div>
     <details><summary>How releases reach this private Pi</summary><p>An administrator downloads a tagged release bundle and checks its SHA-256 checksum before staging it over SSH. GitHub credentials are not stored on the Pi. See the deployment guide for the staging command.</p></details>`);
   const install = actionButton('Install staged release', async () => {
     if (!releaseState || !await confirmWorkflow('Install release ' + releaseState.available + '? The network will be interrupted briefly. Keep Ethernet or SSH available for recovery.')) return;
     await request('/api/updates/install','POST',{version:releaseState.available,confirm:true});
     showMessage('Installation queued. This page will reconnect and show the result.', 'working');
-    releasePollAt=0; await loadReleaseStatus();
+    await loadReleaseStatus({force:true});
   }); install.id='release-install'; install.disabled=true;
   const rollback = actionButton('Restore previous installation', async () => {
     if (!await confirmWorkflow('Restore the previous installation and its settings backup? Changes made since that backup will be replaced.')) return;
     await request('/api/updates/rollback','POST',{confirm:true});
-    releasePollAt=0; await loadReleaseStatus();
+    await loadReleaseStatus({force:true});
   }); rollback.id='release-rollback'; rollback.disabled=true;
-  element('release-actions').append(actionButton('Check for updates', async () => {releasePollAt=0; await loadReleaseStatus();}), install, rollback);
+  element('release-actions').append(actionButton('Check for updates', async () => {await loadReleaseStatus({force:true});}), install, rollback);
+  installUpdateCheckPreference();
+  loadUpdateCheckPreference();
 }
 installReleaseControls();
 

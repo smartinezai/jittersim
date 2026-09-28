@@ -18,6 +18,7 @@ from email.message import Message
 from html.parser import HTMLParser
 from io import BytesIO
 from pathlib import Path
+from typing import Optional
 from unittest.mock import patch
 from urllib.parse import urlencode
 
@@ -53,6 +54,7 @@ class FakeHelper:
         self.reset_called = False
         self.access_plan = None
         self.persistence_enabled = False
+        self.release_status_calls = 0
         self.gateway_state = {
             "gateway_state": "available",
             "outage_observed": False,
@@ -70,6 +72,7 @@ class FakeHelper:
         return self.gateway_status()
 
     def release_status(self):
+        self.release_status_calls += 1
         return {
             "phase": "idle",
             "installed": "test-release",
@@ -625,6 +628,36 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("true or false", json.loads(body)["error"])
         self.assertFalse(self.repository.get_persist_profiles_after_gateway_outage())
 
+    def test_dashboard_update_preference_reads_and_saves_without_network_changes(self) -> None:
+        before = self.repository.get_runtime_state().configuration_version
+
+        read_status, _, read_body = self.server.response_for("/api/update-preferences")
+        initial = json.loads(read_body)
+        saved_status, _, saved_body = self.server.write_response_for(
+            "/api/update-preferences", {"check_staged_updates_on_open": False}
+        )
+        saved = json.loads(saved_body)
+        after = json.loads(self.server.response_for("/api/update-preferences")[2])
+
+        self.assertEqual(read_status, 200)
+        self.assertTrue(initial["check_staged_updates_on_open"])
+        self.assertEqual(saved_status, 200)
+        self.assertTrue(saved["saved"])
+        self.assertFalse(after["check_staged_updates_on_open"])
+        self.assertEqual(self.repository.get_runtime_state().configuration_version, before)
+
+    def test_dashboard_update_preference_rejects_non_boolean_values(self) -> None:
+        for invalid in (1, 0, "off", None):
+            with self.subTest(invalid=invalid):
+                status, _, body = self.server.write_response_for(
+                    "/api/update-preferences",
+                    {"check_staged_updates_on_open": invalid},
+                )
+
+                self.assertEqual(status, 400)
+                self.assertIn("true or false", json.loads(body)["error"])
+                self.assertTrue(self.repository.get_check_staged_updates_on_open())
+
     def test_served_dashboard_script_parses(self) -> None:
         node = shutil.which("node")
         if node is None:
@@ -678,6 +711,7 @@ class ControlServerTests(unittest.TestCase):
             "/api/observations",
             "/api/export",
             "/api/gateway-persistence",
+            "/api/update-preferences",
         ):
             with self.subTest(path=path):
                 self.assertEqual(get(path)["status"], 401)
@@ -5211,6 +5245,38 @@ class SignInTests(unittest.TestCase):
         status, headers, _ = self.request("GET", "/sign-in", headers={"Cookie": session})
         self.assertEqual((status, headers["Location"]), (303, "/"))
 
+    def test_dashboard_update_preference_requires_an_admin_session(self) -> None:
+        body = json.dumps({"check_staged_updates_on_open": False}).encode("utf-8")
+
+        def direct_request(method: str, cookie: Optional[str] = None):
+            # Run this database-backed route in the test thread because SQLite
+            # connections in this fixture are thread-bound.
+            handler = object.__new__(ControlRequestHandler)
+            handler.server = self.server
+            handler.path = "/api/update-preferences"
+            handler.client_address = ("127.0.0.1", 50000)
+            handler.headers = Message()
+            if cookie:
+                handler.headers["Cookie"] = cookie
+            if method == "POST":
+                handler.headers["Content-Type"] = "application/json"
+                handler.headers["Content-Length"] = str(len(body))
+                handler.rfile = BytesIO(body)
+            response = {}
+            handler._send_response = lambda **values: response.update(values)
+            getattr(handler, f"do_{method}")()
+            return response
+
+        self.assertEqual(direct_request("POST")["status"], 401)
+        session = self.session()
+        saved = direct_request("POST", session)
+        read = direct_request("GET", session)
+
+        self.assertEqual(saved["status"], 200)
+        self.assertTrue(json.loads(saved["body"])["saved"])
+        self.assertEqual(read["status"], 200)
+        self.assertFalse(json.loads(read["body"])["check_staged_updates_on_open"])
+
     def test_a_wrong_token_shows_the_page_again(self) -> None:
         status, headers, body = self.sign_in("wrong")
 
@@ -5246,7 +5312,13 @@ class SignInTests(unittest.TestCase):
                         method, path, body="{}", headers={"Content-Type": "application/json"}
                     )[::2]
                     for method in ("POST", "PUT")
-                    for path in ("/api/apply", "/api/everyone-else", "/api/not-a-route", "/other")
+                    for path in (
+                        "/api/apply",
+                        "/api/everyone-else",
+                        "/api/update-preferences",
+                        "/api/not-a-route",
+                        "/other",
+                    )
                 }
                 self.assertEqual(len(answers), 1, answers)
 

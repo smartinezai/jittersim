@@ -171,6 +171,40 @@ class ConfigRepositoryTests(unittest.TestCase):
             finally:
                 upgraded.close()
 
+    def test_dashboard_update_preference_defaults_on_and_preserves_network_version(self) -> None:
+        version_before = self.repository.get_runtime_state().configuration_version
+        self.assertTrue(self.repository.get_check_staged_updates_on_open())
+
+        self.repository.set_check_staged_updates_on_open(False)
+
+        self.assertFalse(self.repository.get_check_staged_updates_on_open())
+        self.assertEqual(self.repository.get_runtime_state().configuration_version, version_before)
+        self.repository.set_check_staged_updates_on_open(True)
+        self.assertTrue(self.repository.get_check_staged_updates_on_open())
+
+    def test_dashboard_update_preference_migration_defaults_existing_database_to_on(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "settings.db"
+            original = ConfigRepository(database)
+            original.save_profile(Profile(id="slow", name="Slow"))
+            original.set_check_staged_updates_on_open(False)
+            original._connection.execute("DROP TABLE dashboard_preferences")
+            original._connection.commit()
+            original.close()
+
+            upgraded = ConfigRepository(database)
+            try:
+                self.assertTrue(upgraded.get_check_staged_updates_on_open())
+                self.assertEqual(upgraded.get_profile("slow"), Profile("slow", "Slow"))
+            finally:
+                upgraded.close()
+
+    def test_dashboard_update_preference_rejects_non_boolean_values(self) -> None:
+        for invalid in (0, 1, None, "on"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(StorageError):
+                    self.repository.set_check_staged_updates_on_open(invalid)
+
     def test_connected_device_labels_persist_without_changing_network_version(self) -> None:
         version_before = self.repository.get_runtime_state().configuration_version
         self.repository.save_connected_device_label(
