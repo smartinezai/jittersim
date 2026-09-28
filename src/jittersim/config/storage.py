@@ -369,6 +369,11 @@ class ConfigRepository:
                 persist_profiles_after_gateway_outage INTEGER NOT NULL DEFAULT 0
                     CHECK (persist_profiles_after_gateway_outage IN (0, 1))
             );
+            CREATE TABLE IF NOT EXISTS dashboard_preferences (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                check_staged_updates_on_open INTEGER NOT NULL DEFAULT 1
+                    CHECK (check_staged_updates_on_open IN (0, 1))
+            );
             CREATE TABLE IF NOT EXISTS everyone_else_settings (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 -- The API refuses to delete this profile. Older versions don't
@@ -433,6 +438,9 @@ class ConfigRepository:
             INSERT OR IGNORE INTO experiment_settings (
                 id, persist_profiles_after_gateway_outage
             ) VALUES (1, 0);
+            INSERT OR IGNORE INTO dashboard_preferences (
+                id, check_staged_updates_on_open
+            ) VALUES (1, 1);
             INSERT OR IGNORE INTO everyone_else_settings (id, profile_id) VALUES (1, NULL);
             """
         )
@@ -1217,6 +1225,34 @@ class ConfigRepository:
                 self.get_persist_profiles_after_gateway_outage()
             ),
         )
+
+    def get_check_staged_updates_on_open(self) -> bool:
+        """Return whether the dashboard checks for a staged release on open."""
+
+        row = self._connection.execute(
+            "SELECT check_staged_updates_on_open FROM dashboard_preferences WHERE id = 1"
+        ).fetchone()
+        if row is None or type(row[0]) is not int or row[0] not in (0, 1):
+            raise StorageError("dashboard update preference is malformed")
+        return bool(row[0])
+
+    def set_check_staged_updates_on_open(self, enabled: bool) -> None:
+        """Save the dashboard's automatic staged-release check preference."""
+
+        if not isinstance(enabled, bool):
+            raise StorageError("automatic update checking must be true or false")
+        try:
+            cursor = self._connection.execute(
+                "UPDATE dashboard_preferences SET check_staged_updates_on_open = ? WHERE id = 1",
+                (int(enabled),),
+            )
+            if cursor.rowcount != 1:
+                self._connection.rollback()
+                raise StorageError("dashboard update preference is unavailable")
+            self._connection.commit()
+        except sqlite3.Error as error:
+            self._connection.rollback()
+            raise StorageError("could not save dashboard update preference") from error
 
     def get_persist_profiles_after_gateway_outage(self) -> bool:
         """Return whether active experiment plans resume after a gateway outage."""

@@ -43,12 +43,14 @@ is unchanged.
 
 ### Check for a staged update
 
-<img src="docs/screenshots/staged-update-check.png" alt="The update check reports that no newer approved release is staged on the Pi" width="100%" />
+<img src="docs/screenshots/staged-update-check.png" alt="Automatic checking is on and a verified release staged on the Pi is ready to install" width="100%" />
 
-**Check for updates** reports a verified release that an administrator has
-already placed on the Pi. It does not search GitHub or the internet for a new
-version. The terminal command `sudo jittersim update check` shows the same
-status.
+Automatic checking is on by default and the setting is saved on the Pi. When
+you open the dashboard, it checks for a verified release already staged there.
+You can turn automatic checking off and use **Check for updates** manually.
+Checking does not download or install a release. The Setup tab shows a badge
+when the staged and installed release labels differ. The terminal command
+`sudo jittersim update check` shows the same status.
 
 ## What you can try
 

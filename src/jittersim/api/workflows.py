@@ -23,6 +23,7 @@ WORKFLOW_WRITES = frozenset(
         "/api/test-sessions/start",
         "/api/test-sessions/save",
         "/api/router/status",
+        "/api/update-preferences",
         "/api/updates/install",
         "/api/updates/rollback",
     )
@@ -58,6 +59,17 @@ def machine_health():
 
 def read_workflow(server, path):
     store = WorkflowStore(server.repository)
+    if path == "/api/update-preferences":
+        try:
+            return response(
+                {
+                    "check_staged_updates_on_open": (
+                        server.repository.get_check_staged_updates_on_open()
+                    )
+                }
+            )
+        except StorageError:
+            return response({"error": "dashboard update preference is unavailable"}, 503)
     if path.startswith("/api/device-workspace/"):
         device_id = path.removeprefix("/api/device-workspace/")
         device = server.repository.get_device(device_id)
@@ -152,6 +164,12 @@ def write_workflow(server, path, payload, parse_settings):
         return None
     store = WorkflowStore(server.repository)
     try:
+        if path == "/api/update-preferences":
+            enabled = payload.get("check_staged_updates_on_open")
+            if not isinstance(enabled, bool):
+                raise ValueError("check_staged_updates_on_open must be true or false")
+            server.repository.set_check_staged_updates_on_open(enabled)
+            return response({"check_staged_updates_on_open": enabled, "saved": True})
         if path in ("/api/updates/install", "/api/updates/rollback"):
             if payload.get("confirm") is not True:
                 raise ValueError("confirm the release operation first")

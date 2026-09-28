@@ -158,7 +158,9 @@ WRITE_PATHS = frozenset(
     )
 )
 WRITE_PATHS = WRITE_PATHS | WORKFLOW_WRITES | ACCESS_WRITES | {"/api/schedules/preview"}
-ACTION_PATHS = frozenset(("/api/apply", "/api/reset", "/api/observations/scan"))
+ACTION_PATHS = frozenset(
+    ("/api/apply", "/api/reset", "/api/observations/scan", "/api/update-preferences")
+)
 
 
 # Raw string: JavaScript escapes such as "\n" must reach the browser unchanged.
@@ -573,6 +575,15 @@ DASHBOARD_HTML = r"""<!doctype html>
     .quota-domain-picker { min-height: 8rem; }
     .quota-check { display: flex; align-items: center; gap: 0.5rem; }
     .quota-check input { width: auto; }
+    .update-auto-check {
+      display: flex; align-items: center; gap: 0.7rem; margin: 1rem 0 0; padding: 0.85rem 0;
+      border-top: 1px solid #2b435f; border-bottom: 1px solid #2b435f; color: #edf5ff;
+    }
+    .update-auto-check input { flex: 0 0 auto; width: 1.1rem; height: 1.1rem; margin: 0; accent-color: #70b7ff; }
+    .update-auto-check span { flex: 1; min-width: 0; }
+    .update-preference-status { margin-top: 0.45rem; color: #a8c7e8; }
+    #release-actions { display: flex; flex-wrap: wrap; gap: 0.55rem; margin-top: 0.6rem; }
+    #release-actions button { margin-top: 0.45rem; }
     .quota-reset-fields { display: contents; }
     .fields {
       display: grid;
@@ -660,6 +671,11 @@ DASHBOARD_HTML = r"""<!doctype html>
     .tabs a {
       flex: 0 0 auto; padding: 0.45rem 0.85rem; border-radius: 0.6rem;
       color: #c4d5e8; font-weight: 600; text-decoration: none; white-space: nowrap;
+    }
+    .update-badge {
+      display: inline-flex; align-items: center; margin-left: 0.4rem; padding: 0.1rem 0.42rem;
+      border: 1px solid #4777a5; border-radius: 999px; background: #14324e;
+      color: #d9ecff; font-size: 0.68rem; font-weight: 600;
     }
     .tabs a:hover { background: rgba(60, 102, 144, 0.35); }
     .tabs a[aria-current="page"] { background: #1f4f86; color: #ffffff; }
@@ -760,7 +776,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     <a href="#profiles">Profiles</a>
     <a href="#rules">Rules &amp; limits</a>
     <a href="#measurements">Measurements</a>
-    <a href="#setup">Setup</a>
+    <a id="setup-tab-link" href="#setup">Setup<span id="staged-release-badge" class="update-badge" hidden>Release staged</span></a>
     <a href="#diagnostics">Diagnostics</a>
   </nav>
   <div class="tab-panel" id="tab-overview" tabindex="-1">
@@ -5451,7 +5467,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           if (currentRuleSection === "access") jobs.push(loadObservations, loadAccessStatus);
         }
         if (currentDashboardTab === "measurements") jobs.push(loadTestSessions);
-        if (currentDashboardTab === "setup") jobs.push(loadReleaseStatus, loadGatewayPersistence);
+        if (currentDashboardTab === "setup") jobs.push(loadGatewayPersistence);
         const results = await Promise.allSettled(jobs.map((job) => job()));
         if (results.some((result) => result.status === "rejected")) {
           element("runtime-summary").textContent = "Some status updates could not load. Retrying shortly.";
