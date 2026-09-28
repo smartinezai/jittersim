@@ -562,6 +562,14 @@ let releaseState = null;
 let releasePollAt = 0;
 let releaseStatusRequest = null;
 let autoCheckStagedUpdates = null;
+const RELEASE_BUSY_PHASES = ['queued','stopping','backing-up','installing','checking','rolling-back'];
+function releaseOperationBusy() {
+  return Boolean(releaseState && RELEASE_BUSY_PHASES.includes(releaseState.phase));
+}
+// The Setup poll follows an install or restore until it finishes.
+function pollReleaseProgress() {
+  return releaseOperationBusy() ? loadReleaseStatus() : Promise.resolve(releaseState);
+}
 function showStagedReleaseBadge(available) {
   element('staged-release-badge').hidden = !available;
   const setupLink = element('setup-tab-link');
@@ -582,12 +590,17 @@ async function loadReleaseStatus({force = false} = {}) {
       element('release-status').textContent = 'Installed: ' + (releaseState.installed || 'Unknown') +
         ' · Available: ' + (releaseState.available || 'None staged') + ' · ' + releaseState.message;
       showStagedReleaseBadge(stagedReleaseReady);
-      const busy = ['queued','stopping','backing-up','installing','checking','rolling-back'].includes(releaseState.phase);
+      const busy = releaseOperationBusy();
       element('release-install').disabled = busy || !stagedReleaseReady;
       element('release-install').classList.toggle('primary', stagedReleaseReady && !busy);
       element('release-rollback').disabled = busy || !releaseState.rollback_available;
       return releaseState;
     } catch (error) {
+      if (releaseOperationBusy()) {
+        // Services restart during an install, so this page waits for them.
+        element('release-status').textContent = 'Waiting for the dashboard to restart. This page checks again shortly.';
+        throw error;
+      }
       element('release-status').textContent = 'Could not check for a staged release. Use Check for updates to try again.';
       showStagedReleaseBadge(false);
       throw error;
@@ -612,7 +625,9 @@ async function loadUpdateCheckPreference() {
       ? 'Automatic checking is on.'
       : 'Automatic checking is off. Use Check for updates whenever you want.';
     if (autoCheckStagedUpdates) loadReleaseStatus().catch(() => {});
-    else element('release-status').textContent = 'Automatic checking is off. Use Check for updates to check now.';
+    else if (releaseState === null && !releaseStatusRequest) {
+      element('release-status').textContent = 'Automatic checking is off. Use Check for updates to check now.';
+    }
   } catch (error) {
     autoCheckStagedUpdates = null;
     toggle.disabled = true;

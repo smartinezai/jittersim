@@ -402,6 +402,57 @@ def run():
                 )
                 expect(page.get_by_role("button", name="Check for updates")).to_be_enabled()
                 page.unroute("**/api/updates")
+                page.route(
+                    "**/api/updates",
+                    lambda route: route.fulfill(
+                        status=200,
+                        content_type="application/json",
+                        body=json.dumps(
+                            {
+                                "phase": "idle",
+                                "installed": None,
+                                "available": None,
+                                "rollback_available": False,
+                                "message": "No release is staged.",
+                            }
+                        ),
+                    ),
+                )
+                page.get_by_role("button", name="Check for updates", exact=True).click()
+                expect(page.locator("#release-status")).to_contain_text(
+                    "Installed: Unknown · Available: None staged"
+                )
+                expect(page.locator("#staged-release-badge")).to_be_hidden()
+                expect(page.locator("#release-install")).to_be_disabled()
+                page.unroute("**/api/updates")
+                release_phases = ["installing", "done"]
+
+                def release_progress(route):
+                    phase = release_phases.pop(0) if len(release_phases) > 1 else release_phases[0]
+                    route.fulfill(
+                        status=200,
+                        content_type="application/json",
+                        body=json.dumps(
+                            {
+                                "phase": phase,
+                                "installed": "test-release",
+                                "available": "candidate-release",
+                                "rollback_available": True,
+                                "message": "Update " + phase + ".",
+                            }
+                        ),
+                    )
+
+                page.route("**/api/updates", release_progress)
+                page.get_by_role("button", name="Check for updates", exact=True).click()
+                expect(page.locator("#release-status")).to_contain_text("Update installing.")
+                expect(page.locator("#release-install")).to_be_disabled()
+                # The Setup poll follows the install without another click.
+                expect(page.locator("#release-status")).to_contain_text(
+                    "Update done.", timeout=15000
+                )
+                expect(page.locator("#release-rollback")).to_be_enabled()
+                page.unroute("**/api/updates")
                 page.set_viewport_size({"width": 320, "height": 740})
                 for tab in (
                     "Overview",

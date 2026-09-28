@@ -18,6 +18,7 @@ from email.message import Message
 from html.parser import HTMLParser
 from io import BytesIO
 from pathlib import Path
+from typing import Optional
 from unittest.mock import patch
 from urllib.parse import urlencode
 
@@ -5247,7 +5248,7 @@ class SignInTests(unittest.TestCase):
     def test_dashboard_update_preference_requires_an_admin_session(self) -> None:
         body = json.dumps({"check_staged_updates_on_open": False}).encode("utf-8")
 
-        def direct_request(method: str, cookie: str | None = None):
+        def direct_request(method: str, cookie: Optional[str] = None):
             # Run this database-backed route in the test thread because SQLite
             # connections in this fixture are thread-bound.
             handler = object.__new__(ControlRequestHandler)

@@ -5467,7 +5467,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           if (currentRuleSection === "access") jobs.push(loadObservations, loadAccessStatus);
         }
         if (currentDashboardTab === "measurements") jobs.push(loadTestSessions);
-        if (currentDashboardTab === "setup") jobs.push(loadGatewayPersistence);
+        if (currentDashboardTab === "setup") jobs.push(loadGatewayPersistence, pollReleaseProgress);
         const results = await Promise.allSettled(jobs.map((job) => job()));
         if (results.some((result) => result.status === "rejected")) {
           element("runtime-summary").textContent = "Some status updates could not load. Retrying shortly.";
