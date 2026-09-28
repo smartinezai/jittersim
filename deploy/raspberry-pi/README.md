@@ -357,7 +357,10 @@ sudo jittersim logs dns --lines 80
 
 Gateway persistence defaults to off. The helper checks the configured router
 gateway once every five seconds. Three unanswered checks confirm an outage
-and two replies confirm recovery. With persistence on, active profiles stay
+and two replies confirm recovery. Before the router has answered once, a
+missing route or unavailable check is unknown. After that, losing the route
+counts as an unanswered check, because a router restart usually drops the
+Ethernet link. With persistence on, active profiles stay
 in place and the current scheduled plan is restored after the router returns.
 With it off, a confirmed outage removes active profiles and keeps them stopped
 until you choose Apply after the router is reachable. Saved profiles and
@@ -375,7 +378,8 @@ once the helper is available.
 The chance defaults to 0%. It rejects a share of DNS requests from test Wi-Fi
 with a quick network error. It does not change answers for the management
 network. A 100% chance asks for confirmation because every new test-network
-name lookup will fail. Device or browser DNS caches may keep already resolved
+name lookup will fail. UDP lookups are decided per request and TCP lookups
+once per connection. Device or browser DNS caches may keep already resolved
 names working until they expire. VPNs, encrypted DNS or direct IP connections
 may bypass the setting.
 
@@ -522,6 +526,11 @@ access rules have loaded. The privileged helper owns the applied access policy.
 The dashboard cannot write its files directly. DNS failures keep blocked
 traffic blocked. A failed policy recovery closes test-network traffic while
 leaving the Ethernet management path available.
+
+`jittersim-dns.service` is installed but not enabled. The helper starts it
+when saved access rules are on, at boot through `jittersim-access-boot` and
+on each access apply. It is expected to be inactive while access rules are off.
+If it is inactive while they are on, check `sudo jittersim logs access-boot`.
 
 The DNS service checks names and all subdomains with separate views for clients
 that have different restrictions. Equivalent clients share a view. Limits are

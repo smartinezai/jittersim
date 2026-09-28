@@ -44,7 +44,7 @@ class AccessPolicyTests(unittest.TestCase):
             rules,
         )
         self.assertIn(
-            'iifname "wlan0" ip saddr 192.168.50.0/24 tcp dport 5353 '
+            'iifname "wlan0" ip saddr 192.168.50.0/24 tcp dport 5353 ct state new '
             "numgen random mod 100 < 35 counter reject with tcp reset",
             rules,
         )
@@ -56,7 +56,7 @@ class AccessPolicyTests(unittest.TestCase):
         self.assertNotIn("numgen random", every_request)
         self.assertEqual(every_request.count("ip saddr 192.168.50.0/24"), 2)
         self.assertIn("udp dport 5353 counter reject", every_request)
-        self.assertIn("tcp dport 5353 counter reject", every_request)
+        self.assertIn("tcp dport 5353 ct state new counter reject", every_request)
 
         disabled = render_access_firewall(
             AccessPlan(options=AccessOptions(enabled=False, dns_failure_percent=35)),

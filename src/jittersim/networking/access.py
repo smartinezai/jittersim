@@ -162,7 +162,9 @@ def render_access_firewall(plan: AccessPlan, topology: Topology) -> str:
         )
         lines.append(
             f'add rule inet {table} input iifname "{interface}" '
-            f"ip saddr {TEST_NETWORK} tcp dport {DNS_PORT} {chance}"
+            # Decide once per TCP connection. A later segment is part of the
+            # same request and must not reset it part-way.
+            f"ip saddr {TEST_NETWORK} tcp dport {DNS_PORT} ct state new {chance}"
             "counter reject with tcp reset"
         )
     mac = plan.mac

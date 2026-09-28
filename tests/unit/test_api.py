@@ -589,6 +589,33 @@ class ControlServerTests(unittest.TestCase):
         )
         self.assertEqual(stale_status, 409)
 
+    def test_reading_gateway_persistence_does_not_change_an_initialized_helper(self) -> None:
+        helper = FakeHelper()
+        helper.persistence_enabled = True
+        helper.gateway_state["mode_initialized"] = True
+        helper.gateway_state["outage_observed"] = True
+        self.server.helper_client = helper
+        calls = []
+        helper.set_gateway_persistence = lambda **kwargs: calls.append(kwargs)
+
+        status, _, body = self.server.response_for("/api/gateway-persistence")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(calls, [])
+        self.assertFalse(json.loads(body)["helper_synced"])
+
+    def test_reading_gateway_persistence_gives_a_restarted_helper_the_mode(self) -> None:
+        helper = FakeHelper()
+        helper.persistence_enabled = True
+        helper.gateway_state["mode_initialized"] = False
+        self.server.helper_client = helper
+
+        status, _, body = self.server.response_for("/api/gateway-persistence")
+
+        self.assertEqual(status, 200)
+        self.assertFalse(helper.persistence_enabled)
+        self.assertTrue(json.loads(body)["helper_synced"])
+
     def test_gateway_persistence_rejects_truthy_non_boolean_values(self) -> None:
         self.server.helper_client = FakeHelper()
 
