@@ -27,7 +27,7 @@ from jittersim.config.models import (
     UnaffectedDevice,
     WebsitePolicy,
 )
-from jittersim.config.storage import ConfigRepository, StorageError
+from jittersim.config.storage import ConfigRepository, DeviceConflictError, StorageError
 from jittersim.engine.scenarios import active_scenario_runs
 
 
@@ -132,6 +132,44 @@ class ConfigRepositoryTests(unittest.TestCase):
                         upload_kbit=invalid,
                         download_kbit=100_000,
                     )
+
+    def test_gateway_persistence_is_versioned_and_saved_idempotently(self) -> None:
+        before = self.repository.get_runtime_state().configuration_version
+        self.assertFalse(self.repository.get_persist_profiles_after_gateway_outage())
+
+        version = self.repository.set_persist_profiles_after_gateway_outage(
+            True, expected_version=before
+        )
+
+        self.assertTrue(self.repository.saved_settings().persist_profiles_after_gateway_outage)
+        self.assertEqual(version, before + 1)
+        self.assertEqual(
+            self.repository.set_persist_profiles_after_gateway_outage(
+                True, expected_version=version
+            ),
+            version,
+        )
+        with self.assertRaises(DeviceConflictError):
+            self.repository.set_persist_profiles_after_gateway_outage(
+                False, expected_version=before
+            )
+        self.assertTrue(self.repository.get_persist_profiles_after_gateway_outage())
+
+    def test_gateway_persistence_migration_defaults_existing_database_to_off(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "settings.db"
+            original = ConfigRepository(database)
+            original.save_profile(Profile(id="slow", name="Slow"))
+            original._connection.execute("DROP TABLE experiment_settings")
+            original._connection.commit()
+            original.close()
+
+            upgraded = ConfigRepository(database)
+            try:
+                self.assertFalse(upgraded.get_persist_profiles_after_gateway_outage())
+                self.assertEqual(upgraded.get_profile("slow"), Profile("slow", "Slow"))
+            finally:
+                upgraded.close()
 
     def test_connected_device_labels_persist_without_changing_network_version(self) -> None:
         version_before = self.repository.get_runtime_state().configuration_version

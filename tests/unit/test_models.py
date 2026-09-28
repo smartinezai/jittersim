@@ -2,6 +2,7 @@ import unittest
 from ipaddress import IPv4Address
 
 from jittersim.config.models import (
+    AccessOptions,
     Device,
     DeviceGroup,
     DataLimit,
@@ -24,6 +25,16 @@ from jittersim.config.models import (
     ValidationError,
     WebsitePolicy,
 )
+
+
+class AccessOptionsTests(unittest.TestCase):
+    def test_dns_failure_chance_accepts_endpoints_and_rejects_bad_numbers(self) -> None:
+        self.assertEqual(AccessOptions().dns_failure_percent, 0)
+        self.assertEqual(AccessOptions(dns_failure_percent=100).dns_failure_percent, 100)
+        for value in (-1, 101, True, 12.5, "25"):
+            with self.subTest(value=value):
+                with self.assertRaises(ValidationError):
+                    AccessOptions(dns_failure_percent=value)
 
 
 class ImpairmentTests(unittest.TestCase):

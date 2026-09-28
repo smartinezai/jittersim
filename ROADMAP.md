@@ -119,7 +119,7 @@ Goal: control the emulator from a Mac without a screen or keyboard attached to t
 - [x] Add a bounded history of admin actions without request contents.
 - [x] Protect the deployed dashboard with HTTPS.
 - [x] Keep the dashboard exempt from impairment.
-- [x] Show anyone without the admin token only a neutral sign-in page, and keep
+- [x] Show anyone without the admin token only a neutral sign-in page and keep
   signed-in browsers signed in for 7 days.
 - [x] Split the dashboard into tabs, fit it on a phone and guide a first setup.
 - [x] Offer the connected devices in forms instead of typed addresses.
@@ -288,6 +288,34 @@ See the [household plan](docs/implementation-plan-household-access-point-2026-09
 
 The dashboard remains inaccessible from the test Wi-Fi. Release delivery uses
 locally staged bundles without storing GitHub credentials on the Pi.
+
+## Milestone 13: DNS failures and headless operations
+
+- [x] Add a 0–100% DNS failure chance for test Wi-Fi with a safe 0% default.
+- [x] Return prompt UDP and TCP network errors without changing the client's
+  Unbound view or affecting management DNS.
+- [x] Show the saved and applied chance in the dashboard and require a clear
+  confirmation before applying 100%.
+- [x] Add headless access, diagnostics, bounded logs and staged update commands.
+- [x] Document caches, bypass paths and recovery commands.
+- [ ] Confirm error behavior, DNS policy and service recovery on the target Pi.
+- [ ] Find a trusted online source if the Pi should check for private releases.
+- [ ] Explore a separate browser feature for returning to a site's home page or
+  a chosen destination. DNS cannot see a page path or browsing history.
+
+## Milestone 14: router outage persistence
+
+- [x] Save one global setting for keeping active profiles through a router
+  outage, defaulting to off.
+- [x] Check the configured gateway with a bounded probe and require repeated
+  failures before stopping profiles.
+- [x] Keep OFF-mode stops in place after recovery until the owner applies again.
+- [x] Show the saved mode and gateway state in the dashboard and terminal.
+- [x] Include the preference in settings export and import.
+- [x] Keep Pi restart behavior unchanged in this first version.
+- [ ] Confirm ICMP behavior and router restart recovery on the target Pi.
+- [ ] Decide whether a later version should stop profiles from resuming after
+  a Pi restart.
 
 ## Deliberate non-goals
 

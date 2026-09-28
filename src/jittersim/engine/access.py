@@ -94,6 +94,7 @@ class AccessPlan:
             self.websites.mode == "allow_only"
             or bool(self.websites.blocked_domains)
             or any(rule.enabled for rule in self.blocks)
+            or self.options.dns_failure_percent > 0
         )
 
 

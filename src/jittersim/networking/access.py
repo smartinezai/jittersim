@@ -15,6 +15,7 @@ from jittersim.config.models import AccessOptions
 from jittersim.engine.access import (
     MAX_ACCESS_BYTES,
     AccessPlan,
+    TEST_NETWORK,
     access_from_payload,
     domain_matches,
 )
@@ -144,6 +145,28 @@ def render_access_firewall(plan: AccessPlan, topology: Topology) -> str:
     )
     if not plan.options.enabled:
         return "\n".join(lines) + "\n"
+    if plan.options.dns_failure_percent:
+        # nftables' random generator returns values from 0 to 99. At 100%,
+        # reject directly instead of comparing against an invalid value.
+        chance = (
+            f"numgen random mod 100 < {plan.options.dns_failure_percent} "
+            if plan.options.dns_failure_percent < 100
+            else ""
+        )
+        # These are prompt errors rather than dropped packets. They run only on
+        # DNS redirected from test Wi-Fi, before it reaches the filtered resolver.
+        lines.append(
+            f'add rule inet {table} input iifname "{interface}" '
+            f"ip saddr {TEST_NETWORK} udp dport {DNS_PORT} {chance}"
+            "counter reject with icmpx type port-unreachable"
+        )
+        lines.append(
+            f'add rule inet {table} input iifname "{interface}" '
+            # Decide once per TCP connection. A later segment is part of the
+            # same request and must not reset it part-way.
+            f"ip saddr {TEST_NETWORK} tcp dport {DNS_PORT} ct state new {chance}"
+            "counter reject with tcp reset"
+        )
     mac = plan.mac
     addresses = mac.allowlist if mac.mode == "allowlist" else mac.denylist
     if mac.mode != "disabled" and addresses:

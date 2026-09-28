@@ -847,10 +847,17 @@ class AccessOptions:
 
     enabled: bool = True
     reject_wifi_joins: bool = False
+    dns_failure_percent: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool) or not isinstance(self.reject_wifi_joins, bool):
             raise ValidationError("access options must be true or false")
+        if (
+            isinstance(self.dns_failure_percent, bool)
+            or not isinstance(self.dns_failure_percent, int)
+            or not 0 <= self.dns_failure_percent <= 100
+        ):
+            raise ValidationError("DNS failure chance must be a whole number from 0 to 100")
 
 
 @dataclass(frozen=True)
@@ -896,3 +903,8 @@ class SavedSettings:
     scenarios: Tuple[Scenario, ...] = ()
     site_blocks: Tuple[SiteBlock, ...] = ()
     access_options: AccessOptions = AccessOptions()
+    persist_profiles_after_gateway_outage: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.persist_profiles_after_gateway_outage, bool):
+            raise ValidationError("gateway-outage persistence must be true or false")

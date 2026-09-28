@@ -231,6 +231,42 @@ class NetworkApplier:
             "gateway": gateway_match.group(1) if gateway_match else None,
         }
 
+    def probe_default_gateway(self) -> Optional[bool]:
+        """Return gateway reachability, or None when a safe probe is unavailable."""
+
+        uplink = self.uplink_info()
+        gateway = uplink["gateway"]
+        if not gateway:
+            return None
+        result = self._executor.run(
+            Command(
+                executable="ping",
+                arguments=(
+                    "-n",
+                    "-c",
+                    "1",
+                    "-W",
+                    "1",
+                    "-I",
+                    self._topology.uplink_interface,
+                    gateway,
+                ),
+                purpose="check reachability of the configured router gateway",
+                ignore_failure=True,
+                timeout_seconds=2,
+            )
+        )
+        if result.return_code == 0:
+            return True
+        if result.return_code == 1:
+            return False
+        raise CommandExecutionError(
+            "the configured router gateway could not be checked",
+            return_code=result.return_code,
+            stdout=result.stdout,
+            stderr=result.stderr,
+        )
+
     def capture_dns_queries(self) -> str:
         """Capture a bounded sample of DNS packets arriving from the test network."""
 

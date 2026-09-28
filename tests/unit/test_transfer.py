@@ -71,8 +71,9 @@ class SettingsTransferTests(unittest.TestCase):
         payload = settings_to_payload(lab_settings(), exported_at=1_000)
 
         self.assertEqual(payload["format"], "jittersim-settings")
-        self.assertEqual(payload["version"], 2)
+        self.assertEqual(payload["version"], 3)
         self.assertEqual(payload["exported_at"], 1_000)
+        self.assertFalse(payload["persist_profiles_after_gateway_outage"])
         self.assertEqual([profile["id"] for profile in payload["profiles"]], ["normal", "slow"])
         self.assertEqual(payload["groups"][0]["device_ids"], ["alice", "bob"])
         self.assertEqual(
@@ -113,6 +114,20 @@ class SettingsTransferTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_gateway_persistence_round_trips_and_old_exports_default_off(self) -> None:
+        from jittersim.api.server import _settings_from_payload
+
+        payload = settings_to_payload(
+            lab_settings(persist_profiles_after_gateway_outage=True), exported_at=1
+        )
+        restored = _settings_from_payload(payload)
+        self.assertTrue(restored.persist_profiles_after_gateway_outage)
+
+        old_payload = dict(payload, version=2)
+        old_payload.pop("persist_profiles_after_gateway_outage")
+        restored_old = _settings_from_payload(old_payload)
+        self.assertFalse(restored_old.persist_profiles_after_gateway_outage)
 
     def test_accepts_consistent_settings(self) -> None:
         check_settings(lab_settings(), max_traffic_classes=15, max_service_domains=200)

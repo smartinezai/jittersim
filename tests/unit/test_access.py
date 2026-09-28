@@ -21,13 +21,49 @@ from jittersim.config.models import (
 from jittersim.config.storage import ConfigRepository, DeviceConflictError, StorageError
 from jittersim.config.transfer import settings_to_payload
 from jittersim.engine.access import AccessClient, AccessPlan, access_from_payload, build_access_plan
-from jittersim.networking.access import AccessManager, read_access, render_dns
+from jittersim.networking.access import (
+    AccessManager,
+    read_access,
+    render_access_firewall,
+    render_dns,
+)
 from jittersim.networking.executor import CommandExecutionError
 from jittersim.networking.topology import Topology
 from tests.access_support import AccessExecutor
 
 
 class AccessPolicyTests(unittest.TestCase):
+    def test_dns_failure_rules_are_random_and_limited_to_test_wifi(self):
+        plan = AccessPlan(options=AccessOptions(dns_failure_percent=35))
+        rules = render_access_firewall(plan, Topology("eth0", "wlan0"))
+
+        self.assertEqual(rules.count("numgen random mod 100 < 35"), 2)
+        self.assertIn(
+            'iifname "wlan0" ip saddr 192.168.50.0/24 udp dport 5353 '
+            "numgen random mod 100 < 35 counter reject with icmpx type port-unreachable",
+            rules,
+        )
+        self.assertIn(
+            'iifname "wlan0" ip saddr 192.168.50.0/24 tcp dport 5353 ct state new '
+            "numgen random mod 100 < 35 counter reject with tcp reset",
+            rules,
+        )
+
+        every_request = render_access_firewall(
+            AccessPlan(options=AccessOptions(dns_failure_percent=100)),
+            Topology("eth0", "wlan0"),
+        )
+        self.assertNotIn("numgen random", every_request)
+        self.assertEqual(every_request.count("ip saddr 192.168.50.0/24"), 2)
+        self.assertIn("udp dport 5353 counter reject", every_request)
+        self.assertIn("tcp dport 5353 ct state new counter reject", every_request)
+
+        disabled = render_access_firewall(
+            AccessPlan(options=AccessOptions(enabled=False, dns_failure_percent=35)),
+            Topology("eth0", "wlan0"),
+        )
+        self.assertNotIn("numgen random", disabled)
+
     def test_deleting_a_missing_target_does_not_leave_access_edits_locked(self):
         with ConfigRepository(':memory:') as repository:
             for delete in (repository.delete_device, repository.delete_device_group):

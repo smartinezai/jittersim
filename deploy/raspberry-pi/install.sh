@@ -39,7 +39,7 @@ if dpkg-query -W -f='${Status}' hostapd 2>/dev/null | grep -q 'install ok instal
     existing_hostapd=yes
 fi
 apt-get update
-apt-get install -y dnsmasq-base iw nftables openssl python3-venv tcpdump unbound dnsutils hostapd conntrack
+apt-get install -y dnsmasq-base iputils-ping iw nftables openssl python3-venv tcpdump unbound dnsutils hostapd conntrack
 # New package defaults must not take over existing DNS or Wi-Fi services.
 if [ "$existing_unbound" = no ]; then systemctl disable --now unbound.service; fi
 if [ "$existing_hostapd" = no ]; then systemctl disable --now hostapd.service; fi

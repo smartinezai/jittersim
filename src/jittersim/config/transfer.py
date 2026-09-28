@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable
 from .models import MAX_UNAFFECTED_DEVICES, SavedSettings
 
 SETTINGS_FORMAT = "jittersim-settings"
-SETTINGS_VERSION = 2
+SETTINGS_VERSION = 3
 
 
 def _json_values(value: Any) -> Any:
@@ -35,6 +35,9 @@ def settings_to_payload(settings: SavedSettings, *, exported_at: int) -> Dict[st
         "format": SETTINGS_FORMAT,
         "version": SETTINGS_VERSION,
         "exported_at": exported_at,
+        "persist_profiles_after_gateway_outage": (
+            settings.persist_profiles_after_gateway_outage
+        ),
         "profiles": [_json_values(asdict(profile)) for profile in settings.profiles],
         "devices": [
             {

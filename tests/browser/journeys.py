@@ -1,6 +1,7 @@
 """Exercise complete page behavior against the real API in CI."""
 
 import json
+import os
 import re
 import selectors
 import subprocess
@@ -8,6 +9,10 @@ import sys
 from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
+
+
+def dismiss_toasts(page):
+    page.locator("#toast").evaluate("toast => { toast.hidden = true; }")
 
 
 def check_access_and_help(page):
@@ -24,8 +29,18 @@ def check_access_and_help(page):
     page.get_by_role("button", name="Save site rule", exact=True).click()
     expect(page.locator("#site-rule-list")).to_contain_text("Video for the test phone")
     expect(page.locator("#access-summary")).to_contain_text("Saved rules differ")
+    page.locator("#dns-failure-percent").fill("20")
+    page.get_by_role("button", name="Save access rules", exact=True).click()
+    expect(page.locator("#dns-failure-status")).to_contain_text("Saved DNS failure chance: 20%")
     page.get_by_role("button", name="Apply access rules", exact=True).click()
+    expect(page.locator("#dns-failure-status")).to_contain_text("Applied DNS failure chance: 20%")
     expect(page.locator("#access-summary")).to_contain_text("Saved access rules are active")
+    page.set_viewport_size({"width": 1440, "height": 1000})
+    dismiss_toasts(page)
+    page.evaluate("window.scrollTo(0, 0)")
+    page.locator(".access-options").screenshot(
+        path="test-results/dns-failure-controls-desktop.png"
+    )
     page.get_by_role("button", name="Reset network", exact=True).click()
     expect(page.locator("#message")).to_contain_text("reset")
     expect(page.locator("#access-summary")).to_contain_text("Saved access rules are active")
@@ -126,7 +141,9 @@ def run():
                 raise RuntimeError("browser fixture did not start")
             port = int(process.stdout.readline().strip())
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch()
+            browser = playwright.chromium.launch(
+                executable_path=os.environ.get("JITTERSIM_BROWSER_EXECUTABLE")
+            )
             context = browser.new_context(viewport={"width": 390, "height": 844})
             context.tracing.start(screenshots=True, snapshots=True, sources=True)
             page = context.new_page()
@@ -238,6 +255,29 @@ def run():
                     page.get_by_role("row").filter(has_text="Slow connection copy")
                 ).to_have_count(0)
                 check_access_and_help(page)
+                page.set_viewport_size({"width": 1440, "height": 1000})
+                page.get_by_role("link", name="Setup", exact=True).click()
+                expect(page.locator("#gateway-persistence-state")).to_contain_text(
+                    "Router reachable."
+                )
+                page.locator("#gateway-persistence-toggle").check()
+                page.get_by_role("button", name="Save outage behavior", exact=True).click()
+                expect(page.locator("#gateway-persistence-state")).to_contain_text(
+                    "Saved and applied to the networking helper."
+                )
+                dismiss_toasts(page)
+                page.locator(".tab-panel#tab-setup > section").nth(0).screenshot(
+                    path="test-results/router-outage-persistence-desktop.png"
+                )
+                page.get_by_role("button", name="Check for updates", exact=True).click()
+                expect(page.locator("#release-status")).to_contain_text("test-release")
+                expect(page.locator("#release-status")).to_contain_text(
+                    "No newer approved release is staged."
+                )
+                dismiss_toasts(page)
+                page.locator("#release-controls").screenshot(
+                    path="test-results/staged-update-check-desktop.png"
+                )
                 page.set_viewport_size({"width": 320, "height": 740})
                 for tab in (
                     "Overview",
@@ -252,6 +292,39 @@ def run():
                     assert page.evaluate(
                         "document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1"
                     ), tab
+                page.set_viewport_size({"width": 1440, "height": 1000})
+                page.get_by_role("link", name="Overview", exact=True).click()
+                discard = page.get_by_role("button", name="Discard unfinished edits", exact=True)
+                if discard.is_visible():
+                    discard.click()
+                    page.get_by_role("dialog").get_by_role(
+                        "button", name="Continue", exact=True
+                    ).click()
+                page.get_by_role("button", name="Apply current configuration", exact=True).click()
+                expect(page.locator("#message")).to_contain_text(
+                    "Configuration applied successfully."
+                )
+                page.set_viewport_size({"width": 390, "height": 844})
+                page.get_by_role("link", name="Devices", exact=True).click()
+                page.get_by_role("button", name="Open Test phone", exact=True).click()
+                page.get_by_role("combobox", name="Temporary profile", exact=True).select_option(
+                    "slow"
+                )
+                page.get_by_role("button", name="Start device timer", exact=True).click()
+                expect(page.locator("#workspace-state")).to_contain_text("Slow connection")
+                page.get_by_role("link", name="Overview", exact=True).click()
+                expect(page.get_by_text(re.compile(r"^Active: Slow connection"))).to_be_visible()
+                dismiss_toasts(page)
+                page.set_viewport_size({"width": 1440, "height": 1000})
+                page.evaluate("window.scrollTo(0, 0)")
+                page.screenshot(
+                    path="test-results/experience-overview-desktop.png", full_page=False
+                )
+                page.set_viewport_size({"width": 430, "height": 1200})
+                page.evaluate("window.scrollTo(0, 0)")
+                page.screenshot(
+                    path="test-results/experience-overview-phone.png", full_page=False
+                )
                 assert not errors, errors
             finally:
                 page.screenshot(path="test-results/browser-journeys.png", full_page=True)

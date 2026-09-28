@@ -46,6 +46,24 @@ class RootQueueExecutor(FakeExecutor):
         return super().run(command)
 
 
+class GatewayProbeExecutor(FakeExecutor):
+    def __init__(self, *, gateway="192.168.0.1", ping_return_code=0) -> None:
+        super().__init__()
+        self.gateway = gateway
+        self.ping_return_code = ping_return_code
+
+    def run(self, command):
+        self.commands.append(command)
+        if command.executable == "nmcli":
+            return CommandResult(return_code=0, stdout="router-ethernet\n")
+        if command.executable == "ip":
+            route = f"default via {self.gateway} dev eth0\n" if self.gateway else ""
+            return CommandResult(return_code=0, stdout=route)
+        if command.executable == "ping":
+            return CommandResult(return_code=self.ping_return_code, stderr="probe result")
+        return CommandResult(return_code=0)
+
+
 class NetworkApplierTests(unittest.TestCase):
     def setUp(self) -> None:
         self.topology = Topology(uplink_interface="eth0", test_interface="wlan0")
@@ -56,6 +74,38 @@ class NetworkApplierTests(unittest.TestCase):
 
         self.assertEqual(report.commands_run, len(executor.commands) - 2)
         self.assertGreater(report.commands_run, 0)
+
+    def test_gateway_probe_targets_only_the_default_router_on_the_uplink(self) -> None:
+        executor = GatewayProbeExecutor()
+        applier = NetworkApplier(executor=executor, topology=self.topology)
+
+        self.assertTrue(applier.probe_default_gateway())
+        probe = executor.commands[-1]
+        self.assertEqual(probe.executable, "ping")
+        self.assertEqual(
+            probe.arguments,
+            ("-n", "-c", "1", "-W", "1", "-I", "eth0", "192.168.0.1"),
+        )
+        self.assertEqual(probe.timeout_seconds, 2)
+
+    def test_gateway_probe_reports_unknown_without_a_route(self) -> None:
+        executor = GatewayProbeExecutor(gateway=None)
+        applier = NetworkApplier(executor=executor, topology=self.topology)
+
+        self.assertIsNone(applier.probe_default_gateway())
+        self.assertFalse(any(command.executable == "ping" for command in executor.commands))
+
+    def test_gateway_probe_distinguishes_no_reply_from_probe_error(self) -> None:
+        no_reply = NetworkApplier(
+            executor=GatewayProbeExecutor(ping_return_code=1), topology=self.topology
+        )
+        self.assertFalse(no_reply.probe_default_gateway())
+
+        probe_error = NetworkApplier(
+            executor=GatewayProbeExecutor(ping_return_code=2), topology=self.topology
+        )
+        with self.assertRaises(CommandExecutionError):
+            probe_error.probe_default_gateway()
 
     def test_reset_runs_project_cleanup_commands(self) -> None:
         executor = RootQueueExecutor()
