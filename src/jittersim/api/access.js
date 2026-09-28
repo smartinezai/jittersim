@@ -4,6 +4,7 @@ let accessState = null;
 let siteRules = [];
 let siteVersion = null;
 let accessRead = null;
+let accessReadAgain = false;
 
 function openAccessRules() {
   showTab('rules'); showRuleSection('access');
@@ -34,48 +35,59 @@ function populateAccessTargets() {
 }
 
 async function loadAccessStatus() {
-  if (accessRead) return accessRead;
+  if (accessRead) {
+    // A read already in flight may predate a save. Read once more after it.
+    accessReadAgain = true;
+    return accessRead;
+  }
   accessRead = (async () => {
-    try {
-      accessState = await request('/api/access', 'GET');
-      const summary = element('access-summary');
-      summary.textContent = !accessState.available ? 'Configuration only. Install the current networking helper on the Pi to enforce access rules.' :
-        accessState.error || (accessState.applied ? (accessState.enabled ?
-          'Saved access rules are active. Resetting an experiment keeps these rules.' : 'Household access rules are disabled.') :
-          'Saved rules differ from the rules currently applied. Apply access rules to update the network.');
-      summary.dataset.state = accessState.error ? 'error' : accessState.applied ? 'applied' : 'pending';
-      element('apply-access').disabled = !accessState.available;
-      element('normal-access-button').disabled = !helperConfigured;
-      element('normal-access-notice').hidden = !accessState.normal_access;
-      element('disable-access').disabled = !accessState.available || !accessState.enabled;
-      element('access-admission').disabled = !accessState.wifi_admission_available;
-      const savedChance = accessState.saved_policy?.options?.dns_failure_percent ?? 0;
-      const appliedChance = accessState.policy?.options?.dns_failure_percent;
-      const dnsState = element('dns-failure-status');
-      dnsState.textContent = appliedChance === undefined
-        ? 'Applied DNS failure chance: unavailable.'
-        : accessState.applied
-          ? (accessState.enabled
-            ? 'Applied DNS failure chance: ' + appliedChance + '%.'
-            : 'Saved DNS failure chance: ' + savedChance + '%. Household access rules are disabled, so DNS failures are off.')
-          : 'Saved DNS failure chance: ' + savedChance + '%. Applied: ' + appliedChance + '%. Apply access rules to change it.';
-      element('admission-note').textContent = accessState.wifi_admission_available ?
-        'Supported by this access point. Blocked devices are disconnected and refused when they try to rejoin.' :
-        'MAC filtering blocks traffic after a device joins. This Wi-Fi setup cannot refuse joins.';
-      renderAccessDevices();
-      renderDeviceCards();
-    } catch (error) {
-      if (accessState) accessState.available = false;
-      renderAccessDevices();
-      element('access-summary').textContent = 'Access status is out of date. ' + error.message;
-      element('access-summary').dataset.state = 'error';
-      element('apply-access').disabled = true;
-      element('normal-access-notice').hidden = true;
-      element('disable-access').disabled = true;
-      throw error;
-    }
+    do {
+      accessReadAgain = false;
+      await readAccessStatusOnce();
+    } while (accessReadAgain);
   })();
   try { await accessRead; } finally { accessRead = null; }
+}
+
+async function readAccessStatusOnce() {
+  try {
+    accessState = await request('/api/access', 'GET');
+    const summary = element('access-summary');
+    summary.textContent = !accessState.available ? 'Configuration only. Install the current networking helper on the Pi to enforce access rules.' :
+      accessState.error || (accessState.applied ? (accessState.enabled ?
+        'Saved access rules are active. Resetting an experiment keeps these rules.' : 'Household access rules are disabled.') :
+        'Saved rules differ from the rules currently applied. Apply access rules to update the network.');
+    summary.dataset.state = accessState.error ? 'error' : accessState.applied ? 'applied' : 'pending';
+    element('apply-access').disabled = !accessState.available;
+    element('normal-access-button').disabled = !helperConfigured;
+    element('normal-access-notice').hidden = !accessState.normal_access;
+    element('disable-access').disabled = !accessState.available || !accessState.enabled;
+    element('access-admission').disabled = !accessState.wifi_admission_available;
+    const savedChance = accessState.saved_policy?.options?.dns_failure_percent ?? 0;
+    const appliedChance = accessState.policy?.options?.dns_failure_percent;
+    const dnsState = element('dns-failure-status');
+    dnsState.textContent = appliedChance === undefined
+      ? 'Applied DNS failure chance: unavailable.'
+      : accessState.applied
+        ? (accessState.enabled
+          ? 'Applied DNS failure chance: ' + appliedChance + '%.'
+          : 'Saved DNS failure chance: ' + savedChance + '%. Household access rules are disabled, so DNS failures are off.')
+        : 'Saved DNS failure chance: ' + savedChance + '%. Applied: ' + appliedChance + '%. Apply access rules to change it.';
+    element('admission-note').textContent = accessState.wifi_admission_available ?
+      'Supported by this access point. Blocked devices are disconnected and refused when they try to rejoin.' :
+      'MAC filtering blocks traffic after a device joins. This Wi-Fi setup cannot refuse joins.';
+    renderAccessDevices();
+    renderDeviceCards();
+  } catch (error) {
+    if (accessState) accessState.available = false;
+    renderAccessDevices();
+    element('access-summary').textContent = 'Access status is out of date. ' + error.message;
+    element('access-summary').dataset.state = 'error';
+    element('apply-access').disabled = true;
+    element('normal-access-notice').hidden = true;
+    element('disable-access').disabled = true;
+    throw error;
+  }
 }
 
 function renderSiteRules() {
