@@ -16,6 +16,7 @@ function updateAccessForms(data) {
     policyVersion = data.version;
     element('access-enabled').checked = data.options.enabled;
     element('access-admission').checked = data.options.reject_wifi_joins;
+    element('dns-failure-percent').value = data.options.dns_failure_percent ?? 0;
   }
   siteRules = data.site_blocks || [];
   if (!formDrafts.has('site-rule-form')) siteVersion = data.version;
@@ -48,6 +49,16 @@ async function loadAccessStatus() {
       element('normal-access-notice').hidden = !accessState.normal_access;
       element('disable-access').disabled = !accessState.available || !accessState.enabled;
       element('access-admission').disabled = !accessState.wifi_admission_available;
+      const savedChance = accessState.saved_policy?.options?.dns_failure_percent ?? 0;
+      const appliedChance = accessState.policy?.options?.dns_failure_percent;
+      const dnsState = element('dns-failure-status');
+      dnsState.textContent = appliedChance === undefined
+        ? 'Applied DNS failure chance: unavailable.'
+        : accessState.applied
+          ? (accessState.enabled
+            ? 'Applied DNS failure chance: ' + appliedChance + '%.'
+            : 'Saved DNS failure chance: ' + savedChance + '%. Household access rules are disabled, so DNS failures are off.')
+          : 'Saved DNS failure chance: ' + savedChance + '%. Applied: ' + appliedChance + '%. Apply access rules to change it.';
       element('admission-note').textContent = accessState.wifi_admission_available ?
         'Supported by this access point. Blocked devices are disconnected and refused when they try to rejoin.' :
         'MAC filtering blocks traffic after a device joins. This Wi-Fi setup cannot refuse joins.';
@@ -175,12 +186,20 @@ function installAccessControls() {
   const options = document.createElement('div'); options.className = 'access-options';
   options.innerHTML = `<label class="quota-check"><input id="access-enabled" type="checkbox" checked>Enable household access rules</label>
     <label class="quota-check"><input id="access-admission" type="checkbox">Also refuse blocked devices when they join Wi-Fi</label>
-    <p id="admission-note" class="form-note"></p>`;
+    <p id="admission-note" class="form-note"></p>
+    <label>DNS failure chance (0 to 100%)
+      <input id="dns-failure-percent" type="number" min="0" max="100" step="1" value="0" required>
+    </label>
+    <p class="form-note">Each new DNS request from test Wi-Fi can get a quick connection error. Device and browser DNS caches may hide failures on later page visits. At 100%, test Wi-Fi name lookups will fail. This setting does not affect management traffic.</p>
+    <p id="dns-failure-status" class="form-note" role="status">Checking the applied DNS failure chance…</p>`;
   element('policy-form').prepend(options);
   card.querySelector('.policy-note').textContent = 'These rules persist after an experiment resets. Domain blocks include subdomains. VPNs, encrypted DNS over HTTPS and another internet connection can bypass network-only filtering. Existing direct connections or a device’s cached DNS answer can continue until it looks up the name again. The managed browser proxy also checks hostnames and closes tunnels when rules change.';
   const actions = textNode('div', '', 'access-actions');
   const apply = actionButton('Apply access rules', async () => {
     if (formDrafts.has('policy-form') || formDrafts.has('site-rule-form')) throw new Error('Save or discard unfinished access-rule edits before applying.');
+    if (accessState.saved_policy?.options?.enabled &&
+        accessState.saved_policy.options.dns_failure_percent === 100 &&
+        !await confirmWorkflow('A 100% DNS failure chance will make every new test-network name lookup fail. Apply this setting?')) return;
     await request('/api/access/apply', 'POST', {version:accessState.version});
     await loadAccessStatus(); showMessage('Access rules applied. Experiment settings were preserved.', 'success');
   }); apply.id = 'apply-access'; apply.classList.add('primary');

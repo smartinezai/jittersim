@@ -52,6 +52,31 @@ class FakeHelper:
         self.applied_plan = None
         self.reset_called = False
         self.access_plan = None
+        self.persistence_enabled = False
+        self.gateway_state = {
+            "gateway_state": "available",
+            "outage_observed": False,
+            "outage_stop_latched": False,
+            "reset_pending": False,
+            "recovery_pending": False,
+            "state_error": False,
+        }
+
+    def gateway_status(self):
+        return {"mode_enabled": self.persistence_enabled, **self.gateway_state}
+
+    def set_gateway_persistence(self, *, enabled):
+        self.persistence_enabled = enabled
+        return self.gateway_status()
+
+    def release_status(self):
+        return {
+            "phase": "idle",
+            "installed": "test-release",
+            "available": None,
+            "rollback_available": False,
+            "message": "No newer approved release is staged.",
+        }
 
     def access_status(self):
         return {"available": True, "wifi_admission_available": False,
@@ -73,13 +98,19 @@ class FakeHelper:
         self.apply_access(replace(plan, options=replace(plan.options, enabled=False)))
         return {"ok": True}
 
-    def apply(self, *, plan):
+    def apply(self, *, plan, explicit_apply=False):
         if self.fail_action == "apply":
             raise HelperClientError("simulated helper failure")
         self.applied_plan = plan
+        if explicit_apply:
+            self.gateway_state["outage_stop_latched"] = False
+            self.gateway_state["recovery_pending"] = False
         if plan.access is not None:
             self.apply_access(plan.access)
         return {"ok": True, "action": "apply", "commands_run": 3}
+
+    def apply_experiment(self, *, plan):
+        return self.apply(plan=plan)
 
     def reset(self):
         if self.fail_action == "reset":
@@ -180,8 +211,8 @@ class CountingHelper(FakeHelper):
         self.devices = dict(devices or {})
         self.services = dict(services or {})
 
-    def apply(self, *, plan):
-        result = super().apply(plan=plan)
+    def apply(self, *, plan, explicit_apply=False):
+        result = super().apply(plan=plan, explicit_apply=explicit_apply)
         self.devices = dict.fromkeys(self.devices, 0)
         self.services = dict.fromkeys(self.services, 0)
         return result
@@ -354,7 +385,7 @@ class ControlServerTests(unittest.TestCase):
 
     def test_failed_actions_are_not_recorded_and_recording_never_breaks_them(self) -> None:
         class FailingHelper(FakeHelper):
-            def apply(self, *, plan):
+            def apply(self, *, plan, explicit_apply=False):
                 raise HelperClientError("apply failed")
 
         self.server.helper_client = FailingHelper()
@@ -528,6 +559,45 @@ class ControlServerTests(unittest.TestCase):
             },
         )
 
+    def test_gateway_persistence_reads_and_saves_through_the_helper(self) -> None:
+        helper = FakeHelper()
+        self.server.helper_client = helper
+
+        read_status, _, read_body = self.server.response_for("/api/gateway-persistence")
+        initial = json.loads(read_body)
+        version = self.repository.get_runtime_state().configuration_version
+        saved_status, _, saved_body = self.server.write_response_for(
+            "/api/gateway-persistence",
+            {"persistence_enabled": True, "version": version},
+        )
+        saved = json.loads(saved_body)
+
+        self.assertEqual(read_status, 200)
+        self.assertFalse(initial["persistence_enabled"])
+        self.assertTrue(initial["helper_synced"])
+        self.assertEqual(saved_status, 200)
+        self.assertTrue(saved["persistence_enabled"])
+        self.assertTrue(saved["helper_synced"])
+        self.assertTrue(helper.persistence_enabled)
+        self.assertTrue(self.repository.get_persist_profiles_after_gateway_outage())
+
+        stale_status, _, _ = self.server.write_response_for(
+            "/api/gateway-persistence",
+            {"persistence_enabled": False, "version": version},
+        )
+        self.assertEqual(stale_status, 409)
+
+    def test_gateway_persistence_rejects_truthy_non_boolean_values(self) -> None:
+        self.server.helper_client = FakeHelper()
+
+        status, _, body = self.server.write_response_for(
+            "/api/gateway-persistence", {"persistence_enabled": 1}
+        )
+
+        self.assertEqual(status, 400)
+        self.assertIn("true or false", json.loads(body)["error"])
+        self.assertFalse(self.repository.get_persist_profiles_after_gateway_outage())
+
     def test_served_dashboard_script_parses(self) -> None:
         node = shutil.which("node")
         if node is None:
@@ -580,6 +650,7 @@ class ControlServerTests(unittest.TestCase):
             "/api/action-history",
             "/api/observations",
             "/api/export",
+            "/api/gateway-persistence",
         ):
             with self.subTest(path=path):
                 self.assertEqual(get(path)["status"], 401)
@@ -3201,7 +3272,11 @@ class ControlServerTests(unittest.TestCase):
                     "Traffic discovery",
                 ],
                 "tab-measurements": ["Measurements"],
-                "tab-setup": ["Upstream router connection", "Manual Pi access-point fallback"],
+                "tab-setup": [
+                    "Router outage behavior",
+                    "Upstream router connection",
+                    "Manual Pi access-point fallback",
+                ],
                 "tab-diagnostics": [
                     "Compiled plan", "Runtime state", "Access rules", "Diagnostics",
                     "Backup and action history",
@@ -4425,9 +4500,9 @@ class ControlServerTests(unittest.TestCase):
                 events.append("activate")
 
         class RecordingHelper(FakeHelper):
-            def apply(self, *, plan):
+            def apply(self, *, plan, explicit_apply=False):
                 events.append("apply")
-                return super().apply(plan=plan)
+                return super().apply(plan=plan, explicit_apply=explicit_apply)
 
         self.server.helper_client = RecordingHelper()
         self.server.scheduler = RecordingScheduler()

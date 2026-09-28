@@ -4,8 +4,10 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 from jittersim.cli import main
+from jittersim.config.storage import ConfigRepository
 
 
 class CliTests(unittest.TestCase):
@@ -44,6 +46,68 @@ class CliTests(unittest.TestCase):
     def test_cli_values_are_validated_before_rendering(self) -> None:
         with self.assertRaises(ValueError):
             main(["--loss-percent", "101"])
+
+    def test_dns_failure_command_saves_a_chance_without_applying_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "settings.db"
+            ConfigRepository(database).close()
+            output = io.StringIO()
+            with redirect_stdout(output):
+                result = main(
+                    [
+                        "access", "dns-failure", "set", "25",
+                        "--database", str(database),
+                    ]
+                )
+
+            self.assertEqual(result, 0)
+            self.assertIn("Saved DNS failure chance: 25%", output.getvalue())
+            self.assertIn("Apply the saved setting", output.getvalue())
+            with ConfigRepository(database) as repository:
+                self.assertEqual(
+                    repository.access_settings().access_options.dns_failure_percent, 25
+                )
+
+    def test_persistence_command_saves_the_mode_and_updates_the_helper(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "settings.db"
+            ConfigRepository(database).close()
+            with patch("jittersim.cli.HelperClient") as helper_client:
+                helper_client.return_value.set_gateway_persistence.return_value = {
+                    "gateway_state": "available",
+                    "outage_stop_latched": False,
+                }
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    result = main(
+                        [
+                            "persistence", "set", "on",
+                            "--database", str(database),
+                        ]
+                    )
+
+            self.assertEqual(result, 0)
+            helper_client.return_value.set_gateway_persistence.assert_called_once_with(
+                enabled=True
+            )
+            self.assertIn("Saved persistence mode: on", output.getvalue())
+            with ConfigRepository(database) as repository:
+                self.assertTrue(repository.get_persist_profiles_after_gateway_outage())
+
+    def test_update_check_explains_it_reads_releases_staged_on_the_pi(self) -> None:
+        with patch("jittersim.cli.HelperClient") as helper_client:
+            helper_client.return_value.release_status.return_value = {
+                "installed": "v1.0",
+                "available": None,
+                "message": "No newer approved release is staged.",
+            }
+            output = io.StringIO()
+            with redirect_stdout(output):
+                result = main(["update", "check"])
+
+        self.assertEqual(result, 0)
+        self.assertIn("Installed: v1.0", output.getvalue())
+        self.assertIn("It does not check the private repository online", output.getvalue())
 
 
 if __name__ == "__main__":

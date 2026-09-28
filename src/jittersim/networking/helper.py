@@ -31,6 +31,11 @@ LOGGER = logging.getLogger(__name__)
 MAX_MESSAGE_BYTES = 256 * 1024
 MAX_LOG_DETAIL_CHARS = 512
 MAX_CONNECTED_CLIENTS = 256
+GATEWAY_CHECK_INTERVAL_SECONDS = 5.0
+GATEWAY_FAILURES_TO_DOWN = 3
+GATEWAY_SUCCESSES_TO_UP = 2
+GATEWAY_RESET_RETRY_SECONDS = 30.0
+MAX_GATEWAY_STATE_BYTES = 4096
 _MAC_ADDRESS_PATTERN = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 _STATION_HEADER_PATTERN = re.compile(
     r"^Station\s+(?P<mac>(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})\b"
@@ -80,11 +85,26 @@ class HelperService:
         applier: NetworkApplier,
         router_factory: Optional[Callable[[str, str], TG3442DERouter]] = None,
         active_plan_path: Optional[Path] = None,
+        gateway_state_path: Optional[Path] = None,
         access_manager: Optional[AccessManager] = None,
     ) -> None:
         self._applier = applier
         self._active_plan_path = active_plan_path
+        self._gateway_state_path = gateway_state_path
         self._access_manager = access_manager
+        self._network_lock = threading.RLock()
+        self._persistence_enabled = False
+        self._persistence_mode_initialized = False
+        self._gateway_state = "unknown"
+        self._outage_observed = False
+        self._outage_stop_latched = False
+        self._reset_pending = False
+        self._recovery_pending = False
+        self._consecutive_failures = 0
+        self._consecutive_successes = 0
+        self._next_reset_retry_at = 0.0
+        self._gateway_state_error = False
+        self._load_gateway_state()
         self._router_factory = router_factory or (
             lambda address, password: TG3442DERouter(address=address, password=password)
         )
@@ -96,15 +116,16 @@ class HelperService:
             return {"ok": False, "error": "request must be an object"}
         action = payload.get("action")
         if action == "normal-access":
-            reset = self._handle_reset()
-            access_ok = False
-            try:
-                if self._access_manager is None:
-                    raise ValueError("persistent access controls are unavailable")
-                self._access_manager.disable()
-                access_ok = True
-            except (OSError, ValueError, CommandExecutionError):
-                LOGGER.exception("could not disable household restrictions")
+            with self._network_lock:
+                reset = self._handle_reset()
+                access_ok = False
+                try:
+                    if self._access_manager is None:
+                        raise ValueError("persistent access controls are unavailable")
+                    self._access_manager.disable()
+                    access_ok = True
+                except (OSError, ValueError, CommandExecutionError):
+                    LOGGER.exception("could not disable household restrictions")
             if not reset["ok"] or not access_ok:
                 return {"ok": False, "error": "normal access was not fully restored",
                         "experiments_stopped": reset["ok"], "access_disabled": access_ok}
@@ -129,8 +150,14 @@ class HelperService:
                 return {"ok": False, "error": "release operation could not be completed"}
         if action == "ping":
             return {"ok": True, "action": "ping"}
+        if action == "gateway-status":
+            with self._network_lock:
+                return {"ok": True, "action": action, **self._gateway_status()}
+        if action == "gateway-persistence":
+            return self._handle_gateway_persistence(payload)
         if action == "reset":
-            return self._handle_reset()
+            with self._network_lock:
+                return self._handle_reset()
         if action == "clients":
             return self._handle_clients()
         if action == "uplink-info":
@@ -148,7 +175,15 @@ class HelperService:
         if action == "router-wifi":
             return self._handle_router_wifi(payload)
         if action in ("apply", "apply-experiment"):
-            return self._handle_apply(payload.get("plan"), update_access=action == "apply")
+            explicit_apply = payload.get("explicit_apply", False)
+            if not isinstance(explicit_apply, bool):
+                return {"ok": False, "error": "explicit_apply must be true or false"}
+            with self._network_lock:
+                return self._handle_apply(
+                    payload.get("plan"),
+                    update_access=action == "apply",
+                    explicit_apply=explicit_apply,
+                )
         return {"ok": False, "error": "unknown action"}
 
     def _handle_clients(self) -> Dict[str, Any]:
@@ -192,6 +227,207 @@ class HelperService:
             return {"ok": False, "error": "upstream connection inspection failed"}
         return {"ok": True, "action": "uplink-info", "uplink": uplink}
 
+    def _load_gateway_state(self) -> None:
+        path = self._gateway_state_path
+        if path is None or not path.exists():
+            return
+        try:
+            with path.open("rb") as state_file:
+                contents = state_file.read(MAX_GATEWAY_STATE_BYTES + 1)
+            if len(contents) > MAX_GATEWAY_STATE_BYTES:
+                raise ValueError("gateway state is too large")
+            state = json.loads(contents.decode("utf-8"))
+            if not isinstance(state, dict) or state.get("version") != 1:
+                raise ValueError("gateway state has an unsupported format")
+            if not isinstance(state.get("persistence_enabled"), bool):
+                raise ValueError("gateway persistence setting is invalid")
+            if state.get("gateway_state") not in ("unknown", "available", "unavailable"):
+                raise ValueError("gateway health state is invalid")
+            for field in (
+                "outage_observed",
+                "outage_stop_latched",
+                "reset_pending",
+                "recovery_pending",
+            ):
+                if not isinstance(state.get(field), bool):
+                    raise ValueError("gateway recovery state is invalid")
+            failures = state.get("consecutive_failures")
+            successes = state.get("consecutive_successes")
+            if (
+                type(failures) is not int
+                or not 0 <= failures <= GATEWAY_FAILURES_TO_DOWN
+                or type(successes) is not int
+                or not 0 <= successes <= GATEWAY_SUCCESSES_TO_UP
+            ):
+                raise ValueError("gateway probe count is invalid")
+            self._persistence_enabled = state["persistence_enabled"]
+            self._persistence_mode_initialized = True
+            self._gateway_state = state["gateway_state"]
+            self._outage_observed = state["outage_observed"]
+            self._outage_stop_latched = state["outage_stop_latched"]
+            self._reset_pending = state["reset_pending"]
+            self._recovery_pending = state["recovery_pending"]
+            self._consecutive_failures = failures
+            self._consecutive_successes = successes
+            active_plan_needs_cleanup = (
+                self._outage_stop_latched
+                and self._active_plan_path is not None
+                and self._active_plan_path.is_file()
+            )
+            if active_plan_needs_cleanup:
+                self._reset_pending = True
+                self._next_reset_retry_at = 0.0
+            elif self._reset_pending:
+                self._next_reset_retry_at = time.monotonic() + GATEWAY_RESET_RETRY_SECONDS
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            LOGGER.exception("gateway persistence state could not be read")
+            self._gateway_state = "unknown"
+            self._persistence_mode_initialized = True
+            self._outage_stop_latched = True
+            self._reset_pending = True
+            self._gateway_state_error = True
+
+    def _gateway_status(self) -> Dict[str, Any]:
+        return {
+            "mode_enabled": self._persistence_enabled,
+            "gateway_state": self._gateway_state,
+            "outage_observed": self._outage_observed,
+            "outage_stop_latched": self._outage_stop_latched,
+            "reset_pending": self._reset_pending,
+            "recovery_pending": self._recovery_pending,
+            "state_error": self._gateway_state_error,
+        }
+
+    def _write_gateway_state(self) -> None:
+        path = self._gateway_state_path
+        if path is None:
+            return
+        state = {
+            "version": 1,
+            "persistence_enabled": self._persistence_enabled,
+            "gateway_state": self._gateway_state,
+            "outage_observed": self._outage_observed,
+            "outage_stop_latched": self._outage_stop_latched,
+            "reset_pending": self._reset_pending,
+            "recovery_pending": self._recovery_pending,
+            "consecutive_failures": self._consecutive_failures,
+            "consecutive_successes": self._consecutive_successes,
+        }
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}")
+        try:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+                json.dump(state, output, sort_keys=True)
+                output.write("\n")
+            os.replace(temporary, path)
+            self._gateway_state_error = False
+        except OSError:
+            self._gateway_state_error = True
+            LOGGER.exception("gateway persistence state could not be saved")
+        finally:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+
+    def _handle_gateway_persistence(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        enabled = payload.get("enabled")
+        if not isinstance(enabled, bool):
+            return {"ok": False, "error": "gateway persistence must be true or false"}
+        with self._network_lock:
+            changed = self._persistence_enabled != enabled
+            self._persistence_enabled = enabled
+            self._persistence_mode_initialized = True
+            if (
+                changed
+                and not enabled
+                and (self._gateway_state == "unavailable" or self._outage_observed)
+                and not self._outage_stop_latched
+            ):
+                self._stop_for_gateway_outage()
+            self._write_gateway_state()
+            return {"ok": True, "action": "gateway-persistence", **self._gateway_status()}
+
+    def monitor_gateway_once(self) -> None:
+        """Update bounded gateway state and perform any required transition."""
+
+        with self._network_lock:
+            if not self._persistence_mode_initialized:
+                return
+
+        try:
+            reachable = self._applier.probe_default_gateway()
+        except CommandExecutionError:
+            LOGGER.warning("configured router gateway probe is unavailable")
+            reachable = None
+        with self._network_lock:
+            if reachable is None:
+                self._gateway_state = "unknown"
+                self._consecutive_failures = 0
+                self._consecutive_successes = 0
+                if not self._persistence_enabled and self._outage_observed:
+                    self._stop_for_gateway_outage()
+            elif reachable:
+                self._consecutive_failures = 0
+                self._consecutive_successes = min(
+                    GATEWAY_SUCCESSES_TO_UP,
+                    self._consecutive_successes + 1,
+                )
+                if self._consecutive_successes >= GATEWAY_SUCCESSES_TO_UP:
+                    was_unavailable = self._gateway_state == "unavailable"
+                    self._gateway_state = "available"
+                    if was_unavailable or self._outage_observed:
+                        self._outage_observed = False
+                        if self._persistence_enabled and not self._outage_stop_latched:
+                            self._recovery_pending = self._has_active_plan()
+            else:
+                self._consecutive_successes = 0
+                self._consecutive_failures = min(
+                    GATEWAY_FAILURES_TO_DOWN,
+                    self._consecutive_failures + 1,
+                )
+                if self._consecutive_failures >= GATEWAY_FAILURES_TO_DOWN:
+                    newly_unavailable = self._gateway_state != "unavailable"
+                    self._gateway_state = "unavailable"
+                    self._outage_observed = True
+                    if newly_unavailable:
+                        LOGGER.warning("configured router gateway is unreachable")
+                    if not self._persistence_enabled and not self._outage_stop_latched:
+                        self._stop_for_gateway_outage()
+            if self._reset_pending and time.monotonic() >= self._next_reset_retry_at:
+                self._attempt_gateway_reset()
+            self._write_gateway_state()
+
+    def _has_active_plan(self) -> bool:
+        path = self._active_plan_path
+        return path is not None and path.is_file()
+
+    def _stop_for_gateway_outage(self) -> None:
+        self._outage_stop_latched = True
+        self._recovery_pending = False
+        self._reset_pending = True
+        self._next_reset_retry_at = 0.0
+        self._write_gateway_state()
+        self._attempt_gateway_reset()
+
+    def _attempt_gateway_reset(self) -> None:
+        if not self._reset_pending:
+            return
+        try:
+            self._applier.reset()
+            if self._active_plan_path is not None:
+                self._active_plan_path.unlink(missing_ok=True)
+        except (CommandExecutionError, OSError):
+            LOGGER.exception("network reset after a router outage failed")
+            self._next_reset_retry_at = time.monotonic() + GATEWAY_RESET_RETRY_SECONDS
+            self._write_gateway_state()
+            return
+        self._reset_pending = False
+        self._next_reset_retry_at = 0.0
+        LOGGER.warning("active experiment stopped after a router gateway outage")
+        self._write_gateway_state()
+
+
     def _handle_dns_observation(self) -> Dict[str, Any]:
         try:
             output = self._applier.capture_dns_queries()
@@ -222,11 +458,36 @@ class HelperService:
             counters["queues"] = {"devices": {}}
         return {"ok": True, "action": "traffic-counters", "counters": counters}
 
-    def _handle_apply(self, payload: Any, *, update_access: bool = True) -> Dict[str, Any]:
+    def _handle_apply(
+        self,
+        payload: Any,
+        *,
+        update_access: bool = True,
+        explicit_apply: bool = False,
+    ) -> Dict[str, Any]:
         try:
             plan = plan_from_payload(payload)
         except PlanCodecError:
             return {"ok": False, "error": "invalid network plan"}
+        if self._outage_stop_latched:
+            if not explicit_apply:
+                return {
+                    "ok": False,
+                    "error": (
+                        "profiles stopped after a gateway outage; use Apply after "
+                        "the gateway recovers"
+                    ),
+                }
+            if self._gateway_state != "available":
+                return {
+                    "ok": False,
+                    "error": "the router gateway must be reachable before applying profiles",
+                }
+        elif not self._persistence_enabled and self._gateway_state == "unavailable":
+            return {
+                "ok": False,
+                "error": "the router gateway is unavailable; profiles cannot start in this mode",
+            }
         if plan.access is not None and update_access:
             if self._access_manager is None:
                 return {"ok": False, "error": "persistent access controls are unavailable"}
@@ -279,6 +540,19 @@ class HelperService:
                 except (CommandExecutionError, OSError):
                     LOGGER.exception("network cleanup failed after plan publication error")
                 return {"ok": False, "error": "network plan state could not be published"}
+        if explicit_apply:
+            self._outage_stop_latched = False
+            self._reset_pending = False
+            self._outage_observed = False
+            self._gateway_state_error = False
+        self._recovery_pending = False
+        self._write_gateway_state()
+        if self._gateway_state_error and explicit_apply:
+            self._outage_stop_latched = True
+            self._reset_pending = True
+            self._next_reset_retry_at = 0.0
+            self._attempt_gateway_reset()
+            return {"ok": False, "error": "gateway recovery state could not be saved safely"}
         return {"ok": True, "action": "apply", "commands_run": report.commands_run}
 
     def _write_active_plan(self, plan: NetworkPlan) -> None:
@@ -381,6 +655,9 @@ class HelperService:
         except (CommandExecutionError, OSError):
             LOGGER.exception("network reset failed")
             return {"ok": False, "error": "network reset failed"}
+        self._recovery_pending = False
+        self._outage_observed = False
+        self._write_gateway_state()
         return {"ok": True, "action": "reset", "commands_run": commands_run}
 
 
@@ -510,11 +787,47 @@ class HelperClient:
 
         return self._request({"action": "ping"})
 
-    def apply(self, *, plan: NetworkPlan) -> Dict[str, Any]:
+    def apply(self, *, plan: NetworkPlan, explicit_apply: bool = False) -> Dict[str, Any]:
         """Ask the helper to apply one validated network plan."""
 
         client = HelperClient(socket_path=self.socket_path, timeout_seconds=60)
-        return client._request({"action": "apply", "plan": plan_to_payload(plan)})
+        return client._request(
+            {
+                "action": "apply",
+                "plan": plan_to_payload(plan),
+                "explicit_apply": explicit_apply,
+            }
+        )
+
+    def gateway_status(self) -> Dict[str, Any]:
+        """Read the helper's bounded gateway and persistence state."""
+
+        result = self._request({"action": "gateway-status"})
+        if result.get("gateway_state") not in ("unknown", "available", "unavailable"):
+            raise HelperClientError("helper returned invalid gateway health")
+        for field in (
+            "mode_enabled",
+            "outage_observed",
+            "outage_stop_latched",
+            "reset_pending",
+            "recovery_pending",
+            "state_error",
+        ):
+            if not isinstance(result.get(field), bool):
+                raise HelperClientError("helper returned invalid gateway persistence state")
+        return result
+
+    def set_gateway_persistence(self, *, enabled: bool) -> Dict[str, Any]:
+        """Set whether active experiment plans resume after gateway recovery."""
+
+        if not isinstance(enabled, bool):
+            raise HelperClientError("gateway persistence must be true or false")
+        result = self._request({"action": "gateway-persistence", "enabled": enabled})
+        if result.get("mode_enabled") is not enabled:
+            raise HelperClientError("helper did not save gateway persistence state")
+        if result.get("state_error") is True:
+            raise HelperClientError("helper could not save gateway recovery state safely")
+        return result
 
     def reset(self) -> Dict[str, Any]:
         """Ask the helper to remove project-owned network state."""
@@ -757,6 +1070,7 @@ def run_helper(
     if not enable_hardware:
         raise HelperError("hardware mode requires --enable-hardware")
     active_plan_path = socket_path.parent / "active-plan.json"
+    gateway_state_path = socket_path.parent / "gateway-state.json"
     access = AccessManager(executor=SubprocessExecutor(timeout_seconds=20), topology=topology,
                            runtime_path=socket_path.parent / "access-policy.json")
     access.restore()
@@ -767,6 +1081,7 @@ def run_helper(
         ),
         router_factory=router_factory,
         active_plan_path=active_plan_path,
+        gateway_state_path=gateway_state_path,
         access_manager=access,
     )
     stopped = threading.Event()
@@ -784,6 +1099,24 @@ def run_helper(
 
     worker = threading.Thread(target=maintain_access, daemon=True, name="access-addresses")
     worker.start()
+
+    def monitor_gateway():
+        while not stopped.is_set():
+            started_at = time.monotonic()
+            service.monitor_gateway_once()
+            remaining = max(
+                0.0,
+                GATEWAY_CHECK_INTERVAL_SECONDS - (time.monotonic() - started_at),
+            )
+            if stopped.wait(remaining):
+                break
+
+    gateway_worker = threading.Thread(
+        target=monitor_gateway,
+        daemon=True,
+        name="gateway-persistence",
+    )
+    gateway_worker.start()
     with UnixHelperServer(socket_path, service) as server:
         try:
             server.serve_forever()
@@ -792,6 +1125,7 @@ def run_helper(
         finally:
             stopped.set()
             worker.join(timeout=5)
+            gateway_worker.join(timeout=5)
 
 
 def _build_parser() -> argparse.ArgumentParser:

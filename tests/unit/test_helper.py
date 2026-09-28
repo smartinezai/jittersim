@@ -3,6 +3,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.engine.codec import plan_to_payload
@@ -97,6 +98,31 @@ class UplinkOutputExecutor(FakeExecutor):
             return_code=0,
             stdout="default via 192.168.0.1 dev eth0 proto dhcp src 192.168.0.17\n",
         )
+
+
+class GatewayProbeApplier(NetworkApplier):
+    def __init__(self, *, executor, topology) -> None:
+        super().__init__(executor=executor, topology=topology)
+        self.probe_results = []
+        self.probe_calls = 0
+        self.reset_calls = 0
+        self.apply_calls = 0
+        self.reset_failures = 0
+
+    def probe_default_gateway(self):
+        self.probe_calls += 1
+        return self.probe_results.pop(0)
+
+    def reset(self):
+        self.reset_calls += 1
+        if self.reset_failures:
+            self.reset_failures -= 1
+            raise CommandExecutionError("simulated gateway reset failure")
+        return super().reset()
+
+    def apply(self, *, plan):
+        self.apply_calls += 1
+        return super().apply(plan=plan)
 
 
 class FakeRouter:
@@ -863,6 +889,125 @@ class HelperServiceTests(unittest.TestCase):
         response = self.service.handle_payload({"action": "shell"})
 
         self.assertEqual(response, {"ok": False, "error": "unknown action"})
+
+
+class GatewayPersistenceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        directory = Path(self.temp.name)
+        self.active_plan_path = directory / "active-plan.json"
+        self.gateway_state_path = directory / "gateway-state.json"
+        self.executor = FakeExecutor()
+        self.applier = GatewayProbeApplier(
+            executor=self.executor,
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+        )
+        self.service = self._new_service()
+        result = self.service.handle_payload(
+            {"action": "apply-experiment", "plan": plan_to_payload(make_plan())}
+        )
+        self.assertTrue(result["ok"])
+
+    def _new_service(self):
+        return HelperService(
+            self.applier,
+            active_plan_path=self.active_plan_path,
+            gateway_state_path=self.gateway_state_path,
+        )
+
+    def _check_probes(self, results):
+        self.applier.probe_results = list(results)
+        for _ in results:
+            self.service.monitor_gateway_once()
+
+    def test_off_mode_stops_once_and_stays_stopped_until_explicit_apply(self) -> None:
+        self.service.handle_payload({"action": "gateway-persistence", "enabled": False})
+        self._check_probes([False, False, False, True, True])
+
+        status = self.service.handle_payload({"action": "gateway-status"})
+        self.assertEqual(status["gateway_state"], "available")
+        self.assertTrue(status["outage_stop_latched"])
+        self.assertFalse(status["reset_pending"])
+        self.assertEqual(self.applier.reset_calls, 1)
+        self.assertFalse(self.active_plan_path.exists())
+
+        restarted = self._new_service()
+        restarted_status = restarted.handle_payload({"action": "gateway-status"})
+        self.assertTrue(restarted_status["outage_stop_latched"])
+        commands_before = len(self.executor.commands)
+        blocked = restarted.handle_payload(
+            {"action": "apply-experiment", "plan": plan_to_payload(make_plan())}
+        )
+        self.assertFalse(blocked["ok"])
+        self.assertIn("use Apply", blocked["error"])
+        self.assertEqual(len(self.executor.commands), commands_before)
+
+        applied = restarted.handle_payload(
+            {
+                "action": "apply",
+                "explicit_apply": True,
+                "plan": plan_to_payload(make_plan()),
+            }
+        )
+        self.assertTrue(applied["ok"])
+        self.assertFalse(restarted.handle_payload({"action": "gateway-status"})[
+            "outage_stop_latched"
+        ])
+        self.assertTrue(self.active_plan_path.exists())
+
+    def test_on_mode_keeps_plan_and_marks_one_reapply_after_recovery(self) -> None:
+        self.service.handle_payload({"action": "gateway-persistence", "enabled": True})
+        self._check_probes([False, False, False, True, True])
+
+        status = self.service.handle_payload({"action": "gateway-status"})
+        self.assertEqual(status["gateway_state"], "available")
+        self.assertTrue(status["recovery_pending"])
+        self.assertEqual(self.applier.reset_calls, 0)
+        self.assertTrue(self.active_plan_path.exists())
+        self.assertEqual(self.applier.apply_calls, 1)
+
+        result = self.service.handle_payload(
+            {"action": "apply-experiment", "plan": plan_to_payload(make_plan())}
+        )
+        self.assertTrue(result["ok"])
+        self.assertFalse(self.service.handle_payload({"action": "gateway-status"})[
+            "recovery_pending"
+        ])
+        self.assertEqual(self.applier.apply_calls, 2)
+
+    def test_unknown_gateway_probe_does_not_stop_profiles_or_count_as_failure(self) -> None:
+        self.service.handle_payload({"action": "gateway-persistence", "enabled": False})
+        self._check_probes([False, False, None, False])
+
+        status = self.service.handle_payload({"action": "gateway-status"})
+        self.assertEqual(status["gateway_state"], "unknown")
+        self.assertFalse(status["outage_stop_latched"])
+        self.assertEqual(self.applier.reset_calls, 0)
+        self.assertTrue(self.active_plan_path.exists())
+
+    def test_failed_outage_reset_stays_latched_and_retries_after_backoff(self) -> None:
+        self.service.handle_payload({"action": "gateway-persistence", "enabled": False})
+        self.applier.reset_failures = 1
+        self.applier.probe_results = [False, False, False, False, False]
+
+        with patch("jittersim.networking.helper.time.monotonic", return_value=100):
+            for _ in range(3):
+                self.service.monitor_gateway_once()
+            status = self.service.handle_payload({"action": "gateway-status"})
+            self.assertTrue(status["outage_stop_latched"])
+            self.assertTrue(status["reset_pending"])
+            self.assertTrue(self.active_plan_path.exists())
+            self.service.monitor_gateway_once()
+            self.assertEqual(self.applier.reset_calls, 1)
+
+        with patch("jittersim.networking.helper.time.monotonic", return_value=130):
+            self.service.monitor_gateway_once()
+        self.assertFalse(self.service.handle_payload({"action": "gateway-status"})[
+            "reset_pending"
+        ])
+        self.assertFalse(self.active_plan_path.exists())
+        self.assertEqual(self.applier.reset_calls, 2)
 
 
 class UnixHelperServerTests(unittest.TestCase):

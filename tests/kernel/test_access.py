@@ -152,6 +152,46 @@ class AccessDatapathTests(unittest.TestCase):
         NetworkApplier(executor=self.executor, topology=TOPOLOGY).reset()
         self.assertIn("status: NXDOMAIN", self.query("video.example.com"))
 
+    def test_dns_failure_percentage_rejects_only_test_wifi_requests(self):
+        self.manager.apply(
+            replace(self.plan, options=AccessOptions(dns_failure_percent=0))
+        )
+        for tcp in (False, True):
+            self.assertIn("203.0.113.7", self.query("news.example.com", tcp=tcp))
+
+        try:
+            self.manager.apply(
+                replace(self.plan, options=AccessOptions(dns_failure_percent=100))
+            )
+        except CommandExecutionError as error:
+            self.fail(f"could not install DNS failure rules: {error.stderr}")
+        for namespace in (CLIENT, OTHER_CLIENT):
+            for tcp in (False, True):
+                result = run_in(
+                    namespace,
+                    "dig",
+                    "@8.8.8.8",
+                    "news.example.com",
+                    "+time=1",
+                    "+tries=1",
+                    *(('+tcp',) if tcp else ()),
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("203.0.113.7", result.stdout + result.stderr)
+
+        management_query = run_in(
+            PI,
+            "dig",
+            "@192.168.50.1",
+            "news.example.com",
+            "+time=1",
+            "+tries=1",
+            check=False,
+        )
+        self.assertEqual(management_query.returncode, 0, management_query.stderr)
+        self.assertIn("203.0.113.7", management_query.stdout)
+
     def test_global_rules_allow_only_and_explicit_disable(self):
         plan = replace(
             self.plan,

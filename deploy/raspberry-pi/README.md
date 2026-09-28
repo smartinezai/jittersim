@@ -72,8 +72,8 @@ prints the certificate fingerprint. It also links the `jittersim` command into
 `/usr/local/bin`.
 
 After updating from a version before September 2026, choose **Reset network**
-once. Older versions left duplicate traffic filters behind, and a reset
-removes them.
+once. Older versions left duplicate traffic filters behind and a reset removes
+them.
 
 An update also upgrades the saved schedules so they can apply to a group or to
 everyone else. Older versions can't read those schedules, so before going back
@@ -99,8 +99,8 @@ The access point isolates its clients: devices on the test Wi-Fi can reach the
 internet through the Pi, but not each other. A visitor's phone can't see your
 laptop's shared folders or other devices on the test Wi-Fi. Casting and screen
 sharing between test Wi-Fi devices stop working too. New installs call the
-test Wi-Fi `TestNet`; existing installs keep their name, and the dashboard can
-change it.
+test Wi-Fi `TestNet`. Existing installs keep their name. You can change it in
+the dashboard.
 
 Isolation starts when the test Wi-Fi next restarts. The installer doesn't
 restart a running test Wi-Fi, so after updating, reboot the Pi or run the
@@ -337,6 +337,62 @@ household access rules separately when ready.
 `sudo jittersim status` shows the last recorded network action and whether the
 helper answers. If reset reports an error, read the helper log as described
 below before applying again.
+
+## Headless commands
+
+The CLI can show access status, change the DNS error chance and apply saved
+rules without opening the dashboard:
+
+```sh
+sudo jittersim access status
+sudo jittersim access dns-failure show
+sudo jittersim access dns-failure set 15
+sudo jittersim access apply
+sudo jittersim persistence show
+sudo jittersim persistence set on
+sudo jittersim persistence set off
+sudo jittersim diagnostics
+sudo jittersim logs dns --lines 80
+```
+
+Gateway persistence defaults to off. The helper checks the configured router
+gateway once every five seconds. Three unanswered checks confirm an outage
+and two replies confirm recovery. With persistence on, active profiles stay
+in place and the current scheduled plan is restored after the router returns.
+With it off, a confirmed outage removes active profiles and keeps them stopped
+until you choose Apply after the router is reachable. Saved profiles and
+schedules remain. Timers continue to use wall-clock time during an outage.
+The preference is saved in settings exports and imports. Gateway health and a
+stopped state stay on the Pi. Pi restart behavior is unchanged in this first
+version. The check uses ICMP to the configured router, so confirm that the
+router answers ping before relying on this setting.
+
+`jittersim persistence show` displays the saved mode and the helper's current
+gateway state. If the helper cannot be reached after changing the setting, the
+CLI reports that the saved value may not yet be active. Run the command again
+once the helper is available.
+
+The chance defaults to 0%. It rejects a share of DNS requests from test Wi-Fi
+with a quick network error. It does not change answers for the management
+network. A 100% chance asks for confirmation because every new test-network
+name lookup will fail. Device or browser DNS caches may keep already resolved
+names working until they expire. VPNs, encrypted DNS or direct IP connections
+may bypass the setting.
+
+Update commands use the same verified staged release and recovery service as
+the dashboard:
+
+```sh
+sudo jittersim update check
+sudo jittersim update install
+sudo jittersim update rollback
+```
+
+`update check` reports releases already staged on the Pi. It does not query
+the private repository online. Install and rollback ask for confirmation and
+briefly interrupt the dashboard and test network. Keep Ethernet or SSH
+available for recovery. Run `sudo jittersim --help` or
+`sudo jittersim update --help` for command help.
 
 ## Troubleshoot a failed apply
 

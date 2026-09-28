@@ -147,6 +147,7 @@ WRITE_PATHS = frozenset(
         "/api/connected-device-labels",
         "/api/connected-device-labels/delete",
         "/api/traffic-settings",
+        "/api/gateway-persistence",
         "/api/observations/scan",
         "/api/observations/add-to-profile",
         "/api/observations/add-global-block",
@@ -1679,6 +1680,20 @@ DASHBOARD_HTML = r"""<!doctype html>
   </section>
   </div>
   <div class="tab-panel" id="tab-setup" tabindex="-1" hidden>
+  <section class="card">
+    <div class="section-heading">
+      <div>
+        <h2>Router outage behavior</h2>
+        <p>Choose what happens when the Pi loses its router connection</p>
+      </div>
+    </div>
+    <p class="policy-note">When on, active profiles stay in place and return with the router. When off, a confirmed router outage stops profiles until you choose Apply. Saved profiles and schedules are kept. This setting does not change what happens after a Pi restart.</p>
+    <label class="quota-check"><input id="gateway-persistence-toggle" type="checkbox"> Keep active profiles through router outages</label>
+    <div class="action-buttons">
+      <button id="gateway-persistence-save" class="primary" type="button">Save outage behavior</button>
+    </div>
+    <p id="gateway-persistence-state" class="token-check-status" role="status" aria-live="polite">Checking the router connection...</p>
+  </section>
   <section class="card uplink-card">
     <div class="section-heading">
       <div>
@@ -2559,6 +2574,9 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     let helperConfigured = false;
+    let gatewayPersistenceSaved = false;
+    let gatewayPersistenceDirty = false;
+    let gatewayPersistenceBusy = false;
     let profiles = [];
     let devices = [];
     let editingDeviceSnapshot = null;
@@ -3911,6 +3929,80 @@ DASHBOARD_HTML = r"""<!doctype html>
         renderUplink(await request("/api/uplink", "GET"));
       } catch (error) {
         recordRead("/api/uplink", error);
+      }
+    }
+
+    function renderGatewayPersistence(data) {
+      const toggle = element("gateway-persistence-toggle");
+      const saveButton = element("gateway-persistence-save");
+      const status = element("gateway-persistence-state");
+      gatewayPersistenceSaved = data.persistence_enabled === true;
+      if (gatewayPersistenceDirty && toggle.checked === gatewayPersistenceSaved) {
+        gatewayPersistenceDirty = false;
+      }
+      if (!gatewayPersistenceDirty) toggle.checked = gatewayPersistenceSaved;
+      saveButton.disabled = gatewayPersistenceBusy || toggle.checked === gatewayPersistenceSaved;
+      status.className = "token-check-status";
+      if (data.state_error) {
+        status.textContent = "The networking helper could not confirm a safe gateway state. Check its service logs.";
+        status.classList.add("error");
+      } else if (data.outage_stop_latched) {
+        status.textContent = "Profiles are stopped after a router outage. Choose Apply after the router is reachable to start them again.";
+      } else if (data.recovery_pending) {
+        status.textContent = "The router is back. The active profiles are being restored.";
+      } else if (data.gateway_state === "unavailable" && data.mode_enabled === true) {
+        status.textContent = "The router is unreachable. Active profiles are being kept in place.";
+      } else if (data.gateway_state === "unavailable") {
+        status.textContent = "The router is unreachable. The helper is applying the saved outage behavior.";
+      } else if (data.gateway_state === "available") {
+        status.textContent = "Router reachable. Saved mode: " + (gatewayPersistenceSaved ? "on" : "off") + ".";
+      } else {
+        status.textContent = data.helper_available === false
+          ? "Gateway checks are available in hardware mode. The saved choice will be used when hardware mode runs."
+          : "Router reachability is unknown. The Pi needs a default gateway before it can check.";
+      }
+      if (data.helper_synced === false && data.helper_available === true && !data.state_error) {
+        status.textContent += " The saved choice has not reached the helper yet.";
+      }
+    }
+
+    async function loadGatewayPersistence() {
+      try {
+        renderGatewayPersistence(await request("/api/gateway-persistence", "GET"));
+      } catch (error) {
+        const status = element("gateway-persistence-state");
+        status.textContent = "Gateway persistence status is unavailable: " + error.message;
+        status.className = "token-check-status error";
+      }
+    }
+
+    async function saveGatewayPersistence() {
+      const toggle = element("gateway-persistence-toggle");
+      const button = element("gateway-persistence-save");
+      const status = element("gateway-persistence-state");
+      gatewayPersistenceBusy = true;
+      setButtonBusy(button, true);
+      toggle.disabled = true;
+      status.textContent = "Saving router outage behavior...";
+      status.className = "token-check-status";
+      try {
+        const result = await request("/api/gateway-persistence", "POST", {
+          persistence_enabled: toggle.checked
+        });
+        gatewayPersistenceDirty = false;
+        renderGatewayPersistence(result);
+        status.textContent = result.message;
+        status.className = "token-check-status " + (result.helper_synced ? "success" : "error");
+        showMessage(result.message, result.helper_synced ? "success" : "error");
+      } catch (error) {
+        status.textContent = error.message;
+        status.className = "token-check-status error";
+        showMessage(error.message, "error");
+      } finally {
+        gatewayPersistenceBusy = false;
+        toggle.disabled = false;
+        setButtonBusy(button, false);
+        button.disabled = !gatewayPersistenceDirty && toggle.checked === gatewayPersistenceSaved;
       }
     }
 
@@ -5359,7 +5451,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           if (currentRuleSection === "access") jobs.push(loadObservations, loadAccessStatus);
         }
         if (currentDashboardTab === "measurements") jobs.push(loadTestSessions);
-        if (currentDashboardTab === "setup") jobs.push(loadReleaseStatus);
+        if (currentDashboardTab === "setup") jobs.push(loadReleaseStatus, loadGatewayPersistence);
         const results = await Promise.allSettled(jobs.map((job) => job()));
         if (results.some((result) => result.status === "rejected")) {
           element("runtime-summary").textContent = "Some status updates could not load. Retrying shortly.";
@@ -5390,6 +5482,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         loadPolicies(),
         loadConnectedDevices(),
         loadUplink(),
+        loadGatewayPersistence(),
         loadQuotas(),
         loadServiceAssignments(),
         loadConditions(),
@@ -5545,7 +5638,11 @@ DASHBOARD_HTML = r"""<!doctype html>
       try {
         await request("/api/policies", "POST", {
           version: policyVersion,
-          options: {enabled: element("access-enabled").checked, reject_wifi_joins: element("access-admission").checked},
+          options: {
+            enabled: element("access-enabled").checked,
+            reject_wifi_joins: element("access-admission").checked,
+            dns_failure_percent: element("dns-failure-percent").valueAsNumber
+          },
           mac: {
             mode: element("mac-mode").value,
             allowlist: commaList("mac-allowlist"),
@@ -6051,6 +6148,12 @@ DASHBOARD_HTML = r"""<!doctype html>
     element("enable-router-wifi").addEventListener("click", (event) => {
       routerAction("/api/router/wifi", { enabled: true }, "Turning on router Wi-Fi...", event.currentTarget);
     });
+
+    element("gateway-persistence-toggle").addEventListener("change", (event) => {
+      gatewayPersistenceDirty = event.currentTarget.checked !== gatewayPersistenceSaved;
+      element("gateway-persistence-save").disabled = !gatewayPersistenceDirty || gatewayPersistenceBusy;
+    });
+    element("gateway-persistence-save").addEventListener("click", saveGatewayPersistence);
 
     window.setInterval(pollDashboard, 5000);
     document.addEventListener("visibilitychange", () => { if (!document.hidden) pollDashboard(); });
@@ -6950,6 +7053,37 @@ class ControlServer(HTTPServer):
             return HTTPStatus.OK, "application/json", _json_bytes(
                 self.repository.get_traffic_rate_settings()
             )
+        if path == "/api/gateway-persistence":
+            saved_mode = self.repository.get_persist_profiles_after_gateway_outage()
+            state = {
+                "persistence_enabled": saved_mode,
+                "mode_enabled": saved_mode,
+                "gateway_state": "unknown",
+                "outage_stop_latched": False,
+                "recovery_pending": False,
+                "state_error": False,
+                "helper_available": self.helper_client is not None,
+                "helper_synced": self.helper_client is None,
+            }
+            if self.helper_client is not None:
+                try:
+                    helper_state = self.helper_client.gateway_status()
+                    if (
+                        helper_state["mode_enabled"] != saved_mode
+                        and not helper_state["state_error"]
+                    ):
+                        helper_state = self.helper_client.set_gateway_persistence(
+                            enabled=saved_mode
+                        )
+                    state.update(helper_state)
+                    state["helper_synced"] = (
+                        state["mode_enabled"] == saved_mode
+                        and state["state_error"] is False
+                    )
+                except HelperClientError:
+                    state["state_error"] = True
+                    state["helper_synced"] = False
+            return HTTPStatus.OK, "application/json", _json_bytes(state)
         if path == "/api/traffic":
             isp_limits = self.repository.get_traffic_rate_settings()
             if self.helper_client is None:
@@ -7040,6 +7174,59 @@ class ControlServer(HTTPServer):
     def _write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
         """Handle one supported configuration or network action request."""
 
+        if path == "/api/gateway-persistence":
+            enabled = payload.get("persistence_enabled")
+            if not isinstance(enabled, bool):
+                return _bad_request(
+                    "invalid gateway persistence setting",
+                    ValueError("persistence_enabled must be true or false"),
+                )
+            try:
+                version = self.repository.set_persist_profiles_after_gateway_outage(
+                    enabled,
+                    expected_version=payload.get("version"),
+                )
+            except DeviceConflictError as error:
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
+            except StorageError as error:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes({"error": str(error)})
+            helper_status = None
+            helper_synced = self.helper_client is None
+            if self.helper_client is not None:
+                try:
+                    helper_status = self.helper_client.set_gateway_persistence(enabled=enabled)
+                    helper_synced = helper_status.get("state_error") is False
+                except HelperClientError:
+                    LOGGER.exception("saved gateway persistence setting did not reach the helper")
+            response = {
+                "persistence_enabled": enabled,
+                "version": version,
+                "saved": True,
+                "helper_synced": helper_synced,
+                "message": (
+                    "Saved for use when hardware mode runs."
+                    if self.helper_client is None
+                    else (
+                        "Saved and applied to the networking helper."
+                        if helper_synced
+                        else "Saved, but the networking helper could not confirm its outage state. Check its service logs."
+                    )
+                ),
+                "helper_available": self.helper_client is not None,
+            }
+            if helper_status is not None:
+                response.update(helper_status)
+            else:
+                response.update(
+                    {
+                        "gateway_state": "unknown",
+                        "outage_stop_latched": False,
+                        "recovery_pending": False,
+                        "state_error": self.helper_client is not None,
+                    }
+                )
+            return HTTPStatus.OK, "application/json", _json_bytes(response)
+
         if path == "/api/import":
             try:
                 settings = _settings_from_payload(payload)
@@ -7051,6 +7238,7 @@ class ControlServer(HTTPServer):
             except (KeyError, TypeError, ValueError) as error:
                 return _bad_request("invalid settings import", error)
             self.repository.replace_settings(self._with_counter_baselines(settings))
+            self._sync_gateway_persistence()
             return self._apply_saved_change(
                 "imported",
                 {
@@ -7847,7 +8035,7 @@ class ControlServer(HTTPServer):
         # Saved changes apply the plan too, but only these buttons count as
         # an Apply or a Reset in the activity log.
         if path == "/api/apply":
-            status, content_type, body = self._apply_configuration()
+            status, content_type, body = self._apply_configuration(explicit_apply=True)
             if status == HTTPStatus.OK:
                 self._record_activity("apply", "Configuration applied")
             return status, content_type, body
@@ -8195,22 +8383,44 @@ class ControlServer(HTTPServer):
                     "message": "saved; the network is reset, so apply the configuration to use it",
                 }
             )
+        if self.helper_client is not None:
+            try:
+                gateway_status = self.helper_client.gateway_status()
+            except HelperClientError:
+                gateway_status = None
+            if gateway_status and (
+                gateway_status.get("outage_stop_latched") is True
+                or gateway_status.get("state_error") is True
+            ):
+                return HTTPStatus.OK, "application/json", _json_bytes(
+                    {
+                        "live_applied": False,
+                        "message": (
+                            "saved; automatic recovery is paused. Check gateway status "
+                            "then Apply the configuration when it is safe"
+                        ),
+                    }
+                )
         return self._apply_configuration()
 
-    def _apply_configuration(self) -> Tuple[int, str, bytes]:
+    def _apply_configuration(self, *, explicit_apply: bool = False) -> Tuple[int, str, bytes]:
         # Scheduled applies, manual applies and resets never interleave.
         operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
         with operation:
-            return self._apply_configuration_locked()
+            return self._apply_configuration_locked(explicit_apply=explicit_apply)
 
-    def _apply_configuration_locked(self) -> Tuple[int, str, bytes]:
+    def _apply_configuration_locked(
+        self, *, explicit_apply: bool = False
+    ) -> Tuple[int, str, bytes]:
         if self.helper_client is None:
             return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
                 {"error": "network helper is not configured"}
             )
-        return self._apply_current_plan()
+        return self._apply_current_plan(explicit_apply=explicit_apply)
 
-    def _apply_current_plan(self) -> Tuple[int, str, bytes]:
+    def _apply_current_plan(
+        self, *, explicit_apply: bool = False
+    ) -> Tuple[int, str, bytes]:
         try:
             prepared = (
                 self.scheduler.prepare_plan(repository=self.repository)
@@ -8235,7 +8445,10 @@ class ControlServer(HTTPServer):
             # Applying recreates the helper counters, so record their traffic first.
             self.scheduler.sample_usage(repository=self.repository)
         try:
-            result = self.helper_client.apply(plan=plan)
+            if explicit_apply:
+                result = self.helper_client.apply(plan=plan, explicit_apply=True)
+            else:
+                result = self.helper_client.apply(plan=plan)
         except HelperClientError as error:
             LOGGER.error("network helper apply failed: %s", error)
             if self.scheduler is not None:
@@ -8334,11 +8547,27 @@ class ControlServer(HTTPServer):
 
         if self.helper_client is None:
             return
-        state = self.repository.get_runtime_state()
-        if state.last_action not in {"reset", "apply", "schedule"}:
-            return
         if not self._wait_for_helper():
             LOGGER.error("network helper did not answer, so network state was not recovered")
+            return
+        if not self._sync_gateway_persistence():
+            return
+        try:
+            gateway_status = self.helper_client.gateway_status()
+        except HelperClientError:
+            LOGGER.error("gateway recovery state was unavailable during dashboard startup")
+            return
+        if (gateway_status.get("outage_stop_latched") is True
+                or gateway_status.get("state_error") is True):
+            if self.scheduler is not None:
+                self.scheduler.pause()
+            self._record_activity(
+                "outage",
+                "Profiles remain stopped after a router gateway outage",
+            )
+            return
+        state = self.repository.get_runtime_state()
+        if state.last_action not in {"reset", "apply", "schedule"}:
             return
         if state.last_action == "reset":
             status, _, _ = self._reset_network()
@@ -8350,6 +8579,20 @@ class ControlServer(HTTPServer):
             LOGGER.error("network state recovery did not complete successfully")
         else:
             self._record_activity(kind, message)
+
+    def _sync_gateway_persistence(self) -> bool:
+        """Give the helper the saved gateway persistence preference."""
+
+        if self.helper_client is None:
+            return False
+        try:
+            self.helper_client.set_gateway_persistence(
+                enabled=self.repository.get_persist_profiles_after_gateway_outage()
+            )
+        except HelperClientError:
+            LOGGER.error("gateway persistence setting did not reach the networking helper")
+            return False
+        return True
 
     def _record_activity(self, kind: str, message: str) -> None:
         try:
@@ -9072,8 +9315,11 @@ def _settings_from_payload(payload: Dict[str, Any]) -> SavedSettings:
     """Read a settings export, naming the first item that is wrong."""
 
     if (payload.get("format") != SETTINGS_FORMAT or type(payload.get("version")) is not int
-            or payload.get("version") not in (1, SETTINGS_VERSION)):
+            or payload.get("version") not in (1, 2, SETTINGS_VERSION)):
         raise ValueError("the file is not a JitterSim settings export this version can read")
+    persistence = payload.get("persist_profiles_after_gateway_outage", False)
+    if not isinstance(persistence, bool):
+        raise ValueError("persist_profiles_after_gateway_outage must be true or false")
     now = int(time.time())
 
     def parse_items(label: str, values: Any, parse: Any) -> tuple:
@@ -9125,6 +9371,7 @@ def _settings_from_payload(payload: Dict[str, Any]) -> SavedSettings:
         site_blocks=parse_items("policies.site_blocks", policies.get("site_blocks", []),
                                 lambda value: SiteBlock(**value)),
         access_options=AccessOptions(**policies.get("options", {})),
+        persist_profiles_after_gateway_outage=persistence,
         data_limits=items(
             "data_limits",
             lambda value: DataLimit(

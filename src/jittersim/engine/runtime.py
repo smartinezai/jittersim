@@ -364,6 +364,21 @@ class RuntimeScheduler:
         owned_repository = repository is None
         active_repository = repository or ConfigRepository(self._database_path)
         try:
+            read_gateway_status = getattr(self._helper_client, "gateway_status", None)
+            gateway_status = read_gateway_status() if read_gateway_status is not None else {}
+            if (gateway_status.get("outage_stop_latched") is True
+                    or gateway_status.get("state_error") is True):
+                self.pause()
+                self._record(
+                    active_repository,
+                    [("outage", "Automatic profile recovery paused by gateway state")],
+                    current_time,
+                )
+                return False
+            recovery_pending = (
+                gateway_status.get("recovery_pending") is True
+                and gateway_status.get("gateway_state") == "available"
+            )
             if active_repository.get_runtime_state().last_action == "reset":
                 self._honor_external_reset(repository=active_repository, now=current_time)
                 return False
@@ -373,7 +388,7 @@ class RuntimeScheduler:
             plan, states = self._build_plan(repository=active_repository, now=current_time)
             payload = plan_to_payload(plan)
             with self._lock:
-                unchanged = payload == self._current_payload
+                unchanged = payload == self._current_payload and not recovery_pending
             if unchanged:
                 # The network already runs this plan, for example one the
                 # dashboard applied after a saved change.

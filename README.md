@@ -1,45 +1,99 @@
 # JitterSim
 
-JitterSim uses a Raspberry Pi to test how apps behave on a slow or unreliable
-network. Connect the Pi to your router by Ethernet. Test devices use a
-separate Wi-Fi network where you can change delay, jitter, packet loss and
-speed.
+JitterSim helps you see how a phone or laptop behaves when its internet
+connection is slow or unreliable. A Raspberry Pi creates a separate test
+Wi-Fi. You can try changes on that Wi-Fi without changing your regular home
+Wi-Fi.
 
 Use JitterSim only on equipment and networks that you own or have permission
-to test. It is a test network, not a replacement for your home router.
+to test. It is for experiments, not a replacement for your home router.
+
+## See it in action
 
 <div align="center">
-  <img src="docs/screenshots/normal-access-phone.png" alt="JitterSim dashboard on a phone, with Normal access on" width="32%" />
-  <img src="docs/screenshots/normal-access-desktop.png" alt="JitterSim dashboard on a desktop, with Normal access on" width="65%" />
+  <img src="docs/screenshots/experience-overview-desktop.png" alt="Dashboard overview with a test phone connected and a slow profile running" width="68%" />
+  <img src="docs/screenshots/experience-overview-phone.png" alt="The connected test phone and its active slow profile on a phone-sized screen" width="27%" />
 </div>
 
-*Phone and desktop previews use test data. They show the dashboard, not a live Pi.*
+*Screenshots use sample data. No real phone, Pi or home network is shown.*
 
-## What you can do
+The dashboard lets you choose a test profile for a device, start a timer,
+then see which profile is active. Press **Normal access** to stop profiles,
+schedules and household blocking when you are done.
 
-- Shape upload and download traffic with delay, jitter, packet loss, speed
-  limits, reordering and short outages.
-- Assign profiles to devices. Use groups, schedules, timers, scenarios or
-  progressions to change profiles over time.
-- Block devices by Wi-Fi MAC address and block named sites or services for a
-  device, a group or everyone on the test Wi-Fi.
-- Set device, group and service data limits. Review traffic graphs and
-  measurements in the dashboard.
-- Use the browser proxy to apply different profiles to selected HTTPS sites.
+### Make some website lookups fail
 
-The **Normal access** button stops profiles and automatic changes, turns off
-MAC and site blocking and keeps saved settings. The Wi-Fi stays up for ordinary
-internet access. The management firewall and isolation between test Wi-Fi
-clients stay enabled. **Reset network** stops experiment effects while keeping
-household access rules on. Run `sudo jittersim normal-access` over SSH if the
-dashboard is unavailable.
+<img src="docs/screenshots/dns-failure-controls.png" alt="A 20 percent chance of a quick connection error is saved and active for the test Wi-Fi" width="100%" />
 
-Site rules include subdomains. They cannot prevent every VPN, encrypted DNS
-connection, direct IP request or other internet connection. Existing
-connections or cached DNS answers may outlive a rule change. Site blocking is
-not guaranteed parental protection. MAC filtering blocks traffic after a
-device joins. Refusing Wi-Fi joins needs a supported access point and Pi
-hardware testing.
+Choose a chance from 0% to 100% that a new website name lookup from the test
+Wi-Fi gets a quick connection error. At 0%, this effect is off. This first
+version shows a site-connection error. It does not send you to the site's home
+page or to a random website. Saved browser and device lookups can delay when
+you see the effect.
+
+### Choose what happens if the router goes offline
+
+<img src="docs/screenshots/router-outage-persistence.png" alt="The option to keep active profiles through a router outage is enabled" width="100%" />
+
+With this option on, active profiles return when the router connection comes
+back. With it off, a confirmed router outage stops active profiles until you
+press **Apply current configuration**. Saved profiles and schedules stay
+available. This first version covers router outages only. Pi restart behavior
+is unchanged.
+
+### Check for a staged update
+
+<img src="docs/screenshots/staged-update-check.png" alt="The update check reports that no newer approved release is staged on the Pi" width="100%" />
+
+**Check for updates** reports a verified release that an administrator has
+already placed on the Pi. It does not search GitHub or the internet for a new
+version. The terminal command `sudo jittersim update check` shows the same
+status.
+
+## What you can try
+
+- Slow down a test device, add delays, drop some data or simulate short
+  interruptions.
+- Change a device's profile for a set time or use schedules and scenarios to
+  switch profiles automatically.
+- Block selected devices or named websites on the test Wi-Fi.
+- Set data or time limits and compare connection measurements.
+- Use the browser proxy to test different profiles on selected secure
+  websites.
+- Choose whether profiles stop or resume after a router outage.
+
+**Reset network** stops active profile effects while leaving saved settings
+and household access rules in place. **Normal access** also turns off device
+and website blocking. Both keep the test Wi-Fi separated from your home
+devices. If the dashboard is unavailable, connect to the Pi over SSH and run
+`sudo jittersim normal-access`.
+
+Site rules include subdomains. A VPN, encrypted DNS or direct internet
+connection can bypass network-only filtering. Existing connections or cached
+website lookups can continue until they expire. Site blocking is not a
+replacement for parental controls. Refusing a device's Wi-Fi connection needs
+a supported access point and Pi hardware testing.
+
+## Use the terminal
+
+You can check the Pi and change the new settings over SSH without opening the
+dashboard:
+
+```sh
+sudo jittersim status
+sudo jittersim access status
+sudo jittersim access dns-failure show
+sudo jittersim persistence show
+sudo jittersim update check
+sudo jittersim diagnostics
+sudo jittersim logs dns --lines 80
+```
+
+To change a setting, use `sudo jittersim access dns-failure set 15` or
+`sudo jittersim persistence set on`. The DNS setting is saved separately from
+applying access rules, so run `sudo jittersim access apply` after changing it.
+Run `sudo jittersim --help` for the command list. More examples are in the
+[Pi installation and recovery guide](deploy/raspberry-pi/README.md).
 
 ## Set up the Pi
 
@@ -60,15 +114,15 @@ hardware testing.
    `sudo grep JITTERSIM_ADMIN_TOKEN /etc/jittersim/control.env` to read it.
    Do not expose the dashboard or SSH to the public internet.
 
-The installer preserves your saved Wi-Fi name and password. When upgrading
-from an older release, use the installer so it can add the new system
-services. A code-only update does not install them.
+The installer preserves your saved Wi-Fi name and password. Use it when
+upgrading an older release so it can add new system services. A code-only
+update does not install those services.
 
-The test Wi-Fi is separate from your home network. Its clients cannot reach
-the router's private network and cannot reach each other. Printing, casting or
-other local services may not work through it. Test on the Pi and keep the
-router's Wi-Fi available before moving devices. See the [Pi installation,
-recovery and household trial guide](deploy/raspberry-pi/README.md).
+The test Wi-Fi is separate from your home network. Devices on it cannot reach
+your router's private network or each other. Printing, casting and other local
+services may not work through it. Test with one device first and keep your
+router's Wi-Fi available. See the [Pi installation, recovery and household
+trial guide](deploy/raspberry-pi/README.md).
 
 ## Run locally
 
@@ -81,8 +135,8 @@ export JITTERSIM_ADMIN_TOKEN='use-a-long-local-token'
 PYTHONPATH=src .venv/bin/python -m jittersim.api --database ./jittersim.db
 ```
 
-Open <http://127.0.0.1:8080/>. For Tailscale access, updates and Pi recovery,
-see the [deployment guide](deploy/raspberry-pi/README.md).
+Open <http://127.0.0.1:8080/>. For Pi setup, remote access and recovery, see
+the [deployment guide](deploy/raspberry-pi/README.md).
 
 ## Run checks
 
@@ -92,8 +146,8 @@ Run the Python tests with:
 PYTHONPATH=src .venv/bin/python -m unittest discover -s tests
 ```
 
-The Linux network checks use real firewall and traffic-control rules in
-disposable network namespaces. Run them in a privileged Linux container with:
+The Linux network checks use real firewall and traffic rules in disposable
+network namespaces. Run them in a privileged Linux container with:
 
 ```sh
 tests/kernel/run-in-docker.sh

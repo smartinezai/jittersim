@@ -28,6 +28,7 @@ from jittersim.config.models import (
     time_quota_counter_id,
 )
 from jittersim.config.storage import ConfigRepository, StorageError
+from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import PlanError
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.networking.helper import HelperClientError
@@ -114,6 +115,41 @@ class RuntimeSchedulerTests(unittest.TestCase):
         self.assertIn("alice", scheduler.applied_target_states())
         scheduler.invalidate_applied_plan()
         self.assertIsNone(scheduler.applied_target_states())
+
+    def test_gateway_recovery_reapplies_the_same_plan_once(self) -> None:
+        class RecoveringHelper(RecordingHelper):
+            def __init__(self) -> None:
+                super().__init__()
+                self.gateway = {
+                    "mode_enabled": True,
+                    "gateway_state": "available",
+                    "outage_observed": False,
+                    "outage_stop_latched": False,
+                    "reset_pending": False,
+                    "recovery_pending": True,
+                    "state_error": False,
+                }
+
+            def gateway_status(self):
+                return dict(self.gateway)
+
+            def apply_experiment(self, *, plan):
+                result = self.apply(plan=plan)
+                self.gateway["recovery_pending"] = False
+                return result
+
+        self._save_device(Profile("normal", "Normal"))
+        helper = RecoveringHelper()
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=helper)
+        prepared = scheduler.prepare_plan(repository=self.repository, now=100)
+        with patch.object(scheduler, "start"):
+            scheduler.activate(applied_payload=plan_to_payload(prepared.plan))
+
+        self.assertTrue(scheduler.tick(repository=self.repository, now=100))
+        self.assertEqual(len(helper.plans), 1)
+        self.assertFalse(helper.gateway["recovery_pending"])
+        self.assertFalse(scheduler.tick(repository=self.repository, now=100))
+        self.assertEqual(len(helper.plans), 1)
 
     def test_pause_waits_for_an_inflight_apply(self) -> None:
         class BlockingHelper(RecordingHelper):

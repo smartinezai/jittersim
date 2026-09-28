@@ -10,6 +10,13 @@ from jittersim.engine.runtime import RuntimeScheduler
 from tests.unit.test_api import FakeHelper
 
 
+class DemoHelper(FakeHelper):
+    def connected_devices(self):
+        devices = super().connected_devices()
+        devices[0]["hostname"] = "Test phone"
+        return devices
+
+
 def main():
     with tempfile.TemporaryDirectory() as directory:
         database = Path(directory) / "browser.db"
@@ -26,7 +33,7 @@ def main():
                     "commute", "Commute", (ScenarioStep("slow", 10), ScenarioStep("normal", 10))
                 )
             )
-            helper = FakeHelper()
+            helper = DemoHelper()
             scheduler = RuntimeScheduler(database_path=database, helper_client=helper)
             with ControlServer(
                 ("127.0.0.1", 0),

@@ -16,7 +16,7 @@ class RecordingHelper:
         self.plans = []
         self.fail = False
 
-    def apply(self, *, plan):
+    def apply(self, *, plan, explicit_apply=False):
         if self.fail:
             raise HelperClientError("simulated apply failure")
         self.plans.append(plan)
@@ -24,6 +24,9 @@ class RecordingHelper:
 
     def reset(self):
         return {"commands_run": 1}
+
+    def gateway_status(self):
+        return {"outage_stop_latched": False, "state_error": False}
 
     def traffic_counters(self):
         return {"devices": {}, "services": {}}

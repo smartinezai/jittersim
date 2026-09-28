@@ -364,6 +364,11 @@ class ConfigRepository:
                 website_allowed_json TEXT NOT NULL,
                 website_blocked_json TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS experiment_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                persist_profiles_after_gateway_outage INTEGER NOT NULL DEFAULT 0
+                    CHECK (persist_profiles_after_gateway_outage IN (0, 1))
+            );
             CREATE TABLE IF NOT EXISTS everyone_else_settings (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 -- The API refuses to delete this profile. Older versions don't
@@ -425,6 +430,9 @@ class ConfigRepository:
                 id, mac_mode, mac_allowlist_json, mac_denylist_json,
                 website_mode, website_allowed_json, website_blocked_json
             ) VALUES (1, 'disabled', '[]', '[]', 'unrestricted', '[]', '[]');
+            INSERT OR IGNORE INTO experiment_settings (
+                id, persist_profiles_after_gateway_outage
+            ) VALUES (1, 0);
             INSERT OR IGNORE INTO everyone_else_settings (id, profile_id) VALUES (1, NULL);
             """
         )
@@ -1205,7 +1213,51 @@ class ConfigRepository:
             scenarios=self.list_scenarios(),
             site_blocks=self.list_site_blocks(),
             access_options=self.get_access_options(),
+            persist_profiles_after_gateway_outage=(
+                self.get_persist_profiles_after_gateway_outage()
+            ),
         )
+
+    def get_persist_profiles_after_gateway_outage(self) -> bool:
+        """Return whether active experiment plans resume after a gateway outage."""
+
+        row = self._connection.execute(
+            "SELECT persist_profiles_after_gateway_outage FROM experiment_settings WHERE id = 1"
+        ).fetchone()
+        if row is None or row[0] not in (0, 1):
+            raise StorageError("gateway-outage persistence setting is malformed")
+        return bool(row[0])
+
+    def set_persist_profiles_after_gateway_outage(
+        self, enabled: bool, *, expected_version: Optional[int] = None
+    ) -> int:
+        """Save the gateway-outage preference and return its settings version."""
+
+        if not isinstance(enabled, bool):
+            raise StorageError("gateway-outage persistence must be true or false")
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            if expected_version is not None and (
+                isinstance(expected_version, bool)
+                or not isinstance(expected_version, int)
+                or self.get_runtime_state().configuration_version != expected_version
+            ):
+                raise DeviceConflictError("settings changed since this form was loaded")
+            current = self.get_persist_profiles_after_gateway_outage()
+            if current != enabled:
+                self._connection.execute(
+                    "UPDATE experiment_settings SET persist_profiles_after_gateway_outage = ? WHERE id = 1",
+                    (int(enabled),),
+                )
+                self._bump_configuration_version()
+            self._connection.commit()
+        except DeviceConflictError:
+            self._connection.rollback()
+            raise
+        except sqlite3.Error as error:
+            self._connection.rollback()
+            raise StorageError("could not save gateway-outage persistence") from error
+        return self.get_runtime_state().configuration_version
 
     def replace_settings(self, settings: SavedSettings, *, expected_version: Optional[int] = None, preserve_usage: bool = False) -> None:
         """Replace every saved setting at once. On failure nothing changes.
@@ -1269,6 +1321,10 @@ class ConfigRepository:
             self._connection.execute(
                 "UPDATE network_policies SET access_options_json = ? WHERE id = 1",
                 (json.dumps(asdict(settings.access_options)),),
+            )
+            self._connection.execute(
+                "UPDATE experiment_settings SET persist_profiles_after_gateway_outage = ? WHERE id = 1",
+                (int(settings.persist_profiles_after_gateway_outage),),
             )
             for data_limit in settings.data_limits:
                 self.save_data_limit(data_limit)
