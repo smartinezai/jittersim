@@ -986,6 +986,23 @@ class GatewayPersistenceTests(unittest.TestCase):
         self.assertEqual(self.applier.reset_calls, 0)
         self.assertTrue(self.active_plan_path.exists())
 
+    def test_route_lost_after_a_reachable_gateway_counts_as_an_outage(self) -> None:
+        # A router reboot drops the Ethernet link, and the default route with it.
+        self.service.handle_payload({"action": "gateway-persistence", "enabled": False})
+        self._check_probes([True, True, False, None, None])
+
+        status = self.service.handle_payload({"action": "gateway-status"})
+        self.assertEqual(status["gateway_state"], "unavailable")
+        self.assertTrue(status["outage_stop_latched"])
+        self.assertEqual(self.applier.reset_calls, 1)
+        self.assertFalse(self.active_plan_path.exists())
+
+    def test_status_reports_whether_the_mode_was_received(self) -> None:
+        fresh = HelperService(self.applier, active_plan_path=self.active_plan_path)
+        self.assertFalse(fresh.handle_payload({"action": "gateway-status"})["mode_initialized"])
+        fresh.handle_payload({"action": "gateway-persistence", "enabled": True})
+        self.assertTrue(fresh.handle_payload({"action": "gateway-status"})["mode_initialized"])
+
     def test_failed_outage_reset_stays_latched_and_retries_after_backoff(self) -> None:
         self.service.handle_payload({"action": "gateway-persistence", "enabled": False})
         self.applier.reset_failures = 1

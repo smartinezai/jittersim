@@ -290,6 +290,7 @@ class HelperService:
     def _gateway_status(self) -> Dict[str, Any]:
         return {
             "mode_enabled": self._persistence_enabled,
+            "mode_initialized": self._persistence_mode_initialized,
             "gateway_state": self._gateway_state,
             "outage_observed": self._outage_observed,
             "outage_stop_latched": self._outage_stop_latched,
@@ -361,6 +362,10 @@ class HelperService:
             LOGGER.warning("configured router gateway probe is unavailable")
             reachable = None
         with self._network_lock:
+            if reachable is None and self._gateway_state != "unknown":
+                # A router restart drops the Ethernet link and the default
+                # route with it. Once the gateway answered, losing it counts.
+                reachable = False
             if reachable is None:
                 self._gateway_state = "unknown"
                 self._consecutive_failures = 0

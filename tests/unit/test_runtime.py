@@ -151,6 +151,25 @@ class RuntimeSchedulerTests(unittest.TestCase):
         self.assertFalse(scheduler.tick(repository=self.repository, now=100))
         self.assertEqual(len(helper.plans), 1)
 
+    def test_unreadable_gateway_status_does_not_record_a_failed_tick(self) -> None:
+        class FlakyHelper(RecordingHelper):
+            def gateway_status(self):
+                raise HelperClientError("helper is restarting")
+
+        self._save_device(Profile("normal", "Normal"))
+        helper = FlakyHelper()
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=helper)
+        prepared = scheduler.prepare_plan(repository=self.repository, now=100)
+        with patch.object(scheduler, "start"):
+            scheduler.activate(applied_payload=plan_to_payload(prepared.plan))
+
+        with patch.object(
+            self.repository, "record_schedule_result", wraps=self.repository.record_schedule_result
+        ) as record:
+            self.assertFalse(scheduler.tick(repository=self.repository, now=100))
+        record.assert_not_called()
+        self.assertEqual(helper.plans, [])
+
     def test_pause_waits_for_an_inflight_apply(self) -> None:
         class BlockingHelper(RecordingHelper):
             def __init__(self) -> None:

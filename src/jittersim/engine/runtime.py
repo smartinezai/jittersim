@@ -365,7 +365,12 @@ class RuntimeScheduler:
         active_repository = repository or ConfigRepository(self._database_path)
         try:
             read_gateway_status = getattr(self._helper_client, "gateway_status", None)
-            gateway_status = read_gateway_status() if read_gateway_status is not None else {}
+            try:
+                gateway_status = read_gateway_status() if read_gateway_status is not None else {}
+            except HelperClientError:
+                # The helper may be restarting. Try again on the next tick.
+                LOGGER.warning("could not read the gateway state", exc_info=True)
+                return False
             if (gateway_status.get("outage_stop_latched") is True
                     or gateway_status.get("state_error") is True):
                 self.pause()

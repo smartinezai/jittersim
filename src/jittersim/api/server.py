@@ -7068,8 +7068,10 @@ class ControlServer(HTTPServer):
             if self.helper_client is not None:
                 try:
                     helper_state = self.helper_client.gateway_status()
+                    # Reading must not change network state. Only a restarted
+                    # helper, which has no outage to act on yet, gets the mode.
                     if (
-                        helper_state["mode_enabled"] != saved_mode
+                        helper_state.get("mode_initialized") is False
                         and not helper_state["state_error"]
                     ):
                         helper_state = self.helper_client.set_gateway_persistence(
