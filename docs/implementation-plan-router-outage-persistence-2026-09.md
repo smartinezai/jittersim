@@ -77,8 +77,9 @@ recovery. The dashboard control and documentation are supporting work.
 - Use one bounded ICMP probe with a one-second timeout every five seconds.
   Three consecutive failures confirm an outage and two consecutive replies
   confirm recovery.
-- Treat a missing route or an unavailable probe as unknown, not as proof of an
-  outage. Do not log client traffic, site names or credentials.
+- Treat a missing route or an unavailable probe as unknown until the gateway
+  has answered once. After that, count it as a failed check, since a router
+  restart drops the Pi's Ethernet link and default route. Do not log client traffic, site names or credentials.
 - Choose a probe that works with the existing privileged-command allowlist
   and test whether the target router responds to it. ICMP can be disabled by
   some routers, so this cannot be assumed from a local unit test.
@@ -206,7 +207,8 @@ recovery. The dashboard control and documentation are supporting work.
 - Persistence defaults off for new and existing installations.
 - Check only the configured gateway with one ICMP probe every five seconds.
   Three failures confirm an outage and two replies confirm recovery. A missing
-  route or unavailable probe is unknown rather than an outage.
+  route or unavailable probe is unknown until the gateway has answered, then
+  counts as a failed check.
 - The helper owns detection and network transitions. Its stop latch survives a
   helper restart in the same boot but clears on Pi reboot.
 - Off mode stops live experiment rules and prevents automatic starts until the
