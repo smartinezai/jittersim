@@ -1,11 +1,254 @@
+import hashlib
+import json
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import unquote, urlsplit
+
+from Crypto.Cipher import AES
 
 from jittersim.networking.router import (
+    RouterError,
     TG3442DERouter,
     _Form,
     _FormParser,
     _wifi_enabled,
 )
+
+
+class FirmwareServer(ThreadingHTTPServer):
+    """Serve the protocol used by the Vodafone firmware with harmless settings."""
+
+    daemon_threads = True
+    password = "router-test-password"
+    salt = bytes.fromhex("0011223344556677")
+    iv = bytes.fromhex("1020304050607080")
+    session_id = "session-test"
+    nonce = "0123456789abcdef" * 3
+
+    def __init__(self):
+        super().__init__(("127.0.0.1", 0), FirmwareHandler)
+        self.key = hashlib.pbkdf2_hmac("sha256", self.password.encode(), self.salt, 1000, 16)
+        self.calls = []
+        self.settings = {
+            "SSID": "Home-Test",
+            "Passphrase": "wifi-test-password",
+            "Enable": True,
+            "SSID5G": "Home-Test",
+            "Passphrase5G": "wifi-test-password",
+            "Enable5G": True,
+            "EnableWiFiFunction": True,
+        }
+        self.api_status = 200
+        self.tamper_wifi = False
+        self.tamper_nonce = False
+        self.login_status = "AdminMatch"
+        self.legacy_html = ""
+
+    def seal(self, value, auth_data):
+        cipher = AES.new(self.key, AES.MODE_CCM, nonce=self.iv, mac_len=16)
+        cipher.update(auth_data.encode())
+        ciphertext, tag = cipher.encrypt_and_digest(value.encode())
+        return (ciphertext + tag).hex()
+
+
+class FirmwareHandler(BaseHTTPRequestHandler):
+    def log_message(self, *_):
+        pass
+
+    def respond(self, body, *, status=200, headers=None):
+        encoded = body.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def authenticated(self):
+        return self.headers.get(
+            "csrfNonce"
+        ) == self.server.nonce and "PHPSESSID=fixture-session" in self.headers.get("Cookie", "")
+
+    def do_GET(self):
+        parsed = urlsplit(self.path)
+        self.server.calls.append(("GET", parsed.path))
+        if parsed.path == "/" and parsed.query:
+            self.respond(self.server.legacy_html)
+        elif parsed.path == "/":
+            self.respond(
+                f'<script>var currentSessionId="{self.server.session_id}";'
+                f'var myIv="{self.server.iv.hex()}";'
+                f'var mySalt="{self.server.salt.hex()}";</script>'
+            )
+        elif parsed.path == "/base_95x.js":
+            self.respond("// Firmware uses a server session cookie.")
+        elif parsed.path == "/php/wifi_general_data.php":
+            if not self.authenticated():
+                self.respond("not authenticated", status=401)
+                return
+            if self.server.api_status != 200:
+                self.respond("endpoint unavailable", status=self.server.api_status)
+                return
+            if json.loads(unquote(parsed.query)) != {"IsManualOperation": "false"}:
+                self.respond("unexpected query", status=400)
+                return
+            encrypted = self.server.seal(json.dumps(self.server.settings), "wifidata")
+            if self.server.tamper_wifi:
+                encrypted = encrypted[:-2] + ("00" if encrypted[-2:] != "00" else "ff")
+            self.respond(json.dumps({"wifidata": encrypted}))
+        else:
+            self.respond("unexpected endpoint", status=404)
+
+    def do_POST(self):
+        path = urlsplit(self.path).path
+        self.server.calls.append(("POST", path))
+        if path == "/php/ajaxSet_Password.php":
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            encrypted = bytes.fromhex(body["EncryptData"])
+            cipher = AES.new(self.server.key, AES.MODE_CCM, nonce=self.server.iv, mac_len=16)
+            cipher.update(b"loginPassword")
+            try:
+                credentials = json.loads(
+                    cipher.decrypt_and_verify(encrypted[:-16], encrypted[-16:])
+                )
+            except ValueError:
+                self.respond(json.dumps({"p_status": "NoMatch", "detail": "AdminMatch"}))
+                return
+            if credentials != {
+                "Password": self.server.password,
+                "Nonce": self.server.session_id,
+            }:
+                self.respond("unexpected login", status=400)
+                return
+            nonce = self.server.seal(self.server.nonce, "nonce")
+            if self.server.tamper_nonce:
+                nonce = nonce[:-2] + ("00" if nonce[-2:] != "00" else "ff")
+            self.respond(
+                json.dumps({"p_status": self.server.login_status, "encryptData": nonce}),
+                headers={"Set-Cookie": "PHPSESSID=fixture-session; Path=/"},
+            )
+        elif path == "/php/ajaxSet_Session.php":
+            self.respond("{}", status=200 if self.authenticated() else 401)
+        elif path == "/php/logout.php":
+            self.respond("{}")
+        else:
+            self.respond("unexpected write", status=400)
+
+
+class RouterProtocolTests(unittest.TestCase):
+    def setUp(self):
+        self.firmware = FirmwareServer()
+        self.thread = threading.Thread(
+            target=lambda: self.firmware.serve_forever(poll_interval=0.01),
+            daemon=True,
+        )
+        self.thread.start()
+        self.router = TG3442DERouter(address="127.0.0.1", password=self.firmware.password)
+        self.router.base_url = f"http://127.0.0.1:{self.firmware.server_port}"
+
+    def tearDown(self):
+        self.router.close()
+        self.firmware.shutdown()
+        self.firmware.server_close()
+        self.thread.join(timeout=2)
+
+    def test_reads_encrypted_settings_with_verified_nonce_and_session_cookie(self):
+        self.router.login()
+        settings = self.router.read_wifi_settings()
+
+        self.assertEqual(settings.ssid, "Home-Test")
+        self.assertEqual(settings.password, "wifi-test-password")
+        self.assertTrue(settings.enabled)
+        self.assertEqual(self.router.csrf_nonce, self.firmware.nonce)
+        self.assertEqual(
+            [path for method, path in self.firmware.calls if method == "POST"],
+            ["/php/ajaxSet_Password.php", "/php/ajaxSet_Session.php"],
+        )
+        self.router.close()
+        self.assertEqual(self.router.password, "")
+        self.assertIsNone(self.router._session_key)
+        self.assertIsNone(self.router._session_iv)
+
+    def test_rejects_failed_login_even_when_response_mentions_admin_match(self):
+        self.router.password = "wrong-router-password"
+        with self.assertRaises(RouterError) as caught:
+            self.router.login()
+        self.assertEqual(caught.exception.reason, "login")
+        self.assertNotIn(("GET", "/php/wifi_general_data.php"), self.firmware.calls)
+
+    def test_rejects_tampered_nonce_before_using_the_session(self):
+        self.firmware.tamper_nonce = True
+        with self.assertRaises(RouterError) as caught:
+            self.router.login()
+        self.assertEqual(caught.exception.reason, "login")
+        self.assertIsNone(self.router._session_key)
+
+    def test_rejects_tampered_settings_instead_of_using_unverified_credentials(self):
+        self.router.login()
+        self.firmware.tamper_wifi = True
+        with self.assertRaises(RouterError) as caught:
+            self.router.read_wifi_settings()
+        self.assertEqual(caught.exception.reason, "invalid")
+        self.assertNotIn("wifi-test-password", str(caught.exception))
+
+    def test_copies_the_enabled_five_ghz_band_when_two_point_four_is_disabled(self):
+        self.router.login()
+        self.firmware.settings.update(
+            Enable=False,
+            SSID5G="Five-Test",
+            Passphrase5G="five-test-password",
+        )
+        settings = self.router.read_wifi_settings()
+        self.assertEqual((settings.ssid, settings.password), ("Five-Test", "five-test-password"))
+
+    def test_does_not_mix_a_wifi_name_and_password_from_incomplete_different_bands(self):
+        self.router.login()
+        self.firmware.settings.pop("Passphrase")
+        self.firmware.settings.pop("SSID5G")
+        with self.assertRaises(RouterError) as caught:
+            self.router.read_wifi_settings()
+        self.assertEqual(caught.exception.reason, "credentials")
+
+    def test_reports_missing_radio_state_as_unknown_while_copying_complete_credentials(self):
+        self.router.login()
+        for name in ("Enable", "Enable5G", "EnableWiFiFunction"):
+            self.firmware.settings.pop(name)
+        settings = self.router.read_wifi_settings()
+        self.assertIsNone(settings.enabled)
+        self.assertEqual(settings.ssid, "Home-Test")
+
+    def test_master_radio_off_overrides_individual_enabled_bands(self):
+        self.router.login()
+        self.firmware.settings["EnableWiFiFunction"] = False
+        self.assertFalse(self.router.read_wifi_settings().enabled)
+
+    def test_unrecognized_master_radio_state_is_not_reported_as_enabled_or_disabled(self):
+        self.router.login()
+        self.firmware.settings["EnableWiFiFunction"] = "unrecognized"
+        self.assertIsNone(self.router.read_wifi_settings().enabled)
+
+    def test_older_firmware_can_still_read_the_legacy_form(self):
+        self.router.login()
+        self.firmware.api_status = 404
+        self.firmware.legacy_html = (
+            '<form><input name="wifi_ssid24" value="Legacy-Test">'
+            '<input name="wifi_password24" value="legacy-test-password">'
+            '<input name="wifi_on_state" value="0"></form>'
+        )
+        settings = self.router.read_wifi_settings()
+        self.assertEqual(
+            (settings.ssid, settings.password), ("Legacy-Test", "legacy-test-password")
+        )
+        self.assertFalse(settings.enabled)
+
+    def test_settings_response_limit_fails_before_parsing_large_data(self):
+        self.router.login()
+        self.router._MAX_RESPONSE_BYTES = 128
+        with self.assertRaises(RouterError) as caught:
+            self.router.read_wifi_settings()
+        self.assertEqual(caught.exception.reason, "invalid")
 
 
 class RouterFormTests(unittest.TestCase):
@@ -57,9 +300,9 @@ class RouterFormTests(unittest.TestCase):
         forms = iter(((initial, ""), (updated, "")))
         requests = []
         router._wifi_form = lambda: next(forms)
-        router._request = lambda method, path, **kwargs: requests.append(
-            (method, path, kwargs)
-        ) or ""
+        router._request = lambda method, path, **kwargs: (
+            requests.append((method, path, kwargs)) or ""
+        )
 
         settings = router.set_wifi_enabled(enabled=False)
 

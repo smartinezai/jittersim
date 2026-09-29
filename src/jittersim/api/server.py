@@ -56,6 +56,7 @@ from jittersim.engine.progression import progression_factor
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.service import compile_stored_plan
 from jittersim.networking.helper import HelperClient, HelperClientError
+from jittersim.networking.router import safe_router_import_message
 
 LOGGER = logging.getLogger(__name__)
 MAX_JSON_BODY_BYTES = 64 * 1024
@@ -5140,10 +5141,11 @@ class ControlServer(HTTPServer):
                 result = self.helper_client.sync_access_point_from_router(
                     admin_password=admin_password
                 )
-            except HelperClientError:
-                LOGGER.exception("router Wi-Fi import failed")
+            except HelperClientError as error:
+                message = safe_router_import_message(str(error))
+                LOGGER.warning("router Wi-Fi import failed: %s", message)
                 return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
-                    {"error": "router Wi-Fi import failed"}
+                    {"error": message}
                 )
             return HTTPStatus.OK, "application/json", _json_bytes({"result": result})
 

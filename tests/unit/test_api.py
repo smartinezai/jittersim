@@ -849,6 +849,27 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(content_type, "application/json")
         self.assertEqual(json.loads(body)["result"]["ssid"], "Vodafone-Test")
 
+    def test_router_import_error_guidance_is_safe_in_response_and_logs(self) -> None:
+        from jittersim.networking.router import ROUTER_IMPORT_MESSAGES
+
+        for message, expected in (
+            (ROUTER_IMPORT_MESSAGES["unsupported"], ROUTER_IMPORT_MESSAGES["unsupported"]),
+            ("router-secret was present in a response", "router Wi-Fi import failed"),
+        ):
+            with self.subTest(message=message):
+                class FailedHelper(FakeHelper):
+                    def sync_access_point_from_router(self, *, admin_password):
+                        raise HelperClientError(message)
+
+                self.server.helper_client = FailedHelper()
+                with self.assertLogs("jittersim.api.server", level="WARNING") as logs:
+                    status, _, body = self.server.write_response_for(
+                        "/api/router/sync-ap", {"admin_password": "router-secret"},
+                    )
+                self.assertEqual(status, 502)
+                self.assertEqual(json.loads(body)["error"], expected)
+                self.assertNotIn("router-secret", body.decode() + "\n".join(logs.output))
+
     def test_router_wifi_endpoint_requires_confirmation_to_disable(self) -> None:
         self.server.helper_client = FakeHelper()
 

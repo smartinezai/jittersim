@@ -22,7 +22,7 @@ from jittersim.networking.helper import (
     _parse_traffic_counter_output,
     run_helper,
 )
-from jittersim.networking.router import RouterWifiSettings
+from jittersim.networking.router import ROUTER_IMPORT_MESSAGES, RouterError, RouterWifiSettings
 from jittersim.networking.topology import Topology
 
 
@@ -219,6 +219,62 @@ class HelperServiceTests(unittest.TestCase):
         self.assertTrue(routers[0].logged_in)
         self.assertTrue(routers[0].closed)
         self.assertEqual(executor.commands[2].arguments[2], "jittersim-ap")
+
+    def test_failed_router_read_never_changes_ap_or_logs_credentials(self) -> None:
+        class FailedReadRouter(FakeRouter):
+            def read_wifi_settings(self):
+                raise RouterError("response contains router-wifi-password", reason="unsupported")
+
+        executor = UplinkOutputExecutor()
+        routers = []
+
+        def factory(address, password):
+            router = FailedReadRouter(address, password)
+            routers.append(router)
+            return router
+
+        service = HelperService(
+            NetworkApplier(
+                executor=executor,
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            ),
+            router_factory=factory,
+        )
+        with self.assertLogs("jittersim.networking.helper", level="WARNING") as logs:
+            response = service.handle_payload(
+                {"action": "router-sync-ap", "admin_password": "router-secret"}
+            )
+
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"], ROUTER_IMPORT_MESSAGES["unsupported"])
+        self.assertTrue(routers[0].closed)
+        self.assertFalse(any("modify" in command.arguments for command in executor.commands))
+        for secret in ("router-secret", "router-wifi-password"):
+            self.assertNotIn(secret, "\n".join(logs.output) + str(response))
+
+    def test_failed_ap_update_does_not_log_password_from_exception_chain(self) -> None:
+        class FailedApExecutor(UplinkOutputExecutor):
+            def run(self, command):
+                if command.executable == "nmcli" and "modify" in command.arguments:
+                    raise CommandExecutionError("update failed") from RuntimeError(
+                        "router-wifi-password"
+                    )
+                return super().run(command)
+
+        service = HelperService(
+            NetworkApplier(
+                executor=FailedApExecutor(),
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            ),
+            router_factory=FakeRouter,
+        )
+        with self.assertLogs("jittersim.networking.helper", level="WARNING") as logs:
+            response = service.handle_payload(
+                {"action": "router-sync-ap", "admin_password": "router-secret"}
+            )
+
+        self.assertEqual(response["error"], ROUTER_IMPORT_MESSAGES["apply"])
+        self.assertNotIn("router-wifi-password", "\n".join(logs.output) + str(response))
 
     def test_changes_router_wifi_through_the_helper(self) -> None:
         executor = UplinkOutputExecutor()

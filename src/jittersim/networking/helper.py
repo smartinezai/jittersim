@@ -19,7 +19,7 @@ from jittersim.engine.plan import NetworkPlan
 
 from .applier import ApplyError, NetworkApplier
 from .executor import CommandExecutionError, SubprocessExecutor
-from .router import RouterError, TG3442DERouter
+from .router import ROUTER_IMPORT_MESSAGES, RouterError, TG3442DERouter
 from .topology import Topology
 
 LOGGER = logging.getLogger(__name__)
@@ -268,9 +268,12 @@ class HelperService:
             )
         except (KeyError, TypeError, ValueError):
             return {"ok": False, "error": "invalid router credentials"}
-        except (CommandExecutionError, RouterError):
-            LOGGER.exception("router Wi-Fi import failed")
-            return {"ok": False, "error": "router Wi-Fi import failed"}
+        except RouterError as error:
+            LOGGER.warning("router Wi-Fi import failed (%s)", error.reason)
+            return {"ok": False, "error": error.import_message}
+        except CommandExecutionError:
+            LOGGER.warning("router Wi-Fi import failed while updating the Pi access point")
+            return {"ok": False, "error": ROUTER_IMPORT_MESSAGES["apply"]}
         finally:
             if router is not None:
                 router.close()
