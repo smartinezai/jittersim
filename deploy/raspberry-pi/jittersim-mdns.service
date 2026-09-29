@@ -1,0 +1,16 @@
+[Unit]
+Description=Publish the JitterSim dashboard name
+Requires=avahi-daemon.service
+After=NetworkManager.service network-online.target avahi-daemon.service jittersim-control-firewall.service
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=/opt/jittersim/deploy/raspberry-pi/publish-dashboard-name.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

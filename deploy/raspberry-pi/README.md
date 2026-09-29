@@ -15,10 +15,11 @@ The Pi has two network roles by default. Create or edit
 The dashboard listens over HTTPS on the management network. The nftables
 service blocks SSH and dashboard traffic arriving from the test interface, so a person who
 receives the test Wi-Fi password cannot use the Pi as an administration
-endpoint. It also blocks private IPv4 destinations and local IPv6 addresses
-forwarded from the test interface to the uplink, including the router's web
-interface. The generated test Wi-Fi uses IPv4 sharing and does not offer client
-IPv6. Browser proxy tunnels may connect to public IPv4 or IPv6 hosts.
+endpoint. It also blocks mDNS traffic on the test interface. The service blocks
+private IPv4 destinations and local IPv6 addresses forwarded from the test
+interface to the uplink, including the router's web interface. The generated
+test Wi-Fi uses IPv4 sharing and does not offer client IPv6. Browser proxy
+tunnels may connect to public IPv4 or IPv6 hosts.
 Dashboard requests and private read routes require the generated admin token.
 
 Do not expose port 8080 or SSH to the public internet. Keep the Pi's router
@@ -70,10 +71,14 @@ private key is readable only by root and the JitterSim service. The installer
 prints the certificate fingerprint.
 
 Open the dashboard at `https://jittersim.local:8080` or use the Pi's Ethernet
-address. Before trusting the local certificate in a browser, compare its
-SHA-256 fingerprint with the value printed by the installer. The certificate
-includes the Pi's current Ethernet address. If that address changes, run the
-installer again and verify and trust the newly printed certificate.
+address. Avahi publishes the name on the local network and the installer
+refreshes it when the management interface receives a new address. Routers do
+not normally carry mDNS between separate networks. If the name does not
+resolve from the management Wi-Fi, use the Pi's Ethernet address. Before
+trusting the local certificate in a browser, compare its SHA-256 fingerprint
+with the value printed by the installer. The certificate includes the Pi's
+current Ethernet address. If that address changes, run the installer again
+and verify and trust the newly printed certificate.
 
 After an update, the dashboard supports schedules, one-shot profile timers,
 progression sessions, MAC rules, website rules, traffic observations and

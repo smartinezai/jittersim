@@ -233,11 +233,14 @@ has setup, access rules, checks and removal steps. Tailscale's Personal plan
 is [free for eligible home use](https://tailscale.com/pricing).
 
 On the Pi, open the dashboard over HTTPS at `https://jittersim.local:8080` or
-the Pi's Ethernet address. The installer creates a local certificate and prints
-its SHA-256 fingerprint. Verify that fingerprint before trusting the
-certificate in your browser. A DHCP address change may require a new
-certificate. HTTPS protects the browser-to-Pi connection, but the TG3442DE's
-own local web interface still uses HTTP between the Pi and router.
+the Pi's Ethernet address. The installer publishes the local name through
+Avahi on the management network. If the router does not carry local name
+traffic between Ethernet and Wi-Fi, use the Ethernet address. The installer
+creates a local certificate and prints its SHA-256 fingerprint. Verify that
+fingerprint before trusting the certificate in your browser. A DHCP address
+change may require a new certificate. HTTPS protects the browser-to-Pi
+connection, but the TG3442DE's own local web interface still uses HTTP between
+the Pi and router.
 
 ## Run locally
 

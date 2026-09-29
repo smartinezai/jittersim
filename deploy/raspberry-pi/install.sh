@@ -150,7 +150,8 @@ install -m 0644 -o root -g root \
     /etc/systemd/system/jittersim-browser-proxy.service
 
 systemctl daemon-reload
-systemctl enable --now jittersim-control-firewall.service
+systemctl enable jittersim-control-firewall.service
+systemctl restart jittersim-control-firewall.service
 systemctl enable jittersim-helper.service jittersim-dashboard.service jittersim-browser-proxy.service
 systemctl restart jittersim-helper.service
 systemctl restart jittersim-dashboard.service
@@ -163,6 +164,33 @@ else
     nmcli connection up jittersim-ap
 fi
 systemctl restart jittersim-browser-proxy.service
+
+setup_dashboard_name_service() {
+    apt-get install -y avahi-daemon avahi-utils || return 1
+    install -d -m 0755 -o root -g root /etc/NetworkManager/dispatcher.d || return 1
+    install -m 0644 -o root -g root \
+        "$SOURCE_DIR/deploy/raspberry-pi/jittersim-mdns.service" \
+        /etc/systemd/system/jittersim-mdns.service || return 1
+    install -m 0755 -o root -g root \
+        "$SOURCE_DIR/deploy/raspberry-pi/publish-dashboard-name.sh" \
+        "$INSTALL_DIR/deploy/raspberry-pi/publish-dashboard-name.sh" || return 1
+    install -m 0755 -o root -g root \
+        "$SOURCE_DIR/deploy/raspberry-pi/jittersim-mdns-dispatcher" \
+        /etc/NetworkManager/dispatcher.d/80-jittersim-mdns || return 1
+    systemctl daemon-reload || return 1
+    systemctl enable jittersim-mdns.service || return 1
+    systemctl restart jittersim-mdns.service || return 1
+}
+
+if setup_dashboard_name_service; then
+    if systemctl is-active --quiet jittersim-mdns.service; then
+        echo "Dashboard name publisher is active. Confirm jittersim.local from the management network." >&2
+    else
+        echo "Warning: dashboard name publication is not active. Use the Pi's Ethernet address." >&2
+    fi
+else
+    echo "Warning: local dashboard name setup failed. Use the Pi's Ethernet address." >&2
+fi
 
 echo "JitterSim installed. Read the generated credentials locally from:" >&2
 echo "  $CONFIG_DIR/control.env" >&2
