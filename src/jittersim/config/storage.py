@@ -25,6 +25,7 @@ from .models import (
     Profile,
     Progression,
     Randomness,
+    RandomWebsiteOutcome,
     RuntimeState,
     Schedule,
     ServiceAssignment,
@@ -48,6 +49,11 @@ DatabasePath = Union[str, Path]
 _DOMAIN_RETENTION_SECONDS = 30 * 24 * 60 * 60
 _MAX_DOMAIN_OBSERVATIONS = 20_000
 _MAX_OBSERVATIONS_PER_DEVICE = 50
+_SECONDS_PER_UTC_DAY = 24 * 60 * 60
+_RANDOM_WEBSITE_ANALYTICS_RETENTION_DAYS = 30
+_MAX_RANDOM_WEBSITE_ANALYTICS_ROWS = 50_000
+MAX_RANDOM_WEBSITE_ANALYTICS_BATCH = 50_000
+_MAX_RANDOM_WEBSITE_ANALYTICS_RESPONSE_ROWS = 5_000
 MIN_TRAFFIC_RATE_KBIT = 100
 MAX_TRAFFIC_RATE_KBIT = 1_000_000
 TRAFFIC_RATE_STEP_KBIT = 100
@@ -311,6 +317,19 @@ class ConfigRepository:
             );
             CREATE INDEX IF NOT EXISTS domain_observations_last_seen_idx
                 ON domain_observations (last_seen);
+            CREATE TABLE IF NOT EXISTS random_website_analytics (
+                event_day_utc INTEGER NOT NULL,
+                device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                domain TEXT NOT NULL,
+                kept_count INTEGER NOT NULL CHECK (kept_count >= 0),
+                removed_count INTEGER NOT NULL CHECK (removed_count >= 0),
+                PRIMARY KEY (event_day_utc, device_id, domain),
+                CHECK (kept_count + removed_count > 0)
+            );
+            CREATE INDEX IF NOT EXISTS random_website_analytics_device_day_idx
+                ON random_website_analytics (device_id, event_day_utc);
+            CREATE INDEX IF NOT EXISTS random_website_analytics_event_day_idx
+                ON random_website_analytics (event_day_utc);
             INSERT OR IGNORE INTO runtime_state (
                 id, configuration_version, observed_state
             ) VALUES (1, 0, 'unknown');
@@ -328,6 +347,8 @@ class ConfigRepository:
         self._add_column_if_missing("progressions", "traffic_target_bytes", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing("progressions", "traffic_baseline_bytes", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing("service_quotas", "weight_percent", "INTEGER NOT NULL DEFAULT 100")
+        self._connection.commit()
+        self._prune_random_website_analytics(now=int(time.time()))
         self._connection.commit()
 
     def _add_column_if_missing(self, table_name: str, column_name: str, column_definition: str) -> None:
@@ -514,6 +535,8 @@ class ConfigRepository:
                 temporary_path = Path(temporary.name)
             target = sqlite3.connect(str(temporary_path))
             self._connection.backup(target)
+            target.execute("DROP TABLE IF EXISTS random_website_analytics")
+            target.commit()
             target.close()
             target = None
             return temporary_path.read_bytes()
@@ -1852,6 +1875,165 @@ class ConfigRepository:
             )
             counts_by_device[ipv4_address] = count + 1
         return tuple(observations)
+
+    def save_random_website_outcomes(
+        self,
+        outcomes: Sequence[RandomWebsiteOutcome],
+        *,
+        now: Optional[int] = None,
+    ) -> None:
+        """Add one bounded scheduler batch to the daily random-choice totals."""
+
+        if not isinstance(outcomes, (list, tuple)):
+            raise StorageError("random website outcomes must be a list")
+        if len(outcomes) > MAX_RANDOM_WEBSITE_ANALYTICS_BATCH:
+            raise StorageError("random website outcome batch is too large")
+        if not outcomes:
+            return
+        counts = {}
+        for outcome in outcomes:
+            if not isinstance(outcome, RandomWebsiteOutcome):
+                raise StorageError("random website outcome is malformed")
+            event_day = (
+                outcome.happened_at // _SECONDS_PER_UTC_DAY
+            ) * _SECONDS_PER_UTC_DAY
+            key = (event_day, outcome.device_id, outcome.domain)
+            pair = counts.setdefault(key, [0, 0])
+            pair[0 if outcome.kept else 1] += 1
+        try:
+            self._connection.executemany(
+                """
+                INSERT INTO random_website_analytics (
+                    event_day_utc, device_id, domain, kept_count, removed_count
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(event_day_utc, device_id, domain) DO UPDATE SET
+                    kept_count = kept_count + excluded.kept_count,
+                    removed_count = removed_count + excluded.removed_count
+                """,
+                [
+                    (event_day, device_id, domain, pair[0], pair[1])
+                    for (event_day, device_id, domain), pair in sorted(counts.items())
+                ],
+            )
+            self._prune_random_website_analytics(
+                now=int(time.time()) if now is None else now
+            )
+            self._connection.commit()
+        except sqlite3.Error as error:
+            self._connection.rollback()
+            raise StorageError("could not save randomized website history") from error
+
+    def prune_random_website_analytics(self, *, now: Optional[int] = None) -> None:
+        """Remove expired and over-limit daily website-choice totals."""
+
+        current_time = int(time.time()) if now is None else now
+        if isinstance(current_time, bool) or not isinstance(current_time, int) or current_time < 0:
+            raise StorageError("random website cleanup time is invalid")
+        try:
+            self._prune_random_website_analytics(now=current_time)
+            self._connection.commit()
+        except sqlite3.Error as error:
+            self._connection.rollback()
+            raise StorageError("could not prune randomized website history") from error
+
+    def list_random_website_analytics(
+        self,
+        *,
+        days: int = _RANDOM_WEBSITE_ANALYTICS_RETENTION_DAYS,
+        device_id: Optional[str] = None,
+        now: Optional[int] = None,
+    ) -> dict:
+        """Return bounded per-device and per-domain totals for a UTC date range."""
+
+        if (
+            isinstance(days, bool)
+            or not isinstance(days, int)
+            or not 1 <= days <= _RANDOM_WEBSITE_ANALYTICS_RETENTION_DAYS
+        ):
+            raise StorageError("random website history range must be between 1 and 30 days")
+        if device_id is not None and (
+            not isinstance(device_id, str) or not device_id or len(device_id) > 64
+        ):
+            raise StorageError("random website history device id is invalid")
+        current_time = int(time.time()) if now is None else now
+        if isinstance(current_time, bool) or not isinstance(current_time, int) or current_time < 0:
+            raise StorageError("random website history time is invalid")
+        current_day = (current_time // _SECONDS_PER_UTC_DAY) * _SECONDS_PER_UTC_DAY
+        first_day = max(
+            0,
+            current_day - (days - 1) * _SECONDS_PER_UTC_DAY,
+        )
+        oldest_query = (
+            "SELECT MIN(event_day_utc) AS oldest_day "
+            "FROM random_website_analytics WHERE event_day_utc <= ?"
+        )
+        oldest_parameters = [current_day]
+        if device_id is not None:
+            oldest_query += " AND device_id = ?"
+            oldest_parameters.append(device_id)
+        query = """
+            SELECT analytics.device_id, devices.name AS device_name, analytics.domain,
+                SUM(analytics.kept_count) AS kept_count,
+                SUM(analytics.removed_count) AS removed_count,
+                COUNT(*) AS days_with_events
+            FROM random_website_analytics AS analytics
+            JOIN devices ON devices.id = analytics.device_id
+            WHERE analytics.event_day_utc BETWEEN ? AND ?
+        """
+        parameters = [first_day, current_day]
+        if device_id is not None:
+            query += " AND analytics.device_id = ?"
+            parameters.append(device_id)
+        query += " GROUP BY analytics.device_id, devices.name, analytics.domain"
+        query += " ORDER BY (SUM(analytics.kept_count) + SUM(analytics.removed_count)) DESC, "
+        query += "devices.name, analytics.domain LIMIT ?"
+        parameters.append(_MAX_RANDOM_WEBSITE_ANALYTICS_RESPONSE_ROWS + 1)
+        try:
+            oldest_row = self._connection.execute(
+                oldest_query,
+                oldest_parameters,
+            ).fetchone()
+            rows = self._connection.execute(query, parameters).fetchall()
+        except sqlite3.Error as error:
+            raise StorageError("could not read randomized website history") from error
+        truncated = len(rows) > _MAX_RANDOM_WEBSITE_ANALYTICS_RESPONSE_ROWS
+        return {
+            "days": days,
+            "from_day_utc": first_day,
+            "to_day_utc": current_day,
+            "oldest_available_day_utc": (
+                oldest_row["oldest_day"] if oldest_row is not None else None
+            ),
+            "truncated": truncated,
+            "rows": [
+                dict(row)
+                for row in rows[:_MAX_RANDOM_WEBSITE_ANALYTICS_RESPONSE_ROWS]
+            ],
+        }
+
+    def _prune_random_website_analytics(self, *, now: int) -> None:
+        current_day = (max(0, now) // _SECONDS_PER_UTC_DAY) * _SECONDS_PER_UTC_DAY
+        first_retained_day = max(
+            0,
+            current_day
+            - (_RANDOM_WEBSITE_ANALYTICS_RETENTION_DAYS - 1) * _SECONDS_PER_UTC_DAY,
+        )
+        self._connection.execute(
+            "DELETE FROM random_website_analytics WHERE event_day_utc < ?",
+            (first_retained_day,),
+        )
+        self._connection.execute(
+            """
+            DELETE FROM random_website_analytics
+            WHERE rowid IN (
+                SELECT rowid
+                FROM random_website_analytics
+                ORDER BY event_day_utc DESC, device_id DESC, domain DESC
+                LIMIT -1 OFFSET ?
+            )
+            """,
+            (_MAX_RANDOM_WEBSITE_ANALYTICS_ROWS,),
+        )
 
     def _prune_domain_observations(self, *, now: int) -> None:
         cutoff = max(0, now - _DOMAIN_RETENTION_SECONDS)

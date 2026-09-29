@@ -1,9 +1,9 @@
 """Deterministic reroll helpers for scheduled profile behavior."""
 
-from dataclasses import replace
 import hashlib
 import random
-from typing import Optional, Sequence
+from dataclasses import replace
+from typing import List, Optional, Tuple
 
 from jittersim.config.models import Impairment, Profile, Randomness
 
@@ -94,19 +94,22 @@ def reroll_profile(
     *,
     profile: Profile,
     generator: random.Random,
+    website_outcomes: Optional[List[Tuple[str, bool]]] = None,
 ) -> Profile:
     """Reroll one profile's packet values and optional website entries."""
 
-    selected_domains = tuple(
-        domain
-        for domain in profile.website_domains
-        if _is_enabled(profile.website_randomness, generator)
-    )
+    selected_domains = []
+    for domain in profile.website_domains:
+        kept = _is_enabled(profile.website_randomness, generator)
+        if kept:
+            selected_domains.append(domain)
+        if website_outcomes is not None:
+            website_outcomes.append((domain, kept))
     return replace(
         profile,
         upload=reroll_impairment(impairment=profile.upload, generator=generator),
         download=reroll_impairment(impairment=profile.download, generator=generator),
-        website_domains=selected_domains,
+        website_domains=tuple(selected_domains),
     )
 
 

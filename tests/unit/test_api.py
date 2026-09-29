@@ -6,13 +6,20 @@ import ssl
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from email.message import Message
 from io import BytesIO
 from pathlib import Path
 
 from jittersim.api.server import DASHBOARD_HTML, ControlRequestHandler, ControlServer
-from jittersim.config.models import Device, DomainObservation, Impairment, Profile
+from jittersim.config.models import (
+    Device,
+    DomainObservation,
+    Impairment,
+    Profile,
+    RandomWebsiteOutcome,
+)
 from jittersim.config.storage import ConfigRepository
 from jittersim.networking.helper import HelperClientError
 
@@ -354,6 +361,7 @@ class ControlServerTests(unittest.TestCase):
             "/api/connected-devices",
             "/api/connected-device-labels",
             "/api/traffic-settings",
+            "/api/random-website-analytics",
         ):
             with self.subTest(path=path):
                 handler = object.__new__(ControlRequestHandler)
@@ -367,6 +375,43 @@ class ControlServerTests(unittest.TestCase):
                 handler.headers["Authorization"] = "Bearer admin-token"
                 handler.do_GET()
                 self.assertEqual(response["status"], 200)
+
+    def test_random_website_analytics_route_filters_and_validates_queries(self) -> None:
+        now = int(time.time())
+        self.repository.save_random_website_outcomes(
+            [
+                RandomWebsiteOutcome("alice", "kept.example", True, now),
+                RandomWebsiteOutcome("alice", "removed.example", False, now),
+            ],
+            now=now,
+        )
+
+        status, content_type, body = self.server.response_for(
+            "/api/random-website-analytics",
+            query="days=1&device_id=alice",
+        )
+        report = json.loads(body)
+        invalid_range = self.server.response_for(
+            "/api/random-website-analytics",
+            query="days=31",
+        )[0]
+        repeated_filter = self.server.response_for(
+            "/api/random-website-analytics",
+            query="days=1&days=2",
+        )[0]
+
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, "application/json")
+        self.assertEqual(report["days"], 1)
+        self.assertEqual(
+            {
+                row["domain"]: (row["kept_count"], row["removed_count"])
+                for row in report["rows"]
+            },
+            {"kept.example": (1, 0), "removed.example": (0, 1)},
+        )
+        self.assertEqual(invalid_range, 400)
+        self.assertEqual(repeated_filter, 400)
 
     def test_health_reports_an_unreachable_helper(self) -> None:
         self.server.helper_client = FakeHelper(fail_action="ping")

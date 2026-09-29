@@ -5,7 +5,7 @@ import threading
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from typing import Dict, Optional, Sequence, Union
+from typing import Dict, List, Optional, Sequence, Union
 
 from jittersim.config.models import (
     DataLimit,
@@ -13,11 +13,17 @@ from jittersim.config.models import (
     DomainObservation,
     GroupDataLimit,
     Profile,
+    RandomWebsiteOutcome,
     ServiceQuota,
     TimeQuota,
     time_quota_counter_id,
 )
-from jittersim.config.storage import ConfigRepository, DatabasePath, StorageError
+from jittersim.config.storage import (
+    MAX_RANDOM_WEBSITE_ANALYTICS_BATCH,
+    ConfigRepository,
+    DatabasePath,
+    StorageError,
+)
 from jittersim.networking.helper import HelperClient, HelperClientError
 
 from .codec import plan_to_payload
@@ -71,6 +77,8 @@ class RuntimeScheduler:
         self._thread: Optional[threading.Thread] = None
         self._last_traffic_sample_at = 0.0
         self._last_quota_sample_at = 0.0
+        self._last_analytics_cleanup_at = 0.0
+        self._analytics_batch_overflowed = False
         self._last_device_counters: Dict[str, int] = {}
         self._device_traffic_bytes: Dict[str, int] = {}
 
@@ -118,7 +126,16 @@ class RuntimeScheduler:
         """Build the current runtime plan, including timers and schedules."""
 
         current_time = time.time() if now is None else now
-        return self._build_plan(repository=repository, now=current_time)
+        with self._lock:
+            previous_rolls = self._rolls
+            self._rolls = {
+                device_id: replace(roll)
+                for device_id, roll in previous_rolls.items()
+            }
+            try:
+                return self._build_plan(repository=repository, now=current_time)
+            finally:
+                self._rolls = previous_rolls
 
     def pause(self) -> None:
         """Pause scheduled reapplication after a manual network reset."""
@@ -209,7 +226,39 @@ class RuntimeScheduler:
         try:
             self._sample_traffic_if_needed(repository=active_repository, now=current_time)
             self._sample_quota_usage_if_needed(repository=active_repository, now=current_time)
-            plan = self._build_plan(repository=active_repository, now=current_time)
+            if current_time - self._last_analytics_cleanup_at >= 24 * 60 * 60:
+                try:
+                    active_repository.prune_random_website_analytics(
+                        now=int(current_time)
+                    )
+                except StorageError:
+                    LOGGER.warning(
+                        "could not prune randomized website history",
+                        exc_info=True,
+                    )
+                self._last_analytics_cleanup_at = current_time
+            random_website_outcomes: List[RandomWebsiteOutcome] = []
+            self._analytics_batch_overflowed = False
+            plan = self._build_plan(
+                repository=active_repository,
+                now=current_time,
+                random_website_outcomes=random_website_outcomes,
+            )
+            if random_website_outcomes:
+                try:
+                    active_repository.save_random_website_outcomes(
+                        random_website_outcomes,
+                        now=int(current_time),
+                    )
+                except StorageError:
+                    LOGGER.warning(
+                        "could not save randomized website history",
+                        exc_info=True,
+                    )
+            if self._analytics_batch_overflowed:
+                LOGGER.warning(
+                    "randomized website history omitted choices because the tick reached its limit"
+                )
             payload = plan_to_payload(plan)
             if payload == self._current_payload:
                 return False
@@ -238,7 +287,13 @@ class RuntimeScheduler:
             if owned_repository:
                 active_repository.close()
 
-    def _build_plan(self, *, repository: ConfigRepository, now: float):
+    def _build_plan(
+        self,
+        *,
+        repository: ConfigRepository,
+        now: float,
+        random_website_outcomes: Optional[List[RandomWebsiteOutcome]] = None,
+    ):
         profiles = {profile.id: profile for profile in repository.list_profiles()}
         schedules = repository.list_schedules()
         active_progressions = {}
@@ -375,10 +430,33 @@ class RuntimeScheduler:
                     device_id=device.id,
                     roll_number=roll.roll_number,
                 )
+                website_choices = []
+                track_website_choices = (
+                    random_website_outcomes is not None
+                    and progression is None
+                    and selected_profile.website_mode == "allow_only"
+                )
                 roll.runtime_profile = reroll_profile(
                     profile=selected_profile,
                     generator=generator,
+                    website_outcomes=website_choices if track_website_choices else None,
                 )
+                if track_website_choices:
+                    if (
+                        len(random_website_outcomes) + len(website_choices)
+                        <= MAX_RANDOM_WEBSITE_ANALYTICS_BATCH
+                    ):
+                        random_website_outcomes.extend(
+                            RandomWebsiteOutcome(
+                                device_id=device.id,
+                                domain=domain,
+                                kept=kept,
+                                happened_at=int(now),
+                            )
+                            for domain, kept in website_choices
+                        )
+                    else:
+                        self._analytics_batch_overflowed = True
                 roll.roll_number += 1
                 roll.next_roll_at = now + max(
                     1,

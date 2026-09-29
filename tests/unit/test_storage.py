@@ -13,6 +13,7 @@ from jittersim.config.models import (
     Profile,
     Progression,
     Randomness,
+    RandomWebsiteOutcome,
     Schedule,
     ServiceAssignment,
     ServiceQuota,
@@ -541,6 +542,61 @@ class ConfigRepositoryTests(unittest.TestCase):
         self.assertEqual(stored_count, 500)
         self.assertEqual(history[0]["action"], "/api/reset")
         self.assertEqual(set(history[0]), {"happened_at", "action", "status_code"})
+
+    def test_random_website_analytics_keeps_only_the_last_30_utc_days(self) -> None:
+        self.repository.save_profile(Profile(id="normal", name="Normal"))
+        self.repository.save_device(
+            Device("alice", "Alice", "192.168.50.10", "normal")
+        )
+        day = 24 * 60 * 60
+        for domain, event_time in (
+            ("expired.example", 30 * day + 100),
+            ("oldest-kept.example", 31 * day + 100),
+            ("newest.example", 60 * day + 100),
+        ):
+            self.repository.save_random_website_outcomes(
+                [RandomWebsiteOutcome("alice", domain, True, event_time)],
+                now=event_time,
+            )
+
+        report = self.repository.list_random_website_analytics(
+            now=60 * day + 200,
+            days=30,
+        )
+
+        self.assertEqual(
+            {row["domain"] for row in report["rows"]},
+            {"oldest-kept.example", "newest.example"},
+        )
+        self.assertEqual(report["oldest_available_day_utc"], 31 * day)
+
+    def test_backup_excludes_random_website_analytics_and_keeps_live_data(self) -> None:
+        self.repository.save_profile(Profile(id="normal", name="Normal"))
+        self.repository.save_device(
+            Device("alice", "Alice", "192.168.50.10", "normal")
+        )
+        self.repository.save_random_website_outcomes(
+            [RandomWebsiteOutcome("alice", "example.com", True, 100)],
+            now=100,
+        )
+
+        backup = self.repository.backup_bytes()
+        with tempfile.NamedTemporaryFile(suffix=".db") as temporary:
+            temporary.write(backup)
+            temporary.flush()
+            with sqlite3.connect(temporary.name) as snapshot:
+                analytics_table = snapshot.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'random_website_analytics'"
+                ).fetchone()
+
+        self.assertIsNone(analytics_table)
+        live_report = self.repository.list_random_website_analytics(
+            now=100,
+            days=1,
+        )
+        self.assertEqual(len(live_report["rows"]), 1)
+        self.assertEqual(live_report["rows"][0]["kept_count"], 1)
 
     def test_backup_is_a_readable_snapshot_of_saved_configuration(self) -> None:
         self.repository.save_profile(Profile(id="normal", name="Normal"))

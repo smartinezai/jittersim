@@ -31,6 +31,9 @@ is a private lab tool, not a replacement for a home router.
 - Random value variation such as `200 ± 30%`.
 - Random feature enablement, reroll timing and short connection outages.
 - Inline help in the dashboard for the variation settings.
+- Daily counts of kept and removed website choices for scheduled random
+  profile rerolls, with up to 30 days stored on the Pi. These counts show the
+  generated profile choices, not site visits or confirmed network blocks.
 
 ### Devices and website rules
 
@@ -84,6 +87,7 @@ bytes.
 - A visible status area for the current mode, connected devices, schedules,
   access rules, diagnostics and a short history of admin actions.
 - Download a point-in-time backup of settings and local DNS observations.
+  Random website-choice analytics stay on the Pi and are left out of downloads.
 - Restore the last applied or reset state when the dashboard service restarts.
 - Optional private remote dashboard access through Tailscale Serve.
 

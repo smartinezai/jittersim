@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from ipaddress import IPv4Network
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Tuple
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from jittersim.config.device_labels import (
     DeviceLabelError,
@@ -502,6 +502,17 @@ DASHBOARD_HTML = """<!doctype html>
     .token-check-status.success { color: #8de2bc; }
     .token-check-status.error { color: #ffb0b0; }
     .data-grid { margin-top: 1rem; }
+    .analytics-card { grid-column: 1 / -1; }
+    .analytics-note, .analytics-status { margin: 0.75rem 0 0; color: #91a8c1; font-size: 0.82rem; }
+    .analytics-status.error { color: #ffb0b0; }
+    .analytics-controls { display: grid; grid-template-columns: repeat(2, minmax(12rem, 18rem)); gap: 0.75rem; margin-top: 1rem; }
+    .analytics-table-wrap { margin-top: 1rem; overflow-x: auto; }
+    .analytics-table { width: 100%; min-width: 34rem; border-collapse: collapse; text-align: left; }
+    .analytics-table th, .analytics-table td { padding: 0.6rem 0.7rem; border-bottom: 1px solid #2b435f; }
+    .analytics-table th { color: #a8c7e8; font-size: 0.78rem; font-weight: 700; }
+    .analytics-table td { color: #d7e4f2; font-size: 0.84rem; }
+    .analytics-table td:nth-child(n + 3) { text-align: right; font-variant-numeric: tabular-nums; }
+    .analytics-domain { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
     @media (max-width: 700px) {
       body { padding-top: 1rem; }
       .page-header, .action-bar { display: block; }
@@ -528,6 +539,7 @@ DASHBOARD_HTML = """<!doctype html>
       .token-controls { align-items: stretch; flex-direction: column; }
       .traffic-controls { grid-template-columns: 1fr; }
       .traffic-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .analytics-controls { grid-template-columns: 1fr; }
     }
     @media (prefers-reduced-motion: reduce) {
       button { transition: none; }
@@ -1313,6 +1325,31 @@ DASHBOARD_HTML = """<!doctype html>
       <div class="section-heading"><h2>Access rules</h2><p>Saved MAC and website policy</p></div>
       <pre id="policies">Loading...</pre>
     </section>
+    <section class="card analytics-card">
+      <div class="section-heading">
+        <div><h2>Random website choices</h2><p>Scheduled profile rerolls</p></div>
+        <button id="random-website-refresh" type="button">Refresh</button>
+      </div>
+      <p class="analytics-note">Counts whether each configured website stayed in or was removed from a device's profile list. Only saved choices appear here. These are not site visits or confirmed network blocks.</p>
+      <div class="analytics-controls">
+        <label for="random-website-device">Device
+          <select id="random-website-device"><option value="">All devices</option></select>
+        </label>
+        <label for="random-website-days">Date range
+          <select id="random-website-days">
+            <option value="7">Last 7 days</option>
+            <option value="30" selected>Last 30 days</option>
+          </select>
+        </label>
+      </div>
+      <p id="random-website-status" class="analytics-status" role="status" aria-live="polite">Enter the admin token to view randomized website choices.</p>
+      <div class="analytics-table-wrap">
+        <table class="analytics-table">
+          <thead><tr><th scope="col">Device</th><th scope="col">Website</th><th scope="col">Kept</th><th scope="col">Removed</th><th scope="col">Active days</th></tr></thead>
+          <tbody id="random-website-rows"></tbody>
+        </table>
+      </div>
+    </section>
     <section class="card">
       <div class="section-heading">
         <div><h2>Diagnostics</h2><p>Runtime state and available traffic counters</p></div>
@@ -1434,6 +1471,7 @@ DASHBOARD_HTML = """<!doctype html>
     let profiles = [];
     let groups = [];
     let observedDomainsByDevice = {};
+    let randomWebsiteAnalyticsRequestVersion = 0;
     let connectedDevicesRequestInFlight = false;
     let observationRequestInFlight = false;
     const TRAFFIC_POLL_INTERVAL_MS = 2000;
@@ -3137,10 +3175,102 @@ DASHBOARD_HTML = """<!doctype html>
       renderRuntimeSummary(data.state);
     }
 
+    function formatUtcDay(timestamp) {
+      return new Date(timestamp * 1000).toLocaleDateString(undefined, {
+        day: "numeric",
+        month: "short",
+        year: "numeric",
+        timeZone: "UTC"
+      });
+    }
+
+    function renderRandomWebsiteAnalytics(data) {
+      const rows = element("random-website-rows");
+      rows.replaceChildren();
+      (data.rows || []).forEach((item) => {
+        const row = document.createElement("tr");
+        const device = document.createElement("td");
+        device.textContent = item.device_name + " (" + item.device_id + ")";
+        const domain = document.createElement("td");
+        domain.className = "analytics-domain";
+        domain.textContent = item.domain;
+        const kept = document.createElement("td");
+        kept.textContent = Number(item.kept_count).toLocaleString();
+        const removed = document.createElement("td");
+        removed.textContent = Number(item.removed_count).toLocaleString();
+        const activeDays = document.createElement("td");
+        activeDays.textContent = Number(item.days_with_events).toLocaleString();
+        row.append(device, domain, kept, removed, activeDays);
+        rows.appendChild(row);
+      });
+      const status = element("random-website-status");
+      const oldestDay = data.oldest_available_day_utc;
+      const history = oldestDay === null
+        ? "No history has been saved yet."
+        : "Oldest saved result: " + formatUtcDay(oldestDay) + " UTC. Older history may have expired or been trimmed.";
+      status.className = "analytics-status";
+      if (data.truncated) {
+        status.textContent = "Showing the 5,000 highest-count device and website totals. Choose one device or a shorter range. " + history;
+      } else if (!data.rows.length) {
+        status.textContent = "No scheduled randomized website choices were recorded in this range. " + history;
+      } else {
+        status.textContent = data.rows.length + " device and website totals. " + history;
+      }
+    }
+
+    async function loadRandomWebsiteAnalytics() {
+      const status = element("random-website-status");
+      const rows = element("random-website-rows");
+      if (!element("admin-token").value.trim()) {
+        randomWebsiteAnalyticsRequestVersion += 1;
+        rows.replaceChildren();
+        status.className = "analytics-status";
+        status.textContent = "Enter the admin token to view randomized website choices.";
+        return;
+      }
+      const requestVersion = ++randomWebsiteAnalyticsRequestVersion;
+      status.className = "analytics-status";
+      status.textContent = "Loading randomized website choices...";
+      try {
+        const deviceData = await request("/api/devices", "GET");
+        const deviceSelect = element("random-website-device");
+        const selectedDevice = deviceSelect.value;
+        deviceSelect.replaceChildren();
+        const allDevices = document.createElement("option");
+        allDevices.value = "";
+        allDevices.textContent = "All devices";
+        deviceSelect.appendChild(allDevices);
+        (deviceData.devices || []).forEach((device) => {
+          const option = document.createElement("option");
+          option.value = device.id;
+          option.textContent = device.name + " (" + device.id + ")";
+          option.selected = device.id === selectedDevice;
+          deviceSelect.appendChild(option);
+        });
+        const parameters = new URLSearchParams({
+          days: element("random-website-days").value,
+          device_id: deviceSelect.value
+        });
+        const data = await request("/api/random-website-analytics?" + parameters.toString(), "GET");
+        if (requestVersion === randomWebsiteAnalyticsRequestVersion) {
+          renderRandomWebsiteAnalytics(data);
+        }
+      } catch (error) {
+        if (requestVersion !== randomWebsiteAnalyticsRequestVersion) return;
+        rows.replaceChildren();
+        status.className = "analytics-status error";
+        status.textContent = "Could not load randomized website history: " + error.message;
+      }
+    }
+
     async function loadAdminTools() {
       if (!element("admin-token").value.trim()) {
         element("diagnostics").textContent = "Enter the admin token to inspect diagnostics.";
         element("action-history").textContent = "Enter the admin token to view recent actions.";
+        randomWebsiteAnalyticsRequestVersion += 1;
+        element("random-website-rows").replaceChildren();
+        element("random-website-status").textContent = "Enter the admin token to view randomized website choices.";
+        element("random-website-status").className = "analytics-status";
         return { ok: false, message: "Enter the admin token first." };
       }
       try {
@@ -3149,8 +3279,13 @@ DASHBOARD_HTML = """<!doctype html>
       } catch (error) {
         element("diagnostics").textContent = error.message;
         element("action-history").textContent = error.message;
+        randomWebsiteAnalyticsRequestVersion += 1;
+        element("random-website-rows").replaceChildren();
+        element("random-website-status").textContent = error.message;
+        element("random-website-status").className = "analytics-status error";
         return { ok: false, message: error.message };
       }
+      let actionHistoryLoaded = true;
       try {
         const data = await request("/api/action-history", "GET");
         element("action-history").textContent = data.actions.length
@@ -3159,9 +3294,15 @@ DASHBOARD_HTML = """<!doctype html>
           : "No admin actions have been recorded.";
       } catch (error) {
         element("action-history").textContent = error.message;
-        return { ok: true, message: "Token accepted. Diagnostics loaded, but action history could not be loaded." };
+        actionHistoryLoaded = false;
       }
-      return { ok: true, message: "Token accepted. Diagnostics loaded." };
+      await loadRandomWebsiteAnalytics();
+      return {
+        ok: true,
+        message: actionHistoryLoaded
+          ? "Token accepted. Diagnostics loaded."
+          : "Token accepted. Diagnostics loaded, but action history could not be loaded."
+      };
     }
 
     async function checkAdminToken() {
@@ -3716,6 +3857,10 @@ DASHBOARD_HTML = """<!doctype html>
       routerAction("/api/router/wifi", { enabled: true }, "Turning on router Wi-Fi...", event.currentTarget);
     });
 
+    element("random-website-device").addEventListener("change", loadRandomWebsiteAnalytics);
+    element("random-website-days").addEventListener("change", loadRandomWebsiteAnalytics);
+    element("random-website-refresh").addEventListener("click", loadRandomWebsiteAnalytics);
+
     window.setInterval(() => { if (adminTokenVerified) loadConnectedDevices(); }, 5000);
     window.setInterval(() => { if (adminTokenVerified) loadTimers(); }, 5000);
     window.setInterval(() => { if (adminTokenVerified) loadProgressions(); }, 5000);
@@ -4022,7 +4167,7 @@ class ControlServer(HTTPServer):
         if tls_context is not None:
             self.socket = tls_context.wrap_socket(self.socket, server_side=True)
 
-    def response_for(self, path: str) -> Tuple[int, str, bytes]:
+    def response_for(self, path: str, query: str = "") -> Tuple[int, str, bytes]:
         """Build the response body for a supported GET path."""
 
         if path == "/":
@@ -4297,6 +4442,43 @@ class ControlServer(HTTPServer):
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {"actions": list(self.repository.list_recent_actions())}
             )
+        if path == "/api/random-website-analytics":
+            try:
+                parameters = parse_qs(
+                    query,
+                    keep_blank_values=True,
+                    max_num_fields=4,
+                )
+            except ValueError:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "too many analytics filters"}
+                )
+            day_values = parameters.get("days", ["30"])
+            device_values = parameters.get("device_id", [""])
+            if len(day_values) != 1 or len(device_values) != 1:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "provide one date range and one device filter"}
+                )
+            try:
+                days = int(day_values[0])
+            except (TypeError, ValueError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "days must be between 1 and 30"}
+                )
+            if not 1 <= days <= 30:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "days must be between 1 and 30"}
+                )
+            device_id = device_values[0] or None
+            if device_id is not None and len(device_id) > 64:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "device id is too long"}
+                )
+            report = self.repository.list_random_website_analytics(
+                days=days,
+                device_id=device_id,
+            )
+            return HTTPStatus.OK, "application/json", _json_bytes(report)
         if path == "/api/backup":
             return HTTPStatus.OK, "application/vnd.sqlite3", self.repository.backup_bytes()
         if path == "/api/traffic-settings":
@@ -5287,7 +5469,8 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
     server: ControlServer
 
     def do_GET(self) -> None:
-        path = urlsplit(self.path).path
+        parsed_path = urlsplit(self.path)
+        path = parsed_path.path
         if path.startswith("/api/") and path not in PUBLIC_READ_PATHS:
             if self.server.admin_token is None:
                 self._send_response(
@@ -5305,7 +5488,10 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
         try:
-            status, content_type, body = self.server.response_for(path)
+            status, content_type, body = self.server.response_for(
+                path,
+                query=parsed_path.query,
+            )
         except (PlanError, StorageError):
             LOGGER.exception("could not build control-plane response for %s", path)
             status = HTTPStatus.INTERNAL_SERVER_ERROR

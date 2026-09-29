@@ -22,6 +22,7 @@ from jittersim.config.models import (
     time_quota_counter_id,
 )
 from jittersim.config.storage import ConfigRepository
+from jittersim.engine.randomizer import reroll_profile, seeded_generator
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.networking.helper import HelperClientError
 
@@ -129,6 +130,77 @@ class RuntimeSchedulerTests(unittest.TestCase):
         self.assertFalse(scheduler.tick(repository=self.repository, now=30))
         self.assertTrue(scheduler.tick(repository=self.repository, now=61))
         self.assertEqual(len(self.helper.plans), 2)
+
+    def test_preview_is_pure_and_tick_records_choices_without_plan_change(self) -> None:
+        profile = Profile(
+            id="website-random",
+            name="Random websites",
+            reroll_interval_seconds=10,
+            random_seed=42,
+            website_mode="allow_only",
+            website_domains=tuple(f"site-{index}.example" for index in range(20)),
+            website_randomness=Randomness(enabled_probability=50),
+        )
+        self._save_device(profile)
+        scheduler = RuntimeScheduler(
+            database_path=":memory:",
+            helper_client=self.helper,
+        )
+        scheduler._paused = False
+        scheduler._current_payload = {}
+
+        self.assertTrue(scheduler.tick(repository=self.repository, now=100))
+        initial_state = scheduler._rolls["alice"]
+        initial_roll = (
+            initial_state.roll_number,
+            initial_state.next_roll_at,
+            initial_state.runtime_profile.website_domains,
+        )
+
+        scheduler.build_plan(repository=self.repository, now=111)
+
+        preview_state = scheduler._rolls["alice"]
+        self.assertEqual(
+            (
+                preview_state.roll_number,
+                preview_state.next_roll_at,
+                preview_state.runtime_profile.website_domains,
+            ),
+            initial_roll,
+        )
+        self.assertEqual(
+            self.repository.list_random_website_analytics(now=111, days=1)["rows"],
+            [],
+        )
+
+        expected_choices = []
+        expected_profile = reroll_profile(
+            profile=profile,
+            generator=seeded_generator(
+                profile=profile,
+                device_id="alice",
+                roll_number=0,
+            ),
+            website_outcomes=expected_choices,
+        )
+        self.assertNotEqual(expected_profile.website_domains, profile.website_domains)
+        self.assertFalse(scheduler.tick(repository=self.repository, now=111))
+        report = self.repository.list_random_website_analytics(now=111, days=1)
+        actual_counts = {
+            row["domain"]: (row["kept_count"], row["removed_count"])
+            for row in report["rows"]
+        }
+        expected_counts = {
+            domain: (int(kept), int(not kept))
+            for domain, kept in expected_choices
+        }
+
+        self.assertEqual(actual_counts, expected_counts)
+        self.assertEqual(
+            scheduler._rolls["alice"].runtime_profile.website_domains,
+            expected_profile.website_domains,
+        )
+        self.assertEqual(scheduler._rolls["alice"].roll_number, 1)
 
     def test_applied_queue_limits_read_only_the_last_successful_plan(self) -> None:
         payload = {

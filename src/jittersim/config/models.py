@@ -292,6 +292,23 @@ class DomainObservation:
 
 
 @dataclass(frozen=True)
+class RandomWebsiteOutcome:
+    """One generated keep-or-remove choice for a configured website."""
+
+    device_id: str
+    domain: str
+    kept: bool
+    happened_at: int
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.device_id, "device_id")
+        object.__setattr__(self, "domain", normalize_domain(self.domain))
+        if not isinstance(self.kept, bool):
+            raise ValidationError("kept must be a boolean")
+        _validate_number(self.happened_at, "happened_at", 0, 2**63 - 1)
+
+
+@dataclass(frozen=True)
 class Schedule:
     """One repeating daily or weekly window for a device profile."""
 
