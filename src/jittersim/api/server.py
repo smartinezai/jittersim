@@ -421,6 +421,7 @@ DASHBOARD_HTML = """<!doctype html>
       opacity: 1;
       visibility: visible;
     }
+    .help-icon.token-help::after { white-space: pre-line; }
     .randomness-fields {
       display: grid;
       gap: 0.75rem;
@@ -671,7 +672,8 @@ DASHBOARD_HTML = """<!doctype html>
   <section class="card token-card">
     <h2>Control token</h2>
     <div class="token-controls">
-      <label>Admin token (kept in this page only)
+      <label>
+        <span class="field-label">Admin token (kept in this page only)<span class="help-icon token-help" id="admin-token-help" tabindex="0" role="img" aria-label="Admin token retrieval commands" data-help="The command to print the token is being prepared.">?</span></span>
         <input id="admin-token" type="password" autocomplete="off">
       </label>
       <button id="check-admin-token" type="button">Check token</button>
@@ -1307,23 +1309,23 @@ DASHBOARD_HTML = """<!doctype html>
   <div class="data-grid">
     <section class="card">
       <div class="section-heading"><h2>Profiles</h2><p>Saved network behavior</p></div>
-      <pre id="profiles">Loading...</pre>
+      <pre id="profiles">Enter the admin token and choose Check token to load.</pre>
     </section>
     <section class="card">
       <div class="section-heading"><h2>Devices</h2><p>Assigned test clients</p></div>
-      <pre id="devices">Loading...</pre>
+      <pre id="devices">Enter the admin token and choose Check token to load.</pre>
     </section>
     <section class="card">
       <div class="section-heading"><h2>Compiled plan</h2><p>Current traffic rules</p></div>
-      <pre id="plan">Loading...</pre>
+      <pre id="plan">Enter the admin token and choose Check token to load.</pre>
     </section>
     <section class="card">
       <div class="section-heading"><h2>Runtime state</h2><p>Last helper result</p></div>
-      <pre id="state">Loading...</pre>
+      <pre id="state">Enter the admin token and choose Check token to load.</pre>
     </section>
     <section class="card">
       <div class="section-heading"><h2>Access rules</h2><p>Saved MAC and website policy</p></div>
-      <pre id="policies">Loading...</pre>
+      <pre id="policies">Enter the admin token and choose Check token to load.</pre>
     </section>
     <section class="card analytics-card">
       <div class="section-heading">
@@ -1464,6 +1466,29 @@ DASHBOARD_HTML = """<!doctype html>
     async function show(endpoint, elementId, key) {
       const data = await request(endpoint, "GET");
       element(elementId).textContent = JSON.stringify(data[key], null, 2);
+    }
+
+    const adminTokenHelp = element("admin-token-help");
+    adminTokenHelp.dataset.help =
+      "On your Mac, run this command:\\n" +
+      "ssh -i ~/.ssh/jittersim_ed25519 jittersim@" + window.location.hostname +
+      " \\\"sudo sed -n 's/^JITTERSIM_ADMIN_TOKEN=//p' /etc/jittersim/control.env\\\"\\n" +
+      "Copy the output into this field. Keep the token private.";
+
+    const privateDataPanelIds = ["profiles", "devices", "plan", "state", "policies"];
+
+    function setPrivateDataPanels(message) {
+      privateDataPanelIds.forEach((panelId) => {
+        element(panelId).textContent = message;
+      });
+    }
+
+    async function loadPrivateDataPanel(panelId, load) {
+      try {
+        await load();
+      } catch (error) {
+        element(panelId).textContent = "Could not load: " + error.message;
+      }
     }
 
     let helperConfigured = false;
@@ -3309,11 +3334,15 @@ DASHBOARD_HTML = """<!doctype html>
       const button = element("check-admin-token");
       const status = element("token-check-status");
       if (!element("admin-token").value.trim()) {
+        adminTokenVerified = false;
+        setPrivateDataPanels("Enter the admin token and choose Check token to load.");
         status.textContent = "Enter the admin token first.";
+        status.className = "token-check-status error";
         showMessage("Enter the admin token first.", "error");
         element("admin-token").focus();
         return;
       }
+      setPrivateDataPanels("Checking the admin token...");
       button.disabled = true;
       button.setAttribute("aria-busy", "true");
       button.textContent = "Checking...";
@@ -3328,12 +3357,14 @@ DASHBOARD_HTML = """<!doctype html>
           await startTrafficSampling();
         } else {
           adminTokenVerified = false;
+          setPrivateDataPanels("Token check failed: " + result.message);
         }
         status.textContent = result.ok ? result.message : "Token check failed: " + result.message;
         status.className = "token-check-status " + (result.ok ? "success" : "error");
         showMessage(status.textContent, result.ok ? "success" : "error");
       } catch (error) {
         adminTokenVerified = false;
+        setPrivateDataPanels("Token check failed: " + error.message);
         status.textContent = "Token check failed: " + error.message;
         status.className = "token-check-status error";
         showMessage(status.textContent, "error");
@@ -3345,19 +3376,19 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     async function refresh() {
-      await loadProfiles();
+      await loadPrivateDataPanel("profiles", loadProfiles);
       await loadHealth();
       await loadObservations();
       await Promise.all([
-        show("/api/devices", "devices", "devices"),
-        show("/api/plan", "plan", "plan"),
-        loadState(),
+        loadPrivateDataPanel("devices", () => show("/api/devices", "devices", "devices")),
+        loadPrivateDataPanel("plan", () => show("/api/plan", "plan", "plan")),
+        loadPrivateDataPanel("state", loadState),
         loadDevicesForSchedule(),
         loadGroups(),
         loadSchedules(),
         loadTimers(),
         loadProgressions(),
-        loadPolicies(),
+        loadPrivateDataPanel("policies", loadPolicies),
         loadConnectedDevices(),
         loadUplink(),
         loadQuotas(),
