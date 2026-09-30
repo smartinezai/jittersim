@@ -583,7 +583,7 @@ DASHBOARD_HTML = """<!doctype html>
     <div class="action-copy">
       <h2>Network controls</h2>
       <p>Apply the saved configuration or return the test network to its normal state.</p>
-      <p id="runtime-summary" class="runtime-summary unknown">Checking runtime state...</p>
+      <p id="runtime-summary" class="runtime-summary unknown">Check the admin token to view the network state.</p>
     </div>
     <div class="action-buttons">
       <button id="apply-button" class="primary" type="button">Apply current configuration</button>
@@ -597,9 +597,9 @@ DASHBOARD_HTML = """<!doctype html>
         <h2>Connected clients</h2>
         <p>Devices on the Pi’s Wi-Fi. Devices on the router’s Wi-Fi are not listed here.</p>
       </div>
-      <span id="connected-count" class="count-badge">Checking...</span>
+      <span id="connected-count" class="count-badge">Check token</span>
     </div>
-    <div id="connected-devices" class="connected-list" aria-live="polite">Loading...</div>
+    <div id="connected-devices" class="connected-list" aria-live="polite">Enter the admin token and choose Check token to view connected devices.</div>
   </section>
   <section class="card connected-card" aria-labelledby="unaffected-title">
     <div class="section-heading">
@@ -674,9 +674,9 @@ DASHBOARD_HTML = """<!doctype html>
         <h2>Upstream router connection</h2>
         <p>What the Pi can see through Ethernet</p>
       </div>
-      <span id="uplink-state" class="count-badge">Checking...</span>
+      <span id="uplink-state" class="count-badge">Check token</span>
     </div>
-    <div id="uplink-details" class="uplink-grid" aria-live="polite">Loading...</div>
+    <div id="uplink-details" class="uplink-grid" aria-live="polite">Enter the admin token and choose Check token to view the router connection.</div>
     <p id="uplink-note" class="policy-note">The router controls use the TG3442DE local web interface. The router admin password is used for one request and is not saved.</p>
     <a id="router-settings-link" class="button-link" href="http://192.168.0.1" target="_blank" rel="noreferrer">Open router Wi-Fi settings</a>
     <div class="router-controls">
@@ -1507,16 +1507,23 @@ DASHBOARD_HTML = """<!doctype html>
     const adminTokenHelp = element("admin-token-help");
     adminTokenHelp.dataset.help =
       "On your Mac, run this command:\\n" +
-      "ssh -i ~/.ssh/jittersim_ed25519 jittersim@" + window.location.hostname +
+      "ssh -t -i ~/.ssh/jittersim_ed25519 jittersim@" + window.location.hostname +
       " \\\"sudo sed -n 's/^JITTERSIM_ADMIN_TOKEN=//p' /etc/jittersim/control.env\\\"\\n" +
       "Copy the output into this field. Keep the token private.";
 
-    const privateDataPanelIds = ["profiles", "devices", "plan", "state", "policies"];
+    const privateDataPanelIds = [
+      "profiles", "devices", "plan", "state", "policies",
+      "connected-devices", "unaffected-devices", "uplink-details"
+    ];
 
-    function setPrivateDataPanels(message) {
+    function setPrivateDataPanels(message, state = "Check token") {
       privateDataPanelIds.forEach((panelId) => {
         element(panelId).textContent = message;
       });
+      element("connected-count").textContent = state;
+      element("uplink-state").textContent = state;
+      element("runtime-summary").textContent = message;
+      element("runtime-summary").className = "runtime-summary unknown";
     }
 
     async function loadPrivateDataPanel(panelId, load) {
@@ -1905,7 +1912,11 @@ DASHBOARD_HTML = """<!doctype html>
 
     function refreshAfterSuccess(message) {
       showMessage(message, "success");
-      refresh().catch((error) => {
+      refresh().then(() => {
+        if (adminTokenVerified && helperConfigured && !trafficSamplingAllowed) {
+          return startTrafficSampling();
+        }
+      }).catch((error) => {
         showMessage(message + " Dashboard refresh failed: " + error.message, "error");
       });
     }
@@ -3528,7 +3539,8 @@ DASHBOARD_HTML = """<!doctype html>
         element("admin-token").focus();
         return;
       }
-      setPrivateDataPanels("Checking the admin token...");
+      adminTokenVerified = false;
+      setPrivateDataPanels("Checking the admin token...", "Checking...");
       button.disabled = true;
       button.setAttribute("aria-busy", "true");
       button.textContent = "Checking...";
@@ -3829,6 +3841,8 @@ DASHBOARD_HTML = """<!doctype html>
       }
     });
     element("admin-token").addEventListener("input", () => {
+      adminTokenVerified = false;
+      setPrivateDataPanels("Token changed. Choose Check token to load.");
       stopTrafficSampling("Token changed. Choose Check token to restart live traffic sampling.");
       element("token-check-status").textContent = "Token changed. Choose Check token to load diagnostics.";
       element("token-check-status").className = "token-check-status";
@@ -4758,11 +4772,16 @@ class ControlServer(HTTPServer):
             )
         if path == "/api/traffic":
             isp_limits = self.repository.get_traffic_rate_settings()
-            if self.helper_client is None:
+            reset = self.repository.get_runtime_state().observed_state == "reset"
+            if self.helper_client is None or reset:
                 return HTTPStatus.OK, "application/json", _json_bytes(
                     {
                         "available": False,
-                        "message": "Live traffic needs hardware mode.",
+                        "message": (
+                            "Live traffic needs hardware mode."
+                            if self.helper_client is None
+                            else "Network is reset. Apply the configuration to start traffic measurements."
+                        ),
                         "devices": {},
                         "isp_limits": isp_limits,
                         "profile_limits_available": False,

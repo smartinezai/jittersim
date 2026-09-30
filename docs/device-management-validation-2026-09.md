@@ -70,3 +70,25 @@ unaffected list.
 Private Wi-Fi MAC changes require updating protection. Website rules remain
 best-effort IPv4 destination rules. These are existing network constraints,
 not claims that every application protocol can be identified.
+
+## Upgrade checks after live sign-in
+
+The authenticated Pi check found an older protection table with a `name`
+column. The new migration preserves saved identities, normalizes their MACs
+and adds an unknown creation time of zero. Invalid or excessive entries roll
+back the migration. The connected-client list and compiled plan depend on
+this upgrade.
+
+The router import now has a separate 90-second helper timeout because router
+login and AP activation can exceed the ordinary eight-second request limit.
+Ordinary helper reads keep their existing timeout. Reset mode no longer polls
+removed traffic tables. Failed or edited tokens release all private loading
+states. The retrieval tooltip includes a terminal for the sudo password prompt.
+
+The full Mac suite passes with 277 tests. New regressions cover legacy database
+upgrade, rollback, repeated opening, slow router import, reset counter handling,
+served dashboard authentication transitions and packet-check isolation.
+Focused lint and whitespace checks pass. A fresh installation of the committed
+package in a disposable Linux container also passes all 277 tests, the network
+smoke check and the routed packet protection check. Authenticated Pi checks
+remain the release gate.

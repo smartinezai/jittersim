@@ -90,7 +90,17 @@ def device_usage(applier):
 
 def main():
     if not Path("/.dockerenv").exists():
-        raise RuntimeError("Run only inside a disposable NET_ADMIN and NET_RAW container")
+        isolated = (
+            Path("/proc/self/ns/net").stat().st_ino
+            != Path("/proc/1/ns/net").stat().st_ino
+        )
+        interfaces = json.loads(
+            subprocess.check_output(["ip", "-j", "link", "show"], text=True)
+        )
+        if not isolated or {item["ifname"] for item in interfaces} != {"lo"}:
+            raise RuntimeError(
+                "Run only in a disposable container or an empty separate network namespace"
+            )
     for interface, peer in (("jittersim0", "client0"), ("up0", "remote0")):
         run("ip", "link", "add", interface, "type", "veth", "peer", "name", peer)
         run("ip", "link", "set", interface, "up")

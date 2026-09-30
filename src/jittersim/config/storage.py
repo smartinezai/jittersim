@@ -383,6 +383,7 @@ class ConfigRepository:
             ) VALUES (1, 'disabled', '[]', '[]', 'unrestricted', '[]', '[]');
             """
         )
+        self._migrate_unaffected_devices()
         self._add_column_if_missing("profiles", "settings_json", "TEXT NOT NULL DEFAULT '{}'")
         self._add_column_if_missing("devices", "mac_address", "TEXT")
         self._connection.execute(
@@ -396,6 +397,45 @@ class ConfigRepository:
         self._commit()
         self._prune_random_website_analytics(now=int(time.time()))
         self._commit()
+
+    def _migrate_unaffected_devices(self) -> None:
+        """Upgrade the original protection list without losing saved identities."""
+
+        with self.transaction():
+            columns = {
+                row["name"]
+                for row in self._connection.execute("PRAGMA table_info(unaffected_devices)")
+            }
+            if "display_name" in columns and "created_at" in columns:
+                return
+            if "display_name" not in columns:
+                if "name" not in columns:
+                    raise StorageError("The saved protection list has an unsupported layout")
+                self._connection.execute(
+                    "ALTER TABLE unaffected_devices RENAME COLUMN name TO display_name"
+                )
+            self._add_column_if_missing(
+                "unaffected_devices", "created_at",
+                "INTEGER NOT NULL DEFAULT 0 CHECK (created_at >= 0)",
+            )
+            rows = self._connection.execute(
+                "SELECT mac_address, display_name, created_at FROM unaffected_devices LIMIT ?",
+                (MAX_UNAFFECTED_DEVICES + 1,),
+            ).fetchall()
+            if len(rows) > MAX_UNAFFECTED_DEVICES:
+                raise StorageError("The unaffected-device list exceeds its limit")
+            try:
+                devices = [UnaffectedDevice(**dict(row)) for row in rows]
+            except ValueError as error:
+                raise StorageError("The saved protection list contains an invalid device") from error
+            if len({device.mac_address for device in devices}) != len(devices):
+                raise StorageError("The saved protection list repeats a device identity")
+            for row, device in zip(rows, devices):
+                if row["mac_address"] != device.mac_address:
+                    self._connection.execute(
+                        "UPDATE unaffected_devices SET mac_address = ? WHERE mac_address = ?",
+                        (device.mac_address, row["mac_address"]),
+                    )
 
     def _add_column_if_missing(self, table_name: str, column_name: str, column_definition: str) -> None:
         columns = {
@@ -731,7 +771,7 @@ class ConfigRepository:
             if not exists and count >= MAX_UNAFFECTED_DEVICES:
                 raise StorageError("The unaffected-device list can contain at most 256 devices")
             self._connection.execute(
-                "INSERT INTO unaffected_devices VALUES (?, ?, ?) "
+                "INSERT INTO unaffected_devices (mac_address, display_name, created_at) VALUES (?, ?, ?) "
                 "ON CONFLICT(mac_address) DO UPDATE SET display_name = excluded.display_name",
                 (device.mac_address, device.display_name, device.created_at),
             )

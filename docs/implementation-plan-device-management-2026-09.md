@@ -86,3 +86,27 @@ The proposed download hook can inspect the Ethernet destination before traffic s
 ## Review gate
 
 The personal working agreement requires a written plan, a separate review and human feedback before implementation. This follow-up extends the earlier exemption plan with connected-client group controls and identity fixes. The review identified packet identity protection, proxy behavior, quota baselines and complete-plan validation as required corrections. They are included above. The owner approved this reviewed scope on 30 September 2026 with “Proceed with the reviewed plan”.
+
+## Live dashboard follow-up
+
+The live check found that connected clients, the upstream connection and the
+runtime summary still looked busy before a token was checked or after a failed
+check. Update those panels together with the existing protected panels. A token
+edit must stop private polling until the new token is checked. Exercise empty,
+rejected, failed and successful checks using the served dashboard functions.
+
+Run the packet check in a separate network namespace on the Pi to verify its
+actual kernel without replacing live network rules. Require a namespace that
+differs from the host and contains only loopback. Deploy the tested source and
+run authenticated checks through the existing administrator workflow.
+
+The authenticated check also found the Pi's original protection table has only
+`mac_address` and `name`. Upgrade it in one transaction by renaming the name
+column and adding an unknown creation time of zero. Preserve entries and
+normalize their MACs. Reject repeated identities or excessive rows without
+partially changing the table. Test reopening, editing, deletion and rollback.
+
+The router import client currently gives up after eight seconds even though
+login, encrypted reading, AP activation and logout can take longer. Give this
+specific operation a bounded 90-second wait. Keep ordinary helper reads at their
+existing timeout. The token tooltip must use `ssh -t` for the sudo prompt.

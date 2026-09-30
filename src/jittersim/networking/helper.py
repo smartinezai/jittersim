@@ -426,7 +426,8 @@ class HelperClient:
         """Copy the router's primary Wi-Fi settings into the local test AP."""
 
         return self._request(
-            {"action": "router-sync-ap", "admin_password": admin_password}
+            {"action": "router-sync-ap", "admin_password": admin_password},
+            timeout_seconds=90.0,
         )
 
     def set_router_wifi(self, *, admin_password: str, enabled: bool) -> Dict[str, Any]:
@@ -576,13 +577,15 @@ class HelperClient:
         result["directions"] = directions
         return result
 
-    def _request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _request(
+        self, payload: Dict[str, Any], *, timeout_seconds: Optional[float] = None
+    ) -> Dict[str, Any]:
         encoded = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
         if len(encoded) > MAX_MESSAGE_BYTES:
             raise HelperClientError("helper request is too large")
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-                connection.settimeout(self.timeout_seconds)
+                connection.settimeout(self.timeout_seconds if timeout_seconds is None else timeout_seconds)
                 connection.connect(str(self.socket_path))
                 with connection.makefile("rwb") as stream:
                     stream.write(encoded)
