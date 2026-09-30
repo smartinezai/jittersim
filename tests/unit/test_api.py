@@ -55,6 +55,7 @@ class FakeHelper:
         self.access_plan = None
         self.persistence_enabled = False
         self.release_status_calls = 0
+        self.wifi_reset_called = False
         self.gateway_state = {
             "gateway_state": "available",
             "outage_observed": False,
@@ -66,6 +67,12 @@ class FakeHelper:
 
     def gateway_status(self):
         return {"mode_enabled": self.persistence_enabled, **self.gateway_state}
+
+    def reset_wifi_name(self):
+        if self.fail_action == "wifi":
+            raise HelperClientError("simulated Wi-Fi failure")
+        self.wifi_reset_called = True
+        return {"ok": True, "action": "wifi-reset", "ssid": "JitterSim", "security": "WPA2-AES"}
 
     def set_gateway_persistence(self, *, enabled):
         self.persistence_enabled = enabled

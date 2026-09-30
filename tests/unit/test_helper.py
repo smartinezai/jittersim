@@ -29,6 +29,7 @@ from jittersim.networking.helper import (
 from jittersim.networking.renderer import render_command_plan
 from jittersim.networking.router import RouterWifiSettings
 from jittersim.networking.topology import Topology
+from tests.wifi_support import WifiExecutor
 
 
 def make_plan():
@@ -89,11 +90,14 @@ class CounterExecutor(FakeExecutor):
         return CommandResult(return_code=0, stdout=output)
 
 
-class UplinkOutputExecutor(FakeExecutor):
+class UplinkOutputExecutor(WifiExecutor):
     def run(self, command):
-        self.commands.append(command)
         if command.executable == "nmcli":
-            return CommandResult(return_code=0, stdout="netplan-eth0\n")
+            if command.arguments[-1] == "eth0":
+                self.commands.append(command)
+                return CommandResult(return_code=0, stdout="netplan-eth0\n")
+            return super().run(command)
+        self.commands.append(command)
         return CommandResult(
             return_code=0,
             stdout="default via 192.168.0.1 dev eth0 proto dhcp src 192.168.0.17\n",
@@ -149,7 +153,7 @@ class FakeRouter:
 
 class HelperServiceTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.executor = FakeExecutor()
+        self.executor = WifiExecutor()
         self.service = HelperService(
             NetworkApplier(
                 executor=self.executor,
@@ -252,9 +256,9 @@ class HelperServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(response["action"], "configure-ap")
-        self.assertEqual(response["commands_run"], 3)
+        self.assertEqual(response["commands_run"], 6)
         self.assertEqual(self.executor.commands[0].executable, "nmcli")
-        self.assertEqual(self.executor.commands[0].arguments[2], "jittersim-ap")
+        self.assertIn("jittersim-ap", self.executor.commands[0].arguments)
 
     def test_copies_router_wifi_to_the_local_access_point(self) -> None:
         executor = UplinkOutputExecutor()
@@ -283,7 +287,9 @@ class HelperServiceTests(unittest.TestCase):
         self.assertEqual(routers[0].password, "router-secret")
         self.assertTrue(routers[0].logged_in)
         self.assertTrue(routers[0].closed)
-        self.assertEqual(executor.commands[2].arguments[2], "jittersim-ap")
+        self.assertIn("jittersim-ap", executor.commands[2].arguments)
+        self.assertEqual(executor.settings["802-11-wireless-security.proto"], "rsn")
+        self.assertEqual(executor.settings["802-11-wireless-security.group"], "ccmp")
 
     def test_changes_router_wifi_through_the_helper(self) -> None:
         executor = UplinkOutputExecutor()
@@ -1031,7 +1037,7 @@ class UnixHelperServerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.socket_path = Path(self.temp_dir.name) / "helper.sock"
-        self.executor = FakeExecutor()
+        self.executor = WifiExecutor()
         service = HelperService(
             NetworkApplier(
                 executor=self.executor,
