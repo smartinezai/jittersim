@@ -61,15 +61,17 @@ class NetworkApplierTests(unittest.TestCase):
         executor = RootQueueExecutor()
         commands_run = NetworkApplier(executor=executor, topology=self.topology).reset()
 
-        self.assertEqual(commands_run, 3)
+        self.assertEqual(commands_run, 4)
         self.assertEqual(executor.commands[2].executable, "nft")
-        self.assertEqual([command.executable for command in executor.commands[3:]], ["tc", "tc"])
+        self.assertEqual(
+            [command.executable for command in executor.commands[3:]], ["nft", "tc", "tc"]
+        )
 
     def test_reset_leaves_a_foreign_root_queue_alone(self) -> None:
         executor = RootQueueExecutor(handle="20:", kind="htb")
         commands_run = NetworkApplier(executor=executor, topology=self.topology).reset()
 
-        self.assertEqual(commands_run, 1)
+        self.assertEqual(commands_run, 2)
         self.assertFalse(any(command.arguments[:2] == ("qdisc", "del") for command in executor.commands))
 
     def test_apply_rejects_a_foreign_root_queue_before_mutation(self) -> None:
@@ -87,7 +89,7 @@ class NetworkApplierTests(unittest.TestCase):
 
         self.assertEqual(context.exception.failed_command_index, 2)
         self.assertIsNone(context.exception.reset_error)
-        self.assertEqual(executor.commands[-1].purpose, "remove the project-owned nftables table")
+        self.assertEqual(executor.commands[-1].purpose, "remove the project-owned download table")
 
     def test_reports_when_cleanup_also_fails(self) -> None:
         executor = FailingResetExecutor(fail_on_index=4)

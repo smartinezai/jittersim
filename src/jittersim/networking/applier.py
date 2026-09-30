@@ -11,7 +11,13 @@ from jittersim.engine.plan import NetworkPlan
 
 from .commands import Command, CommandResult
 from .executor import CommandExecutionError, CommandExecutor
-from .renderer import ROOT_HANDLE, render_command_plan, render_reset_commands
+from .renderer import (
+    DOWNLOAD_TABLE,
+    PROJECT_TABLE,
+    ROOT_HANDLE,
+    render_command_plan,
+    render_reset_commands,
+)
 from .topology import Topology
 
 
@@ -62,7 +68,11 @@ class NetworkApplier:
             for interface in (self._topology.uplink_interface, self._topology.test_interface):
                 self._root_queue(interface, for_apply=True)
             if not plan.queues:
-                self.reset()
+                for command in render_reset_commands(topology=self._topology):
+                    if command.executable == "tc" and self._root_queue(
+                        command.arguments[3], for_apply=False
+                    ):
+                        self._run_checked(command)
         except CommandExecutionError as error:
             raise ApplyError(
                 "network plan could not safely change the root queues",
@@ -257,14 +267,19 @@ class NetworkApplier:
     def traffic_counters(self) -> str:
         """Read project-owned nftables byte counters as JSON."""
 
-        result = self._executor.run(
-            Command(
-                executable="nft",
-                arguments=("-j", "list", "table", "inet", "jittersim"),
-                purpose="inspect JitterSim traffic counters",
+        entries = []
+        for family, table in (("inet", PROJECT_TABLE), ("netdev", DOWNLOAD_TABLE)):
+            result = self._executor.run(
+                Command(
+                    executable="nft",
+                    arguments=("-j", "list", "table", family, table),
+                    purpose=f"inspect JitterSim {family} traffic counters",
+                )
             )
-        )
-        return result.stdout
+            if len(result.stdout) > 512 * 1024:
+                raise CommandExecutionError("traffic counter response is too large")
+            entries.extend(json.loads(result.stdout).get("nftables", []))
+        return json.dumps({"nftables": entries})
 
     def configure_access_point(self, *, ssid: str, password: str) -> int:
         """Set the local test AP credentials without touching the upstream router."""

@@ -44,6 +44,8 @@ is a private lab tool, not a replacement for a home router.
   console, other and unknown. Type labels never change traffic rules.
 - Click-to-select devices and assign profiles from the dashboard.
 - Device groups that apply one profile override to several devices at once.
+- Add connected clients to groups without entering their IP or MAC address.
+- A saved list of devices unaffected by all profiles and profile quotas.
 - A live upload and download graph with packet rates for assigned devices.
 - MAC address allowlists and denylists.
 - A global blocked-site list.
@@ -105,8 +107,10 @@ proxy** to `192.168.50.1` port `3128`. The proxy uses the requested hostname
 for each HTTPS tunnel. Two sites on the same server address can receive
 different profiles. Other HTTPS tunnels use that device's ordinary profile.
 Traffic from devices outside the test Wi-Fi stays outside JitterSim. Existing
-proxy tunnels close when a new network plan is applied so the browser can open
-them with the current profile.
+affected proxy tunnels close when a new network plan is applied so the browser
+can open them with the current profile. Protected clients keep their tunnels
+when another client's profile changes. Removing protection or changing global
+access rules can close those tunnels.
 
 This strict hostname selection covers HTTPS connections that the managed
 browser sends through the proxy. Native apps, browser traffic that bypasses the
@@ -140,6 +144,35 @@ Progression DNS mode uses DNS query counts as its signal. It does not count all
 packets or measure download bytes. Device-data mode counts IPv4 upload and
 download bytes for the selected device, so a long Netflix stream can advance a
 progression even when it creates few new DNS queries.
+
+### Connected clients and unaffected devices
+
+Open **Connected clients** after checking the admin token. This panel shows
+devices on the Pi's test Wi-Fi. Devices on the router's Wi-Fi are outside this
+list. A client needs a verified connection and an IPv4 address before a profile
+or group can be assigned.
+
+Choose a profile beside a client then click **Assign profile** or **Apply
+profile**. Choose an existing group then click **Add to group**. For a client
+without a saved assignment, that group needs a profile override. The **Group
+devices** form can also select several connected clients. A client can belong
+to one group. A base profile can be overridden by a group, schedule, timer,
+progression or quota. The save message explains the current override.
+
+Click **Make unaffected** to protect a connected client from every profile,
+random outage, profile website rule and device or service quota. Its traffic
+also stops consuming shared group quotas. Its saved assignments stay in place
+and resume when protection is removed. Global MAC and website access rules
+still apply. Protection does not grant dashboard or SSH access.
+
+The **Unaffected by profiles** list keeps protection when a client disconnects
+or changes IP. It supports up to 256 saved Wi-Fi MAC addresses. Use **Add an
+offline device** for a device that is not connected. If its private Wi-Fi MAC
+changes, add the new address. When protection is configured, unverifiable
+clients have their profile rules skipped and the dashboard reports a warning.
+If applying a change fails, the dashboard reports that settings were saved
+but network protection is not confirmed. Retry **Apply current configuration**
+after fixing the helper error.
 
 ## Network layout
 

@@ -1,8 +1,9 @@
 """Compile validated configuration into a deterministic network plan."""
 
 from ipaddress import IPv4Address
-from typing import Mapping, Sequence
+from typing import Mapping, Optional, Sequence
 
+from jittersim.config.exemptions import MAX_UNAFFECTED_DEVICES, normalize_exempt_mac
 from jittersim.config.models import Device, MacPolicy, Profile, normalize_service_hostname
 
 from .plan import (
@@ -30,8 +31,11 @@ def compile_plan(
     *,
     devices: Sequence[Device],
     profiles: Mapping[str, Profile],
+    protected_mac_addresses: Sequence[str] = (),
+    unverified_device_ids: Sequence[str] = (),
     mac_policy: MacPolicy = MacPolicy(),
     global_blocked_addresses: Sequence[IPv4Address] = (),
+    global_allowed_addresses: Optional[Sequence[IPv4Address]] = None,
     website_filters: Sequence[WebsiteFilter] = (),
     blocked_device_addresses: Sequence[IPv4Address] = (),
     service_quota_rules: Sequence[ServiceQuotaRule] = (),
@@ -39,6 +43,16 @@ def compile_plan(
 ) -> NetworkPlan:
     """Compile device assignments into deterministic marks and directional queues."""
 
+    if len(protected_mac_addresses) > MAX_UNAFFECTED_DEVICES:
+        raise PlanError("a plan cannot contain more than 256 protected MAC addresses")
+    try:
+        protected_macs = tuple(
+            sorted(set(normalize_exempt_mac(mac) for mac in protected_mac_addresses))
+        )
+    except ValueError as error:
+        raise PlanError(str(error)) from error
+    if any(device.mac_address in protected_macs for device in devices):
+        raise PlanError("a protected client cannot have profile rules")
     if len(devices) > MAX_DEVICES_PER_PLAN:
         raise PlanError(f"a plan cannot contain more than {MAX_DEVICES_PER_PLAN} devices")
 
@@ -235,9 +249,14 @@ def compile_plan(
         )
 
     return NetworkPlan(
+        protected_mac_addresses=protected_macs,
+        unverified_device_ids=tuple(unverified_device_ids),
         mark_rules=tuple(mark_rules),
         queues=tuple(queues) + tuple(service_queues) + tuple(assignment_queues),
         mac_policy=mac_policy,
+        global_allowed_addresses=None
+        if global_allowed_addresses is None
+        else tuple(sorted(set(global_allowed_addresses), key=str)),
         global_blocked_addresses=tuple(sorted(set(global_blocked_addresses), key=str)),
         website_filters=tuple(website_filters),
         blocked_device_addresses=tuple(sorted(set(blocked_device_addresses), key=str)),

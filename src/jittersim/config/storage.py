@@ -4,6 +4,7 @@ import json
 import sqlite3
 import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, Optional, Sequence, Union
@@ -14,6 +15,7 @@ from .device_labels import (
     normalize_device_mac,
     normalize_device_type,
 )
+from .exemptions import MAX_UNAFFECTED_DEVICES, UnaffectedDevice, normalize_exempt_mac
 from .models import (
     DataLimit,
     Device,
@@ -118,6 +120,7 @@ class ConfigRepository:
     """Store profiles and device assignments in a local SQLite database."""
 
     def __init__(self, database_path: DatabasePath) -> None:
+        self._transaction_depth = 0
         self._connection = sqlite3.connect(str(database_path))
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
@@ -133,6 +136,39 @@ class ConfigRepository:
         """Close the database connection owned by this repository."""
 
         self._connection.close()
+
+    def _commit(self) -> None:
+        if not self._transaction_depth:
+            self._connection.commit()
+
+    def _rollback(self) -> None:
+        if not self._transaction_depth:
+            self._connection.rollback()
+
+    @contextmanager
+    def transaction(self):
+        """Commit related configuration writes together or restore all of them."""
+
+        depth = self._transaction_depth
+        savepoint = f"configuration_{depth}"
+        self._connection.execute("BEGIN IMMEDIATE" if depth == 0 else f"SAVEPOINT {savepoint}")
+        self._transaction_depth += 1
+        try:
+            yield
+        except BaseException:
+            self._transaction_depth -= 1
+            if depth == 0:
+                self._connection.rollback()
+            else:
+                self._connection.execute(f"ROLLBACK TO {savepoint}")
+                self._connection.execute(f"RELEASE {savepoint}")
+            raise
+        else:
+            self._transaction_depth -= 1
+            if depth == 0:
+                self._connection.commit()
+            else:
+                self._connection.execute(f"RELEASE {savepoint}")
 
     def _initialize_schema(self) -> None:
         self._connection.executescript(
@@ -151,6 +187,11 @@ class ConfigRepository:
                 ipv4_address TEXT NOT NULL UNIQUE,
                 profile_id TEXT NOT NULL REFERENCES profiles(id),
                 mac_address TEXT
+            );
+            CREATE TABLE IF NOT EXISTS unaffected_devices (
+                mac_address TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                created_at INTEGER NOT NULL CHECK (created_at >= 0)
             );
             CREATE TABLE IF NOT EXISTS connected_device_labels (
                 mac_address TEXT PRIMARY KEY,
@@ -344,12 +385,17 @@ class ConfigRepository:
         )
         self._add_column_if_missing("profiles", "settings_json", "TEXT NOT NULL DEFAULT '{}'")
         self._add_column_if_missing("devices", "mac_address", "TEXT")
-        self._add_column_if_missing("progressions", "traffic_target_bytes", "INTEGER NOT NULL DEFAULT 0")
+        self._connection.execute(
+            "CREATE INDEX IF NOT EXISTS devices_mac_idx ON devices(lower(mac_address))"
+        )
+        self._add_column_if_missing(
+            "progressions", "traffic_target_bytes", "INTEGER NOT NULL DEFAULT 0"
+        )
         self._add_column_if_missing("progressions", "traffic_baseline_bytes", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing("service_quotas", "weight_percent", "INTEGER NOT NULL DEFAULT 100")
-        self._connection.commit()
+        self._commit()
         self._prune_random_website_analytics(now=int(time.time()))
-        self._connection.commit()
+        self._commit()
 
     def _add_column_if_missing(self, table_name: str, column_name: str, column_definition: str) -> None:
         columns = {
@@ -387,15 +433,19 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError(f"could not save profile {profile.id}") from error
 
     def save_device(self, device: Device) -> None:
         """Insert or update one validated device assignment."""
 
         try:
+            if device.mac_address is not None:
+                existing = self.get_device_by_mac_address(device.mac_address)
+                if existing is not None and existing.id != device.id:
+                    raise StorageError("This MAC address already has a saved assignment")
             self._connection.execute(
                 """
                 INSERT INTO devices (id, name, ipv4_address, profile_id, mac_address)
@@ -415,9 +465,9 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError(f"could not save device {device.id}") from error
 
     def get_runtime_state(self) -> RuntimeState:
@@ -474,7 +524,7 @@ class ConfigRepository:
                 updated.last_error,
             ),
         )
-        self._connection.commit()
+        self._commit()
         return updated
 
     def record_action(self, *, action: str, status_code: int) -> None:
@@ -499,9 +549,9 @@ class ConfigRepository:
                 "DELETE FROM action_history WHERE id NOT IN "
                 "(SELECT id FROM action_history ORDER BY id DESC LIMIT 500)"
             )
-            self._connection.commit()
+            self._commit()
         except sqlite3.Error as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError("could not record action history") from error
 
     def list_recent_actions(self, *, limit: int = 50) -> tuple:
@@ -591,9 +641,9 @@ class ConfigRepository:
             )
             if cursor.rowcount != 1:
                 raise StorageError("traffic rate settings are missing")
-            self._connection.commit()
+            self._commit()
         except sqlite3.Error as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError("could not save traffic rate settings") from error
         return {
             "upload_kbit": upload_kbit,
@@ -649,6 +699,72 @@ class ConfigRepository:
             return None
         return self._device_from_row(row)
 
+    def get_device_by_mac_address(self, mac_address: str) -> Optional[Device]:
+        rows = self._connection.execute(
+            "SELECT id, name, ipv4_address, profile_id, mac_address FROM devices "
+            "WHERE lower(mac_address) = ? LIMIT 2",
+            (normalize_exempt_mac(mac_address),),
+        ).fetchall()
+        if len(rows) > 1:
+            raise StorageError("Multiple saved assignments use this MAC address")
+        return None if not rows else self._device_from_row(rows[0])
+
+    def list_unaffected_devices(self) -> tuple:
+        rows = self._connection.execute(
+            "SELECT mac_address, display_name, created_at FROM unaffected_devices "
+            "ORDER BY mac_address LIMIT ?",
+            (MAX_UNAFFECTED_DEVICES + 1,),
+        ).fetchall()
+        if len(rows) > MAX_UNAFFECTED_DEVICES:
+            raise StorageError("The unaffected-device list exceeds its limit")
+        return tuple(UnaffectedDevice(**dict(row)) for row in rows)
+
+    def save_unaffected_device(self, device: UnaffectedDevice) -> None:
+        with self.transaction():
+            count = self._connection.execute("SELECT count(*) FROM unaffected_devices").fetchone()[
+                0
+            ]
+            exists = self._connection.execute(
+                "SELECT 1 FROM unaffected_devices WHERE mac_address = ?",
+                (device.mac_address,),
+            ).fetchone()
+            if not exists and count >= MAX_UNAFFECTED_DEVICES:
+                raise StorageError("The unaffected-device list can contain at most 256 devices")
+            self._connection.execute(
+                "INSERT INTO unaffected_devices VALUES (?, ?, ?) "
+                "ON CONFLICT(mac_address) DO UPDATE SET display_name = excluded.display_name",
+                (device.mac_address, device.display_name, device.created_at),
+            )
+            self._bump_configuration_version()
+
+    def delete_unaffected_device(self, mac_address: str) -> bool:
+        with self.transaction():
+            cursor = self._connection.execute(
+                "DELETE FROM unaffected_devices WHERE mac_address = ?",
+                (normalize_exempt_mac(mac_address),),
+            )
+            if cursor.rowcount:
+                self._bump_configuration_version()
+            return bool(cursor.rowcount)
+
+    def rebase_time_quota_sample(self, quota_id: str, *, now: int) -> None:
+        self._connection.execute(
+            "UPDATE time_quotas SET last_sample_at = ? WHERE id = ?",
+            (now, quota_id),
+        )
+        self._commit()
+
+    def rebase_quota_counters(self, *, now: int) -> None:
+        """Preserve spent usage when applying a replacement counter table."""
+
+        for table in ("data_limits", "group_data_limits", "service_quotas"):
+            self._connection.execute(f"UPDATE {table} SET counter_bytes = 0")
+        self._connection.execute(
+            "UPDATE time_quotas SET counter_bytes = 0, last_sample_at = ?",
+            (now,),
+        )
+        self._commit()
+
     def list_connected_device_labels(self) -> Dict[str, Dict[str, str]]:
         """Read locally saved names and types for Wi-Fi client addresses."""
 
@@ -698,9 +814,9 @@ class ConfigRepository:
                 "device_type = excluded.device_type",
                 (mac, name, kind),
             )
-            self._connection.commit()
+            self._commit()
         except sqlite3.Error as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError("could not save connected-device label") from error
 
     def delete_connected_device_label(self, *, mac_address: str) -> None:
@@ -714,9 +830,9 @@ class ConfigRepository:
             self._connection.execute(
                 "DELETE FROM connected_device_labels WHERE mac_address = ?", (mac,)
             )
-            self._connection.commit()
+            self._commit()
         except sqlite3.Error as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError("could not remove connected-device label") from error
 
     def list_profiles(self) -> tuple:
@@ -798,9 +914,9 @@ class ConfigRepository:
                 ((group.id, device_id) for device_id in group.device_ids),
             )
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError(f"could not save device group {group.id}") from error
 
     def delete_device_group(self, group_id: str) -> bool:
@@ -809,7 +925,7 @@ class ConfigRepository:
         cursor = self._connection.execute("DELETE FROM device_groups WHERE id = ?", (group_id,))
         if cursor.rowcount:
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
             return True
         return False
 
@@ -841,9 +957,9 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError(f"could not save schedule {schedule.id}") from error
 
     def delete_schedule(self, schedule_id: str) -> None:
@@ -852,7 +968,7 @@ class ConfigRepository:
         cursor = self._connection.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
         if cursor.rowcount:
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
 
     def list_schedules(self) -> tuple:
         """Return all schedules in stable identifier order."""
@@ -895,9 +1011,9 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError(f"could not save timer {timer.id}") from error
 
     def delete_timer(self, timer_id: str) -> bool:
@@ -909,7 +1025,7 @@ class ConfigRepository:
         )
         if cursor.rowcount:
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
             return True
         return False
 
@@ -989,9 +1105,9 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError(f"could not save progression {progression.id}") from error
 
     def delete_progression(self, progression_id: str) -> bool:
@@ -1003,7 +1119,7 @@ class ConfigRepository:
         )
         if cursor.rowcount:
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
             return True
         return False
 
@@ -1114,9 +1230,9 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError(f"could not save data limit for {data_limit.device_id}") from error
 
     def reset_data_limit_usage(
@@ -1142,7 +1258,7 @@ class ConfigRepository:
             tuple(values),
         )
         if cursor.rowcount:
-            self._connection.commit()
+            self._commit()
             return True
         return False
 
@@ -1163,7 +1279,7 @@ class ConfigRepository:
             """,
             (updated_used, counter_bytes, device_id),
         )
-        self._connection.commit()
+        self._commit()
         return DataLimit(
             device_id=data_limit.device_id,
             profile_id=data_limit.profile_id,
@@ -1240,9 +1356,9 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError(
                 f"could not save group data limit for {data_limit.group_id}"
             ) from error
@@ -1270,7 +1386,7 @@ class ConfigRepository:
             tuple(values),
         )
         if cursor.rowcount:
-            self._connection.commit()
+            self._commit()
             return True
         return False
 
@@ -1295,7 +1411,7 @@ class ConfigRepository:
             """,
             (updated_used, counter_bytes, group_id),
         )
-        self._connection.commit()
+        self._commit()
         return GroupDataLimit(
             group_id=data_limit.group_id,
             profile_id=data_limit.profile_id,
@@ -1380,9 +1496,9 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError(f"could not save service quota {quota.id}") from error
 
     def list_service_assignments(self) -> tuple:
@@ -1422,9 +1538,9 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError(f"could not save service assignment {assignment.id}") from error
 
     def delete_service_assignment(self, assignment_id: str) -> bool:
@@ -1436,7 +1552,7 @@ class ConfigRepository:
         if not cursor.rowcount:
             return False
         self._bump_configuration_version()
-        self._connection.commit()
+        self._commit()
         return True
 
     def reset_service_quota_usage(
@@ -1462,7 +1578,7 @@ class ConfigRepository:
             tuple(values),
         )
         if cursor.rowcount:
-            self._connection.commit()
+            self._commit()
             return True
         return False
 
@@ -1488,7 +1604,7 @@ class ConfigRepository:
             """,
             (updated_used, counter_bytes, quota_id),
         )
-        self._connection.commit()
+        self._commit()
         return ServiceQuota(
             id=quota.id,
             device_id=quota.device_id,
@@ -1586,9 +1702,9 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
-            self._connection.commit()
+            self._commit()
         except sqlite3.IntegrityError as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError(f"could not save time quota {quota.id}") from error
 
     def reset_time_quota_usage(
@@ -1614,7 +1730,7 @@ class ConfigRepository:
             tuple(values),
         )
         if cursor.rowcount:
-            self._connection.commit()
+            self._commit()
             return True
         return False
 
@@ -1659,7 +1775,7 @@ class ConfigRepository:
                 quota_id,
             ),
         )
-        self._connection.commit()
+        self._commit()
         return self.get_time_quota(quota_id)
 
     def stop_time_quota(self, quota_id: str) -> bool:
@@ -1670,7 +1786,7 @@ class ConfigRepository:
             (quota_id,),
         )
         if cursor.rowcount:
-            self._connection.commit()
+            self._commit()
             return True
         return False
 
@@ -1711,7 +1827,7 @@ class ConfigRepository:
             """,
             (updated_used, counter_bytes, sampled_at, quota_id),
         )
-        self._connection.commit()
+        self._commit()
         return TimeQuota(
             id=quota.id,
             device_id=quota.device_id,
@@ -1764,7 +1880,7 @@ class ConfigRepository:
             (policy.mode, json.dumps(list(policy.allowlist)), json.dumps(list(policy.denylist))),
         )
         self._bump_configuration_version()
-        self._connection.commit()
+        self._commit()
 
     def get_website_policy(self) -> WebsitePolicy:
         """Return the saved global website policy."""
@@ -1802,7 +1918,7 @@ class ConfigRepository:
             ),
         )
         self._bump_configuration_version()
-        self._connection.commit()
+        self._commit()
 
     def save_domain_observations(
         self,
@@ -1842,9 +1958,9 @@ class ConfigRepository:
                     ),
                 )
             self._prune_domain_observations(now=current_time)
-            self._connection.commit()
+            self._commit()
         except (sqlite3.IntegrityError, sqlite3.OperationalError) as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError("could not save domain observations") from error
 
     def list_domain_observations(self) -> tuple:
@@ -1918,9 +2034,9 @@ class ConfigRepository:
             self._prune_random_website_analytics(
                 now=int(time.time()) if now is None else now
             )
-            self._connection.commit()
+            self._commit()
         except sqlite3.Error as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError("could not save randomized website history") from error
 
     def prune_random_website_analytics(self, *, now: Optional[int] = None) -> None:
@@ -1931,9 +2047,9 @@ class ConfigRepository:
             raise StorageError("random website cleanup time is invalid")
         try:
             self._prune_random_website_analytics(now=current_time)
-            self._connection.commit()
+            self._commit()
         except sqlite3.Error as error:
-            self._connection.rollback()
+            self._rollback()
             raise StorageError("could not prune randomized website history") from error
 
     def list_random_website_analytics(

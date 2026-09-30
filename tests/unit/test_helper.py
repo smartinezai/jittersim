@@ -46,6 +46,8 @@ class OutputExecutor(FakeExecutor):
 
     def run(self, command):
         self.commands.append(command)
+        if command.arguments == ("-j", "list", "table", "netdev", "jittersim_download"):
+            return CommandResult(return_code=0, stdout='{"nftables":[]}')
         return CommandResult(return_code=0, stdout=self.output)
 
 
@@ -147,7 +149,7 @@ class HelperServiceTests(unittest.TestCase):
             },
         )
         diagnostic = captured.records[0].getMessage()
-        self.assertIn("step 2", diagnostic)
+        self.assertIn("step 1", diagnostic)
         self.assertIn("exit code 1", diagnostic)
         self.assertIn("private-detail", diagnostic)
         self.assertLessEqual(len(diagnostic), 900)
@@ -157,7 +159,7 @@ class HelperServiceTests(unittest.TestCase):
         response = self.service.handle_payload({"action": "reset"})
 
         self.assertEqual(response["action"], "reset")
-        self.assertEqual(response["commands_run"], 1)
+        self.assertEqual(response["commands_run"], 2)
 
     def test_publishes_and_clears_the_proxy_plan_with_network_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

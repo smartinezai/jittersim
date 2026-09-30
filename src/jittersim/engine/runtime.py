@@ -28,6 +28,7 @@ from jittersim.networking.helper import HelperClient, HelperClientError
 
 from .codec import plan_to_payload
 from .compiler import PlanError, compile_plan
+from .eligibility import eligible_clients, station_snapshot
 from .plan import ServiceAssignmentRule, ServiceQuotaRule
 from .progression import interpolate_profile, progression_factor
 from .randomizer import (
@@ -49,6 +50,7 @@ class _DeviceRollState:
     """Mutable scheduler state for one device between ticks."""
 
     profile_id: str
+    source_configuration: object
     runtime_profile: Profile
     roll_number: int
     next_roll_at: float
@@ -114,7 +116,6 @@ class RuntimeScheduler:
             self._current_payload = applied_payload
             self._paused = False
             self._last_device_counters.clear()
-            self._device_traffic_bytes.clear()
         self.start()
 
     def build_plan(
@@ -122,18 +123,18 @@ class RuntimeScheduler:
         *,
         repository: ConfigRepository,
         now: Optional[float] = None,
+        connected_snapshot: Optional[dict] = None,
     ):
         """Build the current runtime plan, including timers and schedules."""
 
         current_time = time.time() if now is None else now
         with self._lock:
             previous_rolls = self._rolls
-            self._rolls = {
-                device_id: replace(roll)
-                for device_id, roll in previous_rolls.items()
-            }
+            self._rolls = {device_id: replace(roll) for device_id, roll in previous_rolls.items()}
             try:
-                return self._build_plan(repository=repository, now=current_time)
+                return self._build_plan(
+                    repository=repository, now=current_time, connected_snapshot=connected_snapshot
+                )
             finally:
                 self._rolls = previous_rolls
 
@@ -263,6 +264,8 @@ class RuntimeScheduler:
             if payload == self._current_payload:
                 return False
             self._helper_client.apply(plan=plan)
+            active_repository.rebase_quota_counters(now=int(current_time))
+            self._last_device_counters.clear()
             self._current_payload = payload
             active_repository.update_runtime_state(
                 observed_state="applied",
@@ -293,7 +296,12 @@ class RuntimeScheduler:
         repository: ConfigRepository,
         now: float,
         random_website_outcomes: Optional[List[RandomWebsiteOutcome]] = None,
+        connected_snapshot: Optional[dict] = None,
     ):
+        snapshot = connected_snapshot
+        if snapshot is None and repository.list_unaffected_devices():
+            snapshot = station_snapshot(self._helper_client)
+        clients = eligible_clients(repository, snapshot)
         profiles = {profile.id: profile for profile in repository.list_profiles()}
         schedules = repository.list_schedules()
         active_progressions = {}
@@ -322,7 +330,7 @@ class RuntimeScheduler:
             for data_limit in repository.list_group_data_limits()
         }
 
-        for device in repository.list_devices():
+        for device in clients.devices:
             group = groups_by_device.get(device.id)
             progression = active_progressions.get(device.id)
             timer = None if progression is not None else active_timers.get(device.id)
@@ -396,10 +404,20 @@ class RuntimeScheduler:
             if selected_profile is None:
                 raise PlanError(f"device {device.id} references missing profile {source_profile_id}")
             active_device_ids.add(device.id)
+            source_configuration = (
+                (progression, start_profile, end_profile)
+                if source_key.startswith("progression:")
+                else selected_profile
+            )
             roll = self._rolls.get(device.id)
-            if roll is None or roll.profile_id != source_key:
+            if (
+                roll is None
+                or roll.profile_id != source_key
+                or roll.source_configuration != source_configuration
+            ):
                 roll = _DeviceRollState(
                     profile_id=source_key,
+                    source_configuration=source_configuration,
                     runtime_profile=selected_profile,
                     roll_number=0,
                     next_roll_at=now + max(1, selected_profile.reroll_interval_seconds),
@@ -492,10 +510,11 @@ class RuntimeScheduler:
             for device_id, roll in self._rolls.items()
             if device_id in active_device_ids
         }
+        website_policy = repository.get_website_policy()
         global_blocked, website_filters = build_website_filters(
             devices=runtime_devices,
             profiles=runtime_profiles,
-            global_policy=repository.get_website_policy(),
+            global_policy=website_policy,
             blocked_domains_by_device=blocked_domains_by_device,
         )
         service_quota_rules = self._build_service_quota_rules(
@@ -507,7 +526,7 @@ class RuntimeScheduler:
         service_assignment_rules = []
         devices_by_id = {device.id: device for device in runtime_devices}
         for assignment in repository.list_service_assignments():
-            if not assignment.enabled:
+            if not assignment.enabled or assignment.device_id in clients.excluded_ids:
                 continue
             device = devices_by_id.get(assignment.device_id)
             profile = profiles.get(assignment.profile_id)
@@ -527,8 +546,13 @@ class RuntimeScheduler:
         return compile_plan(
             devices=runtime_devices,
             profiles=runtime_profiles,
+            protected_mac_addresses=clients.protected_macs,
+            unverified_device_ids=clients.unverified_ids,
             mac_policy=repository.get_mac_policy(),
             global_blocked_addresses=global_blocked,
+            global_allowed_addresses=resolve_domains(domains=website_policy.allowed_domains)
+            if website_policy.mode == "allow_only"
+            else None,
             website_filters=website_filters,
             blocked_device_addresses=blocked_addresses,
             service_quota_rules=service_quota_rules,
@@ -643,6 +667,24 @@ class RuntimeScheduler:
         except (KeyError, TypeError, ValueError, StorageError, HelperClientError):
             LOGGER.warning("traffic progression sample failed", exc_info=True)
 
+    def counter_device_ids(self, *, repository: ConfigRepository) -> set:
+        """Use the installed rule membership when adding shared counters."""
+
+        protected = {item.mac_address for item in repository.list_unaffected_devices()}
+        allowed = {
+            device.id for device in repository.list_devices() if device.mac_address not in protected
+        }
+        payload = self._current_payload
+        if isinstance(payload, dict) and isinstance(payload.get("mark_rules"), list):
+            return allowed & {rule["device_id"] for rule in payload["mark_rules"]}
+        snapshot = station_snapshot(self._helper_client) if protected else None
+        return {device.id for device in eligible_clients(repository, snapshot).devices}
+
+    def sample_before_control_change(self, *, repository: ConfigRepository) -> None:
+        with self._lock:
+            self._last_quota_sample_at = 0
+            self._sample_quota_usage_if_needed(repository=repository, now=time.time())
+
     def _sample_quota_usage_if_needed(
         self,
         *,
@@ -686,12 +728,39 @@ class RuntimeScheduler:
         self._last_quota_sample_at = now
         try:
             counters = get_traffic_counters()
-            device_counters = counters.get("devices", {})
-            service_counters = counters.get("services", {})
+            eligible_ids = self.counter_device_ids(repository=repository)
+            excluded = {
+                device.id for device in repository.list_devices() if device.id not in eligible_ids
+            }
+            device_counters = {
+                key: value
+                for key, value in counters.get("devices", {}).items()
+                if key not in excluded
+            }
+            excluded_services = {
+                quota.id for quota in service_quotas if quota.device_id in excluded
+            } | {
+                time_quota_counter_id(quota.id)
+                for quota in time_quotas
+                if quota.device_id in excluded
+            }
+            service_counters = {
+                key: value
+                for key, value in counters.get("services", {}).items()
+                if key not in excluded_services
+            }
+            group_members = {
+                group.id: tuple(
+                    device_id for device_id in group.device_ids if device_id not in excluded
+                )
+                for group in groups_by_id.values()
+            }
             for device_id, counter in device_counters.items():
                 previous = self._last_device_counters.get(device_id)
                 if previous is None:
-                    self._device_traffic_bytes[device_id] = counter
+                    self._device_traffic_bytes[device_id] = (
+                        self._device_traffic_bytes.get(device_id, 0) + counter
+                    )
                 elif counter >= previous:
                     self._device_traffic_bytes[device_id] = (
                         self._device_traffic_bytes.get(device_id, 0) + counter - previous
@@ -704,11 +773,11 @@ class RuntimeScheduler:
             for data_limit in group_data_limits:
                 group = groups_by_id.get(data_limit.group_id)
                 if group is None or any(
-                    device_id not in device_counters for device_id in group.device_ids
+                    device_id not in device_counters for device_id in group_members[group.id]
                 ):
                     continue
                 aggregate_counter = sum(
-                    device_counters[device_id] for device_id in group.device_ids
+                    device_counters[device_id] for device_id in group_members[group.id]
                 )
                 repository.record_group_data_usage(data_limit.group_id, aggregate_counter)
             for quota in service_quotas:
@@ -716,6 +785,9 @@ class RuntimeScheduler:
                 if counter is not None:
                     repository.record_service_usage(quota.id, counter)
             for quota in time_quotas:
+                if quota.device_id in excluded:
+                    repository.rebase_time_quota_sample(quota.id, now=int(now))
+                    continue
                 counter_id = time_quota_counter_id(quota.id)
                 counter = service_counters.get(counter_id)
                 if counter is not None:
@@ -740,10 +812,10 @@ class RuntimeScheduler:
                 group = groups_by_id.get(data_limit.group_id)
                 aggregate_counter = None
                 if group is not None and all(
-                    device_id in device_counters for device_id in group.device_ids
+                    device_id in device_counters for device_id in group_members[group.id]
                 ):
                     aggregate_counter = sum(
-                        device_counters[device_id] for device_id in group.device_ids
+                        device_counters[device_id] for device_id in group_members[group.id]
                     )
                 if refreshed is not None and self._quota_reset_is_due(refreshed, now):
                     repository.reset_group_data_limit_usage(

@@ -4,10 +4,11 @@ import socketserver
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from ipaddress import IPv4Address
 from pathlib import Path
 
-from jittersim.config.models import Device, Impairment, Profile
+from jittersim.config.models import Device, Impairment, MacPolicy, Profile
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import compile_plan
 from jittersim.engine.plan import ServiceAssignmentRule, WebsiteFilter
@@ -26,6 +27,85 @@ class _EchoHandler(socketserver.BaseRequestHandler):
 
 
 class BrowserProxyTests(unittest.TestCase):
+    def test_unaffected_tunnel_survives_other_profile_changes_and_rechecks_global_rules(self):
+        mac = "02:00:00:00:00:01"
+        address = IPv4Address("192.168.50.10")
+        # A stale IP assignment must not apply its profile to this verified MAC.
+        device = Device("bob", "Bob", address, "slow", "02:00:00:00:00:02")
+        plan = compile_plan(
+            devices=(device,),
+            profiles={"slow": Profile("slow", "Slow", download=Impairment(loss_percent=100))},
+            protected_mac_addresses=(mac,),
+            website_filters=(WebsiteFilter(address, (IPv4Address("8.8.8.8"),)),),
+        )
+        self.assertEqual(
+            select_mark(plan, client_ip=address, host="example.com", client_mac=mac),
+            (0, "unaffected"),
+        )
+        self.assertTrue(destination_allowed(plan, address, "127.0.0.1", mac))
+        with self.assertRaises(ProxyError):
+            select_mark(plan, client_ip=address, host="example.com")
+        with self.assertRaises(ProxyError):
+            select_mark(
+                replace(plan, mac_policy=MacPolicy(mode="denylist", denylist=(mac,))),
+                client_ip=address,
+                host="example.com",
+                client_mac=mac,
+            )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "active.json"
+
+            def publish(current):
+                temporary = path.with_suffix(".next")
+                temporary.write_text(json.dumps(plan_to_payload(current)))
+                temporary.replace(path)
+
+            publish(plan)
+            echo = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _EchoHandler)
+            echo.daemon_threads = True
+            threading.Thread(target=echo.serve_forever, daemon=True).start()
+            marks = []
+            proxy = BrowserProxyServer(
+                ("127.0.0.1", 0),
+                active_plan_path=path,
+                client_network="127.0.0.0/8",
+                mark_socket=lambda _socket, mark: marks.append(mark),
+                identify_client=lambda _ip: address,
+                identify_mac=lambda _ip: mac,
+                resolve_addresses=lambda _host: [
+                    (socket.AF_INET, socket.SOCK_STREAM, 0, echo.server_address)
+                ],
+            )
+            threading.Thread(target=proxy.serve_forever, daemon=True).start()
+            try:
+                for change in (
+                    replace(
+                        plan,
+                        queues=tuple(
+                            replace(queue, impairment=Impairment(delay_ms=800))
+                            for queue in plan.queues
+                        ),
+                    ),
+                    replace(plan, protected_mac_addresses=()),
+                    replace(plan, global_blocked_addresses=(IPv4Address("127.0.0.1"),)),
+                ):
+                    publish(plan)
+                    with socket.create_connection(proxy.server_address, timeout=3) as client:
+                        client.sendall(b"CONNECT example.com:443 HTTP/1.1\r\n\r\n")
+                        self.assertIn(b"200 Connection Established", client.recv(4096))
+                        self.assertEqual(marks[-2:], [0, 0])
+                        publish(change)
+                        client.sendall(b"after-plan-change")
+                        if change.protected_mac_addresses and not change.global_blocked_addresses:
+                            self.assertEqual(client.recv(4096), b"after-plan-change")
+                        else:
+                            self.assertEqual(client.recv(4096), b"")
+            finally:
+                proxy.shutdown()
+                proxy.server_close()
+                echo.shutdown()
+                echo.server_close()
+
     def test_existing_blocks_still_apply_to_proxied_traffic(self) -> None:
         device = Device("alice", "Alice", "192.168.50.10", "normal")
         plan = compile_plan(

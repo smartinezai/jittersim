@@ -9,6 +9,7 @@ from .commands import Command
 from .topology import Topology
 
 PROJECT_TABLE = "jittersim"
+DOWNLOAD_TABLE = "jittersim_download"
 ROOT_HANDLE = "10:"
 
 
@@ -38,7 +39,14 @@ def _format_impairment_arguments(queue: QueueSpec) -> List[str]:
 
 def _render_nft_script(plan: NetworkPlan, topology: Topology) -> str:
     test_interface = topology.test_interface
+    # Adding an existing table is harmless. Delete and recreate both in one batch.
     lines = [
+        f"add table inet {PROJECT_TABLE}",
+        f"delete table inet {PROJECT_TABLE}",
+        f"add table netdev {DOWNLOAD_TABLE}",
+        f"delete table netdev {DOWNLOAD_TABLE}",
+        f"add table netdev {DOWNLOAD_TABLE}",
+        f'add chain netdev {DOWNLOAD_TABLE} download {{ type filter hook egress device "{test_interface}" priority 0; policy accept; }}',
         f"add table inet {PROJECT_TABLE}",
         (
             f"add chain inet {PROJECT_TABLE} forward "
@@ -55,110 +63,128 @@ def _render_nft_script(plan: NetworkPlan, topology: Topology) -> str:
     ]
     if plan.mac_policy.denylist:
         lines.append(
-            f"add rule inet {PROJECT_TABLE} input iifname \"{test_interface}\" "
+            f'add rule inet {PROJECT_TABLE} input iifname "{test_interface}" '
             f"ether saddr {_render_set(plan.mac_policy.denylist)} drop "
-            "comment \"deny listed test client\""
+            'comment "deny listed test client"'
         )
         lines.append(
-            f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
+            f'add rule inet {PROJECT_TABLE} forward iifname "{test_interface}" '
             f"ether saddr {_render_set(plan.mac_policy.denylist)} drop "
-            "comment \"deny listed test client\""
+            'comment "deny listed test client"'
         )
     if plan.mac_policy.mode == "allowlist":
         lines.append(
-            f"add rule inet {PROJECT_TABLE} input iifname \"{test_interface}\" "
+            f'add rule inet {PROJECT_TABLE} input iifname "{test_interface}" '
             f"ether saddr != {_render_set(plan.mac_policy.allowlist)} drop "
-            "comment \"allow only listed test clients\""
+            'comment "allow only listed test clients"'
         )
         lines.append(
-            f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
+            f'add rule inet {PROJECT_TABLE} forward iifname "{test_interface}" '
             f"ether saddr != {_render_set(plan.mac_policy.allowlist)} drop "
-            "comment \"allow only listed test clients\""
+            'comment "allow only listed test clients"'
         )
     if plan.global_blocked_addresses:
         lines.append(
-            f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
+            f'add rule inet {PROJECT_TABLE} forward iifname "{test_interface}" '
             f"ip daddr {_render_set(plan.global_blocked_addresses)} drop "
-            "comment \"block global website destinations\""
+            'comment "block global website destinations"'
+        )
+    if plan.global_allowed_addresses is not None:
+        match = (
+            f"ip daddr != {_render_set(plan.global_allowed_addresses)} "
+            if plan.global_allowed_addresses
+            else "meta nfproto ipv4 "
+        )
+        lines.append(
+            f'add rule inet {PROJECT_TABLE} forward iifname "{test_interface}" '
+            f'{match}drop comment "enforce global website allowlist"'
+        )
+    if plan.protected_mac_addresses:
+        macs = _render_set(plan.protected_mac_addresses)
+        for chain in ("input", "forward"):
+            lines.append(
+                f'add rule inet {PROJECT_TABLE} {chain} iifname "{test_interface}" '
+                f'ether saddr {macs} meta mark set 0 return comment "unaffected by profiles"'
+            )
+        lines.append(
+            f"add rule netdev {DOWNLOAD_TABLE} download ether daddr {macs} "
+            'meta mark set 0 return comment "unaffected by profiles"'
         )
     for website_filter in plan.website_filters:
-        allowed = _render_set(website_filter.allowed_addresses)
-        if website_filter.allowed_addresses:
-            lines.append(
-                f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
-                f"ip saddr {website_filter.device_ip} ip daddr != {allowed} drop "
-                "comment \"enforce profile website allowlist\""
-            )
-        else:
-            lines.append(
-                f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
-                f"ip saddr {website_filter.device_ip} drop "
-                "comment \"profile website allowlist has no resolved addresses\""
-            )
+        if website_filter.allowed_addresses is not None:
+            if website_filter.allowed_addresses:
+                lines.append(
+                    f'add rule inet {PROJECT_TABLE} forward iifname "{test_interface}" '
+                    f"ip saddr {website_filter.device_ip} ip daddr != {_render_set(website_filter.allowed_addresses)} drop "
+                    'comment "enforce profile website allowlist"'
+                )
+            else:
+                lines.append(
+                    f'add rule inet {PROJECT_TABLE} forward iifname "{test_interface}" '
+                    f"ip saddr {website_filter.device_ip} drop "
+                    'comment "profile website allowlist has no resolved addresses"'
+                )
         if website_filter.blocked_addresses:
             lines.append(
-                f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
+                f'add rule inet {PROJECT_TABLE} forward iifname "{test_interface}" '
                 f"ip saddr {website_filter.device_ip} "
                 f"ip daddr {_render_set(website_filter.blocked_addresses)} drop "
-                "comment \"block progression website destinations\""
+                'comment "block progression website destinations"'
             )
     if plan.blocked_device_addresses:
         lines.append(
-            f"add rule inet {PROJECT_TABLE} input iifname \"{test_interface}\" "
+            f'add rule inet {PROJECT_TABLE} input iifname "{test_interface}" '
             f"ip saddr {_render_set(plan.blocked_device_addresses)} drop "
-            "comment \"temporarily disconnect randomized clients\""
+            'comment "temporarily disconnect randomized clients"'
         )
         lines.append(
-            f"add rule inet {PROJECT_TABLE} forward iifname \"{test_interface}\" "
+            f'add rule inet {PROJECT_TABLE} forward iifname "{test_interface}" '
             f"ip saddr {_render_set(plan.blocked_device_addresses)} drop "
-            "comment \"temporarily disconnect randomized clients\""
+            'comment "temporarily disconnect randomized clients"'
         )
     for rule in plan.mark_rules:
         lines.append(
             f"add rule inet {PROJECT_TABLE} forward "
-            f"ip saddr {rule.ipv4_address} meta mark set {rule.mark} counter "
-            f"comment \"usage-device {rule.device_id} upload\""
+            f'iifname "{test_interface}" ip saddr {rule.ipv4_address} meta mark set {rule.mark} counter '
+            f'comment "usage-device {rule.device_id} upload"'
         )
         lines.append(
-            f"add rule inet {PROJECT_TABLE} forward "
-            f"ip daddr {rule.ipv4_address} meta mark set {rule.mark} counter "
-            f"comment \"usage-device {rule.device_id} download\""
+            f"add rule netdev {DOWNLOAD_TABLE} download ip daddr {rule.ipv4_address} counter "
+            f'comment "usage-device {rule.device_id} download"'
         )
-    for mark, device_id in (
-        [(rule.mark, rule.device_id) for rule in plan.mark_rules]
-        + [(rule.mark, rule.device_id) for rule in plan.service_assignment_rules]
-    ):
         lines.append(
-            f"add rule inet {PROJECT_TABLE} output "
-            f"oifname \"{topology.uplink_interface}\" meta mark {mark} counter "
-            f"comment \"usage-device {device_id} upload\""
+            f"add rule netdev {DOWNLOAD_TABLE} download ip daddr {rule.ipv4_address} "
+            f"meta mark 0 meta mark set {rule.mark}"
         )
+    for mark, device_id in [(rule.mark, rule.device_id) for rule in plan.mark_rules] + [
+        (rule.mark, rule.device_id) for rule in plan.service_assignment_rules
+    ]:
         lines.append(
             f"add rule inet {PROJECT_TABLE} output "
-            f"oifname \"{test_interface}\" meta mark {mark} counter "
-            f"comment \"usage-device {device_id} download\""
+            f'oifname "{topology.uplink_interface}" meta mark {mark} counter '
+            f'comment "usage-device {device_id} upload"'
         )
     for quota_rule in plan.service_quota_rules:
         destinations = _render_set(quota_rule.destination_addresses)
         lines.append(
             f"add rule inet {PROJECT_TABLE} forward "
-            f"ip saddr {quota_rule.device_ip} ip daddr {destinations} counter "
-            f"comment \"usage-service {quota_rule.quota_id} upload\""
+            f'iifname "{test_interface}" ip saddr {quota_rule.device_ip} ip daddr {destinations} counter '
+            f'comment "usage-service {quota_rule.quota_id} upload"'
         )
         lines.append(
-            f"add rule inet {PROJECT_TABLE} forward "
+            f"add rule netdev {DOWNLOAD_TABLE} download "
             f"ip daddr {quota_rule.device_ip} ip saddr {destinations} counter "
-            f"comment \"usage-service {quota_rule.quota_id} download\""
+            f'comment "usage-service {quota_rule.quota_id} download"'
         )
         if quota_rule.active:
             lines.append(
                 f"add rule inet {PROJECT_TABLE} forward "
-                f"ip saddr {quota_rule.device_ip} ip daddr {destinations} "
+                f'iifname "{test_interface}" ip saddr {quota_rule.device_ip} ip daddr {destinations} '
                 f"meta mark set {quota_rule.mark} "
-                f"comment \"apply-service-quota {quota_rule.quota_id} upload\""
+                f'comment "apply-service-quota {quota_rule.quota_id} upload"'
             )
             lines.append(
-                f"add rule inet {PROJECT_TABLE} forward "
+                f"add rule netdev {DOWNLOAD_TABLE} download "
                 f"ip daddr {quota_rule.device_ip} ip saddr {destinations} "
                 f"meta mark set {quota_rule.mark} "
                 f"comment \"apply-service-quota {quota_rule.quota_id} download\""
@@ -302,14 +328,8 @@ def render_command_plan(*, plan: NetworkPlan, topology: Topology) -> Sequence[Co
     commands = [
         Command(
             executable="nft",
-            arguments=("delete", "table", "inet", PROJECT_TABLE),
-            purpose="remove the previous project-owned nftables table",
-            ignore_failure=True,
-        ),
-        Command(
-            executable="nft",
             arguments=("-f", "-"),
-            purpose="install project-owned device mark rules",
+            purpose="replace project-owned traffic rules atomically",
             stdin=_render_nft_script(plan, topology),
         ),
     ]
@@ -345,6 +365,14 @@ def render_reset_commands(*, topology: Topology) -> Sequence[Command]:
             ignore_failure=True,
         )
     ]
+    commands.append(
+        Command(
+            executable="nft",
+            arguments=("delete", "table", "netdev", DOWNLOAD_TABLE),
+            purpose="remove the project-owned download table",
+            ignore_failure=True,
+        )
+    )
     for interface in (topology.uplink_interface, topology.test_interface):
         commands.append(
             Command(

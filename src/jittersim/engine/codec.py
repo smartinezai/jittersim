@@ -5,6 +5,7 @@ from dataclasses import asdict
 from ipaddress import AddressValueError, IPv4Address
 from typing import Any, Dict, List, Mapping, Set
 
+from jittersim.config.exemptions import MAX_UNAFFECTED_DEVICES, normalize_exempt_mac
 from jittersim.config.models import (
     Device,
     Impairment,
@@ -80,6 +81,8 @@ def plan_to_payload(plan: NetworkPlan) -> Dict[str, Any]:
     """Convert a compiled plan into JSON-compatible values."""
 
     return {
+        "protected_mac_addresses": list(plan.protected_mac_addresses),
+        "unverified_device_ids": list(plan.unverified_device_ids),
         "mark_rules": [
             {
                 "device_id": rule.device_id,
@@ -102,32 +105,27 @@ def plan_to_payload(plan: NetworkPlan) -> Dict[str, Any]:
             "allowlist": list(plan.mac_policy.allowlist),
             "denylist": list(plan.mac_policy.denylist),
         },
-        "global_blocked_addresses": [
-            str(address) for address in plan.global_blocked_addresses
-        ],
+        "global_allowed_addresses": None
+        if plan.global_allowed_addresses is None
+        else [str(address) for address in plan.global_allowed_addresses],
+        "global_blocked_addresses": [str(address) for address in plan.global_blocked_addresses],
         "website_filters": [
             {
                 "device_ip": str(website_filter.device_ip),
-                "allowed_addresses": [
-                    str(address) for address in website_filter.allowed_addresses
-                ],
-                "blocked_addresses": [
-                    str(address) for address in website_filter.blocked_addresses
-                ],
+                "allowed_addresses": None
+                if website_filter.allowed_addresses is None
+                else [str(address) for address in website_filter.allowed_addresses],
+                "blocked_addresses": [str(address) for address in website_filter.blocked_addresses],
             }
             for website_filter in plan.website_filters
         ],
-        "blocked_device_addresses": [
-            str(address) for address in plan.blocked_device_addresses
-        ],
+        "blocked_device_addresses": [str(address) for address in plan.blocked_device_addresses],
         "service_quota_rules": [
             {
                 "quota_id": rule.quota_id,
                 "device_id": rule.device_id,
                 "device_ip": str(rule.device_ip),
-                "destination_addresses": [
-                    str(address) for address in rule.destination_addresses
-                ],
+                "destination_addresses": [str(address) for address in rule.destination_addresses],
                 "mark": rule.mark,
                 "upload_impairment": asdict(rule.upload_impairment),
                 "download_impairment": asdict(rule.download_impairment),
@@ -397,6 +395,16 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
                 "global_blocked_addresses",
             )
         )
+        global_allowed_addresses = (
+            None
+            if plan_data.get("global_allowed_addresses") is None
+            else tuple(
+                IPv4Address(value)
+                for value in _as_list(
+                    plan_data["global_allowed_addresses"], "global_allowed_addresses"
+                )
+            )
+        )
         website_filters_data = _as_list(
             plan_data.get("website_filters", []),
             "website_filters",
@@ -406,11 +414,15 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
         for index, raw_filter in enumerate(website_filters_data):
             filter_data = _as_mapping(raw_filter, f"website_filters[{index}]")
             device_ip = IPv4Address(filter_data["device_ip"])
-            allowed_addresses = tuple(
-                IPv4Address(value)
-                for value in _as_list(
-                    filter_data.get("allowed_addresses", []),
-                    f"website_filters[{index}].allowed_addresses",
+            allowed_addresses = (
+                None
+                if filter_data.get("allowed_addresses", []) is None
+                else tuple(
+                    IPv4Address(value)
+                    for value in _as_list(
+                        filter_data.get("allowed_addresses", []),
+                        f"website_filters[{index}].allowed_addresses",
+                    )
                 )
             )
             blocked_filter_addresses = tuple(
@@ -448,10 +460,28 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
             raise
         raise PlanCodecError("network policy is invalid") from error
 
+    try:
+        raw_macs = _as_list(plan_data.get("protected_mac_addresses", []), "protected_mac_addresses")
+        if len(raw_macs) > MAX_UNAFFECTED_DEVICES:
+            raise PlanCodecError("too many protected MAC addresses")
+        protected_macs = tuple(sorted(set(normalize_exempt_mac(mac) for mac in raw_macs)))
+        unverified_ids = _as_list(
+            plan_data.get("unverified_device_ids", []), "unverified_device_ids"
+        )
+        if len(unverified_ids) > 256 or any(
+            not isinstance(value, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", value)
+            for value in unverified_ids
+        ):
+            raise PlanCodecError("unverified device IDs are invalid")
+    except ValueError as error:
+        raise PlanCodecError(str(error)) from error
     return NetworkPlan(
+        protected_mac_addresses=protected_macs,
+        unverified_device_ids=tuple(unverified_ids),
         mark_rules=tuple(mark_rules),
         queues=tuple(queues),
         mac_policy=mac_policy,
+        global_allowed_addresses=global_allowed_addresses,
         global_blocked_addresses=global_blocked_addresses,
         website_filters=tuple(website_filters),
         blocked_device_addresses=blocked_device_addresses,

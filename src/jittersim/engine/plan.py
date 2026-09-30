@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from enum import Enum
 from ipaddress import IPv4Address
-from typing import Tuple
+from typing import Optional, Tuple
 
 from jittersim.config.models import Impairment, MacPolicy
 
@@ -39,7 +39,7 @@ class WebsiteFilter:
     """Resolved destination addresses allowed or blocked for one test client."""
 
     device_ip: IPv4Address
-    allowed_addresses: Tuple[IPv4Address, ...]
+    allowed_addresses: Optional[Tuple[IPv4Address, ...]]
     blocked_addresses: Tuple[IPv4Address, ...] = ()
 
 
@@ -76,8 +76,11 @@ class NetworkPlan:
 
     mark_rules: Tuple[MarkRule, ...]
     queues: Tuple[QueueSpec, ...]
+    protected_mac_addresses: Tuple[str, ...] = ()
+    unverified_device_ids: Tuple[str, ...] = ()
     mac_policy: MacPolicy = MacPolicy()
     global_blocked_addresses: Tuple[IPv4Address, ...] = ()
+    global_allowed_addresses: Optional[Tuple[IPv4Address, ...]] = None
     website_filters: Tuple[WebsiteFilter, ...] = ()
     blocked_device_addresses: Tuple[IPv4Address, ...] = ()
     service_quota_rules: Tuple[ServiceQuotaRule, ...] = ()

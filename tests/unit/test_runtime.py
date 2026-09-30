@@ -644,7 +644,7 @@ class RuntimeSchedulerTests(unittest.TestCase):
 
         data_limit = self.repository.get_data_limit("alice")
         self.assertEqual(data_limit.used_bytes, 0)
-        self.assertEqual(data_limit.counter_bytes, 20)
+        self.assertEqual(data_limit.counter_bytes, 0)
         self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 0)
 
     def test_time_quota_counts_active_traffic_inside_its_timer(self) -> None:

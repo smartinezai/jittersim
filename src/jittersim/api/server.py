@@ -9,6 +9,7 @@ import ssl
 import time
 from contextlib import nullcontext
 from dataclasses import asdict, replace
+from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from ipaddress import IPv4Network
@@ -23,6 +24,7 @@ from jittersim.config.device_labels import (
     normalize_device_mac,
     normalize_device_type,
 )
+from jittersim.config.exemptions import UnaffectedDevice, normalize_exempt_mac
 from jittersim.config.models import (
     DataLimit,
     Device,
@@ -52,8 +54,10 @@ from jittersim.config.storage import (
 )
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN, PlanError
+from jittersim.engine.eligibility import eligible_clients, station_snapshot
 from jittersim.engine.progression import progression_factor
 from jittersim.engine.runtime import RuntimeScheduler
+from jittersim.engine.schedules import active_schedule
 from jittersim.engine.service import compile_stored_plan
 from jittersim.networking.helper import HelperClient, HelperClientError
 from jittersim.networking.router import safe_router_import_message
@@ -64,6 +68,9 @@ WRITE_PATHS = frozenset(
     (
         "/api/profiles",
         "/api/devices",
+        "/api/unaffected-devices",
+        "/api/unaffected-devices/delete",
+        "/api/connected-devices/group",
         "/api/groups",
         "/api/groups/delete",
         "/api/schedules",
@@ -176,6 +183,7 @@ DASHBOARD_HTML = """<!doctype html>
       color: #c8d9ec;
     }
     .card {
+      min-width: 0;
       margin: 1rem 0;
       padding: 1.25rem;
       border: 1px solid #263b55;
@@ -214,7 +222,7 @@ DASHBOARD_HTML = """<!doctype html>
       transition: transform 120ms ease, filter 120ms ease, opacity 120ms ease;
     }
     button:hover:not(:disabled) { filter: brightness(1.18); transform: translateY(-1px); }
-    button:focus-visible, input:focus-visible, .help-icon:focus-visible {
+    button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible, .help-icon:focus-visible {
       outline: 2px solid #70b7ff;
       outline-offset: 2px;
     }
@@ -287,7 +295,7 @@ DASHBOARD_HTML = """<!doctype html>
     .connected-list { display: grid; gap: 0.6rem; }
     .connected-row {
       display: grid;
-      grid-template-columns: auto minmax(0, 1fr) auto minmax(14rem, auto);
+      grid-template-columns: auto minmax(0, 1fr) auto;
       align-items: center;
       gap: 0.75rem;
       padding: 0.75rem;
@@ -299,8 +307,8 @@ DASHBOARD_HTML = """<!doctype html>
     .connected-address { margin: 0; color: #edf5ff; font-weight: 700; }
     .connected-meta { margin: 0.1rem 0 0; color: #91a8c1; font-size: 0.8rem; }
     .connected-state { color: #8de2bc; font-size: 0.78rem; font-weight: 700; text-transform: capitalize; }
-    .connected-controls { display: flex; align-items: center; gap: 0.5rem; }
-    .connected-controls select { min-width: 10rem; }
+    .connected-controls { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+    .connected-controls select { min-width: 0; width: 12rem; max-width: 100%; }
     .connected-controls button { margin-top: 0; white-space: nowrap; }
     .connected-label-editor { margin-top: 0.4rem; color: #a8bdd4; font-size: 0.78rem; }
     .connected-label-editor summary { cursor: pointer; }
@@ -383,9 +391,9 @@ DASHBOARD_HTML = """<!doctype html>
     textarea { min-height: 5rem; resize: vertical; }
     details { margin-top: 1rem; border-top: 1px solid #2b435f; padding-top: 0.8rem; }
     summary { cursor: pointer; color: #a8c7e8; font-weight: 700; }
-    .field-label { display: inline-flex; align-items: center; gap: 0.35rem; }
+    .field-label { position: relative; display: inline-flex; align-items: center; gap: 0.35rem; }
     .help-icon {
-      position: relative;
+      position: static;
       display: inline-grid;
       place-items: center;
       width: 1.05rem;
@@ -399,6 +407,7 @@ DASHBOARD_HTML = """<!doctype html>
       cursor: help;
     }
     .help-icon::after {
+      display: none;
       position: absolute;
       top: calc(100% + 0.5rem);
       left: 0;
@@ -419,6 +428,7 @@ DASHBOARD_HTML = """<!doctype html>
       box-shadow: 0 0.6rem 1.2rem rgba(0, 0, 0, 0.35);
     }
     .help-icon:hover::after, .help-icon:focus-visible::after {
+      display: block;
       opacity: 1;
       visibility: visible;
     }
@@ -436,7 +446,7 @@ DASHBOARD_HTML = """<!doctype html>
       border-radius: 0.55rem;
       background: #0d1b2d;
     }
-    .randomness-title { display: flex; align-items: center; gap: 0.35rem; color: #edf5ff; font-weight: 700; }
+    .randomness-title { position: relative; display: flex; align-items: center; gap: 0.35rem; color: #edf5ff; font-weight: 700; }
     .randomness-inputs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.55rem; }
     .randomness-inputs label { color: #91a8c1; font-size: 0.78rem; }
     .day-field { display: grid; align-content: start; gap: 0.3rem; }
@@ -518,6 +528,8 @@ DASHBOARD_HTML = """<!doctype html>
     @media (max-width: 700px) {
       body { padding-top: 1rem; }
       .page-header, .action-bar { display: block; }
+      .action-bar { position: static; }
+      .help-icon::after { position: fixed; top: auto; bottom: 1rem; left: 1rem; width: calc(100vw - 2rem); }
       .badge { display: inline-block; margin-top: 1rem; }
       .action-buttons { flex-wrap: wrap; }
       .action-buttons button { margin-top: 0.9rem; }
@@ -526,7 +538,10 @@ DASHBOARD_HTML = """<!doctype html>
       .uplink-grid { grid-template-columns: 1fr; }
       .connected-row { grid-template-columns: auto minmax(0, 1fr) auto; }
       .connected-controls { grid-column: 1 / -1; }
-      .connected-controls select { flex: 1; }
+      .connected-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+      .connected-controls select { width: 100%; }
+      .connected-controls button:last-child { grid-column: 1 / -1; }
+      .section-heading { flex-wrap: wrap; }
       .connected-label-form label { max-width: none; }
       .observation-actions { margin-top: 0.75rem; }
       .observation-actions button { width: 100%; }
@@ -580,11 +595,31 @@ DASHBOARD_HTML = """<!doctype html>
     <div class="section-heading">
       <div>
         <h2>Connected clients</h2>
-        <p>Clients currently visible on the JitterSim test network</p>
+        <p>Devices on the Pi’s Wi-Fi. Devices on the router’s Wi-Fi are not listed here.</p>
       </div>
       <span id="connected-count" class="count-badge">Checking...</span>
     </div>
     <div id="connected-devices" class="connected-list" aria-live="polite">Loading...</div>
+  </section>
+  <section class="card connected-card" aria-labelledby="unaffected-title">
+    <div class="section-heading">
+      <div>
+        <h2 id="unaffected-title">Unaffected by profiles</h2>
+        <p>Saved protection stays active when a device disconnects or changes IP. Global access rules still apply.</p>
+      </div>
+    </div>
+    <div id="unaffected-devices" class="connected-list" aria-live="polite">Check the admin token to view saved devices.</div>
+    <details>
+      <summary>Add an offline device</summary>
+      <form id="unaffected-form">
+        <div class="fields">
+          <label>Wi-Fi MAC address <input id="unaffected-mac" required placeholder="aa:bb:cc:dd:ee:ff"></label>
+          <label>Name <input id="unaffected-name" maxlength="64" placeholder="Optional name"></label>
+        </div>
+        <button type="submit">Save protection</button>
+      </form>
+    </details>
+    <p class="form-note">Use “Make unaffected” beside a connected device to add it without typing an address. If a device changes its private Wi-Fi MAC, add its new address.</p>
   </section>
   <section class="card traffic-card" aria-labelledby="traffic-title">
     <div class="section-heading">
@@ -892,7 +927,7 @@ DASHBOARD_HTML = """<!doctype html>
     </section>
     <section class="card">
       <h2>Group devices</h2>
-      <p class="form-note">Choose several assigned devices to give them one profile override or one shared data limit. A device can belong to one group.</p>
+      <p class="form-note">Select saved devices or connected clients. Choose a profile override when adding an unassigned client. A device can belong to one group.</p>
       <form id="group-form">
         <div class="fields">
           <label>Group ID <input id="group-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="family"></label>
@@ -1496,6 +1531,11 @@ DASHBOARD_HTML = """<!doctype html>
     let adminTokenVerified = false;
     let profiles = [];
     let groups = [];
+    let savedDevices = [];
+    let connectedClients = [];
+    let lastConnectedData = null;
+    const connectedDrafts = new Map();
+    const clearConnectedDrafts = new Set();
     let observedDomainsByDevice = {};
     let randomWebsiteAnalyticsRequestVersion = 0;
     let connectedDevicesRequestInFlight = false;
@@ -1953,8 +1993,23 @@ DASHBOARD_HTML = """<!doctype html>
         Array.from(container.querySelectorAll(".connected-label-editor[open]"))
           .map((editor) => editor.dataset.macAddress)
       );
+      container.querySelectorAll(".connected-row[data-mac-address]").forEach((row) => {
+        if (clearConnectedDrafts.has(row.dataset.macAddress)) {
+          connectedDrafts.delete(row.dataset.macAddress);
+          return;
+        }
+        const draft = connectedDrafts.get(row.dataset.macAddress) || {};
+        row.querySelectorAll("[data-draft][data-dirty]").forEach((field) => { draft[field.dataset.draft] = field.value; });
+        connectedDrafts.set(row.dataset.macAddress, draft);
+      });
+      clearConnectedDrafts.clear();
       container.replaceChildren();
       const devices = data.devices || [];
+      connectedClients = devices;
+      lastConnectedData = data;
+      const currentMacs = new Set(devices.map((device) => device.mac_address));
+      for (const mac of connectedDrafts.keys()) if (!currentMacs.has(mac)) connectedDrafts.delete(mac);
+      updateGroupMemberOptions();
       const deviceTypeNames = {
         unknown: "Unknown",
         phone: "Phone",
@@ -1993,6 +2048,8 @@ DASHBOARD_HTML = """<!doctype html>
       devices.forEach((device) => {
         const row = document.createElement("div");
         row.className = "connected-row";
+        row.dataset.macAddress = device.mac_address;
+        const draft = connectedDrafts.get(device.mac_address) || {};
         const dot = document.createElement("span");
         dot.className = "connected-dot";
         const details = document.createElement("div");
@@ -2012,7 +2069,12 @@ DASHBOARD_HTML = """<!doctype html>
         deviceType.textContent = "Type: " + typeName + (
           device.device_type_source === "hostname suggestion" ? " (suggested)" : ""
         );
-        details.append(address, metadata, deviceType);
+        const assignmentInfo = document.createElement("p");
+        assignmentInfo.className = "connected-meta";
+        assignmentInfo.textContent = device.unaffected ? "Unaffected by all profiles and quotas" :
+          "Base profile: " + (device.assigned_profile_id || "Unassigned") +
+          (device.group_name ? " · Group: " + device.group_name + (device.group_profile_id ? " (override: " + device.group_profile_id + ")" : "") : "");
+        details.append(address, metadata, deviceType, assignmentInfo);
         if (device.hostname) {
           const hostname = document.createElement("p");
           hostname.className = "connected-meta";
@@ -2032,7 +2094,8 @@ DASHBOARD_HTML = """<!doctype html>
         const nameInput = document.createElement("input");
         nameInput.type = "text";
         nameInput.maxLength = 64;
-        nameInput.value = device.saved_display_name || device.hostname || "";
+        nameInput.dataset.draft = "name";
+        nameInput.value = draft.name ?? (device.saved_display_name || device.hostname || "");
         nameInput.placeholder = "Optional name";
         nameLabel.appendChild(nameInput);
         const typeLabel = document.createElement("label");
@@ -2049,6 +2112,8 @@ DASHBOARD_HTML = """<!doctype html>
           option.selected = value === device.device_type;
           typeSelect.appendChild(option);
         });
+        typeSelect.dataset.draft = "type";
+        if (draft.type !== undefined) typeSelect.value = draft.type;
         typeLabel.appendChild(typeSelect);
         const saveLabelButton = document.createElement("button");
         saveLabelButton.type = "button";
@@ -2078,6 +2143,7 @@ DASHBOARD_HTML = """<!doctype html>
           "aria-label",
           "Profile for " + (device.display_name || device.mac_address)
         );
+        profileSelect.dataset.draft = "profile";
         const emptyOption = document.createElement("option");
         emptyOption.value = "";
         emptyOption.textContent = profiles.length ? "Choose profile..." : "No profiles saved";
@@ -2089,19 +2155,66 @@ DASHBOARD_HTML = """<!doctype html>
           option.selected = profile.id === device.assigned_profile_id;
           profileSelect.appendChild(option);
         });
+        if (draft.profile !== undefined) profileSelect.value = draft.profile;
+        profileSelect.disabled = !!device.unaffected || !device.ipv4_address || !device.association_verified;
         const applyButton = document.createElement("button");
         applyButton.type = "button";
         applyButton.textContent = device.assigned_profile_id ? "Apply profile" : "Assign profile";
-        applyButton.disabled = !helperConfigured || profiles.length === 0 ||
+        applyButton.disabled = !!device.unaffected || !profileSelect.value || !helperConfigured || profiles.length === 0 ||
           !device.ipv4_address || !device.association_verified;
         profileSelect.addEventListener("change", () => {
-          applyButton.disabled = !helperConfigured || profileSelect.value === "" ||
+          applyButton.disabled = !!device.unaffected || !helperConfigured || profileSelect.value === "" ||
             !device.ipv4_address || !device.association_verified;
         });
         applyButton.addEventListener("click", () => {
           applyProfileToDevice(device, profileSelect.value, applyButton);
         });
-        controls.append(profileSelect, applyButton);
+        const groupSelect = document.createElement("select");
+        groupSelect.dataset.draft = "group";
+        groupSelect.setAttribute("aria-label", "Group for " + (device.display_name || device.mac_address));
+        const groupPlaceholder = document.createElement("option");
+        groupPlaceholder.value = "";
+        groupPlaceholder.textContent = groups.length ? "Choose group..." : "Create a group below";
+        groupSelect.appendChild(groupPlaceholder);
+        groups.forEach((group) => {
+          const option = document.createElement("option");
+          option.value = group.id;
+          option.textContent = group.name;
+          option.disabled = (!!device.group_id && device.group_id !== group.id) || (!device.assigned_device_id && !group.profile_id);
+          option.selected = group.id === device.group_id;
+          groupSelect.appendChild(option);
+        });
+        if (draft.group !== undefined) groupSelect.value = draft.group;
+        const groupButton = document.createElement("button");
+        groupButton.type = "button";
+        groupButton.textContent = "Add to group";
+        const syncGroup = () => {
+          const selected = groups.find((group) => group.id === groupSelect.value);
+          groupButton.disabled = !helperConfigured || !device.association_verified || !device.ipv4_address ||
+            !selected || selected.id === device.group_id || (!device.assigned_device_id && !selected.profile_id);
+        };
+        groupSelect.disabled = !helperConfigured || !device.association_verified || !device.ipv4_address || !groups.length;
+        groupSelect.addEventListener("change", syncGroup);
+        syncGroup();
+        groupButton.addEventListener("click", () => connectedControlAction(
+          "/api/connected-devices/group", {group_id: groupSelect.value, ipv4_address: device.ipv4_address, mac_address: device.mac_address},
+          groupButton, "Group membership saved and applied."
+        ));
+        const protectionButton = document.createElement("button");
+        protectionButton.type = "button";
+        protectionButton.textContent = device.unaffected ? "Remove protection" : "Make unaffected";
+        protectionButton.setAttribute("aria-label", protectionButton.textContent + " for " + (device.display_name || device.mac_address));
+        protectionButton.addEventListener("click", () => connectedControlAction(
+          device.unaffected ? "/api/unaffected-devices/delete" : "/api/unaffected-devices",
+          {mac_address: device.mac_address, display_name: device.display_name || ""}, protectionButton,
+          device.unaffected ? "Protection removed. Saved profiles can apply again." : "Protection saved and applied. This device is unaffected by profiles."
+        ));
+        controls.append(profileSelect, applyButton, groupSelect, groupButton, protectionButton);
+        [...labelForm.querySelectorAll("[data-draft]"), profileSelect, groupSelect].forEach((field) => {
+          if (draft[field.dataset.draft] !== undefined) field.dataset.dirty = "true";
+          field.addEventListener("input", () => { field.dataset.dirty = "true"; });
+          field.addEventListener("change", () => { field.dataset.dirty = "true"; });
+        });
         row.append(dot, details, state, controls);
         container.appendChild(row);
       });
@@ -2229,18 +2342,88 @@ DASHBOARD_HTML = """<!doctype html>
       setButtonBusy(button, true);
       showMessage("Applying " + profileId + " to " + device.ipv4_address + "...", "working");
       try {
-        await request("/api/connected-devices/apply-profile", "POST", {
+        const result = await request("/api/connected-devices/apply-profile", "POST", {
           ipv4_address: device.ipv4_address,
           mac_address: device.mac_address,
           profile_id: profileId
         });
-        refreshAfterSuccess("Applied " + profileId + " to " + device.ipv4_address + ".");
+        clearConnectedDrafts.add(device.mac_address);
+        refreshAfterSuccess((result.message || "Base profile saved and applied.") + (result.warning ? " " + result.warning : ""));
       } catch (error) {
         showMessage(error.message, "error");
+        await loadConnectedDevices();
       } finally {
         setButtonBusy(button, false);
         setActionBusy(false, "/api/apply");
       }
+    }
+
+    async function connectedControlAction(path, payload, button, success) {
+      setButtonBusy(button, true);
+      showMessage("Saving network settings...", "working");
+      try {
+        const result = await request(path, "POST", payload);
+        clearConnectedDrafts.add(payload.mac_address);
+        refreshAfterSuccess((result.live_applied ? success : result.message || "Settings saved. Apply them in hardware mode.") + (result.warning ? " " + result.warning : ""));
+      } catch (error) {
+        showMessage(error.message, "error");
+        await Promise.all([loadUnaffectedDevices(), loadConnectedDevices()]);
+      } finally {
+        setButtonBusy(button, false);
+      }
+    }
+
+    async function loadUnaffectedDevices() {
+      const container = element("unaffected-devices");
+      try {
+        const data = await request("/api/unaffected-devices", "GET");
+        container.replaceChildren();
+        if (!data.devices.length) {
+          container.textContent = "No devices are protected. Choose Make unaffected beside a connected client.";
+        }
+        data.devices.forEach((device) => {
+          const row = document.createElement("div");
+          row.className = "connected-row saved-device-label-row";
+          const name = document.createElement("div");
+          const title = document.createElement("p");
+          title.className = "connected-address";
+          title.textContent = device.display_name || "Unnamed device";
+          const mac = document.createElement("p");
+          mac.className = "connected-meta";
+          mac.textContent = device.mac_address;
+          name.append(title, mac);
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = "Remove protection";
+          button.setAttribute("aria-label", "Remove protection for " + (device.display_name || device.mac_address));
+          button.addEventListener("click", () => connectedControlAction("/api/unaffected-devices/delete", {mac_address: device.mac_address}, button, "Protection removed. Saved profiles can apply again."));
+          row.append(name, button);
+          container.appendChild(row);
+        });
+      } catch (error) {
+        container.textContent = "Could not load protection: " + error.message;
+      }
+    }
+
+    function updateGroupMemberOptions() {
+      const select = element("group-devices");
+      if (document.activeElement === select) return;
+      const selected = new Set(Array.from(select.selectedOptions).map((option) => option.value));
+      select.replaceChildren();
+      savedDevices.forEach((device) => {
+        const option = document.createElement("option");
+        option.value = device.id;
+        option.textContent = device.name + " (" + device.ipv4_address + ")";
+        option.selected = selected.has(option.value);
+        select.appendChild(option);
+      });
+      connectedClients.filter((device) => !device.assigned_device_id && device.association_verified && device.ipv4_address).forEach((device) => {
+        const option = document.createElement("option");
+        option.value = "live:" + device.mac_address;
+        option.textContent = (device.display_name || device.mac_address) + " (connected · unassigned)";
+        option.selected = selected.has(option.value);
+        select.appendChild(option);
+      });
     }
 
     async function loadConnectedDevices() {
@@ -2975,6 +3158,8 @@ DASHBOARD_HTML = """<!doctype html>
 
     async function loadDevicesForSchedule() {
       const data = await request("/api/devices", "GET");
+      savedDevices = data.devices;
+      updateGroupMemberOptions();
       [
         "schedule-device",
         "timer-device",
@@ -2982,8 +3167,7 @@ DASHBOARD_HTML = """<!doctype html>
         "data-limit-device",
         "service-quota-device",
         "service-assignment-device",
-        "time-quota-device",
-        "group-devices"
+        "time-quota-device"
       ].forEach((selectId) => {
         const deviceSelect = element(selectId);
         deviceSelect.replaceChildren();
@@ -3003,6 +3187,7 @@ DASHBOARD_HTML = """<!doctype html>
       try {
         const data = await request("/api/groups", "GET");
         renderGroups(data);
+        if (lastConnectedData && !element("connected-devices").contains(document.activeElement)) renderConnectedDevices(lastConnectedData);
         const groupSelect = element("group-data-limit-group");
         const selectedGroup = groupSelect.value;
         groupSelect.replaceChildren();
@@ -3391,6 +3576,7 @@ DASHBOARD_HTML = """<!doctype html>
         loadProgressions(),
         loadPrivateDataPanel("policies", loadPolicies),
         loadConnectedDevices(),
+        loadUnaffectedDevices(),
         loadUplink(),
         loadQuotas(),
         loadServiceAssignments(),
@@ -3419,7 +3605,7 @@ DASHBOARD_HTML = """<!doctype html>
       try {
         const data = await request(path, "POST", {});
         if (data.state) renderRuntimeSummary(data.state);
-        refreshAfterSuccess(successMessage);
+        refreshAfterSuccess(successMessage + (data.warning ? " " + data.warning : ""));
       } catch (error) {
         showMessage(error.message, "error");
       } finally {
@@ -3485,21 +3671,38 @@ DASHBOARD_HTML = """<!doctype html>
       }
     });
 
+    element("unaffected-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      await connectedControlAction("/api/unaffected-devices", {
+        mac_address: element("unaffected-mac").value,
+        display_name: element("unaffected-name").value
+      }, event.currentTarget.querySelector("button"), "Protection saved and applied.");
+    });
+
     element("group-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
-        const deviceIds = Array.from(element("group-devices").selectedOptions)
-          .map((option) => option.value);
-        if (!deviceIds.length) throw new Error("Select at least one device for the group.");
-        await request("/api/groups", "POST", {
+        const selectedIds = Array.from(element("group-devices").selectedOptions).map((option) => option.value);
+        const deviceIds = selectedIds.filter((id) => !id.startsWith("live:"));
+        const connected = selectedIds.filter((id) => id.startsWith("live:")).map((id) => {
+          const client = connectedClients.find((device) => "live:" + device.mac_address === id);
+          if (!client) throw new Error("A selected client disconnected. Refresh the list.");
+          return {ipv4_address: client.ipv4_address, mac_address: client.mac_address};
+        });
+        if (!selectedIds.length) throw new Error("Select at least one device for the group.");
+        const result = await request("/api/groups", "POST", {
           id: element("group-id").value,
           name: element("group-name").value,
           profile_id: element("group-profile").value || null,
-          device_ids: deviceIds
+          device_ids: deviceIds,
+          connected_clients: connected
         });
-        refreshAfterSuccess("Device group saved.");
+        savedDevices.filter((device) => deviceIds.includes(device.id)).forEach((device) => clearConnectedDrafts.add(device.mac_address));
+        connected.forEach((device) => clearConnectedDrafts.add(device.mac_address));
+        refreshAfterSuccess((result.live_applied ? "Device group saved and applied." : result.message || "Device group saved.") + (result.warning ? " " + result.warning : ""));
       } catch (error) {
         showMessage(error.message, "error");
+        await Promise.all([loadGroups(), loadConnectedDevices()]);
       }
     });
 
@@ -3938,8 +4141,10 @@ def _connected_device_payload(
     saved_label = labels_by_mac.get(mac_address)
     hostname = device.get("hostname")
     suggested_type = guess_device_type(hostname)
-    ipv4_address = device.get("ipv4_address")
-    assignment = assignments_by_address.get(ipv4_address)
+    assignment = next(
+        (saved for saved in assignments_by_address.values() if saved.mac_address == mac_address),
+        None,
+    )
     return {
         **device,
         "display_name": (
@@ -3954,7 +4159,9 @@ def _connected_device_payload(
         "device_type_source": (
             "saved"
             if saved_label is not None
-            else "hostname suggestion" if suggested_type != "unknown" else "unknown"
+            else "hostname suggestion"
+            if suggested_type != "unknown"
+            else "unknown"
         ),
         "assigned_device_id": assignment.id if assignment is not None else None,
         "assigned_device_name": assignment.name if assignment is not None else None,
@@ -4225,6 +4432,11 @@ class ControlServer(HTTPServer):
         if path == "/api/devices":
             devices = [_device_payload(device) for device in self.repository.list_devices()]
             return HTTPStatus.OK, "application/json", _json_bytes({"devices": devices})
+        if path == "/api/unaffected-devices":
+            return HTTPStatus.OK, "application/json", _json_bytes({
+                "devices": [asdict(device) for device in self.repository.list_unaffected_devices()],
+                "limit": 256,
+            })
         if path == "/api/groups":
             groups = [
                 _device_group_payload(group, repository=self.repository)
@@ -4395,13 +4607,21 @@ class ControlServer(HTTPServer):
                 devices = snapshot["devices"]
             except HelperClientError:
                 LOGGER.exception("could not inspect connected clients")
-                return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
-                    {"error": "could not inspect connected clients"}
+                return (
+                    HTTPStatus.BAD_GATEWAY,
+                    "application/json",
+                    _json_bytes({"error": "could not inspect connected clients"}),
                 )
             assignments_by_address = {
                 str(device.ipv4_address): device for device in self.repository.list_devices()
             }
             labels_by_mac = self.repository.list_connected_device_labels()
+            protected = {item.mac_address for item in self.repository.list_unaffected_devices()}
+            groups_by_device = {
+                device_id: group
+                for group in self.repository.list_device_groups()
+                for device_id in group.device_ids
+            }
             devices = [
                 _connected_device_payload(
                     device,
@@ -4410,14 +4630,22 @@ class ControlServer(HTTPServer):
                 )
                 for device in devices
             ]
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                {
-                    "available": True,
-                    "association_status_available": snapshot[
-                        "association_status_available"
-                    ],
-                    "devices": devices,
-                }
+            for client in devices:
+                group = groups_by_device.get(client["assigned_device_id"])
+                client["unaffected"] = client["mac_address"] in protected
+                client["group_id"] = group.id if group else None
+                client["group_name"] = group.name if group else None
+                client["group_profile_id"] = group.profile_id if group else None
+            return (
+                HTTPStatus.OK,
+                "application/json",
+                _json_bytes(
+                    {
+                        "available": True,
+                        "association_status_available": snapshot["association_status_available"],
+                        "devices": devices,
+                    }
+                ),
             )
         if path == "/api/observations":
             observations = self.repository.list_domain_observations()
@@ -4445,34 +4673,45 @@ class ControlServer(HTTPServer):
                 }
                 for address, domains in sorted(grouped.items())
             ]
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                {
-                    "available": self.helper_client is not None,
-                    "devices": devices,
-                    "total_domains": sum(len(domains) for domains in grouped.values()),
-                    "message": (
-                        None
-                        if self.helper_client is not None
-                        else "traffic discovery is unavailable in configuration-only mode"
-                    ),
-                }
+            return (
+                HTTPStatus.OK,
+                "application/json",
+                _json_bytes(
+                    {
+                        "available": self.helper_client is not None,
+                        "devices": devices,
+                        "total_domains": sum(len(domains) for domains in grouped.values()),
+                        "message": (
+                            None
+                            if self.helper_client is not None
+                            else "traffic discovery is unavailable in configuration-only mode"
+                        ),
+                    }
+                ),
             )
         if path == "/api/plan":
             plan = (
                 self.scheduler.build_plan(repository=self.repository)
                 if self.scheduler is not None
-                else compile_stored_plan(repository=self.repository)
+                else compile_stored_plan(
+                    repository=self.repository,
+                    connected_snapshot=station_snapshot(self.helper_client)
+                    if self.helper_client
+                    else None,
+                )
             )
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                {"plan": plan_to_payload(plan)}
-            )
+            return HTTPStatus.OK, "application/json", _json_bytes({"plan": plan_to_payload(plan)})
         if path == "/api/state":
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                {"state": _runtime_state_payload(self.repository.get_runtime_state())}
+            return (
+                HTTPStatus.OK,
+                "application/json",
+                _json_bytes({"state": _runtime_state_payload(self.repository.get_runtime_state())}),
             )
         if path == "/api/action-history":
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                {"actions": list(self.repository.list_recent_actions())}
+            return (
+                HTTPStatus.OK,
+                "application/json",
+                _json_bytes({"actions": list(self.repository.list_recent_actions())}),
             )
         if path == "/api/random-website-analytics":
             try:
@@ -4648,22 +4887,11 @@ class ControlServer(HTTPServer):
                 {"device": _device_payload(device)}
             )
 
-        if path == "/api/groups":
-            try:
-                group = _device_group_from_payload(payload)
-                for device_id in group.device_ids:
-                    if self.repository.get_device(device_id) is None:
-                        raise ValueError("device does not exist")
-                if group.profile_id is not None and self.repository.get_profile(group.profile_id) is None:
-                    raise ValueError("profile does not exist")
-                self.repository.save_device_group(group)
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid device group configuration"}
-                )
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                {"group": _device_group_payload(group, repository=self.repository)}
-            )
+        if path in ("/api/unaffected-devices", "/api/unaffected-devices/delete"):
+            return self._change_unaffected_device(payload, remove=path.endswith("/delete"))
+
+        if path in ("/api/groups", "/api/connected-devices/group"):
+            return self._save_connected_group(payload, existing=path.endswith("/group"))
 
         if path == "/api/groups/delete":
             try:
@@ -5279,40 +5507,225 @@ class ControlServer(HTTPServer):
             {"policies": _policies_payload(self.repository)}
         )
 
-    def _apply_profile_to_connected_device(
-        self, payload: Dict[str, Any]
-    ) -> Tuple[int, str, bytes]:
-        if self.helper_client is None:
-            return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
-                {"error": "network helper is not configured"}
+    def _validate_saved_plan(self) -> None:
+        clients = eligible_clients(self.repository)
+        eligible_ids = {device.id for device in clients.devices}
+        rules = len(eligible_ids) + sum(
+            bool(item.enabled and item.device_id in eligible_ids)
+            for items in (
+                self.repository.list_service_quotas(),
+                self.repository.list_time_quotas(),
+                self.repository.list_service_assignments(),
             )
-        try:
-            device = _connected_device_from_payload(payload, self.repository)
-        except (KeyError, TypeError, ValueError):
-            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                {"error": "invalid connected-device profile assignment"}
+            for item in items
+        )
+        if rules > 15:
+            raise PlanError(
+                "At most 15 affected devices and service rules can be active. Remove an assignment or keep the device unaffected."
             )
-        try:
-            snapshot = self.helper_client.connected_device_snapshot()
-        except HelperClientError:
-            LOGGER.exception("could not verify the connected client before profile assignment")
-            return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
-                {"error": "current Wi-Fi clients could not be verified"}
-            )
+        compile_stored_plan(repository=self.repository)
+
+    def _verify_selected_client(self, device: Device, snapshot: dict) -> None:
         if not snapshot["association_status_available"] or not any(
             client["association_verified"]
             and client["ipv4_address"] == str(device.ipv4_address)
             and client["mac_address"] == device.mac_address
             for client in snapshot["devices"]
         ):
-            return HTTPStatus.CONFLICT, "application/json", _json_bytes(
-                {"error": "the selected client is no longer verified on JitterSim Wi-Fi"}
+            raise ValueError(
+                "The selected client is no longer verified on JitterSim Wi-Fi. Refresh the list."
             )
-        self.repository.save_device(device)
-        status, content_type, body = self._apply_configuration()
-        response = json.loads(body.decode("utf-8"))
-        response["device"] = _device_payload(device)
+
+    def _saved_control_response(self, fields: dict, snapshot=None):
+        if self.helper_client is None:
+            return (
+                HTTPStatus.OK,
+                "application/json",
+                _json_bytes(
+                    {
+                        **fields,
+                        "live_applied": False,
+                        "message": "Saved. Connect the network helper to apply this change.",
+                    }
+                ),
+            )
+        status, content_type, body = self._apply_configuration_locked(
+            connected_snapshot=snapshot, sample_usage=False
+        )
+        response = json.loads(body)
+        response.update(fields)
+        response["live_applied"] = status == HTTPStatus.OK
+        if status != HTTPStatus.OK:
+            response["error"] = (
+                "Settings saved but the network update failed. Protection is not confirmed. "
+                + response.get("error", "")
+            )
         return status, content_type, _json_bytes(response)
+
+    def _change_unaffected_device(self, payload: dict, *, remove: bool):
+        operation = self.scheduler.control_operation() if self.scheduler else nullcontext()
+        with operation:
+            try:
+                item = UnaffectedDevice(
+                    payload["mac_address"], payload.get("display_name", ""), int(time.time())
+                )
+                if self.scheduler:
+                    self.scheduler.sample_before_control_change(repository=self.repository)
+                with self.repository.transaction():
+                    if remove:
+                        self.repository.delete_unaffected_device(item.mac_address)
+                    else:
+                        self.repository.save_unaffected_device(item)
+                    self._validate_saved_plan()
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
+            return self._saved_control_response(
+                {
+                    "devices": [
+                        asdict(device) for device in self.repository.list_unaffected_devices()
+                    ]
+                }
+            )
+
+    def _save_connected_group(self, payload: dict, *, existing: bool):
+        operation = self.scheduler.control_operation() if self.scheduler else nullcontext()
+        with operation:
+            try:
+                if existing:
+                    group = self.repository.get_device_group(payload["group_id"])
+                    if group is None:
+                        raise ValueError("The selected group no longer exists")
+                    connected = [payload]
+                    device_ids = list(group.device_ids)
+                else:
+                    connected = payload.get("connected_clients", [])
+                    device_ids = list(payload.get("device_ids", []))
+                    group = None
+                if not isinstance(connected, list) or len(connected) > 15:
+                    raise ValueError("Select at most 15 connected clients")
+                snapshot = station_snapshot(self.helper_client) if connected else None
+                if self.scheduler:
+                    self.scheduler.sample_before_control_change(repository=self.repository)
+                with self.repository.transaction():
+                    profile_id = group.profile_id if existing else payload.get("profile_id") or None
+                    for client in connected:
+                        mac = normalize_exempt_mac(client["mac_address"])
+                        saved = self.repository.get_device_by_mac_address(mac)
+                        base_profile = saved.profile_id if saved else profile_id
+                        if base_profile is None:
+                            raise ValueError(
+                                "Choose a group profile before adding an unassigned client"
+                            )
+                        device = _connected_device_from_payload(
+                            {**client, "profile_id": base_profile}, self.repository
+                        )
+                        self._verify_selected_client(device, snapshot)
+                        self.repository.save_device(device)
+                        if device.id not in device_ids:
+                            device_ids.append(device.id)
+                    group = DeviceGroup(
+                        id=group.id if existing else payload["id"],
+                        name=group.name if existing else payload["name"],
+                        device_ids=tuple(device_ids),
+                        profile_id=profile_id,
+                    )
+                    for prior in self.repository.list_device_groups():
+                        if prior.id != group.id and set(prior.device_ids) & set(group.device_ids):
+                            raise ValueError(
+                                f"A selected device already belongs to {prior.name}. Remove it from that group first."
+                            )
+                    self.repository.save_device_group(group)
+                    self._validate_saved_plan()
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
+            return self._saved_control_response(
+                {"group": _device_group_payload(group, repository=self.repository)}, snapshot
+            )
+
+    def _base_profile_feedback(self, device: Device) -> str:
+        now = int(time.time())
+        group = next(
+            (item for item in self.repository.list_device_groups() if device.id in item.device_ids),
+            None,
+        )
+        data_limit = self.repository.get_data_limit(device.id)
+        group_limit = self.repository.get_group_data_limit(group.id) if group else None
+        progression = next(
+            (
+                item
+                for item in self.repository.list_active_progressions(now=now)
+                if item.device_id == device.id
+            ),
+            None,
+        )
+        timer = next(
+            (
+                item
+                for item in self.repository.list_active_timers(now=now)
+                if item.device_id == device.id
+            ),
+            None,
+        )
+        schedule = active_schedule(
+            schedules=self.repository.list_schedules(),
+            device_id=device.id,
+            moment=datetime.fromtimestamp(now),
+        )
+        if data_limit and data_limit.enabled and data_limit.used_bytes >= data_limit.limit_bytes:
+            current = f"The device data limit currently uses {data_limit.profile_id}."
+        elif (
+            group_limit
+            and group_limit.enabled
+            and group_limit.used_bytes >= group_limit.limit_bytes
+        ):
+            current = (
+                f"The shared data limit for {group.name} currently uses {group_limit.profile_id}."
+            )
+        elif progression:
+            current = f"Progression {progression.id} is currently active."
+        elif timer:
+            current = f"Timer {timer.id} currently uses {timer.profile_id}."
+        elif schedule:
+            current = f"Schedule {schedule.id} currently uses {schedule.profile_id}."
+        elif group and group.profile_id:
+            current = f"Group {group.name} currently uses {group.profile_id}."
+        else:
+            current = "This is the current device profile."
+        return f"Base profile {device.profile_id} saved. " + current
+
+    def _apply_profile_to_connected_device(self, payload: dict):
+        if self.helper_client is None:
+            return (
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "application/json",
+                _json_bytes({"error": "network helper is not configured"}),
+            )
+        operation = self.scheduler.control_operation() if self.scheduler else nullcontext()
+        with operation:
+            try:
+                device = _connected_device_from_payload(payload, self.repository)
+                if device.mac_address in {
+                    item.mac_address for item in self.repository.list_unaffected_devices()
+                }:
+                    raise ValueError(
+                        "This device is unaffected by profiles. Remove its protection before applying a profile."
+                    )
+                snapshot = station_snapshot(self.helper_client)
+                self._verify_selected_client(device, snapshot)
+                if self.scheduler:
+                    self.scheduler.sample_before_control_change(repository=self.repository)
+                with self.repository.transaction():
+                    self.repository.save_device(device)
+                    self._validate_saved_plan()
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
+            return self._saved_control_response(
+                {
+                    "device": _device_payload(device),
+                    "message": self._base_profile_feedback(device),
+                },
+                snapshot,
+            )
 
     def _quota_counter(self, kind: str, identifier: str) -> Optional[int]:
         """Read one current helper counter for a manual quota reset."""
@@ -5339,17 +5752,33 @@ class ControlServer(HTTPServer):
         group = self.repository.get_device_group(group_id)
         if group is None:
             return None
+        eligible_ids = (
+            self.scheduler.counter_device_ids(repository=self.repository)
+            if self.scheduler
+            else {
+                device.id
+                for device in eligible_clients(
+                    self.repository,
+                    station_snapshot(self.helper_client)
+                    if self.repository.list_unaffected_devices()
+                    else None,
+                ).devices
+            }
+        )
+        member_ids = tuple(device_id for device_id in group.device_ids if device_id in eligible_ids)
         try:
             counters = self.helper_client.traffic_counters().get("devices", {})
         except HelperClientError:
             LOGGER.warning("could not read group quota counter before reset", exc_info=True)
             return None
         if not isinstance(counters, dict) or any(
-            device_id not in counters for device_id in group.device_ids
+            device_id not in counters for device_id in member_ids
         ):
             return None
-        values = [counters[device_id] for device_id in group.device_ids]
-        return sum(values) if all(isinstance(value, int) and value >= 0 for value in values) else None
+        values = [counters[device_id] for device_id in member_ids]
+        return (
+            sum(values) if all(isinstance(value, int) and value >= 0 for value in values) else None
+        )
 
     def _apply_quota_change(
         self,
@@ -5359,12 +5788,16 @@ class ControlServer(HTTPServer):
         """Return saved settings and apply them when hardware is available."""
 
         if self.helper_client is None:
-            return HTTPStatus.OK, "application/json", _json_bytes(
-                {
-                    key: value,
-                    "live_applied": False,
-                    "message": "settings saved; apply the configuration in hardware mode to start them",
-                }
+            return (
+                HTTPStatus.OK,
+                "application/json",
+                _json_bytes(
+                    {
+                        key: value,
+                        "live_applied": False,
+                        "message": "settings saved; apply the configuration in hardware mode to start them",
+                    }
+                ),
             )
         status, content_type, body = self._apply_configuration()
         response = json.loads(body.decode("utf-8"))
@@ -5373,24 +5806,43 @@ class ControlServer(HTTPServer):
         return status, content_type, _json_bytes(response)
 
     def _apply_configuration(self) -> Tuple[int, str, bytes]:
-        operation = self.scheduler.control_operation() if self.scheduler is not None else nullcontext()
+        operation = (
+            self.scheduler.control_operation() if self.scheduler is not None else nullcontext()
+        )
         with operation:
             return self._apply_configuration_locked()
 
-    def _apply_configuration_locked(self) -> Tuple[int, str, bytes]:
+    def _apply_configuration_locked(
+        self, connected_snapshot=None, *, sample_usage=True
+    ) -> Tuple[int, str, bytes]:
         if self.helper_client is None:
-            return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
-                {"error": "network helper is not configured"}
+            return (
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "application/json",
+                _json_bytes({"error": "network helper is not configured"}),
             )
+        if self.scheduler and sample_usage:
+            self.scheduler.sample_before_control_change(repository=self.repository)
         try:
             plan = (
-                self.scheduler.build_plan(repository=self.repository)
+                self.scheduler.build_plan(
+                    repository=self.repository, connected_snapshot=connected_snapshot
+                )
                 if self.scheduler is not None
-                else compile_stored_plan(repository=self.repository)
+                else compile_stored_plan(
+                    repository=self.repository,
+                    connected_snapshot=(
+                        connected_snapshot
+                        if connected_snapshot is not None
+                        else station_snapshot(self.helper_client)
+                    ),
+                )
             )
         except (PlanError, StorageError):
-            return HTTPStatus.CONFLICT, "application/json", _json_bytes(
-                {"error": "stored configuration cannot be applied"}
+            return (
+                HTTPStatus.CONFLICT,
+                "application/json",
+                _json_bytes({"error": "stored configuration cannot be applied"}),
             )
         self.repository.update_runtime_state(
             observed_state="applying",
@@ -5408,17 +5860,22 @@ class ControlServer(HTTPServer):
                 last_result="failure",
                 last_error="network helper apply failed",
             )
-            return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
-                {
-                    "error": "network helper apply failed",
-                    "hint": (
-                        "On the Pi, run sudo journalctl -u jittersim-helper.service "
-                        "-n 80 --no-pager to see which network step failed and "
-                        "whether cleanup completed."
-                    ),
-                    "state": _runtime_state_payload(state),
-                }
+            return (
+                HTTPStatus.BAD_GATEWAY,
+                "application/json",
+                _json_bytes(
+                    {
+                        "error": "network helper apply failed",
+                        "hint": (
+                            "On the Pi, run sudo journalctl -u jittersim-helper.service "
+                            "-n 80 --no-pager to see which network step failed and "
+                            "whether cleanup completed."
+                        ),
+                        "state": _runtime_state_payload(state),
+                    }
+                ),
             )
+        self.repository.rebase_quota_counters(now=int(time.time()))
         state = self.repository.update_runtime_state(
             observed_state="applied",
             last_action="apply",
@@ -5427,19 +5884,37 @@ class ControlServer(HTTPServer):
         )
         if self.scheduler is not None:
             self.scheduler.activate(applied_payload=plan_to_payload(plan))
-        return HTTPStatus.OK, "application/json", _json_bytes(
-            {"result": result, "state": _runtime_state_payload(state)}
+        return (
+            HTTPStatus.OK,
+            "application/json",
+            _json_bytes(
+                {
+                    "result": result,
+                    "state": _runtime_state_payload(state),
+                    "unverified_device_ids": list(plan.unverified_device_ids),
+                    "warning": (
+                        "Profiles were skipped for devices whose current Wi-Fi identity could not be verified: "
+                        + ", ".join(plan.unverified_device_ids)
+                        if plan.unverified_device_ids
+                        else None
+                    ),
+                }
+            ),
         )
 
     def _reset_network(self) -> Tuple[int, str, bytes]:
-        operation = self.scheduler.control_operation() if self.scheduler is not None else nullcontext()
+        operation = (
+            self.scheduler.control_operation() if self.scheduler is not None else nullcontext()
+        )
         with operation:
             return self._reset_network_locked()
 
     def _reset_network_locked(self) -> Tuple[int, str, bytes]:
         if self.helper_client is None:
-            return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
-                {"error": "network helper is not configured"}
+            return (
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "application/json",
+                _json_bytes({"error": "network helper is not configured"}),
             )
         if self.scheduler is not None:
             self.scheduler.pause()
@@ -5950,14 +6425,12 @@ def _policies_from_payload(payload: Dict[str, Any]) -> Tuple[MacPolicy, WebsiteP
     )
 
 
-def _connected_device_from_payload(
-    payload: Dict[str, Any], repository: ConfigRepository
-) -> Device:
+def _connected_device_from_payload(payload: Dict[str, Any], repository: ConfigRepository) -> Device:
     """Build an assignment for a visible client while preserving existing names and IDs."""
 
     ipv4_address = payload["ipv4_address"]
     profile_id = payload["profile_id"]
-    mac_address = payload.get("mac_address")
+    mac_address = normalize_exempt_mac(payload["mac_address"])
     if repository.get_profile(profile_id) is None:
         raise ValueError("profile does not exist")
 
@@ -5967,23 +6440,21 @@ def _connected_device_from_payload(
         ipv4_address=ipv4_address,
         profile_id=profile_id,
     )
-    existing_by_address = repository.get_device_by_ipv4_address(str(address_only.ipv4_address))
-    if existing_by_address is not None:
-        return Device(
-            id=existing_by_address.id,
-            name=existing_by_address.name,
-            ipv4_address=address_only.ipv4_address,
-            profile_id=profile_id,
-            mac_address=mac_address or existing_by_address.mac_address,
+    existing = repository.get_device_by_mac_address(mac_address)
+    occupant = repository.get_device_by_ipv4_address(str(address_only.ipv4_address))
+    if occupant is not None and occupant.mac_address not in (None, mac_address):
+        raise ValueError(
+            "This IP belongs to a different saved device. Update its old IP assignment first."
         )
-
-    generated_id = "client-" + str(address_only.ipv4_address).replace(".", "-")
-    existing_generated_id = repository.get_device(generated_id)
-    if existing_generated_id is not None:
-        raise ValueError("generated connected-device ID is already assigned")
+    if occupant is not None and existing is not None and occupant.id != existing.id:
+        raise ValueError("This IP conflicts with another saved assignment")
+    existing = existing or occupant
+    generated_id = "client-" + mac_address.replace(":", "")
+    if existing is None and repository.get_device(generated_id) is not None:
+        raise ValueError("The detected client ID conflicts with another saved assignment")
     return Device(
-        id=generated_id,
-        name=f"Client {address_only.ipv4_address}",
+        id=existing.id if existing else generated_id,
+        name=existing.name if existing else f"Client {address_only.ipv4_address}",
         ipv4_address=address_only.ipv4_address,
         profile_id=profile_id,
         mac_address=mac_address,

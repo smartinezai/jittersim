@@ -13,6 +13,7 @@ from ipaddress import IPv4Address, ip_address, ip_network
 from pathlib import Path
 from typing import Callable, Optional, Sequence, Tuple
 
+from jittersim.config.exemptions import normalize_exempt_mac
 from jittersim.config.models import ValidationError, normalize_domain
 from jittersim.engine.codec import PlanCodecError, plan_from_payload
 from jittersim.engine.plan import NetworkPlan
@@ -62,11 +63,26 @@ def _plan_generation(path: Path) -> Optional[tuple]:
     return metadata.st_dev, metadata.st_ino, metadata.st_mtime_ns
 
 
-def select_mark(plan: Optional[NetworkPlan], *, client_ip: IPv4Address, host: str) -> Tuple[int, str]:
+def select_mark(
+    plan: Optional[NetworkPlan],
+    *,
+    client_ip: IPv4Address,
+    host: str,
+    client_mac: Optional[str] = None,
+) -> Tuple[int, str]:
     """Choose the one hostname assignment or the device's ordinary mark."""
 
     if plan is None:
         return 0, "reset"
+    if plan.protected_mac_addresses:
+        if client_mac is None:
+            raise ProxyError("current Wi-Fi identity could not be verified")
+        if client_mac in plan.mac_policy.denylist or (
+            plan.mac_policy.mode == "allowlist" and client_mac not in plan.mac_policy.allowlist
+        ):
+            raise ProxyError("client is blocked by global access rules")
+        if client_mac in plan.protected_mac_addresses:
+            return 0, "unaffected"
     base_rule = next((rule for rule in plan.mark_rules if rule.ipv4_address == client_ip), None)
     if base_rule is None:
         raise ProxyError("client does not have an assigned device")
@@ -80,7 +96,12 @@ def select_mark(plan: Optional[NetworkPlan], *, client_ip: IPv4Address, host: st
     return base_rule.mark, "device"
 
 
-def destination_allowed(plan: Optional[NetworkPlan], client_ip: IPv4Address, address: str) -> bool:
+def destination_allowed(
+    plan: Optional[NetworkPlan],
+    client_ip: IPv4Address,
+    address: str,
+    client_mac: Optional[str] = None,
+) -> bool:
     """Preserve existing address blocks for traffic terminating on the proxy."""
 
     if plan is None:
@@ -88,14 +109,24 @@ def destination_allowed(plan: Optional[NetworkPlan], client_ip: IPv4Address, add
     destination = ip_address(address)
     if destination in plan.global_blocked_addresses:
         return False
+    if (
+        plan.global_allowed_addresses is not None
+        and destination not in plan.global_allowed_addresses
+    ):
+        return False
+    if client_mac in plan.protected_mac_addresses:
+        return True
     for website_filter in plan.website_filters:
         if website_filter.device_ip != client_ip:
             continue
-        if destination.version != 4:
+        if destination.version != 4 and website_filter.allowed_addresses is not None:
             return False
         if destination in website_filter.blocked_addresses:
             return False
-        if not website_filter.allowed_addresses or destination not in website_filter.allowed_addresses:
+        if (
+            website_filter.allowed_addresses is not None
+            and destination not in website_filter.allowed_addresses
+        ):
             return False
     return True
 
@@ -146,14 +177,18 @@ def _copy_stream(
     destination: socket.socket,
     plan_path: Path,
     generation: Optional[tuple],
+    allow_plan_change: Optional[Callable[[], bool]] = None,
 ) -> None:
     try:
         while True:
             chunk = source.recv(COPY_BYTES)
             if not chunk:
                 break
-            if _plan_generation(plan_path) != generation:
-                break
+            current_generation = _plan_generation(plan_path)
+            if current_generation != generation:
+                if allow_plan_change is None or not allow_plan_change():
+                    break
+                generation = current_generation
             destination.sendall(chunk)
     except (OSError, socket.timeout):
         pass
@@ -177,7 +212,12 @@ class _ProxyHandler(socketserver.BaseRequestHandler):
             client_ip = self.server.identify_client(peer_ip)
             host, first_bytes = _read_connect_request(client)
             plan, generation = _read_active_plan(self.server.active_plan_path)
-            mark, assignment_id = select_mark(plan, client_ip=client_ip, host=host)
+            client_mac = (
+                self.server.identify_mac(peer_ip) if plan and plan.protected_mac_addresses else None
+            )
+            mark, assignment_id = select_mark(
+                plan, client_ip=client_ip, host=host, client_mac=client_mac
+            )
             try:
                 addresses = self.server.resolver.submit(self.server.resolve_addresses, host).result(
                     timeout=RESOLVE_TIMEOUT_SECONDS
@@ -188,7 +228,7 @@ class _ProxyHandler(socketserver.BaseRequestHandler):
                 raise ProxyError("destination has no public address")
             upstream = None
             for family, socktype, protocol, address in addresses:
-                if not destination_allowed(plan, client_ip, address[0]):
+                if not destination_allowed(plan, client_ip, address[0], client_mac):
                     continue
                 candidate = socket.socket(family, socktype, protocol)
                 try:
@@ -207,7 +247,30 @@ class _ProxyHandler(socketserver.BaseRequestHandler):
             if upstream is None:
                 raise ProxyError("destination connection failed")
             with upstream:
-                if _plan_generation(self.server.active_plan_path) != generation:
+
+                def keep_protected_tunnel() -> bool:
+                    try:
+                        current_plan, _ = _read_active_plan(self.server.active_plan_path)
+                        current_mac = self.server.identify_mac(peer_ip)
+                        return (
+                            assignment_id == "unaffected"
+                            and current_plan is not None
+                            and current_mac == client_mac
+                            and select_mark(
+                                current_plan, client_ip=client_ip, host=host, client_mac=current_mac
+                            )[1]
+                            == "unaffected"
+                            and destination_allowed(
+                                current_plan, client_ip, upstream.getpeername()[0], current_mac
+                            )
+                        )
+                    except (OSError, ProxyError, ValueError):
+                        return False
+
+                allow_change = keep_protected_tunnel if assignment_id == "unaffected" else None
+                if _plan_generation(self.server.active_plan_path) != generation and not (
+                    allow_change and allow_change()
+                ):
                     raise ProxyError("network plan changed while opening the tunnel")
                 self.server.mark_socket(client, mark)
                 client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -218,11 +281,13 @@ class _ProxyHandler(socketserver.BaseRequestHandler):
                     upstream.sendall(first_bytes)
                 upload = threading.Thread(
                     target=_copy_stream,
-                    args=(client, upstream, self.server.active_plan_path, generation),
+                    args=(client, upstream, self.server.active_plan_path, generation, allow_change),
                     daemon=True,
                 )
                 upload.start()
-                _copy_stream(upstream, client, self.server.active_plan_path, generation)
+                _copy_stream(
+                    upstream, client, self.server.active_plan_path, generation, allow_change
+                )
                 upload.join(timeout=1)
             LOGGER.debug("browser tunnel closed for %s", assignment_id)
         except (OSError, ProxyError, ValueError) as error:
@@ -250,6 +315,7 @@ class BrowserProxyServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         mark_socket: Callable[[socket.socket, int], None] = _set_socket_mark,
         resolve_addresses: Callable[[str], list] = _resolve_public_addresses,
         identify_client: Callable[[IPv4Address], IPv4Address] = lambda address: address,
+        identify_mac: Optional[Callable[[IPv4Address], Optional[str]]] = None,
     ) -> None:
         self.active_plan_path = active_plan_path
         self.client_network = ip_network(client_network, strict=True)
@@ -260,6 +326,7 @@ class BrowserProxyServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.mark_socket = mark_socket
         self.resolve_addresses = resolve_addresses
         self.identify_client = identify_client
+        self.identify_mac = identify_mac or _live_client_mac
         self.resolver = ThreadPoolExecutor(max_workers=8, thread_name_prefix="proxy-dns")
         self.connections = threading.BoundedSemaphore(32)
         super().__init__(address, _ProxyHandler)
@@ -283,6 +350,25 @@ class BrowserProxyServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     def server_close(self) -> None:
         super().server_close()
         self.resolver.shutdown(wait=False, cancel_futures=True)
+
+
+def _live_client_mac(address: IPv4Address) -> Optional[str]:
+    from .helper import HelperClient, HelperClientError
+
+    try:
+        snapshot = HelperClient(
+            socket_path=Path("/run/jittersim/helper.sock"), timeout_seconds=3
+        ).connected_device_snapshot()
+        matches = [
+            client["mac_address"]
+            for client in snapshot["devices"]
+            if snapshot["association_status_available"]
+            and client["association_verified"]
+            and client["ipv4_address"] == str(address)
+        ]
+        return normalize_exempt_mac(matches[0]) if len(matches) == 1 else None
+    except (HelperClientError, ValueError, OSError):
+        return None
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

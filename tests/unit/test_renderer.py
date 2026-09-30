@@ -36,8 +36,8 @@ class RendererTests(unittest.TestCase):
             plan=plan,
             topology=Topology(uplink_interface="enp1s0", test_interface="wlp2s0"),
         )
-        self.assertEqual([command.executable for command in commands], ["nft", "nft"])
-        self.assertIn("add chain inet jittersim forward", commands[1].stdin)
+        self.assertEqual([command.executable for command in commands], ["nft"])
+        self.assertIn("add chain inet jittersim forward", commands[0].stdin)
 
     def test_renders_marks_and_direction_specific_queues(self) -> None:
         profiles = {
@@ -79,16 +79,15 @@ class RendererTests(unittest.TestCase):
             topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
         )
 
-        self.assertTrue(commands[0].ignore_failure)
-        self.assertEqual(commands[0].argv, ("nft", "delete", "table", "inet", "jittersim"))
-        self.assertEqual(commands[1].argv, ("nft", "-f", "-"))
-        self.assertIn("ip saddr 192.168.50.10 meta mark set 1", commands[1].stdin or "")
-        self.assertIn("ip daddr 192.168.50.11 meta mark set 2", commands[1].stdin or "")
-        self.assertIn("usage-service alice-video upload", commands[1].stdin or "")
-        self.assertIn("apply-service-quota alice-video download", commands[1].stdin or "")
-        self.assertIn("meta mark set 3", commands[1].stdin or "")
-        self.assertIn("add chain inet jittersim output", commands[1].stdin or "")
-        self.assertIn("oifname \"eth0\" meta mark 1 counter", commands[1].stdin or "")
+        self.assertFalse(commands[0].ignore_failure)
+        self.assertEqual(commands[0].argv, ("nft", "-f", "-"))
+        self.assertIn("ip saddr 192.168.50.10 meta mark set 1", commands[0].stdin or "")
+        self.assertIn("ip daddr 192.168.50.11 meta mark 0 meta mark set 2", commands[0].stdin or "")
+        self.assertIn("usage-service alice-video upload", commands[0].stdin or "")
+        self.assertIn("apply-service-quota alice-video download", commands[0].stdin or "")
+        self.assertIn("meta mark set 3", commands[0].stdin or "")
+        self.assertIn("add chain inet jittersim output", commands[0].stdin or "")
+        self.assertIn("oifname \"eth0\" meta mark 1 counter", commands[0].stdin or "")
 
         root_commands = [
             command for command in commands if "create project queue root" in command.purpose
@@ -168,9 +167,12 @@ class RendererTests(unittest.TestCase):
         )
 
         self.assertEqual(commands[0].argv, ("nft", "delete", "table", "inet", "jittersim"))
+        self.assertEqual(
+            commands[1].argv, ("nft", "delete", "table", "netdev", "jittersim_download")
+        )
         self.assertTrue(all(command.ignore_failure for command in commands))
         self.assertEqual(
-            [command.argv for command in commands[1:]],
+            [command.argv for command in commands[2:]],
             [
                 ("tc", "qdisc", "del", "dev", "eth0", "root", "handle", "10:"),
                 ("tc", "qdisc", "del", "dev", "wlan0", "root", "handle", "10:"),
@@ -195,7 +197,7 @@ class RendererTests(unittest.TestCase):
         nft_script = render_command_plan(
             plan=plan,
             topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
-        )[1].stdin
+        )[0].stdin
 
         self.assertIn("ether saddr { aa:bb:cc:dd:ee:ff } drop", nft_script or "")
         self.assertNotIn("meta nfproto ipv6 drop", nft_script or "")

@@ -32,6 +32,9 @@ python3 "$SOURCE_DIR/deploy/raspberry-pi/preflight.py" \
 
 apt-get install -y dnsmasq-base iw nftables openssl python3-venv tcpdump
 
+# Verify the actual kernel hook before replacing live profile rules.
+python3 "$SOURCE_DIR/deploy/raspberry-pi/check-egress-hook.py" "$JITTERSIM_TEST_INTERFACE"
+
 install -d -m 0750 -o root -g jittersim "$CONFIG_DIR"
 install -d -m 0750 -o jittersim -g jittersim "$DATA_DIR"
 chown -R jittersim:jittersim "$DATA_DIR"

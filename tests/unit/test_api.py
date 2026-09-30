@@ -943,6 +943,10 @@ class ControlServerTests(unittest.TestCase):
                         "assigned_device_id": None,
                         "assigned_device_name": None,
                         "assigned_profile_id": None,
+                        "unaffected": False,
+                        "group_id": None,
+                        "group_name": None,
+                        "group_profile_id": None,
                     }
                 ],
             },
@@ -963,7 +967,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(content_type, "application/json")
         response = json.loads(body)
-        self.assertEqual(response["device"]["id"], "client-192-168-50-178")
+        self.assertEqual(response["device"]["id"], "client-dc1ed53e974c")
         self.assertEqual(response["device"]["profile_id"], "slow")
         self.assertEqual(response["device"]["mac_address"], "dc:1e:d5:3e:97:4c")
         self.assertEqual(
