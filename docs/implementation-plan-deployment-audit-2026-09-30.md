@@ -63,3 +63,11 @@ so software rollback can restore them. On any installation failure restore
 the full private backup then verify administration and the access point before
 continuing. A code rollback alone does not restore service enablement or Wi-Fi
 settings.
+
+## Deployment failure check
+
+The first installation exposed a systemd case not covered by the initial
+tests. Resetting an inactive unloaded service returns an error even when its
+definition exists. The private recovery backup restored the prior package,
+services and Wi-Fi. Clear failure state only when the service is actually
+failed and cover failed, inactive and unloaded states before retrying.

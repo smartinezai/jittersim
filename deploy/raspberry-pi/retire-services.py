@@ -33,10 +33,22 @@ def check_update_idle(units, *, run=subprocess.run):
             raise RuntimeError("Could not check whether a release update is running.")
 
 
+def clear_failure(name, *, run=subprocess.run):
+    result = run(
+        ["systemctl", "is-failed", "--quiet", name],
+        timeout=15, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    if result.returncode == 0:
+        run(["systemctl", "reset-failed", name], check=True, timeout=15,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    elif result.returncode not in (1, 4):
+        raise RuntimeError("Could not check the retired service's failure state.")
+
+
 def retire_services(
     units=Path("/etc/systemd/system"),
     backup=Path("/var/lib/jittersim-retired-services"),
-    *, run=command, check=check_update_idle,
+    *, run=command, check=check_update_idle, clear=clear_failure,
 ):
     check(units)
     for name in OBSOLETE_SERVICES:
@@ -49,11 +61,13 @@ def retire_services(
         if not destination.exists():
             shutil.copyfile(source, destination)
             destination.chmod(0o600)
+        # Inactive units can be unloaded. Resetting an unloaded unit fails
+        # even when its installed definition still exists.
+        clear(name)
         # The old AP unit's stop action disconnects clients. NetworkManager
         # already owns this release's active connection and boot activation.
         flags = ["disable"] if name == "jittersim-ap.service" else ["disable", "--now"]
         run([*flags, name])
-        run(["reset-failed", name])
         source.unlink()
     run(["daemon-reload"])
 
