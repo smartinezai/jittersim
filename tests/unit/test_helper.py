@@ -22,7 +22,12 @@ from jittersim.networking.helper import (
     _parse_traffic_counter_output,
     run_helper,
 )
-from jittersim.networking.router import ROUTER_IMPORT_MESSAGES, RouterError, RouterWifiSettings
+from jittersim.networking.router import (
+    ROUTER_IMPORT_MESSAGES,
+    ROUTER_WIFI_MESSAGES,
+    RouterError,
+    RouterWifiSettings,
+)
 from jittersim.networking.topology import Topology
 
 
@@ -306,6 +311,39 @@ class HelperServiceTests(unittest.TestCase):
         self.assertEqual(response, {"ok": True, "action": "router-wifi", "enabled": False})
         self.assertTrue(routers[0].logged_in)
         self.assertTrue(routers[0].closed)
+
+    def test_router_toggle_returns_safe_guidance_and_always_closes_the_session(self):
+        class RejectedRouter(FakeRouter):
+            def set_wifi_enabled(self, *, enabled):
+                raise RouterError("router-secret wifi-secret response contents", reason="uncertain")
+
+        routers = []
+
+        def router_factory(address, password):
+            router = RejectedRouter(address, password)
+            routers.append(router)
+            return router
+
+        service = HelperService(
+            NetworkApplier(
+                executor=UplinkOutputExecutor(),
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            ),
+            router_factory=router_factory,
+        )
+        with self.assertLogs("jittersim.networking.helper", level="WARNING") as logs:
+            response = service.handle_payload(
+                {
+                    "action": "router-wifi",
+                    "admin_password": "router-secret",
+                    "enabled": False,
+                }
+            )
+        self.assertEqual(response["error"], ROUTER_WIFI_MESSAGES["uncertain"])
+        self.assertTrue(routers[0].closed)
+        recorded = str(response) + "\n".join(logs.output)
+        for secret in ("router-secret", "wifi-secret", "response contents"):
+            self.assertNotIn(secret, recorded)
 
     def test_rejects_short_access_point_passwords(self) -> None:
         response = self.service.handle_payload(

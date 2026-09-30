@@ -60,7 +60,7 @@ from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.schedules import active_schedule
 from jittersim.engine.service import compile_stored_plan
 from jittersim.networking.helper import HelperClient, HelperClientError
-from jittersim.networking.router import safe_router_import_message
+from jittersim.networking.router import safe_router_import_message, safe_router_wifi_message
 
 LOGGER = logging.getLogger(__name__)
 MAX_JSON_BODY_BYTES = 64 * 1024
@@ -4286,7 +4286,7 @@ DASHBOARD_HTML = """<!doctype html>
     });
 
     element("disable-router-wifi").addEventListener("click", (event) => {
-      if (!window.confirm("Turn off both primary router Wi-Fi radios? Keep the Pi connected by Ethernet.")) return;
+      if (!window.confirm("Turn off router Wi-Fi, including guest Wi-Fi? Keep the Pi connected by Ethernet.")) return;
       routerAction(
         "/api/router/wifi",
         { enabled: false, confirm_disable: true },
@@ -5613,11 +5613,10 @@ class ControlServer(HTTPServer):
                     admin_password=admin_password,
                     enabled=enabled,
                 )
-            except HelperClientError:
-                LOGGER.exception("router Wi-Fi change failed")
-                return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
-                    {"error": "router Wi-Fi change failed"}
-                )
+            except HelperClientError as error:
+                message = safe_router_wifi_message(str(error))
+                LOGGER.warning("router Wi-Fi change failed: %s", message)
+                return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes({"error": message})
             return HTTPStatus.OK, "application/json", _json_bytes({"result": result})
 
         if path == "/api/connected-devices/apply-profile":

@@ -74,10 +74,11 @@ def test_rejected_upgrade_keeps_the_original_columns_and_rows(tmp_path, invalid_
         )
 
 
-def test_router_import_can_finish_after_the_normal_helper_timeout():
+@pytest.mark.parametrize("action", ["router-sync-ap", "router-wifi"])
+def test_router_operations_can_finish_after_the_normal_helper_timeout(action):
     class SlowImport:
         def handle_payload(self, payload):
-            assert payload["action"] == "router-sync-ap"
+            assert payload["action"] == action
             time.sleep(0.05)
             return {"ok": True, "ssid": "Fixture network"}
 
@@ -90,7 +91,11 @@ def test_router_import_can_finish_after_the_normal_helper_timeout():
         thread.start()
         try:
             client = HelperClient(socket_path=path, timeout_seconds=0.01)
-            assert client.sync_access_point_from_router(admin_password="fixture password")["ok"]
+            if action == "router-sync-ap":
+                result = client.sync_access_point_from_router(admin_password="fixture password")
+            else:
+                result = client.set_router_wifi(admin_password="fixture password", enabled=False)
+            assert result["ok"]
             assert client.timeout_seconds == 0.01
         finally:
             server.shutdown()

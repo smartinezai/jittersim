@@ -19,7 +19,7 @@ from jittersim.engine.plan import NetworkPlan
 
 from .applier import ApplyError, NetworkApplier
 from .executor import CommandExecutionError, SubprocessExecutor
-from .router import ROUTER_IMPORT_MESSAGES, RouterError, TG3442DERouter
+from .router import ROUTER_IMPORT_MESSAGES, ROUTER_WIFI_MESSAGES, RouterError, TG3442DERouter
 from .topology import Topology
 
 LOGGER = logging.getLogger(__name__)
@@ -302,9 +302,12 @@ class HelperService:
             settings = router.set_wifi_enabled(enabled=enabled)
         except (KeyError, TypeError, ValueError):
             return {"ok": False, "error": "invalid router Wi-Fi request"}
-        except (CommandExecutionError, RouterError):
-            LOGGER.exception("router Wi-Fi change failed")
-            return {"ok": False, "error": "router Wi-Fi change failed"}
+        except RouterError as error:
+            LOGGER.warning("router Wi-Fi change failed (%s)", error.reason)
+            return {"ok": False, "error": error.wifi_message}
+        except CommandExecutionError:
+            LOGGER.warning("router Wi-Fi change failed while inspecting the wired connection")
+            return {"ok": False, "error": ROUTER_WIFI_MESSAGES["unreachable"]}
         finally:
             if router is not None:
                 router.close()
@@ -438,7 +441,8 @@ class HelperClient:
                 "action": "router-wifi",
                 "admin_password": admin_password,
                 "enabled": enabled,
-            }
+            },
+            timeout_seconds=90.0,
         )
 
     def connected_device_snapshot(self) -> Dict[str, Any]:

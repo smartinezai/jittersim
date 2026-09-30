@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+import time
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -31,18 +32,48 @@ ROUTER_IMPORT_MESSAGES = {
 }
 
 
+ROUTER_WIFI_MESSAGES = {
+    "failed": "Router Wi-Fi change failed. Check the router over Ethernet before retrying.",
+    "login": "Router login failed. Check the router admin password and try again.",
+    "unreachable": "Could not contact the router. Check the Pi's wired connection and try again.",
+    "unsupported": (
+        "This router's Wi-Fi controls are unsupported. "
+        "Use Open router Wi-Fi settings to change them directly."
+    ),
+    "invalid": "The router response could not be verified. No Wi-Fi change was sent.",
+    "disabled": (
+        "Both router Wi-Fi bands are disabled. "
+        "Use Open router Wi-Fi settings to enable a band first."
+    ),
+    "uncertain": (
+        "The router may have changed Wi-Fi, but JitterSim could not confirm both radios. "
+        "Check the router over Ethernet before retrying."
+    ),
+}
+
+
 class RouterError(RuntimeError):
     """Raised when a router operation cannot be completed safely."""
 
     def __init__(self, message: str, *, reason: str = "failed") -> None:
         super().__init__(message)
-        self.reason = reason if reason in ROUTER_IMPORT_MESSAGES else "failed"
+        self.reason = (
+            reason
+            if reason in ROUTER_IMPORT_MESSAGES or reason in ROUTER_WIFI_MESSAGES
+            else "failed"
+        )
 
     @property
     def import_message(self) -> str:
         """Return an allow-listed message without router response details."""
 
-        return ROUTER_IMPORT_MESSAGES[self.reason]
+        return ROUTER_IMPORT_MESSAGES.get(self.reason, ROUTER_IMPORT_MESSAGES["failed"])
+
+    @property
+    def wifi_message(self) -> str:
+        """Return fixed toggle guidance without retaining router details."""
+
+        return ROUTER_WIFI_MESSAGES.get(self.reason, ROUTER_WIFI_MESSAGES["failed"])
 
 
 class _EndpointUnavailable(RouterError):
@@ -138,6 +169,37 @@ class TG3442DERouter:
 
     _WIFI_PAGE = "/?wifi_general&mid=WifiGeneral"
     _WIFI_DATA = "/php/wifi_general_data.php"
+    _WIFI_WRITE = "/php/ajaxSet_wifi_general_data.php"
+    _OPERATION_TIMEOUT_SECONDS = 60.0
+    _CONFIRMATION_ATTEMPTS = 4
+    _WIFI_WRITABLE_FIELDS = (
+        "BandSteerEnable",
+        "SplitSSIDEnable",
+        "Enable",
+        "SSID",
+        "SSIDAdvertisementEnabled",
+        "ModeEnabled",
+        "Enable5G",
+        "SSID5G",
+        "SSIDAdvertisementEnabled5G",
+        "ModeEnabled5G",
+        "EnableGuest",
+        "SSIDGuest",
+        "ModeEnabledGuest",
+        "IsolationEnabledGuest",
+        "EnableWiFiFunction",
+    )
+    _WIFI_FLAG_FIELDS = (
+        "BandSteerEnable",
+        "SplitSSIDEnable",
+        "Enable",
+        "SSIDAdvertisementEnabled",
+        "Enable5G",
+        "SSIDAdvertisementEnabled5G",
+        "EnableGuest",
+        "IsolationEnabledGuest",
+        "EnableWiFiFunction",
+    )
     _MAX_RESPONSE_BYTES = 1024 * 1024
     _SSID_NAMES = ("wifi_ssid24", "wifi_ssid5", "wifi_ssid6")
     _PASSWORD_NAMES = ("wifi_password24", "wifi_password5", "wifi_password6")
@@ -172,17 +234,15 @@ class TG3442DERouter:
         self.csrf_nonce = ""
         self._session_key: Optional[bytes] = None
         self._session_iv: Optional[bytes] = None
+        self._deadline: Optional[float] = None
 
     def close(self) -> None:
         """Close the short-lived router session."""
 
         try:
             try:
-                self.session.post(
-                    f"{self.base_url}/php/logout.php",
-                    timeout=self.timeout_seconds,
-                )
-            except requests.RequestException:
+                self._request("post", "/php/logout.php")
+            except RouterError:
                 pass
         finally:
             self.password = ""
@@ -190,6 +250,7 @@ class TG3442DERouter:
             self._session_key = None
             self._session_iv = None
             self.session.cookies.clear()
+            self.session.headers.pop("csrfNonce", None)
             self.session.close()
 
     def login(self) -> None:
@@ -198,6 +259,7 @@ class TG3442DERouter:
         self.csrf_nonce = ""
         self._session_key = None
         self._session_iv = None
+        self._deadline = time.monotonic() + self._OPERATION_TIMEOUT_SECONDS
         page = self._request("get", "/")
         session_id = _required_script_value(page, "currentSessionId")
         try:
@@ -293,32 +355,106 @@ class TG3442DERouter:
         return settings
 
     def set_wifi_enabled(self, *, enabled: bool) -> RouterWifiSettings:
-        """Enable or disable all primary router Wi-Fi radios."""
+        """Change primary radios and confirm them without altering other settings."""
 
+        if not isinstance(enabled, bool):
+            raise RouterError("invalid requested radio state", reason="invalid")
+        try:
+            current = self._read_wifi_data()
+        except _EndpointUnavailable:
+            return self._set_legacy_wifi_enabled(enabled=enabled)
+        payload = self._wifi_write_payload(current, enabled=enabled)
+        if self._session_key is None or self._session_iv is None:
+            raise RouterError("router login is required", reason="login")
+        cipher = AES.new(self._session_key, AES.MODE_CCM, nonce=self._session_iv, mac_len=16)
+        cipher.update(b"wifidata")
+        ciphertext, tag = cipher.encrypt_and_digest(json.dumps(payload).encode("utf-8"))
+        try:
+            self._request(
+                "post",
+                self._WIFI_WRITE,
+                json={
+                    "EncryptData": (ciphertext + tag).hex(),
+                    "Name": "admin",
+                    "AuthData": "wifidata",
+                },
+                headers={"Content-Type": "application/json"},
+            )
+            for attempt in range(self._CONFIRMATION_ATTEMPTS):
+                updated = self._read_wifi_data()
+                if all(
+                    _radio_state(updated.get(name)) is bool(payload[name])
+                    for name in (
+                        "Enable",
+                        "Enable5G",
+                        "EnableWiFiFunction",
+                    )
+                ):
+                    return RouterWifiSettings(ssid="", password="", enabled=enabled)
+                if attempt + 1 < self._CONFIRMATION_ATTEMPTS:
+                    time.sleep(min(0.5, self._remaining_timeout()))
+        except RouterError:
+            raise RouterError("router change could not be confirmed", reason="uncertain") from None
+        raise RouterError("router radios did not confirm the requested state", reason="uncertain")
+
+    def _wifi_write_payload(self, current: Dict[str, Any], *, enabled: bool) -> Dict[str, Any]:
+        if any(name not in current for name in self._WIFI_WRITABLE_FIELDS):
+            raise RouterError("router Wi-Fi write fields are incomplete", reason="unsupported")
+        payload = {name: current[name] for name in self._WIFI_WRITABLE_FIELDS}
+        for name, value in payload.items():
+            if (
+                not isinstance(value, (str, int, bool))
+                or isinstance(value, str)
+                and len(value) > 256
+            ):
+                raise RouterError("router Wi-Fi write fields are invalid", reason="invalid")
+        for name in self._WIFI_FLAG_FIELDS:
+            state = _radio_state(payload[name])
+            if state is None:
+                raise RouterError("router radio state is unknown", reason="unsupported")
+            payload[name] = int(state)
+        if not payload["SplitSSIDEnable"]:
+            payload["Enable"] = payload["Enable5G"] = 1
+        elif enabled and not (payload["Enable"] or payload["Enable5G"]):
+            raise RouterError("both configured router bands are disabled", reason="disabled")
+        payload["EnableWiFiFunction"] = int(enabled)
+        # The master switch controls effective radio activity. Band choices stay configured.
+        # The firmware omits unchanged passphrases, which preserves stored keys.
+        return payload
+
+    def _set_legacy_wifi_enabled(self, *, enabled: bool) -> RouterWifiSettings:
         form, _ = self._wifi_form()
         state = "1" if enabled else "0"
         present = [name for name in self._STATE_NAMES if name in form.controls]
-        if not present:
-            raise RouterError("router Wi-Fi form did not expose radio controls")
+        if not present or any(_radio_state(form.controls[name]) is None for name in present):
+            raise RouterError("router Wi-Fi form has unknown radio controls", reason="unsupported")
         for name in present:
             form.controls[name] = state
-        self._request(
-            "post",
-            urljoin(f"{self.base_url}/", form.action or self._WIFI_PAGE),
-            data=form.controls,
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Referer": f"{self.base_url}{self._WIFI_PAGE}",
-            },
-        )
-        updated_form, _ = self._wifi_form()
-        if _wifi_enabled(updated_form.controls) != enabled:
-            raise RouterError("router did not confirm the requested Wi-Fi state")
-        return RouterWifiSettings(
-            ssid="",
-            password="",
-            enabled=enabled,
-        )
+        try:
+            self._request(
+                "post",
+                urljoin(f"{self.base_url}/", form.action or self._WIFI_PAGE),
+                data=form.controls,
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Referer": f"{self.base_url}{self._WIFI_PAGE}",
+                },
+            )
+            updated_form, _ = self._wifi_form()
+            if any(
+                _radio_state(updated_form.controls.get(name)) is not enabled for name in present
+            ):
+                raise RouterError("router did not confirm every radio")
+        except RouterError:
+            raise RouterError("router change could not be confirmed", reason="uncertain") from None
+        return RouterWifiSettings(ssid="", password="", enabled=enabled)
+
+    def _remaining_timeout(self) -> float:
+        deadline = getattr(self, "_deadline", None)
+        remaining = self.timeout_seconds if deadline is None else deadline - time.monotonic()
+        if remaining <= 0:
+            raise RouterError("router operation timed out", reason="unreachable")
+        return min(self.timeout_seconds, remaining)
 
     def _settings_from_form(self, form: _Form, html: str) -> RouterWifiSettings:
         pairs = zip(self._SSID_NAMES, self._PASSWORD_NAMES)
@@ -355,7 +491,7 @@ class TG3442DERouter:
             response = self.session.request(
                 method,
                 urljoin(f"{self.base_url}/", path),
-                timeout=self.timeout_seconds,
+                timeout=self._remaining_timeout(),
                 allow_redirects=False,
                 stream=True,
                 **kwargs,
@@ -365,14 +501,15 @@ class TG3442DERouter:
             if response.status_code in (401, 403) or 300 <= response.status_code < 400:
                 raise RouterError("router session is not authenticated", reason="login")
             response.raise_for_status()
-            chunks = []
-            size = 0
-            for chunk in response.iter_content(chunk_size=16384):
-                size += len(chunk)
-                if size > self._MAX_RESPONSE_BYTES:
+            content = bytearray()
+            # Check the deadline even when the router sends a slow response.
+            for chunk in response.iter_content(chunk_size=1):
+                self._remaining_timeout()
+                content.extend(chunk)
+                if len(content) > self._MAX_RESPONSE_BYTES:
                     raise RouterError("router response is too large", reason="invalid")
-                chunks.append(chunk)
-            return b"".join(chunks).decode(response.encoding or "utf-8", errors="replace")
+            self._remaining_timeout()
+            return content.decode(response.encoding or "utf-8", errors="replace")
         except requests.RequestException:
             raise RouterError("could not contact the router", reason="unreachable") from None
         finally:
@@ -484,4 +621,12 @@ def safe_router_import_message(message: str) -> str:
 
     return (
         message if message in ROUTER_IMPORT_MESSAGES.values() else ROUTER_IMPORT_MESSAGES["failed"]
+    )
+
+
+def safe_router_wifi_message(message: str) -> str:
+    """Return fixed toggle guidance and treat unknown helper failures as uncertain."""
+
+    return (
+        message if message in ROUTER_WIFI_MESSAGES.values() else ROUTER_WIFI_MESSAGES["uncertain"]
     )

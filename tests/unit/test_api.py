@@ -898,6 +898,36 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(json.loads(body)["result"]["enabled"])
 
+    def test_router_toggle_propagates_only_safe_errors(self):
+        from jittersim.networking.router import ROUTER_WIFI_MESSAGES
+
+        for reported in (*ROUTER_WIFI_MESSAGES.values(), "router-secret response contents"):
+            with self.subTest(reported=reported):
+
+                class RejectedHelper(FakeHelper):
+                    def set_router_wifi(self, *, admin_password, enabled):
+                        raise HelperClientError(reported)
+
+                self.server.helper_client = RejectedHelper()
+                with self.assertLogs("jittersim.api.server", level="WARNING") as logs:
+                    status, _, body = self.server.write_response_for(
+                        "/api/router/wifi",
+                        {
+                            "admin_password": "router-secret",
+                            "enabled": False,
+                            "confirm_disable": True,
+                        },
+                    )
+                self.assertEqual(status, 502)
+                expected = (
+                    reported
+                    if reported in ROUTER_WIFI_MESSAGES.values()
+                    else ROUTER_WIFI_MESSAGES["uncertain"]
+                )
+                self.assertEqual(json.loads(body)["error"], expected)
+                self.assertNotIn("router-secret", body.decode() + "\n".join(logs.output))
+                self.assertNotIn("response contents", body.decode() + "\n".join(logs.output))
+
     def test_connected_devices_endpoint_reports_unavailable_without_helper(self) -> None:
         status, content_type, body = self.server.response_for("/api/connected-devices")
 
