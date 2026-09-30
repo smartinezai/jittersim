@@ -553,7 +553,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(json.loads(body), {"deleted": True})
         self.assertEqual(self.repository.list_connected_device_labels(), {})
 
-    def test_tls_requires_both_files_and_wraps_the_dashboard_socket(self) -> None:
+    def test_tls_requires_both_files_and_encrypts_accepted_connections(self) -> None:
         with self.assertRaisesRegex(ValueError, "TLS is required"):
             ControlServer(("0.0.0.0", 0), self.repository)
         with self.assertRaisesRegex(ValueError, "provided together"):
@@ -598,6 +598,17 @@ class ControlServerTests(unittest.TestCase):
                 tls_keyfile=key,
             )
             response: list[bytes] = []
+            accepted_encryption: list[bool] = []
+            accept_connection = secure_server.get_request
+
+            def accept_encrypted_connection():
+                connection, address = accept_connection()
+                accepted_encryption.append(
+                    isinstance(connection, ssl.SSLSocket) and connection.cipher() is not None
+                )
+                return connection, address
+
+            secure_server.get_request = accept_encrypted_connection
 
             def send_health_request() -> None:
                 context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -620,6 +631,7 @@ class ControlServerTests(unittest.TestCase):
                 secure_server.server_close()
 
         self.assertTrue(secure_server.secure_transport)
+        self.assertEqual(accepted_encryption, [True])
         self.assertEqual(len(response), 1)
         self.assertTrue(response[0].startswith(b"HTTP/1.0 200 OK"))
 

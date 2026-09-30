@@ -109,3 +109,25 @@ Keep router import separately bounded at 180 seconds because wired inspection an
 ## Slow restoration verification
 
 All 316 tests passed on Mac and in a fresh Linux package installation. The real Linux network smoke check, routed protection checks and management name checks passed. Seven harmless acceptance-helper cases passed. The physical trace independently proves full restoration with the preceding release. Complete authenticated dashboard off/on acceptance remains required on the corrected release.
+
+## Interrupted dashboard connection repair
+
+An isolated local HTTPS reproduction confirms that an unfinished TLS handshake, HTTP header block or authenticated request body blocks every other dashboard request until that client closes. The current server handles one connection at a time and has no accepted-connection deadline. This is a demonstrated freeze bug. It does not prove the cause of the lost physical result on the Pi.
+
+Keep the existing single server worker because the settings connection belongs to its thread. Accept the plain socket first then allow at most five seconds for its TLS handshake. Share one ten-second absolute deadline across request headers and body so a client sending occasional bytes cannot keep the server occupied. Limit response sends separately. Closing or timing out a client must not repeat an action or interrupt a router operation already started from a complete authenticated request.
+
+Use a small deadline-aware input wrapper with the existing body and header size limits. Keep TLS certificate validation and admin authentication unchanged. Log only fixed connection errors. Do not include headers, tokens, request bodies or socket data in logs. There are no new threads, endpoints, database changes or saved secrets. Existing code rollback and settings backups apply.
+
+Verify real isolated HTTPS stalls at the handshake, headers and body. Add a slow byte-stream case to prove the total input limit rather than an inactivity limit. Verify a fully received authenticated operation can outlast the input deadline and complete once. Run the full Mac suite, focused lint and fresh Linux package checks before the authorized push and deployment. Verify installed hashes and authenticated dashboard reads afterward. Do not turn the real router off during this repair because this Mac lacks an Ethernet management connection.
+
+This is a narrow continuation of the approved urgent bug-fix scope. The existing human feedback to proceed, immediate takeover request and push/deployment authorization remain active. Review this correction before editing production code.
+
+The focused review requires the input deadline to start before the first HTTP byte and to cover every raw read across headers and body. Reset the response timeout before sending headers. Close raw or TLS sockets after any failed handshake and close the replacement reader with its original stream. Replace inherited raw request-line and parser-error logs with fixed messages plus numeric response status. A disconnected client never causes an action replay.
+
+## Interrupted connection verification
+
+All 326 tests passed on Mac and in a freshly installed Linux package. Focused lint and diff checks passed. The Linux network smoke check, routed device-protection checks and management-name isolation checks passed. Ten real HTTPS regressions cover incomplete handshakes, stalled or slowly sent headers and bodies, their shared deadline, a client that does not read its response, completed long operations, disconnects after complete requests and private request text in parser logs. The accepted TLS connection and negotiated cipher are verified.
+
+The final focused review found no blocker. A deadline-stalled incomplete request performs no helper action or settings change. Existing malformed or prematurely ended requests may still record a rejected 400 attempt. Complete actions finish exactly once and a later health request succeeds. Actual router off/on acceptance remains unverified on the installed release after the power-cycle recovery. This connection repair does not establish that the earlier physical failure had the same cause.
+
+The remote branch gained the merged credential-storage, device-refresh and panic controls before publication. The unpublished connection repair was reapplied on top without conflicts. All 386 tests passed on the combined source on Mac and in a fresh Linux installation. Lint, diff and all three Linux network checks passed again. Preserve these merged features in the deployed release.

@@ -2,9 +2,11 @@
 
 import argparse
 import hmac
+import io
 import json
 import logging
 import os
+import socket
 import ssl
 import time
 from contextlib import nullcontext
@@ -68,6 +70,9 @@ from jittersim.networking.router import (
 
 LOGGER = logging.getLogger(__name__)
 MAX_JSON_BODY_BYTES = 64 * 1024
+TLS_HANDSHAKE_TIMEOUT_SECONDS = 5.0
+REQUEST_INPUT_TIMEOUT_SECONDS = 10.0
+RESPONSE_SEND_TIMEOUT_SECONDS = 5.0
 WRITE_PATHS = frozenset(
     (
         "/api/profiles",
@@ -4908,6 +4913,32 @@ def _json_bytes(payload: Dict[str, Any]) -> bytes:
     return (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
 
 
+class _DeadlineReader(io.RawIOBase):
+    """Bound all input reads to one deadline, including a slow byte stream."""
+
+    def __init__(self, source: io.RawIOBase, connection: socket.socket, deadline: float) -> None:
+        super().__init__()
+        self._source = source
+        self._connection = connection
+        self._deadline = deadline
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> Optional[int]:
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("dashboard request input timed out")
+        self._connection.settimeout(remaining)
+        return self._source.readinto(buffer)
+
+    def close(self) -> None:
+        try:
+            self._source.close()
+        finally:
+            super().close()
+
+
 class ControlServer(HTTPServer):
     """Serve configuration and plan data from one repository."""
 
@@ -4940,9 +4971,19 @@ class ControlServer(HTTPServer):
         self.helper_client = helper_client
         self.scheduler = scheduler
         self.secure_transport = tls_context is not None
+        self._tls_context = tls_context
         super().__init__(server_address, ControlRequestHandler)
-        if tls_context is not None:
-            self.socket = tls_context.wrap_socket(self.socket, server_side=True)
+
+    def get_request(self) -> Tuple[socket.socket, Any]:
+        connection, address = super().get_request()
+        try:
+            connection.settimeout(TLS_HANDSHAKE_TIMEOUT_SECONDS)
+            if self._tls_context is not None:
+                connection = self._tls_context.wrap_socket(connection, server_side=True)
+            return connection, address
+        except OSError:
+            connection.close()
+            raise
 
     def response_for(self, path: str, query: str = "") -> Tuple[int, str, bytes]:
         """Build the response body for a supported GET path."""
@@ -6542,6 +6583,19 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
     """Handle the control-plane routes."""
 
     server: ControlServer
+    rbufsize = 0
+
+    def setup(self) -> None:
+        super().setup()
+        deadline = time.monotonic() + REQUEST_INPUT_TIMEOUT_SECONDS
+        self.rfile = io.BufferedReader(_DeadlineReader(self.rfile, self.connection, deadline))
+
+    def handle(self) -> None:
+        try:
+            super().handle()
+        except (ConnectionError, ssl.SSLError):
+            self.close_connection = True
+            LOGGER.info("dashboard client disconnected")
 
     def do_GET(self) -> None:
         parsed_path = urlsplit(self.path)
@@ -6592,8 +6646,18 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             body=_json_bytes({"error": "delete actions are not enabled"}),
         )
 
+    def log_request(self, code: Any = "-", size: Any = "-") -> None:
+        try:
+            status = int(code)
+        except (TypeError, ValueError):
+            status = 0
+        LOGGER.info("dashboard response status=%s", status)
+
+    def log_error(self, format_string: str, *args: Any) -> None:
+        LOGGER.warning("dashboard request rejected or timed out")
+
     def log_message(self, format_string: str, *args: Any) -> None:
-        LOGGER.info("%s - %s", self.address_string(), format_string % args)
+        LOGGER.info("dashboard connection event")
 
     def _handle_write(self) -> None:
         path = urlsplit(self.path).path
@@ -6662,6 +6726,10 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         if not isinstance(payload, dict):
             raise RequestError("request body must contain a JSON object")
         return payload
+
+    def send_response(self, code: int, message: Optional[str] = None) -> None:
+        self.connection.settimeout(RESPONSE_SEND_TIMEOUT_SECONDS)
+        super().send_response(code, message)
 
     def _send_response(
         self,
