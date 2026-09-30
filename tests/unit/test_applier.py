@@ -61,17 +61,27 @@ class NetworkApplierTests(unittest.TestCase):
         executor = RootQueueExecutor()
         commands_run = NetworkApplier(executor=executor, topology=self.topology).reset()
 
-        self.assertEqual(commands_run, 4)
+        self.assertEqual(commands_run, 5)
         self.assertEqual(executor.commands[2].executable, "nft")
         self.assertEqual(
-            [command.executable for command in executor.commands[3:]], ["nft", "tc", "tc"]
+            [command.executable for command in executor.commands[3:]], ["nft", "nft", "tc", "tc"]
         )
+
+    def test_reset_reports_a_genuine_obsolete_table_cleanup_failure(self) -> None:
+        class FailedLegacyCleanup(RootQueueExecutor):
+            def run(self, command):
+                if command.purpose == "remove obsolete JitterSim firewall tables":
+                    raise CommandExecutionError("simulated permission failure")
+                return super().run(command)
+
+        with self.assertRaisesRegex(CommandExecutionError, "permission failure"):
+            NetworkApplier(executor=FailedLegacyCleanup(), topology=self.topology).reset()
 
     def test_reset_leaves_a_foreign_root_queue_alone(self) -> None:
         executor = RootQueueExecutor(handle="20:", kind="htb")
         commands_run = NetworkApplier(executor=executor, topology=self.topology).reset()
 
-        self.assertEqual(commands_run, 2)
+        self.assertEqual(commands_run, 3)
         self.assertFalse(any(command.arguments[:2] == ("qdisc", "del") for command in executor.commands))
 
     def test_apply_rejects_a_foreign_root_queue_before_mutation(self) -> None:
@@ -89,7 +99,7 @@ class NetworkApplierTests(unittest.TestCase):
 
         self.assertEqual(context.exception.failed_command_index, 2)
         self.assertIsNone(context.exception.reset_error)
-        self.assertEqual(executor.commands[-1].purpose, "remove the project-owned download table")
+        self.assertEqual(executor.commands[-1].purpose, "remove obsolete JitterSim firewall tables")
 
     def test_reports_when_cleanup_also_fails(self) -> None:
         executor = FailingResetExecutor(fail_on_index=4)

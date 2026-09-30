@@ -84,3 +84,17 @@ management address. No repository pull request template was found. A
 deployment-aware review should check mDNS isolation, DHCP updates, name
 conflicts and installer recovery. The actual Pi and router must pass the
 network checks before calling the hostname fixed.
+
+## Live acceptance repair
+
+A bounded capture on the Pi proves that valid Mac name queries arrive through Ethernet. The old `inet jittersim_access` table still drops TCP and UDP port 5353 arriving outside the test interface or loopback. Avahi uses that port for management name queries. Restarting Avahi only sends fresh announcements, so access stops again when the cached record expires.
+
+Remove the known obsolete `jittersim_access` tables in the existing network reset cleanup. Apply removes them in the same atomic batch that installs the current plan. Keep `jittersim_control`, the current gateway rules and every other application's tables. The old DNS service is not listening on this port. The current mDNS firewall continues blocking queries and replies on the test network.
+
+This repairs the already authorized hostname feature during urgent acceptance. Verify real Linux cleanup for apply and repeated reset. Seed the old blocking rule, preserve a separate foreign table and verify that name queries reach a local responder after cleanup. Deploy through the existing installer so recovery of reset or applied state performs the cleanup automatically. Recheck management HTTPS and test-interface isolation on the Pi. No credential or database change is required.
+
+The installer also runs only the obsolete-table cleanup after replacing the services. This covers older databases with no recognized saved action without resetting current queues or current policy tables. Genuine cleanup errors stop installation instead of being mistaken for missing tables.
+
+## Obsolete-rule repair validation
+
+304 tests passed on Mac and in a fresh Linux package installation. Real Linux packets reproduce the old management drop and prove that apply, repeated reset and installer cleanup restore reception. Current test-network mDNS input and output stay blocked. Current control rules and a separate foreign table are preserved. The check refuses every existing table that it would change or delete. Genuine cleanup failures remain errors. Internal review found no remaining production blocker. Management name queries and HTTPS must be checked again on the installed Pi.

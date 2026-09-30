@@ -126,7 +126,7 @@ class HelperServiceTests(unittest.TestCase):
         class ApplyFailureExecutor(FakeExecutor):
             def run(self, command):
                 self.commands.append(command)
-                if command.executable == "nft" and command.arguments == ("-f", "-"):
+                if command.executable == "nft" and command.arguments == ("-f", "-") and command.purpose != "remove obsolete JitterSim firewall tables":
                     return CommandResult(
                         return_code=1,
                         stderr="private-detail " * 100,
@@ -164,7 +164,7 @@ class HelperServiceTests(unittest.TestCase):
         response = self.service.handle_payload({"action": "reset"})
 
         self.assertEqual(response["action"], "reset")
-        self.assertEqual(response["commands_run"], 2)
+        self.assertEqual(response["commands_run"], 3)
 
     def test_publishes_and_clears_the_proxy_plan_with_network_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -167,6 +167,8 @@ else
     nmcli connection up jittersim-ap
 fi
 systemctl restart jittersim-browser-proxy.service
+# Remove obsolete DNS access rules even when an older database has no saved action.
+"$INSTALL_DIR/.venv/bin/python" -m jittersim.networking.legacy
 
 setup_dashboard_name_service() {
     apt-get install -y avahi-daemon avahi-utils || return 1

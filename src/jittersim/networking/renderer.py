@@ -6,6 +6,7 @@ from jittersim.config.models import Impairment
 from jittersim.engine.plan import Direction, NetworkPlan, QueueSpec
 
 from .commands import Command
+from .legacy import LEGACY_ACCESS_CLEANUP, cleanup_command
 from .topology import Topology
 
 PROJECT_TABLE = "jittersim"
@@ -41,6 +42,7 @@ def _render_nft_script(plan: NetworkPlan, topology: Topology) -> str:
     test_interface = topology.test_interface
     # Adding an existing table is harmless. Delete and recreate both in one batch.
     lines = [
+        *LEGACY_ACCESS_CLEANUP.splitlines(),
         f"add table inet {PROJECT_TABLE}",
         f"delete table inet {PROJECT_TABLE}",
         f"add table netdev {DOWNLOAD_TABLE}",
@@ -373,6 +375,7 @@ def render_reset_commands(*, topology: Topology) -> Sequence[Command]:
             ignore_failure=True,
         )
     )
+    commands.append(cleanup_command())
     for interface in (topology.uplink_interface, topology.test_interface):
         commands.append(
             Command(

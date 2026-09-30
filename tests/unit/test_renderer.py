@@ -170,9 +170,10 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(
             commands[1].argv, ("nft", "delete", "table", "netdev", "jittersim_download")
         )
-        self.assertTrue(all(command.ignore_failure for command in commands))
+        self.assertFalse(commands[2].ignore_failure)
+        self.assertTrue(all(command.ignore_failure for command in commands[:2] + commands[3:]))
         self.assertEqual(
-            [command.argv for command in commands[2:]],
+            [command.argv for command in commands[3:]],
             [
                 ("tc", "qdisc", "del", "dev", "eth0", "root", "handle", "10:"),
                 ("tc", "qdisc", "del", "dev", "wlan0", "root", "handle", "10:"),
