@@ -29,6 +29,7 @@ else
 fi
 python3 "$SOURCE_DIR/deploy/raspberry-pi/preflight.py" \
     --uplink "$JITTERSIM_UPLINK" --test-interface "$JITTERSIM_TEST_INTERFACE"
+python3 "$SOURCE_DIR/deploy/raspberry-pi/retire-services.py" --check
 
 apt-get install -y dnsmasq-base iw wpasupplicant nftables openssl python3-venv tcpdump
 
@@ -40,15 +41,14 @@ install -d -m 0750 -o jittersim -g jittersim "$DATA_DIR"
 chown -R jittersim:jittersim "$DATA_DIR"
 install -d -m 0755 -o root -g root "$INSTALL_DIR"
 
-if [ "$SOURCE_DIR" != "$INSTALL_DIR" ]; then
-    cp -R "$SOURCE_DIR/pyproject.toml" "$SOURCE_DIR/README.md" \
-        "$SOURCE_DIR/src" "$SOURCE_DIR/deploy" "$INSTALL_DIR/"
-fi
+python3 "$SOURCE_DIR/deploy/raspberry-pi/replace-source.py" "$SOURCE_DIR" "$INSTALL_DIR"
 
 python3 -m venv "$INSTALL_DIR/.venv"
 "$INSTALL_DIR/.venv/bin/pip" install "$INSTALL_DIR"
 chown -R root:root "$INSTALL_DIR"
+chmod -R go-w "$INSTALL_DIR"
 ln -sfn "$INSTALL_DIR/.venv/bin/jittersim" /usr/local/bin/jittersim
+python3 "$INSTALL_DIR/deploy/raspberry-pi/retire-services.py"
 
 if [ ! -s "$CONFIG_DIR/control.env" ]; then
     admin_token=$(openssl rand -hex 32)

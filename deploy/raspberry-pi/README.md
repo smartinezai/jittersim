@@ -34,6 +34,17 @@ archive:
 sudo deploy/raspberry-pi/install.sh
 ```
 
+This Pi release replaces its source folders on upgrade so removed modules do
+not remain in the installed package. It also retires the access recovery, DNS,
+update and Wi-Fi service definitions from the older main release. Their private
+recovery copies are kept in `/var/lib/jittersim-retired-services`. The active
+Wi-Fi connection stays running and NetworkManager reconnects it at boot.
+An active old update must finish before installation can proceed. Keep a
+private backup of `/opt/jittersim`, `/etc/jittersim`, `/var/lib/jittersim`,
+the current service definitions and NetworkManager connections before changing
+releases. A software rollback must restore those service definitions and their
+previous enabled state as well as code and settings.
+
 If the source tree is stored elsewhere, pass its path as the first argument:
 
 ```sh
