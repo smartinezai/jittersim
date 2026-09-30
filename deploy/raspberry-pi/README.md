@@ -292,20 +292,47 @@ for current command behavior.
 
 To recover from a copied router network name, run `sudo jittersim wifi reset`
 on the Pi through its management connection or a local terminal. Add `--yes`
-to confirm without a prompt. The command restores `JitterSim`, keeps the current
-password and restarts test Wi-Fi. It needs the helper but works with the dashboard
-stopped. The dashboard has the same **Reset Wi-Fi name** control beside its
-manual Wi-Fi form. It cannot be reached from the test network.
+to confirm without a prompt. The command restores `JitterSim` and keeps the
+current password and security type. It restarts test Wi-Fi and needs the
+helper but works with the dashboard stopped. The dashboard has the same
+**Reset Wi-Fi name** control in its floating **Quick actions** panel.
+Administration remains unavailable from the test network.
 
-Installation and runtime Wi-Fi changes require WPA3 with AES and protected
-Wi-Fi management messages. Clients need WPA3 support. Runtime changes verify
-active authentication and required protection before reporting success. Upgrades
-save the stronger settings without restarting an active connection. Reset the
-name or plan a Wi-Fi restart to activate them. Verify a WPA3 client connection
-on each target Pi before a household trial.
-Name recovery makes one bounded restoration attempt if activation fails and
-reports whether recovery succeeded. Code rollback alone does not restore
-NetworkManager settings.
+**Copy router Wi-Fi to Pi** first checks the source band and personal
+security type. Its confirmation shows the detected mode. Name, password and
+security come from the same band. It reads the router again before copying
+and rejects a changed name, band or mode. It never displays the Wi-Fi password.
+Use the router's Wi-Fi password when a test device asks for a WPA password.
+
+WPA, WPA2, WPA3, WPA/WPA2 and WPA2/WPA3 have distinct settings and active-radio
+checks. Older WPA requires confirmation of its weak security. A mode that
+cannot be verified on the Pi fails and restores the previous profile. Open,
+WEP, enterprise and unknown modes are rejected. Numeric firmware codes are
+accepted only where their meaning is known. Older firmware must expose a
+recognized security field to support copying.
+
+A fresh installation and new manual Wi-Fi settings use WPA3 with AES.
+Installer upgrades preserve the existing mode. Verify the advertised security
+and a client connection on each target Pi before relying on a mode. Mixed
+WPA2/WPA3 must allow both kinds of client. Container tests do not prove this.
+
+On the installed Pi with NetworkManager 1.52.1, checks on 30 September 2026
+verified running WPA2 and WPA3 plus name reset preserving each mode. WPA,
+WPA/WPA2 and WPA2/WPA3 failed active-radio checks and restored the previous
+profile. A client connection for each mode remains a separate acceptance check.
+
+Imports keep a NetworkManager recovery profile named `jittersim-ap-recovery`
+with the original credentials. NetworkManager protects its secret storage.
+The copy disables automatic connection of that recovery profile and removes
+it after success. If a copy fails, one bounded restoration attempt restores
+it. The helper attempts pending recovery once when it starts. If that fails
+it leaves management controls available and retains the recovery copy for
+repair. Do not delete a remaining recovery profile before fixing the Wi-Fi.
+Name recovery also reports whether its one restoration attempt succeeded.
+
+Code rollback alone does not restore NetworkManager settings. A previous
+version may force WPA3 during installation. Restore a compatible working
+profile through management access before installing that older version.
 
 Keep SSH access through the Pi's management network. To clear project-owned
 traffic rules after a dashboard problem:

@@ -92,7 +92,7 @@ def test_router_operations_can_finish_after_the_normal_helper_timeout(action):
         try:
             client = HelperClient(socket_path=path, timeout_seconds=0.01)
             if action == "router-sync-ap":
-                result = client.sync_access_point_from_router(admin_password="fixture password")
+                result = client.sync_access_point_from_router(admin_password="fixture password", expected_fingerprint="a" * 64)
             elif action == "router-check":
                 result = client.check_router_password(admin_password="fixture password")
             else:

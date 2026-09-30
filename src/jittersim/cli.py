@@ -13,6 +13,7 @@ from jittersim.networking.helper import HelperClient, HelperClientError
 from jittersim.networking.renderer import render_command_plan
 from jittersim.networking.topology import Topology
 from jittersim.networking.wifi import DEFAULT_WIFI_NAME
+from jittersim.networking.wifi_security import SECURITY_MODES
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -102,7 +103,7 @@ def _wifi_command(argv: Sequence[str]) -> int:
             return 0
     try:
         result = HelperClient(socket_path=arguments.helper_socket).reset_wifi_name()
-        if result.get("ssid") != DEFAULT_WIFI_NAME or result.get("security") != "WPA3-SAE":
+        if result.get("ssid") != DEFAULT_WIFI_NAME or result.get("security") not in SECURITY_MODES:
             raise HelperClientError("The helper did not confirm the expected Wi-Fi settings.")
     except HelperClientError as error:
         print(f"Wi-Fi name reset failed: {error}", file=sys.stderr)
@@ -110,7 +111,7 @@ def _wifi_command(argv: Sequence[str]) -> int:
               "Check sudo systemctl status jittersim-helper.service "
               "and sudo nmcli connection show jittersim-ap.", file=sys.stderr)
         return 1
-    print("Wi-Fi name restored to JitterSim with WPA3 and AES. "
+    print("Wi-Fi name restored to JitterSim with " + result["security"] + ". "
           "Reconnect test devices using the same password.")
     return 0
 

@@ -79,13 +79,28 @@ bytes.
 
 ### Pi and router controls
 
-Test Wi-Fi requires WPA3 with AES and protected Wi-Fi management messages.
-Clients need WPA3 support. Runtime changes verify active authentication before
-reporting success. Use **Reset Wi-Fi name** beside the manual
-Wi-Fi controls or run `sudo jittersim wifi reset` on the Pi to restore
-`JitterSim` while keeping the current password. The action restarts Wi-Fi and
-disconnects test clients. Add `--yes` to confirm without an interactive prompt.
-The console command works with the dashboard stopped and needs the local helper.
+**Copy router Wi-Fi to Pi** checks the router's security before copying its
+name and password. The confirmation shows the source band and security type.
+JitterSim copies personal WPA, WPA2, WPA3 and mixed modes when the Pi can
+verify that mode. Older WPA needs a weak-security warning and confirmation.
+Unknown modes, open networks, WEP and enterprise Wi-Fi are rejected. An
+unsupported Pi mode restores the previous Wi-Fi settings instead of choosing
+another mode. The router itself is not changed by copying.
+
+A device asking for a WPA, WPA2 or WPA3 password needs the Wi-Fi password for
+that network. After copying router Wi-Fi this is the router's Wi-Fi password.
+It is different from the router administration password and dashboard token.
+
+Use **Reset Wi-Fi name** in the floating **Quick actions** panel or run
+`sudo jittersim wifi reset` on the Pi to restore `JitterSim`. Both keep the
+current password and security type. The action restarts Wi-Fi and disconnects
+test clients. Add `--yes` to confirm without an interactive prompt. The console
+works with the dashboard stopped and needs the local helper.
+
+Fresh installations and new manual Wi-Fi settings use WPA3 with AES.
+Upgrades preserve the existing security type. Runtime changes inspect the
+active radio before reporting success. Mixed-mode support depends on the
+Pi's software and Wi-Fi radio. Saved settings alone do not prove support.
 
 Copying the router's Wi-Fi name can make the debugging computer join the Pi
 and lose management access. Keep the router Wi-Fi available and use the
@@ -94,7 +109,7 @@ management network for recovery.
 - The Pi's Ethernet network name and router gateway in the dashboard.
 - Rename the Pi test access point and change its password locally.
 - Enter the Vodafone TG3442DE admin password for one action at a time.
-- Copy the router's primary Wi-Fi name and password to the Pi access point.
+- Check and copy the router's Wi-Fi name, password and security to the Pi.
 - Turn the router's primary Wi-Fi on or off from the dashboard.
 - A direct link to the Vodafone router page for settings JitterSim cannot
   change.

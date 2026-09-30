@@ -42,7 +42,7 @@ const storage = new Map();
 let storageBroken = false;
 const blocked = () => {if (storageBroken) throw new Error("storage blocked")};
 const windowListeners = new Map();
-const window = {innerHeight: 800, setInterval() {},
+const window = {innerHeight: 800, setInterval() {}, confirm() {return true},
   addEventListener(type, callback) {windowListeners.set(type, callback)}, localStorage: {
   getItem(key) {blocked(); return storage.has(key) ? storage.get(key) : null},
   setItem(key, value) {blocked(); storage.set(key, String(value))},
@@ -57,7 +57,7 @@ let pendingFormSubmitButton = null;
 let toolResult = {ok: true, message: "accepted fixture token"};
 let refreshCalls = 0;
 let networkCalls = [];
-let network = async () => ({ok: true, json: async () => ({ssid: "Fixture network"})});
+let network = async () => ({ok: true, json: async () => ({result: {ssid: "Fixture network", security: "WPA2", band: "2.4 GHz", fingerprint: "a".repeat(64), legacy: false}})});
 function element(id) {
   if (!nodes.has(id)) nodes.set(id, {
     id, value: "", textContent: "", className: "", disabled: false, checked: false,

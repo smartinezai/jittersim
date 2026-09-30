@@ -1,6 +1,7 @@
 """Unix-socket boundary for the privileged networking process."""
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -29,11 +30,12 @@ from .router import (
 )
 from .topology import Topology
 from .wifi import WifiError
+from .wifi_security import LEGACY_MODES, SECURITY_MODES
 
 LOGGER = logging.getLogger(__name__)
 MAX_MESSAGE_BYTES = 256 * 1024
 MAX_HELPER_CONNECTIONS = 8
-WIFI_ACTIONS = ("configure-ap", "router-sync-ap", "wifi-reset")
+WIFI_ACTIONS = ("configure-ap", "router-sync-ap", "router-preview-ap", "wifi-reset")
 MAX_LOG_DETAIL_CHARS = 512
 MAX_CONNECTED_CLIENTS = 256
 _MAC_ADDRESS_PATTERN = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
@@ -124,7 +126,7 @@ class HelperService:
                 return {"ok": False, "error": "Another Pi Wi-Fi change is running. Try again later.",
                         "reason": "wifi-busy"}
             try:
-                if action == "router-sync-ap":
+                if action in ("router-sync-ap", "router-preview-ap"):
                     return self._handle_router_sync_ap(payload)
                 if not self._network_lock.acquire(blocking=False):
                     return {"ok": False, "error": "Pi networking is busy. Try again later.",
@@ -310,6 +312,17 @@ class HelperService:
             router = self._router_factory(gateway, admin_password)
             router.login()
             settings = router.read_wifi_settings()
+            if settings.security not in SECURITY_MODES or settings.band is None:
+                raise RouterError("unsupported router security", reason="security")
+            preview = {"ssid": settings.ssid, "security": settings.security, "band": settings.band}
+            fingerprint = hashlib.sha256(json.dumps(preview, sort_keys=True).encode()).hexdigest()
+            if payload.get("action") == "router-preview-ap":
+                return {"ok": True, "action": "router-preview-ap", **preview,
+                        "fingerprint": fingerprint, "legacy": settings.security in LEGACY_MODES}
+            if payload.get("expected_fingerprint") != fingerprint:
+                raise RouterError("stale Wi-Fi preview", reason="changed")
+            if settings.security in LEGACY_MODES and payload.get("confirm_legacy") is not True:
+                raise RouterError("legacy security not confirmed", reason="legacy")
             if not self._network_lock.acquire(blocking=False):
                 return {"ok": False, "error": "Pi networking is busy. Try again later.",
                         "reason": "helper-busy"}
@@ -317,6 +330,7 @@ class HelperService:
                 commands_run = self._applier.configure_access_point(
                     ssid=settings.ssid,
                     password=settings.password,
+                    security=settings.security,
                 )
             finally:
                 self._network_lock.release()
@@ -324,11 +338,13 @@ class HelperService:
             return {"ok": False, "error": "invalid router credentials"}
         except WifiError as error:
             LOGGER.warning("router Wi-Fi import failed")
-            return {"ok": False, "error": ROUTER_IMPORT_MESSAGES["apply"],
+            message = (str(error) if error.reason in ("wifi-restored", "wifi-restore-failed")
+                       else ROUTER_IMPORT_MESSAGES["apply"])
+            return {"ok": False, "error": message,
                     "reason": error.reason}
         except RouterError as error:
             LOGGER.warning("router Wi-Fi import failed (%s)", error.reason)
-            return {"ok": False, "error": error.import_message}
+            return {"ok": False, "error": error.import_message, "reason": error.reason}
         except CommandExecutionError:
             LOGGER.warning("router Wi-Fi import failed while updating the Pi access point")
             return {"ok": False, "error": ROUTER_IMPORT_MESSAGES["apply"]}
@@ -339,6 +355,8 @@ class HelperService:
             "ok": True,
             "action": "router-sync-ap",
             "ssid": settings.ssid,
+            "security": settings.security,
+            "band": settings.band,
             "router_wifi_enabled": settings.enabled,
             "commands_run": commands_run,
         }
@@ -573,11 +591,18 @@ class HelperClient:
         client = HelperClient(socket_path=self.socket_path, timeout_seconds=90)
         return client._request({"action": "wifi-reset"})
 
-    def sync_access_point_from_router(self, *, admin_password: str) -> Dict[str, Any]:
+    def preview_router_wifi(self, *, admin_password: str) -> Dict[str, Any]:
+        """Inspect router security without exposing or applying its password."""
+        return self._request({"action": "router-preview-ap", "admin_password": admin_password},
+                             timeout_seconds=180.0)
+
+    def sync_access_point_from_router(self, *, admin_password: str,
+                                     expected_fingerprint: str, confirm_legacy: bool = False) -> Dict[str, Any]:
         """Copy the router's primary Wi-Fi settings into the local test AP."""
 
         return self._request(
-            {"action": "router-sync-ap", "admin_password": admin_password},
+            {"action": "router-sync-ap", "admin_password": admin_password,
+             "expected_fingerprint": expected_fingerprint, "confirm_legacy": confirm_legacy},
             timeout_seconds=180.0,
         )
 
@@ -783,11 +808,14 @@ def run_helper(
     if not enable_hardware:
         raise HelperError("hardware mode requires --enable-hardware")
     active_plan_path = socket_path.parent / "active-plan.json"
+    applier = NetworkApplier(executor=SubprocessExecutor(timeout_seconds=timeout_seconds),
+                             topology=topology)
+    try:
+        applier.recover_wifi()
+    except (WifiError, CommandExecutionError):
+        LOGGER.warning("Pending Wi-Fi recovery failed. Repair jittersim-ap through management access.")
     service = HelperService(
-        NetworkApplier(
-            executor=SubprocessExecutor(timeout_seconds=timeout_seconds),
-            topology=topology,
-        ),
+        applier,
         router_factory=router_factory,
         active_plan_path=active_plan_path,
     )

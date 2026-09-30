@@ -67,6 +67,7 @@ from jittersim.networking.router import (
     safe_router_import_message,
     safe_router_wifi_message,
 )
+from jittersim.networking.wifi_security import SECURITY_MODES
 
 LOGGER = logging.getLogger(__name__)
 MAX_JSON_BODY_BYTES = 64 * 1024
@@ -106,6 +107,7 @@ WRITE_PATHS = frozenset(
         "/api/access-point",
         "/api/access-point/reset-name",
         "/api/router/sync-ap",
+        "/api/router/preview-ap",
         "/api/router/wifi",
         "/api/router/check",
         "/api/connected-devices/apply-profile",
@@ -529,6 +531,8 @@ DASHBOARD_HTML = """<!doctype html>
     }
     .credential-dock button { margin: 0; min-height: 3.5rem; text-align: left; }
     .credential-dock span { display: block; }
+    .credential-dock #reset-wifi-name { grid-column: 1 / -1; }
+    .credential-dock #wifi-reset-status { grid-column: 1 / -1; margin: 0; max-height: 5rem; overflow-y: auto; }
     .credential-state { margin-top: 0.15rem; color: #c7d7eb; font-size: 0.78rem; font-weight: 400; }
     .credential-state.accepted { color: #8de2bc; }
     .credential-dock .panic-button { min-height: 3rem; text-align: center; font-weight: 700; }
@@ -557,22 +561,19 @@ DASHBOARD_HTML = """<!doctype html>
     .remember-choice input { width: auto; margin: 0; padding: 0; }
     .remember-note:empty { display: none; }
     @media (max-width: 1500px) {
-      body { padding-bottom: calc(11rem + env(safe-area-inset-bottom, 0px)); }
-      html { scroll-padding-bottom: 11rem; }
+      body { padding-bottom: calc(19rem + env(safe-area-inset-bottom, 0px)); }
+      html { scroll-padding-bottom: 19rem; }
       .credential-dock {
         top: auto; bottom: calc(var(--credential-viewport-bottom, 0px) + 0.75rem + env(safe-area-inset-bottom, 0px));
         left: 50%; right: auto; transform: translateX(-50%);
         grid-template-columns: repeat(2, minmax(0, 1fr)); width: min(25rem, calc(100vw - 2rem));
+        padding: 0.5rem; border-radius: 0.75rem; background: #0b1727;
       }
       .credential-dock .panic-button {
         grid-column: 1 / -1; min-height: 2.75rem; padding-block: 0.5rem;
         display: flex; align-items: baseline; justify-content: center; gap: 0.6rem;
       }
       .credential-dock .panic-button span { display: inline; margin-top: 0; }
-      .credentials-panel {
-        top: auto; bottom: calc(var(--credential-viewport-bottom, 0px) + 8.5rem + env(safe-area-inset-bottom, 0px));
-        max-height: calc(var(--credential-viewport-height, 100dvh) - 9.5rem - env(safe-area-inset-bottom, 0px));
-      }
     }
     .token-check-status { min-height: 1.25rem; margin: 0.65rem 0 0; color: #91a8c1; }
     .token-check-status.success { color: #8de2bc; }
@@ -644,6 +645,10 @@ DASHBOARD_HTML = """<!doctype html>
       title="Remove all traffic shaping now. Choose Apply current configuration to resume.">
       <span>Panic</span><span id="panic-state" class="credential-state">Turn all profiles off</span>
     </button>
+    <button id="reset-wifi-name" type="button" disabled aria-describedby="wifi-reset-status">
+      <span>Reset Wi-Fi name</span><span class="credential-state">Restore JitterSim</span>
+    </button>
+    <p id="wifi-reset-status" class="credential-state" role="status" aria-live="polite">Keep password and security</p>
   </nav>
   <section id="credentials-panel" class="credentials-panel" aria-labelledby="credentials-title" hidden>
     <div class="credential-heading">
@@ -1448,13 +1453,10 @@ DASHBOARD_HTML = """<!doctype html>
           <input id="access-point-password" type="password" minlength="8" maxlength="63" autocomplete="new-password" required>
         </label>
       </div>
-      <p class="policy-note">Use this if router import is unavailable. These values configure the Pi only. The password is sent to the helper and is not saved in the dashboard database.</p>
+      <p class="policy-note">These values configure the Pi with WPA3. To keep the router's security type use Copy router Wi-Fi to Pi. To join the copied network use the router's Wi-Fi password. The password is not saved in the dashboard database.</p>
       <button type="submit">Use these values on the Pi</button>
     </form>
-    <div class="action-buttons">
-      <button id="reset-wifi-name" type="button" disabled>Reset Wi-Fi name</button>
-    </div>
-    <p id="wifi-reset-status" class="policy-note" role="status" aria-live="polite">Restore the name to JitterSim and keep the current password. This restarts test Wi-Fi and disconnects its clients. Use these controls from the management network.</p>
+    <p class="policy-note">Reset Wi-Fi name is in Quick actions. It keeps the password and security type. Test devices disconnect while Wi-Fi restarts. Use management access.</p>
   </section>
   <div class="data-grid">
     <section class="card">
@@ -4519,7 +4521,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     element("reset-wifi-name").addEventListener("click", async (event) => {
       if (wifiResetPending || !helperConfigured) return;
-      if (!window.confirm("Restore the Wi-Fi name to JitterSim? The password stays the same. Test clients will disconnect while Wi-Fi restarts.")) return;
+      if (!window.confirm("Restore the Wi-Fi name to JitterSim? The password and security type stay the same. Test clients will disconnect while Wi-Fi restarts.")) return;
       const button = event.currentTarget;
       const status = element("wifi-reset-status");
       wifiResetPending = true;
@@ -4528,7 +4530,7 @@ DASHBOARD_HTML = """<!doctype html>
       try {
         const response = await request("/api/access-point/reset-name", "POST", {});
         element("access-point-ssid").value = response.result.ssid;
-        status.textContent = "Wi-Fi name restored to JitterSim. Reconnect test devices using the same password.";
+        status.textContent = "JitterSim restored using " + response.result.security + ". Password unchanged.";
         showMessage(status.textContent, "success");
       } catch (error) {
         status.textContent = error.message;
@@ -4562,10 +4564,23 @@ DASHBOARD_HTML = """<!doctype html>
       element("credential-router-status").textContent = message;
       showMessage(message, "working");
       try {
+        if (path === "/api/router/sync-ap") {
+          const previewResponse = await request("/api/router/preview-ap", "POST", { admin_password: password });
+          const preview = previewResponse.result;
+          if (passwordRevision !== routerPasswordRevision) throw new Error("Router password changed. Check Wi-Fi security again.");
+          status.textContent = "Router Wi-Fi uses " + preview.security + " on " + preview.band + ".";
+          const warning = preview.legacy ? " Older WPA is weak security. Copy it only for compatibility testing." : "";
+          if (!window.confirm("Copy " + preview.ssid + " using " + preview.security + " (" + preview.band + ")?" + warning + " The Pi will use the router's Wi-Fi password. Test clients disconnect while Wi-Fi restarts. Keep a separate management connection.")) {
+            status.textContent = "Wi-Fi security checked. Copy cancelled.";
+            showMessage(status.textContent, "success");
+            return;
+          }
+          body = { ...body, expected_fingerprint: preview.fingerprint, confirm_legacy: preview.legacy };
+        }
         const response = await request(path, "POST", { admin_password: password, ...body });
         const result = response.result || response;
         status.textContent = result.ssid
-          ? "Copied " + result.ssid + " to the Pi. Reconnect test devices if needed."
+          ? "Copied " + result.ssid + " using " + result.security + ". Join with the router's Wi-Fi password."
           : (result.enabled ? "Router Wi-Fi is on." : "Router Wi-Fi is off.");
         element("credential-router-status").textContent = status.textContent;
         showMessage(status.textContent, "success");
@@ -4649,8 +4664,7 @@ DASHBOARD_HTML = """<!doctype html>
     element("check-router-password").addEventListener("click", checkRouterPassword);
 
     element("sync-router-ap").addEventListener("click", (event) => {
-      if (!window.confirm("The Pi will use the router's Wi-Fi name and password. Your computer may join the Pi and lose dashboard access. Keep a separate management connection before continuing.")) return;
-      routerAction("/api/router/sync-ap", {}, "Reading the router Wi-Fi settings...", event.currentTarget);
+      routerAction("/api/router/sync-ap", {}, "Checking the router Wi-Fi security...", event.currentTarget);
     });
 
     element("disable-router-wifi").addEventListener("click", (event) => {
@@ -5965,7 +5979,7 @@ class ControlServer(HTTPServer):
                 )
             try:
                 result = self.helper_client.reset_wifi_name()
-                if result.get("ssid") != "JitterSim" or result.get("security") != "WPA3-SAE":
+                if result.get("ssid") != "JitterSim" or result.get("security") not in SECURITY_MODES:
                     raise HelperClientError("The helper did not confirm the expected Wi-Fi settings.")
             except HelperClientError as error:
                 status = (HTTPStatus.CONFLICT if error.reason in ("wifi-busy", "helper-busy")
@@ -6002,7 +6016,7 @@ class ControlServer(HTTPServer):
                 )
             return HTTPStatus.OK, "application/json", _json_bytes({"result": result})
 
-        if path == "/api/router/sync-ap":
+        if path in ("/api/router/sync-ap", "/api/router/preview-ap"):
             if self.helper_client is None:
                 return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
                     {"error": "network helper is not configured"}
@@ -6013,9 +6027,27 @@ class ControlServer(HTTPServer):
                     {"error": "router admin password is required"}
                 )
             try:
-                result = self.helper_client.sync_access_point_from_router(
-                    admin_password=admin_password
-                )
+                if path == "/api/router/preview-ap":
+                    preview = getattr(self.helper_client, "preview_router_wifi", None)
+                    if not callable(preview):
+                        raise HelperClientError("The networking helper is out of date. Reinstall the release before copying Wi-Fi.")
+                    result = preview(admin_password=admin_password)
+                    if (result.get("security") not in SECURITY_MODES
+                            or result.get("band") not in ("2.4 GHz", "5 GHz", "6 GHz")
+                            or not isinstance(result.get("ssid"), str)
+                            or not isinstance(result.get("fingerprint"), str)
+                            or len(result["fingerprint"]) != 64
+                            or not isinstance(result.get("legacy"), bool)):
+                        raise HelperClientError("The networking helper is out of date. Reinstall the release before copying Wi-Fi.")
+                    result = {key: result[key] for key in ("ssid", "security", "band", "fingerprint", "legacy")}
+                else:
+                    fingerprint = payload.get("expected_fingerprint")
+                    if not isinstance(fingerprint, str) or len(fingerprint) != 64:
+                        return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes({"error": "Check router Wi-Fi security before copying."})
+                    result = self.helper_client.sync_access_point_from_router(
+                        admin_password=admin_password, expected_fingerprint=fingerprint,
+                        confirm_legacy=payload.get("confirm_legacy") is True,
+                    )
             except HelperClientError as error:
                 message = safe_router_import_message(str(error))
                 LOGGER.warning("router Wi-Fi import failed: %s", message)
@@ -6742,7 +6774,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
 
         origin = self.headers.get("Origin")
         host = self.headers.get("Host", "")
-        if path == "/api/access-point/reset-name" and (
+        if path in ("/api/access-point/reset-name", "/api/router/sync-ap", "/api/router/preview-ap") and (
             self.headers.get("Sec-Fetch-Site") == "cross-site"
             or (origin is not None and origin not in ("http://" + host, "https://" + host))
         ):

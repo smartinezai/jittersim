@@ -12,7 +12,15 @@ from urllib.parse import urljoin
 import requests
 from Crypto.Cipher import AES
 
+from .wifi_security import router_security
+
 ROUTER_IMPORT_MESSAGES = {
+    "security": "The router's Wi-Fi security type is missing or unsupported. No Pi Wi-Fi change was made.",
+    "changed": "Router Wi-Fi changed after it was checked. Check its security again before copying.",
+    "legacy": "Copying older WPA requires confirmation of its weak security.",
+    "outdated": "The networking helper is out of date. Reinstall the release before copying Wi-Fi.",
+    "restored": "Wi-Fi copy failed or its security is unsupported on this Pi. Previous settings were restored.",
+    "restore-failed": "Wi-Fi copy failed and recovery failed. Use management access to repair jittersim-ap.",
     "failed": "router Wi-Fi import failed",
     "login": "Router login failed. Check the router admin password and try again.",
     "unreachable": "Could not contact the router. Check the Pi's wired connection and try again.",
@@ -104,6 +112,8 @@ class RouterWifiSettings:
     ssid: str
     password: str
     enabled: Optional[bool]
+    security: Optional[str] = None
+    band: Optional[str] = None
 
 
 @dataclass
@@ -546,6 +556,8 @@ class TG3442DERouter:
             ssid=ssid,
             password=password,
             enabled=_wifi_enabled(form.controls),
+            security=router_security(form.controls.get("wifi_security" + ssid_name[len("wifi_ssid"):])),
+            band={"24": "2.4 GHz", "5": "5 GHz", "6": "6 GHz"}.get(ssid_name.removeprefix("wifi_ssid")),
         )
 
     def _wifi_form(self) -> Tuple[_Form, str]:
@@ -703,10 +715,13 @@ def _valid_wifi_credentials(ssid: object, password: object) -> bool:
 
 
 def _settings_from_wifi_data(data: Dict[str, Any]) -> RouterWifiSettings:
-    pairs = [("SSID", "Passphrase", "Enable"), ("SSID5G", "Passphrase5G", "Enable5G")]
+    pairs = [("SSID", "Passphrase", "Enable", "ModeEnabled", "2.4 GHz"),
+             ("SSID5G", "Passphrase5G", "Enable5G", "ModeEnabled5G", "5 GHz")]
     if _radio_state(data.get("Enable")) is False and _radio_state(data.get("Enable5G")) is True:
         pairs.reverse()
-    for ssid_key, password_key, _ in pairs:
+    for ssid_key, password_key, state_key, security_key, band in pairs:
+        if _radio_state(data.get(state_key)) is False:
+            continue
         ssid, password = data.get(ssid_key), data.get(password_key)
         if _valid_wifi_credentials(ssid, password):
             break
@@ -723,12 +738,15 @@ def _settings_from_wifi_data(data: Dict[str, Any]) -> RouterWifiSettings:
         enabled = True
     elif all(state is False for state in states):
         enabled = False
-    return RouterWifiSettings(ssid=ssid, password=password, enabled=enabled)
+    return RouterWifiSettings(ssid=ssid, password=password, enabled=enabled,
+                              security=router_security(data.get(security_key)), band=band)
 
 
 def safe_router_import_message(message: str) -> str:
     """Allow only known guidance through the API and its logs."""
 
+    if message == "unknown action":
+        return ROUTER_IMPORT_MESSAGES["outdated"]
     return (
         message if message in ROUTER_IMPORT_MESSAGES.values() else ROUTER_IMPORT_MESSAGES["failed"]
     )
