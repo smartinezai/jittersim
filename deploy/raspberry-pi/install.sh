@@ -48,6 +48,7 @@ fi
 python3 -m venv "$INSTALL_DIR/.venv"
 "$INSTALL_DIR/.venv/bin/pip" install "$INSTALL_DIR"
 chown -R root:root "$INSTALL_DIR"
+ln -sfn "$INSTALL_DIR/.venv/bin/jittersim" /usr/local/bin/jittersim
 
 if [ ! -s "$CONFIG_DIR/control.env" ]; then
     admin_token=$(openssl rand -hex 32)
@@ -61,7 +62,7 @@ if [ ! -s "$CONFIG_DIR/ap.env" ]; then
     ap_password=$(openssl rand -hex 12)
     umask 077
     {
-        printf 'JITTERSIM_AP_SSID=JitterSim-Test\n'
+        printf 'JITTERSIM_AP_SSID=JitterSim\n'
         printf 'JITTERSIM_AP_PASSWORD=%s\n' "$ap_password"
     } > "$CONFIG_DIR/ap.env"
 fi
@@ -89,7 +90,7 @@ if ! nmcli connection show jittersim-ap >/dev/null 2>&1; then
         802-11-wireless-security.psk "$JITTERSIM_AP_PASSWORD"
 else
     ap_settings_before=$(nmcli -g \
-        connection.interface-name,connection.autoconnect,802-11-wireless.mode,ipv4.method,ipv4.addresses,ipv4.shared-dhcp-range,ipv6.method \
+        connection.interface-name,connection.autoconnect,802-11-wireless.mode,ipv4.method,ipv4.addresses,ipv4.shared-dhcp-range,ipv6.method,802-11-wireless-security.key-mgmt,802-11-wireless-security.proto,802-11-wireless-security.pairwise,802-11-wireless-security.group \
         connection show jittersim-ap)
 fi
 if ! nmcli -g ipv4.shared-dhcp-range connection show jittersim-ap >/dev/null 2>&1; then
@@ -100,12 +101,16 @@ nmcli connection modify jittersim-ap \
     connection.interface-name "$JITTERSIM_TEST_INTERFACE" \
     connection.autoconnect yes \
     802-11-wireless.mode ap \
+    802-11-wireless-security.key-mgmt wpa-psk \
+    802-11-wireless-security.proto rsn \
+    802-11-wireless-security.pairwise ccmp \
+    802-11-wireless-security.group ccmp \
     ipv4.method shared \
     ipv4.addresses 192.168.50.1/24 \
     ipv4.shared-dhcp-range 192.168.50.100,192.168.50.199 \
     ipv6.method disabled
 ap_settings_after=$(nmcli -g \
-    connection.interface-name,connection.autoconnect,802-11-wireless.mode,ipv4.method,ipv4.addresses,ipv4.shared-dhcp-range,ipv6.method \
+    connection.interface-name,connection.autoconnect,802-11-wireless.mode,ipv4.method,ipv4.addresses,ipv4.shared-dhcp-range,ipv6.method,802-11-wireless-security.key-mgmt,802-11-wireless-security.proto,802-11-wireless-security.pairwise,802-11-wireless-security.group \
     connection show jittersim-ap)
 
 dashboard_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (p = 1; p <= NF; p++) if ($p == "src") {print $(p + 1); exit}}' || true)

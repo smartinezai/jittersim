@@ -1,0 +1,98 @@
+"""Exercise name recovery through the served release dashboard."""
+
+import os
+import selectors
+import subprocess
+import sys
+from pathlib import Path
+
+from playwright.sync_api import expect, sync_playwright
+
+
+def check_wifi_recovery(page):
+    button = page.locator("#reset-wifi-name")
+    expect(button).to_be_enabled()
+    field = page.locator("#access-point-ssid")
+    field.fill("Copied network")
+    requests = []
+    page.on("request", lambda request: requests.append(request)
+            if request.url.endswith("/api/access-point/reset-name") else None)
+    page.once("dialog", lambda dialog: dialog.dismiss())
+    button.click()
+    expect(field).to_have_value("Copied network")
+    assert not requests
+
+    page.route("**/api/access-point/reset-name", lambda route: route.fulfill(
+        status=502, content_type="application/json", body='{"error":"Simulated reset failure"}'))
+    page.once("dialog", lambda dialog: dialog.accept())
+    button.click()
+    expect(page.locator("#wifi-reset-status")).to_contain_text("Simulated reset failure")
+    expect(button).to_be_enabled()
+    expect(field).to_have_value("Copied network")
+    page.unroute("**/api/access-point/reset-name")
+
+    held = []
+    page.route("**/api/access-point/reset-name", lambda route: held.append(route))
+    page.once("dialog", lambda dialog: dialog.accept())
+    button.click()
+    expect(button).to_be_disabled()
+    assert len(held) == 1
+    held[0].continue_()
+    expect(field).to_have_value("JitterSim")
+    expect(button).to_be_enabled()
+    assert len(requests) == 2
+    page.unroute("**/api/access-point/reset-name")
+    page.route("**/api/health", lambda route: route.fulfill(
+        status=200, content_type="application/json",
+        body='{"helper_configured":false,"mode":"configuration-only"}'))
+    page.reload()
+    expect(button).to_be_disabled()
+    page.unroute("**/api/health")
+    page.reload()
+    expect(button).to_be_enabled()
+
+
+def run():
+    process = subprocess.Popen([sys.executable, "-m", "tests.browser.fixture"],
+                               stdout=subprocess.PIPE, text=True)
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            if not selector.select(timeout=15):
+                raise RuntimeError("Browser fixture did not start")
+            port = int(process.stdout.readline().strip())
+        Path("test-results").mkdir(exist_ok=True)
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                executable_path=os.environ.get("JITTERSIM_BROWSER_EXECUTABLE"))
+            context = browser.new_context(viewport={"width": 1440, "height": 1000})
+            context.tracing.start(screenshots=True, snapshots=True, sources=True)
+            page = context.new_page()
+            errors = []
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            try:
+                page.goto(f"http://127.0.0.1:{port}")
+                page.locator("#open-admin-credentials").click()
+                page.locator("#admin-token").fill("browser-test")
+                page.locator("#check-admin-token").click()
+                expect(page.locator("#admin-credential-state")).to_contain_text("Accepted")
+                page.locator("#close-credentials").click()
+                check_wifi_recovery(page)
+                page.locator("#reset-wifi-name").scroll_into_view_if_needed()
+                page.screenshot(path="test-results/wifi-pi-desktop.png")
+                page.set_viewport_size({"width": 390, "height": 844})
+                page.locator("#reset-wifi-name").scroll_into_view_if_needed()
+                page.screenshot(path="test-results/wifi-pi-phone.png")
+                assert page.evaluate("document.documentElement.scrollWidth") <= 391
+                assert not errors, errors
+                print("Wi-Fi recovery browser acceptance passed.")
+            finally:
+                context.tracing.stop(path="test-results/wifi-pi-browser.zip")
+                browser.close()
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
+
+
+if __name__ == "__main__":
+    run()

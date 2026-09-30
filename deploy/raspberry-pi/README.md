@@ -279,6 +279,20 @@ for current command behavior.
 
 ## Recover over SSH
 
+To recover from a copied router network name, run `sudo jittersim wifi reset`
+on the Pi through its management connection or a local terminal. Add `--yes`
+to confirm without a prompt. The command restores `JitterSim`, keeps the current
+password and restarts test Wi-Fi. It needs the helper but works with the dashboard
+stopped. The dashboard has the same **Reset Wi-Fi name** control beside its
+manual Wi-Fi form. It cannot be reached from the test network.
+
+Installation and runtime Wi-Fi changes require WPA2 with AES. Upgrades save
+the stronger settings without restarting an active connection. Reset the name
+or plan a Wi-Fi restart to activate them. WPA3 needs separate hardware testing.
+Name recovery makes one bounded restoration attempt if activation fails and
+reports whether recovery succeeded. Code rollback alone does not restore
+NetworkManager settings.
+
 Keep SSH access through the Pi's management network. To clear project-owned
 traffic rules after a dashboard problem:
 

@@ -19,6 +19,7 @@ from .renderer import (
     render_reset_commands,
 )
 from .topology import Topology
+from .wifi import WifiController
 
 
 @dataclass(frozen=True)
@@ -285,37 +286,12 @@ class NetworkApplier:
         """Set the local test AP credentials without touching the upstream router."""
 
         _validate_access_point_settings(ssid=ssid, password=password)
-        commands = (
-            Command(
-                executable="nmcli",
-                arguments=(
-                    "connection",
-                    "modify",
-                    "jittersim-ap",
-                    "802-11-wireless.ssid",
-                    ssid,
-                    "802-11-wireless-security.key-mgmt",
-                    "wpa-psk",
-                    "802-11-wireless-security.psk",
-                    password,
-                ),
-                purpose="update the local JitterSim access point credentials",
-            ),
-            Command(
-                executable="nmcli",
-                arguments=("connection", "down", "jittersim-ap"),
-                purpose="restart the local JitterSim access point",
-                ignore_failure=True,
-            ),
-            Command(
-                executable="nmcli",
-                arguments=("connection", "up", "jittersim-ap"),
-                purpose="start the local JitterSim access point",
-            ),
-        )
-        for command in commands:
-            self._executor.run(command)
-        return len(commands)
+        return WifiController(self._executor, self._topology.test_interface).configure(ssid, password)
+
+    def reset_wifi_name(self) -> Dict[str, str]:
+        """Restore the Pi Wi-Fi name without reading or changing its password."""
+
+        return WifiController(self._executor, self._topology.test_interface).reset_name()
 
     def _try_reset(self) -> Optional[CommandExecutionError]:
         try:
@@ -332,3 +308,6 @@ def _validate_access_point_settings(*, ssid: str, password: str) -> None:
         raise ValidationError("ssid contains a control character")
     if not isinstance(password, str) or not 8 <= len(password) <= 63:
         raise ValidationError("password must contain between 8 and 63 characters")
+    if not password.isascii() or any(ord(character) < 32 or ord(character) == 127
+                                   for character in password):
+        raise ValidationError("password must contain printable ASCII characters")

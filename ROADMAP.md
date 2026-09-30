@@ -248,6 +248,10 @@ verified on the target Pi under normal household load.
 - [x] Check Ethernet routing, AP interface and subnet compatibility before
   changing services during installation.
 - [x] Avoid restarting an active AP during a routine software update.
+- [x] Require WPA2 with AES on install and later Wi-Fi changes.
+- [x] Restore the Wi-Fi name from the dashboard or console without changing
+  the password.
+- [ ] Verify stronger Wi-Fi security and name recovery on the target Pi.
 - [ ] Decide whether Wi-Fi devices need the router's wired printers, TVs, NAS
   and other private services. The current isolated subnet blocks them.
 - [ ] Choose and implement a household network design if normal wired-network
