@@ -52,6 +52,17 @@ ROUTER_WIFI_MESSAGES = {
 }
 
 
+ROUTER_CHECK_MESSAGES = {
+    "failed": "Could not check the router password. Try again in a moment.",
+    "login": "Router login failed. Check the router admin password and try again.",
+    "unreachable": "Could not contact the router. Check the Pi's wired connection and try again.",
+    "outdated": (
+        "The networking helper is out of date. "
+        "Restart the JitterSim services or reinstall the release."
+    ),
+}
+
+
 class RouterError(RuntimeError):
     """Raised when a router operation cannot be completed safely."""
 
@@ -74,6 +85,12 @@ class RouterError(RuntimeError):
         """Return fixed toggle guidance without retaining router details."""
 
         return ROUTER_WIFI_MESSAGES.get(self.reason, ROUTER_WIFI_MESSAGES["failed"])
+
+    @property
+    def check_message(self) -> str:
+        """Return fixed password-check guidance without changing-Wi-Fi wording."""
+
+        return ROUTER_CHECK_MESSAGES.get(self.reason, ROUTER_CHECK_MESSAGES["failed"])
 
 
 class _EndpointUnavailable(RouterError):
@@ -714,6 +731,16 @@ def safe_router_import_message(message: str) -> str:
 
     return (
         message if message in ROUTER_IMPORT_MESSAGES.values() else ROUTER_IMPORT_MESSAGES["failed"]
+    )
+
+
+def safe_router_check_message(message: str) -> str:
+    """Allow only known password-check guidance through the API and its logs."""
+
+    if message == "unknown action":
+        return ROUTER_CHECK_MESSAGES["outdated"]
+    return (
+        message if message in ROUTER_CHECK_MESSAGES.values() else ROUTER_CHECK_MESSAGES["failed"]
     )
 
 

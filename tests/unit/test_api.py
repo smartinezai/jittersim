@@ -62,6 +62,9 @@ class FakeHelper:
     def set_router_wifi(self, *, admin_password, enabled):
         return {"ok": True, "action": "router-wifi", "enabled": enabled}
 
+    def check_router_password(self, *, admin_password):
+        return {"ok": True, "action": "router-check"}
+
     def connected_devices(self):
         return [
             {
@@ -908,6 +911,88 @@ class ControlServerTests(unittest.TestCase):
                 self.assertEqual(status, 502)
                 self.assertEqual(json.loads(body)["error"], expected)
                 self.assertNotIn("router-secret", body.decode() + "\n".join(logs.output))
+
+    def test_router_check_endpoint_signs_in_through_the_helper(self) -> None:
+        self.server.helper_client = FakeHelper()
+
+        status, content_type, body = self.server.write_response_for(
+            "/api/router/check", {"admin_password": "router-secret"}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, "application/json")
+        self.assertEqual(json.loads(body), {"result": {"ok": True, "action": "router-check"}})
+        self.assertNotIn("router-secret", body.decode())
+
+    def test_router_check_endpoint_needs_a_helper_and_a_password(self) -> None:
+        self.server.helper_client = None
+        status, _, body = self.server.write_response_for(
+            "/api/router/check", {"admin_password": "router-secret"}
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(json.loads(body)["error"], "network helper is not configured")
+
+        class UnexpectedHelper(FakeHelper):
+            def check_router_password(self, *, admin_password):
+                raise AssertionError("no router contact without a password")
+
+        self.server.helper_client = UnexpectedHelper()
+        for payload in ({}, {"admin_password": ""}, {"admin_password": 5}):
+            with self.subTest(payload=payload):
+                status, _, body = self.server.write_response_for("/api/router/check", payload)
+                self.assertEqual(status, 400)
+                self.assertEqual(json.loads(body)["error"], "router admin password is required")
+
+    def test_router_check_error_guidance_is_safe_in_response_and_logs(self) -> None:
+        from jittersim.networking.router import ROUTER_CHECK_MESSAGES
+
+        for message, expected in (
+            (ROUTER_CHECK_MESSAGES["login"], ROUTER_CHECK_MESSAGES["login"]),
+            (ROUTER_CHECK_MESSAGES["unreachable"], ROUTER_CHECK_MESSAGES["unreachable"]),
+            ("router-secret was present in a response", ROUTER_CHECK_MESSAGES["failed"]),
+            ("some other helper text", ROUTER_CHECK_MESSAGES["failed"]),
+            ("unknown action", ROUTER_CHECK_MESSAGES["outdated"]),
+        ):
+            with self.subTest(message=message):
+
+                class FailedHelper(FakeHelper):
+                    def check_router_password(self, *, admin_password):
+                        raise HelperClientError(message)
+
+                self.server.helper_client = FailedHelper()
+                with self.assertLogs("jittersim.api.server", level="WARNING") as logs:
+                    status, _, body = self.server.write_response_for(
+                        "/api/router/check", {"admin_password": "router-secret"}
+                    )
+                self.assertEqual(status, 502)
+                self.assertEqual(json.loads(body)["error"], expected)
+                self.assertNotIn("router-secret", body.decode() + "\n".join(logs.output))
+
+    def test_router_check_route_requires_the_admin_token_and_records_no_password(self) -> None:
+        self.server.admin_token = "admin-token"
+        self.server.helper_client = FakeHelper()
+        handler = object.__new__(ControlRequestHandler)
+        handler.server = self.server
+        handler.path = "/api/router/check"
+        handler.headers = Message()
+        body = json.dumps({"admin_password": "router-secret"}).encode()
+        handler.headers["Content-Length"] = str(len(body))
+        response = {}
+        handler._send_response = lambda **values: response.update(values)
+
+        handler.rfile = BytesIO(body)
+        handler.do_POST()
+        self.assertEqual(response["status"], 401)
+
+        handler.headers["Authorization"] = "Bearer admin-token"
+        handler.rfile = BytesIO(body)
+        handler.do_POST()
+        self.assertEqual(response["status"], 200)
+        history = self.repository.list_recent_actions()
+        self.assertEqual(
+            (history[0]["action"], history[0]["status_code"]), ("/api/router/check", 200)
+        )
+        self.assertNotIn("router-secret", str(history))
 
     def test_router_wifi_endpoint_requires_confirmation_to_disable(self) -> None:
         self.server.helper_client = FakeHelper()

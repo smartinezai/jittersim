@@ -10,12 +10,14 @@ from urllib.parse import unquote, urlsplit
 from Crypto.Cipher import AES
 
 from jittersim.networking.router import (
+    ROUTER_CHECK_MESSAGES,
     RouterError,
     TG3442DERouter,
     _EndpointUnavailable,
     _Form,
     _FormParser,
     _wifi_enabled,
+    safe_router_check_message,
 )
 
 
@@ -847,6 +849,39 @@ class RouterFormTests(unittest.TestCase):
                 "main_wifi5_state": "0",
             },
         )
+
+
+class RouterPasswordCheckMessageTests(unittest.TestCase):
+    def test_check_failures_map_to_fixed_guidance(self) -> None:
+        for reason, expected in (
+            ("login", ROUTER_CHECK_MESSAGES["login"]),
+            ("unreachable", ROUTER_CHECK_MESSAGES["unreachable"]),
+            ("failed", ROUTER_CHECK_MESSAGES["failed"]),
+            # Wording about changing Wi-Fi must never appear when nothing was changed.
+            ("uncertain", ROUTER_CHECK_MESSAGES["failed"]),
+            ("unsupported", ROUTER_CHECK_MESSAGES["failed"]),
+        ):
+            with self.subTest(reason=reason):
+                error = RouterError("router-secret was in this response", reason=reason)
+                self.assertEqual(error.check_message, expected)
+                self.assertNotIn("router-secret", error.check_message)
+
+    def test_check_messages_guide_the_password_and_never_mention_wifi_changes(self) -> None:
+        self.assertIn("admin password", ROUTER_CHECK_MESSAGES["login"])
+        for message in ROUTER_CHECK_MESSAGES.values():
+            self.assertNotIn("Wi-Fi change", message)
+
+    def test_only_known_check_guidance_passes_through(self) -> None:
+        for message in ROUTER_CHECK_MESSAGES.values():
+            self.assertEqual(safe_router_check_message(message), message)
+        for unknown in ("router-secret was in a response", "some other helper text", ""):
+            self.assertEqual(safe_router_check_message(unknown), ROUTER_CHECK_MESSAGES["failed"])
+
+    def test_an_outdated_helper_is_named_instead_of_asking_for_a_retry(self) -> None:
+        message = safe_router_check_message("unknown action")
+        self.assertEqual(message, ROUTER_CHECK_MESSAGES["outdated"])
+        self.assertIn("out of date", message)
+        self.assertIn("Restart", message)
 
 
 if __name__ == "__main__":

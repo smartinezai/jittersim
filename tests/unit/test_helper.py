@@ -23,6 +23,7 @@ from jittersim.networking.helper import (
     run_helper,
 )
 from jittersim.networking.router import (
+    ROUTER_CHECK_MESSAGES,
     ROUTER_IMPORT_MESSAGES,
     ROUTER_WIFI_MESSAGES,
     RouterError,
@@ -344,6 +345,81 @@ class HelperServiceTests(unittest.TestCase):
         recorded = str(response) + "\n".join(logs.output)
         for secret in ("router-secret", "wifi-secret", "response contents"):
             self.assertNotIn(secret, recorded)
+
+    def _router_check_service(self, router_class=FakeRouter):
+        routers = []
+
+        def router_factory(address, password):
+            router = router_class(address, password)
+            routers.append(router)
+            return router
+
+        service = HelperService(
+            NetworkApplier(
+                executor=UplinkOutputExecutor(),
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            ),
+            router_factory=router_factory,
+        )
+        return service, routers
+
+    def test_checks_the_router_password_without_reading_or_changing_anything(self) -> None:
+        class WatchedRouter(FakeRouter):
+            def read_wifi_settings(self):
+                raise AssertionError("a password check must not read Wi-Fi settings")
+
+            def set_wifi_enabled(self, *, enabled):
+                raise AssertionError("a password check must not change Wi-Fi")
+
+        service, routers = self._router_check_service(WatchedRouter)
+
+        response = service.handle_payload(
+            {"action": "router-check", "admin_password": "router-secret"}
+        )
+
+        self.assertEqual(response, {"ok": True, "action": "router-check"})
+        self.assertEqual(routers[0].address, "192.168.0.1")
+        self.assertEqual(routers[0].password, "router-secret")
+        self.assertTrue(routers[0].logged_in)
+        self.assertTrue(routers[0].closed)
+
+    def test_router_check_returns_safe_guidance_and_always_closes_the_session(self) -> None:
+        for reason, expected in (
+            ("login", ROUTER_CHECK_MESSAGES["login"]),
+            ("unreachable", ROUTER_CHECK_MESSAGES["unreachable"]),
+            ("uncertain", ROUTER_CHECK_MESSAGES["failed"]),
+        ):
+            with self.subTest(reason=reason):
+
+                class RejectedRouter(FakeRouter):
+                    def login(self):
+                        raise RouterError("router-secret response contents", reason=reason)
+
+                service, routers = self._router_check_service(RejectedRouter)
+                with self.assertLogs("jittersim.networking.helper", level="WARNING") as logs:
+                    response = service.handle_payload(
+                        {"action": "router-check", "admin_password": "router-secret"}
+                    )
+                self.assertEqual(response, {"ok": False, "error": expected})
+                self.assertTrue(routers[0].closed)
+                recorded = str(response) + "\n".join(logs.output)
+                for secret in ("router-secret", "response contents"):
+                    self.assertNotIn(secret, recorded)
+
+    def test_router_check_needs_a_password_before_contacting_the_router(self) -> None:
+        service, routers = self._router_check_service()
+
+        for payload in (
+            {"action": "router-check"},
+            {"action": "router-check", "admin_password": ""},
+            {"action": "router-check", "admin_password": 7},
+        ):
+            with self.subTest(payload=payload):
+                self.assertEqual(
+                    service.handle_payload(payload),
+                    {"ok": False, "error": "invalid router credentials"},
+                )
+        self.assertEqual(routers, [])
 
     def test_rejects_short_access_point_passwords(self) -> None:
         response = self.service.handle_payload(

@@ -60,7 +60,11 @@ from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.schedules import active_schedule
 from jittersim.engine.service import compile_stored_plan
 from jittersim.networking.helper import HelperClient, HelperClientError
-from jittersim.networking.router import safe_router_import_message, safe_router_wifi_message
+from jittersim.networking.router import (
+    safe_router_check_message,
+    safe_router_import_message,
+    safe_router_wifi_message,
+)
 
 LOGGER = logging.getLogger(__name__)
 MAX_JSON_BODY_BYTES = 64 * 1024
@@ -97,6 +101,7 @@ WRITE_PATHS = frozenset(
         "/api/access-point",
         "/api/router/sync-ap",
         "/api/router/wifi",
+        "/api/router/check",
         "/api/connected-devices/apply-profile",
         "/api/connected-device-labels",
         "/api/connected-device-labels/delete",
@@ -291,6 +296,11 @@ DASHBOARD_HTML = """<!doctype html>
     .content-grid .card, .data-grid .card { margin: 0; }
     .section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
     .section-heading p { margin: 0; color: #91a8c1; font-size: 0.82rem; }
+    .connected-actions {
+      display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 0.6rem;
+    }
+    .connected-actions button { margin: 0; padding: 0.3rem 0.75rem; font-size: 0.82rem; }
+    .connected-refresh-status { margin: 0.6rem 0 0; color: #91a8c1; font-size: 0.82rem; }
     .count-badge { padding: 0.25rem 0.55rem; border: 1px solid #46627f; border-radius: 999px; color: #c6dbf4; font-size: 0.75rem; white-space: nowrap; }
     .connected-list { display: grid; gap: 0.6rem; }
     .connected-row {
@@ -514,6 +524,7 @@ DASHBOARD_HTML = """<!doctype html>
     .credential-dock span { display: block; }
     .credential-state { margin-top: 0.15rem; color: #c7d7eb; font-size: 0.78rem; font-weight: 400; }
     .credential-state.accepted { color: #8de2bc; }
+    .credential-dock .panic-button { min-height: 3rem; text-align: center; font-weight: 700; }
     .credentials-panel {
       position: fixed; z-index: 110; right: 1rem;
       top: calc(var(--credential-viewport-top, 0px) + 1rem);
@@ -535,17 +546,25 @@ DASHBOARD_HTML = """<!doctype html>
     .credential-help summary { cursor: pointer; }
     .credential-help pre { margin-top: 0.6rem; min-height: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
     .credential-note { margin: 0.65rem 0 0; color: #c7d7eb; font-size: 0.82rem; }
+    .remember-choice { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.65rem; }
+    .remember-choice input { width: auto; margin: 0; padding: 0; }
+    .remember-note:empty { display: none; }
     @media (max-width: 1500px) {
-      body { padding-bottom: calc(8rem + env(safe-area-inset-bottom, 0px)); }
-      html { scroll-padding-bottom: 8rem; }
+      body { padding-bottom: calc(11rem + env(safe-area-inset-bottom, 0px)); }
+      html { scroll-padding-bottom: 11rem; }
       .credential-dock {
         top: auto; bottom: calc(var(--credential-viewport-bottom, 0px) + 0.75rem + env(safe-area-inset-bottom, 0px));
         left: 50%; right: auto; transform: translateX(-50%);
         grid-template-columns: repeat(2, minmax(0, 1fr)); width: min(25rem, calc(100vw - 2rem));
       }
+      .credential-dock .panic-button {
+        grid-column: 1 / -1; min-height: 2.75rem; padding-block: 0.5rem;
+        display: flex; align-items: baseline; justify-content: center; gap: 0.6rem;
+      }
+      .credential-dock .panic-button span { display: inline; margin-top: 0; }
       .credentials-panel {
-        top: auto; bottom: calc(var(--credential-viewport-bottom, 0px) + 5rem + env(safe-area-inset-bottom, 0px));
-        max-height: calc(var(--credential-viewport-height, 100dvh) - 6rem - env(safe-area-inset-bottom, 0px));
+        top: auto; bottom: calc(var(--credential-viewport-bottom, 0px) + 8.5rem + env(safe-area-inset-bottom, 0px));
+        max-height: calc(var(--credential-viewport-height, 100dvh) - 9.5rem - env(safe-area-inset-bottom, 0px));
       }
     }
     .token-check-status { min-height: 1.25rem; margin: 0.65rem 0 0; color: #91a8c1; }
@@ -607,12 +626,16 @@ DASHBOARD_HTML = """<!doctype html>
     <span id="toast-message"></span>
     <button id="toast-dismiss" type="button" aria-label="Dismiss message">Dismiss</button>
   </div>
-  <nav class="credential-dock" aria-label="Credential shortcuts">
+  <nav class="credential-dock" aria-label="Quick actions">
     <button id="open-admin-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
       <span>Admin token</span><span id="admin-credential-state" class="credential-state">Needed</span>
     </button>
     <button id="open-router-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
       <span>Router password</span><span id="router-credential-state" class="credential-state">Not entered</span>
+    </button>
+    <button id="panic-button" class="danger panic-button" type="button"
+      title="Remove all traffic shaping now. Choose Apply current configuration to resume.">
+      <span>Panic</span><span id="panic-state" class="credential-state">Turn all profiles off</span>
     </button>
   </nav>
   <section id="credentials-panel" class="credentials-panel" aria-labelledby="credentials-title" hidden>
@@ -620,11 +643,17 @@ DASHBOARD_HTML = """<!doctype html>
       <h2 id="credentials-title">Credentials</h2>
       <button id="close-credentials" type="button" aria-label="Close credentials panel">Close</button>
     </div>
-    <p class="credential-note">Kept in this page only. Closing this panel keeps your entries.</p>
+    <p class="credential-note">
+      Kept in this page only unless you choose Remember. Closing this panel keeps your entries.
+    </p>
     <h3>Admin token</h3>
-    <label>Admin token (kept in this page only)
+    <label>Admin token
       <input id="admin-token" type="password" autocomplete="off" aria-describedby="token-check-status">
     </label>
+    <label class="remember-choice">
+      <input id="remember-admin-token" type="checkbox" autocomplete="off"> Remember for 24 hours
+    </label>
+    <p id="remember-admin-token-note" class="credential-note remember-note" role="status"></p>
     <div class="credential-actions">
       <button id="check-admin-token" class="primary" type="button">Check token</button>
       <button id="clear-admin-token" type="button">Clear token</button>
@@ -638,8 +667,18 @@ DASHBOARD_HTML = """<!doctype html>
     <label>Router admin password
       <input id="router-admin-password" type="password" autocomplete="off" placeholder="Password for 192.168.0.1" aria-describedby="credential-router-status">
     </label>
-    <div class="credential-actions"><button id="clear-router-password" type="button">Clear router password</button></div>
-    <p id="credential-router-status" class="credential-note" role="status" aria-live="off">Used for one router operation. Entering it does not check it or change the router.</p>
+    <label class="remember-choice">
+      <input id="remember-router-password" type="checkbox" autocomplete="off"> Remember for 24 hours
+    </label>
+    <p id="remember-router-password-note" class="credential-note remember-note" role="status"></p>
+    <div class="credential-actions">
+      <button id="check-router-password" class="primary" type="button">Check password</button>
+      <button id="clear-router-password" type="button">Clear router password</button>
+    </div>
+    <p id="credential-router-status" class="credential-note" role="status" aria-live="off">
+      Choose Check password to sign in to the router once. Nothing on the router is changed.
+      Repeated wrong passwords may temporarily lock its web login.
+    </p>
   </section>
   <header class="page-header">
     <div>
@@ -668,8 +707,14 @@ DASHBOARD_HTML = """<!doctype html>
         <h2>Connected clients</h2>
         <p>Devices on the Pi’s Wi-Fi. Devices on the router’s Wi-Fi are not listed here.</p>
       </div>
-      <span id="connected-count" class="count-badge">Check token</span>
+      <div class="connected-actions">
+        <span id="connected-count" class="count-badge">Check token</span>
+        <button id="check-devices" type="button">Check for devices</button>
+      </div>
     </div>
+    <p id="connected-refresh-status" class="connected-refresh-status">
+      Refreshes every 5 seconds once the admin token is accepted.
+    </p>
     <div id="connected-devices" class="connected-list" aria-live="polite">Enter the admin token and choose Check token to view connected devices.</div>
   </section>
   <section class="card connected-card" aria-labelledby="unaffected-title">
@@ -1592,6 +1637,8 @@ DASHBOARD_HTML = """<!doctype html>
         element(panelId).textContent = message;
       });
       element("connected-count").textContent = state;
+      element("connected-refresh-status").textContent =
+        "Refreshes every 5 seconds once the admin token is accepted.";
       element("uplink-state").textContent = state;
       element("runtime-summary").textContent = message;
       element("runtime-summary").className = "runtime-summary unknown";
@@ -1610,17 +1657,42 @@ DASHBOARD_HTML = """<!doctype html>
     let adminTokenRevision = 0;
     let adminTokenChecking = false;
     let adminTokenRejected = false;
+    let adminTokenRefused = false;
     let routerPasswordRevision = 0;
+    let routerPasswordVerified = false;
+    let routerPasswordRejected = false;
+    let routerPasswordChecking = false;
     let routerActionPending = false;
     let credentialOpener = null;
+    const REMEMBER_MS = 24 * 60 * 60 * 1000;
+    const REMEMBERED = {
+      admin: {
+        key: "jittersim.remembered.admin-token", box: "remember-admin-token",
+        note: "remember-admin-token-note", input: "admin-token", noun: "token"
+      },
+      router: {
+        key: "jittersim.remembered.router-password", box: "remember-router-password",
+        note: "remember-router-password-note", input: "router-admin-password", noun: "password"
+      }
+    };
+    const expiredNotice = { admin: false, router: false };
+    // The value this tab last saved or restored, so it never deletes another tab's entry.
+    const ownedRemembered = { admin: null, router: null };
+    let rememberedCredentialsReady = false;
 
     function updateCredentialStatus() {
       const admin = element("admin-credential-state");
       admin.textContent = adminTokenChecking ? "Checking..." :
         adminTokenVerified ? "Accepted" : adminTokenRejected ? "Rejected" : element("admin-token").value.trim() ? "Check needed" : "Needed";
       admin.className = "credential-state" + (adminTokenVerified ? " accepted" : "");
-      element("router-credential-state").textContent = routerActionPending ? "Working..." :
+      const router = element("router-credential-state");
+      router.textContent = routerActionPending ? "Working..." :
+        routerPasswordChecking ? "Checking..." :
+        routerPasswordVerified ? "Accepted" :
+        routerPasswordRejected ? "Rejected" :
         element("router-admin-password").value ? "Entered" : "Not entered";
+      router.className = "credential-state" + (routerPasswordVerified ? " accepted" : "");
+      syncRememberedCredentials();
     }
 
     function openCredentials(kind, opener) {
@@ -1635,6 +1707,13 @@ DASHBOARD_HTML = """<!doctype html>
       const field = element(kind === "router" ? "router-admin-password" : "admin-token");
       field.focus({preventScroll: true});
       field.scrollIntoView({block: "nearest", inline: "nearest"});
+    }
+
+    function requireAdminToken(opener) {
+      if (element("admin-token").value.trim()) return true;
+      showMessage("Enter the admin token first.", "error");
+      openCredentials("admin", opener);
+      return false;
     }
 
     function closeCredentials() {
@@ -1679,6 +1758,8 @@ DASHBOARD_HTML = """<!doctype html>
     });
     element("router-admin-password").addEventListener("input", () => {
       routerPasswordRevision += 1;
+      routerPasswordVerified = false;
+      routerPasswordRejected = false;
       updateCredentialStatus();
     });
     window.addEventListener("resize", updateCredentialViewport);
@@ -1688,6 +1769,135 @@ DASHBOARD_HTML = """<!doctype html>
     }
     updateCredentialViewport();
     updateCredentialStatus();
+    function savedCredential(kind) {
+      try {
+        const saved = JSON.parse(window.localStorage.getItem(REMEMBERED[kind].key));
+        if (
+          saved && typeof saved.value === "string" && saved.value &&
+          Number.isFinite(saved.expires)
+        ) return saved;
+      } catch (error) {
+        // Storage is blocked or the entry is damaged, so treat it as not saved.
+      }
+      return null;
+    }
+
+    function saveCredential(kind, value) {
+      try {
+        window.localStorage.setItem(
+          REMEMBERED[kind].key,
+          JSON.stringify({ value: value, expires: Date.now() + REMEMBER_MS })
+        );
+        return true;
+      } catch (error) {
+        return false;
+      }
+    }
+
+    function forgetCredential(kind) {
+      try {
+        window.localStorage.removeItem(REMEMBERED[kind].key);
+      } catch (error) {
+        // Nothing was saved that could be removed.
+      }
+    }
+
+    function rememberedUntil(expires) {
+      return new Date(expires).toLocaleString(
+        "en-GB", { weekday: "short", hour: "2-digit", minute: "2-digit" }
+      );
+    }
+
+    function syncRememberedCredentials() {
+      if (!rememberedCredentialsReady) return;
+      for (const kind of Object.keys(REMEMBERED)) {
+        const config = REMEMBERED[kind];
+        const box = element(config.box);
+        const field = element(config.input);
+        const value = kind === "admin" ? field.value.trim() : field.value;
+        const accepted = kind === "admin" ? adminTokenVerified : routerPasswordVerified;
+        const refused = kind === "admin" ? adminTokenRefused : routerPasswordRejected;
+        let saved = savedCredential(kind);
+        let note = "";
+        if (saved && saved.expires <= Date.now()) {
+          forgetCredential(kind);
+          saved = null;
+          ownedRemembered[kind] = null;
+          box.checked = false;
+          expiredNotice[kind] = true;
+        } else if (!box.checked || !value) {
+          if (saved && saved.value === ownedRemembered[kind]) {
+            forgetCredential(kind);
+            saved = null;
+          }
+          ownedRemembered[kind] = null;
+        } else if (refused) {
+          if (saved && saved.value === value) {
+            forgetCredential(kind);
+            saved = null;
+          }
+          ownedRemembered[kind] = null;
+          note = "Not remembered: the " + config.noun + " was rejected.";
+        } else if (accepted && (!saved || saved.value !== value)) {
+          if (saveCredential(kind, value)) {
+            saved = savedCredential(kind);
+            ownedRemembered[kind] = value;
+          } else {
+            note = "This browser blocked saving, so it will be forgotten on reload.";
+          }
+        }
+        if (!note && !box.checked && expiredNotice[kind]) {
+          note = "Forgot the saved " + config.noun + " after 24 hours.";
+        } else if (!note && box.checked) {
+          note = saved && saved.value === value
+            ? "Remembered until " + rememberedUntil(saved.expires) + "."
+            : "Will be remembered for 24 hours once accepted.";
+        }
+        element(config.note).textContent = note;
+      }
+    }
+
+    function restoreRememberedCredentials() {
+      let restoredAdmin = false;
+      for (const kind of Object.keys(REMEMBERED)) {
+        const config = REMEMBERED[kind];
+        const saved = savedCredential(kind);
+        if (saved && saved.expires > Date.now()) {
+          element(config.input).value = saved.value;
+          element(config.box).checked = true;
+          ownedRemembered[kind] = saved.value;
+          if (kind === "admin") restoredAdmin = true;
+        } else if (!saved) {
+          forgetCredential(kind);
+        }
+      }
+      rememberedCredentialsReady = true;
+      updateCredentialStatus();
+      // Only the admin token is checked on load: a wrong router password can lock the router.
+      return restoredAdmin ? checkAdminToken() : undefined;
+    }
+
+    Object.keys(REMEMBERED).forEach((kind) => {
+      element(REMEMBERED[kind].box).addEventListener("change", () => {
+        expiredNotice[kind] = false;
+        updateCredentialStatus();
+      });
+    });
+    window.addEventListener("storage", (event) => {
+      let changed = false;
+      for (const kind of Object.keys(REMEMBERED)) {
+        const removed = event.newValue === null &&
+          (event.key === null || event.key === REMEMBERED[kind].key);
+        if (removed && ownedRemembered[kind] !== null) {
+          ownedRemembered[kind] = null;
+          element(REMEMBERED[kind].box).checked = false;
+          expiredNotice[kind] = false;
+          changed = true;
+        }
+      }
+      if (changed) updateCredentialStatus();
+    });
+    window.setInterval(syncRememberedCredentials, 60000);
     let profiles = [];
     let groups = [];
     let savedDevices = [];
@@ -2132,6 +2342,7 @@ DASHBOARD_HTML = """<!doctype html>
         : "Configuration-only mode is active. Changes are saved but live network actions are unavailable.";
       element("apply-button").disabled = !helperConfigured;
       element("reset-button").disabled = !helperConfigured;
+      element("panic-button").disabled = !helperConfigured;
       element("scan-observations").disabled = !helperConfigured;
     }
 
@@ -2590,14 +2801,15 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     async function loadConnectedDevices() {
-      if (connectedDevicesRequestInFlight) return;
+      if (connectedDevicesRequestInFlight) return null;
       const container = element("connected-devices");
       const activeElement = document.activeElement;
       if (
         activeElement && container.contains(activeElement) &&
         activeElement.matches("input, select")
-      ) return;
+      ) return null;
       connectedDevicesRequestInFlight = true;
+      let data;
       try {
         const [connectedResult, labelsResult] = await Promise.allSettled([
           request("/api/connected-devices", "GET"),
@@ -2607,21 +2819,59 @@ DASHBOARD_HTML = """<!doctype html>
           ? labelsResult.value.labels || []
           : [];
         if (connectedResult.status === "rejected") {
-          renderConnectedDevices({
+          data = {
             available: false,
             devices: [],
             saved_labels: savedLabels,
             message: connectedResult.reason.message
-          });
+          };
         } else {
-          renderConnectedDevices({ ...connectedResult.value, saved_labels: savedLabels });
+          data = { ...connectedResult.value, saved_labels: savedLabels };
         }
+        renderConnectedDevices(data);
       } catch (error) {
-        renderConnectedDevices({ available: false, devices: [], message: error.message });
+        data = { available: false, devices: [], message: error.message };
+        renderConnectedDevices(data);
       } finally {
         connectedDevicesRequestInFlight = false;
       }
+      element("connected-refresh-status").textContent = data.available
+        ? "Updated " + new Date().toLocaleTimeString("en-GB") + ". Refreshes every 5 seconds."
+        : "Could not update: " + (data.message || "connected-client information is unavailable");
+      return data;
     }
+
+    async function checkForDevices() {
+      const button = element("check-devices");
+      if (!requireAdminToken(button)) return;
+      if (adminTokenChecking) {
+        showMessage("The admin token is still being checked. Devices load when it finishes.");
+        return;
+      }
+      if (!adminTokenVerified) {
+        await checkAdminToken();
+        return;
+      }
+      setButtonBusy(button, true);
+      button.textContent = "Checking...";
+      try {
+        const data = await loadConnectedDevices();
+        if (data === null) {
+          showMessage("A device check is already running.");
+        } else if (!data.available) {
+          showMessage(data.message || "Connected-client information is unavailable.", "error");
+        } else {
+          const count = data.devices.length;
+          const found = count === 1 ? "1 device found." : count + " devices found.";
+          showMessage(count === 0 ? "No devices found." : found, "success");
+        }
+      } finally {
+        setButtonBusy(button, false);
+        button.textContent = "Check for devices";
+      }
+    }
+
+    element("check-devices").addEventListener("click", checkForDevices);
 
     async function loadUplink() {
       try {
@@ -3657,7 +3907,7 @@ DASHBOARD_HTML = """<!doctype html>
         element("random-website-rows").replaceChildren();
         element("random-website-status").textContent = error.message;
         element("random-website-status").className = "analytics-status error";
-        return { ok: false, message: error.message };
+        return { ok: false, message: error.message, status: error.status };
       }
       let actionHistoryLoaded = true;
       try {
@@ -3695,6 +3945,7 @@ DASHBOARD_HTML = """<!doctype html>
       }
       adminTokenChecking = true;
       adminTokenRejected = false;
+      adminTokenRefused = false;
       adminTokenVerified = false;
       updateCredentialStatus();
       setPrivateDataPanels("Checking the admin token...", "Checking...");
@@ -3717,6 +3968,7 @@ DASHBOARD_HTML = """<!doctype html>
         } else {
           adminTokenVerified = false;
           adminTokenRejected = true;
+          adminTokenRefused = result.status === 401;
           setPrivateDataPanels("Token check failed: " + result.message);
         }
         status.textContent = result.ok ? result.message : "Token check failed: " + result.message;
@@ -3726,6 +3978,7 @@ DASHBOARD_HTML = """<!doctype html>
         if (tokenRevision !== adminTokenRevision) return;
         adminTokenVerified = false;
         adminTokenRejected = true;
+        adminTokenRefused = error.status === 401;
         setPrivateDataPanels("Token check failed: " + error.message);
         status.textContent = "Token check failed: " + error.message;
         status.className = "token-check-status error";
@@ -3771,6 +4024,11 @@ DASHBOARD_HTML = """<!doctype html>
       resetButton.setAttribute("aria-busy", String(busy && path === "/api/reset"));
       applyButton.textContent = busy && path === "/api/apply" ? "Applying..." : "Apply current configuration";
       resetButton.textContent = busy && path === "/api/reset" ? "Resetting..." : "Reset network";
+      const panicButton = element("panic-button");
+      const panicking = busy && path === "/api/reset";
+      panicButton.disabled = busy || !helperConfigured;
+      panicButton.setAttribute("aria-busy", String(panicking));
+      element("panic-state").textContent = panicking ? "Working..." : "Turn all profiles off";
     }
 
     async function runAction(path, successMessage, workingMessage) {
@@ -3797,6 +4055,14 @@ DASHBOARD_HTML = """<!doctype html>
 
     element("reset-button").addEventListener("click", () => {
       runAction("/api/reset", "Network reset successfully.", "Resetting network...");
+    });
+
+    element("panic-button").addEventListener("click", () => {
+      runAction(
+        "/api/reset",
+        "All profiles are off. Choose Apply current configuration to resume.",
+        "Turning all profiles off..."
+      );
     });
 
     element("scan-observations").addEventListener("click", scanObservations);
@@ -4010,6 +4276,7 @@ DASHBOARD_HTML = """<!doctype html>
       adminTokenRevision += 1;
       adminTokenChecking = false;
       adminTokenRejected = false;
+      adminTokenRefused = false;
       adminTokenVerified = false;
       updateCredentialStatus();
       setPrivateDataPanels("Token changed. Choose Check token to load.");
@@ -4237,12 +4504,8 @@ DASHBOARD_HTML = """<!doctype html>
     });
 
     async function routerAction(path, body, message, button) {
-      if (routerActionPending) return;
-      if (!element("admin-token").value.trim()) {
-        showMessage("Enter the admin token first.", "error");
-        openCredentials("admin", button);
-        return;
-      }
+      if (routerActionPending || routerPasswordChecking) return;
+      if (!requireAdminToken(button)) return;
       const passwordRevision = routerPasswordRevision;
       const password = element("router-admin-password").value;
       const status = element("router-action-message");
@@ -4253,6 +4516,7 @@ DASHBOARD_HTML = """<!doctype html>
         openCredentials("router", button);
         return;
       }
+      if (routerPasswordBlocked(button)) return;
       routerActionPending = true;
       ["sync-router-ap", "disable-router-wifi", "enable-router-wifi"].forEach((id) => { element(id).disabled = true; });
       setButtonBusy(button, true);
@@ -4268,18 +4532,84 @@ DASHBOARD_HTML = """<!doctype html>
           : (result.enabled ? "Router Wi-Fi is on." : "Router Wi-Fi is off.");
         element("credential-router-status").textContent = status.textContent;
         showMessage(status.textContent, "success");
+        if (passwordRevision === routerPasswordRevision) {
+          routerPasswordVerified = true;
+          routerPasswordRejected = false;
+        }
       } catch (error) {
         status.textContent = error.message;
         element("credential-router-status").textContent = status.textContent;
         showMessage(error.message, "error");
+        if (passwordRevision === routerPasswordRevision && isRouterLoginFailure(error)) {
+          routerPasswordVerified = false;
+          routerPasswordRejected = true;
+        }
       } finally {
-        if (passwordRevision === routerPasswordRevision) element("router-admin-password").value = "";
         routerActionPending = false;
         ["sync-router-ap", "disable-router-wifi", "enable-router-wifi"].forEach((id) => { element(id).disabled = false; });
         setButtonBusy(button, false);
         updateCredentialStatus();
       }
     }
+
+    function routerPasswordBlocked(button) {
+      if (!routerPasswordRejected) return false;
+      const text = "The router rejected this password. Change it before trying again.";
+      element("credential-router-status").textContent = text;
+      showMessage(text, "error");
+      openCredentials("router", button);
+      return true;
+    }
+
+    function isRouterLoginFailure(error) {
+      return error.status === 502 && /^Router login failed/.test(error.message);
+    }
+
+    async function checkRouterPassword() {
+      if (routerActionPending || routerPasswordChecking) return;
+      const button = element("check-router-password");
+      const status = element("credential-router-status");
+      if (!requireAdminToken(button)) return;
+      const passwordRevision = routerPasswordRevision;
+      const password = element("router-admin-password").value;
+      if (!password) {
+        status.textContent = "Enter the router admin password first.";
+        showMessage(status.textContent, "error");
+        openCredentials("router", button);
+        return;
+      }
+      if (routerPasswordBlocked(button)) return;
+      const routerButtons = ["sync-router-ap", "disable-router-wifi", "enable-router-wifi"];
+      routerPasswordChecking = true;
+      routerPasswordVerified = false;
+      routerPasswordRejected = false;
+      routerButtons.forEach((id) => { element(id).disabled = true; });
+      setButtonBusy(button, true);
+      button.textContent = "Checking...";
+      updateCredentialStatus();
+      status.textContent = "Signing in to the router...";
+      showMessage("Checking the router password...", "working");
+      try {
+        await request("/api/router/check", "POST", { admin_password: password });
+        if (passwordRevision !== routerPasswordRevision) return;
+        routerPasswordVerified = true;
+        status.textContent = "Router password accepted. Nothing on the router was changed.";
+        showMessage(status.textContent, "success");
+      } catch (error) {
+        if (passwordRevision !== routerPasswordRevision) return;
+        routerPasswordRejected = isRouterLoginFailure(error);
+        status.textContent = error.message;
+        showMessage(error.message, "error");
+      } finally {
+        routerPasswordChecking = false;
+        routerButtons.forEach((id) => { element(id).disabled = false; });
+        setButtonBusy(button, false);
+        button.textContent = "Check password";
+        updateCredentialStatus();
+      }
+    }
+
+    element("check-router-password").addEventListener("click", checkRouterPassword);
 
     element("sync-router-ap").addEventListener("click", (event) => {
       routerAction("/api/router/sync-ap", {}, "Reading the router Wi-Fi settings...", event.currentTarget);
@@ -4312,6 +4642,7 @@ DASHBOARD_HTML = """<!doctype html>
     loadHealth().catch((error) => {
       showMessage(error.message, "error");
     });
+    restoreRememberedCredentials();
   </script>
 </body>
 </html>
@@ -5594,6 +5925,24 @@ class ControlServer(HTTPServer):
                 return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
                     {"error": message}
                 )
+            return HTTPStatus.OK, "application/json", _json_bytes({"result": result})
+
+        if path == "/api/router/check":
+            if self.helper_client is None:
+                return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                    {"error": "network helper is not configured"}
+                )
+            admin_password = payload.get("admin_password")
+            if not isinstance(admin_password, str) or not admin_password:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "router admin password is required"}
+                )
+            try:
+                result = self.helper_client.check_router_password(admin_password=admin_password)
+            except HelperClientError as error:
+                message = safe_router_check_message(str(error))
+                LOGGER.warning("router password check failed: %s", message)
+                return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes({"error": message})
             return HTTPStatus.OK, "application/json", _json_bytes({"result": result})
 
         if path == "/api/router/wifi":
