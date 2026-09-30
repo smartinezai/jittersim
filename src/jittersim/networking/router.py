@@ -354,13 +354,46 @@ class TG3442DERouter:
             raise RouterError("router Wi-Fi response is invalid", reason="invalid") from None
         return settings
 
+    def _read_verified_wifi_data(self) -> Dict[str, Any]:
+        settings = self._read_wifi_data()
+        if "EnableWiFiFunction" not in settings:
+            settings["EnableWiFiFunction"] = self._read_master_wifi_state()
+        return settings
+
+    def _read_master_wifi_state(self) -> bool:
+        try:
+            page = self._request("get", "/", headers={"Cache-Control": "no-cache"})
+        except _EndpointUnavailable:
+            raise RouterError("router master page is unavailable", reason="unsupported") from None
+        states = []
+        for quote, value in re.findall(
+            r"\b_ga\s*\.\s*isWifiEnabled\s*=\s*([\"'])" r"([^\"']*)\1\s*;", page,
+        ):
+            state = _radio_state(value)
+            if state is None:
+                raise RouterError("router master state is unknown", reason="unsupported")
+            states.append(state)
+        for match in re.finditer(r"\b_ga\s*=\s*", page):
+            try:
+                data, _ = json.JSONDecoder().raw_decode(page[match.end():].lstrip())
+            except (ValueError, RecursionError):
+                continue
+            if isinstance(data, dict) and "isWifiEnabled" in data:
+                state = _radio_state(data["isWifiEnabled"])
+                if state is None:
+                    raise RouterError("router master state is unknown", reason="unsupported")
+                states.append(state)
+        if not states or any(state is not states[0] for state in states):
+            raise RouterError("router master state could not be verified", reason="unsupported")
+        return states[0]
+
     def set_wifi_enabled(self, *, enabled: bool) -> RouterWifiSettings:
         """Change primary radios and confirm them without altering other settings."""
 
         if not isinstance(enabled, bool):
             raise RouterError("invalid requested radio state", reason="invalid")
         try:
-            current = self._read_wifi_data()
+            current = self._read_verified_wifi_data()
         except _EndpointUnavailable:
             return self._set_legacy_wifi_enabled(enabled=enabled)
         payload = self._wifi_write_payload(current, enabled=enabled)
@@ -381,7 +414,7 @@ class TG3442DERouter:
                 headers={"Content-Type": "application/json"},
             )
             for attempt in range(self._CONFIRMATION_ATTEMPTS):
-                updated = self._read_wifi_data()
+                updated = self._read_verified_wifi_data()
                 if all(
                     _radio_state(updated.get(name)) is bool(payload[name])
                     for name in (

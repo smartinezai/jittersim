@@ -55,3 +55,13 @@ The installed modules match release 2840e2f and all authenticated dashboard read
 For the physical router test, prepare a Pi-local check with masked password entry. Verify the starting flags before any write. Run a detached bounded off/on check so losing the Mac's Wi-Fi does not stop restoration. Report only verified flags and fixed errors. Restore the exact starting writable settings and confirm them. Do not store the password or router settings on disk. The live test still needs the user's router password through the masked prompt.
 
 The diagnostics correction passes all 297 tests on Mac and in a fresh Linux package installation. The Linux network smoke check and routed packet protection checks pass. The acceptance helper passes harmless encrypted-router checks for success, partial confirmation, an unsuitable starting state and concurrent settings changes. The helper keeps changes made by another administrator and reports any mismatch. Actual router acceptance still needs masked password entry.
+
+## Actual firmware master-state repair
+
+The masked live inspection confirms that `EnableWiFiFunction` is the only missing writable field in the encrypted Wi-Fi read response. All other required fields and radio flags are present. The public firmware reads its master switch through `_ga.isWifiEnabled`. The actual router index page assigns that field to a recognized boolean string.
+
+When the encrypted response omits the master field, read a fresh index page through the same authenticated session. Parse only the exact `_ga.isWifiEnabled` assignment or global object property. Require a recognized state and fail on conflicting values. Share the existing operation deadline. Use the verified master value with the encrypted band settings for payload construction and read-back. Keep strict per-band checks, preserved settings and no repeated write. Add a fixture that omits the master field just like the actual response and test off/on plus absent, unknown and conflicting page states before deployment.
+
+## Master-state repair validation
+
+304 tests passed on Mac and in a fresh Linux package installation. The firmware fixture omits the master field and exercises verified off/on, missing state, conflicting state and failed confirmation. A missing master page cannot select the older writer. The masked acceptance helper also passes success and restoration against this response shape. Internal review found no remaining blocker after the missing-page correction. Actual router off/on and restoration still require the final masked hardware check after installation.

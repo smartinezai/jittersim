@@ -66,6 +66,10 @@ class FirmwareServer(ThreadingHTTPServer):
         self.tamper_after_write = False
         self.slow_wifi = False
         self.unexpected_band = False
+        self.omit_wifi_master = False
+        self.master_page_value = None
+        self.conflicting_master_page = False
+        self.omit_master_page = False
 
     def seal(self, value, auth_data):
         cipher = AES.new(self.key, AES.MODE_CCM, nonce=self.iv, mac_len=16)
@@ -99,10 +103,16 @@ class FirmwareHandler(BaseHTTPRequestHandler):
         if parsed.path == "/" and parsed.query:
             self.respond(self.server.legacy_html)
         elif parsed.path == "/":
+            master = self.server.master_page_value
+            if master is None:
+                master = {True: "true", False: "false"}.get(self.server.settings.get("EnableWiFiFunction"), "unknown")
+            master_script = "" if self.server.omit_master_page else f'_ga.isWifiEnabled="{master}";'
+            if self.server.conflicting_master_page:
+                master_script += '_ga.isWifiEnabled="false";_ga.isWifiEnabled="true";'
             self.respond(
                 f'<script>var currentSessionId="{self.server.session_id}";'
                 f'var myIv="{self.server.iv.hex()}";'
-                f'var mySalt="{self.server.salt.hex()}";</script>'
+                f'var mySalt="{self.server.salt.hex()}";var _ga={{}};{master_script}</script>'
             )
         elif parsed.path == "/base_95x.js":
             self.respond("// Firmware uses a server session cookie.")
@@ -128,7 +138,10 @@ class FirmwareHandler(BaseHTTPRequestHandler):
                 except (BrokenPipeError, ConnectionResetError):
                     pass
                 return
-            encrypted = self.server.seal(json.dumps(self.server.settings), "wifidata")
+            settings = dict(self.server.settings)
+            if self.server.omit_wifi_master:
+                settings.pop("EnableWiFiFunction")
+            encrypted = self.server.seal(json.dumps(settings), "wifidata")
             if self.server.tamper_wifi:
                 encrypted = encrypted[:-2] + ("00" if encrypted[-2:] != "00" else "ff")
             self.respond(json.dumps({"wifidata": encrypted}))
@@ -216,6 +229,74 @@ class RouterProtocolTests(unittest.TestCase):
         self.firmware.shutdown()
         self.firmware.server_close()
         self.thread.join(timeout=2)
+
+    def test_toggle_reads_missing_master_from_the_authenticated_page(self):
+        self.firmware.omit_wifi_master = True
+        self.router.login()
+        for enabled in (False, True):
+            self.assertIs(self.router.set_wifi_enabled(enabled=enabled).enabled, enabled)
+        self.assertEqual(len(self.firmware.writes), 2)
+        self.assertTrue(self.firmware.settings["Enable"])
+        self.assertTrue(self.firmware.settings["Enable5G"])
+
+    def test_missing_master_source_rejects_unknown_and_conflicting_states_before_write(self):
+        self.firmware.omit_wifi_master = True
+        self.router.login()
+        for value, conflicting in (("unknown", False), ("true", True)):
+            with self.subTest(value=value, conflicting=conflicting):
+                self.firmware.master_page_value = value
+                self.firmware.conflicting_master_page = conflicting
+                with self.assertRaises(RouterError):
+                    self.router.set_wifi_enabled(enabled=False)
+        self.assertEqual(self.firmware.writes, [])
+
+    def test_missing_master_page_state_sends_no_write(self):
+        self.firmware.omit_wifi_master = True
+        self.firmware.omit_master_page = True
+        self.router.login()
+        with self.assertRaises(RouterError) as caught:
+            self.router.set_wifi_enabled(enabled=False)
+        self.assertEqual(caught.exception.reason, "unsupported")
+        self.assertEqual(self.firmware.writes, [])
+
+    def test_unavailable_master_page_does_not_switch_to_the_legacy_writer(self):
+        self.firmware.omit_wifi_master = True
+        self.router.login()
+        original_request = self.router._request
+
+        def request(method, path, **kwargs):
+            if path == "/":
+                raise _EndpointUnavailable("not available")
+            return original_request(method, path, **kwargs)
+
+        with patch.object(self.router, "_request", side_effect=request), patch.object(
+            self.router, "_set_legacy_wifi_enabled",
+        ) as legacy:
+            with self.assertRaises(RouterError) as caught:
+                self.router.set_wifi_enabled(enabled=False)
+        self.assertEqual(caught.exception.reason, "unsupported")
+        legacy.assert_not_called()
+        self.assertEqual(self.firmware.writes, [])
+
+    def test_master_page_failure_after_write_reports_uncertainty_without_retrying(self):
+        self.firmware.omit_wifi_master = True
+        self.router.login()
+        with patch.object(self.router, "_read_master_wifi_state", side_effect=[
+            True, RouterError("page unavailable", reason="unreachable"),
+        ]):
+            with self.assertRaises(RouterError) as caught:
+                self.router.set_wifi_enabled(enabled=False)
+        self.assertEqual(caught.exception.reason, "uncertain")
+        self.assertEqual(len(self.firmware.writes), 1)
+
+    def test_master_page_object_and_assignment_must_agree(self):
+        with patch.object(self.router, "_request", return_value='var _ga={"isWifiEnabled":false};'):
+            self.assertFalse(self.router._read_master_wifi_state())
+        with patch.object(self.router, "_request", return_value=(
+            'var _ga={"isWifiEnabled":false};_ga.isWifiEnabled="true";'
+        )):
+            with self.assertRaises(RouterError):
+                self.router._read_master_wifi_state()
 
     def test_reads_encrypted_settings_with_verified_nonce_and_session_cookie(self):
         self.router.login()
