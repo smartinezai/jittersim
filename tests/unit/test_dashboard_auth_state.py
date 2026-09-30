@@ -29,6 +29,9 @@ def test_token_checks_and_edits_release_all_private_loading_states():
       const nodes = new Map();
       const listeners = new Map();
       let adminTokenVerified = false;
+      let adminTokenRevision = 0;
+      let adminTokenChecking = false;
+      let adminTokenRejected = false;
       let refreshCalls = 0;
       let samplingStops = 0;
       let result = {ok: false, message: "rejected fixture token"};
@@ -45,6 +48,8 @@ def test_token_checks_and_edits_release_all_private_loading_states():
         return nodes.get(id);
       }
       function showMessage() {}
+      function updateCredentialStatus() {}
+      function openCredentials() {}
       function stopTrafficSampling() {samplingStops++}
       async function loadAdminTools() {if (failure) throw failure; return result}
       async function refresh() {

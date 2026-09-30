@@ -330,6 +330,8 @@ DASHBOARD_HTML = """<!doctype html>
     .saved-device-labels h3 { margin-top: 0; }
     .saved-device-label-row { grid-template-columns: minmax(0, 1fr) auto auto; }
     select {
+      min-width: 0;
+      max-width: 100%;
       padding: 0.55rem 0.6rem;
       border: 1px solid #3a526e;
       border-radius: 0.45rem;
@@ -432,7 +434,6 @@ DASHBOARD_HTML = """<!doctype html>
       opacity: 1;
       visibility: visible;
     }
-    .help-icon.token-help::after { white-space: pre-line; }
     .randomness-fields {
       display: grid;
       gap: 0.75rem;
@@ -505,11 +506,48 @@ DASHBOARD_HTML = """<!doctype html>
       color: #edf5ff;
       font: inherit;
     }
-    .token-card { margin-top: 1rem; }
-    .token-card label { max-width: 34rem; }
-    .token-controls { display: flex; align-items: end; gap: 0.75rem; }
-    .token-controls label { flex: 1; }
-    .token-controls button { margin-top: 0; white-space: nowrap; }
+    .credential-dock {
+      position: fixed; right: 1rem; top: 50%; transform: translateY(-50%);
+      z-index: 30; display: grid; gap: 0.6rem; width: 9.5rem;
+    }
+    .credential-dock button { margin: 0; min-height: 3.5rem; text-align: left; }
+    .credential-dock span { display: block; }
+    .credential-state { margin-top: 0.15rem; color: #c7d7eb; font-size: 0.78rem; font-weight: 400; }
+    .credential-state.accepted { color: #8de2bc; }
+    .credentials-panel {
+      position: fixed; z-index: 110; right: 1rem;
+      top: calc(var(--credential-viewport-top, 0px) + 1rem);
+      width: min(27rem, calc(100vw - 2rem));
+      max-height: calc(var(--credential-viewport-height, 100dvh) - 2rem);
+      overflow-y: auto; overscroll-behavior: contain;
+      padding: 1.2rem; border: 1px solid #547392; border-radius: 0.75rem;
+      background: #102238; color: #edf5ff;
+    }
+    .credentials-panel[hidden] { display: none; }
+    .credential-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+    .credential-heading h2 { margin: 0; }
+    .credentials-panel button { margin-top: 0; }
+    .credential-heading button { padding: 0.4rem 0.7rem; }
+    .credentials-panel h3 { margin-top: 1.3rem; }
+    .credentials-panel input { font-size: 1rem; }
+    .credential-actions { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-top: 0.65rem; }
+    .credential-help { margin-top: 0.75rem; color: #c7d7eb; font-size: 0.82rem; }
+    .credential-help summary { cursor: pointer; }
+    .credential-help pre { margin-top: 0.6rem; min-height: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .credential-note { margin: 0.65rem 0 0; color: #c7d7eb; font-size: 0.82rem; }
+    @media (max-width: 1500px) {
+      body { padding-bottom: calc(8rem + env(safe-area-inset-bottom, 0px)); }
+      html { scroll-padding-bottom: 8rem; }
+      .credential-dock {
+        top: auto; bottom: calc(var(--credential-viewport-bottom, 0px) + 0.75rem + env(safe-area-inset-bottom, 0px));
+        left: 50%; right: auto; transform: translateX(-50%);
+        grid-template-columns: repeat(2, minmax(0, 1fr)); width: min(25rem, calc(100vw - 2rem));
+      }
+      .credentials-panel {
+        top: auto; bottom: calc(var(--credential-viewport-bottom, 0px) + 5rem + env(safe-area-inset-bottom, 0px));
+        max-height: calc(var(--credential-viewport-height, 100dvh) - 6rem - env(safe-area-inset-bottom, 0px));
+      }
+    }
     .token-check-status { min-height: 1.25rem; margin: 0.65rem 0 0; color: #91a8c1; }
     .token-check-status.success { color: #8de2bc; }
     .token-check-status.error { color: #ffb0b0; }
@@ -553,7 +591,6 @@ DASHBOARD_HTML = """<!doctype html>
       .progression-row button { width: 100%; margin-top: 0.7rem; }
       .quota-row-heading { display: block; }
       .quota-actions button { flex: 1; }
-      .token-controls { align-items: stretch; flex-direction: column; }
       .traffic-controls { grid-template-columns: 1fr; }
       .traffic-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .analytics-controls { grid-template-columns: 1fr; }
@@ -570,6 +607,40 @@ DASHBOARD_HTML = """<!doctype html>
     <span id="toast-message"></span>
     <button id="toast-dismiss" type="button" aria-label="Dismiss message">Dismiss</button>
   </div>
+  <nav class="credential-dock" aria-label="Credential shortcuts">
+    <button id="open-admin-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
+      <span>Admin token</span><span id="admin-credential-state" class="credential-state">Needed</span>
+    </button>
+    <button id="open-router-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
+      <span>Router password</span><span id="router-credential-state" class="credential-state">Not entered</span>
+    </button>
+  </nav>
+  <section id="credentials-panel" class="credentials-panel" aria-labelledby="credentials-title" hidden>
+    <div class="credential-heading">
+      <h2 id="credentials-title">Credentials</h2>
+      <button id="close-credentials" type="button" aria-label="Close credentials panel">Close</button>
+    </div>
+    <p class="credential-note">Kept in this page only. Closing this panel keeps your entries.</p>
+    <h3>Admin token</h3>
+    <label>Admin token (kept in this page only)
+      <input id="admin-token" type="password" autocomplete="off" aria-describedby="token-check-status">
+    </label>
+    <div class="credential-actions">
+      <button id="check-admin-token" class="primary" type="button">Check token</button>
+      <button id="clear-admin-token" type="button">Clear token</button>
+    </div>
+    <p id="token-check-status" class="token-check-status" role="status" aria-live="polite">Enter the token and choose Check token to load diagnostics.</p>
+    <details class="credential-help">
+      <summary>How to get the admin token</summary>
+      <pre id="admin-token-help"></pre>
+    </details>
+    <h3>Router password</h3>
+    <label>Router admin password
+      <input id="router-admin-password" type="password" autocomplete="off" placeholder="Password for 192.168.0.1" aria-describedby="credential-router-status">
+    </label>
+    <div class="credential-actions"><button id="clear-router-password" type="button">Clear router password</button></div>
+    <p id="credential-router-status" class="credential-note" role="status" aria-live="off">Used for one router operation. Entering it does not check it or change the router.</p>
+  </section>
   <header class="page-header">
     <div>
       <p class="eyebrow">NETWORK TEST LAB</p>
@@ -680,9 +751,7 @@ DASHBOARD_HTML = """<!doctype html>
     <p id="uplink-note" class="policy-note">The router controls use the TG3442DE local web interface. The router admin password is used for one request and is not saved.</p>
     <a id="router-settings-link" class="button-link" href="http://192.168.0.1" target="_blank" rel="noreferrer">Open router Wi-Fi settings</a>
     <div class="router-controls">
-      <label>Router admin password
-        <input id="router-admin-password" type="password" autocomplete="off" placeholder="Password for 192.168.0.1">
-      </label>
+      <button id="open-router-credentials-inline" type="button" aria-controls="credentials-panel" aria-expanded="false">Enter router password</button>
       <div class="action-buttons">
         <button id="sync-router-ap" class="primary" type="button">Copy router Wi-Fi to Pi</button>
         <button id="disable-router-wifi" class="danger" type="button">Turn off router Wi-Fi</button>
@@ -704,17 +773,6 @@ DASHBOARD_HTML = """<!doctype html>
     </div>
     <p id="observation-note" class="observation-note">Scanning is on demand. Results are local aggregates, not exact page visits.</p>
     <div id="observations" class="observation-list" aria-live="polite">No observations yet.</div>
-  </section>
-  <section class="card token-card">
-    <h2>Control token</h2>
-    <div class="token-controls">
-      <label>
-        <span class="field-label">Admin token (kept in this page only)<span class="help-icon token-help" id="admin-token-help" tabindex="0" role="img" aria-label="Admin token retrieval commands" data-help="The command to print the token is being prepared.">?</span></span>
-        <input id="admin-token" type="password" autocomplete="off">
-      </label>
-      <button id="check-admin-token" type="button">Check token</button>
-    </div>
-    <p id="token-check-status" class="token-check-status" role="status" aria-live="polite">Enter the token and choose Check token to load diagnostics.</p>
   </section>
   <div class="content-grid">
     <section class="card">
@@ -1472,6 +1530,16 @@ DASHBOARD_HTML = """<!doctype html>
     async function request(path, method, body) {
       const headers = {};
       const token = element("admin-token").value.trim();
+      const tokenRevision = adminTokenRevision;
+      if (method === "GET" && path !== "/api/health" && !adminTokenVerified && !adminTokenChecking) {
+        throw new Error("Token changed. Choose Check token to load.");
+      }
+      if (method !== "GET" && !token) {
+        openCredentials("admin");
+        if (pendingFormSubmitButton) setButtonBusy(pendingFormSubmitButton, false);
+        pendingFormSubmitButton = null;
+        throw new Error("Enter the admin token first.");
+      }
       if (token) headers.Authorization = "Bearer " + token;
       if (body !== undefined) headers["Content-Type"] = "application/json";
       const submitButton = pendingFormSubmitButton;
@@ -1484,6 +1552,9 @@ DASHBOARD_HTML = """<!doctype html>
           cache: "no-store"
         });
         const data = await response.json();
+        if (method === "GET" && tokenRevision !== adminTokenRevision) {
+          throw new Error("Token changed. Choose Check token to load.");
+        }
         if (!response.ok) {
           const applyHint = data.error === "network helper apply failed" &&
             typeof data.hint === "string"
@@ -1505,7 +1576,7 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     const adminTokenHelp = element("admin-token-help");
-    adminTokenHelp.dataset.help =
+    adminTokenHelp.textContent =
       "On your Mac, run this command:\\n" +
       "ssh -t -i ~/.ssh/jittersim_ed25519 jittersim@" + window.location.hostname +
       " \\\"sudo sed -n 's/^JITTERSIM_ADMIN_TOKEN=//p' /etc/jittersim/control.env\\\"\\n" +
@@ -1536,6 +1607,87 @@ DASHBOARD_HTML = """<!doctype html>
 
     let helperConfigured = false;
     let adminTokenVerified = false;
+    let adminTokenRevision = 0;
+    let adminTokenChecking = false;
+    let adminTokenRejected = false;
+    let routerPasswordRevision = 0;
+    let routerActionPending = false;
+    let credentialOpener = null;
+
+    function updateCredentialStatus() {
+      const admin = element("admin-credential-state");
+      admin.textContent = adminTokenChecking ? "Checking..." :
+        adminTokenVerified ? "Accepted" : adminTokenRejected ? "Rejected" : element("admin-token").value.trim() ? "Check needed" : "Needed";
+      admin.className = "credential-state" + (adminTokenVerified ? " accepted" : "");
+      element("router-credential-state").textContent = routerActionPending ? "Working..." :
+        element("router-admin-password").value ? "Entered" : "Not entered";
+    }
+
+    function openCredentials(kind, opener) {
+      const panel = element("credentials-panel");
+      if (opener || panel.hidden) credentialOpener = opener || document.activeElement;
+      panel.hidden = false;
+      ["open-admin-credentials", "open-router-credentials", "open-router-credentials-inline"].forEach((id) => {
+        element(id).setAttribute("aria-expanded", "true");
+      });
+      element("credential-router-status").setAttribute("aria-live", "polite");
+      element("router-action-message").setAttribute("aria-live", "off");
+      const field = element(kind === "router" ? "router-admin-password" : "admin-token");
+      field.focus({preventScroll: true});
+      field.scrollIntoView({block: "nearest", inline: "nearest"});
+    }
+
+    function closeCredentials() {
+      element("credentials-panel").hidden = true;
+      ["open-admin-credentials", "open-router-credentials", "open-router-credentials-inline"].forEach((id) => {
+        element(id).setAttribute("aria-expanded", "false");
+      });
+      element("credential-router-status").setAttribute("aria-live", "off");
+      element("router-action-message").setAttribute("aria-live", "polite");
+      if (credentialOpener && credentialOpener.isConnected) credentialOpener.focus({preventScroll: true});
+    }
+
+    function updateCredentialViewport() {
+      const view = window.visualViewport;
+      const height = view ? view.height : window.innerHeight;
+      const top = view ? view.offsetTop : 0;
+      const style = document.documentElement.style;
+      style.setProperty("--credential-viewport-height", height + "px");
+      style.setProperty("--credential-viewport-top", top + "px");
+      style.setProperty("--credential-viewport-bottom", Math.max(0, window.innerHeight - top - height) + "px");
+    }
+
+    ["open-admin-credentials", "open-router-credentials", "open-router-credentials-inline"].forEach((id) => {
+      element(id).addEventListener("click", (event) => openCredentials(id.includes("router") ? "router" : "admin", event.currentTarget));
+    });
+    element("close-credentials").addEventListener("click", closeCredentials);
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !element("credentials-panel").hidden) {
+        event.preventDefault();
+        closeCredentials();
+      }
+    });
+    element("clear-admin-token").addEventListener("click", () => {
+      element("admin-token").value = "";
+      element("admin-token").dispatchEvent(new Event("input"));
+      element("admin-token").focus({preventScroll: true});
+    });
+    element("clear-router-password").addEventListener("click", () => {
+      element("router-admin-password").value = "";
+      element("router-admin-password").dispatchEvent(new Event("input"));
+      element("router-admin-password").focus({preventScroll: true});
+    });
+    element("router-admin-password").addEventListener("input", () => {
+      routerPasswordRevision += 1;
+      updateCredentialStatus();
+    });
+    window.addEventListener("resize", updateCredentialViewport);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", updateCredentialViewport);
+      window.visualViewport.addEventListener("scroll", updateCredentialViewport);
+    }
+    updateCredentialViewport();
+    updateCredentialStatus();
     let profiles = [];
     let groups = [];
     let savedDevices = [];
@@ -3530,16 +3682,21 @@ DASHBOARD_HTML = """<!doctype html>
     async function checkAdminToken() {
       const button = element("check-admin-token");
       const status = element("token-check-status");
+      const tokenRevision = adminTokenRevision;
       if (!element("admin-token").value.trim()) {
         adminTokenVerified = false;
         setPrivateDataPanels("Enter the admin token and choose Check token to load.");
         status.textContent = "Enter the admin token first.";
         status.className = "token-check-status error";
         showMessage("Enter the admin token first.", "error");
-        element("admin-token").focus();
+        updateCredentialStatus();
+        openCredentials("admin");
         return;
       }
+      adminTokenChecking = true;
+      adminTokenRejected = false;
       adminTokenVerified = false;
+      updateCredentialStatus();
       setPrivateDataPanels("Checking the admin token...", "Checking...");
       button.disabled = true;
       button.setAttribute("aria-busy", "true");
@@ -3548,20 +3705,27 @@ DASHBOARD_HTML = """<!doctype html>
       showMessage("Checking the admin token...", "working");
       try {
         const result = await loadAdminTools();
+        if (tokenRevision !== adminTokenRevision) return;
         if (result.ok) {
           adminTokenVerified = true;
           await refresh();
+          if (tokenRevision !== adminTokenRevision) return;
           await loadTrafficSettings();
+          if (tokenRevision !== adminTokenRevision) return;
           await startTrafficSampling();
+          if (tokenRevision !== adminTokenRevision) return;
         } else {
           adminTokenVerified = false;
+          adminTokenRejected = true;
           setPrivateDataPanels("Token check failed: " + result.message);
         }
         status.textContent = result.ok ? result.message : "Token check failed: " + result.message;
         status.className = "token-check-status " + (result.ok ? "success" : "error");
         showMessage(status.textContent, result.ok ? "success" : "error");
       } catch (error) {
+        if (tokenRevision !== adminTokenRevision) return;
         adminTokenVerified = false;
+        adminTokenRejected = true;
         setPrivateDataPanels("Token check failed: " + error.message);
         status.textContent = "Token check failed: " + error.message;
         status.className = "token-check-status error";
@@ -3570,6 +3734,8 @@ DASHBOARD_HTML = """<!doctype html>
         button.disabled = false;
         button.removeAttribute("aria-busy");
         button.textContent = "Check token";
+        adminTokenChecking = false;
+        updateCredentialStatus();
       }
     }
 
@@ -3841,7 +4007,11 @@ DASHBOARD_HTML = """<!doctype html>
       }
     });
     element("admin-token").addEventListener("input", () => {
+      adminTokenRevision += 1;
+      adminTokenChecking = false;
+      adminTokenRejected = false;
       adminTokenVerified = false;
+      updateCredentialStatus();
       setPrivateDataPanels("Token changed. Choose Check token to load.");
       stopTrafficSampling("Token changed. Choose Check token to restart live traffic sampling.");
       element("token-check-status").textContent = "Token changed. Choose Check token to load diagnostics.";
@@ -3877,20 +4047,25 @@ DASHBOARD_HTML = """<!doctype html>
     element("toast-dismiss").addEventListener("click", dismissToast);
     element("refresh-diagnostics").addEventListener("click", async (event) => {
       const button = event.currentTarget;
+      const tokenRevision = adminTokenRevision;
       button.disabled = true;
       button.setAttribute("aria-busy", "true");
       button.textContent = "Refreshing...";
       showMessage("Refreshing diagnostics...", "working");
       try {
         const result = await loadAdminTools();
+        if (tokenRevision !== adminTokenRevision) return;
         if (result.ok) {
           await loadTrafficSettings();
+          if (tokenRevision !== adminTokenRevision) return;
           await startTrafficSampling();
+          if (tokenRevision !== adminTokenRevision) return;
         }
         element("token-check-status").textContent = result.message;
         element("token-check-status").className = "token-check-status " + (result.ok ? "success" : "error");
         showMessage(result.message, result.ok ? "success" : "error");
       } catch (error) {
+        if (tokenRevision !== adminTokenRevision) return;
         element("token-check-status").textContent = error.message;
         element("token-check-status").className = "token-check-status error";
         showMessage(error.message, "error");
@@ -4062,15 +4237,28 @@ DASHBOARD_HTML = """<!doctype html>
     });
 
     async function routerAction(path, body, message, button) {
+      if (routerActionPending) return;
+      if (!element("admin-token").value.trim()) {
+        showMessage("Enter the admin token first.", "error");
+        openCredentials("admin", button);
+        return;
+      }
+      const passwordRevision = routerPasswordRevision;
       const password = element("router-admin-password").value;
       const status = element("router-action-message");
       if (!password) {
         status.textContent = "Enter the router admin password first.";
+        element("credential-router-status").textContent = status.textContent;
         showMessage(status.textContent, "error");
+        openCredentials("router", button);
         return;
       }
+      routerActionPending = true;
+      ["sync-router-ap", "disable-router-wifi", "enable-router-wifi"].forEach((id) => { element(id).disabled = true; });
       setButtonBusy(button, true);
+      updateCredentialStatus();
       status.textContent = message;
+      element("credential-router-status").textContent = message;
       showMessage(message, "working");
       try {
         const response = await request(path, "POST", { admin_password: password, ...body });
@@ -4078,13 +4266,18 @@ DASHBOARD_HTML = """<!doctype html>
         status.textContent = result.ssid
           ? "Copied " + result.ssid + " to the Pi. Reconnect test devices if needed."
           : (result.enabled ? "Router Wi-Fi is on." : "Router Wi-Fi is off.");
+        element("credential-router-status").textContent = status.textContent;
         showMessage(status.textContent, "success");
       } catch (error) {
         status.textContent = error.message;
+        element("credential-router-status").textContent = status.textContent;
         showMessage(error.message, "error");
       } finally {
-        element("router-admin-password").value = "";
+        if (passwordRevision === routerPasswordRevision) element("router-admin-password").value = "";
+        routerActionPending = false;
+        ["sync-router-ap", "disable-router-wifi", "enable-router-wifi"].forEach((id) => { element(id).disabled = false; });
         setButtonBusy(button, false);
+        updateCredentialStatus();
       }
     }
 
