@@ -546,6 +546,9 @@ DASHBOARD_HTML = """<!doctype html>
     .credential-help summary { cursor: pointer; }
     .credential-help pre { margin-top: 0.6rem; min-height: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
     .credential-note { margin: 0.65rem 0 0; color: #c7d7eb; font-size: 0.82rem; }
+    .remember-choice { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.65rem; }
+    .remember-choice input { width: auto; margin: 0; padding: 0; }
+    .remember-note:empty { display: none; }
     @media (max-width: 1500px) {
       body { padding-bottom: calc(11rem + env(safe-area-inset-bottom, 0px)); }
       html { scroll-padding-bottom: 11rem; }
@@ -640,11 +643,17 @@ DASHBOARD_HTML = """<!doctype html>
       <h2 id="credentials-title">Credentials</h2>
       <button id="close-credentials" type="button" aria-label="Close credentials panel">Close</button>
     </div>
-    <p class="credential-note">Kept in this page only. Closing this panel keeps your entries.</p>
+    <p class="credential-note">
+      Kept in this page only unless you choose Remember. Closing this panel keeps your entries.
+    </p>
     <h3>Admin token</h3>
-    <label>Admin token (kept in this page only)
+    <label>Admin token
       <input id="admin-token" type="password" autocomplete="off" aria-describedby="token-check-status">
     </label>
+    <label class="remember-choice">
+      <input id="remember-admin-token" type="checkbox" autocomplete="off"> Remember for 24 hours
+    </label>
+    <p id="remember-admin-token-note" class="credential-note remember-note" role="status"></p>
     <div class="credential-actions">
       <button id="check-admin-token" class="primary" type="button">Check token</button>
       <button id="clear-admin-token" type="button">Clear token</button>
@@ -658,6 +667,10 @@ DASHBOARD_HTML = """<!doctype html>
     <label>Router admin password
       <input id="router-admin-password" type="password" autocomplete="off" placeholder="Password for 192.168.0.1" aria-describedby="credential-router-status">
     </label>
+    <label class="remember-choice">
+      <input id="remember-router-password" type="checkbox" autocomplete="off"> Remember for 24 hours
+    </label>
+    <p id="remember-router-password-note" class="credential-note remember-note" role="status"></p>
     <div class="credential-actions">
       <button id="check-router-password" class="primary" type="button">Check password</button>
       <button id="clear-router-password" type="button">Clear router password</button>
@@ -1648,6 +1661,19 @@ DASHBOARD_HTML = """<!doctype html>
     let routerPasswordChecking = false;
     let routerActionPending = false;
     let credentialOpener = null;
+    const REMEMBER_MS = 24 * 60 * 60 * 1000;
+    const REMEMBERED = {
+      admin: {
+        key: "jittersim.remembered.admin-token", box: "remember-admin-token",
+        note: "remember-admin-token-note", input: "admin-token", noun: "token"
+      },
+      router: {
+        key: "jittersim.remembered.router-password", box: "remember-router-password",
+        note: "remember-router-password-note", input: "router-admin-password", noun: "password"
+      }
+    };
+    const expiredNotice = { admin: false, router: false };
+    let rememberedCredentialsReady = false;
 
     function updateCredentialStatus() {
       const admin = element("admin-credential-state");
@@ -1661,6 +1687,7 @@ DASHBOARD_HTML = """<!doctype html>
         routerPasswordRejected ? "Rejected" :
         element("router-admin-password").value ? "Entered" : "Not entered";
       router.className = "credential-state" + (routerPasswordVerified ? " accepted" : "");
+      syncRememberedCredentials();
     }
 
     function openCredentials(kind, opener) {
@@ -1730,6 +1757,107 @@ DASHBOARD_HTML = """<!doctype html>
     }
     updateCredentialViewport();
     updateCredentialStatus();
+    function savedCredential(kind) {
+      try {
+        const saved = JSON.parse(window.localStorage.getItem(REMEMBERED[kind].key));
+        if (
+          saved && typeof saved.value === "string" && saved.value &&
+          Number.isFinite(saved.expires)
+        ) return saved;
+      } catch (error) {
+        // Storage is blocked or the entry is damaged, so treat it as not saved.
+      }
+      return null;
+    }
+
+    function saveCredential(kind, value) {
+      try {
+        window.localStorage.setItem(
+          REMEMBERED[kind].key,
+          JSON.stringify({ value: value, expires: Date.now() + REMEMBER_MS })
+        );
+        return true;
+      } catch (error) {
+        return false;
+      }
+    }
+
+    function forgetCredential(kind) {
+      try {
+        window.localStorage.removeItem(REMEMBERED[kind].key);
+      } catch (error) {
+        // Nothing was saved that could be removed.
+      }
+    }
+
+    function rememberedUntil(expires) {
+      return new Date(expires).toLocaleString(
+        "en-GB", { weekday: "short", hour: "2-digit", minute: "2-digit" }
+      );
+    }
+
+    function syncRememberedCredentials() {
+      if (!rememberedCredentialsReady) return;
+      for (const kind of Object.keys(REMEMBERED)) {
+        const config = REMEMBERED[kind];
+        const box = element(config.box);
+        const field = element(config.input);
+        const value = kind === "admin" ? field.value.trim() : field.value;
+        const accepted = kind === "admin" ? adminTokenVerified : routerPasswordVerified;
+        const refused = kind === "admin" ? adminTokenRejected : routerPasswordRejected;
+        let saved = savedCredential(kind);
+        let note = "";
+        if (saved && saved.expires <= Date.now()) {
+          forgetCredential(kind);
+          saved = null;
+          box.checked = false;
+          expiredNotice[kind] = true;
+        } else if (!box.checked || !value) {
+          forgetCredential(kind);
+          saved = null;
+        } else if (refused) {
+          forgetCredential(kind);
+          saved = null;
+          note = "Not remembered: the " + config.noun + " was rejected.";
+        } else if (accepted && (!saved || saved.value !== value)) {
+          if (saveCredential(kind, value)) saved = savedCredential(kind);
+          else note = "This browser blocked saving, so it will be forgotten on reload.";
+        }
+        if (!note && !box.checked && expiredNotice[kind]) {
+          note = "Forgot the saved " + config.noun + " after 24 hours.";
+        } else if (!note && box.checked) {
+          note = saved && saved.value === value
+            ? "Remembered until " + rememberedUntil(saved.expires) + "."
+            : "Will be remembered for 24 hours once accepted.";
+        }
+        element(config.note).textContent = note;
+      }
+    }
+
+    function restoreRememberedCredentials() {
+      let restoredAdmin = false;
+      for (const kind of Object.keys(REMEMBERED)) {
+        const config = REMEMBERED[kind];
+        const saved = savedCredential(kind);
+        if (saved && saved.expires > Date.now()) {
+          element(config.input).value = saved.value;
+          element(config.box).checked = true;
+          if (kind === "admin") restoredAdmin = true;
+        }
+      }
+      rememberedCredentialsReady = true;
+      updateCredentialStatus();
+      // Only the admin token is checked on load: a wrong router password can lock the router.
+      return restoredAdmin ? checkAdminToken() : undefined;
+    }
+
+    Object.keys(REMEMBERED).forEach((kind) => {
+      element(REMEMBERED[kind].box).addEventListener("change", () => {
+        expiredNotice[kind] = false;
+        updateCredentialStatus();
+      });
+    });
+    window.setInterval(syncRememberedCredentials, 60000);
     let profiles = [];
     let groups = [];
     let savedDevices = [];
@@ -4467,6 +4595,7 @@ DASHBOARD_HTML = """<!doctype html>
     loadHealth().catch((error) => {
       showMessage(error.message, "error");
     });
+    restoreRememberedCredentials();
   </script>
 </body>
 </html>
