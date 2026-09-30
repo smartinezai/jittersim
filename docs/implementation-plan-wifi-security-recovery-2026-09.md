@@ -45,7 +45,9 @@ Have the plan reviewed and address feedback before production code changes.
 - This reset changes the test network name. Existing experiment reset and
   Normal access keep their existing meaning. Saved profiles, devices, access
   rules and the upstream router stay intact.
-- No push, merge or Pi deployment is included without explicit authorization.
+- The owner authorized push, merge and Pi deployment on 30 September 2026.
+  Publish the tested main change and port it separately to the current Pi
+  release branch so the deployment retains its existing features.
 
 ## Evidence from the current base
 

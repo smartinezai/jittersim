@@ -71,4 +71,7 @@ continued management access. WPA3 is unverified. Keep the router Wi-Fi
 available during that test. The dashboard button cannot be reached from the
 test network because administration access is intentionally blocked there.
 
-No push, merge or Pi deployment was performed.
+The owner authorized push, merge and Pi deployment after these checks on
+30 September 2026. Publish the main change first. Port it separately to
+`feat/service-profiles-and-pi-hardening`, verify that combined release and
+deploy it with private backups and authenticated acceptance checks.
