@@ -176,6 +176,18 @@ class WifiRecoveryIntegrationTests(unittest.TestCase):
             with self.assertRaises(HelperClientError) as caught:
                 HelperClient(socket_path=self.socket, timeout_seconds=1).ping()
             self.assertEqual(caught.exception.reason, "helper-busy")
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as delayed:
+                delayed.settimeout(1)
+                delayed.connect(str(self.socket))
+                time.sleep(0.05)
+                delayed.sendall(b'{"action":"ping"}\n')
+                reply = bytearray()
+                while b"\n" not in reply and len(reply) < 1024:
+                    chunk = delayed.recv(1024)
+                    if not chunk:
+                        break
+                    reply.extend(chunk)
+                self.assertEqual(json.loads(reply)["reason"], "helper-busy")
         finally:
             for client in clients:
                 client.close()
