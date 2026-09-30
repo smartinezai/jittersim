@@ -50,7 +50,7 @@ class FakeHelper:
     def configure_access_point(self, *, ssid, password):
         return {"ok": True, "action": "configure-ap", "commands_run": 3}
 
-    def sync_access_point_from_router(self, *, admin_password):
+    def sync_access_point_from_router(self, *, admin_password, expected_fingerprint, confirm_legacy=False):
         return {
             "ok": True,
             "action": "router-sync-ap",
@@ -896,12 +896,32 @@ class ControlServerTests(unittest.TestCase):
 
         status, content_type, body = self.server.write_response_for(
             "/api/router/sync-ap",
-            {"admin_password": "router-secret"},
+            {"admin_password": "router-secret", "expected_fingerprint": "a" * 64},
         )
 
         self.assertEqual(status, 200)
         self.assertEqual(content_type, "application/json")
         self.assertEqual(json.loads(body)["result"]["ssid"], "Vodafone-Test")
+
+    def test_router_preview_does_not_expose_helper_secrets(self) -> None:
+        class PreviewHelper(FakeHelper):
+            def preview_router_wifi(self, *, admin_password):
+                return {"ssid": "Home", "security": "WPA2", "band": "2.4 GHz",
+                        "fingerprint": "a" * 64, "legacy": False, "password": "private"}
+
+        self.server.helper_client = PreviewHelper()
+        status, _, body = self.server.write_response_for(
+            "/api/router/preview-ap", {"admin_password": "router-secret"})
+        self.assertEqual(status, 200)
+        self.assertNotIn(b"private", body)
+        self.assertNotIn(b"router-secret", body)
+
+    def test_router_preview_rejects_a_helper_without_detection(self) -> None:
+        self.server.helper_client = FakeHelper()
+        status, _, body = self.server.write_response_for(
+            "/api/router/preview-ap", {"admin_password": "router-secret"})
+        self.assertEqual(status, 502)
+        self.assertIn("out of date", json.loads(body)["error"])
 
     def test_router_import_error_guidance_is_safe_in_response_and_logs(self) -> None:
         from jittersim.networking.router import ROUTER_IMPORT_MESSAGES
@@ -912,13 +932,13 @@ class ControlServerTests(unittest.TestCase):
         ):
             with self.subTest(message=message):
                 class FailedHelper(FakeHelper):
-                    def sync_access_point_from_router(self, *, admin_password):
+                    def sync_access_point_from_router(self, *, admin_password, expected_fingerprint, confirm_legacy=False):
                         raise HelperClientError(message)
 
                 self.server.helper_client = FailedHelper()
                 with self.assertLogs("jittersim.api.server", level="WARNING") as logs:
                     status, _, body = self.server.write_response_for(
-                        "/api/router/sync-ap", {"admin_password": "router-secret"},
+                        "/api/router/sync-ap", {"admin_password": "router-secret", "expected_fingerprint": "a" * 64},
                     )
                 self.assertEqual(status, 502)
                 self.assertEqual(json.loads(body)["error"], expected)

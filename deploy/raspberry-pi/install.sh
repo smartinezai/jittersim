@@ -87,6 +87,10 @@ if ! nmcli connection show jittersim-ap >/dev/null 2>&1; then
         con-name jittersim-ap ssid "$JITTERSIM_AP_SSID" autoconnect no
     nmcli connection modify jittersim-ap \
         802-11-wireless-security.key-mgmt sae \
+        802-11-wireless-security.proto rsn \
+        802-11-wireless-security.pairwise ccmp \
+        802-11-wireless-security.group ccmp \
+        802-11-wireless-security.pmf 3 \
         802-11-wireless-security.psk "$JITTERSIM_AP_PASSWORD"
 else
     ap_settings_before=$(nmcli -g \
@@ -101,11 +105,6 @@ nmcli connection modify jittersim-ap \
     connection.interface-name "$JITTERSIM_TEST_INTERFACE" \
     connection.autoconnect yes \
     802-11-wireless.mode ap \
-    802-11-wireless-security.key-mgmt sae \
-    802-11-wireless-security.proto rsn \
-    802-11-wireless-security.pairwise ccmp \
-    802-11-wireless-security.group ccmp \
-    802-11-wireless-security.pmf 3 \
     ipv4.method shared \
     ipv4.addresses 192.168.50.1/24 \
     ipv4.shared-dhcp-range 192.168.50.100,192.168.50.199 \

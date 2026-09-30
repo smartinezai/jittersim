@@ -4,19 +4,15 @@ from typing import Dict, Mapping, Optional, Tuple
 
 from .commands import Command
 from .executor import CommandExecutionError, CommandExecutor
+from .wifi_security import PREFIX, SECURITY_PROPERTIES, saved_security, security_settings
 
 DEFAULT_WIFI_NAME = "JitterSim"
 AP_CONNECTION = "jittersim-ap"
-WPA3_SETTINGS = {
-    "802-11-wireless-security.key-mgmt": "sae",
-    "802-11-wireless-security.proto": "rsn",
-    "802-11-wireless-security.pairwise": "ccmp",
-    "802-11-wireless-security.group": "ccmp",
-    "802-11-wireless-security.pmf": "3",
-}
+RECOVERY_CONNECTION = "jittersim-ap-recovery"
+WPA3_SETTINGS = security_settings("WPA3")
 SSID_PROPERTY = "802-11-wireless.ssid"
 PROFILE_PROPERTIES = ("connection.type", "connection.interface-name", SSID_PROPERTY,
-                      *WPA3_SETTINGS)
+                      *SECURITY_PROPERTIES)
 MAX_SETTINGS_BYTES = 4096
 
 
@@ -34,18 +30,20 @@ class WifiController:
     def __init__(self, executor: CommandExecutor, interface: str) -> None:
         self.executor = executor
         self.interface = interface
+        self.commands_run = 0
 
     def _run(self, arguments: Tuple[str, ...], *, timeout: float = 3,
              ignore_failure: bool = False) -> str:
+        self.commands_run += 1
         return self.executor.run(Command(
             executable="nmcli", arguments=arguments,
             purpose="manage the local JitterSim Wi-Fi connection",
             timeout_seconds=timeout, ignore_failure=ignore_failure,
         )).stdout
 
-    def _settings(self) -> Dict[str, str]:
+    def _settings(self, connection: str = AP_CONNECTION) -> Dict[str, str]:
         output = self._run(("--escape", "no", "-g", ",".join(PROFILE_PROPERTIES),
-                            "connection", "show", "id", AP_CONNECTION))
+                            "connection", "show", "id", connection))
         values = output.splitlines()
         if len(output.encode("utf-8")) > MAX_SETTINGS_BYTES or len(values) != len(PROFILE_PROPERTIES):
             raise WifiError("Could not read the Pi Wi-Fi settings. No Wi-Fi change was made.")
@@ -61,10 +59,10 @@ class WifiController:
     def _modify(self, settings: Mapping[str, str], password: Optional[str] = None) -> None:
         arguments = ["connection", "modify", "id", AP_CONNECTION]
         for name, value in settings.items():
-            if name in (SSID_PROPERTY, *WPA3_SETTINGS):
+            if name in (SSID_PROPERTY, *SECURITY_PROPERTIES):
                 arguments.extend((name, value))
         if password is not None:
-            arguments.extend(("802-11-wireless-security.psk", password))
+            arguments.extend((PREFIX + "psk", password))
         self._run(tuple(arguments))
 
     def _activate(self) -> None:
@@ -73,18 +71,26 @@ class WifiController:
         self._run(("--wait", "10", "connection", "up", "id", AP_CONNECTION,
                    "ifname", self.interface), timeout=12)
 
-    def _verify(self, expected: Mapping[str, str]) -> None:
+    def _verify(self, expected: Mapping[str, str], *, radio: bool = True,
+                security: Optional[str] = None) -> Optional[str]:
         actual = self._settings()
-        if any(actual[name] != value for name, value in expected.items()):
-            raise WifiError("The Pi Wi-Fi settings did not match the requested change.")
+        for name, value in expected.items():
+            if name in (PREFIX + "proto", PREFIX + "pairwise", PREFIX + "group"):
+                matches = set(actual[name].split(",")) == set(value.split(","))
+            else:
+                matches = actual[name] == value
+            if not matches:
+                raise WifiError("The Pi Wi-Fi settings did not match the requested change.")
         active = self._run(("-g", "GENERAL.CONNECTION", "device", "show",
                             self.interface)).strip()
         if active != AP_CONNECTION:
             raise WifiError("The Pi Wi-Fi connection did not become active.")
-        if expected.get("802-11-wireless-security.key-mgmt") == "sae":
-            self._verify_wpa3()
+        if radio:
+            return self._verify_radio(expected, security=security)
+        return None
 
     def _radio(self, *arguments: str) -> str:
+        self.commands_run += 1
         output = self.executor.run(Command(
             executable="wpa_cli", arguments=("-i", self.interface, *arguments),
             purpose="verify the local JitterSim Wi-Fi authentication",
@@ -94,62 +100,121 @@ class WifiController:
             raise WifiError("Could not verify the active Pi Wi-Fi security.")
         return output.strip()
 
-    def _verify_wpa3(self) -> None:
+    def _verify_radio(self, expected: Mapping[str, str], *, security: Optional[str] = None) -> str:
         status = dict(line.split("=", 1) for line in self._radio("status").splitlines()
                       if "=" in line)
-        if any(status.get(name) != value for name, value in (
-            ("mode", "AP"), ("wpa_state", "COMPLETED"),
-            ("pairwise_cipher", "CCMP"), ("group_cipher", "CCMP"),
-        )):
-            raise WifiError("The Pi Wi-Fi radio did not start with WPA3 and AES.")
-        networks = self._radio("list_networks").splitlines()
-        current = [line.split("\t")[0] for line in networks if "[CURRENT]" in line]
+        if status.get("mode") != "AP" or status.get("wpa_state") != "COMPLETED":
+            raise WifiError("The Pi Wi-Fi radio did not start in hotspot mode.")
+        for name, property_name in (("pairwise_cipher", "pairwise"), ("group_cipher", "group")):
+            allowed = set(expected[PREFIX + property_name].upper().split(","))
+            if "" in allowed:
+                allowed = {"CCMP", "TKIP"}
+            if status.get(name) not in allowed:
+                raise WifiError("The Pi Wi-Fi radio did not start with the requested encryption.")
+        current = [line.split("\t")[0] for line in self._radio("list_networks").splitlines()
+                   if "[CURRENT]" in line]
         if len(current) != 1 or not current[0].isascii() or not current[0].isdigit():
             raise WifiError("Could not identify the active Pi Wi-Fi network.")
         identifier = current[0]
-        if (self._radio("get_network", identifier, "key_mgmt") != "SAE"
-                or self._radio("get_network", identifier, "ieee80211w") != "2"):
-            raise WifiError("The Pi Wi-Fi radio did not require WPA3 authentication and protection.")
+        keys = set(self._radio("get_network", identifier, "key_mgmt").split())
+        protocols = set(self._radio("get_network", identifier, "proto").split())
+        if keys == {"SAE"} and protocols == {"RSN"}:
+            mode = "WPA3"
+        elif "SAE" in keys and protocols == {"RSN"}:
+            mode = "WPA2/WPA3"
+        elif protocols == {"WPA", "RSN"}:
+            mode = "WPA/WPA2"
+        elif protocols == {"WPA"}:
+            mode = "WPA"
+        elif protocols == {"RSN"}:
+            mode = "WPA2"
+        else:
+            raise WifiError("The running Pi Wi-Fi security type is unsupported.")
+        allowed_keys = {"WPA-PSK", "WPA-PSK-SHA256"}
+        if mode == "WPA3":
+            valid_keys = keys == {"SAE"}
+        elif mode == "WPA2/WPA3":
+            valid_keys = {"SAE", "WPA-PSK"} <= keys <= allowed_keys | {"SAE"}
+        else:
+            valid_keys = "WPA-PSK" in keys and keys <= allowed_keys
+        expected_protocols = {"WPA" if item == "wpa" else "RSN"
+                              for item in expected[PREFIX + "proto"].split(",") if item}
+        if not expected_protocols:
+            expected_protocols = {"WPA", "RSN"}
+        pmf = self._radio("get_network", identifier, "ieee80211w")
+        expected_pmf = {"0": "0", "1": "0", "2": "1", "3": "2"}.get(expected[PREFIX + "pmf"])
+        if (not valid_keys or protocols != expected_protocols or pmf != expected_pmf
+                or (expected[PREFIX + "key-mgmt"] == "sae" and mode != "WPA3")
+                or (expected[PREFIX + "key-mgmt"] == "wpa-psk" and mode == "WPA3")
+                or (security is not None and mode != security)):
+            raise WifiError("The Pi cannot offer the requested Wi-Fi security type. Previous settings will be restored.")
+        return mode
 
-    def configure(self, ssid: str, password: str) -> int:
-        expected = {SSID_PROPERTY: ssid, **WPA3_SETTINGS}
+    def _backup_exists(self) -> bool:
+        name = self._run(("-g", "connection.id", "connection", "show", "id", RECOVERY_CONNECTION),
+                         ignore_failure=True).strip()
+        return name == RECOVERY_CONNECTION
+
+    def recover_pending(self) -> bool:
+        """Restore an interrupted import from a NetworkManager-owned secret copy."""
+        if not self._backup_exists():
+            return False
+        previous = self._settings(RECOVERY_CONNECTION)
+        self._run(("connection", "delete", "id", AP_CONNECTION), ignore_failure=True)
+        self._run(("connection", "clone", RECOVERY_CONNECTION, AP_CONNECTION))
+        self._run(("connection", "modify", "id", AP_CONNECTION,
+                   "connection.autoconnect", "yes"))
+        self._activate()
+        self._verify(previous, radio=False)
+        self._run(("connection", "delete", "id", RECOVERY_CONNECTION))
+        return True
+
+    def configure(self, ssid: str, password: str, security: str = "WPA3") -> int:
+        expected = {SSID_PROPERTY: ssid, **security_settings(security)}
         try:
+            self.recover_pending()
             self._settings()
+            self._run(("connection", "clone", AP_CONNECTION, RECOVERY_CONNECTION))
+        except (CommandExecutionError, WifiError, ValueError):
+            raise WifiError("Could not preserve the previous Pi Wi-Fi. No new settings were applied.") from None
+        try:
+            self._run(("connection", "modify", "id", RECOVERY_CONNECTION,
+                       "connection.autoconnect", "no"))
             self._modify(expected, password)
             self._activate()
-            self._verify(expected)
-        except (CommandExecutionError, WifiError):
-            raise WifiError(
-                "Pi Wi-Fi could not be updated. Check the saved connection through management access."
-            ) from None
-        return 10
+            self._verify(expected, security=security)
+            self._run(("connection", "delete", "id", RECOVERY_CONNECTION))
+        except (CommandExecutionError, WifiError, ValueError):
+            try:
+                self.recover_pending()
+            except (CommandExecutionError, WifiError, ValueError):
+                raise WifiError("Wi-Fi copy failed and recovery failed. Use management access to repair jittersim-ap.",
+                                reason="wifi-restore-failed") from None
+            raise WifiError("Wi-Fi copy failed or its security is unsupported on this Pi. Previous settings were restored.",
+                            reason="wifi-restored") from None
+        return self.commands_run
 
     def reset_name(self) -> Dict[str, str]:
         try:
+            self.recover_pending()
             previous = self._settings()
-        except (CommandExecutionError, WifiError):
-            raise WifiError(
-                "Could not inspect the Pi Wi-Fi connection. Check that jittersim-ap exists "
-                "on the configured test interface. No Wi-Fi change was made."
-            ) from None
-        expected = {SSID_PROPERTY: DEFAULT_WIFI_NAME, **WPA3_SETTINGS}
+            saved_security(previous)
+        except (CommandExecutionError, WifiError, ValueError):
+            raise WifiError("Could not inspect the Pi Wi-Fi connection. No Wi-Fi change was made.") from None
+        expected = {**previous, SSID_PROPERTY: DEFAULT_WIFI_NAME}
         try:
-            self._modify(expected)
+            mode = self._verify_radio(previous)
+            self._modify({SSID_PROPERTY: DEFAULT_WIFI_NAME})
             self._activate()
-            self._verify(expected)
-        except (CommandExecutionError, WifiError):
+            self._verify(expected, security=mode)
+        except (CommandExecutionError, WifiError, ValueError):
             try:
                 self._modify(previous)
                 self._activate()
-                self._verify(previous)
+                self._verify(previous, radio=False)
             except (CommandExecutionError, WifiError):
-                raise WifiError(
-                    "Wi-Fi name reset failed and the previous connection could not be restored. "
-                    "Use management access to repair jittersim-ap.",
-                    reason="wifi-restore-failed",
-                ) from None
-            raise WifiError(
-                "Wi-Fi name reset failed. The previous Wi-Fi settings were restored.",
-                reason="wifi-restored",
-            ) from None
-        return {"ssid": DEFAULT_WIFI_NAME, "security": "WPA3-SAE"}
+                raise WifiError("Wi-Fi name reset failed and the previous connection could not be restored. Use management access to repair jittersim-ap.",
+                                reason="wifi-restore-failed") from None
+            raise WifiError("Wi-Fi name reset failed. The previous Wi-Fi settings were restored.",
+                            reason="wifi-restored") from None
+        return {"ssid": DEFAULT_WIFI_NAME, "security": mode}

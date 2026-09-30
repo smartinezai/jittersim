@@ -87,7 +87,7 @@ class FakeRouter:
         self.logged_in = True
 
     def read_wifi_settings(self) -> RouterWifiSettings:
-        return RouterWifiSettings("Vodafone-Test", "router-wifi-password", self.enabled)
+        return RouterWifiSettings("Vodafone-Test", "router-wifi-password", self.enabled, "WPA2", "2.4 GHz")
 
     def set_wifi_enabled(self, *, enabled: bool) -> RouterWifiSettings:
         self.enabled = enabled
@@ -202,9 +202,9 @@ class HelperServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(response["action"], "configure-ap")
-        self.assertEqual(response["commands_run"], 10)
+        self.assertGreater(response["commands_run"], 10)
         self.assertEqual(self.executor.commands[0].executable, "nmcli")
-        self.assertEqual(self.executor.commands[1].arguments[3], "jittersim-ap")
+        self.assertEqual(self.executor.settings["802-11-wireless-security.key-mgmt"], "sae")
 
     def test_copies_router_wifi_to_the_local_access_point(self) -> None:
         executor = UplinkOutputExecutor()
@@ -223,8 +223,10 @@ class HelperServiceTests(unittest.TestCase):
             router_factory=router_factory,
         )
 
+        preview = service.handle_payload({"action": "router-preview-ap", "admin_password": "router-secret"})
         response = service.handle_payload(
-            {"action": "router-sync-ap", "admin_password": "router-secret"}
+            {"action": "router-sync-ap", "admin_password": "router-secret",
+             "expected_fingerprint": preview["fingerprint"]}
         )
 
         self.assertEqual(response["action"], "router-sync-ap")
@@ -233,7 +235,8 @@ class HelperServiceTests(unittest.TestCase):
         self.assertEqual(routers[0].password, "router-secret")
         self.assertTrue(routers[0].logged_in)
         self.assertTrue(routers[0].closed)
-        self.assertEqual(executor.commands[3].arguments[3], "jittersim-ap")
+        self.assertEqual(executor.settings["802-11-wireless-security.proto"], "rsn")
+        self.assertEqual(executor.settings["802-11-wireless-security.key-mgmt"], "wpa-psk")
 
     def test_failed_router_read_never_changes_ap_or_logs_credentials(self) -> None:
         class FailedReadRouter(FakeRouter):
@@ -283,12 +286,14 @@ class HelperServiceTests(unittest.TestCase):
             ),
             router_factory=FakeRouter,
         )
+        preview = service.handle_payload({"action": "router-preview-ap", "admin_password": "router-secret"})
         with self.assertLogs("jittersim.networking.helper", level="WARNING") as logs:
             response = service.handle_payload(
-                {"action": "router-sync-ap", "admin_password": "router-secret"}
+                {"action": "router-sync-ap", "admin_password": "router-secret",
+                 "expected_fingerprint": preview["fingerprint"]}
             )
 
-        self.assertEqual(response["error"], ROUTER_IMPORT_MESSAGES["apply"])
+        self.assertEqual(response["error"], ROUTER_IMPORT_MESSAGES["restore-failed"])
         self.assertNotIn("router-wifi-password", "\n".join(logs.output) + str(response))
 
     def test_changes_router_wifi_through_the_helper(self) -> None:

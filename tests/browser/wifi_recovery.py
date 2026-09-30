@@ -12,6 +12,7 @@ from playwright.sync_api import expect, sync_playwright
 def check_wifi_recovery(page):
     button = page.locator("#reset-wifi-name")
     expect(button).to_be_enabled()
+    expect(button).to_be_in_viewport()
     field = page.locator("#access-point-ssid")
     field.fill("Copied network")
     requests = []
@@ -52,6 +53,33 @@ def check_wifi_recovery(page):
     expect(button).to_be_enabled()
 
 
+def check_router_copy(page):
+    page.locator("#open-router-credentials").click()
+    page.locator("#router-admin-password").fill("browser-router-password")
+    page.locator("#check-router-password").click()
+    expect(page.locator("#router-credential-state")).to_contain_text("Accepted")
+    page.locator("#close-credentials").click()
+    button = page.locator("#sync-router-ap")
+    copies = []
+    page.on("request", lambda request: copies.append(request)
+            if request.url.endswith("/api/router/sync-ap") else None)
+
+    def check_dialog(dialog, accept):
+        assert "Browser home using WPA2 (2.4 GHz)" in dialog.message
+        assert "browser-wifi-password" not in dialog.message
+        dialog.accept() if accept else dialog.dismiss()
+
+    page.once("dialog", lambda dialog: check_dialog(dialog, False))
+    button.click()
+    expect(page.locator("#router-action-message")).to_contain_text("Copy cancelled")
+    assert not copies
+    page.once("dialog", lambda dialog: check_dialog(dialog, True))
+    button.click()
+    expect(page.locator("#router-action-message")).to_contain_text("Copied Browser home using WPA2")
+    assert len(copies) == 1
+    assert len(copies[0].post_data_json["expected_fingerprint"]) == 64
+
+
 def run():
     process = subprocess.Popen([sys.executable, "-m", "tests.browser.fixture"],
                                stdout=subprocess.PIPE, text=True)
@@ -65,7 +93,7 @@ def run():
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(
                 executable_path=os.environ.get("JITTERSIM_BROWSER_EXECUTABLE"))
-            context = browser.new_context(viewport={"width": 1440, "height": 1000})
+            context = browser.new_context(viewport={"width": 1920, "height": 1000})
             context.tracing.start(screenshots=True, snapshots=True, sources=True)
             page = context.new_page()
             errors = []
@@ -77,13 +105,21 @@ def run():
                 page.locator("#check-admin-token").click()
                 expect(page.locator("#admin-credential-state")).to_contain_text("Accepted")
                 page.locator("#close-credentials").click()
+                check_router_copy(page)
                 check_wifi_recovery(page)
-                page.locator("#reset-wifi-name").scroll_into_view_if_needed()
+                expect(page.locator("#reset-wifi-name")).to_be_in_viewport()
                 page.screenshot(path="test-results/wifi-pi-desktop.png")
                 page.set_viewport_size({"width": 390, "height": 844})
-                page.locator("#reset-wifi-name").scroll_into_view_if_needed()
+                expect(page.locator("#reset-wifi-name")).to_be_in_viewport()
                 page.screenshot(path="test-results/wifi-pi-phone.png")
                 assert page.evaluate("document.documentElement.scrollWidth") <= 391
+                page.set_viewport_size({"width": 390, "height": 360})
+                page.locator("#open-admin-credentials").click()
+                page.locator("#admin-token").fill("browser-test")
+                expect(page.locator("#check-admin-token")).to_be_in_viewport()
+                page.locator("#check-admin-token").click()
+                expect(page.locator("#admin-credential-state")).to_contain_text("Accepted")
+                page.locator("#close-credentials").click()
                 assert not errors, errors
                 print("Wi-Fi recovery browser acceptance passed.")
             finally:

@@ -85,19 +85,19 @@ class WifiInstallationTests(unittest.TestCase):
         self.assertEqual(state["settings"]["802-11-wireless-security.psk"], "new-fixture-password")
         self.assert_security(state["settings"])
 
-    def test_upgrade_preserves_credentials_and_detects_security_change_without_restart(self):
+    def test_upgrade_preserves_credentials_and_security_without_restart(self):
         result, state = self.run_setup(exists=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(state["settings"]["802-11-wireless.ssid"], "Existing household name")
         self.assertEqual(state["settings"]["802-11-wireless-security.psk"], "existing-wifi-secret")
-        self.assert_security(state["settings"])
-        self.assertIn("Settings changed", result.stdout)
+        self.assertEqual(state["settings"]["802-11-wireless-security.proto"], "wpa,rsn")
+        self.assertEqual(state["settings"]["802-11-wireless-security.pairwise"], "tkip,ccmp")
         self.assertFalse(any("up" in command or "down" in command for command in state["commands"]))
 
     def test_unsupported_security_fails_without_trying_weaker_settings(self):
-        result, state = self.run_setup(exists=True, reject_security=True)
+        result, state = self.run_setup(exists=False, reject_security=True)
         self.assertEqual(result.returncode, 7)
-        self.assertEqual(state["settings"]["802-11-wireless-security.psk"], "existing-wifi-secret")
+        self.assertNotIn("802-11-wireless-security.psk", state["settings"])
         changes = [command for command in state["commands"] if "modify" in command]
         self.assertEqual(len(changes), 1)
         self.assertEqual(changes[0][changes[0].index("802-11-wireless-security.proto") + 1], "rsn")

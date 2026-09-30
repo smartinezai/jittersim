@@ -293,3 +293,11 @@ The project is ready for presentation when it can:
 7. Restore normal traffic with one reset action.
 8. Explain what is measured at packet level versus application level.
 9. Show tests and measured evidence.
+
+## Router security matching and visible name recovery
+
+- [x] Put Wi-Fi name recovery in the floating Quick actions panel.
+- [x] Detect and preview the router band and personal security type.
+- [x] Copy matching security with bounded recovery on failure.
+- [x] Preserve the mode during name reset and installation upgrades.
+- [ ] Complete physical client acceptance for every claimed supported mode.

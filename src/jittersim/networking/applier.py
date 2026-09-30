@@ -282,11 +282,15 @@ class NetworkApplier:
             entries.extend(json.loads(result.stdout).get("nftables", []))
         return json.dumps({"nftables": entries})
 
-    def configure_access_point(self, *, ssid: str, password: str) -> int:
+    def configure_access_point(self, *, ssid: str, password: str, security: str = "WPA3") -> int:
         """Set the local test AP credentials without touching the upstream router."""
 
         _validate_access_point_settings(ssid=ssid, password=password)
-        return WifiController(self._executor, self._topology.test_interface).configure(ssid, password)
+        return WifiController(self._executor, self._topology.test_interface).configure(ssid, password, security)
+
+    def recover_wifi(self) -> bool:
+        """Restore a Wi-Fi import interrupted before its recovery copy was removed."""
+        return WifiController(self._executor, self._topology.test_interface).recover_pending()
 
     def reset_wifi_name(self) -> Dict[str, str]:
         """Restore the Pi Wi-Fi name without reading or changing its password."""
