@@ -31,6 +31,7 @@ const refreshMessages = [];
 const runtimeStates = [];
 const networkCalls = [];
 let helperConfigured = true;
+let wifiResetPending = false;
 let adminTokenVerified = true;
 let adminTokenRevision = 0;
 let adminTokenChecking = false;

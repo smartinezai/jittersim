@@ -104,6 +104,7 @@ WRITE_PATHS = frozenset(
         "/api/time-quotas/stop",
         "/api/policies",
         "/api/access-point",
+        "/api/access-point/reset-name",
         "/api/router/sync-ap",
         "/api/router/wifi",
         "/api/router/check",
@@ -118,7 +119,8 @@ WRITE_PATHS = frozenset(
         "/api/reset",
     )
 )
-ACTION_PATHS = frozenset(("/api/apply", "/api/reset", "/api/observations/scan"))
+ACTION_PATHS = frozenset(("/api/apply", "/api/reset", "/api/observations/scan",
+                          "/api/access-point/reset-name"))
 PUBLIC_READ_PATHS = frozenset(("/", "/api/health"))
 
 
@@ -1440,7 +1442,7 @@ DASHBOARD_HTML = """<!doctype html>
     <form id="access-point-form">
       <div class="fields">
         <label>Test network name (SSID)
-          <input id="access-point-ssid" value="JitterSim-Test" maxlength="32" required>
+          <input id="access-point-ssid" value="JitterSim" maxlength="32" required>
         </label>
         <label>Test network password
           <input id="access-point-password" type="password" minlength="8" maxlength="63" autocomplete="new-password" required>
@@ -1449,6 +1451,10 @@ DASHBOARD_HTML = """<!doctype html>
       <p class="policy-note">Use this if router import is unavailable. These values configure the Pi only. The password is sent to the helper and is not saved in the dashboard database.</p>
       <button type="submit">Use these values on the Pi</button>
     </form>
+    <div class="action-buttons">
+      <button id="reset-wifi-name" type="button" disabled>Reset Wi-Fi name</button>
+    </div>
+    <p id="wifi-reset-status" class="policy-note" role="status" aria-live="polite">Restore the name to JitterSim and keep the current password. This restarts test Wi-Fi and disconnects its clients. Use these controls from the management network.</p>
   </section>
   <div class="data-grid">
     <section class="card">
@@ -2336,6 +2342,8 @@ DASHBOARD_HTML = """<!doctype html>
       showMessage(saving, "working");
     }, true);
 
+    let wifiResetPending = false;
+
     function renderMode(data) {
       helperConfigured = data.helper_configured;
       const badge = element("mode-badge");
@@ -2349,6 +2357,7 @@ DASHBOARD_HTML = """<!doctype html>
       element("reset-button").disabled = !helperConfigured;
       element("panic-button").disabled = !helperConfigured;
       element("scan-observations").disabled = !helperConfigured;
+      element("reset-wifi-name").disabled = !helperConfigured || wifiResetPending;
     }
 
     function renderRuntimeSummary(state) {
@@ -4508,6 +4517,29 @@ DASHBOARD_HTML = """<!doctype html>
       }
     });
 
+    element("reset-wifi-name").addEventListener("click", async (event) => {
+      if (wifiResetPending || !helperConfigured) return;
+      if (!window.confirm("Restore the Wi-Fi name to JitterSim? The password stays the same. Test clients will disconnect while Wi-Fi restarts.")) return;
+      const button = event.currentTarget;
+      const status = element("wifi-reset-status");
+      wifiResetPending = true;
+      setButtonBusy(button, true);
+      status.textContent = "Restoring the Pi Wi-Fi name...";
+      try {
+        const response = await request("/api/access-point/reset-name", "POST", {});
+        element("access-point-ssid").value = response.result.ssid;
+        status.textContent = "Wi-Fi name restored to JitterSim. Reconnect test devices using the same password.";
+        showMessage(status.textContent, "success");
+      } catch (error) {
+        status.textContent = error.message;
+        showMessage(error.message, "error");
+      } finally {
+        wifiResetPending = false;
+        setButtonBusy(button, false);
+        button.disabled = !helperConfigured;
+      }
+    });
+
     async function routerAction(path, body, message, button) {
       if (routerActionPending || routerPasswordChecking) return;
       if (!requireAdminToken(button)) return;
@@ -4617,6 +4649,7 @@ DASHBOARD_HTML = """<!doctype html>
     element("check-router-password").addEventListener("click", checkRouterPassword);
 
     element("sync-router-ap").addEventListener("click", (event) => {
+      if (!window.confirm("The Pi will use the router's Wi-Fi name and password. Your computer may join the Pi and lose dashboard access. Keep a separate management connection before continuing.")) return;
       routerAction("/api/router/sync-ap", {}, "Reading the router Wi-Fi settings...", event.currentTarget);
     });
 
@@ -5925,6 +5958,29 @@ class ControlServer(HTTPServer):
                 _policies_payload(self.repository)
             )
 
+        if path == "/api/access-point/reset-name":
+            if self.helper_client is None:
+                return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                    {"error": "network helper is not configured"}
+                )
+            try:
+                result = self.helper_client.reset_wifi_name()
+                if result.get("ssid") != "JitterSim" or result.get("security") != "WPA2-AES":
+                    raise HelperClientError("The helper did not confirm the expected Wi-Fi settings.")
+            except HelperClientError as error:
+                status = (HTTPStatus.CONFLICT if error.reason in ("wifi-busy", "helper-busy")
+                          else HTTPStatus.BAD_GATEWAY)
+                safe_errors = {
+                    "wifi-restored": "Wi-Fi name reset failed. The previous Wi-Fi settings were restored.",
+                    "wifi-restore-failed": "Wi-Fi name reset failed and recovery failed. Use management access to repair jittersim-ap.",
+                    "wifi-busy": "Another Pi Wi-Fi change is running. Try again later.",
+                    "helper-busy": "The networking helper is busy. Try again later.",
+                }
+                return status, "application/json", _json_bytes({
+                    "error": safe_errors.get(error.reason, "Wi-Fi name reset failed. Check the Pi helper and jittersim-ap connection through management access.")
+                })
+            return HTTPStatus.OK, "application/json", _json_bytes({"result": result})
+
         if path == "/api/access-point":
             if self.helper_client is None:
                 return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
@@ -6684,6 +6740,18 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
+        origin = self.headers.get("Origin")
+        host = self.headers.get("Host", "")
+        if path == "/api/access-point/reset-name" and (
+            self.headers.get("Sec-Fetch-Site") == "cross-site"
+            or (origin is not None and origin not in ("http://" + host, "https://" + host))
+        ):
+            self._send_response(
+                status=HTTPStatus.FORBIDDEN,
+                content_type="application/json",
+                body=_json_bytes({"error": "Wi-Fi recovery must use the dashboard's own site"}),
+            )
+            return
         try:
             payload = self._read_json_body(required=path not in ACTION_PATHS)
             status, content_type, body = self.server.write_response_for(path, payload)
