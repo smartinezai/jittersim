@@ -104,6 +104,7 @@ def run():
                 page.locator("#admin-token").fill("browser-test")
                 page.locator("#check-admin-token").click()
                 expect(page.locator("#admin-credential-state")).to_contain_text("Accepted")
+                page.locator("#remember-admin-token").check()
                 page.locator("#close-credentials").click()
                 check_router_copy(page)
                 check_wifi_recovery(page)

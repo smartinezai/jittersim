@@ -16,7 +16,8 @@ def served_functions():
         return script[script.index(start) : script.index(end, script.index(start))]
 
     return (
-        block("const privateDataPanelIds =", "async function loadPrivateDataPanel(")
+        block("const privateDataPanelIds =", "function setDashboardUnlocked(")
+        + block("function setPrivateDataPanels(", "async function loadPrivateDataPanel(")
         + block("let helperConfigured =", "let profiles =")
         + block("async function request(", "const adminTokenHelp =")
         + block("async function checkAdminToken()", "async function refresh()")
@@ -76,6 +77,8 @@ function setButtonBusy(button, busy) {button.disabled = busy}
 function showMessage(text, kind) {messages.push({text, kind})}
 function stopTrafficSampling() {}
 async function loadAdminTools() {return await toolResult}
+async function loadDashboardAccess() {return {allowed: true}}
+function setDashboardUnlocked() {}
 async function refresh() {refreshCalls++}
 async function loadTrafficSettings() {}
 async function startTrafficSampling() {}

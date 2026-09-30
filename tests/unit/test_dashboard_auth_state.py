@@ -18,7 +18,8 @@ def test_token_checks_and_edits_release_all_private_loading_states():
     def block(start, end):
         return script[script.index(start) : script.index(end, script.index(start))]
 
-    functions = block("const privateDataPanelIds =", "async function loadPrivateDataPanel(")
+    functions = block("const privateDataPanelIds =", "function setDashboardUnlocked(")
+    functions += block("function setPrivateDataPanels(", "async function loadPrivateDataPanel(")
     functions += block("async function checkAdminToken()", "async function refresh()")
     listener = block(
         'element("admin-token").addEventListener("input",',
@@ -52,6 +53,8 @@ def test_token_checks_and_edits_release_all_private_loading_states():
       function openCredentials() {}
       function stopTrafficSampling() {samplingStops++}
       async function loadAdminTools() {if (failure) throw failure; return result}
+      async function loadDashboardAccess() {return {allowed: true}}
+      function setDashboardUnlocked() {}
       async function refresh() {
         refreshCalls++;
         for (const id of privateDataPanelIds) element(id).textContent = "fixture data";

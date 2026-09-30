@@ -4,7 +4,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from jittersim.config.models import ValidationError
 from jittersim.engine.plan import NetworkPlan
@@ -181,6 +181,50 @@ class NetworkApplier:
             )
         )
         return result.stdout
+
+    @property
+    def test_interface(self) -> str:
+        return self._topology.test_interface
+
+    @property
+    def uplink_interface(self) -> str:
+        return self._topology.uplink_interface
+
+    def dashboard_peer_route(self, peer: str) -> Dict[str, object]:
+        """Inspect a validated peer's return route without accepting shell input."""
+        from ipaddress import IPv4Address
+
+        address = str(IPv4Address(peer))
+        result = self._run_checked(Command(
+            executable="ip", arguments=("-j", "-4", "route", "get", address),
+            purpose="verify dashboard peer route", timeout_seconds=2,
+        ))
+        if len(result.stdout) > 32 * 1024:
+            raise ValueError("peer route is too large")
+        routes = json.loads(result.stdout)
+        if not isinstance(routes, list) or len(routes) != 1 or not isinstance(routes[0], dict):
+            raise ValueError("invalid peer route")
+        return routes[0]
+
+    def dashboard_peer_neighbors(self, peer: str, interface: str) -> List[Dict[str, object]]:
+        """Inspect the exact peer on one configured interface."""
+        from ipaddress import IPv4Address
+
+        if interface not in (self.test_interface, self.uplink_interface):
+            raise ValueError("invalid peer interface")
+        result = self._run_checked(Command(
+            executable="ip", arguments=("-j", "-4", "neigh", "show", "to",
+                                       str(IPv4Address(peer)), "dev", interface),
+            purpose="verify dashboard peer address", timeout_seconds=2,
+        ))
+        if len(result.stdout) > 32 * 1024:
+            raise ValueError("peer neighbors are too large")
+        neighbors = json.loads(result.stdout)
+        if not isinstance(neighbors, list) or len(neighbors) > 256:
+            raise ValueError("invalid peer neighbors")
+        if any(not isinstance(item, dict) for item in neighbors):
+            raise ValueError("invalid peer neighbor")
+        return neighbors
 
     def list_connected_stations(self) -> str:
         """Read Wi-Fi stations associated with the test access point."""

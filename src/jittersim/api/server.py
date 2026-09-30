@@ -119,6 +119,8 @@ WRITE_PATHS = frozenset(
         "/api/observations/add-global-block",
         "/api/apply",
         "/api/reset",
+        "/api/dashboard-access/register-self",
+        "/api/dashboard-access/remove",
     )
 )
 ACTION_PATHS = frozenset(("/api/apply", "/api/reset", "/api/observations/scan",
@@ -140,6 +142,9 @@ DASHBOARD_HTML = """<!doctype html>
       color: #e7eef8;
     }
     * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    .dashboard-locked #router-credentials,
+    .dashboard-locked .credential-dock > :not(#open-admin-credentials) { display: none; }
     body {
       margin: 0 auto;
       max-width: 72rem;
@@ -628,7 +633,7 @@ DASHBOARD_HTML = """<!doctype html>
     }
   </style>
 </head>
-<body>
+<body class="dashboard-locked">
   <div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true" hidden>
     <span id="toast-icon" class="toast-icon" aria-hidden="true"></span>
     <span id="toast-message"></span>
@@ -675,6 +680,7 @@ DASHBOARD_HTML = """<!doctype html>
       <summary>How to get the admin token</summary>
       <pre id="admin-token-help"></pre>
     </details>
+    <div id="router-credentials">
     <h3>Router password</h3>
     <label>Router admin password
       <input id="router-admin-password" type="password" autocomplete="off" placeholder="Password for 192.168.0.1" aria-describedby="credential-router-status">
@@ -691,7 +697,18 @@ DASHBOARD_HTML = """<!doctype html>
       Choose Check password to sign in to the router once. Nothing on the router is changed.
       Repeated wrong passwords may temporarily lock its web login.
     </p>
+    </div>
   </section>
+  <section class="card" id="dashboard-access-panel" aria-labelledby="dashboard-access-title">
+    <h2 id="dashboard-access-title">Dashboard access</h2>
+    <p id="dashboard-access-status" role="status">Open Admin token and choose Check token to sign in.</p>
+    <label>Device name (optional)<input id="dashboard-access-name" maxlength="64" autocomplete="off"></label>
+    <button id="allow-dashboard-device" type="button" disabled>Allow this device</button>
+    <p>Saved access keeps this dashboard usable during tests. Internet traffic still follows profiles.
+      A changed private Wi-Fi address needs registration again. The admin token is always required.</p>
+    <div id="dashboard-access-list" hidden></div>
+  </section>
+  <div id="private-dashboard" hidden>
   <header class="page-header">
     <div>
       <p class="eyebrow">NETWORK TEST LAB</p>
@@ -1519,6 +1536,7 @@ DASHBOARD_HTML = """<!doctype html>
       <pre id="action-history">Enter the admin token to view recent actions.</pre>
     </section>
   </div>
+  </div>
   <script>
     const element = (id) => document.getElementById(id);
     let pendingFormSubmitButton = null;
@@ -1614,6 +1632,7 @@ DASHBOARD_HTML = """<!doctype html>
           throw new Error("Token changed. Choose Check token to load.");
         }
         if (!response.ok) {
+          if (data.registration_required) lockDashboardAccess(data.error);
           const applyHint = data.error === "network helper apply failed" &&
             typeof data.hint === "string"
             ? "Network helper apply failed. " + data.hint
@@ -1644,6 +1663,75 @@ DASHBOARD_HTML = """<!doctype html>
       "profiles", "devices", "plan", "state", "policies",
       "connected-devices", "unaffected-devices", "uplink-details"
     ];
+
+    function setDashboardUnlocked(allowed) {
+      element("private-dashboard").hidden = !allowed;
+      element("dashboard-access-list").hidden = !allowed;
+      document.body.classList.toggle("dashboard-locked", !allowed);
+    }
+
+    function lockDashboardAccess(message) {
+      adminTokenVerified = false;
+      setDashboardUnlocked(false);
+      element("dashboard-access-list").replaceChildren();
+      element("dashboard-access-status").textContent = message;
+      setPrivateDataPanels(message);
+      stopTrafficSampling(message);
+    }
+
+    async function loadDashboardAccess() {
+      const data = await request("/api/dashboard-access/status", "GET");
+      element("allow-dashboard-device").disabled = !data.can_register;
+      element("dashboard-access-status").textContent = data.allowed
+        ? "Dashboard access is available."
+        : data.can_register ? "Token accepted. Choose Allow this device to save dashboard access."
+        : "Token accepted but this device could not be verified. Wait a few seconds and check again.";
+      setDashboardUnlocked(data.allowed);
+      return data;
+    }
+
+    async function loadDashboardAccessList() {
+      const container = element("dashboard-access-list");
+      try {
+        const data = await request("/api/dashboard-access", "GET");
+        container.replaceChildren();
+        if (!data.devices.length) container.textContent = "No devices have saved Pi Wi-Fi access.";
+        data.devices.forEach((device) => {
+          const row = document.createElement("p");
+          const label = document.createElement("span");
+          label.textContent = (device.name || "Device") + " · " + device.mac_address + " ";
+          const remove = document.createElement("button");
+          remove.type = "button";
+          remove.textContent = "Remove";
+          remove.addEventListener("click", async () => {
+            if (!window.confirm("Remove dashboard access for " + (device.name || device.mac_address) +
+                "? Removing this device returns it to sign-in.")) return;
+            setButtonBusy(remove, true);
+            try {
+              await request("/api/dashboard-access/remove", "POST", {mac_address: device.mac_address});
+              await checkAdminToken();
+            } catch (error) { showMessage(error.message, "error"); }
+            finally { setButtonBusy(remove, false); }
+          });
+          row.append(label, remove);
+          container.appendChild(row);
+        });
+      } catch (error) { container.textContent = error.message; }
+    }
+
+    element("allow-dashboard-device").addEventListener("click", async () => {
+      const button = element("allow-dashboard-device");
+      setButtonBusy(button, true);
+      try {
+        await request("/api/dashboard-access/register-self", "POST", {
+          name: element("dashboard-access-name").value
+        });
+        await checkAdminToken();
+      } catch (error) {
+        element("dashboard-access-status").textContent = error.message;
+        showMessage(error.message, "error");
+      } finally { setButtonBusy(button, false); }
+    });
 
     function setPrivateDataPanels(message, state = "Check token") {
       privateDataPanelIds.forEach((panelId) => {
@@ -3949,6 +4037,8 @@ DASHBOARD_HTML = """<!doctype html>
       const button = element("check-admin-token");
       const status = element("token-check-status");
       const tokenRevision = adminTokenRevision;
+      setDashboardUnlocked(false);
+      element("allow-dashboard-device").disabled = true;
       if (!element("admin-token").value.trim()) {
         adminTokenVerified = false;
         setPrivateDataPanels("Enter the admin token and choose Check token to load.");
@@ -3971,6 +4061,16 @@ DASHBOARD_HTML = """<!doctype html>
       status.textContent = "Checking the token and loading diagnostics...";
       showMessage("Checking the admin token...", "working");
       try {
+        const access = await loadDashboardAccess();
+        if (tokenRevision !== adminTokenRevision) return;
+        if (!access.allowed) {
+          adminTokenVerified = false;
+          setPrivateDataPanels("Allow this device to use dashboard controls.");
+          status.textContent = access.can_register ? "Token accepted. Choose Allow this device."
+            : "Token accepted but device verification is pending. Wait a few seconds and check again.";
+          status.className = "token-check-status success";
+          return;
+        }
         const result = await loadAdminTools();
         if (tokenRevision !== adminTokenRevision) return;
         if (result.ok) {
@@ -3995,6 +4095,8 @@ DASHBOARD_HTML = """<!doctype html>
         adminTokenVerified = false;
         adminTokenRejected = true;
         adminTokenRefused = error.status === 401;
+        setDashboardUnlocked(false);
+        element("allow-dashboard-device").disabled = true;
         setPrivateDataPanels("Token check failed: " + error.message);
         status.textContent = "Token check failed: " + error.message;
         status.className = "token-check-status error";
@@ -4027,7 +4129,8 @@ DASHBOARD_HTML = """<!doctype html>
         loadUplink(),
         loadQuotas(),
         loadServiceAssignments(),
-        loadAdminTools()
+        loadAdminTools(),
+        loadDashboardAccessList()
       ]);
     }
 
@@ -4294,6 +4397,8 @@ DASHBOARD_HTML = """<!doctype html>
       adminTokenRejected = false;
       adminTokenRefused = false;
       adminTokenVerified = false;
+      setDashboardUnlocked(false);
+      element("allow-dashboard-device").disabled = true;
       updateCredentialStatus();
       setPrivateDataPanels("Token changed. Choose Check token to load.");
       stopTrafficSampling("Token changed. Choose Check token to restart live traffic sampling.");
@@ -5031,6 +5136,19 @@ class ControlServer(HTTPServer):
         except OSError:
             connection.close()
             raise
+
+    def dashboard_access(self, peer: str, operation: str = "status", **values: Any) -> Dict[str, Any]:
+        """Authorize the socket peer through the helper instead of request headers."""
+        if operation == "status" and peer in ("127.0.0.1", "::1"):
+            return {"ok": True, "network": "management", "allowed": True,
+                    "can_register": False, "mac_address": None}
+        if self.helper_client is None:
+            raise HelperClientError("Device verification needs the Pi networking helper.")
+        result = self.helper_client.dashboard_access(operation, peer=peer, **values)
+        if (type(result.get("allowed")) is not bool or type(result.get("can_register")) is not bool
+                or result.get("network") not in ("test", "management")):
+            raise HelperClientError("Device verification returned an invalid response.")
+        return result
 
     def response_for(self, path: str, query: str = "") -> Tuple[int, str, bytes]:
         """Build the response body for a supported GET path."""
@@ -6704,11 +6822,18 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                     headers={"WWW-Authenticate": "Bearer"},
                 )
                 return
+            if path != "/api/dashboard-access/status" and not self._check_device_access():
+                return
         try:
-            status, content_type, body = self.server.response_for(
-                path,
-                query=parsed_path.query,
-            )
+            if path in ("/api/dashboard-access/status", "/api/dashboard-access"):
+                data = self.server.dashboard_access(
+                    self.client_address[0], "status" if path.endswith("/status") else "list")
+                status, content_type, body = HTTPStatus.OK, "application/json", _json_bytes(data)
+            else:
+                status, content_type, body = self.server.response_for(path, query=parsed_path.query)
+        except HelperClientError as error:
+            status, content_type, body = (HTTPStatus.SERVICE_UNAVAILABLE, "application/json",
+                                          _json_bytes({"error": str(error)}))
         except (PlanError, StorageError):
             LOGGER.exception("could not build control-plane response for %s", path)
             status = HTTPStatus.INTERNAL_SERVER_ERROR
@@ -6771,10 +6896,13 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 headers={"WWW-Authenticate": "Bearer"},
             )
             return
+        if path != "/api/dashboard-access/register-self" and not self._check_device_access():
+            return
 
         origin = self.headers.get("Origin")
         host = self.headers.get("Host", "")
-        if path in ("/api/access-point/reset-name", "/api/router/sync-ap", "/api/router/preview-ap") and (
+        if path in ("/api/access-point/reset-name", "/api/router/sync-ap", "/api/router/preview-ap",
+                    "/api/dashboard-access/register-self", "/api/dashboard-access/remove") and (
             self.headers.get("Sec-Fetch-Site") == "cross-site"
             or (origin is not None and origin not in ("http://" + host, "https://" + host))
         ):
@@ -6786,7 +6914,18 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             return
         try:
             payload = self._read_json_body(required=path not in ACTION_PATHS)
-            status, content_type, body = self.server.write_response_for(path, payload)
+            if path.startswith("/api/dashboard-access/"):
+                register = path.endswith("/register-self")
+                if set(payload) - ({"name"} if register else {"mac_address"}):
+                    raise RequestError("Device identity must come from the connection.")
+                data = self.server.dashboard_access(
+                    self.client_address[0], "register-self" if register else "remove", **payload)
+                status, content_type, body = HTTPStatus.OK, "application/json", _json_bytes(data)
+            else:
+                status, content_type, body = self.server.write_response_for(path, payload)
+        except HelperClientError as error:
+            status, content_type, body = (HTTPStatus.SERVICE_UNAVAILABLE, "application/json",
+                                          _json_bytes({"error": str(error)}))
         except RequestError as error:
             status = HTTPStatus.BAD_REQUEST
             content_type = "application/json"
@@ -6801,6 +6940,19 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         except StorageError:
             LOGGER.exception("could not record action history for %s", path)
         self._send_response(status=status, content_type=content_type, body=body)
+
+    def _check_device_access(self) -> bool:
+        try:
+            allowed = self.server.dashboard_access(self.client_address[0])["allowed"]
+        except HelperClientError as error:
+            self._send_response(status=HTTPStatus.SERVICE_UNAVAILABLE, content_type="application/json",
+                                body=_json_bytes({"error": str(error)}))
+            return False
+        if not allowed:
+            self._send_response(status=HTTPStatus.FORBIDDEN, content_type="application/json",
+                                body=_json_bytes({"error": "Allow this device to use the dashboard.",
+                                                  "registration_required": True}))
+        return allowed
 
     def _read_json_body(self, *, required: bool = True) -> Dict[str, Any]:
         length_header = self.headers.get("Content-Length")

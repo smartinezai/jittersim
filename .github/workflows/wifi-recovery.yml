@@ -34,6 +34,7 @@ jobs:
       - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_network_smoke.py
       - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_exemption_packets.py
       - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_mdns_upgrade.py
+      - run: docker run --rm --cap-add NET_ADMIN --cap-add NET_RAW jittersim-wifi-release python tests/integration/linux_dashboard_access_packets.py
 
   browser:
     runs-on: ubuntu-latest
@@ -46,6 +47,7 @@ jobs:
       - run: pip install . 'playwright==1.63.0'
       - run: python -m playwright install --with-deps chromium
       - run: python -m tests.browser.wifi_recovery
+      - run: python -m tests.browser.dashboard_access
       - uses: actions/upload-artifact@v5
         if: always()
         with:

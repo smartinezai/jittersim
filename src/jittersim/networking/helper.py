@@ -1,6 +1,7 @@
 """Unix-socket boundary for the privileged networking process."""
 
 import argparse
+import grp
 import hashlib
 import json
 import logging
@@ -20,6 +21,7 @@ from jittersim.engine.codec import PlanCodecError, plan_from_payload, plan_to_pa
 from jittersim.engine.plan import NetworkPlan
 
 from .applier import ApplyError, NetworkApplier
+from .dashboard_access import ACCESS_FILE, AccessError, AccessStore, identify_peer
 from .executor import CommandExecutionError, SubprocessExecutor
 from .router import (
     ROUTER_CHECK_MESSAGES,
@@ -87,11 +89,15 @@ class HelperService:
         applier: NetworkApplier,
         router_factory: Optional[Callable[[str, str], TG3442DERouter]] = None,
         active_plan_path: Optional[Path] = None,
+        access_store: Optional[AccessStore] = None,
     ) -> None:
         self._applier = applier
         self._active_plan_path = active_plan_path
         self._network_lock = threading.Lock()
         self._wifi_lock = threading.Lock()
+        self._access_store = access_store
+        self._access_lock = threading.Lock()
+        self._peer_cache: Dict[str, Any] = {}
         self._router_factory = router_factory or (
             lambda address, password: TG3442DERouter(address=address, password=password)
         )
@@ -104,6 +110,14 @@ class HelperService:
         action = payload.get("action")
         if action == "ping":
             return {"ok": True, "action": "ping"}
+        if action == "dashboard-access":
+            if not self._access_lock.acquire(blocking=False):
+                return {"ok": False, "error": "Device verification is busy. Try again.",
+                        "reason": "helper-busy"}
+            try:
+                return self._handle_dashboard_access(payload)
+            finally:
+                self._access_lock.release()
         if action in ("apply", "reset"):
             if not self._network_lock.acquire(blocking=False):
                 return {"ok": False, "error": "Pi networking is busy. Try again later.",
@@ -144,6 +158,60 @@ class HelperService:
         if action == "router-check":
             return self._handle_router_check(payload)
         return {"ok": False, "error": "unknown action"}
+
+    def _handle_dashboard_access(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        store = self._access_store
+        if store is None:
+            return {"ok": False, "error": "Saved dashboard access is not configured."}
+        operation = payload.get("operation", "status")
+        try:
+            if operation == "local-add":
+                devices = store.add(payload.get("mac_address"), payload.get("name", ""))
+                return {"ok": True, "devices": devices}
+            if operation == "local-remove":
+                return {"ok": True, "devices": store.remove(payload.get("mac_address"))}
+            if operation == "local-list":
+                return {"ok": True, "devices": store.list_devices()}
+            if operation not in ("status", "register-self", "list", "remove"):
+                raise AccessError("Unknown dashboard access action.")
+            peer = str(IPv4Address(payload.get("peer")))
+            now = time.monotonic()
+            cached = self._peer_cache.get(peer)
+            if operation == "status" and cached is not None and now - cached[0] < 1:
+                identity = dict(cached[1])
+            else:
+                identity = identify_peer(self._applier, peer)
+                self._peer_cache = {key: value for key, value in self._peer_cache.items()
+                                    if now - value[0] < 1}
+                if len(self._peer_cache) < MAX_CONNECTED_CLIENTS:
+                    self._peer_cache[peer] = (now, dict(identity))
+            devices = ([] if operation == "status" and identity["network"] == "management"
+                       else store.list_devices())
+            allowed = identity["network"] == "management" or any(
+                device["mac_address"] == identity["mac_address"] for device in devices)
+            if operation == "register-self":
+                if not identity["can_register"]:
+                    raise AccessError("This device could not be verified. Connect directly to Pi Wi-Fi "
+                                      "and try again or use the Pi recovery command.")
+                store.add(identity["mac_address"], payload.get("name", ""))
+                allowed = True
+            if operation in ("list", "remove"):
+                if not allowed:
+                    raise AccessError("Allow this device before using dashboard controls.")
+                devices = (store.remove(payload.get("mac_address")) if operation == "remove"
+                           else devices)
+                allowed = identity["network"] == "management" or any(
+                    device["mac_address"] == identity["mac_address"] for device in devices)
+            result = {"ok": True, **identity, "allowed": allowed}
+            if operation in ("list", "remove"):
+                result["devices"] = devices
+            return result
+        except AccessError as error:
+            return {"ok": False, "error": str(error)}
+        except (ValueError, TypeError, OSError, CommandExecutionError):
+            # Do not expose kernel output or saved device records to an unregistered caller.
+            return {"ok": False, "error": "Dashboard access could not be verified or saved. "
+                    "Check the Pi access file and reconnect directly to its Wi-Fi."}
 
     def _handle_clients(self) -> Dict[str, Any]:
         station_info_available = True
@@ -453,7 +521,7 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
             self._send_response({"ok": False, "error": "request must be valid JSON"})
             return
         action = payload.get("action") if isinstance(payload, dict) else None
-        if action == "ping" or action in WIFI_ACTIONS:
+        if action in ("ping", "dashboard-access") or action in WIFI_ACTIONS:
             self._send_response(self.server.service.handle_payload(payload))
             return
         if not self.server.operation_lock.acquire(blocking=False):
@@ -566,6 +634,12 @@ class HelperClient:
         """Check whether the helper is accepting requests."""
 
         return self._request({"action": "ping"})
+
+    def dashboard_access(self, operation: str = "status", *, peer: Optional[str] = None,
+                         mac_address: Optional[str] = None, name: str = "") -> Dict[str, Any]:
+        """Use the saved access list without supplying command arguments."""
+        return self._request({"action": "dashboard-access", "operation": operation,
+                              "peer": peer, "mac_address": mac_address, "name": name})
 
     def apply(self, *, plan: NetworkPlan) -> Dict[str, Any]:
         """Ask the helper to apply one validated network plan."""
@@ -818,6 +892,7 @@ def run_helper(
         applier,
         router_factory=router_factory,
         active_plan_path=active_plan_path,
+        access_store=AccessStore(ACCESS_FILE, group_id=grp.getgrnam("jittersim").gr_gid),
     )
     with UnixHelperServer(socket_path, service) as server:
         try:

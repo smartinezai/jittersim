@@ -102,9 +102,60 @@ Upgrades preserve the existing security type. Runtime changes inspect the
 active radio before reporting success. Mixed-mode support depends on the
 Pi's software and Wi-Fi radio. Saved settings alone do not prove support.
 
-Copying the router's Wi-Fi name can make the debugging computer join the Pi
-and lose management access. Keep the router Wi-Fi available and use the
-management network for recovery.
+Copying the router's Wi-Fi name can make the debugging computer join the Pi.
+Use saved dashboard access below to keep control while testing. SSH still
+requires the router network or a local Pi terminal.
+
+### Dashboard access from Pi Wi-Fi
+
+Open the HTTPS dashboard using the Pi address covered by its certificate,
+for example `https://192.168.0.17:8080`. Choose **Admin token** then **Check
+token** and **Allow this device**. This registers the actual requesting
+computer. The dashboard lists saved devices and supports removal.
+
+Only dashboard traffic avoids simulated loss and client blocks. Your ordinary
+internet traffic still follows its profile. The separate unaffected-device
+list continues to cover broader profile exemptions. SSH and access to private
+router devices remain restricted.
+
+The limited sign-in page is reachable before registration. Private data,
+downloads and controls require the token plus saved access on Pi Wi-Fi.
+The hardware address is not a password. Anyone holding the admin token may
+register their own device. Changed private Wi-Fi addresses need registration
+again. If current device observations cannot be verified, reconnect and retry.
+
+From your **Mac**, with JitterSim installed and a trusted copy of the Pi's
+public dashboard certificate:
+
+```sh
+jittersim dashboard-access allow-self --url https://192.168.0.17:8080 \
+  --ca-cert ~/jittersim-dashboard.crt --name 'My Mac'
+```
+
+The hidden prompt asks for the **JitterSim admin token**. Certificate checks
+stay enabled. No `sudo` or Linux firewall command is needed on the Mac. Copy
+`/etc/jittersim/dashboard.crt` through a previously trusted Pi connection.
+Do not copy the private key or accept an unverified replacement certificate.
+
+From a **Pi terminal**, root recovery works while the dashboard is stopped:
+
+```sh
+sudo jittersim dashboard-access add 02:00:00:00:00:01 --name 'My Mac'
+sudo jittersim dashboard-access list
+sudo jittersim dashboard-access remove 02:00:00:00:00:01
+sudo jittersim dashboard-access status
+```
+
+Use your device's current Wi-Fi hardware address. Here `sudo` asks for the
+Pi account password. The helper must be running. Entries survive restart,
+reboot and upgrades in root-owned `/etc/jittersim/dashboard-access.json`.
+Include this file in private Pi backups. Dashboard SQLite downloads do not
+contain it. The file contains device addresses, optional names and addition
+times. It contains no tokens or traffic history and removal deletes the entry.
+
+An initial upgrade of an older release still needs wireless access through
+the real router or a local Pi terminal because its firewall predates sign-in.
+Rollback restores that older access behavior while retaining the saved file.
 
 - The Pi's Ethernet network name and router gateway in the dashboard.
 - Rename the Pi test access point and change its password locally.

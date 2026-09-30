@@ -291,6 +291,7 @@ class ControlServerTests(unittest.TestCase):
         def get_traffic(authorization):
             handler = object.__new__(ControlRequestHandler)
             handler.server = self.server
+            handler.client_address = ("127.0.0.1", 45000)
             handler.path = "/api/traffic"
             handler.headers = Message()
             if authorization:
@@ -333,6 +334,7 @@ class ControlServerTests(unittest.TestCase):
         def save_rates(*, authorization, body):
             handler = object.__new__(ControlRequestHandler)
             handler.server = self.server
+            handler.client_address = ("127.0.0.1", 45000)
             handler.path = "/api/traffic-settings"
             handler.headers = Message()
             if authorization:
@@ -408,6 +410,7 @@ class ControlServerTests(unittest.TestCase):
             with self.subTest(path=path):
                 handler = object.__new__(ControlRequestHandler)
                 handler.server = self.server
+                handler.client_address = ("127.0.0.1", 45000)
                 handler.path = path
                 handler.headers = Message()
                 response = {}
@@ -468,6 +471,7 @@ class ControlServerTests(unittest.TestCase):
         def handle_write(*, authorization, body, path="/api/apply"):
             handler = object.__new__(ControlRequestHandler)
             handler.server = self.server
+            handler.client_address = ("127.0.0.1", 45000)
             handler.path = path
             handler.headers = Message()
             handler.headers["Authorization"] = authorization
@@ -501,6 +505,7 @@ class ControlServerTests(unittest.TestCase):
         self.server.admin_token = "admin-token"
         handler = object.__new__(ControlRequestHandler)
         handler.server = self.server
+        handler.client_address = ("127.0.0.1", 45000)
         handler.path = "/api/connected-device-labels"
         handler.headers = Message()
         body = json.dumps(
@@ -1005,6 +1010,7 @@ class ControlServerTests(unittest.TestCase):
         self.server.helper_client = FakeHelper()
         handler = object.__new__(ControlRequestHandler)
         handler.server = self.server
+        handler.client_address = ("127.0.0.1", 45000)
         handler.path = "/api/router/check"
         handler.headers = Message()
         body = json.dumps({"admin_password": "router-secret"}).encode()

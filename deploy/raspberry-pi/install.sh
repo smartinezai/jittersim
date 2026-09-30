@@ -47,6 +47,7 @@ python3 -m venv "$INSTALL_DIR/.venv"
 "$INSTALL_DIR/.venv/bin/pip" install "$INSTALL_DIR"
 chown -R root:root "$INSTALL_DIR"
 chmod -R go-w "$INSTALL_DIR"
+"$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/deploy/raspberry-pi/bootstrap-dashboard-access.py"
 ln -sfn "$INSTALL_DIR/.venv/bin/jittersim" /usr/local/bin/jittersim
 python3 "$INSTALL_DIR/deploy/raspberry-pi/retire-services.py"
 

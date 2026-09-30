@@ -12,6 +12,7 @@ from .topology import Topology
 PROJECT_TABLE = "jittersim"
 DOWNLOAD_TABLE = "jittersim_download"
 ROOT_HANDLE = "10:"
+DASHBOARD_REPLY_MARK = 0x80000000
 
 
 def _render_set(values: Sequence[object]) -> str:
@@ -63,6 +64,16 @@ def _render_nft_script(plan: NetworkPlan, topology: Topology) -> str:
             "{ type filter hook output priority -150; policy accept; }"
         ),
     ]
+    # Only locally generated dashboard replies get this mark. A forwarded
+    # server using port 8080 must still follow the client's download profile.
+    lines.extend([
+        f'add rule inet {PROJECT_TABLE} input iifname "{test_interface}" '
+        'tcp dport 8080 return comment "keep dashboard sign-in reachable"',
+        f'add rule inet {PROJECT_TABLE} output oifname "{test_interface}" '
+        f'tcp sport 8080 meta mark set {DASHBOARD_REPLY_MARK}',
+        f'add rule netdev {DOWNLOAD_TABLE} download meta mark {DASHBOARD_REPLY_MARK} '
+        'meta mark set 0 return comment "keep local dashboard replies usable"',
+    ])
     if plan.mac_policy.denylist:
         lines.append(
             f'add rule inet {PROJECT_TABLE} input iifname "{test_interface}" '

@@ -41,6 +41,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     raw_arguments = list(sys.argv[1:] if argv is None else argv)
     if raw_arguments and raw_arguments[0] == "wifi":
         return _wifi_command(raw_arguments[1:])
+    if raw_arguments and raw_arguments[0] == "dashboard-access":
+        from jittersim.dashboard_access_cli import main as access_main
+
+        return access_main(raw_arguments[1:])
     parser = _build_parser()
     parser.epilog = "Restore the test Wi-Fi name with 'jittersim wifi reset'."
     arguments = parser.parse_args(argv)
