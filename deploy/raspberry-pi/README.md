@@ -286,9 +286,12 @@ password and restarts test Wi-Fi. It needs the helper but works with the dashboa
 stopped. The dashboard has the same **Reset Wi-Fi name** control beside its
 manual Wi-Fi form. It cannot be reached from the test network.
 
-Installation and runtime Wi-Fi changes require WPA2 with AES. Upgrades save
-the stronger settings without restarting an active connection. Reset the name
-or plan a Wi-Fi restart to activate them. WPA3 needs separate hardware testing.
+Installation and runtime Wi-Fi changes require WPA3 with AES and protected
+Wi-Fi management messages. Clients need WPA3 support. Runtime changes verify
+active authentication and required protection before reporting success. Upgrades
+save the stronger settings without restarting an active connection. Reset the
+name or plan a Wi-Fi restart to activate them. Verify a WPA3 client connection
+on each target Pi before a household trial.
 Name recovery makes one bounded restoration attempt if activation fails and
 reports whether recovery succeeded. Code rollback alone does not restore
 NetworkManager settings.

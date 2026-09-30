@@ -523,8 +523,8 @@ class HelperClient:
     """Send bounded requests to a local privileged helper."""
 
     def __init__(self, *, socket_path: Path, timeout_seconds: float = 8.0) -> None:
-        if timeout_seconds <= 0 or timeout_seconds > 60:
-            raise ValueError("timeout_seconds must be greater than 0 and no more than 60")
+        if timeout_seconds <= 0 or timeout_seconds > 90:
+            raise ValueError("timeout_seconds must be greater than 0 and no more than 90")
         self.socket_path = socket_path
         self.timeout_seconds = timeout_seconds
 
@@ -546,7 +546,7 @@ class HelperClient:
     def configure_access_point(self, *, ssid: str, password: str) -> Dict[str, Any]:
         """Set the local test AP credentials through the privileged helper."""
 
-        client = HelperClient(socket_path=self.socket_path, timeout_seconds=60)
+        client = HelperClient(socket_path=self.socket_path, timeout_seconds=90)
         return client._request(
             {"action": "configure-ap", "ssid": ssid, "password": password}
         )
@@ -554,7 +554,7 @@ class HelperClient:
     def reset_wifi_name(self) -> Dict[str, Any]:
         """Reset only the Pi Wi-Fi name without dashboard or router credentials."""
 
-        client = HelperClient(socket_path=self.socket_path, timeout_seconds=60)
+        client = HelperClient(socket_path=self.socket_path, timeout_seconds=90)
         return client._request({"action": "wifi-reset"})
 
     def sync_access_point_from_router(self, *, admin_password: str) -> Dict[str, Any]:

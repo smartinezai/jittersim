@@ -60,6 +60,8 @@ class OutputExecutor(FakeExecutor):
 
 class UplinkOutputExecutor(WifiExecutor):
     def run(self, command):
+        if command.executable == "wpa_cli":
+            return super().run(command)
         if command.executable == "nmcli" and (
             "connection" in command.arguments or command.arguments[-1] == "wlan0"
         ):
@@ -200,7 +202,7 @@ class HelperServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(response["action"], "configure-ap")
-        self.assertEqual(response["commands_run"], 6)
+        self.assertEqual(response["commands_run"], 10)
         self.assertEqual(self.executor.commands[0].executable, "nmcli")
         self.assertEqual(self.executor.commands[1].arguments[3], "jittersim-ap")
 

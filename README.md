@@ -79,7 +79,9 @@ bytes.
 
 ### Pi and router controls
 
-Test Wi-Fi requires WPA2 with AES. Use **Reset Wi-Fi name** beside the manual
+Test Wi-Fi requires WPA3 with AES and protected Wi-Fi management messages.
+Clients need WPA3 support. Runtime changes verify active authentication before
+reporting success. Use **Reset Wi-Fi name** beside the manual
 Wi-Fi controls or run `sudo jittersim wifi reset` on the Pi to restore
 `JitterSim` while keeping the current password. The action restarts Wi-Fi and
 disconnects test clients. Add `--yes` to confirm without an interactive prompt.
@@ -87,7 +89,7 @@ The console command works with the dashboard stopped and needs the local helper.
 
 Copying the router's Wi-Fi name can make the debugging computer join the Pi
 and lose management access. Keep the router Wi-Fi available and use the
-management network for recovery. WPA3 support remains unverified.
+management network for recovery.
 
 - The Pi's Ethernet network name and router gateway in the dashboard.
 - Rename the Pi test access point and change its password locally.
