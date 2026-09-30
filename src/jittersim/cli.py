@@ -19,6 +19,7 @@ from jittersim.networking.commands import Command
 from jittersim.networking.helper import HelperClient, HelperClientError
 from jittersim.networking.renderer import render_command_plan
 from jittersim.networking.topology import Topology
+from jittersim.networking.wifi import DEFAULT_WIFI_NAME
 
 CONTROL_COMMANDS = ("reset", "normal-access", "status")
 MEASUREMENT_COMMANDS = ("measure", "compare")
@@ -102,6 +103,13 @@ def _build_operations_parser() -> argparse.ArgumentParser:
         description="Headless status, access, update, persistence and recovery commands.",
     )
     commands = parser.add_subparsers(dest="operation", required=True)
+
+    wifi = commands.add_parser("wifi", help="recover the Pi test Wi-Fi name")
+    wifi_commands = wifi.add_subparsers(dest="wifi_command", required=True)
+    wifi_reset = wifi_commands.add_parser("reset", help="restore JitterSim and keep the password")
+    wifi_reset.add_argument("--yes", action="store_true", help="confirm without a prompt")
+    wifi_reset.add_argument("--helper-socket", type=Path,
+                            default=Path("/run/jittersim/helper.sock"))
 
     access = commands.add_parser("access", help="read or apply saved access rules")
     access_commands = access.add_subparsers(dest="access_command", required=True)
@@ -651,6 +659,24 @@ def _show_logs(arguments) -> int:
 
 def _run_operations(raw_arguments: Sequence[str]) -> int:
     arguments = _build_operations_parser().parse_args(raw_arguments)
+    if arguments.operation == "wifi":
+        if not _confirm("Restore the Wi-Fi name to JitterSim and disconnect test clients? "
+                        "The password stays the same.", arguments.yes):
+            print("Wi-Fi name reset cancelled.")
+            return 0
+        try:
+            result = HelperClient(socket_path=arguments.helper_socket).reset_wifi_name()
+            if result.get("ssid") != DEFAULT_WIFI_NAME or result.get("security") != "WPA2-AES":
+                raise HelperClientError("The helper did not confirm the expected Wi-Fi settings.")
+        except HelperClientError as error:
+            print(f"Wi-Fi name reset failed: {error}", file=sys.stderr)
+            print("Use the Pi's management connection or a local terminal. "
+                  "Check sudo systemctl status jittersim-helper.service "
+                  "and sudo nmcli connection show jittersim-ap.", file=sys.stderr)
+            return 1
+        print("Wi-Fi name restored to JitterSim with WPA2 and AES. "
+              "Reconnect test devices using the same password.")
+        return 0
     if arguments.operation == "access":
         if arguments.access_command == "status":
             return _print_access_status(arguments)
@@ -682,7 +708,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return (_reset(arguments, all_restrictions=command == "normal-access")
                 if command != "status" else _status(arguments))
     if raw_arguments and raw_arguments[0] in (
-        "access", "update", "persistence", "diagnostics", "logs"
+        "access", "update", "persistence", "diagnostics", "logs", "wifi"
     ):
         return _run_operations(raw_arguments)
     if raw_arguments and raw_arguments[0] in ("-h", "--help"):
@@ -690,7 +716,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.epilog = (
             "Headless commands: access status, access apply, access dns-failure, "
             "persistence show, persistence set on/off, diagnostics, logs, "
-            "update check, update install and update rollback."
+            "update check, update install, update rollback and wifi reset."
         )
         parser.print_help()
         return 0

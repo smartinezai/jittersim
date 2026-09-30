@@ -63,6 +63,7 @@ when the staged and installed release labels differ. The terminal command
 - Use the browser proxy to test different profiles on selected secure
   websites.
 - Choose whether profiles stop or resume after a router outage.
+- Restore the Pi Wi-Fi name to JitterSim from the dashboard or terminal.
 
 **Reset network** stops active profile effects while leaving saved settings
 and household access rules in place. **Normal access** also turns off device
@@ -97,6 +98,12 @@ applying access rules, so run `sudo jittersim access apply` after changing it.
 Run `sudo jittersim --help` for the command list. More examples are in the
 [Pi installation and recovery guide](deploy/raspberry-pi/README.md).
 
+Use **Reset Wi-Fi name** on Setup or run `sudo jittersim wifi reset` on the Pi.
+It restores `JitterSim` and keeps the current password. Confirming the reset
+restarts test Wi-Fi, so its clients need to reconnect. Add `--yes` when running
+without a prompt. This command needs the local helper but not the dashboard or
+its settings database.
+
 ## Set up the Pi
 
 1. Connect the Pi to your router by Ethernet and keep the router's Wi-Fi
@@ -119,6 +126,16 @@ Run `sudo jittersim --help` for the command list. More examples are in the
 The installer preserves your saved Wi-Fi name and password. Use it when
 upgrading an older release so it can add new system services. A code-only
 update does not install those services.
+
+The test network requires WPA2 with AES. Upgrades save the stronger security
+settings and report when an active network needs a planned restart. Manual
+Wi-Fi changes, router imports and name resets activate the stronger settings.
+WPA3 support on the Pi remains unverified.
+
+Copying your router's Wi-Fi name can make your debugging computer join the Pi
+instead. Keep a working management connection before using that action. The
+reset button is available through management access. A computer already on the
+test Wi-Fi cannot reach the dashboard or SSH.
 
 The test Wi-Fi is separate from your home network. Devices on it cannot reach
 your router's private network or each other. Printing, casting and other local

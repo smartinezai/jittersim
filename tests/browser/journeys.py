@@ -14,6 +14,49 @@ from playwright.sync_api import expect, sync_playwright
 def dismiss_toasts(page):
     page.locator("#toast").evaluate("toast => { toast.hidden = true; }")
 
+def check_wifi_recovery(page):
+    page.get_by_role("link", name=re.compile("^Setup")).click()
+    button = page.locator("#reset-wifi-name")
+    expect(button).to_be_enabled()
+    field = page.locator("#access-point-ssid")
+    field.fill("Copied network")
+    requests = []
+    page.on("request", lambda request: requests.append(request)
+            if request.url.endswith("/api/access-point/reset-name") else None)
+    page.once("dialog", lambda dialog: dialog.dismiss())
+    button.click()
+    expect(field).to_have_value("Copied network")
+    assert not requests
+
+    page.route("**/api/access-point/reset-name", lambda route: route.fulfill(
+        status=502, content_type="application/json", body='{"error":"Simulated reset failure"}'))
+    page.once("dialog", lambda dialog: dialog.accept())
+    button.click()
+    expect(page.locator("#wifi-reset-status")).to_contain_text("Simulated reset failure")
+    expect(button).to_be_enabled()
+    expect(field).to_have_value("Copied network")
+    page.unroute("**/api/access-point/reset-name")
+
+    held = []
+    page.route("**/api/access-point/reset-name", lambda route: held.append(route))
+    page.once("dialog", lambda dialog: dialog.accept())
+    button.click()
+    expect(button).to_be_disabled()
+    assert len(held) == 1
+    held[0].continue_()
+    expect(field).to_have_value("JitterSim")
+    expect(button).to_be_enabled()
+    assert len(requests) == 2
+    page.unroute("**/api/access-point/reset-name")
+    page.route("**/api/health", lambda route: route.fulfill(
+        status=200, content_type="application/json",
+        body='{"helper_configured":false,"mode":"configuration-only"}'))
+    page.reload()
+    expect(button).to_be_disabled()
+    page.unroute("**/api/health")
+    page.reload()
+    expect(button).to_be_enabled()
+
 
 def check_access_and_help(page):
     if page.get_by_role("button", name="Discard unfinished edits", exact=True).is_visible():
@@ -501,6 +544,11 @@ def run():
                 page.screenshot(
                     path="test-results/experience-overview-phone.png", full_page=False
                 )
+                check_wifi_recovery(page)
+                page.set_viewport_size({"width": 1440, "height": 1000})
+                page.screenshot(path="test-results/wifi-recovery-desktop.png", full_page=True)
+                page.set_viewport_size({"width": 430, "height": 1000})
+                page.screenshot(path="test-results/wifi-recovery-phone.png", full_page=True)
                 assert not errors, errors
             finally:
                 page.screenshot(path="test-results/browser-journeys.png", full_page=True)

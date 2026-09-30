@@ -26,9 +26,12 @@ from .executor import CommandExecutionError, SubprocessExecutor
 from .renderer import band_class
 from .router import RouterError, TG3442DERouter
 from .topology import Topology
+from .wifi import WifiError
 
 LOGGER = logging.getLogger(__name__)
 MAX_MESSAGE_BYTES = 256 * 1024
+MAX_HELPER_CONNECTIONS = 8
+WIFI_ACTIONS = ("configure-ap", "router-sync-ap", "wifi-reset")
 MAX_LOG_DETAIL_CHARS = 512
 MAX_CONNECTED_CLIENTS = 256
 GATEWAY_CHECK_INTERVAL_SECONDS = 5.0
@@ -76,6 +79,10 @@ class HelperError(RuntimeError):
 class HelperClientError(RuntimeError):
     """Raised when a helper request cannot be completed."""
 
+    def __init__(self, message: str, *, reason: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.reason = reason
+
 
 class HelperService:
     """Dispatch validated plan and reset requests to one network applier."""
@@ -93,6 +100,7 @@ class HelperService:
         self._gateway_state_path = gateway_state_path
         self._access_manager = access_manager
         self._network_lock = threading.RLock()
+        self._wifi_lock = threading.Lock()
         self._persistence_enabled = False
         self._persistence_mode_initialized = False
         self._gateway_state = "unknown"
@@ -166,10 +174,24 @@ class HelperService:
             return self._handle_dns_observation()
         if action == "traffic-counters":
             return self._handle_traffic_counters()
-        if action == "configure-ap":
-            return self._handle_configure_ap(payload)
-        if action == "router-sync-ap":
-            return self._handle_router_sync_ap(payload)
+        if action in WIFI_ACTIONS:
+            if not self._wifi_lock.acquire(blocking=False):
+                return {"ok": False, "error": "Another Pi Wi-Fi change is running. Try again later.",
+                        "reason": "wifi-busy"}
+            try:
+                if action == "router-sync-ap":
+                    return self._handle_router_sync_ap(payload)
+                if not self._network_lock.acquire(blocking=False):
+                    return {"ok": False, "error": "Pi networking is busy. Try again later.",
+                            "reason": "helper-busy"}
+                try:
+                    if action == "configure-ap":
+                        return self._handle_configure_ap(payload)
+                    return self._handle_wifi_reset()
+                finally:
+                    self._network_lock.release()
+            finally:
+                self._wifi_lock.release()
         if action == "router-status":
             return self._handle_router_wifi(payload, read_only=True)
         if action == "router-wifi":
@@ -586,10 +608,21 @@ class HelperService:
             )
         except (KeyError, TypeError, ValidationError):
             return {"ok": False, "error": "invalid access point settings"}
+        except WifiError as error:
+            LOGGER.warning("access point configuration failed")
+            return {"ok": False, "error": str(error), "reason": error.reason}
         except CommandExecutionError:
-            LOGGER.exception("access point configuration failed")
+            LOGGER.warning("access point configuration failed")
             return {"ok": False, "error": "access point configuration failed"}
         return {"ok": True, "action": "configure-ap", "commands_run": commands_run}
+
+    def _handle_wifi_reset(self) -> Dict[str, Any]:
+        try:
+            result = self._applier.reset_wifi_name()
+        except WifiError as error:
+            LOGGER.warning("Wi-Fi name reset failed: %s", error.reason)
+            return {"ok": False, "error": str(error), "reason": error.reason}
+        return {"ok": True, "action": "wifi-reset", **result}
 
     def _handle_router_sync_ap(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         router = None
@@ -603,14 +636,23 @@ class HelperService:
             router = self._router_factory(gateway, admin_password)
             router.login()
             settings = router.read_wifi_settings()
-            commands_run = self._applier.configure_access_point(
-                ssid=settings.ssid,
-                password=settings.password,
-            )
+            if not self._network_lock.acquire(blocking=False):
+                return {"ok": False, "error": "Pi networking is busy. Try again later.",
+                        "reason": "helper-busy"}
+            try:
+                commands_run = self._applier.configure_access_point(
+                    ssid=settings.ssid,
+                    password=settings.password,
+                )
+            finally:
+                self._network_lock.release()
         except (KeyError, TypeError, ValueError):
             return {"ok": False, "error": "invalid router credentials"}
+        except WifiError as error:
+            LOGGER.warning("router Wi-Fi import failed")
+            return {"ok": False, "error": str(error), "reason": error.reason}
         except (CommandExecutionError, RouterError):
-            LOGGER.exception("router Wi-Fi import failed")
+            LOGGER.warning("router Wi-Fi import failed")
             return {"ok": False, "error": "router Wi-Fi import failed"}
         finally:
             if router is not None:
@@ -672,6 +714,13 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
     server: "UnixHelperServer"
 
     def handle(self) -> None:
+        self.request.settimeout(3)
+        try:
+            self._handle_request()
+        except (OSError, TimeoutError):
+            return
+
+    def _handle_request(self) -> None:
         line = self.rfile.readline(MAX_MESSAGE_BYTES + 1)
         if not line:
             return
@@ -683,19 +732,32 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
         except (UnicodeDecodeError, json.JSONDecodeError):
             self._send_response({"ok": False, "error": "request must be valid JSON"})
             return
-        self._send_response(self.server.service.handle_payload(payload))
+        action = payload.get("action") if isinstance(payload, dict) else None
+        if action == "ping" or action in WIFI_ACTIONS:
+            self._send_response(self.server.service.handle_payload(payload))
+            return
+        if not self.server.operation_lock.acquire(blocking=False):
+            self._send_response({"ok": False, "error": "The networking helper is busy. Try again later.",
+                                 "reason": "helper-busy"})
+            return
+        try:
+            self._send_response(self.server.service.handle_payload(payload))
+        finally:
+            self.server.operation_lock.release()
 
     def _send_response(self, payload: Dict[str, Any]) -> None:
         encoded = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
         self.wfile.write(encoded)
 
 
-class UnixHelperServer(socketserver.UnixStreamServer):
+class UnixHelperServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     """Serve the helper protocol through a filesystem-protected Unix socket."""
 
     def __init__(self, socket_path: Path, service: HelperService) -> None:
         self.socket_path = socket_path
         self.service = service
+        self.operation_lock = threading.Lock()
+        self._request_slots = threading.BoundedSemaphore(MAX_HELPER_CONNECTIONS)
         self._prepare_socket_path()
         try:
             super().__init__(str(socket_path), HelperRequestHandler)
@@ -703,6 +765,29 @@ class UnixHelperServer(socketserver.UnixStreamServer):
         except OSError as error:
             self._remove_socket_path()
             raise HelperError("could not create the helper socket") from error
+
+    def process_request(self, request, client_address) -> None:
+        if not self._request_slots.acquire(blocking=False):
+            try:
+                request.settimeout(1)
+                request.sendall(b'{"ok":false,"error":"The networking helper is busy. Try again later.",'
+                                b'"reason":"helper-busy"}\n')
+            except OSError:
+                pass
+            finally:
+                self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._request_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._request_slots.release()
 
     def server_close(self) -> None:
         """Close the socket and remove it only when it is still a socket."""
@@ -860,14 +945,22 @@ class HelperClient:
     def configure_access_point(self, *, ssid: str, password: str) -> Dict[str, Any]:
         """Set the local test AP credentials through the privileged helper."""
 
-        return self._request(
+        client = HelperClient(socket_path=self.socket_path, timeout_seconds=60)
+        return client._request(
             {"action": "configure-ap", "ssid": ssid, "password": password}
         )
+
+    def reset_wifi_name(self) -> Dict[str, Any]:
+        """Reset only the Pi Wi-Fi name without dashboard or router credentials."""
+
+        client = HelperClient(socket_path=self.socket_path, timeout_seconds=60)
+        return client._request({"action": "wifi-reset"})
 
     def sync_access_point_from_router(self, *, admin_password: str) -> Dict[str, Any]:
         """Copy the router's primary Wi-Fi settings into the local test AP."""
 
-        return self._request(
+        client = HelperClient(socket_path=self.socket_path, timeout_seconds=60)
+        return client._request(
             {"action": "router-sync-ap", "admin_password": admin_password}
         )
 
@@ -1058,7 +1151,11 @@ class HelperClient:
         if not isinstance(decoded, dict):
             raise HelperClientError("helper returned an invalid response object")
         if not decoded.get("ok", False):
-            raise HelperClientError(str(decoded.get("error", "helper request failed")))
+            reason = decoded.get("reason")
+            if reason not in ("wifi-busy", "helper-busy", "wifi-failed",
+                              "wifi-restored", "wifi-restore-failed"):
+                reason = None
+            raise HelperClientError(str(decoded.get("error", "helper request failed")), reason=reason)
         return decoded
 
 
