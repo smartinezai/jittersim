@@ -6,6 +6,10 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
+# Program files must remain readable by the service user. Credentials below
+# use explicit private permissions.
+umask 022
+
 SOURCE_DIR=${1:-$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)}
 INSTALL_DIR=/opt/jittersim
 CONFIG_DIR=/etc/jittersim
@@ -47,6 +51,8 @@ python3 -m venv "$INSTALL_DIR/.venv"
 "$INSTALL_DIR/.venv/bin/pip" install "$INSTALL_DIR"
 chown -R root:root "$INSTALL_DIR"
 chmod -R go-w "$INSTALL_DIR"
+runuser -u jittersim -- "$INSTALL_DIR/.venv/bin/python" -I -c \
+    'import jittersim.api.server, jittersim.networking.helper, jittersim.networking.browser_proxy, jittersim.dashboard_access_cli'
 "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/deploy/raspberry-pi/bootstrap-dashboard-access.py"
 ln -sfn "$INSTALL_DIR/.venv/bin/jittersim" /usr/local/bin/jittersim
 python3 "$INSTALL_DIR/deploy/raspberry-pi/retire-services.py"

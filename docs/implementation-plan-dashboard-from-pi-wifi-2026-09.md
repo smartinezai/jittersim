@@ -230,3 +230,21 @@ address currently uses VPN interface `utun4` and SSH times out. The first
 upgrade needs a verified wireless router connection or a local Pi terminal.
 After installation, verify the actual Mac route and use an address covered by
 the preserved certificate before claiming dashboard acceptance.
+
+## Installation repair after the first Pi attempt
+
+The Mac reached the router network after the Pi was temporarily powered off.
+SSH now reaches the Pi at `192.168.0.17`. The first update was automatically
+reverted because the dashboard and browser proxy could not import their
+installed modules. The deployment wrapper's private-file settings reached
+the installer and made new package folders unreadable by the service user.
+The prior release and its services are restored.
+
+Set ordinary program permissions before the installer creates its environment
+and installs the package. Keep explicit private permissions on credentials,
+the access list and recovery backups. Verify a fresh package under the actual
+service user's permissions with private-file settings inherited from its
+caller. Add that check to Linux CI. Then push the repair, build the exact
+release and repeat deployment with the existing private recovery backup.
+Check package imports as the service user before starting services and keep
+automatic rollback if any live check fails.
