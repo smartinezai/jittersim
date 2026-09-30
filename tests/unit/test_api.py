@@ -72,7 +72,7 @@ class FakeHelper:
         if self.fail_action == "wifi":
             raise HelperClientError("simulated Wi-Fi failure")
         self.wifi_reset_called = True
-        return {"ok": True, "action": "wifi-reset", "ssid": "JitterSim", "security": "WPA2-AES"}
+        return {"ok": True, "action": "wifi-reset", "ssid": "JitterSim", "security": "WPA3-SAE"}
 
     def set_gateway_persistence(self, *, enabled):
         self.persistence_enabled = enabled

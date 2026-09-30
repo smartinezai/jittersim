@@ -39,7 +39,7 @@ if dpkg-query -W -f='${Status}' hostapd 2>/dev/null | grep -q 'install ok instal
     existing_hostapd=yes
 fi
 apt-get update
-apt-get install -y dnsmasq-base iputils-ping iw nftables openssl python3-venv tcpdump unbound dnsutils hostapd conntrack
+apt-get install -y dnsmasq-base iputils-ping iw wpasupplicant nftables openssl python3-venv tcpdump unbound dnsutils hostapd conntrack
 # New package defaults must not take over existing DNS or Wi-Fi services.
 if [ "$existing_unbound" = no ]; then systemctl disable --now unbound.service; fi
 if [ "$existing_hostapd" = no ]; then systemctl disable --now hostapd.service; fi
@@ -105,11 +105,11 @@ if ! nmcli connection show jittersim-ap >/dev/null 2>&1; then
     nmcli connection add type wifi ifname "$JITTERSIM_TEST_INTERFACE" \
         con-name jittersim-ap ssid "$JITTERSIM_AP_SSID" autoconnect no
     nmcli connection modify jittersim-ap \
-        802-11-wireless-security.key-mgmt wpa-psk \
+        802-11-wireless-security.key-mgmt sae \
         802-11-wireless-security.psk "$JITTERSIM_AP_PASSWORD"
 else
     ap_settings_before=$(nmcli -g \
-        connection.interface-name,connection.autoconnect,802-11-wireless.mode,802-11-wireless.ap-isolation,ipv4.method,ipv4.addresses,ipv4.shared-dhcp-range,ipv6.method,802-11-wireless-security.key-mgmt,802-11-wireless-security.proto,802-11-wireless-security.pairwise,802-11-wireless-security.group \
+        connection.interface-name,connection.autoconnect,802-11-wireless.mode,802-11-wireless.ap-isolation,ipv4.method,ipv4.addresses,ipv4.shared-dhcp-range,ipv6.method,802-11-wireless-security.key-mgmt,802-11-wireless-security.proto,802-11-wireless-security.pairwise,802-11-wireless-security.group,802-11-wireless-security.pmf \
         connection show jittersim-ap)
 fi
 if ! nmcli -g ipv4.shared-dhcp-range connection show jittersim-ap >/dev/null 2>&1; then
@@ -121,16 +121,17 @@ nmcli connection modify jittersim-ap \
     connection.autoconnect no \
     802-11-wireless.mode ap \
     802-11-wireless.ap-isolation "$ap_isolation" \
-    802-11-wireless-security.key-mgmt wpa-psk \
+    802-11-wireless-security.key-mgmt sae \
     802-11-wireless-security.proto rsn \
     802-11-wireless-security.pairwise ccmp \
     802-11-wireless-security.group ccmp \
+    802-11-wireless-security.pmf 3 \
     ipv4.method shared \
     ipv4.addresses 192.168.50.1/24 \
     ipv4.shared-dhcp-range 192.168.50.100,192.168.50.199 \
     ipv6.method disabled
 ap_settings_after=$(nmcli -g \
-    connection.interface-name,connection.autoconnect,802-11-wireless.mode,802-11-wireless.ap-isolation,ipv4.method,ipv4.addresses,ipv4.shared-dhcp-range,ipv6.method,802-11-wireless-security.key-mgmt,802-11-wireless-security.proto,802-11-wireless-security.pairwise,802-11-wireless-security.group \
+    connection.interface-name,connection.autoconnect,802-11-wireless.mode,802-11-wireless.ap-isolation,ipv4.method,ipv4.addresses,ipv4.shared-dhcp-range,ipv6.method,802-11-wireless-security.key-mgmt,802-11-wireless-security.proto,802-11-wireless-security.pairwise,802-11-wireless-security.group,802-11-wireless-security.pmf \
     connection show jittersim-ap)
 
 dashboard_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (p = 1; p <= NF; p++) if ($p == "src") {print $(p + 1); exit}}' || true)
