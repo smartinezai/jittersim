@@ -471,6 +471,7 @@ class UnixHelperServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServe
     def process_request(self, request, client_address) -> None:
         if not self._request_slots.acquire(blocking=False):
             try:
+                self._drain_rejected_request(request)
                 request.settimeout(1)
                 request.sendall(b'{"ok":false,"error":"The networking helper is busy. Try again later.",'
                                 b'"reason":"helper-busy"}\n')
@@ -484,6 +485,21 @@ class UnixHelperServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServe
         except BaseException:
             self._request_slots.release()
             raise
+
+    @staticmethod
+    def _drain_rejected_request(request) -> None:
+        # Closing with unread input can discard the busy response on Linux.
+        deadline = time.monotonic() + 0.25
+        remaining = MAX_MESSAGE_BYTES + 1
+        while remaining:
+            wait = deadline - time.monotonic()
+            if wait <= 0:
+                return
+            request.settimeout(wait)
+            chunk = request.recv(min(4096, remaining))
+            if not chunk or b"\n" in chunk:
+                return
+            remaining -= len(chunk)
 
     def process_request_thread(self, request, client_address) -> None:
         try:

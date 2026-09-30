@@ -88,3 +88,12 @@ The first two recovery runs hit a NetworkManager reload timeout. The corrected
 runner activates the original unchanged profile directly and restarts services
 that stop with the helper. Its final activation and recovery checks both passed.
 No firmware binary was replaced.
+
+## CI failure and scoped recovery fix
+
+Linux CI exposed an existing overload response race. Closing a rejected socket
+with an unread request can discard its busy response. Consume at most one
+bounded request before rejecting it, with a total quarter-second deadline.
+Keep the worker limit unchanged. Extend the existing real-socket test with a
+briefly delayed sender to prove delivery. Verify this fix on main and the Pi
+branch before completing deployment.
