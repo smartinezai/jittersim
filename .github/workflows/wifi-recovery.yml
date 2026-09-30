@@ -31,6 +31,7 @@ jobs:
       - uses: actions/checkout@v5
       - run: docker build -f tests/wifi/Dockerfile -t jittersim-wifi-release .
       - run: docker run --rm jittersim-wifi-release python tests/integration/linux_installer_permissions.py
+      - run: docker run --rm --cap-add NET_ADMIN jittersim-wifi-release python tests/integration/linux_dashboard_peer_identity.py
       - run: docker run --rm --privileged jittersim-wifi-release
       - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_network_smoke.py
       - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_exemption_packets.py

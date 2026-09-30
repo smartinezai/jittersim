@@ -212,9 +212,11 @@ class NetworkApplier:
 
         if interface not in (self.test_interface, self.uplink_interface):
             raise ValueError("invalid peer interface")
+        # A device filter makes ip omit its name from the returned entries.
+        # Keep that name in the output and select the verified interface below.
         result = self._run_checked(Command(
             executable="ip", arguments=("-j", "-4", "neigh", "show", "to",
-                                       str(IPv4Address(peer)), "dev", interface),
+                                       str(IPv4Address(peer))),
             purpose="verify dashboard peer address", timeout_seconds=2,
         ))
         if len(result.stdout) > 32 * 1024:
@@ -224,7 +226,7 @@ class NetworkApplier:
             raise ValueError("invalid peer neighbors")
         if any(not isinstance(item, dict) for item in neighbors):
             raise ValueError("invalid peer neighbor")
-        return neighbors
+        return [item for item in neighbors if item.get("dev") == interface]
 
     def list_connected_stations(self) -> str:
         """Read Wi-Fi stations associated with the test access point."""

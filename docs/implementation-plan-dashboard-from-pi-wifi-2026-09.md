@@ -248,3 +248,11 @@ caller. Add that check to Linux CI. Then push the repair, build the exact
 release and repeat deployment with the existing private recovery backup.
 Check package imports as the service user before starting services and keep
 automatic rollback if any live check fails.
+
+The installed release passed authenticated hardware checks after the restart
+check was changed to wait for readiness. Actual Mac enrollment then found
+that an interface-filtered Linux neighbor query omits the interface name.
+Query the exact peer without an interface filter so Linux includes the name.
+Select the verified interface from the bounded result before returning it.
+Verify this against an actual Linux neighbor entry in CI and on the Pi before
+repeating the Mac enrollment check.
