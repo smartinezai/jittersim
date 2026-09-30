@@ -78,7 +78,7 @@ class WifiInstallationTests(unittest.TestCase):
                                          "PATH": directory + os.pathsep + os.environ["PATH"]})
             return result, json.loads(state.read_text())
 
-    def test_fresh_install_requires_wpa2_and_aes(self):
+    def test_fresh_install_requires_wpa3_and_aes(self):
         result, state = self.run_setup(exists=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(state["settings"]["802-11-wireless.ssid"], "JitterSim")
@@ -103,6 +103,8 @@ class WifiInstallationTests(unittest.TestCase):
         self.assertEqual(changes[0][changes[0].index("802-11-wireless-security.proto") + 1], "rsn")
 
     def assert_security(self, settings):
+        self.assertEqual(settings["802-11-wireless-security.key-mgmt"], "sae")
+        self.assertEqual(settings["802-11-wireless-security.pmf"], "3")
         self.assertEqual(settings["802-11-wireless-security.proto"], "rsn")
         self.assertEqual(settings["802-11-wireless-security.pairwise"], "ccmp")
         self.assertEqual(settings["802-11-wireless-security.group"], "ccmp")

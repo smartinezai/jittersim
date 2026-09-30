@@ -13,7 +13,8 @@ class WifiRecoveryTests(unittest.TestCase):
 
     def assert_security(self):
         for name, value in (
-            ("proto", "rsn"), ("pairwise", "ccmp"), ("group", "ccmp"), ("key-mgmt", "wpa-psk"),
+            ("proto", "rsn"), ("pairwise", "ccmp"), ("group", "ccmp"),
+            ("key-mgmt", "sae"), ("pmf", "3"),
         ):
             self.assertEqual(self.executor.settings["802-11-wireless-security." + name], value)
 
@@ -22,7 +23,7 @@ class WifiRecoveryTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.executor.settings["802-11-wireless.ssid"] = name
                 result = self.applier.reset_wifi_name()
-                self.assertEqual(result, {"ssid": "JitterSim", "security": "WPA2-AES"})
+                self.assertEqual(result, {"ssid": "JitterSim", "security": "WPA3-SAE"})
                 self.assertEqual(self.executor.settings["802-11-wireless-security.psk"],
                                  "fixture-wifi-password")
                 self.assert_security()
@@ -79,3 +80,29 @@ class WifiRecoveryTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.applier.configure_access_point(ssid="Manual", password=password)
                 self.assertEqual(self.executor.commands, [])
+
+    def test_saved_wpa3_cannot_hide_weaker_or_invalid_active_radio_settings(self):
+        for name, value in (
+            ("status", "mode=AP\nwpa_state=COMPLETED\npairwise_cipher=TKIP\ngroup_cipher=CCMP\n"),
+            ("key_mgmt", "WPA-PSK\n"), ("key_mgmt", "SAE WPA-PSK\n"),
+            ("ieee80211w", "1\n"), ("list_networks", "7\tJitterSim\tany\n"),
+            ("list_networks", "7\tJitterSim\tany\t[CURRENT]\n8\tOther\tany\t[CURRENT]\n"),
+            ("list_networks", "x\tJitterSim\tany\t[CURRENT]\n"),
+            ("status", "x" * 4097),
+        ):
+            with self.subTest(name=name, value=value[:30]):
+                self.setUp()
+                previous = dict(self.executor.settings)
+                self.executor.radio_overrides[name] = value
+                with self.assertRaises(WifiError) as caught:
+                    self.applier.reset_wifi_name()
+                self.assertEqual(caught.exception.reason, "wifi-restored")
+                self.assertEqual(self.executor.settings, previous)
+                self.assertEqual(self.executor.active, "jittersim-ap")
+
+    def test_name_reset_preserves_an_existing_wpa3_network(self):
+        self.applier.configure_access_point(ssid="Cloned home network", password="new-test-password")
+        result = self.applier.reset_wifi_name()
+        self.assertEqual(result["security"], "WPA3-SAE")
+        self.assert_security()
+        self.assertEqual(self.executor.settings["802-11-wireless-security.psk"], "new-test-password")

@@ -5965,7 +5965,7 @@ class ControlServer(HTTPServer):
                 )
             try:
                 result = self.helper_client.reset_wifi_name()
-                if result.get("ssid") != "JitterSim" or result.get("security") != "WPA2-AES":
+                if result.get("ssid") != "JitterSim" or result.get("security") != "WPA3-SAE":
                     raise HelperClientError("The helper did not confirm the expected Wi-Fi settings.")
             except HelperClientError as error:
                 status = (HTTPStatus.CONFLICT if error.reason in ("wifi-busy", "helper-busy")
