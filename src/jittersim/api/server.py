@@ -514,6 +514,7 @@ DASHBOARD_HTML = """<!doctype html>
     .credential-dock span { display: block; }
     .credential-state { margin-top: 0.15rem; color: #c7d7eb; font-size: 0.78rem; font-weight: 400; }
     .credential-state.accepted { color: #8de2bc; }
+    .credential-dock .panic-button { min-height: 3rem; text-align: center; font-weight: 700; }
     .credentials-panel {
       position: fixed; z-index: 110; right: 1rem;
       top: calc(var(--credential-viewport-top, 0px) + 1rem);
@@ -536,16 +537,21 @@ DASHBOARD_HTML = """<!doctype html>
     .credential-help pre { margin-top: 0.6rem; min-height: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
     .credential-note { margin: 0.65rem 0 0; color: #c7d7eb; font-size: 0.82rem; }
     @media (max-width: 1500px) {
-      body { padding-bottom: calc(8rem + env(safe-area-inset-bottom, 0px)); }
-      html { scroll-padding-bottom: 8rem; }
+      body { padding-bottom: calc(11rem + env(safe-area-inset-bottom, 0px)); }
+      html { scroll-padding-bottom: 11rem; }
       .credential-dock {
         top: auto; bottom: calc(var(--credential-viewport-bottom, 0px) + 0.75rem + env(safe-area-inset-bottom, 0px));
         left: 50%; right: auto; transform: translateX(-50%);
         grid-template-columns: repeat(2, minmax(0, 1fr)); width: min(25rem, calc(100vw - 2rem));
       }
+      .credential-dock .panic-button {
+        grid-column: 1 / -1; min-height: 2.75rem; padding-block: 0.5rem;
+        display: flex; align-items: baseline; justify-content: center; gap: 0.6rem;
+      }
+      .credential-dock .panic-button span { display: inline; margin-top: 0; }
       .credentials-panel {
-        top: auto; bottom: calc(var(--credential-viewport-bottom, 0px) + 5rem + env(safe-area-inset-bottom, 0px));
-        max-height: calc(var(--credential-viewport-height, 100dvh) - 6rem - env(safe-area-inset-bottom, 0px));
+        top: auto; bottom: calc(var(--credential-viewport-bottom, 0px) + 8.5rem + env(safe-area-inset-bottom, 0px));
+        max-height: calc(var(--credential-viewport-height, 100dvh) - 9.5rem - env(safe-area-inset-bottom, 0px));
       }
     }
     .token-check-status { min-height: 1.25rem; margin: 0.65rem 0 0; color: #91a8c1; }
@@ -607,12 +613,16 @@ DASHBOARD_HTML = """<!doctype html>
     <span id="toast-message"></span>
     <button id="toast-dismiss" type="button" aria-label="Dismiss message">Dismiss</button>
   </div>
-  <nav class="credential-dock" aria-label="Credential shortcuts">
+  <nav class="credential-dock" aria-label="Quick actions">
     <button id="open-admin-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
       <span>Admin token</span><span id="admin-credential-state" class="credential-state">Needed</span>
     </button>
     <button id="open-router-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
       <span>Router password</span><span id="router-credential-state" class="credential-state">Not entered</span>
+    </button>
+    <button id="panic-button" class="danger panic-button" type="button"
+      title="Remove all traffic shaping now. Choose Apply current configuration to resume.">
+      <span>Panic</span><span id="panic-state" class="credential-state">Turn all profiles off</span>
     </button>
   </nav>
   <section id="credentials-panel" class="credentials-panel" aria-labelledby="credentials-title" hidden>
@@ -2132,6 +2142,7 @@ DASHBOARD_HTML = """<!doctype html>
         : "Configuration-only mode is active. Changes are saved but live network actions are unavailable.";
       element("apply-button").disabled = !helperConfigured;
       element("reset-button").disabled = !helperConfigured;
+      element("panic-button").disabled = !helperConfigured;
       element("scan-observations").disabled = !helperConfigured;
     }
 
@@ -3771,6 +3782,11 @@ DASHBOARD_HTML = """<!doctype html>
       resetButton.setAttribute("aria-busy", String(busy && path === "/api/reset"));
       applyButton.textContent = busy && path === "/api/apply" ? "Applying..." : "Apply current configuration";
       resetButton.textContent = busy && path === "/api/reset" ? "Resetting..." : "Reset network";
+      const panicButton = element("panic-button");
+      const panicking = busy && path === "/api/reset";
+      panicButton.disabled = busy || !helperConfigured;
+      panicButton.setAttribute("aria-busy", String(panicking));
+      element("panic-state").textContent = panicking ? "Working..." : "Turn all profiles off";
     }
 
     async function runAction(path, successMessage, workingMessage) {
@@ -3797,6 +3813,14 @@ DASHBOARD_HTML = """<!doctype html>
 
     element("reset-button").addEventListener("click", () => {
       runAction("/api/reset", "Network reset successfully.", "Resetting network...");
+    });
+
+    element("panic-button").addEventListener("click", () => {
+      runAction(
+        "/api/reset",
+        "All profiles are off. Choose Apply current configuration to resume.",
+        "Turning all profiles off..."
+      );
     });
 
     element("scan-observations").addEventListener("click", scanObservations);
