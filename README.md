@@ -127,10 +127,12 @@ The installer preserves your saved Wi-Fi name and password. Use it when
 upgrading an older release so it can add new system services. A code-only
 update does not install those services.
 
-The test network requires WPA2 with AES. Upgrades save the stronger security
-settings and report when an active network needs a planned restart. Manual
+The test network requires WPA3 with AES and protected Wi-Fi management messages.
+Upgrades save the stronger security settings and report when an active network
+needs a planned restart. Manual
 Wi-Fi changes, router imports and name resets activate the stronger settings.
-WPA3 support on the Pi remains unverified.
+Devices must support WPA3 to join. The radio is checked for WPA3 authentication
+and required protection before runtime changes report success.
 
 Copying your router's Wi-Fi name can make your debugging computer join the Pi
 instead. Keep a working management connection before using that action. The

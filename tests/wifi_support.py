@@ -15,6 +15,7 @@ class WifiExecutor(FakeExecutor):
             "802-11-wireless-security.proto": "wpa,rsn",
             "802-11-wireless-security.pairwise": "tkip,ccmp",
             "802-11-wireless-security.group": "tkip,ccmp",
+            "802-11-wireless-security.pmf": "0",
             "802-11-wireless-security.psk": "fixture-wifi-password",
         }
         self.active = "jittersim-ap"
@@ -23,9 +24,21 @@ class WifiExecutor(FakeExecutor):
         self.calls = {}
         self.on_up = None
         self.keep_inactive = False
+        self.radio_overrides = {}
 
     def run(self, command):
         result = super().run(command)
+        if command.executable == "wpa_cli":
+            args = command.arguments[2:]
+            responses = {
+                "status": "mode=AP\nwpa_state=COMPLETED\npairwise_cipher=CCMP\ngroup_cipher=CCMP\n",
+                "list_networks": "network id / ssid / bssid / flags\n7\tJitterSim\tany\t[CURRENT]\n",
+                "key_mgmt": "SAE\n",
+                "ieee80211w": "2\n",
+            }
+            responses.update(self.radio_overrides)
+            name = args[-1] if args[0] == "get_network" else args[0]
+            return CommandResult(0, stdout=responses[name])
         if command.executable != "nmcli":
             return result
         args = command.arguments

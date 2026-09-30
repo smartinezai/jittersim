@@ -58,7 +58,7 @@ class SubprocessExecutor:
 
     _ALLOWED_EXECUTABLES = frozenset((
         "ip", "iw", "nft", "tc", "tcpdump", "nmcli", "unbound-checkconf",
-        "systemctl", "dig", "hostapd_cli", "conntrack", "ping",
+        "systemctl", "dig", "hostapd_cli", "wpa_cli", "conntrack", "ping",
     ))
 
     def __init__(self, timeout_seconds: float = 10.0) -> None:
