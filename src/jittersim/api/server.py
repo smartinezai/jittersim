@@ -291,6 +291,11 @@ DASHBOARD_HTML = """<!doctype html>
     .content-grid .card, .data-grid .card { margin: 0; }
     .section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
     .section-heading p { margin: 0; color: #91a8c1; font-size: 0.82rem; }
+    .connected-actions {
+      display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 0.6rem;
+    }
+    .connected-actions button { margin: 0; padding: 0.3rem 0.75rem; font-size: 0.82rem; }
+    .connected-refresh-status { margin: 0.6rem 0 0; color: #91a8c1; font-size: 0.82rem; }
     .count-badge { padding: 0.25rem 0.55rem; border: 1px solid #46627f; border-radius: 999px; color: #c6dbf4; font-size: 0.75rem; white-space: nowrap; }
     .connected-list { display: grid; gap: 0.6rem; }
     .connected-row {
@@ -678,8 +683,14 @@ DASHBOARD_HTML = """<!doctype html>
         <h2>Connected clients</h2>
         <p>Devices on the Pi’s Wi-Fi. Devices on the router’s Wi-Fi are not listed here.</p>
       </div>
-      <span id="connected-count" class="count-badge">Check token</span>
+      <div class="connected-actions">
+        <span id="connected-count" class="count-badge">Check token</span>
+        <button id="check-devices" type="button">Check for devices</button>
+      </div>
     </div>
+    <p id="connected-refresh-status" class="connected-refresh-status">
+      Refreshes every 5 seconds once the admin token is accepted.
+    </p>
     <div id="connected-devices" class="connected-list" aria-live="polite">Enter the admin token and choose Check token to view connected devices.</div>
   </section>
   <section class="card connected-card" aria-labelledby="unaffected-title">
@@ -2601,14 +2612,15 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     async function loadConnectedDevices() {
-      if (connectedDevicesRequestInFlight) return;
+      if (connectedDevicesRequestInFlight) return null;
       const container = element("connected-devices");
       const activeElement = document.activeElement;
       if (
         activeElement && container.contains(activeElement) &&
         activeElement.matches("input, select")
-      ) return;
+      ) return null;
       connectedDevicesRequestInFlight = true;
+      let data;
       try {
         const [connectedResult, labelsResult] = await Promise.allSettled([
           request("/api/connected-devices", "GET"),
@@ -2618,21 +2630,59 @@ DASHBOARD_HTML = """<!doctype html>
           ? labelsResult.value.labels || []
           : [];
         if (connectedResult.status === "rejected") {
-          renderConnectedDevices({
+          data = {
             available: false,
             devices: [],
             saved_labels: savedLabels,
             message: connectedResult.reason.message
-          });
+          };
         } else {
-          renderConnectedDevices({ ...connectedResult.value, saved_labels: savedLabels });
+          data = { ...connectedResult.value, saved_labels: savedLabels };
         }
+        renderConnectedDevices(data);
       } catch (error) {
-        renderConnectedDevices({ available: false, devices: [], message: error.message });
+        data = { available: false, devices: [], message: error.message };
+        renderConnectedDevices(data);
       } finally {
         connectedDevicesRequestInFlight = false;
       }
+      element("connected-refresh-status").textContent = data.available
+        ? "Updated " + new Date().toLocaleTimeString("en-GB") + ". Refreshes every 5 seconds."
+        : "Could not update: " + (data.message || "connected-client information is unavailable");
+      return data;
     }
+
+    async function checkForDevices() {
+      const button = element("check-devices");
+      if (!element("admin-token").value.trim()) {
+        showMessage("Enter the admin token first.", "error");
+        openCredentials("admin", button);
+        return;
+      }
+      if (!adminTokenVerified) {
+        await checkAdminToken();
+        return;
+      }
+      setButtonBusy(button, true);
+      button.textContent = "Checking...";
+      try {
+        const data = await loadConnectedDevices();
+        if (data === null) {
+          showMessage("A device check is already running.");
+        } else if (!data.available) {
+          showMessage(data.message || "Connected-client information is unavailable.", "error");
+        } else {
+          const count = data.devices.length;
+          const found = count === 1 ? "1 device found." : count + " devices found.";
+          showMessage(count === 0 ? "No devices found." : found, "success");
+        }
+      } finally {
+        setButtonBusy(button, false);
+        button.textContent = "Check for devices";
+      }
+    }
+
+    element("check-devices").addEventListener("click", checkForDevices);
 
     async function loadUplink() {
       try {
