@@ -214,7 +214,10 @@ def test_served_device_check_behavior(case):
         + served_functions()
         + "\n(async () => {"
         + CASES[case]
+        + "\nconsole.log('CASE-COMPLETE');"
         + "\n})().catch(error => {console.error(error); process.exitCode = 1});"
     )
     result = subprocess.run([node, "-"], input=program, text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
+    # Node exits quietly with code 0 if a case hangs on a promise that never settles.
+    assert "CASE-COMPLETE" in result.stdout, "the case never finished"

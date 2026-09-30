@@ -19,7 +19,13 @@ from jittersim.engine.plan import NetworkPlan
 
 from .applier import ApplyError, NetworkApplier
 from .executor import CommandExecutionError, SubprocessExecutor
-from .router import ROUTER_IMPORT_MESSAGES, ROUTER_WIFI_MESSAGES, RouterError, TG3442DERouter
+from .router import (
+    ROUTER_CHECK_MESSAGES,
+    ROUTER_IMPORT_MESSAGES,
+    ROUTER_WIFI_MESSAGES,
+    RouterError,
+    TG3442DERouter,
+)
 from .topology import Topology
 
 LOGGER = logging.getLogger(__name__)
@@ -102,6 +108,8 @@ class HelperService:
             return self._handle_router_sync_ap(payload)
         if action == "router-wifi":
             return self._handle_router_wifi(payload)
+        if action == "router-check":
+            return self._handle_router_check(payload)
         if action == "apply":
             return self._handle_apply(payload.get("plan"))
         return {"ok": False, "error": "unknown action"}
@@ -317,6 +325,30 @@ class HelperService:
             "enabled": settings.enabled,
         }
 
+    def _handle_router_check(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        router = None
+        try:
+            admin_password = payload["admin_password"]
+            if not isinstance(admin_password, str) or not admin_password:
+                raise ValueError("router admin password is invalid")
+            gateway = self._applier.uplink_info().get("gateway")
+            if not gateway:
+                raise RouterError("the router gateway could not be determined")
+            router = self._router_factory(gateway, admin_password)
+            router.login()
+        except (KeyError, TypeError, ValueError):
+            return {"ok": False, "error": "invalid router credentials"}
+        except RouterError as error:
+            LOGGER.warning("router password check failed (%s)", error.reason)
+            return {"ok": False, "error": error.check_message}
+        except CommandExecutionError:
+            LOGGER.warning("router password check failed while inspecting the wired connection")
+            return {"ok": False, "error": ROUTER_CHECK_MESSAGES["unreachable"]}
+        finally:
+            if router is not None:
+                router.close()
+        return {"ok": True, "action": "router-check"}
+
     def _handle_reset(self) -> Dict[str, Any]:
         try:
             commands_run = self._applier.reset()
@@ -442,6 +474,14 @@ class HelperClient:
                 "admin_password": admin_password,
                 "enabled": enabled,
             },
+            timeout_seconds=90.0,
+        )
+
+    def check_router_password(self, *, admin_password: str) -> Dict[str, Any]:
+        """Sign in to the upstream router once and sign out again, changing nothing."""
+
+        return self._request(
+            {"action": "router-check", "admin_password": admin_password},
             timeout_seconds=90.0,
         )
 

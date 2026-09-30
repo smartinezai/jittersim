@@ -60,7 +60,11 @@ from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.schedules import active_schedule
 from jittersim.engine.service import compile_stored_plan
 from jittersim.networking.helper import HelperClient, HelperClientError
-from jittersim.networking.router import safe_router_import_message, safe_router_wifi_message
+from jittersim.networking.router import (
+    safe_router_check_message,
+    safe_router_import_message,
+    safe_router_wifi_message,
+)
 
 LOGGER = logging.getLogger(__name__)
 MAX_JSON_BODY_BYTES = 64 * 1024
@@ -97,6 +101,7 @@ WRITE_PATHS = frozenset(
         "/api/access-point",
         "/api/router/sync-ap",
         "/api/router/wifi",
+        "/api/router/check",
         "/api/connected-devices/apply-profile",
         "/api/connected-device-labels",
         "/api/connected-device-labels/delete",
@@ -653,8 +658,14 @@ DASHBOARD_HTML = """<!doctype html>
     <label>Router admin password
       <input id="router-admin-password" type="password" autocomplete="off" placeholder="Password for 192.168.0.1" aria-describedby="credential-router-status">
     </label>
-    <div class="credential-actions"><button id="clear-router-password" type="button">Clear router password</button></div>
-    <p id="credential-router-status" class="credential-note" role="status" aria-live="off">Used for one router operation. Entering it does not check it or change the router.</p>
+    <div class="credential-actions">
+      <button id="check-router-password" class="primary" type="button">Check password</button>
+      <button id="clear-router-password" type="button">Clear router password</button>
+    </div>
+    <p id="credential-router-status" class="credential-note" role="status" aria-live="off">
+      Choose Check password to sign in to the router once. Nothing on the router is changed.
+      Repeated wrong passwords may temporarily lock its web login.
+    </p>
   </section>
   <header class="page-header">
     <div>
@@ -1632,6 +1643,9 @@ DASHBOARD_HTML = """<!doctype html>
     let adminTokenChecking = false;
     let adminTokenRejected = false;
     let routerPasswordRevision = 0;
+    let routerPasswordVerified = false;
+    let routerPasswordRejected = false;
+    let routerPasswordChecking = false;
     let routerActionPending = false;
     let credentialOpener = null;
 
@@ -1640,8 +1654,13 @@ DASHBOARD_HTML = """<!doctype html>
       admin.textContent = adminTokenChecking ? "Checking..." :
         adminTokenVerified ? "Accepted" : adminTokenRejected ? "Rejected" : element("admin-token").value.trim() ? "Check needed" : "Needed";
       admin.className = "credential-state" + (adminTokenVerified ? " accepted" : "");
-      element("router-credential-state").textContent = routerActionPending ? "Working..." :
+      const router = element("router-credential-state");
+      router.textContent = routerActionPending ? "Working..." :
+        routerPasswordChecking ? "Checking..." :
+        routerPasswordVerified ? "Accepted" :
+        routerPasswordRejected ? "Rejected" :
         element("router-admin-password").value ? "Entered" : "Not entered";
+      router.className = "credential-state" + (routerPasswordVerified ? " accepted" : "");
     }
 
     function openCredentials(kind, opener) {
@@ -1700,6 +1719,8 @@ DASHBOARD_HTML = """<!doctype html>
     });
     element("router-admin-password").addEventListener("input", () => {
       routerPasswordRevision += 1;
+      routerPasswordVerified = false;
+      routerPasswordRejected = false;
       updateCredentialStatus();
     });
     window.addEventListener("resize", updateCredentialViewport);
@@ -4311,7 +4332,7 @@ DASHBOARD_HTML = """<!doctype html>
     });
 
     async function routerAction(path, body, message, button) {
-      if (routerActionPending) return;
+      if (routerActionPending || routerPasswordChecking) return;
       if (!element("admin-token").value.trim()) {
         showMessage("Enter the admin token first.", "error");
         openCredentials("admin", button);
@@ -4342,18 +4363,78 @@ DASHBOARD_HTML = """<!doctype html>
           : (result.enabled ? "Router Wi-Fi is on." : "Router Wi-Fi is off.");
         element("credential-router-status").textContent = status.textContent;
         showMessage(status.textContent, "success");
+        if (passwordRevision === routerPasswordRevision) {
+          routerPasswordVerified = true;
+          routerPasswordRejected = false;
+        }
       } catch (error) {
         status.textContent = error.message;
         element("credential-router-status").textContent = status.textContent;
         showMessage(error.message, "error");
+        if (passwordRevision === routerPasswordRevision && isRouterLoginFailure(error)) {
+          routerPasswordVerified = false;
+          routerPasswordRejected = true;
+        }
       } finally {
-        if (passwordRevision === routerPasswordRevision) element("router-admin-password").value = "";
         routerActionPending = false;
         ["sync-router-ap", "disable-router-wifi", "enable-router-wifi"].forEach((id) => { element(id).disabled = false; });
         setButtonBusy(button, false);
         updateCredentialStatus();
       }
     }
+
+    function isRouterLoginFailure(error) {
+      return error.status === 502 && /^Router login failed/.test(error.message);
+    }
+
+    async function checkRouterPassword() {
+      if (routerActionPending || routerPasswordChecking) return;
+      const button = element("check-router-password");
+      const status = element("credential-router-status");
+      if (!element("admin-token").value.trim()) {
+        showMessage("Enter the admin token first.", "error");
+        openCredentials("admin", button);
+        return;
+      }
+      const passwordRevision = routerPasswordRevision;
+      const password = element("router-admin-password").value;
+      if (!password) {
+        status.textContent = "Enter the router admin password first.";
+        showMessage(status.textContent, "error");
+        openCredentials("router", button);
+        return;
+      }
+      const routerButtons = ["sync-router-ap", "disable-router-wifi", "enable-router-wifi"];
+      routerPasswordChecking = true;
+      routerPasswordVerified = false;
+      routerPasswordRejected = false;
+      routerButtons.forEach((id) => { element(id).disabled = true; });
+      setButtonBusy(button, true);
+      button.textContent = "Checking...";
+      updateCredentialStatus();
+      status.textContent = "Signing in to the router...";
+      showMessage("Checking the router password...", "working");
+      try {
+        await request("/api/router/check", "POST", { admin_password: password });
+        if (passwordRevision !== routerPasswordRevision) return;
+        routerPasswordVerified = true;
+        status.textContent = "Router password accepted. Nothing on the router was changed.";
+        showMessage(status.textContent, "success");
+      } catch (error) {
+        if (passwordRevision !== routerPasswordRevision) return;
+        routerPasswordRejected = isRouterLoginFailure(error);
+        status.textContent = error.message;
+        showMessage(error.message, "error");
+      } finally {
+        routerPasswordChecking = false;
+        routerButtons.forEach((id) => { element(id).disabled = false; });
+        setButtonBusy(button, false);
+        button.textContent = "Check password";
+        updateCredentialStatus();
+      }
+    }
+
+    element("check-router-password").addEventListener("click", checkRouterPassword);
 
     element("sync-router-ap").addEventListener("click", (event) => {
       routerAction("/api/router/sync-ap", {}, "Reading the router Wi-Fi settings...", event.currentTarget);
@@ -5668,6 +5749,24 @@ class ControlServer(HTTPServer):
                 return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
                     {"error": message}
                 )
+            return HTTPStatus.OK, "application/json", _json_bytes({"result": result})
+
+        if path == "/api/router/check":
+            if self.helper_client is None:
+                return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                    {"error": "network helper is not configured"}
+                )
+            admin_password = payload.get("admin_password")
+            if not isinstance(admin_password, str) or not admin_password:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "router admin password is required"}
+                )
+            try:
+                result = self.helper_client.check_router_password(admin_password=admin_password)
+            except HelperClientError as error:
+                message = safe_router_check_message(str(error))
+                LOGGER.warning("router password check failed: %s", message)
+                return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes({"error": message})
             return HTTPStatus.OK, "application/json", _json_bytes({"result": result})
 
         if path == "/api/router/wifi":

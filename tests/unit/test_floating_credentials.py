@@ -35,6 +35,7 @@ def served_functions():
 HARNESS = r"""
 const assert = require("node:assert/strict");
 const nodes = new Map();
+const messages = [];
 const document = {activeElement: null, documentElement: {style: {setProperty() {}}},
                   addEventListener() {}};
 const window = {innerHeight: 800, addEventListener() {}};
@@ -58,7 +59,7 @@ function element(id) {
   return nodes.get(id);
 }
 function setButtonBusy(button, busy) {button.disabled = busy}
-function showMessage() {}
+function showMessage(text, kind) {messages.push({text, kind})}
 function stopTrafficSampling() {}
 async function loadAdminTools() {return await toolResult}
 async function refresh() {refreshCalls++}
@@ -70,6 +71,8 @@ function deferred() {
   const promise = new Promise(done => {resolve = done});
   return {promise, resolve};
 }
+const ROUTER_BUTTONS = ["check-router-password", "sync-router-ap", "disable-router-wifi",
+                        "enable-router-wifi"];
 function enter(id, value) {
   element(id).value = value;
   element(id).dispatchEvent(new Event("input"));
@@ -169,14 +172,115 @@ CASES = {
       assert.equal(element("router-credential-state").textContent, "Entered");
       network = async () => ({ok:false, status:502, json:async () => ({error:"fixture failure"})});
       await routerAction("/api/router/sync-ap", {}, "Importing", element("sync-router-ap"));
-      assert.equal(element("router-admin-password").value, "");
+      assert.equal(element("router-admin-password").value, "fixture password");
       assert.equal(element("credential-router-status").textContent, "fixture failure");
       for (const id of ["sync-router-ap", "disable-router-wifi", "enable-router-wifi"])
         assert.equal(element(id).disabled, false);
       assert.equal(routerActionPending, false);
+      enter("router-admin-password", "");
       await routerAction("/api/router/sync-ap", {}, "Importing", element("sync-router-ap"));
       assert.equal(document.activeElement.id, "router-admin-password");
       assert.equal(networkCalls.length, 2);
+    """,
+    "router_password_check_accepts_and_keeps_the_password": r"""
+      assert.equal(element("check-router-password").listeners.get("click"), checkRouterPassword);
+      enter("admin-token", "fixture token");
+      enter("router-admin-password", "fixture password");
+      const checked = {result: {ok: true, action: "router-check"}};
+      network = async () => ({ok:true, json:async () => checked});
+      await checkRouterPassword();
+      assert.equal(networkCalls.length, 1);
+      assert.equal(networkCalls[0].path, "/api/router/check");
+      assert.equal(networkCalls[0].options.method, "POST");
+      assert.equal(networkCalls[0].options.headers.Authorization, "Bearer fixture token");
+      assert.deepEqual(
+        JSON.parse(networkCalls[0].options.body), {admin_password:"fixture password"});
+      assert.equal(element("router-credential-state").textContent, "Accepted");
+      assert.equal(element("router-credential-state").className, "credential-state accepted");
+      assert.match(element("credential-router-status").textContent, /accepted.*nothing.*changed/i);
+      assert.equal(messages.at(-1).kind, "success");
+      assert.equal(element("router-admin-password").value, "fixture password");
+      assert.equal(element("check-router-password").disabled, false);
+      assert.equal(element("check-router-password").textContent, "Check password");
+      enter("router-admin-password", "edited password");
+      assert.equal(element("router-credential-state").textContent, "Entered");
+      assert.equal(element("router-credential-state").className, "credential-state");
+    """,
+    "router_password_check_rejection_and_other_failures": r"""
+      enter("admin-token", "fixture token");
+      enter("router-admin-password", "fixture password");
+      const loginFailed = "Router login failed. Check the router admin password and try again.";
+      network = async () => ({ok:false, status:502, json:async () => ({error:loginFailed})});
+      await checkRouterPassword();
+      assert.equal(element("router-credential-state").textContent, "Rejected");
+      assert.equal(element("credential-router-status").textContent, loginFailed);
+      assert.equal(messages.at(-1).kind, "error");
+      assert.equal(element("router-admin-password").value, "fixture password");
+      enter("router-admin-password", "another password");
+      assert.equal(element("router-credential-state").textContent, "Entered");
+      for (const [status, error] of [[502, "Could not contact the router. Try again."],
+                                     [503, "network helper is not configured"]]) {
+        network = async () => ({ok:false, status, json:async () => ({error})});
+        await checkRouterPassword();
+        assert.equal(element("router-credential-state").textContent, "Entered", error);
+        assert.equal(element("credential-router-status").textContent, error);
+        assert.equal(element("check-router-password").disabled, false);
+      }
+    """,
+    "router_password_check_needs_both_credentials": r"""
+      enter("router-admin-password", "fixture password");
+      await checkRouterPassword();
+      assert.equal(networkCalls.length, 0);
+      assert.equal(document.activeElement.id, "admin-token");
+      assert.match(messages.at(-1).text, /admin token/);
+      closeCredentials();
+      enter("admin-token", "fixture token");
+      enter("router-admin-password", "");
+      await checkRouterPassword();
+      assert.equal(networkCalls.length, 0);
+      assert.equal(document.activeElement.id, "router-admin-password");
+      assert.equal(
+        element("credential-router-status").textContent, "Enter the router admin password first.");
+      assert.equal(element("check-router-password").disabled, false);
+    """,
+    "router_check_runs_alone_and_ignores_stale_results": r"""
+      enter("admin-token", "fixture token");
+      enter("router-admin-password", "fixture password");
+      const pending = deferred();
+      network = () => pending.promise;
+      const checking = checkRouterPassword();
+      assert.equal(element("router-credential-state").textContent, "Checking...");
+      for (const id of ROUTER_BUTTONS)
+        assert.equal(element(id).disabled, true, id);
+      const blockedAction = routerAction(
+        "/api/router/wifi", {enabled:true}, "Enabling", element("enable-router-wifi"));
+      const blockedCheck = checkRouterPassword();
+      await new Promise(resolve => setTimeout(resolve, 0));
+      assert.equal(networkCalls.length, 1);
+      enter("router-admin-password", "replacement password");
+      pending.resolve({ok:true, json:async () => ({result:{ok:true}})});
+      await checking;
+      assert.equal(element("router-credential-state").textContent, "Entered");
+      assert.ok(!/accepted/i.test(element("credential-router-status").textContent));
+      for (const id of ROUTER_BUTTONS)
+        assert.equal(element(id).disabled, false, id);
+    """,
+    "router_operations_report_the_password_state_and_keep_it": r"""
+      enter("admin-token", "fixture token");
+      enter("router-admin-password", "fixture password");
+      await routerAction("/api/router/sync-ap", {}, "Importing", element("sync-router-ap"));
+      assert.equal(element("router-admin-password").value, "fixture password");
+      assert.equal(element("router-credential-state").textContent, "Accepted");
+      const loginFailed = "Router login failed. Check the router admin password and try again.";
+      network = async () => ({ok:false, status:502, json:async () => ({error:loginFailed})});
+      await routerAction("/api/router/sync-ap", {}, "Importing", element("sync-router-ap"));
+      assert.equal(element("router-admin-password").value, "fixture password");
+      assert.equal(element("router-credential-state").textContent, "Rejected");
+      const unreachable = {error: "Could not contact the router."};
+      network = async () => ({ok:false, status:502, json:async () => unreachable});
+      enter("router-admin-password", "fixture password");
+      await routerAction("/api/router/sync-ap", {}, "Importing", element("sync-router-ap"));
+      assert.equal(element("router-credential-state").textContent, "Entered");
     """,
 }
 
@@ -191,7 +295,26 @@ def test_served_credential_state_transitions(case):
         + served_functions()
         + "\n(async () => {"
         + CASES[case]
+        + "\nconsole.log('CASE-COMPLETE');"
         + "\n})().catch(error => {console.error(error); process.exitCode = 1});"
     )
     result = subprocess.run([node, "-"], input=program, text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
+    # Node exits quietly with code 0 if a case hangs on a promise that never settles.
+    assert "CASE-COMPLETE" in result.stdout, "the case never finished"
+
+
+def test_router_password_check_button_sits_with_the_password_field():
+    panel = re.search(
+        r'<section id="credentials-panel".*?</section>', DASHBOARD_HTML, re.DOTALL
+    ).group(0)
+    router = panel[panel.index("<h3>Router password</h3>") :]
+    button = re.search(
+        r'<button[^>]*id="check-router-password"[^>]*>[^<]*</button>', router
+    ).group(0)
+    assert 'type="button"' in button
+    assert "Check password" in button
+    assert router.index('id="check-router-password"') < router.index('id="clear-router-password"')
+    assert "Nothing on the router is changed" in router
+    assert "Used for one router operation" not in router
+    assert DASHBOARD_HTML.count('id="check-router-password"') == 1
