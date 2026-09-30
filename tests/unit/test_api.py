@@ -950,7 +950,8 @@ class ControlServerTests(unittest.TestCase):
             (ROUTER_CHECK_MESSAGES["login"], ROUTER_CHECK_MESSAGES["login"]),
             (ROUTER_CHECK_MESSAGES["unreachable"], ROUTER_CHECK_MESSAGES["unreachable"]),
             ("router-secret was present in a response", ROUTER_CHECK_MESSAGES["failed"]),
-            ("unknown action", ROUTER_CHECK_MESSAGES["failed"]),
+            ("some other helper text", ROUTER_CHECK_MESSAGES["failed"]),
+            ("unknown action", ROUTER_CHECK_MESSAGES["outdated"]),
         ):
             with self.subTest(message=message):
 

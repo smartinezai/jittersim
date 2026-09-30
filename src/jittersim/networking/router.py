@@ -56,6 +56,10 @@ ROUTER_CHECK_MESSAGES = {
     "failed": "Could not check the router password. Try again in a moment.",
     "login": "Router login failed. Check the router admin password and try again.",
     "unreachable": "Could not contact the router. Check the Pi's wired connection and try again.",
+    "outdated": (
+        "The networking helper is out of date. "
+        "Restart the JitterSim services or reinstall the release."
+    ),
 }
 
 
@@ -733,6 +737,8 @@ def safe_router_import_message(message: str) -> str:
 def safe_router_check_message(message: str) -> str:
     """Allow only known password-check guidance through the API and its logs."""
 
+    if message == "unknown action":
+        return ROUTER_CHECK_MESSAGES["outdated"]
     return (
         message if message in ROUTER_CHECK_MESSAGES.values() else ROUTER_CHECK_MESSAGES["failed"]
     )

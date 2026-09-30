@@ -1637,6 +1637,8 @@ DASHBOARD_HTML = """<!doctype html>
         element(panelId).textContent = message;
       });
       element("connected-count").textContent = state;
+      element("connected-refresh-status").textContent =
+        "Refreshes every 5 seconds once the admin token is accepted.";
       element("uplink-state").textContent = state;
       element("runtime-summary").textContent = message;
       element("runtime-summary").className = "runtime-summary unknown";
@@ -1655,6 +1657,7 @@ DASHBOARD_HTML = """<!doctype html>
     let adminTokenRevision = 0;
     let adminTokenChecking = false;
     let adminTokenRejected = false;
+    let adminTokenRefused = false;
     let routerPasswordRevision = 0;
     let routerPasswordVerified = false;
     let routerPasswordRejected = false;
@@ -1673,6 +1676,8 @@ DASHBOARD_HTML = """<!doctype html>
       }
     };
     const expiredNotice = { admin: false, router: false };
+    // The value this tab last saved or restored, so it never deletes another tab's entry.
+    const ownedRemembered = { admin: null, router: null };
     let rememberedCredentialsReady = false;
 
     function updateCredentialStatus() {
@@ -1702,6 +1707,13 @@ DASHBOARD_HTML = """<!doctype html>
       const field = element(kind === "router" ? "router-admin-password" : "admin-token");
       field.focus({preventScroll: true});
       field.scrollIntoView({block: "nearest", inline: "nearest"});
+    }
+
+    function requireAdminToken(opener) {
+      if (element("admin-token").value.trim()) return true;
+      showMessage("Enter the admin token first.", "error");
+      openCredentials("admin", opener);
+      return false;
     }
 
     function closeCredentials() {
@@ -1804,24 +1816,35 @@ DASHBOARD_HTML = """<!doctype html>
         const field = element(config.input);
         const value = kind === "admin" ? field.value.trim() : field.value;
         const accepted = kind === "admin" ? adminTokenVerified : routerPasswordVerified;
-        const refused = kind === "admin" ? adminTokenRejected : routerPasswordRejected;
+        const refused = kind === "admin" ? adminTokenRefused : routerPasswordRejected;
         let saved = savedCredential(kind);
         let note = "";
         if (saved && saved.expires <= Date.now()) {
           forgetCredential(kind);
           saved = null;
+          ownedRemembered[kind] = null;
           box.checked = false;
           expiredNotice[kind] = true;
         } else if (!box.checked || !value) {
-          forgetCredential(kind);
-          saved = null;
+          if (saved && saved.value === ownedRemembered[kind]) {
+            forgetCredential(kind);
+            saved = null;
+          }
+          ownedRemembered[kind] = null;
         } else if (refused) {
-          forgetCredential(kind);
-          saved = null;
+          if (saved && saved.value === value) {
+            forgetCredential(kind);
+            saved = null;
+          }
+          ownedRemembered[kind] = null;
           note = "Not remembered: the " + config.noun + " was rejected.";
         } else if (accepted && (!saved || saved.value !== value)) {
-          if (saveCredential(kind, value)) saved = savedCredential(kind);
-          else note = "This browser blocked saving, so it will be forgotten on reload.";
+          if (saveCredential(kind, value)) {
+            saved = savedCredential(kind);
+            ownedRemembered[kind] = value;
+          } else {
+            note = "This browser blocked saving, so it will be forgotten on reload.";
+          }
         }
         if (!note && !box.checked && expiredNotice[kind]) {
           note = "Forgot the saved " + config.noun + " after 24 hours.";
@@ -1842,7 +1865,10 @@ DASHBOARD_HTML = """<!doctype html>
         if (saved && saved.expires > Date.now()) {
           element(config.input).value = saved.value;
           element(config.box).checked = true;
+          ownedRemembered[kind] = saved.value;
           if (kind === "admin") restoredAdmin = true;
+        } else if (!saved) {
+          forgetCredential(kind);
         }
       }
       rememberedCredentialsReady = true;
@@ -1856,6 +1882,20 @@ DASHBOARD_HTML = """<!doctype html>
         expiredNotice[kind] = false;
         updateCredentialStatus();
       });
+    });
+    window.addEventListener("storage", (event) => {
+      let changed = false;
+      for (const kind of Object.keys(REMEMBERED)) {
+        const removed = event.newValue === null &&
+          (event.key === null || event.key === REMEMBERED[kind].key);
+        if (removed && ownedRemembered[kind] !== null) {
+          ownedRemembered[kind] = null;
+          element(REMEMBERED[kind].box).checked = false;
+          expiredNotice[kind] = false;
+          changed = true;
+        }
+      }
+      if (changed) updateCredentialStatus();
     });
     window.setInterval(syncRememberedCredentials, 60000);
     let profiles = [];
@@ -2803,9 +2843,9 @@ DASHBOARD_HTML = """<!doctype html>
 
     async function checkForDevices() {
       const button = element("check-devices");
-      if (!element("admin-token").value.trim()) {
-        showMessage("Enter the admin token first.", "error");
-        openCredentials("admin", button);
+      if (!requireAdminToken(button)) return;
+      if (adminTokenChecking) {
+        showMessage("The admin token is still being checked. Devices load when it finishes.");
         return;
       }
       if (!adminTokenVerified) {
@@ -3867,7 +3907,7 @@ DASHBOARD_HTML = """<!doctype html>
         element("random-website-rows").replaceChildren();
         element("random-website-status").textContent = error.message;
         element("random-website-status").className = "analytics-status error";
-        return { ok: false, message: error.message };
+        return { ok: false, message: error.message, status: error.status };
       }
       let actionHistoryLoaded = true;
       try {
@@ -3905,6 +3945,7 @@ DASHBOARD_HTML = """<!doctype html>
       }
       adminTokenChecking = true;
       adminTokenRejected = false;
+      adminTokenRefused = false;
       adminTokenVerified = false;
       updateCredentialStatus();
       setPrivateDataPanels("Checking the admin token...", "Checking...");
@@ -3927,6 +3968,7 @@ DASHBOARD_HTML = """<!doctype html>
         } else {
           adminTokenVerified = false;
           adminTokenRejected = true;
+          adminTokenRefused = result.status === 401;
           setPrivateDataPanels("Token check failed: " + result.message);
         }
         status.textContent = result.ok ? result.message : "Token check failed: " + result.message;
@@ -3936,6 +3978,7 @@ DASHBOARD_HTML = """<!doctype html>
         if (tokenRevision !== adminTokenRevision) return;
         adminTokenVerified = false;
         adminTokenRejected = true;
+        adminTokenRefused = error.status === 401;
         setPrivateDataPanels("Token check failed: " + error.message);
         status.textContent = "Token check failed: " + error.message;
         status.className = "token-check-status error";
@@ -4233,6 +4276,7 @@ DASHBOARD_HTML = """<!doctype html>
       adminTokenRevision += 1;
       adminTokenChecking = false;
       adminTokenRejected = false;
+      adminTokenRefused = false;
       adminTokenVerified = false;
       updateCredentialStatus();
       setPrivateDataPanels("Token changed. Choose Check token to load.");
@@ -4461,11 +4505,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     async function routerAction(path, body, message, button) {
       if (routerActionPending || routerPasswordChecking) return;
-      if (!element("admin-token").value.trim()) {
-        showMessage("Enter the admin token first.", "error");
-        openCredentials("admin", button);
-        return;
-      }
+      if (!requireAdminToken(button)) return;
       const passwordRevision = routerPasswordRevision;
       const password = element("router-admin-password").value;
       const status = element("router-action-message");
@@ -4476,6 +4516,7 @@ DASHBOARD_HTML = """<!doctype html>
         openCredentials("router", button);
         return;
       }
+      if (routerPasswordBlocked(button)) return;
       routerActionPending = true;
       ["sync-router-ap", "disable-router-wifi", "enable-router-wifi"].forEach((id) => { element(id).disabled = true; });
       setButtonBusy(button, true);
@@ -4511,6 +4552,15 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    function routerPasswordBlocked(button) {
+      if (!routerPasswordRejected) return false;
+      const text = "The router rejected this password. Change it before trying again.";
+      element("credential-router-status").textContent = text;
+      showMessage(text, "error");
+      openCredentials("router", button);
+      return true;
+    }
+
     function isRouterLoginFailure(error) {
       return error.status === 502 && /^Router login failed/.test(error.message);
     }
@@ -4519,11 +4569,7 @@ DASHBOARD_HTML = """<!doctype html>
       if (routerActionPending || routerPasswordChecking) return;
       const button = element("check-router-password");
       const status = element("credential-router-status");
-      if (!element("admin-token").value.trim()) {
-        showMessage("Enter the admin token first.", "error");
-        openCredentials("admin", button);
-        return;
-      }
+      if (!requireAdminToken(button)) return;
       const passwordRevision = routerPasswordRevision;
       const password = element("router-admin-password").value;
       if (!password) {
@@ -4532,6 +4578,7 @@ DASHBOARD_HTML = """<!doctype html>
         openCredentials("router", button);
         return;
       }
+      if (routerPasswordBlocked(button)) return;
       const routerButtons = ["sync-router-ap", "disable-router-wifi", "enable-router-wifi"];
       routerPasswordChecking = true;
       routerPasswordVerified = false;

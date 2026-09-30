@@ -15,7 +15,11 @@ def served_functions():
     def block(start, end):
         return script[script.index(start) : script.index(end, script.index(start))]
 
-    return block("async function loadConnectedDevices(", "async function loadUplink(")
+    return (
+        block("const privateDataPanelIds =", "async function loadPrivateDataPanel(")
+        + block("function requireAdminToken(", "function closeCredentials(")
+        + block("async function loadConnectedDevices(", "async function loadUplink(")
+    )
 
 
 HARNESS = r"""
@@ -26,6 +30,7 @@ const requests = [];
 const rendered = [];
 const openedCredentials = [];
 let adminTokenVerified = true;
+let adminTokenChecking = false;
 let connectedDevicesRequestInFlight = false;
 let tokenChecks = 0;
 let responses = {};
@@ -149,6 +154,29 @@ CASES = {
       assert.equal(element("check-devices").disabled, false);
       assert.equal(element("check-devices").textContent, "Check for devices");
     """,
+    "waits_while_the_token_is_still_being_checked": r"""
+      element("admin-token").value = "fixture token";
+      adminTokenVerified = false;
+      adminTokenChecking = true;
+      press("check-devices");
+      await flush();
+      assert.equal(tokenChecks, 0);
+      assert.equal(requests.length, 0);
+      assert.match(messages.at(-1).text, /still being checked/);
+      assert.equal(element("check-devices").disabled, false);
+    """,
+    "locking_the_private_panels_resets_the_refresh_status": r"""
+      element("admin-token").value = "fixture token";
+      twoDevices();
+      press("check-devices");
+      await flush();
+      assert.match(element("connected-refresh-status").textContent, /^Updated /);
+      setPrivateDataPanels("Token changed. Choose Check token to load.");
+      assert.equal(
+        element("connected-refresh-status").textContent,
+        "Refreshes every 5 seconds once the admin token is accepted."
+      );
+    """,
     "reports_why_devices_could_not_be_read": r"""
       element("admin-token").value = "fixture token";
       responses = {
@@ -221,3 +249,13 @@ def test_served_device_check_behavior(case):
     assert result.returncode == 0, result.stderr
     # Node exits quietly with code 0 if a case hangs on a promise that never settles.
     assert "CASE-COMPLETE" in result.stdout, "the case never finished"
+
+
+def test_refresh_status_wording_matches_between_the_page_and_the_script():
+    script = re.search(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL).group(1)
+    initial = re.search(
+        r'<p id="connected-refresh-status"[^>]*>\s*(.*?)\s*</p>', DASHBOARD_HTML, re.DOTALL
+    ).group(1)
+    locked = script[script.index("function setPrivateDataPanels(") :]
+    locked = locked[: locked.index("async function loadPrivateDataPanel(")]
+    assert initial in locked

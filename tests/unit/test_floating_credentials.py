@@ -41,7 +41,9 @@ const document = {activeElement: null, documentElement: {style: {setProperty() {
 const storage = new Map();
 let storageBroken = false;
 const blocked = () => {if (storageBroken) throw new Error("storage blocked")};
-const window = {innerHeight: 800, addEventListener() {}, setInterval() {}, localStorage: {
+const windowListeners = new Map();
+const window = {innerHeight: 800, setInterval() {},
+  addEventListener(type, callback) {windowListeners.set(type, callback)}, localStorage: {
   getItem(key) {blocked(); return storage.has(key) ? storage.get(key) : null},
   setItem(key, value) {blocked(); storage.set(key, String(value))},
   removeItem(key) {blocked(); storage.delete(key)}
@@ -331,7 +333,7 @@ CASES = {
       enter("admin-token", "good token");
       await checkAdminToken();
       assert.ok(storage.has(ADMIN_KEY));
-      toolResult = {ok: false, message: "rejected fixture token"};
+      toolResult = {ok: false, message: "rejected fixture token", status: 401};
       await checkAdminToken();
       assert.equal(storage.has(ADMIN_KEY), false);
       assert.match(element("remember-admin-token-note").textContent, /rejected/);
@@ -372,7 +374,7 @@ CASES = {
     """,
     "a_saved_token_that_is_now_rejected_is_forgotten": r"""
       storage.set(ADMIN_KEY, JSON.stringify({value: "stale token", expires: clock + DAY}));
-      toolResult = {ok: false, message: "rejected fixture token"};
+      toolResult = {ok: false, message: "rejected fixture token", status: 401};
       await restoreRememberedCredentials();
       assert.equal(element("admin-credential-state").textContent, "Rejected");
       assert.equal(storage.has(ADMIN_KEY), false);
@@ -438,6 +440,113 @@ CASES = {
       assert.equal(element("admin-token").value, "fixture token");
       assert.equal(storage.size, 0);
     """,
+    "a_failed_check_that_is_not_a_refusal_keeps_the_saved_token": r"""
+      tick("remember-admin-token", true);
+      enter("admin-token", "good token");
+      await checkAdminToken();
+      assert.ok(storage.has(ADMIN_KEY));
+      for (const failure of [{ok: false, message: "Failed to fetch"},
+                             {ok: false, message: "service unavailable", status: 503}]) {
+        toolResult = failure;
+        await checkAdminToken();
+        assert.equal(JSON.parse(storage.get(ADMIN_KEY)).value, "good token", failure.message);
+        assert.match(element("remember-admin-token-note").textContent, /^Remembered until/);
+      }
+      toolResult = {ok: false, message: "unauthorized", status: 401};
+      await checkAdminToken();
+      assert.equal(storage.has(ADMIN_KEY), false);
+    """,
+    "a_refusal_removes_only_the_entry_it_refers_to": r"""
+      storage.set(ADMIN_KEY, JSON.stringify({value: "other tab token", expires: clock + DAY}));
+      tick("remember-admin-token", true);
+      enter("admin-token", "wrong token");
+      toolResult = {ok: false, message: "unauthorized", status: 401};
+      await checkAdminToken();
+      assert.equal(JSON.parse(storage.get(ADMIN_KEY)).value, "other tab token");
+      storage.set(ADMIN_KEY, JSON.stringify({value: "wrong token", expires: clock + DAY}));
+      await checkAdminToken();
+      assert.equal(storage.has(ADMIN_KEY), false);
+    """,
+    "unticking_after_a_restore_removes_the_entry": r"""
+      storage.set(ADMIN_KEY, JSON.stringify({value: "saved token", expires: clock + DAY}));
+      storage.set(ROUTER_KEY, JSON.stringify({value: "saved password", expires: clock + DAY}));
+      await restoreRememberedCredentials();
+      tick("remember-admin-token", false);
+      assert.equal(storage.has(ADMIN_KEY), false);
+      assert.ok(storage.has(ROUTER_KEY));
+      element("clear-router-password").listeners.get("click")();
+      assert.equal(storage.size, 0);
+    """,
+    "a_tab_that_saved_nothing_never_deletes_another_tabs_entry": r"""
+      storage.set(ADMIN_KEY, JSON.stringify({value: "other tab token", expires: clock + DAY}));
+      enter("admin-token", "typed here");
+      enter("admin-token", "");
+      syncRememberedCredentials();
+      updateCredentialStatus();
+      assert.equal(JSON.parse(storage.get(ADMIN_KEY)).value, "other tab token");
+    """,
+    "unticking_removes_only_the_entry_this_tab_saved": r"""
+      tick("remember-admin-token", true);
+      enter("admin-token", "my token");
+      await checkAdminToken();
+      storage.set(ADMIN_KEY, JSON.stringify({value: "other tab token", expires: clock + DAY}));
+      tick("remember-admin-token", false);
+      assert.equal(JSON.parse(storage.get(ADMIN_KEY)).value, "other tab token");
+    """,
+    "forgetting_in_another_tab_unticks_this_one_and_stays_forgotten": r"""
+      tick("remember-admin-token", true);
+      enter("admin-token", "fixture token");
+      await checkAdminToken();
+      assert.ok(storage.has(ADMIN_KEY));
+      storage.delete(ADMIN_KEY);
+      windowListeners.get("storage")({key: ADMIN_KEY, newValue: null});
+      assert.equal(element("remember-admin-token").checked, false);
+      syncRememberedCredentials();
+      updateCredentialStatus();
+      assert.equal(storage.size, 0);
+      assert.equal(element("admin-token").value, "fixture token");
+      enter("router-admin-password", "fixture password");
+      tick("remember-router-password", true);
+      await routerAction("/api/router/sync-ap", {}, "Importing", element("sync-router-ap"));
+      assert.ok(storage.has(ROUTER_KEY));
+      storage.clear();
+      windowListeners.get("storage")({key: null, newValue: null});
+      assert.equal(element("remember-router-password").checked, false);
+      syncRememberedCredentials();
+      assert.equal(storage.size, 0);
+    """,
+    "unrelated_storage_changes_leave_the_boxes_alone": r"""
+      tick("remember-admin-token", true);
+      enter("admin-token", "fixture token");
+      await checkAdminToken();
+      windowListeners.get("storage")({key: "something-else", newValue: null});
+      windowListeners.get("storage")({key: ADMIN_KEY, newValue: "{}"});
+      assert.equal(element("remember-admin-token").checked, true);
+      assert.ok(storage.has(ADMIN_KEY));
+    """,
+    "a_rejected_router_password_is_not_sent_again_until_it_changes": r"""
+      enter("admin-token", "fixture token");
+      enter("router-admin-password", "typo password");
+      const refused = "Router login failed. Check the router admin password and try again.";
+      network = async () => ({ok: false, status: 502, json: async () => ({error: refused})});
+      await checkRouterPassword();
+      assert.equal(networkCalls.length, 1);
+      assert.equal(element("router-credential-state").textContent, "Rejected");
+      await checkRouterPassword();
+      await routerAction("/api/router/sync-ap", {}, "Importing", element("sync-router-ap"));
+      await routerAction(
+        "/api/router/wifi", {enabled: true}, "Enabling", element("enable-router-wifi"));
+      assert.equal(networkCalls.length, 1);
+      assert.match(messages.at(-1).text, /rejected.*change/i);
+      assert.equal(messages.at(-1).kind, "error");
+      assert.equal(document.activeElement.id, "router-admin-password");
+      assert.equal(element("check-router-password").disabled, false);
+      enter("router-admin-password", "corrected password");
+      network = async () => ({ok: true, json: async () => ({result: {ok: true}})});
+      await checkRouterPassword();
+      assert.equal(networkCalls.length, 2);
+      assert.equal(element("router-credential-state").textContent, "Accepted");
+    """,
 }
 
 
@@ -499,3 +608,58 @@ def test_remembered_credentials_are_restored_once_at_the_end_of_startup():
     assert script.count("restoreRememberedCredentials();") == 1
     assert "restoreRememberedCredentials();" in script[script.rindex("loadHealth()") :]
     assert "window.setInterval(syncRememberedCredentials" in script
+
+
+def test_diagnostics_failures_report_their_http_status():
+    """Only a 401 may count as a refused token; other failures must be told apart."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to exercise the served dashboard")
+    script = re.search(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL).group(1)
+    real = script[
+        script.index("async function loadAdminTools()") : script.index(
+            "async function checkAdminToken()"
+        )
+    ]
+    program = (
+        r"""
+const assert = require("node:assert/strict");
+const nodes = new Map();
+let randomWebsiteAnalyticsRequestVersion = 0;
+let failure = null;
+function element(id) {
+  if (!nodes.has(id)) nodes.set(id, {value: "fixture token", textContent: "", className: "",
+                                     replaceChildren() {}});
+  return nodes.get(id);
+}
+async function request() {throw failure}
+async function loadRandomWebsiteAnalytics() {}
+"""
+        + real
+        + r"""
+(async () => {
+  failure = Object.assign(new Error("unauthorized"), {status: 401});
+  assert.deepEqual(await loadAdminTools(), {ok: false, message: "unauthorized", status: 401});
+  failure = new Error("Failed to fetch");
+  const network = await loadAdminTools();
+  assert.equal(network.ok, false);
+  assert.equal(network.status, undefined);
+  console.log("CASE-COMPLETE");
+})().catch(error => {console.error(error); process.exitCode = 1});
+"""
+    )
+    result = subprocess.run([node, "-"], input=program, text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert "CASE-COMPLETE" in result.stdout
+
+
+def test_login_failure_wording_matches_what_the_dashboard_recognises():
+    from jittersim.networking.router import (
+        ROUTER_CHECK_MESSAGES,
+        ROUTER_IMPORT_MESSAGES,
+        ROUTER_WIFI_MESSAGES,
+    )
+
+    for table in (ROUTER_CHECK_MESSAGES, ROUTER_IMPORT_MESSAGES, ROUTER_WIFI_MESSAGES):
+        assert table["login"].startswith("Router login failed")
+    assert "/^Router login failed/" in DASHBOARD_HTML

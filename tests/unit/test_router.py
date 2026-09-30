@@ -793,8 +793,14 @@ class RouterPasswordCheckMessageTests(unittest.TestCase):
     def test_only_known_check_guidance_passes_through(self) -> None:
         for message in ROUTER_CHECK_MESSAGES.values():
             self.assertEqual(safe_router_check_message(message), message)
-        for unknown in ("router-secret was in a response", "unknown action", ""):
+        for unknown in ("router-secret was in a response", "some other helper text", ""):
             self.assertEqual(safe_router_check_message(unknown), ROUTER_CHECK_MESSAGES["failed"])
+
+    def test_an_outdated_helper_is_named_instead_of_asking_for_a_retry(self) -> None:
+        message = safe_router_check_message("unknown action")
+        self.assertEqual(message, ROUTER_CHECK_MESSAGES["outdated"])
+        self.assertIn("out of date", message)
+        self.assertIn("Restart", message)
 
 
 if __name__ == "__main__":
