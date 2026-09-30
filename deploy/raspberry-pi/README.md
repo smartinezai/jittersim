@@ -12,10 +12,13 @@ The Pi has two network roles by default. Create or edit
 - `eth0` is the management and router-facing interface.
 - `wlan0` is the isolated test-network interface.
 
-The dashboard listens over HTTPS on the management network. The nftables
-service blocks SSH and dashboard traffic arriving from the test interface, so a person who
-receives the test Wi-Fi password cannot use the Pi as an administration
-endpoint. It also blocks mDNS traffic on the test interface. The service blocks
+The dashboard listens over HTTPS on the management network and test Wi-Fi.
+Test clients can reach a limited sign-in page. Private data and controls
+require the admin token plus saved device access on test Wi-Fi. Choose
+**Check token** then **Allow this device** to register the requesting computer.
+Anyone holding the admin token may register their own device. The saved
+hardware address is not a second password. The nftables service keeps SSH
+and mDNS traffic blocked on the test interface. The service blocks
 private IPv4 destinations and local IPv6 addresses forwarded from the test
 interface to the uplink, including the router's web interface. The generated
 test Wi-Fi uses IPv4 sharing and does not offer client IPv6. Browser proxy
@@ -23,7 +26,14 @@ tunnels may connect to public IPv4 or IPv6 hosts.
 Dashboard requests and private read routes require the generated admin token.
 
 Do not expose port 8080 or SSH to the public internet. Keep the Pi's router
-connection on `eth0` and use the dashboard from the management network.
+connection on `eth0`. Management access remains available for recovery.
+
+Only local dashboard traffic avoids profiles and client blocks. Ordinary
+internet traffic still follows the assigned profile. The access list is kept
+in root-owned `/etc/jittersim/dashboard-access.json` and survives reboot and
+upgrades. Include it in private configuration backups. The SQLite dashboard
+download does not contain it. See the [dashboard access guide](../../README.md#dashboard-access-from-pi-wi-fi)
+for the Mac command and Pi recovery commands.
 
 ## Install or update
 
@@ -141,15 +151,15 @@ This remains a routed, isolated test network. Wi-Fi clients cannot reach
 private addresses behind the Ethernet router. Wired clients cannot normally
 start connections to Wi-Fi clients through the Pi's NAT. Cross-network
 discovery, some casting and local equipment may fail. Client IPv6 is disabled.
-The Pi dashboard is blocked from this Wi-Fi, so use the management Ethernet
-network or the private Tailscale address for control.
+Use saved dashboard access for control from this Wi-Fi. Router management
+Wi-Fi and a configured private Tailscale address remain recovery options.
 There is no automatic fallback if the Pi, its power supply, its radio or its
 Ethernet link fails. The built-in radio's coverage and load capacity need
 measurement on the actual Pi. Keep the router Wi-Fi on during the trial.
 The first household trial uses internet access only. Reaching devices on the
 router's wired network would require a separate network design.
 
-1. Install while connected to the Pi over Ethernet. Confirm the installer
+1. Install from the router management network or a local Pi terminal. Confirm the installer
    preflight passes and keep the router's Wi-Fi name available for recovery.
 2. Join an unconfigured laptop and another household device to the JitterSim
    AP. Check automatic IP and DNS, web browsing, video and the local services
