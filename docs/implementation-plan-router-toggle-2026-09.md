@@ -65,3 +65,15 @@ When the encrypted response omits the master field, read a fresh index page thro
 ## Master-state repair validation
 
 304 tests passed on Mac and in a fresh Linux package installation. The firmware fixture omits the master field and exercises verified off/on, missing state, conflicting state and failed confirmation. A missing master page cannot select the older writer. The masked acceptance helper also passes success and restoration against this response shape. Internal review found no remaining blocker after the missing-page correction. Actual router off/on and restoration still require the final masked hardware check after installation.
+
+## Actual firmware security-mode repair
+
+The live masked diagnostic confirms that all three security fields are numeric 4. The router's own wifi_general_data.js maps this value to WPA2-Personal before writing. The adapter currently writes the numeric read values unchanged. The router returns an empty HTTP 200 response and the requested off state does not confirm.
+
+Translate recognized numeric security modes to the exact firmware write names for both primary bands and guest settings. Keep recognized write names when already present. Reject unknown modes before any write. Preserve Wi-Fi names, passwords, guest settings and every other existing choice. Do not add a second write or relax confirmation.
+
+Add a fixture that returns numeric read modes but requires names in writes. Verify off and on, preservation and unknown-mode rejection. Run the full Mac suite and a fresh Linux package check. Build the exact tested commit, push the authorized changes and install it with settings backup. Finish the actual authenticated dashboard off/on check with independent restoration. An empty HTTP response remains insufficient evidence of successful change.
+
+This is a narrow continuation of the approved urgent router repair. There are no new stored secrets, endpoints or database changes. The existing installer and settings backups cover code rollback. Router-state recovery remains the independent on action in the hardware check.
+
+The focused plan review requires rejecting booleans and restricting TG3442 security codes to 0/4/5. The fixture keeps reads numeric after named writes so both directions exercise conversion. The hardware preservation check compares fresh numeric read responses before and after restoration. The urgent takeover and existing repair authorization cover this continuation.

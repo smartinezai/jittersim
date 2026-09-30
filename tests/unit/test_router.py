@@ -67,6 +67,7 @@ class FirmwareServer(ThreadingHTTPServer):
         self.slow_wifi = False
         self.unexpected_band = False
         self.omit_wifi_master = False
+        self.numeric_security_modes = False
         self.master_page_value = None
         self.conflicting_master_page = False
         self.omit_master_page = False
@@ -188,6 +189,11 @@ class FirmwareHandler(BaseHTTPRequestHandler):
             cipher = AES.new(self.server.key, AES.MODE_CCM, nonce=self.server.iv, mac_len=16)
             cipher.update(b"wifidata")
             payload = json.loads(cipher.decrypt_and_verify(ciphertext[:-16], ciphertext[-16:]))
+            modes = {"None": 0, "WPA2-Personal": 4, "WPA-WPA2-Personal": 5}
+            for name in ("ModeEnabled", "ModeEnabled5G", "ModeEnabledGuest"):
+                if payload[name] not in modes:
+                    self.respond("invalid security mode", status=400)
+                    return
             self.server.writes.append(payload)
             if not payload["SplitSSIDEnable"] and (
                 payload["Enable"] != 1 or payload["Enable5G"] != 1
@@ -201,6 +207,9 @@ class FirmwareHandler(BaseHTTPRequestHandler):
                 self.server.settings["Enable"] = payload["Enable"]
             else:
                 self.server.settings.update(payload)
+                if self.server.numeric_security_modes:
+                    for name in ("ModeEnabled", "ModeEnabled5G", "ModeEnabledGuest"):
+                        self.server.settings[name] = modes[payload[name]]
             if self.server.unexpected_band:
                 self.server.settings["Enable5G"] = not bool(payload["Enable5G"])
             self.server.tamper_wifi = self.server.tamper_after_write
@@ -229,6 +238,38 @@ class RouterProtocolTests(unittest.TestCase):
         self.firmware.shutdown()
         self.firmware.server_close()
         self.thread.join(timeout=2)
+
+    def test_numeric_security_modes_are_named_in_writes_and_preserved_on_readback(self):
+        self.firmware.numeric_security_modes = True
+        self.firmware.omit_wifi_master = True
+        names = ("ModeEnabled", "ModeEnabled5G", "ModeEnabledGuest")
+        modes = {0: "None", 4: "WPA2-Personal", 5: "WPA-WPA2-Personal"}
+        self.router.login()
+        for values in ((0, 4, 5), (4, 5, 0), (5, 0, 4), ("4", "5", "0")):
+            with self.subTest(values=values):
+                self.firmware.settings.update(zip(names, values))
+                before = dict(self.firmware.settings)
+                for enabled in (False, True):
+                    self.assertIs(self.router.set_wifi_enabled(enabled=enabled).enabled, enabled)
+                    posted = self.firmware.writes[-1]
+                    for name, value in zip(names, values):
+                        self.assertEqual(posted[name], modes[int(value)])
+                        self.assertEqual(self.firmware.settings[name], int(value))
+                    for name in set(before) - set(names) - {"EnableWiFiFunction"}:
+                        self.assertEqual(self.firmware.settings[name], before[name])
+                    self.assertEqual(self.firmware.settings["EnableWiFiFunction"], int(enabled))
+
+    def test_unknown_or_boolean_security_modes_fail_before_write(self):
+        self.router.login()
+        before = dict(self.firmware.settings)
+        for name in ("ModeEnabled", "ModeEnabled5G", "ModeEnabledGuest"):
+            for value in (False, True, 10, "10", "WPA3-Personal-Transition", "unknown"):
+                with self.subTest(name=name, value=value):
+                    self.firmware.settings = dict(before, **{name: value})
+                    with self.assertRaises(RouterError) as caught:
+                        self.router.set_wifi_enabled(enabled=False)
+                    self.assertEqual(caught.exception.reason, "unsupported")
+        self.assertEqual(self.firmware.writes, [])
 
     def test_toggle_reads_missing_master_from_the_authenticated_page(self):
         self.firmware.omit_wifi_master = True

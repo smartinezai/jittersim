@@ -446,6 +446,8 @@ class TG3442DERouter:
             if state is None:
                 raise RouterError("router radio state is unknown", reason="unsupported")
             payload[name] = int(state)
+        for name in ("ModeEnabled", "ModeEnabled5G", "ModeEnabledGuest"):
+            payload[name] = _wifi_security_mode(payload[name])
         if not payload["SplitSSIDEnable"]:
             payload["Enable"] = payload["Enable5G"] = 1
         elif enabled and not (payload["Enable"] or payload["Enable5G"]):
@@ -591,6 +593,20 @@ def _radio_state(value: object) -> Optional[bool]:
         if normalized in {"0", "false", "off"}:
             return False
     return None
+
+
+def _wifi_security_mode(value: object) -> str:
+    """Translate the TG3442 read codes to its writable security names."""
+
+    modes = {0: "None", 4: "WPA2-Personal", 5: "WPA-WPA2-Personal"}
+    if type(value) is int and value in modes:
+        return modes[value]
+    if isinstance(value, str):
+        if value in modes.values():
+            return value
+        if value in {"0", "4", "5"}:
+            return modes[int(value)]
+    raise RouterError("router Wi-Fi security mode is unsupported", reason="unsupported")
 
 
 def _wifi_enabled(controls: Dict[str, str]) -> Optional[bool]:
