@@ -93,3 +93,19 @@ The focused plan review requires reserving confirmation time before assigning th
 ## Restart repair verification
 
 314 tests passed on Mac and in a fresh Linux package. Focused lint and diff checks passed. Linux network smoke, routed protection and management-name isolation checks passed. The independent acceptance helper passed seven harmless cases including numeric security, effective off readings and lost write replies. Confirmation tests exercise one successful authentication refresh and persistent loss without another Wi-Fi write or deadline reset. Internal review found no remaining blocker. Actual API off/on and full restoration remain the final acceptance check after deployment.
+
+## Measured slow restoration follow-up
+
+The physical trace verifies the off action. Turning on sends one write but the router web service stays unavailable beyond the 60-second operation limit. A fresh read at about 74 seconds verifies all starting settings were restored. The dashboard reports uncertainty because confirmation ends too early.
+
+Allow 120 seconds for router operations and 150 seconds for the router helper calls. Cap the write connection plus read timeout at 40 seconds and reserve at least half the remaining time for confirmation. Allow up to eight read attempts while preserving the same deadline and one authentication refresh. Keep quick helper calls unchanged. Never repeat the Wi-Fi write.
+
+Add a simulated slow-restart test that advances a clock through failed reads then confirms both off and on. Check deadline exhaustion, one write per change and preserved settings. Update the existing helper timeout integration coverage. Run full Mac and clean Linux checks then push and deploy the exact tested commit. The physical trace already restored Wi-Fi but complete dashboard off/on acceptance must pass before reporting success. This continues the approved urgent repair and uses the existing installer, backup and rollback. Credentials remain in memory only.
+
+The focused review requires ten-second spacing between confirmation attempts so immediate connection failures do not exhaust all eight attempts before recovery. Simulated tests cover both immediate failures and ten-second read timeouts. Raise the Pi acceptance HTTPS timeout to 180 seconds so it exceeds the 150-second helper bound.
+
+Keep router import separately bounded at 180 seconds because wired inspection and AP configuration add up to 50 seconds around the router work. The Wi-Fi toggle helper stays at 150 seconds. Normal helper reads retain their short timeout.
+
+## Slow restoration verification
+
+All 316 tests passed on Mac and in a fresh Linux package installation. The real Linux network smoke check, routed protection checks and management name checks passed. Seven harmless acceptance-helper cases passed. The physical trace independently proves full restoration with the preceding release. Complete authenticated dashboard off/on acceptance remains required on the corrected release.

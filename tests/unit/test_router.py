@@ -242,6 +242,7 @@ class RouterProtocolTests(unittest.TestCase):
         self.thread.start()
         self.router = TG3442DERouter(address="127.0.0.1", password=self.firmware.password)
         self.router.base_url = f"http://127.0.0.1:{self.firmware.server_port}"
+        self.router._CONFIRMATION_DELAY_SECONDS = 0.01
 
     def tearDown(self):
         self.router.close()
@@ -261,6 +262,80 @@ class RouterProtocolTests(unittest.TestCase):
             self.assertIs(self.router.set_wifi_enabled(enabled=enabled).enabled, enabled)
         self.assertEqual(len(self.firmware.writes), 2)
         self.assertEqual(self.firmware.settings, before)
+
+    def test_slow_restart_confirms_after_a_minute_without_rewriting(self):
+        self.firmware.omit_wifi_master = True
+        self.firmware.effective_band_reads = True
+        for read_duration in (0.0, 10.0):
+            with self.subTest(read_duration=read_duration):
+                clock = [1000.0]
+                recovering_until = [0.0]
+                original = self.router._request
+                self.router._CONFIRMATION_DELAY_SECONDS = 10.0
+                before = dict(self.firmware.settings)
+                writes_before = len(self.firmware.writes)
+
+                def sleep(seconds):
+                    clock[0] += seconds
+
+                def request(method, path, **kwargs):
+                    self.router._remaining_timeout()
+                    if path == self.router._WIFI_WRITE and method == "post":
+                        recovering_until[0] = clock[0] + 74.0
+                        original(method, path, **kwargs)
+                        clock[0] += 30.0
+                        raise RouterError("lost write reply", reason="unreachable")
+                    if path == self.router._WIFI_DATA and clock[0] < recovering_until[0]:
+                        clock[0] += read_duration
+                        raise RouterError("router is restarting", reason="unreachable")
+                    return original(method, path, **kwargs)
+
+                with patch("jittersim.networking.router.time.monotonic", side_effect=lambda: clock[0]), \
+                     patch("jittersim.networking.router.time.sleep", side_effect=sleep), \
+                     patch.object(self.router, "_request", side_effect=request):
+                    for enabled in (False, True):
+                        self.router.password = self.firmware.password
+                        self.router.login()
+                        began = clock[0]
+                        self.assertIs(self.router.set_wifi_enabled(enabled=enabled).enabled, enabled)
+                        self.assertGreaterEqual(clock[0] - began, 74.0)
+                        self.assertLessEqual(clock[0] - began, 120.0)
+                        self.router.close()
+                self.assertEqual(len(self.firmware.writes), writes_before + 2)
+                self.assertEqual(self.firmware.settings, before)
+
+    def test_restart_that_exceeds_the_deadline_stays_uncertain_without_rewriting(self):
+        clock = [1000.0]
+        restarting = [False]
+        original = self.router._request
+        self.router._CONFIRMATION_DELAY_SECONDS = 10.0
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        def request(method, path, **kwargs):
+            self.router._remaining_timeout()
+            if path == self.router._WIFI_WRITE and method == "post":
+                original(method, path, **kwargs)
+                restarting[0] = True
+                clock[0] += 30.0
+                raise RouterError("lost write reply", reason="unreachable")
+            if path == self.router._WIFI_DATA and restarting[0]:
+                clock[0] += min(10.0, self.router._remaining_timeout())
+                raise RouterError("router is still restarting", reason="unreachable")
+            return original(method, path, **kwargs)
+
+        with patch("jittersim.networking.router.time.monotonic", side_effect=lambda: clock[0]), \
+             patch("jittersim.networking.router.time.sleep", side_effect=sleep), \
+             patch.object(self.router, "_request", side_effect=request):
+            self.router.login()
+            with self.assertRaises(RouterError) as caught:
+                self.router.set_wifi_enabled(enabled=False)
+            self.assertEqual(caught.exception.reason, "uncertain")
+            self.assertLessEqual(clock[0], self.router._deadline)
+            self.router.close()
+        self.assertEqual(len(self.firmware.writes), 1)
+        self.assertEqual(self.router.password, "")
 
     def test_lost_write_reply_is_verified_without_another_write(self):
         self.firmware.omit_wifi_master = True
@@ -429,7 +504,10 @@ class RouterProtocolTests(unittest.TestCase):
         self.firmware.omit_wifi_master = True
         self.router.login()
         with patch.object(self.router, "_read_master_wifi_state", side_effect=[
-            True, *[RouterError("page unavailable", reason="unreachable") for _ in range(4)],
+            True, *[
+                RouterError("page unavailable", reason="unreachable")
+                for _ in range(self.router._CONFIRMATION_ATTEMPTS)
+            ],
         ]):
             with self.assertRaises(RouterError) as caught:
                 self.router.set_wifi_enabled(enabled=False)
@@ -622,7 +700,10 @@ class RouterProtocolTests(unittest.TestCase):
                 self.router.set_wifi_enabled(enabled=True)
         self.assertEqual(caught.exception.reason, "uncertain")
         self.assertEqual(len(self.firmware.writes), 1)
-        self.assertEqual(self.firmware.calls.count(("GET", "/php/wifi_general_data.php")), 5)
+        self.assertEqual(
+            self.firmware.calls.count(("GET", "/php/wifi_general_data.php")),
+            1 + self.router._CONFIRMATION_ATTEMPTS,
+        )
         self.assertNotIn(("GET", "/"), self.firmware.calls[4:])
 
     def test_master_confirmation_does_not_hide_an_unexpected_band_change(self):

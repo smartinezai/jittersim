@@ -170,8 +170,9 @@ class TG3442DERouter:
     _WIFI_PAGE = "/?wifi_general&mid=WifiGeneral"
     _WIFI_DATA = "/php/wifi_general_data.php"
     _WIFI_WRITE = "/php/ajaxSet_wifi_general_data.php"
-    _OPERATION_TIMEOUT_SECONDS = 60.0
-    _CONFIRMATION_ATTEMPTS = 4
+    _OPERATION_TIMEOUT_SECONDS = 120.0
+    _CONFIRMATION_ATTEMPTS = 8
+    _CONFIRMATION_DELAY_SECONDS = 10.0
     _WIFI_WRITABLE_FIELDS = (
         "BandSteerEnable",
         "SplitSSIDEnable",
@@ -445,7 +446,7 @@ class TG3442DERouter:
                 if updated is not None and _wifi_state_matches(updated, payload):
                     return RouterWifiSettings(ssid="", password="", enabled=enabled)
                 if attempt + 1 < self._CONFIRMATION_ATTEMPTS:
-                    time.sleep(min(1.0, self._remaining_timeout()))
+                    time.sleep(min(self._CONFIRMATION_DELAY_SECONDS, self._remaining_timeout()))
         except RouterError:
             raise RouterError("router change could not be confirmed", reason="uncertain") from None
         raise RouterError("router radios did not confirm the requested state", reason="uncertain")
@@ -552,8 +553,7 @@ class TG3442DERouter:
                 remaining = self._deadline - time.monotonic()
                 if remaining <= 0:
                     raise RouterError("router operation timed out", reason="unreachable")
-                reserve = min(20.0, remaining / 2)
-                write_budget = remaining - reserve
+                write_budget = min(40.0, remaining / 2)
                 connect = min(self.timeout_seconds, write_budget / 2)
                 request_timeout = (connect, write_budget - connect)
             response = self.session.request(
