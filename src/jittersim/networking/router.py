@@ -235,6 +235,7 @@ class TG3442DERouter:
         self._session_key: Optional[bytes] = None
         self._session_iv: Optional[bytes] = None
         self._deadline: Optional[float] = None
+        self._wifi_master_from_page = False
 
     def close(self) -> None:
         """Close the short-lived router session."""
@@ -253,13 +254,15 @@ class TG3442DERouter:
             self.session.headers.pop("csrfNonce", None)
             self.session.close()
 
-    def login(self) -> None:
+    def login(self, *, preserve_deadline: bool = False) -> None:
         """Authenticate without persisting the router password."""
 
         self.csrf_nonce = ""
         self._session_key = None
         self._session_iv = None
-        self._deadline = time.monotonic() + self._OPERATION_TIMEOUT_SECONDS
+        if not preserve_deadline:
+            self._deadline = time.monotonic() + self._OPERATION_TIMEOUT_SECONDS
+        self._remaining_timeout()
         page = self._request("get", "/")
         session_id = _required_script_value(page, "currentSessionId")
         try:
@@ -356,7 +359,8 @@ class TG3442DERouter:
 
     def _read_verified_wifi_data(self) -> Dict[str, Any]:
         settings = self._read_wifi_data()
-        if "EnableWiFiFunction" not in settings:
+        self._wifi_master_from_page = "EnableWiFiFunction" not in settings
+        if self._wifi_master_from_page:
             settings["EnableWiFiFunction"] = self._read_master_wifi_state()
         return settings
 
@@ -397,35 +401,51 @@ class TG3442DERouter:
         except _EndpointUnavailable:
             return self._set_legacy_wifi_enabled(enabled=enabled)
         payload = self._wifi_write_payload(current, enabled=enabled)
+        if _wifi_state_matches(current, payload):
+            return RouterWifiSettings(ssid="", password="", enabled=enabled)
+        if not enabled and self._wifi_master_from_page and (
+            payload["SplitSSIDEnable"] or payload["EnableGuest"]
+        ):
+            raise RouterError("configured band choices cannot be preserved", reason="unsupported")
         if self._session_key is None or self._session_iv is None:
             raise RouterError("router login is required", reason="login")
         cipher = AES.new(self._session_key, AES.MODE_CCM, nonce=self._session_iv, mac_len=16)
         cipher.update(b"wifidata")
         ciphertext, tag = cipher.encrypt_and_digest(json.dumps(payload).encode("utf-8"))
+        refreshed = False
         try:
-            self._request(
-                "post",
-                self._WIFI_WRITE,
-                json={
-                    "EncryptData": (ciphertext + tag).hex(),
-                    "Name": "admin",
-                    "AuthData": "wifidata",
-                },
-                headers={"Content-Type": "application/json"},
-            )
+            try:
+                self._request(
+                    "post",
+                    self._WIFI_WRITE,
+                    json={
+                        "EncryptData": (ciphertext + tag).hex(),
+                        "Name": "admin",
+                        "AuthData": "wifidata",
+                    },
+                    headers={"Content-Type": "application/json"},
+                    wait_for_wifi_restart=True,
+                )
+            except RouterError as error:
+                if error.reason != "unreachable":
+                    raise
             for attempt in range(self._CONFIRMATION_ATTEMPTS):
-                updated = self._read_verified_wifi_data()
-                if all(
-                    _radio_state(updated.get(name)) is bool(payload[name])
-                    for name in (
-                        "Enable",
-                        "Enable5G",
-                        "EnableWiFiFunction",
-                    )
-                ):
+                updated = None
+                try:
+                    updated = self._read_verified_wifi_data()
+                except RouterError as error:
+                    if error.reason == "login" and not refreshed:
+                        refreshed = True
+                        self.session.cookies.clear()
+                        self.session.headers.pop("csrfNonce", None)
+                        self.login(preserve_deadline=True)
+                        updated = self._read_verified_wifi_data()
+                    elif error.reason != "unreachable":
+                        raise
+                if updated is not None and _wifi_state_matches(updated, payload):
                     return RouterWifiSettings(ssid="", password="", enabled=enabled)
                 if attempt + 1 < self._CONFIRMATION_ATTEMPTS:
-                    time.sleep(min(0.5, self._remaining_timeout()))
+                    time.sleep(min(1.0, self._remaining_timeout()))
         except RouterError:
             raise RouterError("router change could not be confirmed", reason="uncertain") from None
         raise RouterError("router radios did not confirm the requested state", reason="uncertain")
@@ -520,13 +540,26 @@ class TG3442DERouter:
                 return form, html
         raise RouterError("router Wi-Fi settings form was not found", reason="unsupported")
 
-    def _request(self, method: str, path: str, **kwargs: object) -> str:
+    def _request(
+        self, method: str, path: str, *, wait_for_wifi_restart: bool = False, **kwargs: object
+    ) -> str:
         response = None
         try:
+            request_timeout = self._remaining_timeout()
+            if wait_for_wifi_restart:
+                if self._deadline is None:
+                    raise RouterError("router login is required", reason="login")
+                remaining = self._deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RouterError("router operation timed out", reason="unreachable")
+                reserve = min(20.0, remaining / 2)
+                write_budget = remaining - reserve
+                connect = min(self.timeout_seconds, write_budget / 2)
+                request_timeout = (connect, write_budget - connect)
             response = self.session.request(
                 method,
                 urljoin(f"{self.base_url}/", path),
-                timeout=self._remaining_timeout(),
+                timeout=request_timeout,
                 allow_redirects=False,
                 stream=True,
                 **kwargs,
@@ -593,6 +626,17 @@ def _radio_state(value: object) -> Optional[bool]:
         if normalized in {"0", "false", "off"}:
             return False
     return None
+
+
+def _wifi_state_matches(settings: Dict[str, Any], payload: Dict[str, Any]) -> bool:
+    master = _radio_state(settings.get("EnableWiFiFunction"))
+    if master is not bool(payload["EnableWiFiFunction"]):
+        return False
+    bands = tuple(_radio_state(settings.get(name)) for name in ("Enable", "Enable5G"))
+    configured = (bool(payload["Enable"]), bool(payload["Enable5G"]))
+    if master is False and not payload["SplitSSIDEnable"]:
+        return bands == (False, False) or bands == configured
+    return bands == configured
 
 
 def _wifi_security_mode(value: object) -> str:

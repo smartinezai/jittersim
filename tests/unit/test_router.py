@@ -68,6 +68,9 @@ class FirmwareServer(ThreadingHTTPServer):
         self.unexpected_band = False
         self.omit_wifi_master = False
         self.numeric_security_modes = False
+        self.effective_band_reads = False
+        self.write_delay = 0.0
+        self.drop_write_reply = False
         self.master_page_value = None
         self.conflicting_master_page = False
         self.omit_master_page = False
@@ -140,6 +143,8 @@ class FirmwareHandler(BaseHTTPRequestHandler):
                     pass
                 return
             settings = dict(self.server.settings)
+            if self.server.effective_band_reads and not settings["EnableWiFiFunction"]:
+                settings["Enable"] = settings["Enable5G"] = False
             if self.server.omit_wifi_master:
                 settings.pop("EnableWiFiFunction")
             encrypted = self.server.seal(json.dumps(settings), "wifidata")
@@ -213,6 +218,11 @@ class FirmwareHandler(BaseHTTPRequestHandler):
             if self.server.unexpected_band:
                 self.server.settings["Enable5G"] = not bool(payload["Enable5G"])
             self.server.tamper_wifi = self.server.tamper_after_write
+            if self.server.write_delay:
+                time.sleep(self.server.write_delay)
+            if self.server.drop_write_reply:
+                self.close_connection = True
+                return
             self.respond("{}")
         elif path == "/php/ajaxSet_Session.php":
             self.respond("{}", status=200 if self.authenticated() else 401)
@@ -238,6 +248,102 @@ class RouterProtocolTests(unittest.TestCase):
         self.firmware.shutdown()
         self.firmware.server_close()
         self.thread.join(timeout=2)
+
+    def test_slow_write_and_effective_band_reads_confirm_off_and_restore_on(self):
+        self.firmware.omit_wifi_master = True
+        self.firmware.effective_band_reads = True
+        self.firmware.write_delay = 0.12
+        self.router.timeout_seconds = 0.02
+        self.router._OPERATION_TIMEOUT_SECONDS = 0.8
+        self.router.login()
+        before = dict(self.firmware.settings)
+        for enabled in (False, True):
+            self.assertIs(self.router.set_wifi_enabled(enabled=enabled).enabled, enabled)
+        self.assertEqual(len(self.firmware.writes), 2)
+        self.assertEqual(self.firmware.settings, before)
+
+    def test_lost_write_reply_is_verified_without_another_write(self):
+        self.firmware.omit_wifi_master = True
+        self.firmware.effective_band_reads = True
+        self.firmware.drop_write_reply = True
+        self.router.login()
+        for enabled in (False, True):
+            self.assertIs(self.router.set_wifi_enabled(enabled=enabled).enabled, enabled)
+        self.assertEqual(len(self.firmware.writes), 2)
+
+    def test_matching_state_is_verified_without_writing(self):
+        self.router.login()
+        self.assertTrue(self.router.set_wifi_enabled(enabled=True).enabled)
+        self.assertEqual(self.firmware.writes, [])
+
+    def test_effective_response_rejects_split_or_guest_off_before_write(self):
+        self.firmware.omit_wifi_master = True
+        self.router.login()
+        for field in ("SplitSSIDEnable", "EnableGuest"):
+            with self.subTest(field=field):
+                self.firmware.settings[field] = True
+                with self.assertRaises(RouterError) as caught:
+                    self.router.set_wifi_enabled(enabled=False)
+                self.assertEqual(caught.exception.reason, "unsupported")
+                self.firmware.settings[field] = False
+        self.assertEqual(self.firmware.writes, [])
+
+    def test_confirmation_refreshes_authentication_once_without_rewriting(self):
+        self.router.login()
+        original = self.router._read_verified_wifi_data
+        deadline = self.router._deadline
+        count = 0
+
+        def read():
+            nonlocal count
+            count += 1
+            if count == 2:
+                raise RouterError("expired session", reason="login")
+            return original()
+
+        with patch.object(self.router, "_read_verified_wifi_data", side_effect=read):
+            self.assertFalse(self.router.set_wifi_enabled(enabled=False).enabled)
+        self.assertEqual(self.router._deadline, deadline)
+        self.assertEqual(len(self.firmware.writes), 1)
+        self.assertEqual(self.firmware.calls.count(("POST", "/php/ajaxSet_Password.php")), 2)
+
+    def test_persistent_confirmation_authentication_loss_stops_after_one_refresh(self):
+        self.router.login()
+        original = self.router._read_verified_wifi_data
+        count = 0
+
+        def read():
+            nonlocal count
+            count += 1
+            if count > 1:
+                raise RouterError("expired session", reason="login")
+            return original()
+
+        with patch.object(self.router, "_read_verified_wifi_data", side_effect=read):
+            with self.assertRaises(RouterError) as caught:
+                self.router.set_wifi_enabled(enabled=False)
+        self.assertEqual(caught.exception.reason, "uncertain")
+        self.assertEqual(len(self.firmware.writes), 1)
+        self.assertEqual(self.firmware.calls.count(("POST", "/php/ajaxSet_Password.php")), 2)
+
+    def test_already_off_split_or_guest_settings_do_not_need_a_write(self):
+        self.firmware.omit_wifi_master = True
+        self.router.login()
+        for settings in (
+            dict(SplitSSIDEnable=True, Enable=False, Enable5G=False),
+            dict(SplitSSIDEnable=False, Enable=True, Enable5G=True, EnableGuest=True),
+        ):
+            self.firmware.settings.update(settings, EnableWiFiFunction=False)
+            self.assertFalse(self.router.set_wifi_enabled(enabled=False).enabled)
+        self.assertEqual(self.firmware.writes, [])
+
+    def test_login_refresh_keeps_the_original_deadline(self):
+        self.router.login()
+        deadline = self.router._deadline
+        self.router.session.cookies.clear()
+        self.router.session.headers.pop("csrfNonce", None)
+        self.router.login(preserve_deadline=True)
+        self.assertEqual(self.router._deadline, deadline)
 
     def test_numeric_security_modes_are_named_in_writes_and_preserved_on_readback(self):
         self.firmware.numeric_security_modes = True
@@ -323,7 +429,7 @@ class RouterProtocolTests(unittest.TestCase):
         self.firmware.omit_wifi_master = True
         self.router.login()
         with patch.object(self.router, "_read_master_wifi_state", side_effect=[
-            True, RouterError("page unavailable", reason="unreachable"),
+            True, *[RouterError("page unavailable", reason="unreachable") for _ in range(4)],
         ]):
             with self.assertRaises(RouterError) as caught:
                 self.router.set_wifi_enabled(enabled=False)
@@ -545,6 +651,7 @@ class RouterProtocolTests(unittest.TestCase):
                 self.firmware.tamper_wifi = False
                 self.firmware.tamper_after_write = not failed_post
                 self.firmware.fail_write = failed_post
+                self.firmware.settings["EnableWiFiFunction"] = True
                 previous = len(self.firmware.writes)
                 with self.assertRaises(RouterError) as caught:
                     self.router.set_wifi_enabled(enabled=False)

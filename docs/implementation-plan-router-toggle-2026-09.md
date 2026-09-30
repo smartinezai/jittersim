@@ -77,3 +77,19 @@ Add a fixture that returns numeric read modes but requires names in writes. Veri
 This is a narrow continuation of the approved urgent router repair. There are no new stored secrets, endpoints or database changes. The existing installer and settings backups cover code rollback. Router-state recovery remains the independent on action in the hardware check.
 
 The focused plan review requires rejecting booleans and restricting TG3442 security codes to 0/4/5. The fixture keeps reads numeric after named writes so both directions exercise conversion. The hardware preservation check compares fresh numeric read responses before and after restoration. The urgent takeover and existing repair authorization cover this continuation.
+
+## Physical restart and effective-state repair
+
+The automatic physical trace proves that a Wi-Fi write can exceed the ten-second HTTP timeout while actually applying the change. A fresh authenticated read shows the master off and both bands off. This firmware reports effective band activity while the master is off. The previous confirmation expected the configured shared bands to remain enabled.
+
+Give the single write a longer read timeout within the existing total operation deadline. Divide the remaining connection and read budget so their sum stays bounded. Never repeat the write. After a lost reply use bounded read-back attempts to confirm the state. Refresh authentication at most once if the restart invalidates it, preserving the original deadline.
+
+For a shared SSID accept both known off band flags when the master is verified off. Keep strict checks for turning on and reject mixed or unknown flags. Return verified success without writing when the requested state already matches. On this response shape refuse turning off split SSIDs before writing because the effective read cannot preserve their selected-band configuration across separate operations. Keep support for older configured-band responses.
+
+Cover slow and lost write replies, effective off readings, unknown or mixed flags, idempotent requests, unchanged settings and deadline preservation. Run the full Mac and fresh Linux checks then publish and deploy the exact tested source. Finish actual API off/on with independent restoration. The previous physical test of32b162f failed and is not acceptance evidence.
+
+The focused plan review requires reserving confirmation time before assigning the longer write timeout. Authentication refresh preserves the deadline before making any request. Also refuse off for enabled guest Wi-Fi on the effective-state firmware until its configured-state source is verified. The inspected router has shared Wi-Fi with guest disabled.
+
+## Restart repair verification
+
+314 tests passed on Mac and in a fresh Linux package. Focused lint and diff checks passed. Linux network smoke, routed protection and management-name isolation checks passed. The independent acceptance helper passed seven harmless cases including numeric security, effective off readings and lost write replies. Confirmation tests exercise one successful authentication refresh and persistent loss without another Wi-Fi write or deadline reset. Internal review found no remaining blocker. Actual API off/on and full restoration remain the final acceptance check after deployment.
