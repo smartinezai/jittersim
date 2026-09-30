@@ -462,7 +462,7 @@ class HelperClient:
 
         return self._request(
             {"action": "router-sync-ap", "admin_password": admin_password},
-            timeout_seconds=90.0,
+            timeout_seconds=180.0,
         )
 
     def set_router_wifi(self, *, admin_password: str, enabled: bool) -> Dict[str, Any]:
@@ -474,7 +474,7 @@ class HelperClient:
                 "admin_password": admin_password,
                 "enabled": enabled,
             },
-            timeout_seconds=90.0,
+            timeout_seconds=150.0,
         )
 
     def check_router_password(self, *, admin_password: str) -> Dict[str, Any]:
