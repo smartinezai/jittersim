@@ -242,6 +242,45 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(content_type, "application/vnd.sqlite3")
         self.assertTrue(backup.startswith(b"SQLite format 3\x00"))
 
+    def test_reset_diagnostics_keeps_client_scan_without_reading_removed_counters(self) -> None:
+        class ResetHelper(FakeHelper):
+            def traffic_counters(self):
+                raise AssertionError("Reset traffic tables must not be inspected")
+
+        self.server.helper_client = ResetHelper()
+        self.repository.update_runtime_state(
+            observed_state="reset", last_action="reset", last_result="success", last_error=None,
+        )
+
+        status, _, body = self.server.response_for("/api/diagnostics")
+        diagnostics = json.loads(body)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(diagnostics["runtime"]["observed_state"], "reset")
+        self.assertEqual(diagnostics["connected_clients"], 1)
+        self.assertIsNone(diagnostics["traffic_counters"])
+        self.assertTrue(diagnostics["traffic_counters_message"])
+        self.assertEqual(diagnostics["warnings"], [])
+
+    def test_active_diagnostics_still_reports_failed_counters(self) -> None:
+        class FailedCountersHelper(FakeHelper):
+            def traffic_counters(self):
+                raise HelperClientError("simulated counter failure")
+
+        self.server.helper_client = FailedCountersHelper()
+        self.repository.update_runtime_state(
+            observed_state="applied", last_action="apply", last_result="success", last_error=None,
+        )
+
+        status, _, body = self.server.response_for("/api/diagnostics")
+        diagnostics = json.loads(body)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(diagnostics["connected_clients"], 1)
+        self.assertIsNone(diagnostics["traffic_counters_message"])
+        self.assertIsNone(diagnostics["traffic_counters"])
+        self.assertEqual(diagnostics["warnings"], ["traffic counters are unavailable"])
+
     def test_live_traffic_requires_admin_token_and_returns_directional_counters(self) -> None:
         self.server.admin_token = "admin-token"
         self.server.helper_client = FakeHelper()

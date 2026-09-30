@@ -47,3 +47,11 @@ The firmware keeps both configured bands enabled with a shared SSID even when th
 295 tests passed on Mac and in a fresh Linux package installation. Linux network smoke and routed protection packet checks passed. Focused lint, the complete served JavaScript syntax check and diff checks passed. The protocol tests exercise encrypted off/on requests, shared and split SSIDs, preserved passwords and other settings, unknown states, partial changes, failed confirmation, helper timing and slow responses.
 
 Real off/on acceptance on this router remains pending installation and a wired management connection. The existing copy action has already succeeded. Do not report the physical toggle as verified from these local tests.
+
+## Deployment acceptance follow-up
+
+The installed modules match release 2840e2f and all authenticated dashboard reads pass. The live network is deliberately reset. Diagnostics still requests removed traffic tables and reports an avoidable helper failure. Use the same reset-state check as live traffic, keep connected-client inspection available and explain why counters are absent. Cover reset and active states without changing the live network configuration. This is a small correction within the authorized bug fixes.
+
+For the physical router test, prepare a Pi-local check with masked password entry. Verify the starting flags before any write. Run a detached bounded off/on check so losing the Mac's Wi-Fi does not stop restoration. Report only verified flags and fixed errors. Restore the exact starting writable settings and confirm them. Do not store the password or router settings on disk. The live test still needs the user's router password through the masked prompt.
+
+The diagnostics correction passes all 297 tests on Mac and in a fresh Linux package installation. The Linux network smoke check and routed packet protection checks pass. The acceptance helper passes harmless encrypted-router checks for success, partial confirmation, an unsuitable starting state and concurrent settings changes. The helper keeps changes made by another administrator and reports any mismatch. Actual router acceptance still needs masked password entry.

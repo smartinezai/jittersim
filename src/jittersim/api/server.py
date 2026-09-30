@@ -5010,12 +5010,18 @@ class ControlServer(HTTPServer):
                 }
             )
         if path == "/api/diagnostics":
+            runtime = self.repository.get_runtime_state()
             diagnostics = {
                 "checked_at": int(time.time()),
-                "runtime": _runtime_state_payload(self.repository.get_runtime_state()),
+                "runtime": _runtime_state_payload(runtime),
                 "helper_available": self.helper_client is not None,
                 "connected_clients": None,
                 "traffic_counters": None,
+                "traffic_counters_message": (
+                    "Network is reset. Apply the configuration to start traffic measurements."
+                    if runtime.observed_state == "reset"
+                    else None
+                ),
                 "warnings": [],
             }
             if self.helper_client is not None:
@@ -5025,10 +5031,11 @@ class ControlServer(HTTPServer):
                     )
                 except (HelperClientError, AttributeError, TypeError):
                     diagnostics["warnings"].append("connected-client scan failed")
-                try:
-                    diagnostics["traffic_counters"] = self.helper_client.traffic_counters()
-                except (HelperClientError, AttributeError, TypeError):
-                    diagnostics["warnings"].append("traffic counters are unavailable")
+                if runtime.observed_state != "reset":
+                    try:
+                        diagnostics["traffic_counters"] = self.helper_client.traffic_counters()
+                    except (HelperClientError, AttributeError, TypeError):
+                        diagnostics["warnings"].append("traffic counters are unavailable")
             return HTTPStatus.OK, "application/json", _json_bytes(diagnostics)
         return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
 
