@@ -1,3 +1,5 @@
+import json
+import logging
 import tempfile
 import threading
 import unittest
@@ -14,6 +16,7 @@ from tests.helper_support import OldHelperService, OlderHelperService, captures,
 from tests.wifi_support import WifiExecutor
 from jittersim.networking.helper import (
     HELPER_OUT_OF_DATE_MESSAGE,
+    WIFI_DETAILS_MISSING_MESSAGE,
     HelperClient,
     HelperClientError,
     HelperError,
@@ -127,7 +130,8 @@ class HelperServiceTests(unittest.TestCase):
     def test_all_router_operations_share_one_session_lock(self):
         self.service._router_lock.acquire()
         try:
-            for action in ("router-check", "router-wifi", "router-sync-ap", "router-preview-ap", "router-status"):
+            for action in ("router-check", "router-wifi", "router-sync-ap", "router-preview-ap",
+                           "router-status", "router-wifi-credentials"):
                 self.assertEqual(self.service.handle_payload({"action": action})["reason"], "helper-busy")
         finally:
             self.service._router_lock.release()
@@ -464,6 +468,200 @@ class HelperServiceTests(unittest.TestCase):
                     service.handle_payload(payload),
                     {"ok": False, "error": "invalid router credentials"},
                 )
+        self.assertEqual(routers, [])
+
+    def test_wifi_credentials_return_the_name_and_password_when_asked(self) -> None:
+        service, routers = self._router_check_service()
+
+        response = service.handle_payload(
+            {"action": "router-wifi-credentials", "admin_password": "router-secret",
+             "include_password": True}
+        )
+
+        self.assertEqual(
+            response,
+            {"ok": True, "action": "router-wifi-credentials", "ssid": "Vodafone-Test",
+             "password": "router-wifi-password"},
+        )
+        self.assertEqual(routers[0].address, "192.168.0.1")
+        self.assertEqual(routers[0].password, "router-secret")
+        self.assertTrue(routers[0].logged_in)
+        self.assertTrue(routers[0].closed)
+
+    def test_wifi_credentials_without_the_password_never_read_it(self) -> None:
+        class NoPasswordSettings:
+            ssid = "Vodafone-Test"
+            enabled = True
+            security = "WPA2"
+            band = "2.4 GHz"
+
+            @property
+            def password(self):
+                raise AssertionError("the password must not be read for a name-only request")
+
+        class NameOnlyRouter(FakeRouter):
+            def read_wifi_settings(self):
+                return NoPasswordSettings()
+
+            def set_wifi_enabled(self, *, enabled):
+                raise AssertionError("copying the name must not change Wi-Fi")
+
+        for payload in (
+            {"action": "router-wifi-credentials", "admin_password": "router-secret",
+             "include_password": False},
+            {"action": "router-wifi-credentials", "admin_password": "router-secret"},
+        ):
+            with self.subTest(payload=payload):
+                service, routers = self._router_check_service(NameOnlyRouter)
+                response = service.handle_payload(payload)
+                self.assertEqual(
+                    response,
+                    {"ok": True, "action": "router-wifi-credentials", "ssid": "Vodafone-Test"},
+                )
+                self.assertNotIn("password", response)
+                self.assertNotIn("router-wifi-password", json.dumps(response))
+                self.assertTrue(routers[0].closed)
+
+    def test_wifi_credentials_without_the_password_leave_it_out_of_the_response(self) -> None:
+        service, routers = self._router_check_service()
+
+        response = service.handle_payload(
+            {"action": "router-wifi-credentials", "admin_password": "router-secret",
+             "include_password": False}
+        )
+
+        self.assertEqual(response["ok"], True)
+        self.assertEqual(response["ssid"], "Vodafone-Test")
+        self.assertNotIn("password", response)
+        self.assertNotIn("router-wifi-password", json.dumps(response))
+        self.assertNotIn("router-secret", json.dumps(response))
+
+    def test_wifi_credentials_need_a_password_and_a_real_boolean(self) -> None:
+        service, routers = self._router_check_service()
+
+        for payload in (
+            {"action": "router-wifi-credentials"},
+            {"action": "router-wifi-credentials", "admin_password": ""},
+            {"action": "router-wifi-credentials", "admin_password": 7},
+            {"action": "router-wifi-credentials", "admin_password": None},
+            {"action": "router-wifi-credentials", "admin_password": "router-secret",
+             "include_password": "yes"},
+            {"action": "router-wifi-credentials", "admin_password": "router-secret",
+             "include_password": 1},
+            {"action": "router-wifi-credentials", "admin_password": "router-secret",
+             "include_password": "true"},
+            {"action": "router-wifi-credentials", "admin_password": "router-secret",
+             "include_password": "false"},
+        ):
+            with self.subTest(payload=payload):
+                self.assertEqual(
+                    service.handle_payload(payload),
+                    {"ok": False, "error": "invalid router credentials"},
+                )
+        self.assertEqual(routers, [])
+
+    def test_wifi_credentials_return_safe_guidance_and_never_echo_the_password(self) -> None:
+        for reason, expected in (
+            ("login", ROUTER_CHECK_MESSAGES["login"]),
+            ("unreachable", ROUTER_CHECK_MESSAGES["unreachable"]),
+            ("credentials", ROUTER_CHECK_MESSAGES["failed"]),
+            ("uncertain", ROUTER_CHECK_MESSAGES["failed"]),
+        ):
+            for step in ("login", "read_wifi_settings"):
+                with self.subTest(reason=reason, step=step):
+
+                    class RejectedRouter(FakeRouter):
+                        def login(self, **kwargs):
+                            if step == "login":
+                                raise RouterError("router-secret router-wifi-password", reason=reason)
+
+                        def read_wifi_settings(self):
+                            if step == "read_wifi_settings":
+                                raise RouterError("router-secret router-wifi-password", reason=reason)
+                            return super().read_wifi_settings()
+
+                    service, routers = self._router_check_service(RejectedRouter)
+                    with self.assertLogs("jittersim.networking.helper", level="WARNING") as logs:
+                        response = service.handle_payload(
+                            {"action": "router-wifi-credentials", "admin_password": "router-secret",
+                             "include_password": True}
+                        )
+                    self.assertEqual(response["ok"], False)
+                    self.assertEqual(response["error"], expected)
+                    self.assertTrue(routers[0].closed)
+                    recorded = json.dumps(response) + "\n".join(logs.output)
+                    for secret in ("router-secret", "router-wifi-password"):
+                        self.assertNotIn(secret, recorded)
+
+    def test_wifi_credentials_handle_an_unreachable_router_without_leaking(self) -> None:
+        class BrokenRouter(FakeRouter):
+            def login(self, **kwargs):
+                raise CommandExecutionError("ip route failed for router-secret")
+
+        service, routers = self._router_check_service(BrokenRouter)
+        response = service.handle_payload(
+            {"action": "router-wifi-credentials", "admin_password": "router-secret",
+             "include_password": True}
+        )
+
+        self.assertEqual(response, {"ok": False, "error": ROUTER_CHECK_MESSAGES["unreachable"]})
+        self.assertTrue(routers[0].closed)
+
+    def test_wifi_credentials_never_log_the_password_on_success(self) -> None:
+        service, routers = self._router_check_service()
+        records = []
+
+        class Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        handler = Capture(level=logging.DEBUG)
+        root = logging.getLogger()
+        old_level = root.level
+        root.addHandler(handler)
+        root.setLevel(logging.DEBUG)
+        try:
+            response = service.handle_payload(
+                {"action": "router-wifi-credentials", "admin_password": "router-secret",
+                 "include_password": True}
+            )
+        finally:
+            root.removeHandler(handler)
+            root.setLevel(old_level)
+
+        self.assertEqual(response["password"], "router-wifi-password")
+        for message in records:
+            self.assertNotIn("router-wifi-password", message)
+            self.assertNotIn("router-secret", message)
+
+    def test_wifi_credentials_ask_the_router_for_a_fifteen_second_limit(self) -> None:
+        class TimedRouter(FakeRouter):
+            def login(self, **kwargs):
+                self.login_kwargs = kwargs
+                super().login(**kwargs)
+
+        service, routers = self._router_check_service(TimedRouter)
+        service.handle_payload(
+            {"action": "router-wifi-credentials", "admin_password": "router-secret",
+             "include_password": False}
+        )
+
+        self.assertEqual(routers[0].limit, 15.0)
+        self.assertEqual(routers[0].login_kwargs, {"preserve_deadline": True})
+
+    def test_wifi_credentials_are_refused_while_another_router_operation_runs(self) -> None:
+        service, routers = self._router_check_service()
+        service._router_lock.acquire()
+        try:
+            response = service.handle_payload(
+                {"action": "router-wifi-credentials", "admin_password": "router-secret",
+                 "include_password": True}
+            )
+        finally:
+            service._router_lock.release()
+
+        self.assertEqual(response["reason"], "helper-busy")
+        self.assertNotIn("router-wifi-password", json.dumps(response))
         self.assertEqual(routers, [])
 
     def test_rejects_short_access_point_passwords(self) -> None:
@@ -1003,6 +1201,91 @@ class ObserveDnsClientTests(unittest.TestCase):
                 ["02:00:00:00:%02x:%02x" % (index // 256, index % 256) for index in range(257)]
             )
         self.assertEqual(client.sent, [])
+
+
+class RouterWifiCredentialsClientTests(unittest.TestCase):
+    GOOD = {"ok": True, "action": "router-wifi-credentials", "ssid": "Vodafone-Test",
+            "password": "router-wifi-password"}
+
+    def test_asks_for_the_name_and_password_and_returns_both(self) -> None:
+        client = RecordingHelperClient(dict(self.GOOD))
+
+        result = client.read_router_wifi_credentials(
+            admin_password="router-secret", include_password=True)
+
+        self.assertEqual(result, {"ssid": "Vodafone-Test", "password": "router-wifi-password"})
+        self.assertEqual(
+            client.sent,
+            [{"action": "router-wifi-credentials", "admin_password": "router-secret",
+              "include_password": True}],
+        )
+
+    def test_returns_only_the_name_when_the_password_was_not_asked_for(self) -> None:
+        client = RecordingHelperClient(dict(self.GOOD))
+
+        result = client.read_router_wifi_credentials(
+            admin_password="router-secret", include_password=False)
+
+        self.assertEqual(result, {"ssid": "Vodafone-Test"})
+        self.assertFalse(client.sent[0]["include_password"])
+
+    def test_gives_the_router_no_more_than_twenty_five_seconds(self) -> None:
+        timeouts = []
+
+        class TimedClient(RecordingHelperClient):
+            def _request(self, payload, *, timeout_seconds=None):
+                timeouts.append(timeout_seconds)
+                return super()._request(payload, timeout_seconds=timeout_seconds)
+
+        TimedClient(dict(self.GOOD)).read_router_wifi_credentials(
+            admin_password="router-secret", include_password=True)
+
+        self.assertEqual(timeouts, [25.0])
+
+    def test_rejects_a_name_that_is_not_usable(self) -> None:
+        for ssid in (None, 7, "", "x" * 33, "\u00e4" * 17, ["Vodafone-Test"]):
+            with self.subTest(ssid=ssid):
+                client = RecordingHelperClient({**self.GOOD, "ssid": ssid})
+                with self.assertRaises(HelperClientError) as caught:
+                    client.read_router_wifi_credentials(
+                        admin_password="router-secret", include_password=False)
+                self.assertEqual(str(caught.exception), WIFI_DETAILS_MISSING_MESSAGE)
+
+    def test_rejects_a_password_that_is_not_usable_without_repeating_it(self) -> None:
+        for password in (None, 12345678, "short", "x" * 64, "has\ncontrol-char", ["router-wifi-pass"]):
+            with self.subTest(password=password):
+                client = RecordingHelperClient({**self.GOOD, "password": password})
+                with self.assertRaises(HelperClientError) as caught:
+                    client.read_router_wifi_credentials(
+                        admin_password="router-secret", include_password=True)
+                self.assertEqual(str(caught.exception), WIFI_DETAILS_MISSING_MESSAGE)
+                self.assertNotIn(str(password), str(caught.exception))
+                self.assertNotIn("router-secret", str(caught.exception))
+
+    def test_a_missing_password_is_an_error_only_when_it_was_asked_for(self) -> None:
+        without_password = {key: value for key, value in self.GOOD.items() if key != "password"}
+        client = RecordingHelperClient(without_password)
+        with self.assertRaises(HelperClientError) as caught:
+            client.read_router_wifi_credentials(admin_password="router-secret", include_password=True)
+        self.assertEqual(str(caught.exception), WIFI_DETAILS_MISSING_MESSAGE)
+        self.assertEqual(
+            client.read_router_wifi_credentials(
+                admin_password="router-secret", include_password=False),
+            {"ssid": "Vodafone-Test"},
+        )
+
+    def test_an_old_helper_answers_unknown_action_through_the_socket(self) -> None:
+        class HelperWithoutCredentials(HelperService):
+            def _handle_payload(self, payload):
+                if isinstance(payload, dict) and payload.get("action") == "router-wifi-credentials":
+                    return {"ok": False, "error": "unknown action"}
+                return super()._handle_payload(payload)
+
+        with serving(HelperWithoutCredentials) as (client, _):
+            with self.assertRaises(HelperClientError) as caught:
+                client.read_router_wifi_credentials(
+                    admin_password="router-secret", include_password=True)
+        self.assertEqual(str(caught.exception), "unknown action")
 
 
 class UnixHelperServerTests(unittest.TestCase):

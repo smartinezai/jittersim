@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import shutil
 import socket
@@ -8,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import contextmanager
 from email.message import Message
 from io import BytesIO
 from ipaddress import IPv4Address
@@ -28,6 +30,28 @@ from jittersim.config.storage import ConfigRepository, StorageError
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.networking.helper import HelperClientError
 from tests.helper_support import OlderHelperService, OldHelperService, captures, serving
+
+
+@contextmanager
+def captured_logs():
+    """Collect every log message from every logger while the block runs."""
+
+    records = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = Capture(level=logging.DEBUG)
+    root = logging.getLogger()
+    old_level = root.level
+    root.addHandler(handler)
+    root.setLevel(logging.DEBUG)
+    try:
+        yield records
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(old_level)
 
 
 class FakeHelper:
@@ -73,6 +97,12 @@ class FakeHelper:
 
     def read_router_wifi_status(self, *, admin_password):
         return {"ok": True, "enabled": False}
+
+    def read_router_wifi_credentials(self, *, admin_password, include_password):
+        result = {"ssid": "Browser home"}
+        if include_password:
+            result["password"] = "browser-wifi-password"
+        return result
 
     def connected_devices(self):
         return [
@@ -164,7 +194,8 @@ class MovingClientHelper(FakeHelper):
 class ControlServerTests(unittest.TestCase):
     def test_router_status_and_results_require_admin_and_own_site(self):
         self.server.admin_token = "fixture-admin"
-        for path in ("/api/router/status", "/api/router/operation", "/api/router/wifi", "/api/router/check"):
+        for path in ("/api/router/status", "/api/router/operation", "/api/router/wifi", "/api/router/check",
+                     "/api/router/wifi-credentials"):
             for authorized, cross_site, expected in ((False, False, 401), (True, True, 403)):
                 handler = object.__new__(ControlRequestHandler)
                 handler.server = self.server
@@ -1129,6 +1160,271 @@ class ControlServerTests(unittest.TestCase):
             (history[0]["action"], history[0]["status_code"]), ("/api/router/check", 200)
         )
         self.assertNotIn("router-secret", str(history))
+
+    def test_wifi_credentials_return_the_name_without_the_password(self) -> None:
+        self.server.helper_client = FakeHelper()
+        status, _, body = self.server.write_response_for(
+            "/api/router/wifi-credentials",
+            {"admin_password": "router-secret", "include_password": False},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"result": {"ssid": "Browser home"}})
+        self.assertNotIn("router-secret", body.decode())
+        self.assertNotIn("browser-wifi-password", body.decode())
+
+    def test_wifi_credentials_default_to_the_name_only(self) -> None:
+        self.server.helper_client = FakeHelper()
+        status, _, body = self.server.write_response_for(
+            "/api/router/wifi-credentials", {"admin_password": "router-secret"})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"result": {"ssid": "Browser home"}})
+
+    def test_wifi_credentials_return_the_password_only_when_asked(self) -> None:
+        self.server.helper_client = FakeHelper()
+        status, _, body = self.server.write_response_for(
+            "/api/router/wifi-credentials",
+            {"admin_password": "router-secret", "include_password": True},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            json.loads(body)["result"], {"ssid": "Browser home", "password": "browser-wifi-password"}
+        )
+
+    def test_wifi_credentials_never_ask_the_helper_for_more_than_was_requested(self) -> None:
+        asked = []
+
+        class Recording(FakeHelper):
+            def read_router_wifi_credentials(self, *, admin_password, include_password):
+                asked.append((admin_password, include_password))
+                # A misbehaving helper that always sends the password must not leak it.
+                return {"ssid": "Browser home", "password": "browser-wifi-password"}
+
+        self.server.helper_client = Recording()
+        status, _, body = self.server.write_response_for(
+            "/api/router/wifi-credentials",
+            {"admin_password": "router-secret", "include_password": False},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(asked, [("router-secret", False)])
+        self.assertEqual(json.loads(body), {"result": {"ssid": "Browser home"}})
+        self.assertNotIn("browser-wifi-password", body.decode())
+
+    def test_wifi_credentials_reject_bad_requests(self) -> None:
+        self.server.helper_client = FakeHelper()
+        for payload in (
+            {},
+            {"admin_password": ""},
+            {"admin_password": 7},
+            {"admin_password": "x" * 1025},
+            {"admin_password": "x", "include_password": "yes"},
+            {"admin_password": "x", "include_password": "true"},
+            {"admin_password": "x", "include_password": "false"},
+            {"admin_password": "x", "include_password": 1},
+            {"admin_password": "x", "include_password": None},
+        ):
+            status, _, body = self.server.write_response_for(
+                "/api/router/wifi-credentials", payload)
+            self.assertEqual(status, 400, payload)
+            self.assertNotIn("browser-wifi-password", body.decode())
+
+    def test_wifi_credentials_need_a_helper_and_the_admin_token(self) -> None:
+        from jittersim.api.server import WRITE_PATHS
+
+        self.server.helper_client = None
+        status, _, _ = self.server.write_response_for(
+            "/api/router/wifi-credentials", {"admin_password": "x"})
+        self.assertEqual(status, 503)
+        self.assertIn("/api/router/wifi-credentials", WRITE_PATHS)
+
+    def _assert_no_secret_logged(self, records) -> None:
+        for message in records:
+            for secret in ("hunter2hunter2", "router-secret", "browser-wifi-password"):
+                self.assertNotIn(secret, message)
+
+    def test_wifi_credentials_never_echo_a_wrong_password(self) -> None:
+        class Rejecting(FakeHelper):
+            def read_router_wifi_credentials(self, *, admin_password, include_password):
+                raise HelperClientError(
+                    "The router rejected the password " + admin_password + " browser-wifi-password")
+
+        self.server.helper_client = Rejecting()
+        with captured_logs() as records:
+            status, _, body = self.server.write_response_for(
+                "/api/router/wifi-credentials",
+                {"admin_password": "hunter2hunter2", "include_password": True})
+        self.assertEqual(status, 502)
+        self.assertNotIn("hunter2hunter2", body.decode())
+        self.assertNotIn("browser-wifi-password", body.decode())
+        # The failure is logged once so the capture is not vacuous.
+        self.assertTrue(any("router Wi-Fi copy failed" in message for message in records))
+        self._assert_no_secret_logged(records)
+
+    def test_wifi_credentials_pass_on_only_the_fixed_router_messages(self) -> None:
+        from jittersim.networking.helper import WIFI_DETAILS_MISSING_MESSAGE
+        from jittersim.networking.router import ROUTER_CHECK_MESSAGES
+
+        busy = "The router is busy right now. Try again in a moment."
+        for error, expected in (
+            (HelperClientError(ROUTER_CHECK_MESSAGES["login"]), ROUTER_CHECK_MESSAGES["login"]),
+            (HelperClientError(ROUTER_CHECK_MESSAGES["unreachable"]),
+             ROUTER_CHECK_MESSAGES["unreachable"]),
+            (HelperClientError("unknown action"), ROUTER_CHECK_MESSAGES["outdated"]),
+            (HelperClientError("browser-wifi-password leaked here"), ROUTER_CHECK_MESSAGES["failed"]),
+            (HelperClientError("Another router operation is running. Try again shortly.",
+                               reason="helper-busy"), busy),
+            (HelperClientError("router-secret browser-wifi-password", reason="helper-busy"), busy),
+            (HelperClientError(WIFI_DETAILS_MISSING_MESSAGE), WIFI_DETAILS_MISSING_MESSAGE),
+        ):
+            class Failing(FakeHelper):
+                def read_router_wifi_credentials(self, *, admin_password, include_password):
+                    raise error
+
+            self.server.helper_client = Failing()
+            with captured_logs() as records:
+                status, _, body = self.server.write_response_for(
+                    "/api/router/wifi-credentials",
+                    {"admin_password": "router-secret", "include_password": True})
+            self.assertEqual(status, 502, str(error))
+            self.assertEqual(json.loads(body), {"error": expected}, str(error))
+            self._assert_no_secret_logged(records)
+
+    def test_wifi_credentials_wording_is_for_this_route_only(self) -> None:
+        from jittersim.networking.helper import WIFI_DETAILS_MISSING_MESSAGE
+        from jittersim.networking.router import ROUTER_CHECK_MESSAGES
+
+        for error in (
+            HelperClientError("Another router operation is running. Try again shortly.",
+                              reason="helper-busy"),
+            HelperClientError(WIFI_DETAILS_MISSING_MESSAGE),
+        ):
+            class Failing(FakeHelper):
+                def check_router_password(self, *, admin_password):
+                    raise error
+
+            self.server.helper_client = Failing()
+            status, _, body = self.server.write_response_for(
+                "/api/router/check", {"admin_password": "router-secret"})
+            self.assertEqual(status, 502)
+            self.assertEqual(json.loads(body), {"error": ROUTER_CHECK_MESSAGES["failed"]})
+
+    def test_an_old_helper_gets_the_out_of_date_message(self) -> None:
+        class Old(FakeHelper):
+            read_router_wifi_credentials = None
+
+        self.server.helper_client = Old()
+        status, _, body = self.server.write_response_for(
+            "/api/router/wifi-credentials", {"admin_password": "router-secret"})
+        self.assertEqual(status, 502)
+        self.assertIn("out of date", json.loads(body)["error"])
+
+    def test_wifi_credentials_are_not_logged_or_recorded(self) -> None:
+        self.server.helper_client = FakeHelper()
+        before = list(self.repository.list_recent_actions())
+        with captured_logs() as records:
+            status, _, body = self.server.write_response_for(
+                "/api/router/wifi-credentials",
+                {"admin_password": "router-secret", "include_password": True})
+        self.assertEqual(status, 200)
+        self.assertIn("browser-wifi-password", body.decode())
+        self.assertEqual(list(self.repository.list_recent_actions()), before)
+        self._assert_no_secret_logged(records)
+
+    def test_wifi_credentials_never_run_as_a_background_operation(self) -> None:
+        self.server.helper_client = FakeHelper()
+        status, _, body = self.server.write_response_for(
+            "/api/router/wifi-credentials",
+            {"admin_password": "router-secret", "include_password": True, "background": True})
+        # The password would be kept for minutes in the retained operation result.
+        self.assertEqual(status, 200)
+        self.assertNotIn("operation_id", json.loads(body))
+        self.assertIsNone(self.server.router_operations.completed_action())
+        self.assertIsNone(self.server.router_operations._active)
+        self.assertIsNone(self.server.router_operations._completed)
+
+    def _post_over_http(self, path, payload, headers=None):
+        """Send one POST over a real socket while the repository's own thread serves it."""
+
+        import http.client
+
+        outcome = []
+
+        def send() -> None:
+            connection = http.client.HTTPConnection(*self.server.server_address[:2], timeout=5)
+            try:
+                request_headers = {"Content-Type": "application/json"}
+                request_headers.update(headers or {})
+                connection.request("POST", path, body=json.dumps(payload).encode(),
+                                   headers=request_headers)
+                response = connection.getresponse()
+                outcome.append((response.status,
+                                {k.lower(): v for k, v in response.getheaders()},
+                                response.read()))
+            finally:
+                connection.close()
+
+        client = threading.Thread(target=send)
+        client.start()
+        try:
+            self.server.timeout = 5
+            self.server.handle_request()
+        finally:
+            client.join(timeout=5)
+        self.assertEqual(len(outcome), 1)
+        return outcome[0]
+
+    def test_wifi_credentials_over_http_need_the_token_and_are_never_cached(self) -> None:
+        self.server.admin_token = "admin-token"
+        self.server.helper_client = FakeHelper()
+        payload = {"admin_password": "router-secret", "include_password": True}
+
+        status, headers, body = self._post_over_http("/api/router/wifi-credentials", payload)
+        self.assertEqual(status, 401)
+        self.assertEqual(headers["cache-control"], "no-store")
+        self.assertNotIn("browser-wifi-password", body.decode())
+
+        status, headers, body = self._post_over_http(
+            "/api/router/wifi-credentials", payload,
+            {"Authorization": "Bearer wrong-token"})
+        self.assertEqual(status, 401)
+        self.assertNotIn("browser-wifi-password", body.decode())
+
+        status, headers, body = self._post_over_http(
+            "/api/router/wifi-credentials", payload,
+            {"Authorization": "Bearer admin-token"})
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["cache-control"], "no-store")
+        self.assertEqual(headers["x-content-type-options"], "nosniff")
+        self.assertEqual(json.loads(body)["result"]["password"], "browser-wifi-password")
+
+    def test_wifi_credentials_over_http_refuse_other_sites(self) -> None:
+        self.server.admin_token = "admin-token"
+        self.server.helper_client = FakeHelper()
+        payload = {"admin_password": "router-secret", "include_password": True}
+        host = "%s:%s" % self.server.server_address[:2]
+
+        for extra in ({"Origin": "https://different.example"}, {"Sec-Fetch-Site": "cross-site"}):
+            status, headers, body = self._post_over_http(
+                "/api/router/wifi-credentials", payload,
+                {"Authorization": "Bearer admin-token", "Host": host, **extra})
+            self.assertEqual(status, 403, extra)
+            self.assertEqual(headers["cache-control"], "no-store")
+            self.assertNotIn("browser-wifi-password", body.decode())
+
+    def test_wifi_credentials_history_keeps_no_password(self) -> None:
+        self.server.admin_token = "admin-token"
+        self.server.helper_client = FakeHelper()
+        status, _, _ = self._post_over_http(
+            "/api/router/wifi-credentials",
+            {"admin_password": "router-secret", "include_password": True},
+            {"Authorization": "Bearer admin-token"})
+        self.assertEqual(status, 200)
+        history = self.repository.list_recent_actions()
+        self.assertEqual(
+            (history[0]["action"], history[0]["status_code"]),
+            ("/api/router/wifi-credentials", 200),
+        )
+        for secret in ("router-secret", "browser-wifi-password"):
+            self.assertNotIn(secret, str(history))
 
     def test_router_wifi_endpoint_requires_confirmation_to_disable(self) -> None:
         self.server.helper_client = FakeHelper()

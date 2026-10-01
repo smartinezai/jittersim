@@ -57,6 +57,7 @@ jobs:
       - run: python -m tests.browser.saved_profiles
       - run: python -m tests.browser.dashboard_navigation
       - run: python -m tests.browser.protected_clients
+      - run: python -m tests.browser.router_copy
       - uses: actions/upload-artifact@v5
         if: always()
         with:
