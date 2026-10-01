@@ -218,6 +218,7 @@ def test_no_blocked_name_offers_block_all_with_every_name():
         "disabled": False,
         "ariaLabel": "Block all 7 ImmoScout24 names",
         "title": "Block all 7 ImmoScout24 names",
+        "note": "",
     }
 
 
@@ -247,6 +248,7 @@ def test_all_blocked_names_offer_unblock_all_with_every_name():
         "disabled": False,
         "ariaLabel": "Unblock all 7 ImmoScout24 names",
         "title": "Unblock all 7 ImmoScout24 names",
+        "note": "",
     }
 
 
@@ -290,8 +292,8 @@ def test_a_group_of_exactly_the_call_limit_can_still_be_blocked():
 
 
 RISK_NOTE = (
-    "Blocking a whole system or shared hosting group could cut the device off the internet. "
-    "Block single names instead."
+    "Blocking a whole group of system or content delivery names could cut the device off the "
+    "internet. Block single names instead."
 )
 
 
@@ -303,6 +305,7 @@ def test_a_system_or_cdn_group_has_no_block_all(kind):
     assert action["label"] == "Block all"
     assert action["disabled"] is True
     assert action["title"] == RISK_NOTE
+    assert action["note"] == RISK_NOTE
     assert action["ariaLabel"] == "Block all 7 ImmoScout24 names"
 
 
@@ -327,6 +330,7 @@ def test_unblocking_a_whole_system_or_cdn_group_stays_possible(kind):
     assert action["label"] == "Unblock all"
     assert action["disabled"] is False
     assert action["title"] == "Unblock all 7 ImmoScout24 names"
+    assert action["note"] == RISK_NOTE
 
 
 @NODE
@@ -336,6 +340,79 @@ def test_other_kinds_keep_the_block_all_button(kind):
 
     assert action["disabled"] is False
     assert action["title"] == "Block all 7 ImmoScout24 names"
+    assert action["note"] == ""
+
+
+@NODE
+def test_the_risk_note_is_true_for_both_kinds_and_names_neither_hosting_nor_a_cdn():
+    assert "shared hosting" not in RISK_NOTE
+    assert "system or content delivery" in RISK_NOTE
+    assert evaluate("RISKY_BLOCK_NOTE") == RISK_NOTE
+
+
+def unblock_action(items, kind=None):
+    return evaluate("groupUnblockAction(" + json.dumps(group_of(items, kind=kind)) + ")")
+
+
+@NODE
+@pytest.mark.parametrize("kind", ["system", "cdn"])
+def test_a_partly_blocked_system_or_cdn_group_offers_to_unblock_the_blocked_names(kind):
+    items = immo(blocked=False)
+    items[1]["globally_blocked"] = True
+    items[5]["globally_blocked"] = True
+
+    action = unblock_action(items, kind=kind)
+
+    assert action == {
+        "label": "Unblock blocked names",
+        "path": REMOVE_BLOCK,
+        "domains": [IMMO_NAMES[1][0], IMMO_NAMES[5][0]],
+        "disabled": False,
+        "ariaLabel": "Unblock blocked names: 2 ImmoScout24 names",
+        "title": "Unblock blocked names: 2 ImmoScout24 names",
+    }
+
+
+@NODE
+def test_the_undo_uses_the_singular_for_one_blocked_name():
+    items = immo(blocked=False)
+    items[2]["globally_blocked"] = True
+
+    assert unblock_action(items, kind="system")["ariaLabel"] == (
+        "Unblock blocked names: 1 ImmoScout24 name"
+    )
+
+
+@NODE
+@pytest.mark.parametrize("kind", ["app", "iot", "tracker", "unknown", None])
+def test_other_kinds_get_no_undo_because_block_remaining_works_for_them(kind):
+    items = immo(blocked=False)
+    items[1]["globally_blocked"] = True
+
+    assert unblock_action(items, kind=kind) is None
+
+
+@NODE
+def test_a_risky_group_with_nothing_blocked_or_everything_blocked_gets_no_undo():
+    assert unblock_action(immo(blocked=False), kind="system") is None
+    assert unblock_action(immo(blocked=True), kind="system") is None
+
+
+@NODE
+def test_the_unblock_messages_name_the_group_and_the_count():
+    items = immo(blocked=False)
+    items[1]["globally_blocked"] = True
+    items[2]["globally_blocked"] = True
+    group = json.dumps(group_of(items, kind="cdn"))
+
+    messages = evaluate(
+        "groupBlockMessages(%s, groupUnblockAction(%s))" % (group, group)
+    )
+
+    assert messages == {
+        "busy": "Removing 2 ImmoScout24 names from the global block list...",
+        "done": "Removed 2 ImmoScout24 names from the global block list. " + ENFORCE,
+    }
 
 
 @NODE
@@ -640,6 +717,8 @@ function groupParts(card, index) {
     badge: byClass(toggle, "observation-badge")[0],
     profileButton: byClass(item, "observation-group-profile-button")[0],
     blockButton: byClass(item, "observation-group-block-button")[0],
+    unblockButton: byClass(item, "observation-group-unblock-button")[0],
+    note: byClass(item, "observation-group-note")[0],
     rows: byClass(body, "observation-domain"),
     isOpen: () => toggle.attrs["aria-expanded"] === "true" && body.hidden === false
   };
@@ -1168,6 +1247,7 @@ def test_the_group_row_has_styles_for_the_header_the_toggle_and_the_body():
         ".observation-group-toggle {",
         ".observation-group-body {",
         ".observation-group-chevron {",
+        ".observation-group-note {",
         '.observation-group-toggle[aria-expanded="true"] .observation-group-chevron',
     ):
         assert selector in DASHBOARD_HTML, selector
@@ -1303,6 +1383,162 @@ def test_a_single_name_row_always_keeps_its_label_line():
     out = run_dashboard(steps, [device("192.168.50.124", [only_name])])
 
     assert out == {"labels": 1}
+
+
+def system_device(blocked_flags=(False, False, False)):
+    names = [
+        item("n%d.google.com" % i, 1, "label:google", "Google", flag, "system")
+        for i, flag in enumerate(blocked_flags)
+    ]
+    return device("192.168.50.124", with_labels(names))
+
+
+@NODE
+def test_a_risky_group_shows_the_reason_in_a_visible_note_that_the_disabled_button_points_at():
+    steps = """
+      const parts = groupParts(cards()[0], 0);
+      console.log(JSON.stringify({
+        text: parts.note.textContent, tag: parts.note.tagName, hidden: parts.note.hidden,
+        id: parts.note.id, describedBy: parts.blockButton.attrs["aria-describedby"] || null,
+        disabled: parts.blockButton.disabled,
+        profileDescribedBy: parts.profileButton.attrs["aria-describedby"] || null,
+        bodyId: parts.body.id,
+        order: Array.from(parts.item.children[0].children).map((node) => node.className)
+      }));
+    """
+
+    out = run_dashboard(steps, [system_device()])
+
+    assert out["text"] == RISK_NOTE
+    assert out["tag"] == "p"
+    assert out["hidden"] is False
+    assert out["id"] != "" and out["describedBy"] == out["id"]
+    assert out["disabled"] is True
+    assert out["profileDescribedBy"] is None
+    assert out["id"] != out["bodyId"]
+
+
+@NODE
+def test_a_group_that_is_not_risky_has_a_hidden_note_and_no_describedby():
+    steps = """
+      const parts = groupParts(cards()[0], 0);
+      console.log(JSON.stringify({
+        hidden: parts.note.hidden, text: parts.note.textContent,
+        describedBy: parts.blockButton.attrs["aria-describedby"] || null
+      }));
+    """
+    items = with_labels(kinded(immo(), "app"))
+
+    out = run_dashboard(steps, [device("192.168.50.124", items)])
+
+    assert out == {"hidden": True, "text": "", "describedBy": None}
+
+
+@NODE
+def test_the_note_is_part_of_the_group_under_the_header_and_not_inside_a_button():
+    steps = """
+      const parts = groupParts(cards()[0], 0);
+      const wrapper = parts.item.children[0];
+      console.log(JSON.stringify({
+        order: wrapper.children.map((node) => node.className),
+        insideButton: findAll(parts.toggle, (n) => n === parts.note).length
+      }));
+    """
+
+    out = run_dashboard(steps, [system_device()])
+
+    assert out["order"] == [
+        "observation-group-header", "observation-group-note", "observation-group-body"
+    ]
+    assert out["insideButton"] == 0
+
+
+@NODE
+def test_the_header_buttons_come_in_tab_order_toggle_then_profile_then_block_then_undo():
+    steps = """
+      const parts = groupParts(cards()[0], 0);
+      console.log(JSON.stringify(parts.header.children.map((node) => node.className)));
+    """
+
+    out = run_dashboard(steps, [system_device()])
+
+    assert out == [
+        "observation-group-toggle",
+        "observation-group-profile-button",
+        "observation-group-block-button",
+        "observation-group-unblock-button",
+    ]
+
+
+@NODE
+def test_a_partly_blocked_system_group_shows_an_undo_next_to_the_disabled_block_remaining():
+    steps = """
+      const parts = groupParts(cards()[0], 0);
+      const state = () => ({
+        block: [parts.blockButton.textContent, parts.blockButton.disabled],
+        undo: [parts.unblockButton.textContent, parts.unblockButton.hidden, parts.unblockButton.disabled,
+               parts.unblockButton.attrs["aria-label"] || null],
+        note: parts.note.hidden, badge: parts.badge.textContent
+      });
+      const before = state();
+      await click(parts.unblockButton);
+      console.log(JSON.stringify({
+        before, after: state(), calls,
+        rows: parts.rows.map((row) => row.children[3].textContent)
+      }));
+    """
+    blocked = system_device((True, False, True))
+
+    out = run_dashboard(steps, [blocked])
+
+    assert out["before"] == {
+        "block": ["Block remaining", True],
+        "undo": ["Unblock blocked names", False, False, "Unblock blocked names: 2 Google names"],
+        "note": False,
+        "badge": "2 blocked",
+    }
+    assert out["calls"] == [
+        ["message", "Removing 2 Google names from the global block list...", "working"],
+        ["request", REMOVE_BLOCK, "POST", {"domains": ["n0.google.com", "n2.google.com"]}],
+        ["success", "Removed 2 Google names from the global block list. " + ENFORCE],
+    ]
+    assert out["after"]["block"] == ["Block all", True]
+    assert out["after"]["undo"][1] is True
+    assert out["after"]["badge"] == ""
+    assert out["rows"] == ["Block globally"] * 3
+
+
+@NODE
+def test_the_undo_is_hidden_when_nothing_is_blocked_and_when_everything_is():
+    steps = """
+      const parts = groupParts(cards()[0], 0);
+      console.log(JSON.stringify([parts.unblockButton.hidden, parts.blockButton.textContent]));
+    """
+
+    assert run_dashboard(steps, [system_device((False, False, False))]) == [True, "Block all"]
+    assert run_dashboard(steps, [system_device((True, True, True))]) == [True, "Unblock all"]
+
+
+@NODE
+def test_a_failed_undo_keeps_the_state_and_shows_the_error():
+    steps = """
+      requestFails = true;
+      const parts = groupParts(cards()[0], 0);
+      await click(parts.unblockButton);
+      console.log(JSON.stringify({
+        last: calls[calls.length - 1], undoHidden: parts.unblockButton.hidden,
+        undoDisabled: parts.unblockButton.disabled, badge: parts.badge.textContent
+      }));
+    """
+
+    out = run_dashboard(steps, [system_device((True, False, False))])
+
+    assert out == {
+        "last": ["message", "the helper is busy", "error"],
+        "undoHidden": False,
+        "undoDisabled": False,
+        "badge": "1 blocked",
+    }
 
 
 # ---------------------------------------------------------------------------------------------

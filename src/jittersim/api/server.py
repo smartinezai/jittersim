@@ -481,6 +481,8 @@ DASHBOARD_HTML = """<!doctype html>
     .observation-group-title { flex: 1 1 10rem; min-width: 0; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     .observation-group-name { display: block; color: #edf5ff; font-size: 0.88rem; font-weight: 650; overflow-wrap: anywhere; }
     .observation-group-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0.15rem 0.5rem; margin-top: 0.1rem; color: #9fb3ca; font-size: 0.76rem; font-weight: 400; }
+    .observation-group-note { margin: 0; padding: 0 0.55rem 0.5rem 1.6rem; color: #f5ca78; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 0.78rem; }
+    .observation-group-note[hidden], .observation-group-header button[hidden] { display: none; }
     .observation-group-body { margin: 0 0.55rem 0.55rem 1.1rem; padding-left: 0.6rem; border-left: 2px solid #2b435f; }
     .observation-group-body[hidden] { display: none; }
     .policy-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
@@ -3364,8 +3366,8 @@ DASHBOARD_HTML = """<!doctype html>
     const GROUP_ACTION_MAX_NAMES = 64;
 
     // Blocking every name of a group of these kinds could cut a device off the internet.
-    const RISKY_BLOCK_NOTE = "Blocking a whole system or shared hosting group could cut the device " +
-      "off the internet. Block single names instead.";
+    const RISKY_BLOCK_NOTE = "Blocking a whole group of system or content delivery names could cut " +
+      "the device off the internet. Block single names instead.";
 
     function isRiskyGroupKind(kind) {
       return kind === "system" || kind === "cdn";
@@ -3411,12 +3413,33 @@ DASHBOARD_HTML = """<!doctype html>
             domains: domains(open)
           };
       action.ariaLabel = action.label + " " + groupSubject(group, action.domains.length);
-      const note = (!unblocking && isRiskyGroupKind(group.kind))
-        ? RISKY_BLOCK_NOTE
-        : groupLimitNote(action.domains.length);
-      action.disabled = note !== "";
-      action.title = note || action.ariaLabel;
+      const risky = isRiskyGroupKind(group.kind);
+      const limitNote = groupLimitNote(action.domains.length);
+      const reason = (risky && !unblocking) ? RISKY_BLOCK_NOTE : limitNote;
+      action.disabled = reason !== "";
+      action.title = reason || action.ariaLabel;
+      // The visible line under the header. It stays for a risky group and explains the button.
+      action.note = risky ? RISKY_BLOCK_NOTE : limitNote;
       return action;
+    }
+
+    // The way back for a risky group that is only partly blocked. Block remaining is off there.
+    function groupUnblockAction(group) {
+      if (!isRiskyGroupKind(group.kind)) return null;
+      const blocked = group.names
+        .filter((observation) => observation.globally_blocked === true)
+        .map((observation) => observation.domain);
+      if (blocked.length === 0 || blocked.length === group.names.length) return null;
+      const text = "Unblock blocked names: " + groupSubject(group, blocked.length);
+      const note = groupLimitNote(blocked.length);
+      return {
+        label: "Unblock blocked names",
+        path: blockButtonState({ globally_blocked: true }).path,
+        domains: blocked,
+        disabled: note !== "",
+        ariaLabel: text,
+        title: note || text
+      };
     }
 
     function groupProfileAction(group, profile) {
@@ -3742,6 +3765,14 @@ DASHBOARD_HTML = """<!doctype html>
           const groupBlockButton = document.createElement("button");
           groupBlockButton.type = "button";
           groupBlockButton.className = "observation-group-block-button";
+          const groupUndoButton = document.createElement("button");
+          groupUndoButton.type = "button";
+          groupUndoButton.className = "observation-group-unblock-button";
+          groupUndoButton.hidden = true;
+          const groupNote = document.createElement("p");
+          groupNote.className = "observation-group-note";
+          groupNote.id = body.id + "-note";
+          groupNote.hidden = true;
           const syncGroupProfile = () => {
             // A request in flight keeps the button disabled. Its finally block syncs again.
             if (groupProfileButton.getAttribute("aria-busy") === "true") return;
@@ -3756,12 +3787,28 @@ DASHBOARD_HTML = """<!doctype html>
             const blockedText = groupBlockedText(group);
             groupBadge.textContent = blockedText;
             groupBadge.hidden = blockedText === "";
-            if (groupBlockButton.getAttribute("aria-busy") === "true") return;
             const action = groupBlockAction(group);
-            groupBlockButton.textContent = action.label;
-            groupBlockButton.title = action.title;
-            groupBlockButton.setAttribute("aria-label", action.ariaLabel);
-            groupBlockButton.disabled = action.disabled;
+            groupNote.textContent = action.note;
+            groupNote.hidden = action.note === "";
+            if (groupBlockButton.getAttribute("aria-busy") !== "true") {
+              groupBlockButton.textContent = action.label;
+              groupBlockButton.title = action.title;
+              groupBlockButton.setAttribute("aria-label", action.ariaLabel);
+              groupBlockButton.disabled = action.disabled;
+              if (action.disabled && action.note) {
+                groupBlockButton.setAttribute("aria-describedby", groupNote.id);
+              } else {
+                groupBlockButton.removeAttribute("aria-describedby");
+              }
+            }
+            const undo = groupUnblockAction(group);
+            groupUndoButton.hidden = undo === null;
+            if (undo !== null && groupUndoButton.getAttribute("aria-busy") !== "true") {
+              groupUndoButton.textContent = undo.label;
+              groupUndoButton.title = undo.title;
+              groupUndoButton.setAttribute("aria-label", undo.ariaLabel);
+              groupUndoButton.disabled = undo.disabled;
+            }
           };
           const rowSyncs = [];
           const syncRowsAndHeader = () => {
@@ -3782,14 +3829,20 @@ DASHBOARD_HTML = """<!doctype html>
             groupBlockButton,
             syncRowsAndHeader
           ));
-          header.append(toggle, groupProfileButton, groupBlockButton);
+          groupUndoButton.addEventListener("click", () => changeGroupBlock(
+            group,
+            groupUndoButton,
+            syncRowsAndHeader,
+            groupUnblockAction
+          ));
+          header.append(toggle, groupProfileButton, groupBlockButton, groupUndoButton);
           const rows = document.createElement("ul");
           rows.className = "observation-domain-list";
           group.names.forEach((observation) => {
             rows.appendChild(buildRow(observation, rowSyncs, syncGroupBlock, group.name));
           });
           body.appendChild(rows);
-          wrapper.append(header, body);
+          wrapper.append(header, groupNote, body);
           item.appendChild(wrapper);
           return item;
         };
@@ -3837,9 +3890,9 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
-    async function changeGroupBlock(group, button, onChange) {
-      const action = groupBlockAction(group);
-      if (action.disabled || action.domains.length === 0) return;
+    async function changeGroupBlock(group, button, onChange, pickAction) {
+      const action = (pickAction || groupBlockAction)(group);
+      if (!action || action.disabled || action.domains.length === 0) return;
       const messages = groupBlockMessages(group, action);
       setButtonBusy(button, true);
       showMessage(messages.busy, "working");
