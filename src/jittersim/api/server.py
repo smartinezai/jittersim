@@ -3472,6 +3472,22 @@ DASHBOARD_HTML = """<!doctype html>
       };
     }
 
+    // True when every row of the group has the same category so the group header says it all.
+    function groupCategoriesUniform(group) {
+      const category = (observation) => (observation.label && observation.label.category) || "";
+      return group.names.every((observation) => category(observation) === category(group.names[0]));
+    }
+
+    // What a row shows in its label line. A row in a group skips a name that only repeats the
+    // group name and skips the category when the whole group has the same one.
+    function rowLabelParts(parts, groupName, categoriesUniform) {
+      const repeated = Boolean(groupName) && parts.labelName === groupName;
+      return {
+        showName: Boolean(parts.labelName) && !repeated,
+        showCategory: Boolean(parts.category) && !(repeated && categoriesUniform)
+      };
+    }
+
     function groupNamesText(count) {
       return count + (count === 1 ? " name" : " names");
     }
@@ -3621,23 +3637,33 @@ DASHBOARD_HTML = """<!doctype html>
         list.className = "observation-domain-list";
         // One name. A row of a group also gets its block button in blockSyncs so the group can
         // refresh it and calls afterBlockChange when its own block state changes. A row in a
-        // group skips its label line when the label only repeats the group name.
-        const buildRow = (observation, blockSyncs, afterBlockChange, groupName) => {
+        // group skips what its label line only repeats from the group header.
+        const buildRow = (observation, blockSyncs, afterBlockChange, inGroup) => {
           const item = document.createElement("li");
           item.className = "observation-domain";
           const domain = document.createElement("div");
           domain.className = "observation-domain-name";
           const parts = domainRowParts(observation);
-          if (parts.labelName && parts.labelName !== groupName) {
+          const labelShown = rowLabelParts(
+            parts,
+            inGroup ? inGroup.name : "",
+            inGroup ? inGroup.categoriesUniform : false
+          );
+          if (labelShown.showName || labelShown.showCategory) {
             const labelLine = document.createElement("div");
             labelLine.className = "observation-label";
-            const labelName = document.createElement("strong");
-            labelName.textContent = parts.labelName;
-            const category = document.createElement("span");
-            category.className = "observation-category";
-            category.dataset.kind = parts.kind;
-            category.textContent = parts.category;
-            labelLine.append(labelName, category);
+            if (labelShown.showName) {
+              const labelName = document.createElement("strong");
+              labelName.textContent = parts.labelName;
+              labelLine.appendChild(labelName);
+            }
+            if (labelShown.showCategory) {
+              const category = document.createElement("span");
+              category.className = "observation-category";
+              category.dataset.kind = parts.kind;
+              category.textContent = parts.category;
+              labelLine.appendChild(category);
+            }
             domain.appendChild(labelLine);
           }
           const host = document.createElement("div");
@@ -3838,8 +3864,9 @@ DASHBOARD_HTML = """<!doctype html>
           header.append(toggle, groupProfileButton, groupBlockButton, groupUndoButton);
           const rows = document.createElement("ul");
           rows.className = "observation-domain-list";
+          const inGroup = { name: group.name, categoriesUniform: groupCategoriesUniform(group) };
           group.names.forEach((observation) => {
-            rows.appendChild(buildRow(observation, rowSyncs, syncGroupBlock, group.name));
+            rows.appendChild(buildRow(observation, rowSyncs, syncGroupBlock, inGroup));
           });
           body.appendChild(rows);
           wrapper.append(header, groupNote, body);

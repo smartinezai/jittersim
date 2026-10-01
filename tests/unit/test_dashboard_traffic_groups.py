@@ -1372,6 +1372,114 @@ def test_a_group_name_that_only_differs_in_case_keeps_the_label_line():
     assert out["labelLines"] == [1, 0]
 
 
+CATEGORY_STEPS = """
+  const parts = groupParts(cards()[0], 0);
+  console.log(JSON.stringify(parts.rows.map((row) =>
+    byClass(row, "observation-label").map((line) => line.children.map((node) =>
+      node.tagName + "." + node.className + ":" + node.textContent)))));
+"""
+
+
+@NODE
+def test_a_row_that_repeats_the_group_name_keeps_a_category_that_differs_from_the_others():
+    items = [
+        labelled("a.msftconnecttest.com", 3, "label:windows", "Windows", "Windows", "system",
+                 "Connectivity check"),
+        labelled("b.windows.com", 2, "label:windows", "Windows", "Windows", "system",
+                 "Windows services"),
+    ]
+
+    out = run_dashboard(CATEGORY_STEPS, [device("192.168.50.124", items)])
+
+    assert out == [
+        [["span.observation-category:Connectivity check"]],
+        [["span.observation-category:Windows services"]],
+    ]
+
+
+@NODE
+def test_a_group_with_one_category_for_every_row_has_no_label_line_at_all():
+    items = [
+        labelled("a.immobilienscout24.de", 3, "label:immoscout24", "ImmoScout24", "ImmoScout24",
+                 "app", "Real estate"),
+        labelled("b.immobilienscout24.de", 2, "label:immoscout24", "ImmoScout24", "ImmoScout24",
+                 "app", "Real estate"),
+    ]
+
+    out = run_dashboard(CATEGORY_STEPS, [device("192.168.50.124", items)])
+
+    assert out == [[], []]
+
+
+@NODE
+def test_a_row_with_another_name_keeps_both_the_name_and_the_category():
+    items = [
+        labelled("a.tiqcdn.com", 3, "domain:tiqcdn.com", "tiqcdn.com", "Tealium", "tracker",
+                 "Tag manager"),
+        labelled("b.tiqcdn.com", 2, "domain:tiqcdn.com", "tiqcdn.com", "tiqcdn.com", "unknown",
+                 "Tag manager"),
+    ]
+
+    out = run_dashboard(CATEGORY_STEPS, [device("192.168.50.124", items)])
+
+    assert out == [
+        [["strong.:Tealium", "span.observation-category:Tag manager"]],
+        [],
+    ]
+
+
+@NODE
+def test_the_category_line_of_a_repeated_name_has_no_name_in_it_when_categories_differ():
+    items = [
+        labelled("a.apple.com", 3, "label:apple", "Apple", "Apple", "system", "Apple services"),
+        labelled("b.mzstatic.com", 2, "label:apple", "Apple", "Apple", "system", "App Store media"),
+        labelled("c.aaplimg.com", 1, "label:apple", "Apple", "Apple", "system", "Apple downloads"),
+    ]
+
+    out = run_dashboard(CATEGORY_STEPS, [device("192.168.50.124", items)])
+
+    assert [len(lines) for lines in out] == [1, 1, 1]
+    assert all(len(lines[0]) == 1 and lines[0][0].startswith("span.") for lines in out)
+
+
+def label_parts(parts, group_name, uniform):
+    return evaluate("rowLabelParts(%s, %s, %s)" % (
+        json.dumps(parts), json.dumps(group_name), json.dumps(uniform)))
+
+
+@NODE
+def test_the_label_parts_of_a_row_follow_the_name_and_category_rules():
+    parts = {"labelName": "Windows", "category": "Windows services"}
+
+    # A single row has no group so it keeps everything.
+    assert label_parts(parts, None, True) == {"showName": True, "showCategory": True}
+    # Same name and one category for the group: nothing to show.
+    assert label_parts(parts, "Windows", True) == {"showName": False, "showCategory": False}
+    # Same name and categories differ: only the category.
+    assert label_parts(parts, "Windows", False) == {"showName": False, "showCategory": True}
+    # Another name keeps both whatever the categories are.
+    assert label_parts(parts, "Google", True) == {"showName": True, "showCategory": True}
+    assert label_parts(parts, "Google", False) == {"showName": True, "showCategory": True}
+    # No label at all shows nothing.
+    assert label_parts({"labelName": "", "category": ""}, "Windows", False) == {
+        "showName": False, "showCategory": False}
+
+
+@NODE
+def test_a_group_has_one_category_when_every_row_has_the_same_one():
+    def uniform(categories):
+        items = [
+            {"domain": "n%d.example.com" % i, "label": {"name": "X", "category": category}}
+            for i, category in enumerate(categories)
+        ]
+        return evaluate("groupCategoriesUniform(" + json.dumps(group_of(items)) + ")")
+
+    assert uniform(["A", "A", "A"]) is True
+    assert uniform(["A", "B", "A"]) is False
+    assert uniform(["A"]) is True
+    assert uniform(["A", None]) is False
+
+
 @NODE
 def test_a_single_name_row_always_keeps_its_label_line():
     steps = """
