@@ -31,6 +31,7 @@ from .models import (
     RuntimeState,
     Schedule,
     ServiceAssignment,
+    ServiceList,
     ServiceQuota,
     TimeQuota,
     Timer,
@@ -309,6 +310,14 @@ class ConfigRepository:
                 name TEXT NOT NULL,
                 domains_json TEXT NOT NULL,
                 profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                enabled INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS service_lists (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                services_json TEXT NOT NULL,
+                hostnames_json TEXT NOT NULL,
                 enabled INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS time_quotas (
@@ -1628,6 +1637,70 @@ class ConfigRepository:
         self._commit()
         return True
 
+    def get_service_list(self, list_id: str) -> Optional[ServiceList]:
+        """Return one service list or `None` when it is not stored."""
+
+        row = self._connection.execute(
+            """
+            SELECT id, name, profile_id, services_json, hostnames_json, enabled
+            FROM service_lists WHERE id = ?
+            """,
+            (list_id,),
+        ).fetchone()
+        return None if row is None else self._service_list_from_row(row)
+
+    def list_service_lists(self) -> tuple:
+        """Return service lists in stable identifier order."""
+
+        rows = self._connection.execute(
+            """
+            SELECT id, name, profile_id, services_json, hostnames_json, enabled
+            FROM service_lists ORDER BY id
+            """
+        ).fetchall()
+        return tuple(self._service_list_from_row(row) for row in rows)
+
+    def save_service_list(self, service_list: ServiceList) -> None:
+        """Insert or update a service list that overrides device profiles."""
+
+        try:
+            self._connection.execute(
+                """
+                INSERT INTO service_lists (
+                    id, name, profile_id, services_json, hostnames_json, enabled
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    profile_id = excluded.profile_id,
+                    services_json = excluded.services_json,
+                    hostnames_json = excluded.hostnames_json,
+                    enabled = excluded.enabled
+                """,
+                (
+                    service_list.id,
+                    service_list.name,
+                    service_list.profile_id,
+                    json.dumps(list(service_list.services)),
+                    json.dumps(list(service_list.hostnames)),
+                    int(service_list.enabled),
+                ),
+            )
+            self._bump_configuration_version()
+            self._commit()
+        except sqlite3.IntegrityError as error:
+            self._rollback()
+            raise StorageError(f"could not save service list {service_list.id}") from error
+
+    def delete_service_list(self, list_id: str) -> bool:
+        """Remove one service list and its matching rules on the next apply."""
+
+        cursor = self._connection.execute("DELETE FROM service_lists WHERE id = ?", (list_id,))
+        if not cursor.rowcount:
+            return False
+        self._bump_configuration_version()
+        self._commit()
+        return True
+
     def reset_service_quota_usage(
         self,
         quota_id: str,
@@ -2385,6 +2458,20 @@ class ConfigRepository:
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
             raise StorageError("stored service assignment is malformed") from error
+
+    @staticmethod
+    def _service_list_from_row(row: sqlite3.Row) -> ServiceList:
+        try:
+            return ServiceList(
+                id=row["id"],
+                name=row["name"],
+                profile_id=row["profile_id"],
+                services=tuple(json.loads(row["services_json"])),
+                hostnames=tuple(json.loads(row["hostnames_json"])),
+                enabled=bool(row["enabled"]),
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
+            raise StorageError("stored service list is malformed") from error
 
     @staticmethod
     def _service_quota_from_row(row: sqlite3.Row) -> ServiceQuota:

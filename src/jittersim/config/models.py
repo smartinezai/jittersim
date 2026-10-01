@@ -567,6 +567,61 @@ class ServiceAssignment:
             raise ValidationError("enabled must be a boolean")
 
 
+MAX_SERVICE_LIST_DOMAINS = 100
+
+
+@dataclass(frozen=True)
+class ServiceList:
+    """A profile for named services that overrides every affected device's profile.
+
+    The list names well-known services from the catalogue and any extra
+    hostnames. `domains` is the combined set of hostnames the list matches.
+    """
+
+    id: str
+    name: str
+    profile_id: str
+    services: Tuple[str, ...] = ()
+    hostnames: Tuple[str, ...] = ()
+    enabled: bool = True
+
+    def __post_init__(self) -> None:
+        from .service_catalogue import catalogue_service, expand_service_domains
+
+        _validate_identifier(self.id, "service list id")
+        object.__setattr__(self, "name", _validate_name(self.name, "service list name"))
+        _validate_identifier(self.profile_id, "profile_id")
+        if not isinstance(self.services, (list, tuple)) or not isinstance(
+            self.hostnames, (list, tuple)
+        ):
+            raise ValidationError("services and hostnames must be lists")
+        services = tuple(self.services)
+        if len(set(services)) != len(services):
+            raise ValidationError("services must not repeat")
+        for key in services:
+            catalogue_service(key)
+        hostnames = tuple(
+            dict.fromkeys(normalize_service_hostname(name) for name in self.hostnames)
+        )
+        object.__setattr__(self, "services", services)
+        object.__setattr__(self, "hostnames", hostnames)
+        domains = expand_service_domains(services, hostnames)
+        if not domains:
+            raise ValidationError("service list requires at least one service or hostname")
+        if len(domains) > MAX_SERVICE_LIST_DOMAINS:
+            raise ValidationError(
+                f"service list must contain no more than {MAX_SERVICE_LIST_DOMAINS} hostnames"
+            )
+        if not isinstance(self.enabled, bool):
+            raise ValidationError("enabled must be a boolean")
+
+    @property
+    def domains(self) -> Tuple[str, ...]:
+        from .service_catalogue import expand_service_domains
+
+        return expand_service_domains(self.services, self.hostnames)
+
+
 @dataclass(frozen=True)
 class ServiceQuota:
     """A weighted byte quota for selected observed domains on one device."""
