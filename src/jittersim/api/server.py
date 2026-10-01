@@ -351,6 +351,26 @@ DASHBOARD_HTML = """<!doctype html>
     }
     .saved-device-labels h3 { margin-top: 0; }
     .saved-device-label-row { grid-template-columns: minmax(0, 1fr) auto auto; }
+    .saved-profile-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.75rem;
+      border: 1px solid #2b435f;
+      border-radius: 0.6rem;
+      background: #0d1b2d;
+    }
+    .saved-profile-name {
+      display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.6rem;
+      margin: 0; color: #edf5ff;
+    }
+    .saved-profile-id { color: #91a8c1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
+    .saved-profile-summary { margin: 0.15rem 0 0; color: #c6dbf4; font-size: 0.84rem; overflow-wrap: anywhere; }
+    .saved-profile-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+    .saved-profile-actions button { margin: 0; white-space: nowrap; }
+    .general-badge { border-color: #2c9d73; background: #10372d; color: #8de2bc; }
+    #profile-id[readonly] { background: #0d1b2d; color: #91a8c1; cursor: not-allowed; }
     select {
       min-width: 0;
       max-width: 100%;
@@ -659,6 +679,8 @@ DASHBOARD_HTML = """<!doctype html>
       .policy-grid { grid-template-columns: 1fr; }
       .uplink-grid { grid-template-columns: 1fr; }
       .connected-row { grid-template-columns: auto minmax(0, 1fr) auto; }
+      .saved-profile-row { grid-template-columns: minmax(0, 1fr); }
+      .saved-profile-actions button { flex: 1; }
       .connected-controls { grid-column: 1 / -1; }
       .connected-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
       .connected-controls select { width: 100%; }
@@ -852,8 +874,12 @@ DASHBOARD_HTML = """<!doctype html>
   </section>
   </section><!-- /page:devices -->
   <section class="page" id="page-profiles" data-page="profiles" aria-label="Profiles" hidden>
+    <section class="card" data-collapse="open" aria-labelledby="saved-profiles-title">
+      <h2 id="saved-profiles-title">Saved profiles</h2>
+      <div id="saved-profiles" class="connected-list" aria-live="polite">Check the admin token to view saved profiles.</div>
+    </section>
     <section class="card" data-collapse="open">
-      <h2>Save profile</h2>
+      <h2 id="profile-form-title">Save profile</h2>
       <form id="profile-form">
         <div class="fields">
           <label>Profile ID
@@ -1041,6 +1067,7 @@ DASHBOARD_HTML = """<!doctype html>
           </div>
         </details>
         <button type="submit">Save profile</button>
+        <button id="new-profile" type="button" hidden>New profile</button>
       </form>
     </section>
     <section class="card">
@@ -1798,7 +1825,8 @@ DASHBOARD_HTML = """<!doctype html>
 
     const privateDataPanelIds = [
       "profiles", "devices", "plan", "state", "policies",
-      "connected-devices", "unaffected-devices", "uplink-details", "general-profile-status"
+      "connected-devices", "unaffected-devices", "uplink-details", "general-profile-status",
+      "saved-profiles"
     ];
 
     function setDashboardUnlocked(allowed) {
@@ -2152,6 +2180,7 @@ DASHBOARD_HTML = """<!doctype html>
     window.setInterval(syncRememberedCredentials, 60000);
     let profiles = [];
     let generalProfileState = null;
+    let savedProfileBusy = null;
     let networkActionBusy = false;
     let groups = [];
     let savedDevices = [];
@@ -2633,6 +2662,7 @@ DASHBOARD_HTML = """<!doctype html>
       element("general-profile-apply").disabled = select.disabled || !select.value;
       element("general-profile-stop").disabled = networkActionBusy || !helperConfigured ||
         !generalProfileState || !generalProfileState.profile;
+      renderSavedProfiles();
     }
 
     function renderRuntimeSummary(state) {
@@ -4527,11 +4557,12 @@ DASHBOARD_HTML = """<!doctype html>
       );
     });
 
-    async function runGeneralProfileAction(stop) {
+    async function runGeneralProfileAction(stop, rowProfileId) {
       if (networkActionBusy || !helperConfigured) return;
-      const profileId = element("general-profile-select").value;
+      const profileId = rowProfileId || element("general-profile-select").value;
       if (!stop && !profileId) return;
       const path = stop ? "/api/general-profile/stop" : "/api/general-profile";
+      savedProfileBusy = rowProfileId ? { id: rowProfileId, stop: stop } : null;
       setActionBusy(true, path);
       showMessage(stop ? "Stopping the general profile..." : "Applying the profile to all unprotected devices...", "working");
       try {
@@ -4543,6 +4574,7 @@ DASHBOARD_HTML = """<!doctype html>
         showMessage(error.message, "error");
       } finally {
         await loadPrivateDataPanel("general-profile-status", loadGeneralProfile);
+        savedProfileBusy = null;
         setActionBusy(false, path);
       }
     }
@@ -4638,6 +4670,98 @@ DASHBOARD_HTML = """<!doctype html>
 
     let editingProfile = null;
 
+    function setProfileFormTitle(text) {
+      const title = element("profile-form-title");
+      (title.querySelector(".card-toggle") || title).textContent = text;
+    }
+
+    function startEditingProfile(profile) {
+      editingProfile = profile;
+      fillProfileForm(profile);
+      element("profile-id").readOnly = true;
+      setProfileFormTitle("Edit profile");
+      element("new-profile").hidden = false;
+      revealElement(element("profile-form-title"));
+      element("profile-name").focus({ preventScroll: true });
+    }
+
+    function resetProfileEditing() {
+      editingProfile = null;
+      element("profile-id").readOnly = false;
+      setProfileFormTitle("Save profile");
+      element("new-profile").hidden = true;
+    }
+
+    function renderSavedProfiles() {
+      if (!adminTokenVerified) return;
+      const container = element("saved-profiles");
+      const general = generalProfileState && generalProfileState.profile;
+      const generalId = general ? general.id : null;
+      const generalActive = Boolean(general && generalProfileState.active);
+      const actionsDisabled = networkActionBusy || !helperConfigured;
+      const signature = JSON.stringify([
+        profiles.map((profile) => [profile.id, profile.name, profileSummary(profile)]),
+        generalId, generalActive, actionsDisabled, savedProfileBusy
+      ]);
+      if (container.dataset.signature === signature && container.children.length) return;
+      container.dataset.signature = signature;
+      if (!profiles.length) {
+        const empty = document.createElement("p");
+        empty.className = "device-empty";
+        empty.textContent = "No saved profiles yet. Create one below.";
+        container.replaceChildren(empty);
+        return;
+      }
+      container.replaceChildren(...profiles.map((profile) => {
+        const row = document.createElement("div");
+        row.className = "saved-profile-row";
+        row.dataset.profileId = profile.id;
+        const text = document.createElement("div");
+        const heading = document.createElement("p");
+        heading.className = "saved-profile-name";
+        const name = document.createElement("strong");
+        name.textContent = profile.name;
+        const id = document.createElement("span");
+        id.className = "saved-profile-id";
+        id.textContent = profile.id;
+        heading.append(name, id);
+        if (profile.id === generalId) {
+          const badge = document.createElement("span");
+          badge.className = "count-badge general-badge";
+          badge.textContent = generalActive ? "General · active" : "General · paused";
+          heading.append(badge);
+        }
+        const summary = document.createElement("p");
+        summary.className = "saved-profile-summary";
+        summary.textContent = profileSummary(profile);
+        text.append(heading, summary);
+        const actions = document.createElement("div");
+        actions.className = "saved-profile-actions";
+        const edit = document.createElement("button");
+        edit.type = "button";
+        edit.textContent = "Edit";
+        edit.setAttribute("aria-label", "Edit " + profile.name);
+        edit.addEventListener("click", () => {
+          const current = profiles.find((item) => item.id === profile.id);
+          if (current) startEditingProfile(current);
+        });
+        const stopping = profile.id === generalId && generalActive;
+        const apply = document.createElement("button");
+        apply.type = "button";
+        apply.className = stopping ? "" : "primary";
+        apply.textContent = stopping ? "Stop" : "Apply to all";
+        apply.setAttribute("aria-label", (stopping ? "Stop " : "Apply to all: ") + profile.name);
+        apply.disabled = actionsDisabled;
+        apply.addEventListener("click", () => runGeneralProfileAction(stopping, profile.id));
+        if (savedProfileBusy && savedProfileBusy.id === profile.id && savedProfileBusy.stop === stopping) {
+          setButtonBusy(apply, true);
+        }
+        actions.append(edit, apply);
+        row.append(text, actions);
+        return row;
+      }));
+    }
+
     element("profile-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
@@ -4648,6 +4772,12 @@ DASHBOARD_HTML = """<!doctype html>
       } catch (error) {
         showMessage(error.message, "error");
       }
+    });
+
+    element("new-profile").addEventListener("click", () => {
+      element("profile-form").reset();
+      resetProfileEditing();
+      element("profile-id").focus();
     });
 
     element("device-form").addEventListener("submit", async (event) => {
