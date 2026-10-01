@@ -5415,12 +5415,12 @@ def _device_display_name(
 
 
 def _device_payload(
-    device: Device, *, labels_by_mac: Optional[Dict[str, Dict[str, str]]] = None
+    device: Device, *, labels_by_mac: Dict[str, Dict[str, str]]
 ) -> Dict[str, Any]:
     return {
         "id": device.id,
         "name": device.name,
-        "display_name": _device_display_name(device, labels_by_mac or {}),
+        "display_name": _device_display_name(device, labels_by_mac),
         "ipv4_address": str(device.ipv4_address),
         "profile_id": device.profile_id,
         "mac_address": device.mac_address,
@@ -5487,12 +5487,13 @@ def _device_group_payload(
     group: DeviceGroup,
     *,
     repository: ConfigRepository,
+    labels_by_mac: Dict[str, Dict[str, str]],
 ) -> Dict[str, Any]:
     """Build the dashboard representation of one device group."""
 
     profile = repository.get_profile(group.profile_id) if group.profile_id else None
     devices = [
-        _device_payload(device)
+        _device_payload(device, labels_by_mac=labels_by_mac)
         for device_id in group.device_ids
         if (device := repository.get_device(device_id)) is not None
     ]
@@ -5980,8 +5981,11 @@ class ControlServer(HTTPServer):
                 "limit": 256,
             })
         if path == "/api/groups":
+            labels_by_mac = self.repository.list_connected_device_labels()
             groups = [
-                _device_group_payload(group, repository=self.repository)
+                _device_group_payload(
+                    group, repository=self.repository, labels_by_mac=labels_by_mac
+                )
                 for group in self.repository.list_device_groups()
             ]
             return HTTPStatus.OK, "application/json", _json_bytes({"groups": groups})
@@ -6467,8 +6471,9 @@ class ControlServer(HTTPServer):
                     {"error": "invalid device configuration"}
                 )
             self.repository.save_device(device)
+            labels_by_mac = self.repository.list_connected_device_labels()
             return HTTPStatus.OK, "application/json", _json_bytes(
-                {"device": _device_payload(device)}
+                {"device": _device_payload(device, labels_by_mac=labels_by_mac)}
             )
 
         if path in ("/api/general-profile", "/api/general-profile/stop"):
@@ -7468,7 +7473,14 @@ class ControlServer(HTTPServer):
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
             return self._saved_control_response(
-                {"group": _device_group_payload(group, repository=self.repository)}, snapshot
+                {
+                    "group": _device_group_payload(
+                        group,
+                        repository=self.repository,
+                        labels_by_mac=self.repository.list_connected_device_labels(),
+                    )
+                },
+                snapshot,
             )
 
     def _base_profile_feedback(self, device: Device) -> str:
@@ -7560,7 +7572,9 @@ class ControlServer(HTTPServer):
                 return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
             return self._saved_control_response(
                 {
-                    "device": _device_payload(device),
+                    "device": _device_payload(
+                        device, labels_by_mac=self.repository.list_connected_device_labels()
+                    ),
                     "message": self._base_profile_feedback(device),
                 },
                 snapshot,

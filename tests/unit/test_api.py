@@ -1994,6 +1994,86 @@ class ControlServerTests(unittest.TestCase):
         saved = self.repository.get_device_by_ipv4_address("192.168.50.178")
         self.assertEqual(saved.name, "MacBook-Pro")
 
+    def _save_unlabelled_client(self, name: str = "Client 192.168.50.178") -> None:
+        self.repository.save_device(
+            Device(
+                id="client-dc1ed53e974c",
+                name=name,
+                ipv4_address="192.168.50.178",
+                profile_id="slow",
+                mac_address="dc:1e:d5:3e:97:4c",
+            )
+        )
+        self.repository.save_connected_device_label(
+            mac_address="dc:1e:d5:3e:97:4c", display_name="Sam MacBook", device_type="laptop"
+        )
+
+    def test_group_members_carry_the_saved_label_as_display_name(self) -> None:
+        self._save_unlabelled_client()
+        self.repository.save_device_group(
+            DeviceGroup("family", "Family", ("alice", "client-dc1ed53e974c"), "slow")
+        )
+
+        _, _, body = self.server.response_for("/api/groups")
+        members = {item["id"]: item for item in json.loads(body)["groups"][0]["devices"]}
+
+        self.assertEqual(members["client-dc1ed53e974c"]["display_name"], "Sam MacBook")
+        self.assertEqual(members["alice"]["display_name"], "Alice's laptop")
+
+    def test_the_group_save_response_carries_the_saved_label(self) -> None:
+        self._save_unlabelled_client()
+
+        status, _, body = self.server.write_response_for(
+            "/api/groups",
+            {
+                "id": "family",
+                "name": "Family",
+                "device_ids": ["client-dc1ed53e974c"],
+                "profile_id": "slow",
+            },
+        )
+
+        self.assertEqual(status, 200, body)
+        member = json.loads(body)["group"]["devices"][0]
+        self.assertEqual(member["display_name"], "Sam MacBook")
+
+    def test_the_device_save_response_carries_the_saved_label(self) -> None:
+        self.repository.save_connected_device_label(
+            mac_address="dc:1e:d5:3e:97:4c", display_name="Sam MacBook", device_type="laptop"
+        )
+
+        status, _, body = self.server.write_response_for(
+            "/api/devices",
+            {
+                "id": "client-dc1ed53e974c",
+                "name": "Client 192.168.50.178",
+                "ipv4_address": "192.168.50.178",
+                "profile_id": "slow",
+                "mac_address": "dc:1e:d5:3e:97:4c",
+            },
+        )
+
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["device"]["display_name"], "Sam MacBook")
+
+    def test_the_apply_profile_response_carries_the_saved_label(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self._save_unlabelled_client(name="Alice phone")
+
+        status, _, body = self.server.write_response_for(
+            "/api/connected-devices/apply-profile",
+            {
+                "ipv4_address": "192.168.50.178",
+                "mac_address": "dc:1e:d5:3e:97:4c",
+                "profile_id": "slow",
+            },
+        )
+
+        self.assertEqual(status, 200, body)
+        device = json.loads(body)["device"]
+        self.assertEqual(device["name"], "Alice phone")
+        self.assertEqual(device["display_name"], "Sam MacBook")
+
 
 if __name__ == "__main__":
     unittest.main()
