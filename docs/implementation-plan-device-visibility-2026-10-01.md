@@ -395,24 +395,70 @@ bodies. The general-profile badge.
 
 ## 8. Sidebar status
 
-A compact block between the navigation and the footer.
+A compact block between the navigation and the footer. It is hidden until the
+admin token is accepted. Editing or clearing the token hides it and makes it
+forget everything it knew so a new check can never show data from before.
 
-- **General profile:** `Bad test · active` or `Bad test · paused` or `none`.
-- **Affected devices:** a count and a short list of display names with profile
-  names (five then "+N more") in a `<details>`. When the runtime state is
-  `applied` and the general profile is active the list is every connected client
-  that is not protected. When it is applied without a general profile the list is
-  the connected clients with their own profile. When the state is `reset` it says
-  `Profiles off`. Before the first token check it says nothing.
-- **Service lists:** one line `Service lists: A · B (every device)` when lists are
-  enabled and the state is applied.
-- All data is already polled (`/api/state` and `/api/general-profile` and
-  `/api/connected-devices` and `/api/service-lists`). No new server calls.
-- Laptop layout first. The phone layout stays on the later follow-up.
+**Inputs.** Five inputs that the page already loads: the runtime state from
+`/api/state` (with the `running` flag that says whether the scheduler keeps
+applying changes) and the general profile and the connected clients and the saved
+profiles and the service lists. No new endpoint. Every 5 seconds the page reads
+the connected clients and the general profile and the runtime state. The state is
+not read while the tab is hidden or a network action is busy. An answer that was
+asked for before a network action started is dropped. A failed Apply or Reset
+reads the state once so the block and the runtime line catch up. A reset from
+another tab or the command line shows on the next poll.
 
-**Tests.** A node test that drives the render function through each state:
-unknown and reset and applied with general and applied without and protected
-clients excluded and lists enabled.
+**Loading.** Until all five inputs have arrived the block shows one muted line
+`Loading…` instead of the three lines. A request that fails keeps that line and
+the failed panel shows its own error.
+
+**General profile line.**
+
+| Situation | Text |
+| --- | --- |
+| none saved | `General profile: none` |
+| running and the state is `applied` and the server says active | `General profile: Bad test · active` (green) |
+| running and the state is `unknown` (a saved change is settling) | `General profile: Bad test · active` (green) |
+| the state is `reset` | `General profile: Bad test · paused` |
+| anything else including a stale active flag | `General profile: Bad test · saved, not applied` |
+
+**Devices line.** The first matching row wins.
+
+| Situation | Text |
+| --- | --- |
+| the state is `reset` | `Profiles off` |
+| the state is `applying` or `resetting` | `Changing…` |
+| the state is `error` | `Last network action failed` |
+| the scheduler is not running | `Not started yet` |
+| the device list is unavailable (the scan failed or the Wi-Fi association status is unavailable) | `Connected devices unavailable` |
+| running with the general profile in effect | `N device affected` or `N devices affected` or `No connected device is affected` |
+| running without a general profile | `N device affected` or `N devices affected` or `No device has its own profile` or `No connected device is affected` |
+
+With the general profile in effect the list is every connected client that is
+verified and not protected. Without it the list is the connected clients that
+have a saved device and are not protected. Each shows its group profile or else its
+own profile. `No device has its own profile` is used when clients are connected
+and none of them has a saved device. `No connected device is affected` is used
+when nobody is connected or every client with a saved device is protected.
+Protected clients are never listed.
+
+Only a list of devices can be opened. It is a `<details>` that shows five names
+with their profile names and `+N more` and scrolls inside the block above 8rem.
+Every other text is a plain line with nothing to toggle.
+
+**Service lists line.** `Service lists: A · B (every unprotected device)` when the
+scheduler is running and the state is `applied` or `unknown` and a list is enabled.
+
+Laptop layout first. At 1280 by 800 the collapsed block is 49 px high with two
+lines. The phone layout stays on the later follow-up.
+
+**Tests.** Node tests run the real loaders with a fake page and check what the
+block shows when each input arrives last and while one is missing and when the
+device list is unavailable for each of its two causes and after locking. They also
+cover the state poll and the guards and the failed action. A browser journey
+signs in and applies a general profile and adds a service list and protects the
+client and resets from outside the page.
 
 ## 9. Copy router Wi-Fi name and password
 

@@ -84,10 +84,12 @@ from jittersim.engine.service import compile_stored_plan
 from jittersim.networking.applier import MAX_PROTECTED_MACS
 from jittersim.networking.helper import (
     HELPER_OUT_OF_DATE_MESSAGE,
+    WIFI_DETAILS_MISSING_MESSAGE,
     HelperClient,
     HelperClientError,
 )
 from jittersim.networking.router import (
+    ROUTER_CHECK_MESSAGES,
     safe_router_check_message,
     safe_router_import_message,
     safe_router_wifi_message,
@@ -96,6 +98,7 @@ from jittersim.networking.wifi_security import SECURITY_MODES
 from jittersim.api.router_operations import RouterOperations
 
 LOGGER = logging.getLogger(__name__)
+WIFI_COPY_BUSY_MESSAGE = "The router is busy right now. Try again in a moment."
 MAX_JSON_BODY_BYTES = 64 * 1024
 # One block or profile call may carry this many names.
 MAX_BATCH_DOMAINS = 64
@@ -146,6 +149,7 @@ WRITE_PATHS = frozenset(
         "/api/router/check",
         "/api/router/status",
         "/api/router/operation",
+        "/api/router/wifi-credentials",
         "/api/connected-devices/apply-profile",
         "/api/connected-device-labels",
         "/api/connected-device-labels/delete",
@@ -627,6 +631,8 @@ DASHBOARD_HTML = """<!doctype html>
     }
     .router-wifi-label { font-size: 0.85rem; font-weight: 550; }
     .router-wifi-status { margin: 0.2rem 0 0; font-size: 0.78rem; color: #b6c8db; }
+    .router-wifi-copy { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+    .sidebar .router-wifi-copy button { min-height: 2.4rem; padding: 0.35rem 0.5rem; font-size: 0.8rem; text-align: center; }
     .sidebar .router-wifi-toggle {
       display: grid; place-items: center; flex: 0 0 2.8rem; min-height: 2.75rem;
       padding: 0; border: 0; background: transparent; border-radius: 0.5rem;
@@ -686,21 +692,22 @@ DASHBOARD_HTML = """<!doctype html>
     .sidebar-nav a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     .nav-chip { padding: 0.05rem 0.45rem; border-radius: 999px; background: #243b57; color: #dcecff; font-size: 0.74rem; }
     .sidebar-status {
-      display: grid; gap: 0.4rem; padding: 0.6rem 0.65rem; border: 1px solid var(--line);
-      border-radius: 0.5rem; font-size: 0.8rem; line-height: 1.35;
+      display: grid; gap: 0.25rem; padding: 0.35rem 0.6rem; border: 1px solid var(--line);
+      border-radius: 0.5rem; font-size: 0.76rem; line-height: 1.3;
     }
     .sidebar-status p, .sidebar-status ul { margin: 0; }
     .sidebar .status-line { color: var(--muted); overflow-wrap: anywhere; }
     .sidebar .status-line.status-on { color: #8de2bc; }
     .sidebar-status .status-devices { margin: 0; padding: 0; border: 0; }
     .status-devices summary { color: #e7eef8; font-weight: 550; cursor: pointer; }
-    .status-devices.is-empty summary { color: var(--muted); font-weight: 400; cursor: default; list-style: none; }
-    .status-devices.is-empty summary::-webkit-details-marker { display: none; }
-    .status-devices ul { display: grid; gap: 0.3rem; margin-top: 0.4rem; padding: 0; list-style: none; }
-    .status-devices li { font-size: 0.76rem; overflow-wrap: anywhere; }
+    .status-devices ul {
+      display: grid; gap: 0.25rem; max-height: 8rem; overflow-y: auto; margin-top: 0.3rem;
+      padding: 0; list-style: none;
+    }
+    .status-devices li { font-size: 0.74rem; overflow-wrap: anywhere; }
     .status-device-name { color: #e7eef8; }
-    .status-device-profile, .status-more { color: var(--muted); font-size: 0.74rem; }
-    .status-more { margin-top: 0.3rem; }
+    .status-device-profile, .status-more { color: var(--muted); font-size: 0.72rem; }
+    .status-more { margin-top: 0.4rem; }
     .sidebar-footer { display: grid; gap: 0.6rem; margin-top: auto; }
     .sidebar-operate, .sidebar-actions { display: grid; gap: 0.5rem; }
     .sidebar-credentials { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
@@ -865,7 +872,8 @@ DASHBOARD_HTML = """<!doctype html>
     </nav>
     <section id="sidebar-status" class="sidebar-status" aria-label="Current status" hidden>
       <p id="status-general" class="status-line"></p>
-      <details id="status-devices" class="status-devices">
+      <p id="status-devices-plain" class="status-line" hidden></p>
+      <details id="status-devices" class="status-devices" hidden>
         <summary id="status-devices-summary"></summary>
         <ul id="status-devices-list"></ul>
         <p id="status-devices-more" class="status-more" hidden></p>
@@ -899,6 +907,10 @@ DASHBOARD_HTML = """<!doctype html>
             aria-checked="false" aria-labelledby="router-wifi-label" aria-describedby="router-wifi-status" data-unknown="true" disabled>
             <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
           </button>
+        </div>
+        <div class="router-wifi-copy">
+          <button id="copy-wifi-name" type="button">Copy Wi-Fi name</button>
+          <button id="copy-wifi-password" type="button">Copy Wi-Fi password</button>
         </div>
       </div>
       <div class="sidebar-credentials">
@@ -2038,6 +2050,7 @@ DASHBOARD_HTML = """<!doctype html>
     let routerPasswordRejected = false;
     let routerPasswordChecking = false;
     let routerActionPending = false;
+    let routerCopyPending = false;
     let routerWifiEnabled = null;
     let routerWifiCheckedAt = null;
     let routerWifiPolling = false;
@@ -2289,16 +2302,24 @@ DASHBOARD_HTML = """<!doctype html>
     window.setInterval(syncRememberedCredentials, 60000);
     let profiles = [];
     let generalProfileState = null;
+    // Each input of the sidebar block counts as loaded once it is not null.
+    // The profiles and the service lists start empty so they have a flag.
     let lastRuntimeState = null;
     let serviceListsState = [];
+    let serviceListsLoaded = false;
+    let profilesLoaded = false;
     let savedProfileBusy = null;
     let unaffectedMacs = [];
     let applyBusy = false;
     let networkActionBusy = false;
+    // Counts the network actions started. A state answer that was asked for before an
+    // action started describes the old network so loadState drops it.
+    let networkActionRevision = 0;
     let groups = [];
     let savedDevices = [];
     let connectedClients = [];
     let lastConnectedData = null;
+    let connectedClientsAvailable = false;
     const connectedDrafts = new Map();
     const clearConnectedDrafts = new Set();
     let observedDomainsByDevice = {};
@@ -2782,11 +2803,24 @@ DASHBOARD_HTML = """<!doctype html>
       renderSavedProfiles();
     }
 
-    // Works out the three sidebar lines from data the page already holds.
+    // Works out the sidebar lines from data the page already holds.
     // A saved change sets the observed state to "unknown" and the running scheduler turns
     // it back to "applied" within about a second. So "unknown" while running still means
     // that devices are affected and a saved general profile is taking effect.
     function sidebarStatus(input) {
+      const visible = !!input.adminTokenVerified;
+      const loaded = input.loaded || {};
+      const ready = ["runtime", "general", "clients", "profiles", "lists"]
+        .every((name) => loaded[name] === true);
+      if (!ready) {
+        return {
+          visible,
+          loading: true,
+          general: {text: "Loading…", tone: "muted"},
+          devices: {summary: "", items: [], more: 0},
+          lists: {text: ""}
+        };
+      }
       const state = input.runtimeState || "unknown";
       const running = input.running === true;
       const generalState = input.generalState || null;
@@ -2795,18 +2829,17 @@ DASHBOARD_HTML = """<!doctype html>
       const clients = input.clients || [];
       const serviceLists = input.serviceLists || [];
       const steady = running && (state === "applied" || state === "unknown");
-      const generalActive = !!generalProfile && (generalState.active === true ||
-        (running && state === "unknown"));
+      const generalInEffect = !!generalProfile && steady &&
+        (generalState.active === true || state === "unknown");
       const generalName = generalProfile ? generalProfile.name || generalProfile.id : "";
 
       let general = {text: "General profile: none", tone: "muted"};
       if (generalProfile) {
-        const observed = generalState.state && generalState.state.observed_state;
-        general = generalActive
+        general = generalInEffect
           ? {text: "General profile: " + generalName + " · active", tone: "on"}
           : {
               text: "General profile: " + generalName + " · " +
-                (observed === "reset" ? "paused" : "saved, not applied"),
+                (state === "reset" ? "paused" : "saved, not applied"),
               tone: "muted"
             };
       }
@@ -2821,13 +2854,15 @@ DASHBOARD_HTML = """<!doctype html>
         devices = quiet("Last network action failed");
       } else if (!running) {
         devices = quiet("Not started yet");
+      } else if (input.clientsAvailable !== true) {
+        devices = quiet("Connected devices unavailable");
       } else {
         const nameOf = (client) => client.display_name || client.mac_address || "Unknown device";
         const profileNameOf = (id) => {
           const match = profiles.find((profile) => profile.id === id);
           return match ? match.name || id : id || "";
         };
-        const affected = generalActive
+        const affected = generalInEffect
           ? clients
               .filter((client) => !client.unaffected && client.association_verified !== false)
               .map((client) => ({name: nameOf(client), profile: generalName}))
@@ -2837,10 +2872,12 @@ DASHBOARD_HTML = """<!doctype html>
                 name: nameOf(client),
                 profile: profileNameOf(client.group_profile_id || client.assigned_profile_id)
               }));
+        const unassigned = !generalInEffect && clients.length > 0 &&
+          !clients.some((client) => client.assigned_device_id);
         devices = {
           summary: affected.length
             ? affected.length + (affected.length === 1 ? " device affected" : " devices affected")
-            : "No connected device is affected",
+            : unassigned ? "No device has its own profile" : "No connected device is affected",
           items: affected.slice(0, 5),
           more: Math.max(0, affected.length - 5)
         };
@@ -2850,47 +2887,83 @@ DASHBOARD_HTML = """<!doctype html>
         ? serviceLists.filter((serviceList) => serviceList.enabled).map((serviceList) => serviceList.name)
         : [];
       return {
-        visible: !!input.adminTokenVerified,
+        visible,
+        loading: false,
         general,
         devices,
         lists: {
-          text: enabledLists.length ? "Service lists: " + enabledLists.join(" · ") + " (every device)" : ""
+          text: enabledLists.length
+            ? "Service lists: " + enabledLists.join(" · ") + " (every unprotected device)"
+            : ""
         }
       };
     }
 
+    // Forgets everything the block was built from so that a new check of the token cannot
+    // show data from before.
+    function clearSidebarInputs() {
+      lastRuntimeState = null;
+      generalProfileState = null;
+      lastConnectedData = null;
+      connectedClients = [];
+      connectedClientsAvailable = false;
+      serviceListsState = [];
+      serviceListsLoaded = false;
+      profilesLoaded = false;
+    }
+
     function renderSidebarStatus() {
-      const block = element("sidebar-status");
       const view = sidebarStatus({
         adminTokenVerified,
+        loaded: {
+          runtime: lastRuntimeState !== null,
+          general: generalProfileState !== null,
+          clients: lastConnectedData !== null,
+          profiles: profilesLoaded,
+          lists: serviceListsLoaded
+        },
         runtimeState: lastRuntimeState ? lastRuntimeState.observed_state : null,
         running: !!lastRuntimeState && lastRuntimeState.running === true,
         generalState: generalProfileState,
         profiles,
         clients: connectedClients,
+        clientsAvailable: lastConnectedData !== null && connectedClientsAvailable,
         serviceLists: serviceListsState
       });
-      block.hidden = !view.visible;
+      element("sidebar-status").hidden = !view.visible;
       renderApplySummary();
       renderApplyButton();
       const generalLine = element("status-general");
       const devicesBlock = element("status-devices");
+      const devicesPlain = element("status-devices-plain");
+      const devicesSummary = element("status-devices-summary");
       const list = element("status-devices-list");
       const more = element("status-devices-more");
       const listsLine = element("status-lists");
       if (!view.visible) {
         // Nothing private stays in the page while the dashboard is locked.
+        clearSidebarInputs();
         generalLine.textContent = "";
-        element("status-devices-summary").textContent = "";
+        generalLine.className = "status-line";
+        devicesBlock.hidden = true;
+        devicesPlain.hidden = true;
+        devicesPlain.textContent = "";
+        devicesSummary.textContent = "";
         list.replaceChildren();
+        more.hidden = true;
         more.textContent = "";
+        listsLine.hidden = true;
         listsLine.textContent = "";
         return;
       }
       generalLine.textContent = view.general.text;
       generalLine.className = "status-line" + (view.general.tone === "on" ? " status-on" : "");
-      element("status-devices-summary").textContent = view.devices.summary;
-      devicesBlock.classList.toggle("is-empty", view.devices.items.length === 0);
+      // Only a list of devices opens and closes. Anything else is one plain line.
+      const hasItems = view.devices.items.length > 0;
+      devicesBlock.hidden = !hasItems;
+      devicesSummary.textContent = hasItems ? view.devices.summary : "";
+      devicesPlain.hidden = hasItems || view.loading;
+      devicesPlain.textContent = hasItems || view.loading ? "" : view.devices.summary;
       list.replaceChildren(...view.devices.items.map((item) => {
         const row = document.createElement("li");
         const name = document.createElement("span");
@@ -3065,6 +3138,8 @@ DASHBOARD_HTML = """<!doctype html>
       const devices = data.devices || [];
       connectedClients = devices;
       lastConnectedData = data;
+      connectedClientsAvailable = data.available !== false &&
+        data.association_status_available !== false;
       renderSidebarStatus();
       const currentMacs = new Set(devices.map((device) => device.mac_address));
       for (const mac of connectedDrafts.keys()) if (!currentMacs.has(mac)) connectedDrafts.delete(mac);
@@ -4482,6 +4557,7 @@ DASHBOARD_HTML = """<!doctype html>
     function renderServiceLists(data) {
       const lists = data.service_lists || [];
       serviceListsState = lists;
+      serviceListsLoaded = true;
       renderSidebarStatus();
       const container = element("service-list-list");
       element("service-list-count").textContent = lists.length +
@@ -4907,6 +4983,7 @@ DASHBOARD_HTML = """<!doctype html>
     async function loadProfiles() {
       const data = await request("/api/profiles", "GET");
       profiles = data.profiles;
+      profilesLoaded = true;
       renderSidebarStatus();
       element("profiles").textContent = JSON.stringify(profiles, null, 2);
       [
@@ -5191,7 +5268,9 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     async function loadState() {
+      const revision = networkActionRevision;
       const data = await request("/api/state", "GET");
+      if (revision !== networkActionRevision) return;
       element("state").textContent = JSON.stringify(data.state, null, 2);
       renderRuntimeSummary(data.state);
     }
@@ -5368,7 +5447,6 @@ DASHBOARD_HTML = """<!doctype html>
         if (tokenRevision !== adminTokenRevision) return;
         if (result.ok) {
           adminTokenVerified = true;
-          renderSidebarStatus();
           await refresh();
           if (tokenRevision !== adminTokenRevision) return;
           await loadTrafficSettings();
@@ -5432,6 +5510,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     function setActionBusy(busy, path) {
       networkActionBusy = busy;
+      if (busy) networkActionRevision += 1;
       const applyButton = element("apply-button");
       const resetButton = element("reset-button");
       applyButton.disabled = busy || !helperConfigured;
@@ -5470,6 +5549,8 @@ DASHBOARD_HTML = """<!doctype html>
         refreshAfterSuccess(done + (data.warning ? " " + data.warning : ""));
       } catch (error) {
         showMessage(error.message, "error");
+        // A failed action can still have changed the state so the page reads it again.
+        loadPrivateDataPanel("state", loadState);
       } finally {
         setActionBusy(false, path);
       }
@@ -6250,13 +6331,149 @@ DASHBOARD_HTML = """<!doctype html>
       }
     });
 
+    // Put text on the clipboard. The text may still be on its way: the browser write starts now
+    // because Safari only allows a clipboard write inside the click that asked for it.
+    async function copyText(textOrPromise, env) {
+      const scope = env || {
+        navigator: typeof navigator === "undefined" ? undefined : navigator,
+        document: typeof document === "undefined" ? undefined : document
+      };
+      const clipboard = scope.navigator && scope.navigator.clipboard;
+      const text = Promise.resolve(textOrPromise).then((value) => {
+        if (typeof value !== "string" || value === "") throw new Error("Nothing to copy");
+        return value;
+      });
+      const blob = text.then((value) => new Blob([value], {type: "text/plain"}));
+      blob.catch(() => {});
+      if (clipboard && typeof clipboard.write === "function" && typeof ClipboardItem === "function") {
+        try {
+          await clipboard.write([new ClipboardItem({"text/plain": blob})]);
+          return "clipboard-item";
+        } catch (error) {
+          // Fall through. When the text itself failed the next line throws that error.
+        }
+      }
+      const value = await text;
+      if (clipboard && typeof clipboard.writeText === "function") {
+        try {
+          await clipboard.writeText(value);
+          return "write-text";
+        } catch (error) {
+          // Fall through to the oldest method.
+        }
+      }
+      const doc = scope.document;
+      if (doc && doc.body && typeof doc.createElement === "function" && typeof doc.execCommand === "function") {
+        const area = doc.createElement("textarea");
+        const previous = doc.activeElement;
+        let copied = false;
+        area.setAttribute("readonly", "");
+        area.setAttribute("aria-hidden", "true");
+        area.style.position = "fixed";
+        area.style.left = "-9999px";
+        area.value = value;
+        doc.body.appendChild(area);
+        try {
+          area.select();
+          if (typeof area.setSelectionRange === "function") area.setSelectionRange(0, value.length);
+          copied = doc.execCommand("copy") === true;
+        } catch (error) {
+          copied = false;
+        } finally {
+          area.value = "";
+          doc.body.removeChild(area);
+          if (previous && typeof previous.focus === "function") previous.focus({preventScroll: true});
+        }
+        if (copied) return "exec-command";
+      }
+      throw new Error("Copy failed");
+    }
+
+    function routerCopyState(input) {
+      const needsPassword = !input.hasRouterPassword;
+      const noun = input.kind === "password" ? "password" : "name";
+      let disabled = true;
+      let title = "Copy the router Wi-Fi " + noun;
+      if (!input.adminTokenVerified) title = "Check the admin token first";
+      else if (!input.helperConfigured) title = "Needs the Pi helper";
+      else if (input.routerPasswordRejected) title = "Router password rejected. Enter it again.";
+      else if (input.busy) title = "Working…";
+      else {
+        disabled = false;
+        if (needsPassword) title = "Enter the router password first";
+      }
+      return {disabled: disabled, title: title, needsPassword: needsPassword};
+    }
+
+    function copyRouterWifi(kind) {
+      const wantPassword = kind === "password";
+      const button = element(wantPassword ? "copy-wifi-password" : "copy-wifi-name");
+      if (button.disabled || routerCopyPending || routerActionPending || routerPasswordChecking) return;
+      if (!requireAdminToken(button)) return;
+      const routerPassword = element("router-admin-password").value;
+      if (!routerPassword) {
+        const note = "Enter the router admin password first.";
+        element("credential-router-status").textContent = note;
+        showMessage(note, "error");
+        openCredentials("router", button);
+        return;
+      }
+      if (routerPasswordBlocked(button)) return;
+      const passwordRevision = routerPasswordRevision;
+      const label = wantPassword ? "Copy Wi-Fi password" : "Copy Wi-Fi name";
+      routerCopyPending = true;
+      setButtonBusy(button, true);
+      updateCredentialStatus();
+      // The Wi-Fi value only travels through this promise on its way to the clipboard.
+      const pending = request("/api/router/wifi-credentials", "POST", {
+        admin_password: routerPassword, include_password: wantPassword
+      }).then((response) => wantPassword ? response.result.password : response.result.ssid);
+      return copyText(pending).then(() => {
+        if (passwordRevision === routerPasswordRevision) {
+          routerPasswordVerified = true;
+          routerPasswordRejected = false;
+        }
+        if (button.copiedTimer) window.clearTimeout(button.copiedTimer);
+        button.textContent = "Copied";
+        button.copiedTimer = window.setTimeout(() => {
+          button.textContent = label;
+          button.copiedTimer = null;
+        }, 2000);
+        showMessage(wantPassword ?
+          "Router Wi-Fi password copied. It stays on your clipboard until you copy something else." :
+          "Router Wi-Fi name copied.", "success");
+      }, (error) => {
+        if (passwordRevision === routerPasswordRevision && isRouterLoginFailure(error)) {
+          routerPasswordVerified = false;
+          routerPasswordRejected = true;
+        }
+        const reason = error && error.message === "Copy failed" ? "The browser did not allow it." :
+          (error && error.message) || "Try again.";
+        showMessage("Could not copy. " + reason, "error");
+      }).finally(() => {
+        routerCopyPending = false;
+        setButtonBusy(button, false);
+        updateCredentialStatus();
+      });
+    }
+
     function renderRouterWifi() {
       const button = element("router-wifi-toggle");
       const status = element("router-wifi-status");
       const password = element("router-admin-password").value;
       const fresh = routerWifiCheckedAt && Date.now() / 1000 - routerWifiCheckedAt < 45;
       const known = typeof routerWifiEnabled === "boolean" && fresh && adminTokenVerified && !routerPasswordRejected;
-      const busy = routerActionPending || routerPasswordChecking || routerWifiRemoteBusy || routerWifiPolling;
+      const busy = routerActionPending || routerPasswordChecking || routerWifiRemoteBusy || routerWifiPolling ||
+        routerCopyPending;
+      [["copy-wifi-name", "name"], ["copy-wifi-password", "password"]].forEach(([id, kind]) => {
+        const copyState = routerCopyState({
+          helperConfigured: helperConfigured, adminTokenVerified: adminTokenVerified,
+          routerPasswordRejected: routerPasswordRejected, busy: busy,
+          hasRouterPassword: Boolean(password), kind: kind
+        });
+        element(id).disabled = copyState.disabled;
+        element(id).title = copyState.title;
+      });
       element("sync-router-ap").disabled = busy;
       element("check-router-password").disabled = busy;
       button.disabled = !helperConfigured || !known || busy;
@@ -6275,13 +6492,14 @@ DASHBOARD_HTML = """<!doctype html>
       if (routerWifiTimer !== null) window.clearTimeout(routerWifiTimer);
       routerWifiTimer = null;
       if (document.hidden || !adminTokenVerified || !helperConfigured || routerPasswordRejected ||
-          !element("router-admin-password").value || routerActionPending || routerPasswordChecking || routerWifiPolling) return;
+          !element("router-admin-password").value || routerActionPending || routerPasswordChecking || routerWifiPolling ||
+          routerCopyPending) return;
       routerWifiTimer = window.setTimeout(pollRouterWifi, delay);
     }
 
     async function pollRouterWifi() {
       routerWifiTimer = null;
-      if (document.hidden || !adminTokenVerified || routerPasswordRejected || routerActionPending || routerPasswordChecking || routerWifiPolling) return;
+      if (document.hidden || !adminTokenVerified || routerPasswordRejected || routerActionPending || routerPasswordChecking || routerWifiPolling || routerCopyPending) return;
       const password = element("router-admin-password").value;
       if (!password || !helperConfigured) return;
       const passwordRevision = routerPasswordRevision;
@@ -6342,7 +6560,7 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     async function routerAction(path, body, message, button) {
-      if (routerActionPending || routerPasswordChecking) return;
+      if (routerActionPending || routerPasswordChecking || routerCopyPending) return;
       if (!requireAdminToken(button)) return;
       const passwordRevision = routerPasswordRevision;
       const password = element("router-admin-password").value;
@@ -6424,7 +6642,7 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     async function checkRouterPassword() {
-      if (routerActionPending || routerPasswordChecking) return;
+      if (routerActionPending || routerPasswordChecking || routerCopyPending) return;
       const button = element("check-router-password");
       const status = element("credential-router-status");
       if (!requireAdminToken(button)) return;
@@ -6468,6 +6686,8 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     element("check-router-password").addEventListener("click", checkRouterPassword);
+    element("copy-wifi-name").addEventListener("click", () => copyRouterWifi("name"));
+    element("copy-wifi-password").addEventListener("click", () => copyRouterWifi("password"));
 
     element("sync-router-ap").addEventListener("click", (event) => {
       routerAction("/api/router/sync-ap", {}, "Checking the router Wi-Fi security...", event.currentTarget);
@@ -6489,18 +6709,19 @@ DASHBOARD_HTML = """<!doctype html>
     element("random-website-days").addEventListener("change", loadRandomWebsiteAnalytics);
     element("random-website-refresh").addEventListener("click", loadRandomWebsiteAnalytics);
 
-    window.setInterval(() => {
-      if (adminTokenVerified && !networkActionBusy) {
-        loadConnectedDevices();
-        loadPrivateDataPanel("general-profile-status", loadGeneralProfile);
-      }
-    }, 5000);
+    function pollLiveStatus() {
+      if (!adminTokenVerified || networkActionBusy) return;
+      loadConnectedDevices();
+      loadPrivateDataPanel("general-profile-status", loadGeneralProfile);
+      // Another tab or the command line can reset the network so the state is read again.
+      if (!document.hidden) loadPrivateDataPanel("state", loadState);
+    }
+    window.setInterval(pollLiveStatus, 5000);
     window.setInterval(() => { if (adminTokenVerified) loadTimers(); }, 5000);
     window.setInterval(() => { if (adminTokenVerified) loadProgressions(); }, 5000);
     window.setInterval(() => { if (adminTokenVerified) loadQuotas(); }, 5000);
     window.setInterval(() => { if (adminTokenVerified) loadObservations(); }, 15000);
 
-    renderSidebarStatus();
     loadHealth().catch((error) => {
       showMessage(error.message, "error");
     });
@@ -8344,6 +8565,10 @@ class ControlServer(HTTPServer):
             if not payload["enabled"] and payload.get("confirm_disable") is not True:
                 return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
                     {"error": "turning off router Wi-Fi requires confirmation"})
+        if path == "/api/router/wifi-credentials":
+            # Never a background operation: those keep their result for minutes and this one
+            # carries the Wi-Fi password.
+            return self._router_response_for(path, payload)
         if payload.get("background") is True:
             fields = {key: payload[key] for key in (
                 "admin_password", "enabled", "confirm_disable", "expected_fingerprint", "confirm_legacy") if key in payload}
@@ -8365,6 +8590,33 @@ class ControlServer(HTTPServer):
                 return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
                     {"error": safe_router_check_message(str(error))})
             return HTTPStatus.OK, "application/json", _json_bytes({"result": result})
+        if path == "/api/router/wifi-credentials":
+            include_password = payload.get("include_password", False)
+            if type(include_password) is not bool:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid router Wi-Fi request"})
+            reader = getattr(self.helper_client, "read_router_wifi_credentials", None)
+            try:
+                if not callable(reader):
+                    raise HelperClientError(
+                        "The networking helper is out of date. Restart the JitterSim services "
+                        "or reinstall the release.")
+                found = reader(admin_password=payload["admin_password"],
+                               include_password=include_password)
+                # Pass on only what this request asked for whatever the helper sent.
+                result = {"ssid": found["ssid"]}
+                if include_password:
+                    result["password"] = found["password"]
+                if not all(isinstance(value, str) for value in result.values()):
+                    raise TypeError("invalid Wi-Fi details")
+            except HelperClientError as error:
+                message = _safe_wifi_copy_message(error)
+            except (KeyError, TypeError):
+                message = ROUTER_CHECK_MESSAGES["failed"]
+            else:
+                return HTTPStatus.OK, "application/json", _json_bytes({"result": result})
+            LOGGER.warning("router Wi-Fi copy failed: %s", message)
+            return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes({"error": message})
         if path in ("/api/router/sync-ap", "/api/router/preview-ap"):
             if self.helper_client is None:
                 return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
@@ -9418,6 +9670,16 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
 
 class RequestError(ValueError):
     """Raised when an HTTP request body cannot be safely decoded."""
+
+
+def _safe_wifi_copy_message(error: HelperClientError) -> str:
+    """Name the two copy-only answers and let nothing else through but the router messages."""
+
+    if error.reason == "helper-busy":
+        return WIFI_COPY_BUSY_MESSAGE
+    if str(error) == WIFI_DETAILS_MISSING_MESSAGE:
+        return WIFI_DETAILS_MISSING_MESSAGE
+    return safe_router_check_message(str(error))
 
 
 def _impairment_from_payload(payload: Any) -> Impairment:

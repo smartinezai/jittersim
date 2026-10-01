@@ -27,6 +27,33 @@ SERVICE_DOWNLOAD_MARK_BASE = 0x20000000
 SERVICE_SET_SIZE = 2048
 
 
+def queue_band(mark: int) -> str:
+    """Return the traffic class number of a mark's queue as tc reads it.
+
+    Band 1 carries ordinary traffic so a mark's queue sits one above it. tc reads
+    a class minor number as hexadecimal while `prio bands` counts in decimal so
+    the band must be written in hex or every class above 9 lands on the wrong one.
+    """
+
+    return format(mark + 1, "x")
+
+
+def queue_parent(mark: int) -> str:
+    """Return the class a mark's queue hangs from and its filter points at."""
+
+    return ROOT_HANDLE + queue_band(mark)
+
+
+def queue_handle(mark: int) -> str:
+    """Return the handle of a mark's child queue.
+
+    tc reads the digits as a hexadecimal major number and prints them back
+    unchanged. Marks of 1 and above never reach the root handle `10:`.
+    """
+
+    return f"{mark + 10}:"
+
+
 def _render_set(values: Sequence[object]) -> str:
     return "{ " + ", ".join(str(value) for value in values) + " }"
 
@@ -349,8 +376,6 @@ def _render_tc_commands(
         ),
     ]
     for queue in queues:
-        band = str(queue.mark + 1)
-        child_handle = f"{queue.mark + 10}:"
         commands.append(
             Command(
                 executable="tc",
@@ -360,9 +385,9 @@ def _render_tc_commands(
                     "dev",
                     interface,
                     "parent",
-                    f"{ROOT_HANDLE}{band}",
+                    queue_parent(queue.mark),
                     "handle",
-                    child_handle,
+                    queue_handle(queue.mark),
                 ),
                 purpose=f"clear the previous queue for device {queue.device_id} on {interface}",
                 ignore_failure=True,
@@ -371,8 +396,6 @@ def _render_tc_commands(
     # Old sibling queues can prevent the kernel from accepting duplication.
     # Clear them all before installing any replacement queues.
     for queue in queues:
-        band = str(queue.mark + 1)
-        child_handle = f"{queue.mark + 10}:"
         if queue.impairment != Impairment():
             commands.append(
                 Command(
@@ -383,9 +406,9 @@ def _render_tc_commands(
                         "dev",
                         interface,
                         "parent",
-                        f"{ROOT_HANDLE}{band}",
+                        queue_parent(queue.mark),
                         "handle",
-                        child_handle,
+                        queue_handle(queue.mark),
                         *_format_impairment_arguments(queue),
                     ),
                     purpose=(
@@ -404,9 +427,9 @@ def _render_tc_commands(
                         "dev",
                         interface,
                         "parent",
-                        f"{ROOT_HANDLE}{band}",
+                        queue_parent(queue.mark),
                         "handle",
-                        child_handle,
+                        queue_handle(queue.mark),
                         "fq_codel",
                     ),
                     purpose=(
@@ -434,7 +457,7 @@ def _render_tc_commands(
                         str(queue.mark),
                         "fw",
                         "flowid",
-                        f"{ROOT_HANDLE}{band}",
+                        queue_parent(queue.mark),
                     ),
                     purpose=f"route {protocol} mark {queue.mark} on {interface}",
                 )

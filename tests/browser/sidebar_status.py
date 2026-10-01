@@ -30,6 +30,12 @@ def start_fixture():
         return process, int(process.stdout.readline().strip())
 
 
+def devices_line(page):
+    """The devices text: the summary of a list or the plain line when there is no list."""
+
+    return page.locator("#status-devices-plain, #status-devices-summary").locator("visible=true")
+
+
 def wait_for_automatic_token_check(page):
     expect(page.locator("#message")).to_contain_text("Token accepted. Diagnostics loaded.")
 
@@ -79,8 +85,12 @@ def check_width(browser, width, height):
         # signed in with nothing applied yet
         expect(status).to_be_visible()
         expect(page.locator("#status-general")).to_have_text("General profile: none")
-        expect(page.locator("#status-devices-summary")).to_have_text("Not started yet")
+        expect(devices_line(page)).to_have_text("Not started yet")
         expect(page.locator("#status-lists")).to_be_hidden()
+        # nothing to open when there is no list of devices
+        expect(page.locator("#status-devices")).to_be_hidden()
+        # the collapsed block stays small so that the footer buttons keep their place
+        assert status.bounding_box()["height"] <= 52, status.bounding_box()
 
         # the general profile reaches the one connected client
         expect(page.locator("#general-profile-select")).to_be_enabled()
@@ -89,14 +99,37 @@ def check_width(browser, width, height):
         expect(page.locator("#status-general")).to_have_text(
             f"General profile: {PROFILE_NAME} · active"
         )
-        expect(page.locator("#status-devices-summary")).to_have_text("1 device affected")
+        expect(devices_line(page)).to_have_text("1 device affected")
         page.locator("#status-devices-summary").click()
         expect(page.locator("#status-devices-list li")).to_have_count(1)
         expect(page.locator("#status-devices-list li")).to_contain_text(CLIENT_NAME)
         expect(page.locator("#status-devices-list li")).to_contain_text(PROFILE_NAME)
+        # a long list scrolls inside the block
+        limits = page.locator("#status-devices-list").evaluate(
+            "(node) => [getComputedStyle(node).maxHeight, getComputedStyle(node).overflowY]"
+        )
+        assert limits[0] == "128px" and limits[1] == "auto", limits
         page.wait_for_timeout(300)
         page.locator(".sidebar").screenshot(path=f"test-results/sidebar-status-{width}.png")
         assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
+
+        # an enabled service list shows on its own line
+        post(
+            "/api/service-lists",
+            {
+                "id": "video",
+                "name": "Video",
+                "profile_id": "slow",
+                "services": [],
+                "hostnames": ["video.example.com"],
+                "enabled": True,
+            },
+        )
+        page.reload()
+        wait_for_automatic_token_check(page)
+        expect(page.locator("#status-lists")).to_have_text(
+            "Service lists: Video (every unprotected device)"
+        )
 
         # A saved change sets the observed state to unknown for about a second while the
         # scheduler keeps running. The answer must stay the same during that second.
@@ -116,7 +149,7 @@ def check_width(browser, width, height):
         expect(page.locator("#status-general")).to_have_text(
             f"General profile: {PROFILE_NAME} · active"
         )
-        expect(page.locator("#status-devices-summary")).to_have_text("1 device affected")
+        expect(devices_line(page)).to_have_text("1 device affected")
         page.unroute("**/api/state", state_route)
         page.unroute("**/api/general-profile", general_route)
 
@@ -124,29 +157,42 @@ def check_width(browser, width, height):
         post("/api/unaffected-devices", {"mac_address": MAC_ADDRESS, "display_name": CLIENT_NAME})
         page.reload()
         wait_for_automatic_token_check(page)
-        expect(page.locator("#status-devices-summary")).to_have_text(
-            "No connected device is affected"
-        )
+        expect(devices_line(page)).to_have_text("No connected device is affected")
+        expect(page.locator("#status-devices")).to_be_hidden()
         expect(page.locator("#status-devices-list li")).to_have_count(0)
         expect(status).not_to_contain_text(CLIENT_NAME)
         page.wait_for_timeout(300)
         page.locator(".sidebar").screenshot(path=f"test-results/sidebar-status-protected-{width}.png")
 
+        # A reset from another tab or the command line shows up on the next poll.
+        post("/api/reset", {})
+        expect(devices_line(page)).to_have_text("Profiles off", timeout=9000)
+        expect(page.locator("#status-general")).to_have_text(
+            f"General profile: {PROFILE_NAME} · paused"
+        )
+        expect(page.locator("#status-lists")).to_be_hidden()
+        post("/api/apply", {})
+        expect(devices_line(page)).to_have_text("No connected device is affected", timeout=9000)
+        expect(page.locator("#status-general")).to_have_text(
+            f"General profile: {PROFILE_NAME} · active"
+        )
+
         # turning every profile off
         page.locator("#panic-button").click()
-        expect(page.locator("#status-devices-summary")).to_have_text("Profiles off")
+        expect(devices_line(page)).to_have_text("Profiles off")
         expect(page.locator("#status-general")).to_have_text(
             f"General profile: {PROFILE_NAME} · paused"
         )
         page.reload()
         wait_for_automatic_token_check(page)
-        expect(page.locator("#status-devices-summary")).to_have_text("Profiles off")
+        expect(devices_line(page)).to_have_text("Profiles off")
 
         # clearing the token takes the block and the names out of the page
         page.locator("#open-admin-credentials").click()
         page.locator("#clear-admin-token").click()
         expect(status).to_be_hidden()
         expect(page.locator("#status-general")).to_have_text("")
+        expect(page.locator("#status-devices-plain")).to_have_text("")
         expect(page.locator("#status-devices-summary")).to_have_text("")
 
         assert not errors, errors

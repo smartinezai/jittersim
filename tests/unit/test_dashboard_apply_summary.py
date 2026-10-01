@@ -186,6 +186,10 @@ let savedDevices = [];
 let groups = [];
 let unaffectedMacs = [];
 let applyBusy = false;
+let lastConnectedData = null;
+let connectedClientsAvailable = false;
+let serviceListsLoaded = true;
+let profilesLoaded = true;
 """
 
 

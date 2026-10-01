@@ -16,28 +16,35 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="Node.js is required to run
 def served_function():
     script = re.search(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL).group(1)
     start = script.index("function sidebarStatus(")
-    return script[start : script.index("function renderRuntimeSummary(", start)]
+    return script[start : script.index("function renderSidebarStatus(", start)]
 
+
+ALL_LOADED = {"runtime": True, "general": True, "clients": True, "profiles": True, "lists": True}
 
 BASE = {
     "adminTokenVerified": True,
+    "loaded": ALL_LOADED,
     "runtimeState": "applied",
     "running": True,
     "generalState": None,
     "profiles": [],
     "clients": [],
+    "clientsAvailable": True,
     "serviceLists": [],
 }
 
 
-def status(**overrides):
-    data = {**BASE, **overrides}
+def run_function(data):
     program = served_function() + "\nconsole.log(JSON.stringify(sidebarStatus(%s)));" % json.dumps(
         data
     )
     result = subprocess.run([NODE, "-"], input=program, text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
+
+
+def status(**overrides):
+    return run_function({**BASE, **overrides})
 
 
 def general(name="Shared slow", active=False, observed="applied"):
@@ -70,10 +77,38 @@ def test_empty_input_gives_quiet_lines():
     result = status(runtimeState=None, running=False)
     assert result == {
         "visible": True,
+        "loading": False,
         "general": {"text": "General profile: none", "tone": "muted"},
         "devices": {"summary": "Not started yet", "items": [], "more": 0},
         "lists": {"text": ""},
     }
+
+
+@pytest.mark.parametrize("missing", sorted(ALL_LOADED))
+def test_a_single_loading_line_shows_while_any_input_is_not_loaded(missing):
+    result = status(
+        loaded={**ALL_LOADED, missing: False},
+        generalState=general(active=True),
+        clients=[client("Laptop", "02:00:00:00:00:01")],
+        serviceLists=[{"name": "Video", "enabled": True}],
+    )
+    assert result == {
+        "visible": True,
+        "loading": True,
+        "general": {"text": "Loading…", "tone": "muted"},
+        "devices": {"summary": "", "items": [], "more": 0},
+        "lists": {"text": ""},
+    }
+
+
+def test_nothing_is_loaded_before_the_page_says_so():
+    assert status(loaded={})["loading"] is True
+    assert status(loaded=None)["loading"] is True
+
+
+def test_a_locked_dashboard_stays_hidden_while_loading():
+    result = status(adminTokenVerified=False, loaded={})
+    assert result["visible"] is False
 
 
 @pytest.mark.parametrize(
@@ -86,30 +121,39 @@ def test_no_general_profile(state):
     }
 
 
-def test_active_general_profile_is_marked_on():
-    result = status(generalState=general(active=True))
-    assert result["general"] == {"text": "General profile: Shared slow · active", "tone": "on"}
+# running, runtime state, what the server says about active, expected wording and tone
+GENERAL_LINE = [
+    (True, "applied", True, "active", "on"),
+    (True, "applied", False, "saved, not applied", "muted"),
+    # A saved change leaves the state unknown for about a second while the scheduler runs.
+    (True, "unknown", False, "active", "on"),
+    (True, "unknown", True, "active", "on"),
+    # The server data can be older than the runtime state so the state wins.
+    (True, "reset", True, "paused", "muted"),
+    (True, "error", True, "saved, not applied", "muted"),
+    (True, "applying", True, "saved, not applied", "muted"),
+    (True, "resetting", True, "saved, not applied", "muted"),
+    (False, "applied", True, "saved, not applied", "muted"),
+    (False, "unknown", True, "saved, not applied", "muted"),
+    (False, "unknown", False, "saved, not applied", "muted"),
+    (False, "reset", False, "paused", "muted"),
+    (False, "reset", True, "paused", "muted"),
+    (False, "error", False, "saved, not applied", "muted"),
+]
 
 
-def test_general_profile_paused_after_a_reset():
+@pytest.mark.parametrize("running,state,active,wording,tone", GENERAL_LINE)
+def test_general_profile_wording_follows_the_runtime_state(running, state, active, wording, tone):
     result = status(
-        generalState=general(observed="reset"), runtimeState="reset", running=False
+        running=running, runtimeState=state, generalState=general(active=active, observed=state)
     )
-    assert result["general"] == {"text": "General profile: Shared slow · paused", "tone": "muted"}
-
-
-@pytest.mark.parametrize("observed", ["unknown", "applied", "error", "applying"])
-def test_general_profile_saved_but_not_applied(observed):
-    result = status(generalState=general(observed=observed), runtimeState=observed, running=False)
     assert result["general"] == {
-        "text": "General profile: Shared slow · saved, not applied",
-        "tone": "muted",
+        "text": "General profile: Shared slow · " + wording,
+        "tone": tone,
     }
 
 
 def test_a_saved_change_does_not_make_the_general_profile_look_unapplied():
-    # The server reports the general profile as inactive while the observed state is unknown.
-    # That lasts about a second after every saved change while the scheduler keeps running.
     result = status(
         generalState=general(active=False, observed="unknown"),
         runtimeState="unknown",
@@ -267,6 +311,95 @@ def test_singular_and_empty_summaries():
     assert only_protected["devices"]["items"] == []
 
 
+# Without a general profile and with clients that the page knows about
+
+def test_no_device_has_its_own_profile_when_nobody_connected_is_assigned():
+    result = status(
+        generalState=None,
+        clients=[client("Laptop", "02:00:00:00:00:01"), client("Phone", "02:00:00:00:00:02")],
+        serviceLists=[{"name": "Video", "enabled": True}],
+    )
+    assert result["devices"] == {"summary": "No device has its own profile", "items": [], "more": 0}
+    assert result["lists"]["text"] == "Service lists: Video (every unprotected device)"
+
+
+def test_assigned_clients_that_are_all_protected_are_not_affected():
+    mixed = status(
+        generalState=None,
+        clients=[
+            client("Protected", "02:00:00:00:00:01", assigned_device_id="a",
+                   assigned_profile_id="p", unaffected=True),
+            client("Guest", "02:00:00:00:00:02"),
+        ],
+    )
+    only = status(
+        generalState=None,
+        clients=[
+            client("Protected", "02:00:00:00:00:01", assigned_device_id="a",
+                   assigned_profile_id="p", unaffected=True),
+        ],
+    )
+    assert mixed["devices"]["summary"] == "No connected device is affected"
+    assert only["devices"]["summary"] == "No connected device is affected"
+
+
+def test_nobody_connected_is_not_affected_rather_than_unassigned():
+    assert status(generalState=None, clients=[])["devices"]["summary"] == (
+        "No connected device is affected"
+    )
+
+
+def test_a_general_profile_never_says_no_device_has_its_own_profile():
+    result = status(
+        generalState=general(active=True),
+        clients=[client("Protected", "02:00:00:00:00:01", unaffected=True)],
+    )
+    assert result["devices"]["summary"] == "No connected device is affected"
+
+
+# The device list can be unavailable for two different reasons. The page works out which.
+
+@pytest.mark.parametrize("general_state", [None, general(active=True)])
+def test_an_unavailable_device_list_is_not_reported_as_no_affected_devices(general_state):
+    result = status(
+        generalState=general_state,
+        clientsAvailable=False,
+        profiles=[{"id": "slow", "name": "Slow network"}],
+        clients=[
+            client("Laptop", "02:00:00:00:00:01", assigned_device_id="laptop",
+                   assigned_profile_id="slow", association_verified=False),
+        ],
+        serviceLists=[{"name": "Video", "enabled": True}],
+    )
+    assert result["devices"] == {
+        "summary": "Connected devices unavailable",
+        "items": [],
+        "more": 0,
+    }
+    assert "Laptop" not in json.dumps(result)
+    # The lines that do not depend on the device list keep working.
+    assert result["general"]["text"].startswith(
+        "General profile: " + ("Shared slow" if general_state else "none")
+    )
+    assert result["lists"]["text"] == "Service lists: Video (every unprotected device)"
+
+
+@pytest.mark.parametrize(
+    "state,summary",
+    [("reset", "Profiles off"), ("applying", "Changing…"), ("error", "Last network action failed")],
+)
+def test_the_other_summaries_do_not_depend_on_the_device_list(state, summary):
+    assert status(runtimeState=state, clientsAvailable=False)["devices"]["summary"] == summary
+    assert status(running=False, clientsAvailable=False)["devices"]["summary"] == (
+        "Not started yet"
+    )
+
+
+def test_the_page_must_say_the_device_list_is_available():
+    data = {key: value for key, value in BASE.items() if key != "clientsAvailable"}
+    assert run_function(data)["devices"]["summary"] == "Connected devices unavailable"
+
+
 def test_service_lists_line_only_while_running_and_enabled():
     lists = [
         {"name": "Video", "enabled": True},
@@ -274,7 +407,7 @@ def test_service_lists_line_only_while_running_and_enabled():
         {"name": "Chat", "enabled": True},
     ]
     assert status(serviceLists=lists)["lists"] == {
-        "text": "Service lists: Video · Chat (every device)"
+        "text": "Service lists: Video · Chat (every unprotected device)"
     }
     assert status(serviceLists=lists, runtimeState="unknown")["lists"]["text"].startswith(
         "Service lists: Video"
@@ -295,171 +428,6 @@ def test_names_are_returned_as_plain_text_for_the_page_to_insert_safely():
     assert result["devices"]["items"][0]["name"] == "<img src=x onerror=alert(1)>"
 
 
-RENDER_HARNESS = r"""
-const nodes = new Map();
-function makeNode(tag) {
-  return {
-    tag, children: [], textContent: "", className: "", hidden: false, classes: new Set(),
-    classList: {toggle(name, on) {on ? this.owner.classes.add(name) : this.owner.classes.delete(name)}},
-    appendChild(child) {this.children.push(child)},
-    replaceChildren(...children) {this.children = children}
-  };
-}
-const document = {createElement: makeNode};
-function element(id) {
-  if (!nodes.has(id)) {
-    const node = makeNode("div");
-    node.classList.owner = node;
-    nodes.set(id, node);
-  }
-  return nodes.get(id);
-}
-let adminTokenVerified = true;
-let lastRuntimeState = {observed_state: "applied", running: true};
-let generalProfileState = {profile: {id: "slow", name: "Shared slow"}, active: true,
-  state: {observed_state: "applied"}};
-let profiles = [];
-let connectedClients = [];
-let serviceListsState = [];
-let savedDevices = [];
-let groups = [];
-let unaffectedMacs = [];
-let applyBusy = false;
-const listed = () => element("status-devices-list").children.map(
-  (row) => row.children.map((part) => part.textContent));
-"""
-
-
-def render(setup):
-    program = RENDER_HARNESS + served_function() + "\n" + setup
-    result = subprocess.run([NODE, "-"], input=program, text=True, capture_output=True, timeout=10)
-    assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout)
-
-
-def test_the_block_fills_in_every_line_with_plain_text():
-    out = render(
-        """
-        connectedClients = [
-          {display_name: "<b>Laptop</b>", mac_address: "m1", unaffected: false},
-          {display_name: "Protected phone", mac_address: "m2", unaffected: true},
-        ];
-        serviceListsState = [{name: "Video", enabled: true}];
-        renderSidebarStatus();
-        console.log(JSON.stringify({
-          hidden: element("sidebar-status").hidden,
-          general: element("status-general").textContent,
-          generalClass: element("status-general").className,
-          summary: element("status-devices-summary").textContent,
-          items: listed(),
-          moreHidden: element("status-devices-more").hidden,
-          emptyClass: element("status-devices").classes.has("is-empty"),
-          lists: element("status-lists").textContent,
-          listsHidden: element("status-lists").hidden,
-        }));
-        """
-    )
-    assert out == {
-        "hidden": False,
-        "general": "General profile: Shared slow · active",
-        "generalClass": "status-line status-on",
-        "summary": "1 device affected",
-        "items": [["<b>Laptop</b>", "Shared slow"]],
-        "moreHidden": True,
-        "emptyClass": False,
-        "lists": "Service lists: Video (every device)",
-        "listsHidden": False,
-    }
-
-
-def test_the_more_line_and_the_quiet_states():
-    out = render(
-        """
-        connectedClients = Array.from({length: 7}, (_, i) => ({display_name: "D" + i,
-          mac_address: "m" + i}));
-        renderSidebarStatus();
-        const crowded = {items: listed().length, more: element("status-devices-more").textContent,
-          moreHidden: element("status-devices-more").hidden};
-        lastRuntimeState = {observed_state: "reset", running: false};
-        generalProfileState = {profile: {id: "slow", name: "Shared slow"}, active: false,
-          state: {observed_state: "reset"}};
-        renderSidebarStatus();
-        console.log(JSON.stringify({
-          crowded,
-          summary: element("status-devices-summary").textContent,
-          items: listed().length,
-          more: element("status-devices-more").hidden,
-          emptyClass: element("status-devices").classes.has("is-empty"),
-          general: element("status-general").textContent,
-          generalClass: element("status-general").className,
-        }));
-        """
-    )
-    assert out["crowded"] == {"items": 5, "more": "+2 more", "moreHidden": False}
-    assert out["summary"] == "Profiles off"
-    assert out["items"] == 0
-    assert out["more"] is True
-    assert out["emptyClass"] is True
-    assert out["general"] == "General profile: Shared slow · paused"
-    assert out["generalClass"] == "status-line"
-
-
-def test_a_locked_dashboard_hides_the_block_and_removes_names():
-    out = render(
-        """
-        connectedClients = [{display_name: "Laptop", mac_address: "m1"}];
-        renderSidebarStatus();
-        const before = listed().length;
-        adminTokenVerified = false;
-        renderSidebarStatus();
-        console.log(JSON.stringify({
-          before,
-          hidden: element("sidebar-status").hidden,
-          general: element("status-general").textContent,
-          summary: element("status-devices-summary").textContent,
-          items: listed().length,
-          lists: element("status-lists").textContent,
-        }));
-        """
-    )
-    assert out == {"before": 1, "hidden": True, "general": "", "summary": "", "items": 0,
-                   "lists": ""}
-
-
 def test_the_status_code_never_writes_html():
-    script = re.search(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL).group(1)
     assert "innerHTML" not in served_function()
     assert "insertAdjacentHTML" not in served_function()
-    assert "function renderSidebarStatus(" in script
-
-
-def test_the_block_sits_between_the_navigation_and_the_footer():
-    nav_end = DASHBOARD_HTML.index("</nav>")
-    block = DASHBOARD_HTML.index('<section id="sidebar-status"')
-    footer = DASHBOARD_HTML.index('<div class="sidebar-footer">')
-    assert nav_end < block < footer
-    assert re.search(r'<section id="sidebar-status"[^>]*\shidden>', DASHBOARD_HTML)
-    assert DASHBOARD_HTML.count('id="sidebar-status"') == 1
-
-
-def test_every_input_of_the_block_calls_the_renderer():
-    script = re.search(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL).group(1)
-
-    def body(start, end):
-        begin = script.index(start)
-        return script[begin : script.index(end, begin)]
-
-    assert "lastRuntimeState = state;" in body(
-        "function renderRuntimeSummary(", "function connectedRowState("
-    )
-    calls = [
-        ("function renderRuntimeSummary(", "function connectedRowState("),
-        ("function renderConnectedDevices(", "function renderSavedConnectedDeviceLabels("),
-        ("async function loadProfiles(", "async function loadGeneralProfile("),
-        ("async function loadGeneralProfile(", "async function loadDevicesForSchedule("),
-        ("function renderServiceLists(", "async function loadServiceLists("),
-        ("function setPrivateDataPanels(", "async function loadPrivateDataPanel("),
-    ]
-    for start, end in calls:
-        assert "renderSidebarStatus();" in body(start, end), start
-    assert "serviceListsState = lists;" in body(*calls[4])
