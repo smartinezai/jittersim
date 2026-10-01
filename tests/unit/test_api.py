@@ -1917,6 +1917,28 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(domains["cdn.somesmallsite.io"]["label"]["known"], False)
         self.assertEqual(domains["cdn.somesmallsite.io"]["seen_with"], [])
 
+    def test_observations_carry_a_group(self) -> None:
+        self.repository.save_domain_observations(
+            [
+                DomainObservation("192.168.50.124", "sso.immobilienscout24.de", 2, 100, 100),
+                DomainObservation("192.168.50.124", "tracking.immobilienscout24.de", 2, 100, 100),
+                DomainObservation("192.168.50.124", "tags-eu.tiqcdn.com", 2, 100, 100),
+            ],
+            now=100,
+        )
+
+        _, _, body = self.server.response_for("/api/observations")
+        domains = {item["domain"]: item for item in json.loads(body)["devices"][0]["domains"]}
+
+        self.assertEqual(
+            domains["sso.immobilienscout24.de"]["group"],
+            {"key": "label:immoscout24", "name": "ImmoScout24"},
+        )
+        self.assertEqual(
+            domains["tracking.immobilienscout24.de"]["group"]["key"], "label:immoscout24"
+        )
+        self.assertEqual(domains["tags-eu.tiqcdn.com"]["group"]["key"], "domain:tiqcdn.com")
+
     def test_seen_with_hints_never_cross_devices(self) -> None:
         self.repository.save_domain_observations(
             [
@@ -1983,6 +2005,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertNotIn("label", observation)
         self.assertNotIn("seen_with", observation)
         self.assertNotIn("globally_blocked", observation)
+        self.assertNotIn("group", observation)
 
     def test_observations_work_without_the_helper(self) -> None:
         self.server.helper_client = FakeHelper()

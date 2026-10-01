@@ -33,7 +33,7 @@ from jittersim.config.device_names import (
     has_hidden_characters,
     resolve_device_name,
 )
-from jittersim.config.domain_labels import label_domain, seen_with
+from jittersim.config.domain_labels import group_domain, label_domain, seen_with
 from jittersim.config.exemptions import UnaffectedDevice, normalize_exempt_mac
 from jittersim.config.models import (
     DataLimit,
@@ -5851,7 +5851,7 @@ def _domain_observation_payload(observation: DomainObservation) -> Dict[str, Any
 def _labelled_domain_payloads(
     rows: Sequence[DomainObservation], blocked_domains: Collection[str] = ()
 ) -> List[Dict[str, Any]]:
-    """Add a label and a seen-with guess and the global block state to observed names.
+    """Add a label and a group and a seen-with guess and the global block state to observed names.
 
     A name counts as blocked only when it is an exact entry of the global block list because
     the engine resolves each listed name on its own and does not match subdomains.
@@ -5862,6 +5862,7 @@ def _labelled_domain_payloads(
         {
             **_domain_observation_payload(row),
             "label": label_domain(row.domain).as_dict(),
+            "group": group_domain(row.domain),
             "seen_with": hints.get(row.domain, []),
             "globally_blocked": row.domain in blocked_domains,
         }
