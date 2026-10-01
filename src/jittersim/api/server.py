@@ -5942,7 +5942,15 @@ class ControlServer(HTTPServer):
             return []
         try:
             stations = station_snapshot(self.helper_client)["devices"]
-            return [station for station in stations if isinstance(station, dict)]
+            return [
+                station
+                for station in stations
+                if isinstance(station, dict)
+                and all(
+                    station.get(key) is None or isinstance(station.get(key), str)
+                    for key in ("ipv4_address", "mac_address", "hostname")
+                )
+            ]
         except (AttributeError, HelperClientError, KeyError, OSError, TypeError, ValueError):
             LOGGER.warning("could not read client names from the station snapshot", exc_info=True)
             return []
