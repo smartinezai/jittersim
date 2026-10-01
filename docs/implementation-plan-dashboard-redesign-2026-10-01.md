@@ -10,9 +10,9 @@ Laptop first. One left sidebar, one visible section at a time, collapsible cards
 
 ### Shell
 
-- Sidebar: product name and mode badge, section links with live chips, then a footer that is always visible: Apply, Reset, Panic, router Wi-Fi switch, and status rows for the admin token and router password that open the existing credentials panel.
+- Sidebar: product name and mode badge (the old "NETWORK TEST LAB" kicker is dropped), section links with live chips, then a footer that is always visible: Apply, Reset, Panic, router Wi-Fi switch, and status rows for the admin token and router password that open the existing credentials panel.
 - `credential-dock` and the sticky `action-bar` are removed. Their buttons and IDs move into the sidebar footer.
-- Narrow screens (under 48rem): the sidebar becomes a collapsible top menu. Nothing more is promised there.
+- Narrow screens (under 48rem): the sidebar stacks above the content as a plain block (links wrap, buttons stay reachable). Nothing more is promised there; a proper phone layout is a follow-up.
 
 ### Sections
 
@@ -32,9 +32,9 @@ Unknown or empty hash opens Devices. The back button moves between sections. The
 
 - All element IDs stay, so existing JavaScript and tests keep working.
 - Sections that are not shown are hidden with `hidden`, and their timers keep running (the 5-second device refresh does not stop).
-- Cards inside sections use `<details>`. Open or closed state is remembered per card in `localStorage`, wrapped in try/catch. The first card of each section starts open.
+- Cards marked `data-collapse` get a toggle button in their heading (added by a second inline script). Open or closed state is remembered per card in `localStorage`, wrapped in try/catch. The main card of each section starts open; reference and rarely used cards start closed. Editing a limit or service from a list opens its card and scrolls to the form.
 - Sidebar links are real links with `aria-current="page"` on the active one. Keyboard focus and a visible focus ring work throughout.
-- The page does not scroll as a whole on a laptop-height window: the sidebar is full height and the content column scrolls.
+- The sidebar is `position: sticky` at full viewport height with its own scroll, so it stays put while the page scrolls. It is the only pinned element besides the toast and the credentials overlay.
 
 ### Look
 
