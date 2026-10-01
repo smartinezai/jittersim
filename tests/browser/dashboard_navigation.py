@@ -78,6 +78,18 @@ def check_collapsing(page):
     expect(page.locator("#timer-list")).to_be_hidden()
 
 
+def check_reveal(page):
+    page.locator('[data-page-link="devices"]').click()
+    only_visible(page, "devices")
+    page.evaluate('revealElement(document.getElementById("time-quota-form"))')
+    only_visible(page, "schedules")
+    assert page.url.endswith("#schedules")
+    expect(page.get_by_role("button", name="Service time limit")).to_have_attribute(
+        "aria-expanded", "true"
+    )
+    expect(page.locator("#time-quota-form")).to_be_visible()
+
+
 def check_narrow(page):
     page.set_viewport_size({"width": 390, "height": 844})
     assert page.evaluate("document.documentElement.scrollWidth") <= 391
@@ -113,6 +125,7 @@ def run():
                     check_sections(page)
                     check_nothing_floats(page)
                     check_collapsing(page)
+                    check_reveal(page)
                     page.locator('[data-page-link="devices"]').click()
                     page.screenshot(path=f"test-results/dashboard-devices-{width}.png")
                     if width == 1280:

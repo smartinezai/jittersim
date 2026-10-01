@@ -587,6 +587,7 @@ DASHBOARD_HTML = """<!doctype html>
     .sidebar-footer { display: grid; gap: 0.6rem; margin-top: auto; }
     .sidebar-operate, .sidebar-actions { display: grid; gap: 0.5rem; }
     .sidebar-credentials { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+    .dashboard-locked .sidebar-credentials { grid-template-columns: 1fr; }
     .sidebar-credentials button { min-height: 2.4rem; padding: 0.35rem 0.5rem; font-size: 0.8rem; }
     .sidebar button { margin: 0; min-height: 2.6rem; text-align: left; }
     .sidebar-actions button { text-align: center; }
@@ -780,7 +781,7 @@ DASHBOARD_HTML = """<!doctype html>
   </section>
   <div id="private-dashboard" hidden>
   <p id="mode-notice" class="notice" role="status">Checking control mode...</p>
-  <section class="page" id="page-devices" data-page="devices" aria-label="devices">
+  <section class="page" id="page-devices" data-page="devices" aria-label="Devices">
   <section class="card" aria-labelledby="general-profile-title">
     <h2 id="general-profile-title">General profile</h2>
     <p>Apply a saved profile to every device on JitterSim Wi-Fi except those in Unaffected by profiles. New arrivals are included.</p>
@@ -835,7 +836,7 @@ DASHBOARD_HTML = """<!doctype html>
     <p class="form-note">Use “Make unaffected” beside a connected device to add it without typing an address. If a device changes its private Wi-Fi MAC, add its new address.</p>
   </section>
   </section><!-- /page:devices -->
-  <section class="page" id="page-profiles" data-page="profiles" aria-label="profiles" hidden>
+  <section class="page" id="page-profiles" data-page="profiles" aria-label="Profiles" hidden>
     <section class="card" data-collapse="open">
       <h2>Save profile</h2>
       <form id="profile-form">
@@ -1063,7 +1064,7 @@ DASHBOARD_HTML = """<!doctype html>
       <div id="group-list" class="quota-list" aria-live="polite">No groups saved.</div>
     </section>
   </section><!-- /page:profiles -->
-  <section class="page" id="page-schedules" data-page="schedules" aria-label="schedules" hidden>
+  <section class="page" id="page-schedules" data-page="schedules" aria-label="Schedules and limits" hidden>
     <section class="card" data-collapse="open">
       <h2>Schedule a profile</h2>
       <form id="schedule-form">
@@ -1402,7 +1403,7 @@ DASHBOARD_HTML = """<!doctype html>
     <div id="time-quota-list" class="quota-list" aria-live="polite">Enter the admin token to view time limits.</div>
   </section>
   </section><!-- /page:schedules -->
-  <section class="page" id="page-router" data-page="router" aria-label="router" hidden>
+  <section class="page" id="page-router" data-page="router" aria-label="Router and Wi-Fi" hidden>
     <section class="card wifi-name-card">
     <h2>Wi-Fi name</h2>
     <p>Restore the Pi's test network name to JitterSim. It keeps the password and security type. Test devices disconnect while Wi-Fi restarts. Use management access.</p>
@@ -1447,7 +1448,7 @@ DASHBOARD_HTML = """<!doctype html>
     <p class="policy-note">To restore the JitterSim name without changing the password, use Reset Wi-Fi name above.</p>
   </section>
   </section><!-- /page:router -->
-  <section class="page" id="page-traffic" data-page="traffic" aria-label="traffic" hidden>
+  <section class="page" id="page-traffic" data-page="traffic" aria-label="Traffic" hidden>
   <section class="card traffic-card" data-collapse="open" aria-labelledby="traffic-title">
     <div class="section-heading">
       <div>
@@ -1535,7 +1536,7 @@ DASHBOARD_HTML = """<!doctype html>
       </div>
     </section>
   </section><!-- /page:traffic -->
-  <section class="page" id="page-access" data-page="access" aria-label="access" hidden>
+  <section class="page" id="page-access" data-page="access" aria-label="Access and rules" hidden>
     <section class="card" data-collapse="open">
       <h2>Network access rules</h2>
       <form id="policy-form">
@@ -1581,7 +1582,7 @@ DASHBOARD_HTML = """<!doctype html>
       </form>
     </section>
   </section><!-- /page:access -->
-  <section class="page" id="page-diagnostics" data-page="diagnostics" aria-label="diagnostics" hidden>
+  <section class="page" id="page-diagnostics" data-page="diagnostics" aria-label="Diagnostics" hidden>
     <section class="card" data-collapse="closed">
       <div class="section-heading"><h2>Profiles</h2><p>Saved network behavior</p></div>
       <pre id="profiles">Enter the admin token and choose Check token to load.</pre>
@@ -5151,7 +5152,10 @@ DASHBOARD_HTML = """<!doctype html>
       const card = target.closest(".card[data-collapse]");
       if (card) setCardOpen(card, true, false);
       const page = target.closest("[data-page]");
-      if (page && page.hidden) showPage(page.dataset.page, false);
+      if (page && page.hidden) {
+        showPage(page.dataset.page, false);
+        window.history.replaceState(null, "", "#" + page.dataset.page);
+      }
       target.scrollIntoView({ behavior: "smooth", block: "center" });
     }
 

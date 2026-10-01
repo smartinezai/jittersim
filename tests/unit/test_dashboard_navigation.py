@@ -120,3 +120,9 @@ def test_page_from_hash(hash_, expected):
 ])
 def test_card_start_state(saved, default, expected):
     assert run_node(f"cardStartsOpen({json.dumps(saved)}, {json.dumps(default)})") is expected
+
+
+def test_sections_are_labelled_with_the_visible_link_text():
+    for page in PAGES:
+        link = re.search(rf'<a href="#{page}"[^>]*>([^<]+?)\s*(?:<span|</a>)', HTML).group(1).strip()
+        assert f'id="page-{page}" data-page="{page}" aria-label="{link}"' in HTML, page
