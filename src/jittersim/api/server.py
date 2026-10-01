@@ -344,6 +344,13 @@ DASHBOARD_HTML = """<!doctype html>
     .connected-controls { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
     .connected-controls select { min-width: 0; width: 12rem; max-width: 100%; }
     .connected-controls button { margin-top: 0; white-space: nowrap; }
+    .connected-row.protected { border-color: #3a4656; background: #111b29; }
+    .connected-row.protected .connected-dot { background: #7b8797; box-shadow: 0 0 0 0.2rem #7b879722; }
+    .connected-row.protected .connected-address { color: #c3cfde; }
+    .connected-row.protected .connected-meta { color: #9fb0c4; }
+    .connected-row.protected .connected-controls select:disabled,
+    .connected-row.protected .connected-controls button:disabled { opacity: 1; color: #8493a6; border-color: #2c3847; background: #0f1824; cursor: not-allowed; }
+    .protected-badge { display: inline-block; margin-left: 0.5rem; padding: 0.05rem 0.5rem; border: 1px solid #5b6b7f; border-radius: 999px; color: #c3cfde; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.02em; }
     .connected-label-editor { margin-top: 0.4rem; color: #a8bdd4; font-size: 0.78rem; }
     .connected-label-editor summary { cursor: pointer; }
     .connected-label-form {
@@ -2666,6 +2673,27 @@ DASHBOARD_HTML = """<!doctype html>
       summary.className = "runtime-summary " + state.observed_state;
     }
 
+    function connectedRowState(device, context) {
+      const protectedRow = !!device.unaffected;
+      const disableProfile = protectedRow || !device.ipv4_address || !device.association_verified;
+      const disableApply = protectedRow || !context.selectedProfile || !context.helperConfigured ||
+        context.profileCount === 0 || !device.ipv4_address || !device.association_verified;
+      const disableGroupSelect = protectedRow || !context.helperConfigured ||
+        !device.association_verified || !device.ipv4_address || context.groupCount === 0;
+      const disableGroupButton = disableGroupSelect || !context.selectedGroup ||
+        context.selectedGroup === device.group_id;
+      return {
+        protectedRow,
+        rowClass: "connected-row" + (protectedRow ? " protected" : ""),
+        badge: protectedRow ? "Protected" : "",
+        disableProfile,
+        disableApply,
+        disableGroupSelect,
+        disableGroupButton,
+        protectionLabel: protectedRow ? "Remove protection" : "Make unaffected"
+      };
+    }
+
     function renderConnectedDevices(data) {
       const container = element("connected-devices");
       const count = element("connected-count");
@@ -2838,16 +2866,9 @@ DASHBOARD_HTML = """<!doctype html>
           profileSelect.appendChild(option);
         });
         if (draft.profile !== undefined) profileSelect.value = draft.profile;
-        profileSelect.disabled = !!device.unaffected || !device.ipv4_address || !device.association_verified;
         const applyButton = document.createElement("button");
         applyButton.type = "button";
         applyButton.textContent = device.assigned_profile_id ? "Apply profile" : "Assign profile";
-        applyButton.disabled = !!device.unaffected || !profileSelect.value || !helperConfigured || profiles.length === 0 ||
-          !device.ipv4_address || !device.association_verified;
-        profileSelect.addEventListener("change", () => {
-          applyButton.disabled = !!device.unaffected || !helperConfigured || profileSelect.value === "" ||
-            !device.ipv4_address || !device.association_verified;
-        });
         applyButton.addEventListener("click", () => {
           applyProfileToDevice(device, profileSelect.value, applyButton);
         });
@@ -2870,12 +2891,32 @@ DASHBOARD_HTML = """<!doctype html>
         const groupButton = document.createElement("button");
         groupButton.type = "button";
         groupButton.textContent = "Add to group";
+        const rowContext = () => ({
+          helperConfigured,
+          profileCount: profiles.length,
+          groupCount: groups.length,
+          selectedProfile: profileSelect.value,
+          selectedGroup: groupSelect.value
+        });
+        const rowState = connectedRowState(device, rowContext());
+        row.className = rowState.rowClass;
+        if (rowState.badge) {
+          const protectedBadge = document.createElement("span");
+          protectedBadge.className = "protected-badge";
+          protectedBadge.textContent = rowState.badge;
+          address.append(" ", protectedBadge);
+        }
+        profileSelect.disabled = rowState.disableProfile;
+        applyButton.disabled = rowState.disableApply;
+        profileSelect.addEventListener("change", () => {
+          applyButton.disabled = connectedRowState(device, rowContext()).disableApply;
+        });
         const syncGroup = () => {
           const selected = groups.find((group) => group.id === groupSelect.value);
-          groupButton.disabled = !helperConfigured || !device.association_verified || !device.ipv4_address ||
-            !selected || selected.id === device.group_id || (!device.assigned_device_id && !selected.profile_id);
+          groupButton.disabled = connectedRowState(device, rowContext()).disableGroupButton ||
+            !selected || (!device.assigned_device_id && !selected.profile_id);
         };
-        groupSelect.disabled = !helperConfigured || !device.association_verified || !device.ipv4_address || !groups.length;
+        groupSelect.disabled = rowState.disableGroupSelect;
         groupSelect.addEventListener("change", syncGroup);
         syncGroup();
         groupButton.addEventListener("click", () => connectedControlAction(
@@ -2884,7 +2925,7 @@ DASHBOARD_HTML = """<!doctype html>
         ));
         const protectionButton = document.createElement("button");
         protectionButton.type = "button";
-        protectionButton.textContent = device.unaffected ? "Remove protection" : "Make unaffected";
+        protectionButton.textContent = rowState.protectionLabel;
         protectionButton.setAttribute("aria-label", protectionButton.textContent + " for " + (device.display_name || device.mac_address));
         protectionButton.addEventListener("click", () => connectedControlAction(
           device.unaffected ? "/api/unaffected-devices/delete" : "/api/unaffected-devices",
@@ -2892,6 +2933,11 @@ DASHBOARD_HTML = """<!doctype html>
           device.unaffected ? "Protection removed. Saved profiles can apply again." : "Protection saved and applied. This device is unaffected by profiles."
         ));
         controls.append(profileSelect, applyButton, groupSelect, groupButton, protectionButton);
+        if (rowState.protectedRow) {
+          [profileSelect, applyButton, groupSelect, groupButton].forEach((control) => {
+            control.setAttribute("aria-disabled", "true");
+          });
+        }
         [...labelForm.querySelectorAll("[data-draft]"), profileSelect, groupSelect].forEach((field) => {
           if (draft[field.dataset.draft] !== undefined) field.dataset.dirty = "true";
           field.addEventListener("input", () => { field.dataset.dirty = "true"; });
@@ -3099,7 +3145,7 @@ DASHBOARD_HTML = """<!doctype html>
         option.selected = selected.has(option.value);
         select.appendChild(option);
       });
-      connectedClients.filter((device) => !device.assigned_device_id && device.association_verified && device.ipv4_address).forEach((device) => {
+      connectedClients.filter((device) => !device.assigned_device_id && device.association_verified && device.ipv4_address && !device.unaffected).forEach((device) => {
         const option = document.createElement("option");
         option.value = "live:" + device.mac_address;
         option.textContent = (device.display_name || device.mac_address) + " (connected · unassigned)";
@@ -7520,8 +7566,15 @@ class ControlServer(HTTPServer):
                     self.scheduler.sample_before_control_change(repository=self.repository)
                 with self.repository.transaction():
                     profile_id = group.profile_id if existing else payload.get("profile_id") or None
+                    protected_macs = {
+                        item.mac_address for item in self.repository.list_unaffected_devices()
+                    }
                     for client in connected:
                         mac = normalize_exempt_mac(client["mac_address"])
+                        if mac in protected_macs:
+                            raise ValueError(
+                                "This device is unaffected by profiles. Remove its protection before adding it to a group."
+                            )
                         saved = self.repository.get_device_by_mac_address(mac)
                         base_profile = saved.profile_id if saved else profile_id
                         if base_profile is None:
