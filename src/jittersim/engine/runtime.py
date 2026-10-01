@@ -31,6 +31,7 @@ from .compiler import PlanError, compile_plan
 from .eligibility import eligible_clients, station_snapshot
 from .general import compile_general_plan
 from .plan import GENERAL_QUEUE_ID, NetworkPlan, ServiceAssignmentRule, ServiceQuotaRule
+from .service_lists import build_service_list_rules
 from .progression import interpolate_profile, progression_factor
 from .randomizer import (
     outage_duration_seconds,
@@ -561,6 +562,7 @@ class RuntimeScheduler:
             blocked_device_addresses=blocked_addresses,
             service_quota_rules=service_quota_rules,
             service_assignment_rules=service_assignment_rules,
+            service_list_rules=build_service_list_rules(repository, profiles),
         )
 
     def _build_general_plan(

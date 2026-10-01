@@ -1,10 +1,17 @@
 """Compile validated configuration into a deterministic network plan."""
 
+import re
 from ipaddress import IPv4Address
 from typing import Mapping, Optional, Sequence
 
 from jittersim.config.exemptions import MAX_UNAFFECTED_DEVICES, normalize_exempt_mac
-from jittersim.config.models import Device, MacPolicy, Profile, normalize_service_hostname
+from jittersim.config.models import (
+    Device,
+    MacPolicy,
+    Profile,
+    ValidationError,
+    normalize_service_hostname,
+)
 
 from .plan import (
     GENERAL_QUEUE_ID,
@@ -14,9 +21,13 @@ from .plan import (
     NetworkPlan,
     QueueSpec,
     ServiceAssignmentRule,
+    ServiceListRule,
     ServiceQuotaRule,
     WebsiteFilter,
 )
+
+
+_LIST_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
 class PlanError(ValueError):
@@ -27,6 +38,7 @@ MAX_DEVICES_PER_PLAN = 15
 MAX_SERVICE_QUOTAS_PER_PLAN = 15
 MAX_SHAPED_MARKS_PER_PLAN = 15
 MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN = 200
+MAX_SERVICE_LIST_DOMAINS_PER_PLAN = 400
 
 
 def compile_plan(
@@ -43,6 +55,7 @@ def compile_plan(
     service_quota_rules: Sequence[ServiceQuotaRule] = (),
     service_assignment_rules: Sequence[ServiceAssignmentRule] = (),
     general_profile: Optional[GeneralProfileRule] = None,
+    service_list_rules: Sequence[ServiceListRule] = (),
 ) -> NetworkPlan:
     """Compile device assignments into deterministic marks and directional queues."""
 
@@ -144,7 +157,11 @@ def compile_plan(
             f"a plan cannot contain more than {MAX_SERVICE_QUOTAS_PER_PLAN} service quotas"
         )
     if (
-        len(mark_rules) + len(service_quota_rules) + len(service_assignment_rules)
+        len(mark_rules)
+        + len(service_quota_rules)
+        + len(service_assignment_rules)
+        + len(service_list_rules)
+        + (1 if general_profile is not None else 0)
         > MAX_SHAPED_MARKS_PER_PLAN
     ):
         raise PlanError(
@@ -269,11 +286,74 @@ def compile_plan(
             )
         )
 
+    list_queues = []
+    normalized_lists = []
+    list_domains = []
+    first_list_mark = (
+        len(mark_rules)
+        + len(service_quota_rules)
+        + len(service_assignment_rules)
+        + (1 if general_profile is not None else 0)
+        + 1
+    )
+    if sum(len(rule.domains) for rule in service_list_rules) > MAX_SERVICE_LIST_DOMAINS_PER_PLAN:
+        raise PlanError(
+            f"a plan cannot contain more than {MAX_SERVICE_LIST_DOMAINS_PER_PLAN} "
+            "service list hostnames"
+        )
+    list_ids = set()
+    for index, list_rule in enumerate(
+        sorted(service_list_rules, key=lambda item: item.list_id), start=first_list_mark
+    ):
+        if not isinstance(list_rule.list_id, str) or not _LIST_ID_PATTERN.fullmatch(list_rule.list_id):
+            raise PlanError("service list id is invalid")
+        if list_rule.list_id in list_ids:
+            raise PlanError(f"duplicate service list id: {list_rule.list_id}")
+        list_ids.add(list_rule.list_id)
+        if not list_rule.domains:
+            raise PlanError(f"service list {list_rule.list_id} has no hostnames")
+        try:
+            domains = tuple(
+                dict.fromkeys(normalize_service_hostname(domain) for domain in list_rule.domains)
+            )
+        except ValidationError as error:
+            raise PlanError("service list must contain only DNS hostnames") from error
+        for domain in domains:
+            if any(
+                domain == prior or domain.endswith("." + prior) or prior.endswith("." + domain)
+                for prior in list_domains
+            ):
+                raise PlanError(f"service list hostnames overlap on {domain}")
+            list_domains.append(domain)
+        normalized_lists.append(
+            ServiceListRule(
+                list_id=list_rule.list_id,
+                domains=domains,
+                mark=index,
+                upload_impairment=list_rule.upload_impairment,
+                download_impairment=list_rule.download_impairment,
+            )
+        )
+        for direction, impairment in (
+            (Direction.UPLOAD, list_rule.upload_impairment),
+            (Direction.DOWNLOAD, list_rule.download_impairment),
+        ):
+            list_queues.append(
+                QueueSpec(
+                    device_id=f"servicelist:{list_rule.list_id}",
+                    direction=direction,
+                    mark=index,
+                    impairment=impairment,
+                )
+            )
+    if first_list_mark + len(normalized_lists) - 1 > MAX_SHAPED_MARKS_PER_PLAN:
+        raise PlanError("service list mark is outside the safe range")
+
     return NetworkPlan(
         protected_mac_addresses=protected_macs,
         unverified_device_ids=tuple(unverified_device_ids),
         mark_rules=tuple(mark_rules),
-        queues=tuple(queues) + tuple(service_queues) + tuple(assignment_queues),
+        queues=tuple(queues) + tuple(service_queues) + tuple(assignment_queues) + tuple(list_queues),
         mac_policy=mac_policy,
         global_allowed_addresses=None
         if global_allowed_addresses is None
@@ -284,4 +364,5 @@ def compile_plan(
         service_quota_rules=normalized_service_rules,
         service_assignment_rules=tuple(normalized_assignments),
         general_profile=general_profile,
+        service_list_rules=tuple(normalized_lists),
     )

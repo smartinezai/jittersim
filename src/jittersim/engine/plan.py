@@ -70,6 +70,28 @@ class ServiceAssignmentRule:
     download_impairment: Impairment
 
 
+@dataclass(frozen=True)
+class ServiceListRule:
+    """Hostnames and queue for one service list shared by every affected client.
+
+    The destination addresses are not part of the plan. They change as DNS
+    answers change, so the privileged helper keeps them in the list's
+    nftables set separately from the plan.
+    """
+
+    list_id: str
+    domains: Tuple[str, ...]
+    mark: int
+    upload_impairment: Impairment
+    download_impairment: Impairment
+
+
+def service_list_set_name(rule: "ServiceListRule") -> str:
+    """Name the nftables set of destination addresses for one list."""
+
+    return f"svc_{rule.mark}"
+
+
 GENERAL_QUEUE_ID = "general-profile"
 
 
@@ -98,3 +120,4 @@ class NetworkPlan:
     service_quota_rules: Tuple[ServiceQuotaRule, ...] = ()
     service_assignment_rules: Tuple[ServiceAssignmentRule, ...] = ()
     general_profile: Optional[GeneralProfileRule] = None
+    service_list_rules: Tuple[ServiceListRule, ...] = ()
