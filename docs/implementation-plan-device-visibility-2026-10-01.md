@@ -495,11 +495,19 @@ what is set and what the kernel queue did in the last minute.
 - Loss: `set 5% · actual 4.7% (31 of 660 packets dropped)`. A queue with duplicates
   adds `(may read low because duplicated packets are counted)`. A queue that drops
   without any loss setting reads `Dropped (queue full at the speed cap) · actual 10%
-  (10 of 100 packets dropped)`.
+  (10 of 100 packets dropped)`. The packets offered are the packets that left and the
+  packets dropped and the change in the queue length. A queue counts a drop when a
+  packet arrives and a packet only when it leaves so a delay would otherwise read as
+  loss. On the real kernel 1000 packets with 20% loss and a 2000 ms delay showed 0 sent
+  and 216 dropped and 784 waiting at first. That is 21.6% and not 100%.
 - Speed cap: `set 2 Mbit/s · using 727 kbit/s · peak 2 Mbit/s · cap reached`. The
   average divides by the time between the first and last sample. The peak is the
   fastest pair of neighbouring samples. The cap counts as reached when any interval
-  with traffic reaches 90% of the limit so a burst is never averaged away.
+  with traffic reaches 90% of the limit or when a sample of a queue without delay finds
+  a backlog of at least 10 ms of cap time (the queue is then holding packets back). A
+  burst that starts and ends between two samples and fills less than 90% of one
+  interval and leaves no backlog at a sample can still be missed. A 500 kB burst at a
+  2 Mbit/s cap drains in 2 seconds and averages 799 kbit/s over a 5 second interval.
 - Queue wait: `Queue wait now: about 320 ms` only for a queue that has a speed cap and
   no delay and no jitter (a delay alone also fills the backlog so it would mislead).
   It reads the backlog of the last sample and is hidden below 10 ms.
@@ -508,7 +516,7 @@ what is set and what the kernel queue did in the last minute.
   `Reorder: set 25% · configured, not measured` and so on.
 - Verdict chips:
   - `Affected in the last minute`: drops grew or the cap was reached.
-  - `No traffic in the last minute`: no packets were offered.
+  - `No traffic in the last minute`: no packets arrived or left.
   - `Too few packets to judge`: under 50 packets offered. For a queue with loss also
     while the packets times the loss percentage is below 3.
   - `No drops or cap hit seen`: the queue has loss or a speed cap and enough packets.
@@ -528,8 +536,17 @@ what is set and what the kernel queue did in the last minute.
   join). Each entry holds `{device_id, direction, interface, handle, kind,
   impairment, packets, bytes, drops, overlimits, requeues, backlog_bytes, qlen,
   generation}`. The client validates every field like `traffic_counters`.
-- The action takes the helper's operation lock like an apply. An apply in progress
-  answers `helper-busy` so the numbers never mix an old plan with new kernel queues.
+- The socket handler takes the helper's one operation lock around every action except
+  ping and dashboard access and the Wi-Fi and router actions. `queue-stats` is a read
+  like `clients` and `traffic-counters`. It never waits and answers `helper-busy` while
+  an apply or reset runs so the numbers never mix an old plan with new kernel queues.
+  It takes no second lock because a Wi-Fi action never changes queues and would only be
+  refused for no reason.
+- `apply` and `reset` (so Panic too) are the writes. They wait up to 3 seconds for a
+  read to finish before they answer `helper-busy` so a dashboard poll never makes Panic
+  fail. A read that hangs (`tc` is killed after 10 seconds) holds the lock that long
+  and a write then waits its 3 seconds and answers `helper-busy`. A failing read is
+  logged once for each new reason and not on every poll.
 - `generation` is a boot nonce plus a count of applied plans (also counted when the
   helper adopts the published plan after a restart). It changes on every apply even
   when the settings stay the same.
@@ -539,7 +556,8 @@ what is set and what the kernel queue did in the last minute.
   `Service list streaming`). It answers `available: false` with a message for no
   helper and a reset network and an old helper. Any other unreadable answer
   (a busy helper and so on) is `available: false` with `paused: true`. The time is the
-  server clock as a float like the Traffic card.
+  server clock as a float like the Traffic card. It is taken right after the helper
+  answered so slow name lookups never stretch an interval.
 - The browser polls every 5 seconds while Diagnostics is visible and the tab is
   visible. It keeps 13 samples per queue (60 seconds). A queue's history restarts
   when a counter goes backwards or the generation or the device or the setting
@@ -561,7 +579,11 @@ loss and send packets then assert that drops track about 20% and grow. The same
 script joins a plan with 15 devices against the real `tc -j` output. Mutation checks on the join and
 the counter restart rule and the generation. Node tests for each verdict and the
 bursty cap and the restart cases and the fake-DOM tests for in-place updates and the
-status line and the paused state. One browser journey.
+status line and the paused state and for a backlog at a sample and for packets that
+still wait in the queue. Socket tests that a reset and an apply fired during a slow queue
+read wait and succeed and that a read answers `helper-busy` during a write and that a
+hung read gives a bounded wait. Generation tests for an apply that fails halfway and for
+a reset followed by the same plan. One browser journey.
 
 ## After these ten (separate work)
 
