@@ -4,6 +4,7 @@ from jittersim.config.protection import (
     observation_is_protected,
     protected_addresses,
     protected_macs,
+    station_mac,
     station_macs_by_address,
 )
 from jittersim.config.storage import ConfigRepository
@@ -103,3 +104,24 @@ def test_an_observation_is_protected_by_its_hardware_address_or_its_address():
     assert not observation_is_protected(seen("192.168.50.99", OTHER), macs, addresses)
     assert not observation_is_protected(seen("192.168.50.99"), macs, addresses)
     assert not observation_is_protected(seen("192.168.50.99", PROTECTED), set(), set())
+
+
+def test_a_station_mac_is_read_in_its_normal_form():
+    assert station_mac({"mac_address": "DC:1E:D5:3E:97:4C"}) == "dc:1e:d5:3e:97:4c"
+    assert station_mac({"mac_address": "dc-1e-d5-3e-97-4c"}) == "dc:1e:d5:3e:97:4c"
+    for station in ({}, {"mac_address": None}, {"mac_address": "nope"}, {"mac_address": 5},
+                    {"mac_address": "01:00:5e:00:00:01"}):
+        assert station_mac(station) is None
+
+
+def test_protected_addresses_match_stations_that_name_their_mac_in_another_form(tmp_path):
+    repository = make_repository(tmp_path)
+    repository.save_unaffected_device(UnaffectedDevice("dc:1e:d5:3e:97:4c", "a", 1))
+    stations = [
+        {"mac_address": "DC:1E:D5:3E:97:4C", "ipv4_address": "192.168.50.30"},
+        {"mac_address": "dc-1e-d5-3e-97-4c", "ipv4_address": "192.168.50.31"},
+        {"mac_address": "DC:1E:D5:3E:97:4D", "ipv4_address": "192.168.50.32"},
+        {"mac_address": "garbage", "ipv4_address": "192.168.50.33"},
+    ]
+
+    assert protected_addresses(repository, stations) == {"192.168.50.30", "192.168.50.31"}

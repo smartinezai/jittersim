@@ -2114,6 +2114,22 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(self.repository.list_domain_observations(), ())
 
+    def test_protecting_a_client_that_the_snapshot_names_in_capitals_purges_its_old_rows(
+        self,
+    ) -> None:
+        self.server.helper_client = MovingClientHelper(self.UPPERCASE_PHONE, "192.168.50.178")
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.178", "amazon.com", 2, 10, 10)], now=10
+        )
+        self.assertEqual(self.stored_macs(), {("192.168.50.178", None)})
+
+        status, _, _ = self.server.write_response_for(
+            "/api/unaffected-devices", {"mac_address": self.UPPERCASE_PHONE}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self.repository.list_domain_observations(), ())
+
     def test_a_scan_records_a_capital_snapshot_address_in_its_normal_form(self) -> None:
         self.scan_with(MovingClientHelper(self.UPPERCASE_PHONE, "192.168.50.99"))
 
