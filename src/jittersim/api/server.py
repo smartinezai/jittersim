@@ -642,6 +642,7 @@ DASHBOARD_HTML = """<!doctype html>
     .sidebar-status p, .sidebar-status ul { margin: 0; }
     .sidebar .status-line { color: var(--muted); overflow-wrap: anywhere; }
     .sidebar .status-line.status-on { color: #8de2bc; }
+    .sidebar-status .status-devices { margin: 0; padding: 0; border: 0; }
     .status-devices summary { color: #e7eef8; font-weight: 550; cursor: pointer; }
     .status-devices.is-empty summary { color: var(--muted); font-weight: 400; cursor: default; list-style: none; }
     .status-devices.is-empty summary::-webkit-details-marker { display: none; }
