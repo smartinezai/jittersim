@@ -4,7 +4,13 @@ from ipaddress import IPv4Address
 from jittersim.config.models import Device, Impairment, MacPolicy, Profile
 from jittersim.engine.compiler import compile_plan
 from jittersim.engine.plan import ServiceQuotaRule, WebsiteFilter
-from jittersim.networking.renderer import render_command_plan, render_reset_commands
+from jittersim.networking.renderer import (
+    queue_band,
+    queue_handle,
+    queue_parent,
+    render_command_plan,
+    render_reset_commands,
+)
 from jittersim.networking.topology import Topology, TopologyError
 
 
@@ -15,6 +21,79 @@ def make_device(device_id: str, address: str, profile_id: str) -> Device:
         ipv4_address=address,
         profile_id=profile_id,
     )
+
+
+# Copied from a render on the base commit with 8 devices that each delay both directions.
+EIGHT_DEVICE_TC_COMMANDS = """\
+tc qdisc replace dev eth0 root handle 10: prio bands 9 priomap 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+tc qdisc replace dev eth0 parent 10:1 handle 100: fq_codel
+tc qdisc del dev eth0 parent 10:2 handle 11:
+tc qdisc del dev eth0 parent 10:3 handle 12:
+tc qdisc del dev eth0 parent 10:4 handle 13:
+tc qdisc del dev eth0 parent 10:5 handle 14:
+tc qdisc del dev eth0 parent 10:6 handle 15:
+tc qdisc del dev eth0 parent 10:7 handle 16:
+tc qdisc del dev eth0 parent 10:8 handle 17:
+tc qdisc del dev eth0 parent 10:9 handle 18:
+tc qdisc replace dev eth0 parent 10:2 handle 11: netem delay 50ms
+tc filter replace dev eth0 protocol ip parent 10: pref 1 handle 1 fw flowid 10:2
+tc filter replace dev eth0 protocol ipv6 parent 10: pref 101 handle 1 fw flowid 10:2
+tc qdisc replace dev eth0 parent 10:3 handle 12: netem delay 50ms
+tc filter replace dev eth0 protocol ip parent 10: pref 2 handle 2 fw flowid 10:3
+tc filter replace dev eth0 protocol ipv6 parent 10: pref 102 handle 2 fw flowid 10:3
+tc qdisc replace dev eth0 parent 10:4 handle 13: netem delay 50ms
+tc filter replace dev eth0 protocol ip parent 10: pref 3 handle 3 fw flowid 10:4
+tc filter replace dev eth0 protocol ipv6 parent 10: pref 103 handle 3 fw flowid 10:4
+tc qdisc replace dev eth0 parent 10:5 handle 14: netem delay 50ms
+tc filter replace dev eth0 protocol ip parent 10: pref 4 handle 4 fw flowid 10:5
+tc filter replace dev eth0 protocol ipv6 parent 10: pref 104 handle 4 fw flowid 10:5
+tc qdisc replace dev eth0 parent 10:6 handle 15: netem delay 50ms
+tc filter replace dev eth0 protocol ip parent 10: pref 5 handle 5 fw flowid 10:6
+tc filter replace dev eth0 protocol ipv6 parent 10: pref 105 handle 5 fw flowid 10:6
+tc qdisc replace dev eth0 parent 10:7 handle 16: netem delay 50ms
+tc filter replace dev eth0 protocol ip parent 10: pref 6 handle 6 fw flowid 10:7
+tc filter replace dev eth0 protocol ipv6 parent 10: pref 106 handle 6 fw flowid 10:7
+tc qdisc replace dev eth0 parent 10:8 handle 17: netem delay 50ms
+tc filter replace dev eth0 protocol ip parent 10: pref 7 handle 7 fw flowid 10:8
+tc filter replace dev eth0 protocol ipv6 parent 10: pref 107 handle 7 fw flowid 10:8
+tc qdisc replace dev eth0 parent 10:9 handle 18: netem delay 50ms
+tc filter replace dev eth0 protocol ip parent 10: pref 8 handle 8 fw flowid 10:9
+tc filter replace dev eth0 protocol ipv6 parent 10: pref 108 handle 8 fw flowid 10:9
+tc qdisc replace dev wlan0 root handle 10: prio bands 9 priomap 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+tc qdisc replace dev wlan0 parent 10:1 handle 100: fq_codel
+tc qdisc del dev wlan0 parent 10:2 handle 11:
+tc qdisc del dev wlan0 parent 10:3 handle 12:
+tc qdisc del dev wlan0 parent 10:4 handle 13:
+tc qdisc del dev wlan0 parent 10:5 handle 14:
+tc qdisc del dev wlan0 parent 10:6 handle 15:
+tc qdisc del dev wlan0 parent 10:7 handle 16:
+tc qdisc del dev wlan0 parent 10:8 handle 17:
+tc qdisc del dev wlan0 parent 10:9 handle 18:
+tc qdisc replace dev wlan0 parent 10:2 handle 11: netem delay 60ms
+tc filter replace dev wlan0 protocol ip parent 10: pref 1 handle 1 fw flowid 10:2
+tc filter replace dev wlan0 protocol ipv6 parent 10: pref 101 handle 1 fw flowid 10:2
+tc qdisc replace dev wlan0 parent 10:3 handle 12: netem delay 60ms
+tc filter replace dev wlan0 protocol ip parent 10: pref 2 handle 2 fw flowid 10:3
+tc filter replace dev wlan0 protocol ipv6 parent 10: pref 102 handle 2 fw flowid 10:3
+tc qdisc replace dev wlan0 parent 10:4 handle 13: netem delay 60ms
+tc filter replace dev wlan0 protocol ip parent 10: pref 3 handle 3 fw flowid 10:4
+tc filter replace dev wlan0 protocol ipv6 parent 10: pref 103 handle 3 fw flowid 10:4
+tc qdisc replace dev wlan0 parent 10:5 handle 14: netem delay 60ms
+tc filter replace dev wlan0 protocol ip parent 10: pref 4 handle 4 fw flowid 10:5
+tc filter replace dev wlan0 protocol ipv6 parent 10: pref 104 handle 4 fw flowid 10:5
+tc qdisc replace dev wlan0 parent 10:6 handle 15: netem delay 60ms
+tc filter replace dev wlan0 protocol ip parent 10: pref 5 handle 5 fw flowid 10:6
+tc filter replace dev wlan0 protocol ipv6 parent 10: pref 105 handle 5 fw flowid 10:6
+tc qdisc replace dev wlan0 parent 10:7 handle 16: netem delay 60ms
+tc filter replace dev wlan0 protocol ip parent 10: pref 6 handle 6 fw flowid 10:7
+tc filter replace dev wlan0 protocol ipv6 parent 10: pref 106 handle 6 fw flowid 10:7
+tc qdisc replace dev wlan0 parent 10:8 handle 17: netem delay 60ms
+tc filter replace dev wlan0 protocol ip parent 10: pref 7 handle 7 fw flowid 10:8
+tc filter replace dev wlan0 protocol ipv6 parent 10: pref 107 handle 7 fw flowid 10:8
+tc qdisc replace dev wlan0 parent 10:9 handle 18: netem delay 60ms
+tc filter replace dev wlan0 protocol ip parent 10: pref 8 handle 8 fw flowid 10:9
+tc filter replace dev wlan0 protocol ipv6 parent 10: pref 108 handle 8 fw flowid 10:9
+""".splitlines()
 
 
 class TopologyTests(unittest.TestCase):
@@ -293,6 +372,149 @@ class RendererTests(unittest.TestCase):
         self.assertIn("ip daddr { 203.0.113.10 } drop", nft_script or "")
         self.assertIn("ip daddr != { 203.0.113.20 } drop", nft_script or "")
         self.assertIn("ip daddr { 203.0.113.30 } drop", nft_script or "")
+
+
+# mark -> (band that tc reads as a hexadecimal class minor, parent class, child qdisc handle)
+QUEUE_NAMES = {
+    1: ("2", "10:2", "11:"),
+    2: ("3", "10:3", "12:"),
+    3: ("4", "10:4", "13:"),
+    4: ("5", "10:5", "14:"),
+    5: ("6", "10:6", "15:"),
+    6: ("7", "10:7", "16:"),
+    7: ("8", "10:8", "17:"),
+    8: ("9", "10:9", "18:"),
+    9: ("a", "10:a", "19:"),
+    10: ("b", "10:b", "20:"),
+    11: ("c", "10:c", "21:"),
+    12: ("d", "10:d", "22:"),
+    13: ("e", "10:e", "23:"),
+    14: ("f", "10:f", "24:"),
+    15: ("10", "10:10", "25:"),
+}
+
+
+HEX_BANDS = ["2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f", "10"]
+
+
+def delayed_devices(count: int) -> tuple:
+    return tuple(
+        make_device(f"d{index:02d}", f"192.168.50.{10 + index}", "delay")
+        for index in range(1, count + 1)
+    )
+
+
+def render_delayed_plan(count: int):
+    profile = Profile(
+        id="delay",
+        name="Delay",
+        upload=Impairment(delay_ms=50),
+        download=Impairment(delay_ms=60),
+    )
+    plan = compile_plan(devices=delayed_devices(count), profiles={"delay": profile})
+    return render_command_plan(
+        plan=plan,
+        topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+    )
+
+
+def argument_after(command, keyword: str) -> str:
+    return command.arguments[command.arguments.index(keyword) + 1]
+
+
+class QueueNameHelperTests(unittest.TestCase):
+    def test_band_parent_and_handle_for_marks_one_to_fifteen(self) -> None:
+        for mark, (band, parent, handle) in QUEUE_NAMES.items():
+            with self.subTest(mark=mark):
+                self.assertEqual(queue_band(mark), band)
+                self.assertEqual(queue_parent(mark), parent)
+                self.assertEqual(queue_handle(mark), handle)
+
+    def test_a_child_handle_never_collides_with_the_root_or_the_ordinary_queue(self) -> None:
+        # tc reads the digits of a handle as a hexadecimal major number.
+        majors = [int(queue_handle(mark).rstrip(":"), 16) for mark in range(1, 16)]
+        self.assertEqual(len(set(majors)), 15)
+        self.assertFalse({0x10, 0x100} & set(majors))
+
+
+class QueueClassTests(unittest.TestCase):
+    def test_fifteen_devices_use_the_same_hex_band_everywhere(self) -> None:
+        commands = [command for command in render_delayed_plan(15) if command.executable == "tc"]
+
+        for interface in ("eth0", "wlan0"):
+            on_interface = [command for command in commands if command.arguments[3] == interface]
+            roots = [command for command in on_interface if "prio" in command.arguments]
+            self.assertEqual([argument_after(command, "bands") for command in roots], ["16"])
+            clears = [
+                command
+                for command in on_interface
+                if command.arguments[:2] == ("qdisc", "del")
+            ]
+            self.assertEqual(
+                [argument_after(command, "parent") for command in clears],
+                ["10:" + band for band in HEX_BANDS],
+            )
+            self.assertEqual(
+                [argument_after(command, "handle") for command in clears],
+                [f"{mark + 10}:" for mark in range(1, 16)],
+            )
+            netem = [
+                command
+                for command in on_interface
+                if command.arguments[:2] == ("qdisc", "replace") and "netem" in command.arguments
+            ]
+            self.assertEqual(
+                [argument_after(command, "parent") for command in netem],
+                ["10:" + band for band in HEX_BANDS],
+            )
+            self.assertEqual(
+                [argument_after(command, "handle") for command in netem],
+                [f"{mark + 10}:" for mark in range(1, 16)],
+            )
+            filters = [command for command in on_interface if command.arguments[0] == "filter"]
+            self.assertEqual(len(filters), 30)
+            for protocol in ("ip", "ipv6"):
+                self.assertEqual(
+                    [
+                        argument_after(command, "flowid")
+                        for command in filters
+                        if argument_after(command, "protocol") == protocol
+                    ],
+                    ["10:" + band for band in HEX_BANDS],
+                )
+            self.assertEqual(
+                [
+                    argument_after(command, "handle")
+                    for command in filters
+                    if argument_after(command, "protocol") == "ip"
+                ],
+                [str(mark) for mark in range(1, 16)],
+            )
+
+    def test_every_class_exists_among_the_prio_bands_for_each_device_count(self) -> None:
+        for count in range(1, 16):
+            with self.subTest(devices=count):
+                commands = [
+                    command for command in render_delayed_plan(count) if command.executable == "tc"
+                ]
+                for command in commands:
+                    if "prio" in command.arguments:
+                        bands = int(argument_after(command, "bands"))
+                        self.assertEqual(bands, count + 1)
+                        continue
+                    for keyword in ("parent", "flowid"):
+                        if keyword not in command.arguments:
+                            continue
+                        major, minor = argument_after(command, keyword).split(":")
+                        # A filter's parent is the bare root handle without a class.
+                        if major == "10" and minor:
+                            # tc reads a class minor number as hexadecimal.
+                            self.assertTrue(1 <= int(minor, 16) <= count + 1, command.argv)
+
+    def test_eight_devices_render_the_same_commands_as_before(self) -> None:
+        commands = [command for command in render_delayed_plan(8) if command.executable == "tc"]
+
+        self.assertEqual([" ".join(command.argv) for command in commands], EIGHT_DEVICE_TC_COMMANDS)
 
 
 if __name__ == "__main__":
