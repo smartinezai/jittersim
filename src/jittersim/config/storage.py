@@ -7,7 +7,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Union
+from typing import Dict, Iterable, Optional, Sequence, Union
 
 from .device_labels import (
     MAX_SAVED_CONNECTED_DEVICE_LABELS,
@@ -2108,6 +2108,25 @@ class ConfigRepository:
         except (sqlite3.IntegrityError, sqlite3.OperationalError) as error:
             self._rollback()
             raise StorageError("could not save domain observations") from error
+
+    def delete_domain_observations(self, ipv4_addresses: Iterable[str]) -> int:
+        """Remove every stored DNS aggregate for the given client addresses."""
+
+        addresses = sorted({str(address) for address in ipv4_addresses})
+        if not addresses:
+            return 0
+        try:
+            cursor = self._connection.execute(
+                "DELETE FROM domain_observations WHERE ipv4_address IN ("
+                + ",".join("?" for _ in addresses)
+                + ")",
+                addresses,
+            )
+            self._commit()
+        except (sqlite3.IntegrityError, sqlite3.OperationalError) as error:
+            self._rollback()
+            raise StorageError("could not delete domain observations") from error
+        return cursor.rowcount
 
     def list_domain_observations(self) -> tuple:
         """Return recent domain aggregates ordered by device and query count."""

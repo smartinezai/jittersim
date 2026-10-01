@@ -529,6 +529,39 @@ class ConfigRepositoryTests(unittest.TestCase):
             [("amazon.com", 5), ("chat.openai.com", 1)],
         )
 
+    def test_deletes_domain_observations_for_the_given_addresses_only(self) -> None:
+        self.repository.save_domain_observations(
+            [
+                DomainObservation("192.168.50.20", "amazon.com", 2, 10, 10),
+                DomainObservation("192.168.50.20", "chat.openai.com", 1, 11, 11),
+                DomainObservation("192.168.50.21", "amazon.com", 4, 12, 12),
+            ],
+            now=12,
+        )
+
+        removed = self.repository.delete_domain_observations(["192.168.50.20"])
+
+        self.assertEqual(removed, 2)
+        self.assertEqual(
+            {
+                str(observation.ipv4_address)
+                for observation in self.repository.list_domain_observations()
+            },
+            {"192.168.50.21"},
+        )
+        self.assertEqual(self.repository.total_domain_queries("192.168.50.20"), 0)
+        self.assertEqual(self.repository.total_domain_queries("192.168.50.21"), 4)
+
+    def test_deleting_no_domain_observation_addresses_removes_nothing(self) -> None:
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.20", "amazon.com", 2, 10, 10)],
+            now=10,
+        )
+
+        self.assertEqual(self.repository.delete_domain_observations([]), 0)
+        self.assertEqual(self.repository.delete_domain_observations(["192.168.50.99"]), 0)
+        self.assertEqual(len(self.repository.list_domain_observations()), 1)
+
     def test_action_history_is_newest_first_and_keeps_only_500_entries(self) -> None:
         for index in range(501):
             action = "/api/apply" if index < 500 else "/api/reset"
