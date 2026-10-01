@@ -3212,7 +3212,10 @@ DASHBOARD_HTML = """<!doctype html>
         kind: label.kind || "",
         domain: observation.domain,
         hintText: hint.text,
-        searchUrl: hint.searchable ? domainSearchUrl(observation.domain) : ""
+        searchUrl: hint.searchable ? domainSearchUrl(observation.domain) : "",
+        searchLabel: hint.searchable
+          ? "Search the web for " + observation.domain + " (opens a new tab)"
+          : ""
       };
     }
 
@@ -3305,6 +3308,7 @@ DASHBOARD_HTML = """<!doctype html>
             link.href = parts.searchUrl;
             link.target = "_blank";
             link.rel = "noopener noreferrer";
+            link.setAttribute("aria-label", parts.searchLabel);
             link.textContent = "What is this?";
             hintLine.appendChild(link);
           }

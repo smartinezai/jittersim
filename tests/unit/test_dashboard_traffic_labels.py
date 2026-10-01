@@ -72,6 +72,7 @@ def test_each_row_is_built_from_the_row_parts():
     assert "What is this?" in body
     assert 'link.target = "_blank";' in body
     assert 'link.rel = "noopener noreferrer";' in body
+    assert 'link.setAttribute("aria-label", parts.searchLabel);' in body
 
 
 def test_the_row_text_is_set_without_parsing_html():
@@ -141,6 +142,20 @@ def test_the_search_link_shows_only_for_unknown_and_cdn_names(domain, shows_link
 
 
 @needs_node
+@pytest.mark.parametrize(
+    ("domain", "expected"),
+    [
+        ("a1051.dscg4.akamai.net", "Search the web for a1051.dscg4.akamai.net (opens a new tab)"),
+        ("cdn.somesmallsite.io", "Search the web for cdn.somesmallsite.io (opens a new tab)"),
+        ("mmx-ds.cdn.whatsapp.net", ""),
+        ("tags-eu.tiqcdn.com", ""),
+    ],
+)
+def test_the_search_link_has_a_spoken_label_only_when_it_shows(domain, expected):
+    assert row_parts(observed(domain))["searchLabel"] == expected
+
+
+@needs_node
 def test_the_hint_text_appears_in_the_parts():
     parts = row_parts(observed("a1051.dscg4.akamai.net", ["WhatsApp", "Netflix"]))
     assert parts["hintText"] == "Seen with WhatsApp and Netflix (guess)"
@@ -171,7 +186,7 @@ def test_a_row_without_a_label_has_empty_label_fields_and_no_link():
     parts = row_parts({"domain": "old.example.com", "query_count": 1})
     assert parts == {
         "labelName": "", "category": "", "kind": "", "domain": "old.example.com",
-        "hintText": "", "searchUrl": "",
+        "hintText": "", "searchUrl": "", "searchLabel": "",
     }
 
 
@@ -186,6 +201,7 @@ def test_every_part_is_plain_text_and_markup_is_not_interpreted():
     assert parts["labelName"] == hostile
     assert parts["hintText"] == "Seen with " + hostile + " (guess)"
     assert parts["searchUrl"] == "https://duckduckgo.com/?q=a.example.com"
+    assert parts["searchLabel"] == "Search the web for a.example.com (opens a new tab)"
 
 
 # A small stand-in for the browser's document so the real renderObservations can run in node.
@@ -299,6 +315,9 @@ def test_the_search_link_is_rendered_only_for_unknown_and_cdn_rows():
         assert link["href"] == "https://duckduckgo.com/?q=" + domain
         assert link["target"] == "_blank"
         assert link["rel"] == "noopener noreferrer"
+        assert link["attributes"] == {
+            "aria-label": "Search the web for " + domain + " (opens a new tab)"
+        }
 
 
 @needs_node
