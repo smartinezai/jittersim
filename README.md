@@ -292,6 +292,10 @@ not press the button again. **Reset network** and **Panic** stop JitterSim and
 remove every rule from the Pi. Your saved settings are kept. Choose **Start with
 saved settings** to run them again. Protected devices are never touched.
 
+The line under the button counts what is saved. The message after a start counts
+what JitterSim really started. Without the Pi helper the dashboard says that it
+needs the helper to run.
+
 ### General profile
 
 Choose a saved profile under **General profile** then click **Apply to all**.

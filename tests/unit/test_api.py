@@ -1843,6 +1843,37 @@ class ControlServerTests(unittest.TestCase):
             },
         )
 
+    def test_a_failed_apply_has_the_same_body_as_before_the_summary_existed(self) -> None:
+        # The dashboard shows the error and the hint. A summary of what was sent would say
+        # that something was started when nothing was.
+        self.server.helper_client = FakeHelper(fail_action="apply")
+
+        status, _, body = self.server.write_response_for("/api/apply", {})
+
+        self.assertEqual(status, 502)
+        failure = json.loads(body)
+        self.assertEqual(set(failure), {"error", "hint", "state"})
+        self.assertEqual(failure["error"], "network helper apply failed")
+        self.assertEqual(failure["state"]["observed_state"], "error")
+
+    def test_a_plan_that_cannot_be_built_has_the_same_body_as_before(self) -> None:
+        from jittersim.engine.compiler import PlanError
+
+        self.server.helper_client = FakeHelper()
+        with patch("jittersim.api.server.compile_stored_plan", side_effect=PlanError("broken")):
+            status, _, body = self.server.write_response_for("/api/apply", {})
+
+        self.assertEqual(status, 409)
+        self.assertEqual(
+            json.loads(body), {"error": "stored configuration cannot be applied"}
+        )
+
+    def test_apply_without_a_helper_has_the_same_body_as_before(self) -> None:
+        status, _, body = self.server.write_response_for("/api/apply", {})
+
+        self.assertEqual(status, 503)
+        self.assertEqual(json.loads(body), {"error": "network helper is not configured"})
+
     def test_diagnostics_runtime_carries_the_running_flag(self) -> None:
         self.server.helper_client = FakeHelper()
         _, _, body = self.server.response_for("/api/diagnostics")

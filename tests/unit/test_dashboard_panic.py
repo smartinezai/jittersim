@@ -34,6 +34,7 @@ let helperConfigured = true;
 let profiles = [];
 let generalProfileState = null;
 let lastRuntimeState = null;
+let helperKnown = true;
 let applyBusy = false;
 let networkActionBusy = false;
 let networkActionRevision = 0;
@@ -110,7 +111,7 @@ CASES = {
       assert.equal(networkCalls[0].path, "/api/apply");
       assert.equal(
         refreshMessages[0],
-        "Started: 2 devices with a profile · 1 group · 1 protected device stays untouched"
+        "Started: 2 devices with a profile · 1 group · 1 protected device stays untouched."
       );
       assert.equal(element("apply-button").textContent, "Re-apply saved settings");
     """,
@@ -125,7 +126,7 @@ CASES = {
       await flush();
       assert.equal(
         refreshMessages[0],
-        'Re-applied: Applies the general profile "Office" to every device that is not protected'
+        'Re-applied: General profile "Office" for every unprotected device.'
       );
     """,
     "apply_without_a_summary_still_confirms": r"""
@@ -164,6 +165,55 @@ CASES = {
       await flush();
       assert.equal(refreshMessages[0], "Network reset successfully.");
       assert.equal(element("apply-button").textContent, "Start with saved settings");
+    """,
+    "apply_message_counts_the_service_lists_the_server_sent": r"""
+      element("admin-token").value = "fixture token";
+      network = async () => ({ok: true, json: async () => ({
+        state: {observed_state: "applied", running: true},
+        applied: {devices: 1, groups: 0, service_lists: 2, protected: 0, general_profile: null}
+      })});
+      press("apply-button");
+      await flush();
+      assert.equal(refreshMessages[0], "Started: 1 device with a profile · 2 service lists.");
+    """,
+    "a_warning_about_skipped_devices_follows_a_finished_sentence": r"""
+      element("admin-token").value = "fixture token";
+      network = async () => ({ok: true, json: async () => ({
+        state: {observed_state: "applied", running: true},
+        applied: {devices: 1, groups: 0, service_lists: 0, protected: 1, general_profile: null},
+        warning: "Profiles were skipped for devices whose current Wi-Fi identity could not be verified: tv."
+      })});
+      press("apply-button");
+      await flush();
+      assert.equal(
+        refreshMessages[0],
+        "Started: 1 device with a profile · 1 protected device stays untouched. " +
+        "Profiles were skipped for devices whose current Wi-Fi identity could not be verified: tv."
+      );
+    """,
+    "a_failed_apply_shows_the_server_error_and_no_summary": r"""
+      element("admin-token").value = "fixture token";
+      network = async () => ({
+        ok: false, status: 502, json: async () => ({
+          error: "network helper apply failed", applied: {devices: 9}
+        })
+      });
+      press("apply-button");
+      await flush();
+      assert.equal(messages.at(-1).kind, "error");
+      assert.equal(refreshMessages.length, 0);
+    """,
+    "without_the_helper_the_status_says_it_is_needed_as_soon_as_the_mode_is_known": r"""
+      lastRuntimeState = {observed_state: "unknown", running: false};
+      helperKnown = false;
+      helperConfigured = false;
+      renderMode({helper_configured: false});
+      assert.equal(element("runtime-summary").textContent, "Needs the Pi helper to run.");
+      assert.equal(element("apply-button").disabled, true);
+      renderMode({helper_configured: true});
+      assert.equal(
+        element("runtime-summary").textContent, "Not started. Choose Start with saved settings."
+      );
     """,
     "locks_every_action_while_running": r"""
       element("admin-token").value = "fixture token";

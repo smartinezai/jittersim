@@ -83,7 +83,10 @@ let lastRuntimeState = null;
 let serviceListsState = [];
 let serviceListsLoaded = false;
 let profilesLoaded = false;
-let unaffectedMacs = [];
+let unaffectedMacs = null;
+let savedDevicesLoaded = false;
+let groupsLoaded = false;
+let helperKnown = true;
 let applyBusy = false;
 let serviceCatalogue = [];
 let networkActionRevision = 0;
@@ -503,22 +506,35 @@ def test_a_poll_answer_that_arrives_after_an_action_started_is_dropped():
 
 # A failed Apply or Reset
 
-@pytest.mark.parametrize("path", ["/api/apply", "/api/reset"])
-def test_a_failed_action_refreshes_the_state_once(path):
+@pytest.mark.parametrize(
+    "path,last_action,runtime,shown",
+    [
+        ("/api/apply", "apply", "The last start failed. Check the Pi and try again.",
+         "Last network action failed"),
+        # The scheduler is paused before the Pi is asked to remove its rules. A failed reset
+        # therefore reads as an error with running false and the last action "reset".
+        ("/api/reset", "reset", "The last reset failed. The Pi may still be shaping. Check it.",
+         "Last reset failed. The Pi may still be shaping."),
+    ],
+)
+def test_a_failed_action_refreshes_the_state_once(path, last_action, runtime, shown):
     body = (
         everything_loaded()
         + "\nrequests.length = 0;"
         "\nresponses[%s] = new Error('network helper failed');" % json.dumps(path)
-        + "\nresponses['/api/state'] = {state: {observed_state: 'error', running: false}};"
-        "\nawait runAction(%s, 'done', 'working');" % json.dumps(path)
+        + "\nresponses['/api/state'] = {state: {observed_state: 'error', running: false,"
+        " last_action: %s}};" % json.dumps(last_action)
+        + "\nawait runAction(%s, 'done', 'working');" % json.dumps(path)
         + "\nawait flush();"
         "\nconsole.log(JSON.stringify({requests, messages, shown: block().plain,"
-        " runtime: element('runtime-summary').textContent}));"
+        " runtime: element('runtime-summary').textContent,"
+        " button: element('apply-button').textContent}));"
     )
     result = run(body)
     assert result["requests"].count("GET /api/state") == 1
-    assert result["shown"] == "Last network action failed"
-    assert result["runtime"] == "The last start failed. Check the Pi and try again."
+    assert result["shown"] == shown
+    assert result["runtime"] == runtime
+    assert result["button"] == "Start with saved settings"
     assert result["messages"][-1] == ["network helper failed", "error"]
 
 

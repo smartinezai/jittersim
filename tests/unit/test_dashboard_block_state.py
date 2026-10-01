@@ -189,7 +189,7 @@ def test_a_failed_change_keeps_the_state_and_shows_the_error(blocked):
 
 def test_the_success_text_says_when_the_change_applies():
     # While the scheduler runs it applies a saved change on its next tick. After Reset or
-    # Panic it is paused and a saved change waits for the Apply button.
+    # Panic it is paused and a saved change waits for Start with saved settings.
     assert "to enforce it" not in served_functions()
 
 

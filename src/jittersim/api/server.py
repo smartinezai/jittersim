@@ -715,7 +715,7 @@ DASHBOARD_HTML = """<!doctype html>
     .sidebar-credentials button { min-height: 2.4rem; padding: 0.35rem 0.5rem; font-size: 0.8rem; }
     .sidebar button { margin: 0; min-height: 2.6rem; text-align: left; }
     .sidebar-actions button { text-align: center; }
-    .sidebar-action-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 0.45rem; }
+    .sidebar-action-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 0.45rem; }
     .sidebar .sidebar-action-row .help-icon { display: inline-grid; flex: none; }
     .sidebar .apply-summary { margin: -0.15rem 0 0; color: var(--muted); font-size: 0.76rem; line-height: 1.35; overflow-wrap: anywhere; }
     .sidebar span { display: block; }
@@ -762,9 +762,15 @@ DASHBOARD_HTML = """<!doctype html>
     .analytics-table td { color: #d7e4f2; font-size: 0.84rem; }
     .analytics-table td:nth-child(n + 3) { text-align: right; font-variant-numeric: tabular-nums; }
     .analytics-domain { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+    /* The sidebar scrolls so a tip placed inside it is cut off on a short window. Next to the
+       sidebar the tip is fixed to the window and always has room. */
     @media (min-width: 701px) {
-      /* The sidebar scrolls and would cut off a wider tip so it opens upward at the row width. */
-      .sidebar .sidebar-action-row .help-icon::after { top: auto; bottom: calc(100% + 0.4rem); left: 0; right: 0; width: auto; }
+      .sidebar .sidebar-action-row .help-icon::after { position: fixed; top: auto; bottom: 1rem; left: 16rem; right: auto; width: min(22rem, calc(100vw - 17rem)); }
+    }
+    /* The label wraps to two lines in the narrow sidebar. Both labels need the same room so the
+       buttons below do not jump when it changes. */
+    @media (min-width: 48.01rem) {
+      .sidebar .sidebar-actions #apply-button { min-height: 4.1rem; min-height: calc(2lh + 1.24rem + 2px); }
     }
     @media (max-width: 700px) {
       .help-icon::after { position: fixed; top: auto; bottom: 1rem; left: 1rem; width: calc(100vw - 2rem); }
@@ -2040,6 +2046,8 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     let helperConfigured = false;
+    // The status says the helper is missing only after the health check has answered.
+    let helperKnown = false;
     let adminTokenVerified = false;
     let adminTokenRevision = 0;
     let adminTokenChecking = false;
@@ -2309,7 +2317,9 @@ DASHBOARD_HTML = """<!doctype html>
     let serviceListsLoaded = false;
     let profilesLoaded = false;
     let savedProfileBusy = null;
-    let unaffectedMacs = [];
+    let unaffectedMacs = null;
+    let savedDevicesLoaded = false;
+    let groupsLoaded = false;
     let applyBusy = false;
     let networkActionBusy = false;
     // Counts the network actions started. A state answer that was asked for before an
@@ -2779,6 +2789,8 @@ DASHBOARD_HTML = """<!doctype html>
 
     function renderMode(data) {
       helperConfigured = data.helper_configured;
+      helperKnown = true;
+      renderRuntimeText();
       const badge = element("mode-badge");
       const notice = element("mode-notice");
       badge.textContent = helperConfigured ? "Hardware mode" : "Configuration only";
@@ -2851,7 +2863,9 @@ DASHBOARD_HTML = """<!doctype html>
       } else if (state === "applying" || state === "resetting") {
         devices = quiet("Changing…");
       } else if (state === "error") {
-        devices = quiet("Last network action failed");
+        devices = quiet(input.lastAction === "reset"
+          ? "Last reset failed. The Pi may still be shaping."
+          : "Last network action failed");
       } else if (!running) {
         devices = quiet("Not started yet");
       } else if (input.clientsAvailable !== true) {
@@ -2910,6 +2924,9 @@ DASHBOARD_HTML = """<!doctype html>
       serviceListsState = [];
       serviceListsLoaded = false;
       profilesLoaded = false;
+      unaffectedMacs = null;
+      savedDevicesLoaded = false;
+      groupsLoaded = false;
     }
 
     function renderSidebarStatus() {
@@ -2924,6 +2941,7 @@ DASHBOARD_HTML = """<!doctype html>
         },
         runtimeState: lastRuntimeState ? lastRuntimeState.observed_state : null,
         running: !!lastRuntimeState && lastRuntimeState.running === true,
+        lastAction: lastRuntimeState ? lastRuntimeState.last_action : null,
         generalState: generalProfileState,
         profiles,
         clients: connectedClients,
@@ -2984,32 +3002,47 @@ DASHBOARD_HTML = """<!doctype html>
       listsLine.textContent = view.lists.text;
     }
 
-    // Says in plain words what the Apply button runs. The input counts what is saved.
+    // Says in plain words what has been saved. The input counts what is saved. The server
+    // leaves out devices that are not connected so this never claims what will run.
     function applySummary(input) {
       const count = (number, one, many) => number + " " + (number === 1 ? one : many);
       const protectedCount = input.protected || 0;
       const protectedText = protectedCount === 1
         ? "1 protected device stays untouched"
         : protectedCount + " protected devices stay untouched";
-      if (input.generalProfileName) {
-        const text = 'Applies the general profile "' + input.generalProfileName +
-          '" to every device that is not protected';
-        return protectedCount > 0 ? text + " · " + protectedText : text;
-      }
       const parts = [];
-      if (input.devices > 0) parts.push(count(input.devices, "device", "devices") + " with a profile");
-      if (input.groups > 0) parts.push(count(input.groups, "group", "groups"));
+      if (input.generalProfileName) {
+        // The server runs the enabled service lists together with the general profile.
+        parts.push('General profile "' + input.generalProfileName + '" for every unprotected device');
+      } else {
+        if (input.devices > 0) {
+          parts.push(count(input.devices, "device", "devices") + " with a profile");
+        }
+        if (input.groups > 0) parts.push(count(input.groups, "group", "groups"));
+      }
       if (input.serviceLists > 0) {
         parts.push(count(input.serviceLists, "service list", "service lists"));
       }
       if (protectedCount > 0) parts.push(protectedText);
-      return parts.length ? parts.join(" · ") : "Nothing saved to apply yet";
+      return parts.length ? parts.join(" · ") : "No device profiles or service lists saved yet";
     }
 
-    // Says whether JitterSim is running on the Pi. A saved change sets the state to "unknown"
-    // and the running scheduler turns it back to "applied" within about a second. So
-    // "unknown" means "not started" only while the scheduler is not running.
-    function runtimeStatusText(state, running) {
+    // The line under the button. Nothing saved is already a full sentence.
+    function savedLine(input) {
+      const text = applySummary(input);
+      return text === applySummary({}) ? text : "Saved: " + text;
+    }
+
+    // Says whether JitterSim is running on the Pi. A saved change sets the state to "unknown".
+    // The running scheduler writes "applied" again only when the change altered the plan. So
+    // "unknown" while running is true for as long as the scheduler runs. Reset and Panic pause
+    // the scheduler before they ask the Pi to remove its rules. So a failed reset reads as an
+    // error with running false and the last action "reset".
+    function runtimeStatusText(state, running, context) {
+      const options = context || {};
+      if (options.helperConfigured === false) {
+        return {text: "Needs the Pi helper to run.", tone: "muted"};
+      }
       if (state === "applying") return {text: "Applying…", tone: "working"};
       if (state === "resetting") return {text: "Resetting…", tone: "working"};
       if (running === true) {
@@ -3019,7 +3052,9 @@ DASHBOARD_HTML = """<!doctype html>
             tone: "ok"
           };
         }
-        if (state === "unknown") return {text: "Applying your latest change…", tone: "working"};
+        if (state === "unknown") {
+          return {text: "Running. Your latest change applies on its own.", tone: "ok"};
+        }
         if (state === "error") return {text: "The last apply failed. Check the Pi.", tone: "error"};
       } else {
         if (state === "reset") {
@@ -3029,7 +3064,12 @@ DASHBOARD_HTML = """<!doctype html>
           return {text: "Not started. Choose Start with saved settings.", tone: "pending"};
         }
         if (state === "error") {
-          return {text: "The last start failed. Check the Pi and try again.", tone: "error"};
+          return options.lastAction === "reset"
+            ? {
+                text: "The last reset failed. The Pi may still be shaping. Check it.",
+                tone: "error"
+              }
+            : {text: "The last start failed. Check the Pi and try again.", tone: "error"};
         }
         if (state === "applied") {
           return {text: "Applied. Waiting for the scheduler.", tone: "muted"};
@@ -3038,10 +3078,11 @@ DASHBOARD_HTML = """<!doctype html>
       return {text: "State unknown.", tone: "muted"};
     }
 
+    // While JitterSim runs the button keeps its name through an apply or a reset.
     function applyButtonLabel(state, running) {
-      return running === true && (state === "applied" || state === "unknown" || state === "error")
-        ? "Re-apply saved settings"
-        : "Start with saved settings";
+      const keepsRunning = state === "applied" || state === "unknown" || state === "error" ||
+        state === "applying" || state === "resetting";
+      return running === true && keepsRunning ? "Re-apply saved settings" : "Start with saved settings";
     }
 
     function currentApplyLabel() {
@@ -3052,47 +3093,65 @@ DASHBOARD_HTML = """<!doctype html>
       );
     }
 
-    function renderApplyButton() {
-      if (applyBusy) return;
-      element("apply-button").textContent = currentApplyLabel();
+    // The live regions are read out each time their text is written so only a change writes.
+    function setTextIfChanged(node, text) {
+      if (node.textContent !== text) node.textContent = text;
     }
 
-    // Counts what the next apply sends from the data the page already holds. The server
-    // leaves out a protected device and a group that has no other member.
+    function renderApplyButton() {
+      if (applyBusy) return;
+      setTextIfChanged(element("apply-button"), currentApplyLabel());
+    }
+
+    // The line is kept back until every input of the count has arrived.
+    function applyInputsLoaded() {
+      return savedDevicesLoaded && groupsLoaded && unaffectedMacs !== null && serviceListsLoaded &&
+        generalProfileState !== null;
+    }
+
     function renderApplySummary() {
       const line = element("apply-summary");
-      if (!adminTokenVerified) {
-        line.textContent = "";
-        line.hidden = true;
-        return;
+      let text = "";
+      if (adminTokenVerified && applyInputsLoaded()) {
+        const generalProfile = generalProfileState.profile ? generalProfileState.profile : null;
+        const protectedMacs = new Set(unaffectedMacs);
+        const affected = savedDevices.filter(
+          (device) => !device.mac_address || !protectedMacs.has(device.mac_address)
+        );
+        const affectedIds = new Set(affected.map((device) => device.id));
+        text = savedLine({
+          devices: affected.length,
+          groups: groups.filter(
+            (group) => (group.device_ids || []).some((id) => affectedIds.has(id))
+          ).length,
+          serviceLists: serviceListsState.filter((serviceList) => serviceList.enabled).length,
+          protected: unaffectedMacs.length,
+          generalProfileName: generalProfile ? generalProfile.name || generalProfile.id : ""
+        });
       }
-      const running = !!lastRuntimeState && lastRuntimeState.running === true;
-      const generalProfile = generalProfileState && generalProfileState.profile
-        ? generalProfileState.profile : null;
-      const protectedMacs = new Set(unaffectedMacs);
-      const affected = savedDevices.filter(
-        (device) => !device.mac_address || !protectedMacs.has(device.mac_address)
+      setTextIfChanged(line, text);
+      if (line.hidden !== (text === "")) line.hidden = text === "";
+    }
+
+    function renderRuntimeText() {
+      if (!lastRuntimeState) return;
+      const status = runtimeStatusText(
+        lastRuntimeState.observed_state,
+        lastRuntimeState.running === true,
+        {
+          lastAction: lastRuntimeState.last_action,
+          helperConfigured: helperKnown ? helperConfigured : true
+        }
       );
-      const affectedIds = new Set(affected.map((device) => device.id));
-      const text = applySummary({
-        devices: affected.length,
-        groups: groups.filter(
-          (group) => (group.device_ids || []).some((id) => affectedIds.has(id))
-        ).length,
-        serviceLists: serviceListsState.filter((serviceList) => serviceList.enabled).length,
-        protected: unaffectedMacs.length,
-        generalProfileName: generalProfile ? generalProfile.name || generalProfile.id : ""
-      });
-      line.textContent = (running ? "Running: " : "Will run: ") + text;
-      line.hidden = false;
+      const summary = element("runtime-summary");
+      setTextIfChanged(summary, status.text);
+      const className = "runtime-summary " + lastRuntimeState.observed_state + " tone-" + status.tone;
+      if (summary.className !== className) summary.className = className;
     }
 
     function renderRuntimeSummary(state) {
       lastRuntimeState = state;
-      const status = runtimeStatusText(state.observed_state, state.running === true);
-      const summary = element("runtime-summary");
-      summary.textContent = status.text;
-      summary.className = "runtime-summary " + state.observed_state + " tone-" + status.tone;
+      renderRuntimeText();
       renderSidebarStatus();
     }
 
@@ -4449,6 +4508,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     function renderGroups(data) {
       groups = data.groups || [];
+      groupsLoaded = true;
       renderApplySummary();
       const container = element("group-list");
       container.replaceChildren();
@@ -5045,6 +5105,7 @@ DASHBOARD_HTML = """<!doctype html>
     async function loadDevicesForSchedule() {
       const data = await request("/api/devices", "GET");
       savedDevices = data.devices;
+      savedDevicesLoaded = true;
       renderApplySummary();
       updateGroupMemberOptions();
       [
@@ -5561,13 +5622,14 @@ DASHBOARD_HTML = """<!doctype html>
       if (!applied) {
         return wasRunning ? "Re-applied your saved settings." : "Started with your saved settings.";
       }
+      // The full stop keeps a warning about skipped devices from running on.
       return (wasRunning ? "Re-applied: " : "Started: ") + applySummary({
         devices: applied.devices,
         groups: applied.groups,
         serviceLists: applied.service_lists,
         protected: applied.protected,
         generalProfileName: applied.general_profile
-      });
+      }) + ".";
     }
 
     element("apply-button").addEventListener("click", () => {

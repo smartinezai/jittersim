@@ -187,6 +187,27 @@ def test_summary_when_the_scheduler_is_not_running(state, summary):
     assert result["lists"] == {"text": ""}
 
 
+@pytest.mark.parametrize("running", [False, True])
+def test_a_failed_reset_says_the_pi_may_still_be_shaping(running):
+    # The block must not suggest that nothing is affected after a reset that failed.
+    result = status(
+        runtimeState="error",
+        lastAction="reset",
+        running=running,
+        generalState=general(active=True),
+        clients=[client("Laptop", "02:00:00:00:00:01", assigned_device_id="laptop")],
+    )
+    assert result["devices"] == {
+        "summary": "Last reset failed. The Pi may still be shaping.", "items": [], "more": 0
+    }
+
+
+@pytest.mark.parametrize("last_action", ["apply", "schedule", None])
+def test_another_failed_action_keeps_the_general_wording(last_action):
+    result = status(runtimeState="error", lastAction=last_action, running=False)
+    assert result["devices"]["summary"] == "Last network action failed"
+
+
 @pytest.mark.parametrize(
     "state,summary",
     [
