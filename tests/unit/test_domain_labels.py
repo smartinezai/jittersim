@@ -360,6 +360,70 @@ TWO_PART_SUFFIXES = sorted(_SECOND_LEVEL)
 TENANT_SUFFIXES = sorted(_TENANT_SUFFIXES)
 
 
+# The tables above are walked as they are. These lists are written out so that dropping an entry
+# from a table fails a test instead of shrinking the walk.
+PINNED_TWO_PART_SUFFIXES = [
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.nz", "co.jp",
+    "co.in", "com.br", "com.mx", "co.za", "com.tr", "com.cn", "com.hk", "com.sg",
+    "co.kr", "or.kr", "com.ar", "com.tw", "com.pl", "ne.jp", "or.jp", "co.id", "co.il",
+    "com.my", "com.ph", "com.vn", "com.ua", "org.nz", "net.nz", "co.th",
+    "co.at", "or.at", "com.co", "com.pe", "com.ve", "co.ve", "com.ec", "com.uy", "com.pk",
+    "com.bd", "com.ng", "com.eg", "com.sa", "co.ke", "com.gh", "co.tz", "net.cn", "org.cn",
+    "gov.cn", "edu.au", "gov.au", "ac.nz", "govt.nz", "ac.jp", "go.jp", "gr.jp", "com.pt",
+    "com.gr", "com.ro", "com.es", "com.fr", "co.hu", "com.ru",
+    "gov.br", "org.br", "net.br", "edu.br", "sch.uk", "nhs.uk", "ltd.uk", "me.uk", "edu.sg",
+    "edu.my", "ed.jp", "gv.at",
+]
+PINNED_TENANT_SUFFIXES = [
+    "github.io", "gitlab.io", "herokuapp.com", "vercel.app", "netlify.app", "pages.dev",
+    "workers.dev", "web.app", "firebaseapp.com", "appspot.com", "azurewebsites.net",
+    "blogspot.com", "wordpress.com", "onrender.com", "fly.dev", "myshopify.com",
+    "cloudfront.net", "trafficmanager.net", "azureedge.net", "akamaized.net", "b-cdn.net",
+]
+
+
+@pytest.mark.parametrize("suffix", PINNED_TWO_PART_SUFFIXES)
+def test_every_pinned_two_part_suffix_keeps_two_sibling_sites_apart(suffix):
+    assert suffix in _SECOND_LEVEL
+    assert group_domain("www.alpha." + suffix)["key"] == "domain:alpha." + suffix
+    assert group_domain("www.beta." + suffix)["key"] == "domain:beta." + suffix
+
+
+@pytest.mark.parametrize("suffix", PINNED_TENANT_SUFFIXES)
+def test_every_pinned_hosting_suffix_keeps_two_tenants_apart(suffix):
+    assert suffix in _TENANT_SUFFIXES
+    assert group_domain("api.alpha." + suffix)["key"] == "domain:alpha." + suffix
+    assert group_domain("api.beta." + suffix)["key"] == "domain:beta." + suffix
+
+
+def test_the_tables_hold_nothing_that_is_not_pinned():
+    assert set(PINNED_TWO_PART_SUFFIXES) == set(_SECOND_LEVEL)
+    assert set(PINNED_TENANT_SUFFIXES) == set(_TENANT_SUFFIXES)
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ("www.gov.br", "www.org.br"),
+        ("a.alpha.gov.br", "a.beta.gov.br"),
+        ("a.alpha.org.br", "a.beta.org.br"),
+        ("a.alpha.net.br", "a.beta.net.br"),
+        ("a.alpha.edu.br", "a.beta.edu.br"),
+        ("a.alpha.sch.uk", "a.beta.sch.uk"),
+        ("a.alpha.nhs.uk", "a.beta.nhs.uk"),
+        ("a.alpha.ltd.uk", "a.beta.ltd.uk"),
+        ("a.alpha.me.uk", "a.beta.me.uk"),
+        ("a.alpha.edu.sg", "a.beta.edu.sg"),
+        ("a.alpha.edu.my", "a.beta.edu.my"),
+        ("a.alpha.ed.jp", "a.beta.ed.jp"),
+        ("a.alpha.gv.at", "a.beta.gv.at"),
+    ],
+)
+def test_the_added_suffixes_keep_unrelated_sites_apart(first, second):
+    assert group_domain(first)["key"] != group_domain(second)["key"]
+    assert registrable_domain("a." + first) == registrable_domain("b." + first)
+
+
 @pytest.mark.parametrize("suffix", TWO_PART_SUFFIXES)
 def test_names_under_a_two_part_suffix_keep_their_registered_name(suffix):
     assert registrable_domain("www.alpha." + suffix) == "alpha." + suffix

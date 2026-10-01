@@ -35,6 +35,8 @@ _SECOND_LEVEL = frozenset({
     "com.bd", "com.ng", "com.eg", "com.sa", "co.ke", "com.gh", "co.tz", "net.cn", "org.cn",
     "gov.cn", "edu.au", "gov.au", "ac.nz", "govt.nz", "ac.jp", "go.jp", "gr.jp", "com.pt",
     "com.gr", "com.ro", "com.es", "com.fr", "co.hu", "com.ru",
+    "gov.br", "org.br", "net.br", "edu.br", "sch.uk", "nhs.uk", "ltd.uk", "me.uk", "edu.sg",
+    "edu.my", "ed.jp", "gv.at",
 })
 # Hosting suffixes where every tenant is a different owner. The tenant label stays in the
 # registrable domain so two tenants never share a group.
