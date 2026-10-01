@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import shutil
 import socket
@@ -8,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import contextmanager
 from email.message import Message
 from io import BytesIO
 from ipaddress import IPv4Address
@@ -28,6 +30,28 @@ from jittersim.config.storage import ConfigRepository, StorageError
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.networking.helper import HelperClientError
 from tests.helper_support import OlderHelperService, OldHelperService, captures, serving
+
+
+@contextmanager
+def captured_logs():
+    """Collect every log message from every logger while the block runs."""
+
+    records = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = Capture(level=logging.DEBUG)
+    root = logging.getLogger()
+    old_level = root.level
+    root.addHandler(handler)
+    root.setLevel(logging.DEBUG)
+    try:
+        yield records
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(old_level)
 
 
 class FakeHelper:
@@ -1193,6 +1217,8 @@ class ControlServerTests(unittest.TestCase):
             {"admin_password": 7},
             {"admin_password": "x" * 1025},
             {"admin_password": "x", "include_password": "yes"},
+            {"admin_password": "x", "include_password": "true"},
+            {"admin_password": "x", "include_password": "false"},
             {"admin_password": "x", "include_password": 1},
             {"admin_password": "x", "include_password": None},
         ):
@@ -1210,36 +1236,76 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 503)
         self.assertIn("/api/router/wifi-credentials", WRITE_PATHS)
 
+    def _assert_no_secret_logged(self, records) -> None:
+        for message in records:
+            for secret in ("hunter2hunter2", "router-secret", "browser-wifi-password"):
+                self.assertNotIn(secret, message)
+
     def test_wifi_credentials_never_echo_a_wrong_password(self) -> None:
         class Rejecting(FakeHelper):
             def read_router_wifi_credentials(self, *, admin_password, include_password):
-                raise HelperClientError("The router rejected the password " + admin_password)
+                raise HelperClientError(
+                    "The router rejected the password " + admin_password + " browser-wifi-password")
 
         self.server.helper_client = Rejecting()
-        status, _, body = self.server.write_response_for(
-            "/api/router/wifi-credentials", {"admin_password": "hunter2hunter2"})
+        with captured_logs() as records:
+            status, _, body = self.server.write_response_for(
+                "/api/router/wifi-credentials",
+                {"admin_password": "hunter2hunter2", "include_password": True})
         self.assertEqual(status, 502)
         self.assertNotIn("hunter2hunter2", body.decode())
+        self.assertNotIn("browser-wifi-password", body.decode())
+        # The failure is logged once so the capture is not vacuous.
+        self.assertTrue(any("router Wi-Fi copy failed" in message for message in records))
+        self._assert_no_secret_logged(records)
 
     def test_wifi_credentials_pass_on_only_the_fixed_router_messages(self) -> None:
+        from jittersim.networking.helper import WIFI_DETAILS_MISSING_MESSAGE
         from jittersim.networking.router import ROUTER_CHECK_MESSAGES
 
-        for message, expected in (
-            (ROUTER_CHECK_MESSAGES["login"], ROUTER_CHECK_MESSAGES["login"]),
-            (ROUTER_CHECK_MESSAGES["unreachable"], ROUTER_CHECK_MESSAGES["unreachable"]),
-            ("unknown action", ROUTER_CHECK_MESSAGES["outdated"]),
-            ("browser-wifi-password leaked here", ROUTER_CHECK_MESSAGES["failed"]),
+        busy = "The router is busy right now. Try again in a moment."
+        for error, expected in (
+            (HelperClientError(ROUTER_CHECK_MESSAGES["login"]), ROUTER_CHECK_MESSAGES["login"]),
+            (HelperClientError(ROUTER_CHECK_MESSAGES["unreachable"]),
+             ROUTER_CHECK_MESSAGES["unreachable"]),
+            (HelperClientError("unknown action"), ROUTER_CHECK_MESSAGES["outdated"]),
+            (HelperClientError("browser-wifi-password leaked here"), ROUTER_CHECK_MESSAGES["failed"]),
+            (HelperClientError("Another router operation is running. Try again shortly.",
+                               reason="helper-busy"), busy),
+            (HelperClientError("router-secret browser-wifi-password", reason="helper-busy"), busy),
+            (HelperClientError(WIFI_DETAILS_MISSING_MESSAGE), WIFI_DETAILS_MISSING_MESSAGE),
         ):
             class Failing(FakeHelper):
                 def read_router_wifi_credentials(self, *, admin_password, include_password):
-                    raise HelperClientError(message)
+                    raise error
+
+            self.server.helper_client = Failing()
+            with captured_logs() as records:
+                status, _, body = self.server.write_response_for(
+                    "/api/router/wifi-credentials",
+                    {"admin_password": "router-secret", "include_password": True})
+            self.assertEqual(status, 502, str(error))
+            self.assertEqual(json.loads(body), {"error": expected}, str(error))
+            self._assert_no_secret_logged(records)
+
+    def test_wifi_credentials_wording_is_for_this_route_only(self) -> None:
+        from jittersim.networking.helper import WIFI_DETAILS_MISSING_MESSAGE
+        from jittersim.networking.router import ROUTER_CHECK_MESSAGES
+
+        for error in (
+            HelperClientError("Another router operation is running. Try again shortly.",
+                              reason="helper-busy"),
+            HelperClientError(WIFI_DETAILS_MISSING_MESSAGE),
+        ):
+            class Failing(FakeHelper):
+                def check_router_password(self, *, admin_password):
+                    raise error
 
             self.server.helper_client = Failing()
             status, _, body = self.server.write_response_for(
-                "/api/router/wifi-credentials",
-                {"admin_password": "router-secret", "include_password": True})
+                "/api/router/check", {"admin_password": "router-secret"})
             self.assertEqual(status, 502)
-            self.assertEqual(json.loads(body), {"error": expected})
+            self.assertEqual(json.loads(body), {"error": ROUTER_CHECK_MESSAGES["failed"]})
 
     def test_an_old_helper_gets_the_out_of_date_message(self) -> None:
         class Old(FakeHelper):
@@ -1252,34 +1318,16 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("out of date", json.loads(body)["error"])
 
     def test_wifi_credentials_are_not_logged_or_recorded(self) -> None:
-        import logging
-
         self.server.helper_client = FakeHelper()
-        records = []
-
-        class Capture(logging.Handler):
-            def emit(self, record):
-                records.append(record.getMessage())
-
-        handler = Capture(level=logging.DEBUG)
-        root = logging.getLogger()
-        old_level = root.level
-        root.addHandler(handler)
-        root.setLevel(logging.DEBUG)
         before = list(self.repository.list_recent_actions())
-        try:
+        with captured_logs() as records:
             status, _, body = self.server.write_response_for(
                 "/api/router/wifi-credentials",
                 {"admin_password": "router-secret", "include_password": True})
-        finally:
-            root.removeHandler(handler)
-            root.setLevel(old_level)
         self.assertEqual(status, 200)
         self.assertIn("browser-wifi-password", body.decode())
         self.assertEqual(list(self.repository.list_recent_actions()), before)
-        for message in records:
-            self.assertNotIn("browser-wifi-password", message)
-            self.assertNotIn("router-secret", message)
+        self._assert_no_secret_logged(records)
 
     def test_wifi_credentials_never_run_as_a_background_operation(self) -> None:
         self.server.helper_client = FakeHelper()

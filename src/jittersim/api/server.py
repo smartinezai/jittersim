@@ -84,6 +84,7 @@ from jittersim.engine.service import compile_stored_plan
 from jittersim.networking.applier import MAX_PROTECTED_MACS
 from jittersim.networking.helper import (
     HELPER_OUT_OF_DATE_MESSAGE,
+    WIFI_DETAILS_MISSING_MESSAGE,
     HelperClient,
     HelperClientError,
 )
@@ -97,6 +98,7 @@ from jittersim.networking.wifi_security import SECURITY_MODES
 from jittersim.api.router_operations import RouterOperations
 
 LOGGER = logging.getLogger(__name__)
+WIFI_COPY_BUSY_MESSAGE = "The router is busy right now. Try again in a moment."
 MAX_JSON_BODY_BYTES = 64 * 1024
 # One block or profile call may carry this many names.
 MAX_BATCH_DOMAINS = 64
@@ -8200,7 +8202,7 @@ class ControlServer(HTTPServer):
                 if not all(isinstance(value, str) for value in result.values()):
                     raise TypeError("invalid Wi-Fi details")
             except HelperClientError as error:
-                message = safe_router_check_message(str(error))
+                message = _safe_wifi_copy_message(error)
             except (KeyError, TypeError):
                 message = ROUTER_CHECK_MESSAGES["failed"]
             else:
@@ -9259,6 +9261,16 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
 
 class RequestError(ValueError):
     """Raised when an HTTP request body cannot be safely decoded."""
+
+
+def _safe_wifi_copy_message(error: HelperClientError) -> str:
+    """Name the two copy-only answers and let nothing else through but the router messages."""
+
+    if error.reason == "helper-busy":
+        return WIFI_COPY_BUSY_MESSAGE
+    if str(error) == WIFI_DETAILS_MISSING_MESSAGE:
+        return WIFI_DETAILS_MISSING_MESSAGE
+    return safe_router_check_message(str(error))
 
 
 def _impairment_from_payload(payload: Any) -> Impairment:
