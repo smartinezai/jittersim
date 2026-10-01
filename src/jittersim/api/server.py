@@ -77,6 +77,7 @@ LOGGER = logging.getLogger(__name__)
 MAX_JSON_BODY_BYTES = 64 * 1024
 TLS_HANDSHAKE_TIMEOUT_SECONDS = 5.0
 REQUEST_INPUT_TIMEOUT_SECONDS = 10.0
+MAX_PENDING_CONNECTION_LIFETIME_SECONDS = 30.0
 MAX_PENDING_DASHBOARD_CONNECTIONS = 16
 RESPONSE_SEND_TIMEOUT_SECONDS = 5.0
 WRITE_PATHS = frozenset(
@@ -5475,6 +5476,7 @@ class _PendingConnection:
     address: Any
     deadline: float
     handshake: bool
+    expires_at: float
     want_write: bool = False
 
 
@@ -5525,7 +5527,7 @@ class ControlServer(HTTPServer):
         while not self._stop_connections.is_set():
             now = time.monotonic()
             for connection, pending in tuple(self._pending_connections.items()):
-                if now >= pending.deadline:
+                if now >= min(pending.deadline, pending.expires_at):
                     self._close_pending(connection)
             if attempted and not self._pending_connections:
                 raise TimeoutError("dashboard connections expired")
@@ -5535,24 +5537,8 @@ class ControlServer(HTTPServer):
                        in self._pending_connections.items() if pending.want_write]
             readable, writable, _ = select.select(readers, writers, [], 0.05)
             if self.socket in readable:
-                connection, address = self.socket.accept()
                 attempted = True
-                if len(self._pending_connections) >= MAX_PENDING_DASHBOARD_CONNECTIONS:
-                    connection.close()
-                else:
-                    try:
-                        connection.setblocking(False)
-                        if self._tls_context is not None:
-                            connection = self._tls_context.wrap_socket(
-                                connection, server_side=True, do_handshake_on_connect=False)
-                        self._pending_connections[connection] = _PendingConnection(
-                            address=address,
-                            deadline=time.monotonic() + (TLS_HANDSHAKE_TIMEOUT_SECONDS
-                                if self._tls_context is not None else REQUEST_INPUT_TIMEOUT_SECONDS),
-                            handshake=self._tls_context is not None,
-                        )
-                    except OSError:
-                        connection.close()
+                self._accept_connection()
             for connection in readable + writable:
                 if connection is self.socket:
                     continue
@@ -5561,7 +5547,8 @@ class ControlServer(HTTPServer):
                     if pending.handshake:
                         connection.do_handshake()
                         pending.handshake = False
-                        pending.deadline = time.monotonic() + REQUEST_INPUT_TIMEOUT_SECONDS
+                        pending.deadline = min(
+                            pending.expires_at, time.monotonic() + REQUEST_INPUT_TIMEOUT_SECONDS)
                     prefix = connection.recv(1)
                     if not prefix:
                         self._close_pending(connection)
@@ -5581,6 +5568,41 @@ class ControlServer(HTTPServer):
                 except OSError:
                     self._close_pending(connection)
         raise OSError("dashboard is stopping")
+
+    def _accept_connection(self) -> None:
+        connection, address = self.socket.accept()
+        if len(self._pending_connections) >= MAX_PENDING_DASHBOARD_CONNECTIONS:
+            connection.close()
+            return
+        try:
+            connection.setblocking(False)
+            if self._tls_context is not None:
+                connection = self._tls_context.wrap_socket(
+                    connection, server_side=True, do_handshake_on_connect=False)
+            now = time.monotonic()
+            self._pending_connections[connection] = _PendingConnection(
+                address=address,
+                deadline=now + (TLS_HANDSHAKE_TIMEOUT_SECONDS
+                    if self._tls_context is not None else REQUEST_INPUT_TIMEOUT_SECONDS),
+                handshake=self._tls_context is not None,
+                expires_at=now + MAX_PENDING_CONNECTION_LIFETIME_SECONDS,
+            )
+        except OSError:
+            connection.close()
+
+    def finish_request(self, request: socket.socket, client_address: Any) -> None:
+        started = time.monotonic()
+        try:
+            super().finish_request(request, client_address)
+        finally:
+            # Waiting clients keep their remaining time while one request runs.
+            finished = time.monotonic()
+            elapsed = max(0.0, finished - started)
+            for connection, pending in tuple(self._pending_connections.items()):
+                if finished >= pending.expires_at:
+                    self._close_pending(connection)
+                else:
+                    pending.deadline = min(pending.expires_at, pending.deadline + elapsed)
 
     def _close_pending(self, connection: socket.socket) -> None:
         self._pending_connections.pop(connection, None)

@@ -90,6 +90,13 @@ class DashboardConnectionTests(unittest.TestCase):
         raw = socket.create_connection(self.server.server_address, timeout=2)
         return self.context.wrap_socket(raw, server_hostname="127.0.0.1")
 
+    def _handle_next_request(self) -> None:
+        # The live serving loop also advances sockets already accepted.
+        if self.server._pending_connections:
+            self.server.service_actions()
+        else:
+            self.server.handle_request()
+
     @staticmethod
     def _response(client: ssl.SSLSocket) -> bytes:
         response = bytearray()
@@ -142,10 +149,10 @@ class DashboardConnectionTests(unittest.TestCase):
         self._start_client(stall)
         self._start_client(healthy)
         started = time.monotonic()
-        self.server.handle_request()
+        self._handle_next_request()
         self.threads[1].join(timeout=0.1)
         if not response:
-            self.server.handle_request()
+            self._handle_next_request()
         elapsed = time.monotonic() - started
         self.threads[1].join(timeout=2)
         self.assertLess(elapsed, 1.0, "unfinished client blocked the next request")
@@ -172,7 +179,7 @@ class DashboardConnectionTests(unittest.TestCase):
         try:
             with patch.object(api, "TLS_HANDSHAKE_TIMEOUT_SECONDS", 1.0):
                 started = time.monotonic()
-                self.server.handle_request()
+                self._handle_next_request()
                 elapsed = time.monotonic() - started
             self.assertLess(elapsed, 0.5, "idle handshakes delayed the healthy connection")
             self.threads[-1].join(timeout=2)
@@ -202,7 +209,7 @@ class DashboardConnectionTests(unittest.TestCase):
         try:
             with patch.object(api, "REQUEST_INPUT_TIMEOUT_SECONDS", 1.0):
                 started = time.monotonic()
-                self.server.handle_request()
+                self._handle_next_request()
                 elapsed = time.monotonic() - started
             self.threads[-1].join(timeout=2)
             self.assertLess(elapsed, 0.5)
@@ -226,7 +233,7 @@ class DashboardConnectionTests(unittest.TestCase):
         self._start_client(excess)
         try:
             with patch.object(api, "MAX_PENDING_DASHBOARD_CONNECTIONS", 3):
-                self.server.handle_request()
+                self._handle_next_request()
             self.threads[-1].join(timeout=2)
             self.assertLess(rejected[0], 0.5)
             self.assertEqual(len(self.server._pending_connections), 0)
@@ -241,7 +248,7 @@ class DashboardConnectionTests(unittest.TestCase):
                 response.append(self._response(client))
 
         self._start_client(healthy)
-        self.server.handle_request()
+        self._handle_next_request()
         self.threads[-1].join(timeout=2)
         self.assertTrue(response[0].startswith(b"HTTP/1.0 200 OK"))
 
@@ -272,6 +279,38 @@ class DashboardConnectionTests(unittest.TestCase):
     def test_body_bytes_cannot_extend_the_input_deadline(self) -> None:
         self._assert_next_client_recovers("body", drip=True)
 
+    def test_queued_handshake_survives_an_active_request_timeout(self) -> None:
+        original = api.ControlRequestHandler._read_json_body
+
+        def queue_healthy_connection(handler, *args, **kwargs):
+            if not self.server._pending_connections:
+                self.server.socket.settimeout(1)
+                try:
+                    self.server._accept_connection()
+                finally:
+                    self.server.socket.settimeout(None)
+            return original(handler, *args, **kwargs)
+
+        with patch.object(api.ControlRequestHandler, "_read_json_body", queue_healthy_connection):
+            self._assert_next_client_recovers("body", drip=True)
+
+    def test_active_work_cannot_extend_a_pending_connection_past_its_lifetime(self) -> None:
+        connection, peer = socket.socketpair()
+        try:
+            self.server._pending_connections[connection] = api._PendingConnection(
+                address=("127.0.0.1", 1), deadline=100.1, handshake=True, expires_at=100.5,
+            )
+            with patch.object(api.HTTPServer, "finish_request"), patch.object(
+                api.time, "monotonic", side_effect=(100.0, 101.0)
+            ):
+                self.server.finish_request(None, None)
+            self.assertEqual(self.server._pending_connections, {})
+            peer.settimeout(1)
+            self.assertEqual(peer.recv(1), b"")
+        finally:
+            connection.close()
+            peer.close()
+
     def test_waiting_for_first_byte_uses_the_same_input_deadline(self) -> None:
         payload = json.dumps({"admin_password": "isolated-password", "enabled": True}).encode()
 
@@ -290,7 +329,7 @@ class DashboardConnectionTests(unittest.TestCase):
                     pass
 
         self._start_client(delayed_request)
-        self.server.handle_request()
+        self._handle_next_request()
         self.threads[-1].join(timeout=2)
         self.assertEqual(self.helper_calls, [])
         self.assertEqual(self.repository.list_recent_actions(), ())
@@ -324,8 +363,8 @@ class DashboardConnectionTests(unittest.TestCase):
 
         self._start_client(delayed_body)
         self._start_client(healthy)
-        self.server.handle_request()
-        self.server.handle_request()
+        self._handle_next_request()
+        self._handle_next_request()
         self.threads[1].join(timeout=2)
         self.assertTrue(response[0].startswith(b"HTTP/1.0 200 OK"))
         self.assertEqual(self.helper_calls, [])
@@ -357,8 +396,8 @@ class DashboardConnectionTests(unittest.TestCase):
         self._start_client(slow_reader)
         self._start_client(healthy)
         started = time.monotonic()
-        self.server.handle_request()
-        self.server.handle_request()
+        self._handle_next_request()
+        self._handle_next_request()
         self.threads[1].join(timeout=2)
         self.assertLess(time.monotonic() - started, 1.0)
         self.assertTrue(response[0].startswith(b"HTTP/1.0 200 OK"))
@@ -390,7 +429,7 @@ class DashboardConnectionTests(unittest.TestCase):
                     response.append(self._response(client))
 
         self._start_client(client_action)
-        self.server.handle_request()
+        self._handle_next_request()
         self.threads[0].join(timeout=2)
         self.assertEqual(calls, [True])
         history = self.repository.list_recent_actions()
@@ -406,7 +445,7 @@ class DashboardConnectionTests(unittest.TestCase):
                 health.append(self._response(client))
 
         self._start_client(healthy)
-        self.server.handle_request()
+        self._handle_next_request()
         self.threads[-1].join(timeout=2)
         self.assertTrue(health[0].startswith(b"HTTP/1.0 200 OK"))
         self.assertEqual(calls, [True])
@@ -427,7 +466,7 @@ class DashboardConnectionTests(unittest.TestCase):
 
         self._start_client(malformed)
         with self.assertLogs(api.LOGGER, level="INFO") as logs:
-            self.server.handle_request()
+            self._handle_next_request()
         self.threads[0].join(timeout=2)
         self.assertNotIn("PRIVATE_REQUEST_MARKER", "\n".join(logs.output))
         self.assertIn(b"400", response[0])
