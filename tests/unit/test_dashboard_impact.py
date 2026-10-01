@@ -389,7 +389,7 @@ def test_queues_without_any_impairment_are_left_out():
 
 
 @needs_node
-def test_rows_are_sorted_by_name_then_direction():
+def test_rows_are_sorted_by_name_then_upload_before_download():
     result = run(
         "(() => { const imp = {loss_percent: 5};"
         " const h = recordImpactSample({}, {queues: ["
@@ -400,7 +400,7 @@ def test_rows_are_sorted_by_name_then_direction():
         "]}, 0);"
         " return impactRows(h).map((row) => row.name + '/' + row.direction); })()"
     )
-    assert result == ["a/download", "a/upload", "b/download", "b/upload"]
+    assert result == ["a/upload", "a/download", "b/upload", "b/download"]
 
 
 @needs_node

@@ -372,7 +372,7 @@ DASHBOARD_HTML = """<!doctype html>
     .saved-device-labels h3 { margin-top: 0; }
     .saved-device-label-row { grid-template-columns: minmax(0, 1fr) auto auto; }
     .impact-note { margin: 0 0 0.75rem; color: #a8b8ce; font-size: 0.82rem; }
-    .impact-list { display: grid; gap: 0.6rem; }
+    .impact-list { display: grid; gap: 0.6rem; color: #c4d5e8; font-size: 0.9rem; }
     .impact-row { padding: 0.75rem; border: 1px solid #2b435f; border-radius: 0.6rem; background: #0d1b2d; }
     .impact-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.3rem 0.75rem; }
     .impact-name { color: #edf5ff; font-weight: 700; overflow-wrap: anywhere; }
@@ -2805,7 +2805,8 @@ DASHBOARD_HTML = """<!doctype html>
       return Object.keys(history)
         .filter((key) => !impactHasNoImpairment(history[key].latest.impairment))
         .map((key) => impactRow(key, history[key]))
-        .sort((a, b) => a.name.localeCompare(b.name) || a.direction.localeCompare(b.direction));
+        .sort((a, b) => a.name.localeCompare(b.name) ||
+          (a.direction === b.direction ? 0 : a.direction === "upload" ? -1 : 1));
     }
     // end of the impact functions
 
