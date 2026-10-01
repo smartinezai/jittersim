@@ -3509,14 +3509,15 @@ DASHBOARD_HTML = """<!doctype html>
         const list = document.createElement("ul");
         list.className = "observation-domain-list";
         // One name. A row of a group also gets its block button in blockSyncs so the group can
-        // refresh it and calls afterBlockChange when its own block state changes.
-        const buildRow = (observation, blockSyncs, afterBlockChange) => {
+        // refresh it and calls afterBlockChange when its own block state changes. A row in a
+        // group skips its label line when the label only repeats the group name.
+        const buildRow = (observation, blockSyncs, afterBlockChange, groupName) => {
           const item = document.createElement("li");
           item.className = "observation-domain";
           const domain = document.createElement("div");
           domain.className = "observation-domain-name";
           const parts = domainRowParts(observation);
-          if (parts.labelName) {
+          if (parts.labelName && parts.labelName !== groupName) {
             const labelLine = document.createElement("div");
             labelLine.className = "observation-label";
             const labelName = document.createElement("strong");
@@ -3697,7 +3698,7 @@ DASHBOARD_HTML = """<!doctype html>
           const rows = document.createElement("ul");
           rows.className = "observation-domain-list";
           group.names.forEach((observation) => {
-            rows.appendChild(buildRow(observation, rowSyncs, syncGroupBlock));
+            rows.appendChild(buildRow(observation, rowSyncs, syncGroupBlock, group.name));
           });
           body.appendChild(rows);
           wrapper.append(header, body);

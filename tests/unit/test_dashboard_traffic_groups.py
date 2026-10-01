@@ -1221,6 +1221,75 @@ def test_the_server_text_of_a_full_list_reaches_the_message_unchanged():
     ]
 
 
+def labelled(domain, count, key, group_name, label_name, kind="app", category="Cat"):
+    value = item(domain, count, key, group_name, None, kind)
+    value["label"] = {"kind": kind, "name": label_name, "category": category, "known": True}
+    value["seen_with"] = []
+    return value
+
+
+LABEL_STEPS = """
+  const parts = groupParts(cards()[0], 0);
+  console.log(JSON.stringify({
+    labelLines: parts.rows.map((row) => byClass(row, "observation-label").length),
+    hosts: parts.rows.map((row) => byClass(row, "observation-domain-host")[0].children[0].textContent),
+    firstLabel: parts.rows.map((row) => byClass(row, "observation-label").map((l) => l.children[0].textContent))
+  }));
+"""
+
+
+@NODE
+def test_rows_whose_label_is_the_group_name_skip_the_label_line_inside_the_group():
+    items = [
+        labelled("a.immobilienscout24.de", 3, "label:immoscout24", "ImmoScout24", "ImmoScout24"),
+        labelled("b.immobilienscout24.de", 2, "label:immoscout24", "ImmoScout24", "ImmoScout24"),
+    ]
+
+    out = run_dashboard(LABEL_STEPS, [device("192.168.50.124", items)])
+
+    assert out["labelLines"] == [0, 0]
+    assert out["hosts"] == ["a.immobilienscout24.de", "b.immobilienscout24.de"]
+
+
+@NODE
+def test_rows_with_a_different_label_keep_it_inside_a_registrable_domain_group():
+    items = [
+        labelled("a.tiqcdn.com", 3, "domain:tiqcdn.com", "tiqcdn.com", "Tealium", "tracker"),
+        labelled("b.tiqcdn.com", 2, "domain:tiqcdn.com", "tiqcdn.com", "tiqcdn.com", "unknown"),
+        labelled("c.tiqcdn.com", 1, "domain:tiqcdn.com", "tiqcdn.com", "Tealium IQ", "tracker"),
+    ]
+
+    out = run_dashboard(LABEL_STEPS, [device("192.168.50.124", items)])
+
+    assert out["labelLines"] == [1, 0, 1]
+    assert out["firstLabel"] == [["Tealium"], [], ["Tealium IQ"]]
+
+
+@NODE
+def test_a_group_name_that_only_differs_in_case_keeps_the_label_line():
+    items = [
+        labelled("a.example.com", 3, "label:x", "X (Twitter)", "x (twitter)"),
+        labelled("b.example.com", 2, "label:x", "X (Twitter)", "X (Twitter)"),
+    ]
+
+    out = run_dashboard(LABEL_STEPS, [device("192.168.50.124", items)])
+
+    assert out["labelLines"] == [1, 0]
+
+
+@NODE
+def test_a_single_name_row_always_keeps_its_label_line():
+    steps = """
+      const item = topList(cards()[0]).children[0];
+      console.log(JSON.stringify({labels: byClass(item, "observation-label").length}));
+    """
+    only_name = labelled("a.immobilienscout24.de", 3, "label:immoscout24", "ImmoScout24", "ImmoScout24")
+
+    out = run_dashboard(steps, [device("192.168.50.124", [only_name])])
+
+    assert out == {"labels": 1}
+
+
 # ---------------------------------------------------------------------------------------------
 # Each card keeps the profile that was picked in its select across dashboard refreshes.
 # ---------------------------------------------------------------------------------------------
