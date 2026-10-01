@@ -7493,8 +7493,15 @@ class ControlServer(HTTPServer):
                     self.scheduler.sample_before_control_change(repository=self.repository)
                 with self.repository.transaction():
                     profile_id = group.profile_id if existing else payload.get("profile_id") or None
+                    protected_macs = {
+                        item.mac_address for item in self.repository.list_unaffected_devices()
+                    }
                     for client in connected:
                         mac = normalize_exempt_mac(client["mac_address"])
+                        if mac in protected_macs:
+                            raise ValueError(
+                                "This device is unaffected by profiles. Remove its protection before adding it to a group."
+                            )
                         saved = self.repository.get_device_by_mac_address(mac)
                         base_profile = saved.profile_id if saved else profile_id
                         if base_profile is None:

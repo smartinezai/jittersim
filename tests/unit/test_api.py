@@ -1996,6 +1996,50 @@ class ControlServerTests(unittest.TestCase):
         saved = self.repository.get_device_by_ipv4_address("192.168.50.178")
         self.assertEqual(saved.name, "MacBook-Pro")
 
+    def test_a_protected_client_cannot_join_a_new_group(self) -> None:
+        from jittersim.config.exemptions import UnaffectedDevice
+
+        self.server.helper_client = FakeHelper()
+        self.repository.save_unaffected_device(UnaffectedDevice("dc:1e:d5:3e:97:4c", "Mine", 1))
+
+        status, _, body = self.server.write_response_for(
+            "/api/groups",
+            {
+                "id": "lab",
+                "name": "Lab",
+                "profile_id": "slow",
+                "connected_clients": [
+                    {"ipv4_address": "192.168.50.178", "mac_address": "dc:1e:d5:3e:97:4c"}
+                ],
+            },
+        )
+
+        self.assertEqual(status, 409, body)
+        self.assertIn("unaffected by profiles", json.loads(body)["error"])
+        self.assertIsNone(self.repository.get_device_by_mac_address("dc:1e:d5:3e:97:4c"))
+        self.assertIsNone(self.repository.get_device_group("lab"))
+
+    def test_a_protected_client_cannot_be_added_to_an_existing_group(self) -> None:
+        from jittersim.config.exemptions import UnaffectedDevice
+
+        self.server.helper_client = FakeHelper()
+        self.repository.save_device_group(DeviceGroup("family", "Family", ("alice",), "slow"))
+        self.repository.save_unaffected_device(UnaffectedDevice("dc:1e:d5:3e:97:4c", "Mine", 1))
+
+        status, _, body = self.server.write_response_for(
+            "/api/connected-devices/group",
+            {
+                "group_id": "family",
+                "ipv4_address": "192.168.50.178",
+                "mac_address": "dc:1e:d5:3e:97:4c",
+            },
+        )
+
+        self.assertEqual(status, 409, body)
+        self.assertIn("unaffected by profiles", json.loads(body)["error"])
+        self.assertIsNone(self.repository.get_device_by_mac_address("dc:1e:d5:3e:97:4c"))
+        self.assertEqual(self.repository.get_device_group("family").device_ids, ("alice",))
+
     def _save_unlabelled_client(self, name: str = "Client 192.168.50.178") -> None:
         self.repository.save_device(
             Device(
