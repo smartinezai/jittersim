@@ -58,6 +58,15 @@ def expect_ordinary(row):
     expect(found["add"]).not_to_have_attribute("aria-disabled", re.compile(".*"))
 
 
+def look(row):
+    return row.evaluate(
+        """(node) => ({
+            dot: getComputedStyle(node.querySelector('.connected-dot')).backgroundColor,
+            border: getComputedStyle(node).borderTopColor
+        })"""
+    )
+
+
 def sign_in(page, base):
     page.goto(base)
     expect(page.locator("#private-dashboard")).to_be_hidden()
@@ -113,6 +122,7 @@ def check_width(browser, base, width, height):
     expect(row).to_be_visible()
 
     expect_ordinary(row)
+    ordinary_look = look(row)
     page.wait_for_timeout(300)  # let the 160 ms button fade finish
     row.screenshot(path=f"test-results/protected-clients-ordinary-{width}.png")
 
@@ -123,6 +133,9 @@ def check_width(browser, base, width, height):
     expect(row).to_have_class(re.compile(r"\bprotected\b"))
     expect(row.locator(".protected-badge")).to_have_text("Protected")
     expect(row).to_contain_text("Unaffected by all profiles and quotas")
+    protected_look = look(row)
+    assert protected_look["dot"] != ordinary_look["dot"], (protected_look, ordinary_look)
+    assert protected_look["border"] != ordinary_look["border"], (protected_look, ordinary_look)
     expect_greyed_out(row)
     page.wait_for_timeout(300)  # let the 160 ms button fade finish
     row.screenshot(path=f"test-results/protected-clients-protected-{width}.png")
