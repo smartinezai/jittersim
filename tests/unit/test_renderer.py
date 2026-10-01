@@ -161,17 +161,18 @@ class RendererTests(unittest.TestCase):
         self.assertIn("0ms", upload_command.argv)
         self.assertIn("250ms", upload_command.argv)
 
-    def test_reorder_is_only_rendered_together_with_a_delay(self) -> None:
-        # tc refuses "netem reorder" without a delay and the failed apply resets the network.
-        profile = Profile(
-            id="reorder",
-            name="Reorder",
-            upload=Impairment(reorder_percent=10),
-            download=Impairment(delay_ms=100, reorder_percent=10),
-        )
+    def test_reordering_is_only_rendered_with_a_delay(self) -> None:
+        profiles = {
+            "reorder": Profile(
+                id="reorder",
+                name="Reorder",
+                upload=Impairment(reorder_percent=10),
+                download=Impairment(delay_ms=50, reorder_percent=10),
+            )
+        }
         plan = compile_plan(
             devices=(make_device("alice", "192.168.50.10", "reorder"),),
-            profiles={"reorder": profile},
+            profiles=profiles,
         )
 
         commands = render_command_plan(
@@ -181,9 +182,32 @@ class RendererTests(unittest.TestCase):
 
         upload = next(c for c in commands if "upload impairment for device alice" in c.purpose)
         download = next(c for c in commands if "download impairment for device alice" in c.purpose)
+        # tc rejects "netem reorder" unless the queue also delays packets.
         self.assertNotIn("reorder", upload.argv)
         self.assertIn("reorder", download.argv)
-        self.assertIn("10%", download.argv)
+
+    def test_jitter_alone_does_not_allow_reorder(self) -> None:
+        profiles = {
+            "jitter": Profile(
+                id="jitter",
+                name="Jitter",
+                upload=Impairment(jitter_ms=50, reorder_percent=10),
+            )
+        }
+        plan = compile_plan(
+            devices=(make_device("alice", "192.168.50.10", "jitter"),),
+            profiles=profiles,
+        )
+
+        commands = render_command_plan(
+            plan=plan,
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+        )
+
+        upload = next(c for c in commands if "upload impairment for device alice" in c.purpose)
+        # Jitter renders as a zero delay but tc still rejects "netem delay 0ms 50ms reorder 10%".
+        netem = list(upload.argv[upload.argv.index("netem") :])
+        self.assertEqual(netem, ["netem", "delay", "0ms", "50ms"])
 
     def test_clears_all_previous_device_queues_before_replacements(self) -> None:
         plan = compile_plan(
