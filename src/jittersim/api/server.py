@@ -18,7 +18,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from ipaddress import IPv4Network
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Collection, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, urlsplit
 
 from jittersim.config.device_labels import (
@@ -5786,8 +5786,14 @@ def _domain_observation_payload(observation: DomainObservation) -> Dict[str, Any
     }
 
 
-def _labelled_domain_payloads(rows: Sequence[DomainObservation]) -> List[Dict[str, Any]]:
-    """Add a plain-language label and a seen-with guess to one device's observed names."""
+def _labelled_domain_payloads(
+    rows: Sequence[DomainObservation], blocked_domains: Collection[str] = ()
+) -> List[Dict[str, Any]]:
+    """Add a label and a seen-with guess and the global block state to observed names.
+
+    A name counts as blocked only when it is an exact entry of the global block list because
+    the engine resolves each listed name on its own and does not match subdomains.
+    """
 
     hints = seen_with([(row.domain, row.first_seen) for row in rows])
     return [
@@ -5795,6 +5801,7 @@ def _labelled_domain_payloads(rows: Sequence[DomainObservation]) -> List[Dict[st
             **_domain_observation_payload(row),
             "label": label_domain(row.domain).as_dict(),
             "seen_with": hints.get(row.domain, []),
+            "globally_blocked": row.domain in blocked_domains,
         }
         for row in rows
     ]
@@ -6324,6 +6331,7 @@ class ControlServer(HTTPServer):
                 grouped.setdefault(address, []).append(observation)
             stations = self._station_identities(station_devices)
             labels_by_mac = self.repository.list_connected_device_labels()
+            blocked_names = frozenset(self.repository.get_website_policy().blocked_domains)
             devices = [
                 {
                     "ipv4_address": address,
@@ -6343,7 +6351,7 @@ class ControlServer(HTTPServer):
                         if address in assignments_by_address
                         else None
                     ),
-                    "domains": _labelled_domain_payloads(rows),
+                    "domains": _labelled_domain_payloads(rows, blocked_names),
                 }
                 for address, rows in sorted(grouped.items())
             ]

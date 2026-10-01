@@ -1857,6 +1857,49 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(devices["192.168.50.125"]["domains"][0]["seen_with"], [])
 
+    def test_observations_flag_globally_blocked_names(self) -> None:
+        from dataclasses import replace
+
+        self.repository.save_domain_observations(
+            [
+                DomainObservation("192.168.50.124", "facebook.com", 2, 100, 100),
+                DomainObservation("192.168.50.124", "www.facebook.com", 1, 100, 100),
+            ],
+            now=100,
+        )
+        policy = self.repository.get_website_policy()
+        self.repository.save_website_policy(replace(policy, blocked_domains=("facebook.com",)))
+
+        _, _, body = self.server.response_for("/api/observations")
+        domains = {item["domain"]: item for item in json.loads(body)["devices"][0]["domains"]}
+
+        self.assertTrue(domains["facebook.com"]["globally_blocked"])
+        self.assertFalse(domains["www.facebook.com"]["globally_blocked"])
+
+    def test_globally_blocked_matches_after_normalization(self) -> None:
+        from dataclasses import replace
+
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.124", "Ads.Example.COM.", 1, 100, 100)], now=100
+        )
+        policy = self.repository.get_website_policy()
+        self.repository.save_website_policy(replace(policy, blocked_domains=("ADS.example.com",)))
+
+        _, _, body = self.server.response_for("/api/observations")
+        domain = json.loads(body)["devices"][0]["domains"][0]
+
+        self.assertEqual(domain["domain"], "ads.example.com")
+        self.assertTrue(domain["globally_blocked"])
+
+    def test_nothing_is_globally_blocked_without_a_block_list(self) -> None:
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.124", "facebook.com", 1, 100, 100)], now=100
+        )
+
+        _, _, body = self.server.response_for("/api/observations")
+
+        self.assertFalse(json.loads(body)["devices"][0]["domains"][0]["globally_blocked"])
+
     def test_the_scan_response_keeps_its_original_fields(self) -> None:
         self.server.helper_client = FakeHelper()
 
@@ -1865,6 +1908,7 @@ class ControlServerTests(unittest.TestCase):
         observation = json.loads(body)["observations"][0]
         self.assertNotIn("label", observation)
         self.assertNotIn("seen_with", observation)
+        self.assertNotIn("globally_blocked", observation)
 
     def test_observations_work_without_the_helper(self) -> None:
         self.server.helper_client = FakeHelper()
