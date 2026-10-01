@@ -371,7 +371,8 @@ def seen_with(observations: Iterable[Tuple[str, int]]) -> Dict[str, List[str]]:
 
     Each pair is a name and the time it was first seen. Only names labelled cdn or tracker or
     unknown get a hint. The hint lists the apps whose own names were first seen within the window
-    of this name. It is dropped when more than two apps qualify because the guess is too vague.
+    of this name. An app with the same name as this label never counts. The hint is dropped when
+    more than two apps qualify because the guess is too vague.
     """
 
     labelled = [(domain, first_seen, label_domain(domain)) for domain, first_seen in observations]
@@ -385,10 +386,12 @@ def seen_with(observations: Iterable[Tuple[str, int]]) -> Dict[str, List[str]]:
             continue
         near = []
         for name, times in app_times.items():
+            if name == label.name:
+                continue
             distance = min(abs(time - first_seen) for time in times)
             if distance <= SEEN_WITH_WINDOW_SECONDS:
                 near.append((distance, name))
-        near.sort()
+        near.sort(key=lambda item: (item[0], item[1].lower(), item[1]))
         if near and len(near) <= _SEEN_WITH_MAX_APPS:
             hints[domain] = [name for _, name in near]
     return hints

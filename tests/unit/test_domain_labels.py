@@ -288,3 +288,27 @@ def test_google_country_domains_are_google_system_names(domain):
         label = label_domain(name)
         assert (label.kind, label.name, label.category, label.known) == (
             "system", "Google", "Google services", True)
+
+
+def test_ties_sort_case_insensitively():
+    pairs = [("ebay.com", 5), ("netflix.com", 5), ("x.akamai.net", 5)]
+    assert seen_with(pairs) == {"x.akamai.net": ["eBay", "Netflix"]}
+
+
+def test_a_tracker_is_never_seen_with_the_app_of_its_own_name():
+    pairs = [("connect.facebook.net", 5), ("www.facebook.com", 5)]
+    assert seen_with(pairs) == {}
+
+
+def test_the_own_app_is_left_out_before_the_other_apps_are_counted():
+    pairs = [("connect.facebook.net", 5), ("www.facebook.com", 5), ("netflix.com", 5)]
+    assert seen_with(pairs) == {"connect.facebook.net": ["Netflix"]}
+    two_more = pairs + [("whatsapp.net", 5)]
+    assert seen_with(two_more) == {"connect.facebook.net": ["Netflix", "WhatsApp"]}
+    crowded = two_more + [("spotify.com", 5)]
+    assert seen_with(crowded) == {}
+
+
+def test_other_trackers_still_get_the_facebook_hint():
+    pairs = [("tags-eu.tiqcdn.com", 5), ("www.facebook.com", 5)]
+    assert seen_with(pairs) == {"tags-eu.tiqcdn.com": ["Facebook"]}
