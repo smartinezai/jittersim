@@ -48,6 +48,10 @@ HELPER_OUT_OF_DATE_MESSAGE = (
 WIFI_DETAILS_MISSING_MESSAGE = "The router did not return a Wi-Fi name or password."
 MAX_MESSAGE_BYTES = 256 * 1024
 MAX_HELPER_CONNECTIONS = 8
+# Apply and reset wait this long for a read to finish before they answer helper-busy.
+# Reads never wait so a dashboard poll cannot make Panic fail.
+WRITE_ACTIONS = ("apply", "reset")
+WRITE_LOCK_WAIT_SECONDS = 3.0
 WIFI_ACTIONS = ("configure-ap", "router-sync-ap", "router-preview-ap", "wifi-reset")
 ROUTER_ACTIONS = (
     "router-sync-ap",
@@ -137,6 +141,7 @@ class HelperService:
         # queues were replaced even if the settings stayed the same.
         self._boot_nonce = secrets.token_hex(4)
         self._plan_count = 0
+        self._queue_read_error: Optional[str] = None
         self._service_addresses = ServiceAddressBook(clock=service_address_clock)
         self._list_domains: Dict[str, tuple] = {}
         self._network_lock = threading.Lock()
@@ -184,8 +189,8 @@ class HelperService:
                 return self._handle_dashboard_access(payload)
             finally:
                 self._access_lock.release()
-        if action in ("apply", "reset"):
-            if not self._network_lock.acquire(blocking=False):
+        if action in WRITE_ACTIONS:
+            if not self._network_lock.acquire(timeout=WRITE_LOCK_WAIT_SECONDS):
                 return {"ok": False, "error": "Pi networking is busy. Try again later.",
                         "reason": "helper-busy"}
             try:
@@ -204,13 +209,7 @@ class HelperService:
         if action == "traffic-counters":
             return self._handle_traffic_counters()
         if action == "queue-stats":
-            if not self._network_lock.acquire(blocking=False):
-                return {"ok": False, "error": "Pi networking is busy. Try again later.",
-                        "reason": "helper-busy"}
-            try:
-                return self._handle_queue_stats()
-            finally:
-                self._network_lock.release()
+            return self._handle_queue_stats()
         if action in WIFI_ACTIONS:
             if not self._wifi_lock.acquire(blocking=False):
                 return {"ok": False, "error": "Another Pi Wi-Fi change is running. Try again later.",
@@ -368,8 +367,11 @@ class HelperService:
     def _handle_queue_stats(self) -> Dict[str, Any]:
         """Report what each applied queue did so far without changing anything.
 
-        The caller holds the operation lock so an apply in progress never mixes old
-        plan data with new kernel queues.
+        The socket handler holds the helper's one operation lock around this read. An
+        apply or reset cannot run meanwhile so old plan data never meets new kernel
+        queues. A read that arrives during one answers helper-busy. This method takes no
+        lock of its own because a Wi-Fi action never changes queues and would only be
+        refused for no reason.
         """
 
         plan = self._current_plan()
@@ -377,9 +379,14 @@ class HelperService:
             return {"ok": True, "action": "queue-stats", "queues": []}
         try:
             stats = self._applier.queue_stats()
-        except CommandExecutionError:
-            LOGGER.warning("queue statistics unavailable", exc_info=True)
+        except CommandExecutionError as error:
+            # The dashboard asks every few seconds so say it once for each new reason.
+            reason = str(error)
+            if reason != self._queue_read_error:
+                self._queue_read_error = reason
+                LOGGER.warning("queue statistics unavailable: %s", reason, exc_info=True)
             return {"ok": False, "error": "queue statistics unavailable"}
+        self._queue_read_error = None
         interfaces = {
             "upload": self._applier.uplink_interface,
             "download": self._applier.test_interface,
@@ -847,7 +854,13 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
         if action in ("ping", "dashboard-access") or action in WIFI_ACTIONS or action in ROUTER_ACTIONS:
             self._send_response(self.server.service.handle_payload(payload))
             return
-        if not self.server.operation_lock.acquire(blocking=False):
+        # Apply and reset wait a moment for a read so a poll never refuses Panic. Every
+        # read answers helper-busy at once.
+        if action in WRITE_ACTIONS:
+            acquired = self.server.operation_lock.acquire(timeout=WRITE_LOCK_WAIT_SECONDS)
+        else:
+            acquired = self.server.operation_lock.acquire(blocking=False)
+        if not acquired:
             self._send_response({"ok": False, "error": "The networking helper is busy. Try again later.",
                                  "reason": "helper-busy"})
             return
