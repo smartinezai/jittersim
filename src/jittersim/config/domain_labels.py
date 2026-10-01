@@ -24,12 +24,26 @@ _SEEN_WITH_KINDS = frozenset({"cdn", "tracker", "unknown"})
 _GROUPED_KINDS = frozenset({"app", "system", "iot"})
 _FALLBACK_CATALOGUE_CATEGORY = "Online service"
 
-# Second-level suffixes under which the registrable domain has three labels.
+# Two-part public suffixes under which the registrable domain has three labels.
 _SECOND_LEVEL = frozenset({
     "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.nz", "co.jp",
     "co.in", "com.br", "com.mx", "co.za", "com.tr", "com.cn", "com.hk", "com.sg",
     "co.kr", "or.kr", "com.ar", "com.tw", "com.pl", "ne.jp", "or.jp", "co.id", "co.il",
     "com.my", "com.ph", "com.vn", "com.ua", "org.nz", "net.nz", "co.th",
+    "co.at", "or.at", "com.co", "com.pe", "com.ve", "co.ve", "com.ec", "com.uy", "com.pk",
+    "com.bd", "com.ng", "com.eg", "com.sa", "co.ke", "com.gh", "co.tz", "net.cn", "org.cn",
+    "gov.cn", "edu.au", "gov.au", "ac.nz", "govt.nz", "ac.jp", "go.jp", "gr.jp", "com.pt",
+    "com.gr", "com.ro", "com.es", "com.fr", "co.hu", "com.ru",
+})
+# Hosting suffixes where every tenant is a different owner. The tenant label stays in the
+# registrable domain so two tenants never share a group.
+_TENANT_SUFFIXES = frozenset({
+    "github.io", "gitlab.io", "herokuapp.com", "vercel.app", "netlify.app", "pages.dev",
+    "workers.dev", "web.app", "firebaseapp.com", "appspot.com", "azurewebsites.net",
+    "blogspot.com", "wordpress.com", "onrender.com", "fly.dev", "myshopify.com",
+    "cloudfront.net", "s3.amazonaws.com", "execute-api.amazonaws.com", "elb.amazonaws.com",
+    "compute.amazonaws.com", "trafficmanager.net", "azureedge.net", "akamaized.net",
+    "edgekey.net", "fastly.net", "b-cdn.net",
 })
 # Reverse lookup names are shown whole because their labels are the address digits.
 _REVERSE_SUFFIXES = ("in-addr.arpa", "ip6.arpa")
@@ -340,15 +354,22 @@ def _is_reverse_name(name: str) -> bool:
 
 
 def registrable_domain(domain: str) -> str:
-    """Return the last two labels or the last three under a known second-level suffix.
+    """Return the owner's part of a name.
 
-    A bare IPv4 address and a reverse lookup name are returned whole.
+    That is the last two labels or the last three under a known two-part suffix. Under a hosting
+    suffix such as herokuapp.com it is the tenant label plus the suffix. A name that is only a
+    suffix and a bare IPv4 address and a reverse lookup name are returned whole.
     """
 
     normalized = normalize_domain(domain)
     if _is_ipv4_address(normalized) or _is_reverse_name(normalized):
         return normalized
+    if normalized in _TENANT_SUFFIXES:
+        return normalized
     labels = normalized.split(".")
+    for start in range(1, len(labels)):
+        if ".".join(labels[start:]) in _TENANT_SUFFIXES:
+            return ".".join(labels[start - 1 :])
     if len(labels) <= 2:
         return ".".join(labels)
     if ".".join(labels[-2:]) in _SECOND_LEVEL:

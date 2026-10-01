@@ -344,3 +344,84 @@ def test_shared_infrastructure_groups_by_registrable_domain():
 def test_unknown_names_group_by_registrable_domain():
     assert group_domain("a.b.somesmallsite.co.uk") == {
         "key": "domain:somesmallsite.co.uk", "name": "somesmallsite.co.uk"}
+
+
+# Two-part public suffixes. The registered name sits left of them so two sites never merge.
+TWO_PART_SUFFIXES = [
+    "co.kr", "or.kr", "com.ar", "com.pl", "co.at", "or.at", "com.co", "com.pe", "com.ve",
+    "co.ve", "com.ec", "com.uy", "com.pk", "com.bd", "com.ng", "com.eg", "com.sa", "co.ke",
+    "com.gh", "co.tz", "net.cn", "org.cn", "gov.cn", "edu.au", "gov.au", "ac.nz", "govt.nz",
+    "ac.jp", "go.jp", "gr.jp", "com.pt", "com.gr", "com.ro", "com.es", "com.fr", "co.hu",
+    "com.ru",
+]
+# Hosting suffixes where every tenant is a different owner so the tenant label stays.
+TENANT_SUFFIXES = [
+    "github.io", "gitlab.io", "herokuapp.com", "vercel.app", "netlify.app", "pages.dev",
+    "workers.dev", "web.app", "firebaseapp.com", "appspot.com", "azurewebsites.net",
+    "blogspot.com", "wordpress.com", "onrender.com", "fly.dev", "myshopify.com",
+    "cloudfront.net", "s3.amazonaws.com", "execute-api.amazonaws.com", "elb.amazonaws.com",
+    "compute.amazonaws.com", "trafficmanager.net", "azureedge.net", "akamaized.net",
+    "edgekey.net", "fastly.net", "b-cdn.net",
+]
+
+
+@pytest.mark.parametrize("suffix", TWO_PART_SUFFIXES)
+def test_names_under_a_two_part_suffix_keep_their_registered_name(suffix):
+    assert registrable_domain("www.alpha." + suffix) == "alpha." + suffix
+    assert registrable_domain("alpha." + suffix) == "alpha." + suffix
+    alpha = group_domain("www.alpha." + suffix)
+    beta = group_domain("www.beta." + suffix)
+    assert alpha == {"key": "domain:alpha." + suffix, "name": "alpha." + suffix}
+    assert alpha["key"] != beta["key"]
+
+
+@pytest.mark.parametrize("suffix", TENANT_SUFFIXES)
+def test_tenants_of_a_shared_host_are_different_groups(suffix):
+    alpha = group_domain("api.alpha." + suffix)
+    beta = group_domain("api.beta." + suffix)
+    assert alpha == {"key": "domain:alpha." + suffix, "name": "alpha." + suffix}
+    assert beta["key"] == "domain:beta." + suffix
+    assert group_domain("alpha." + suffix)["key"] == alpha["key"]
+
+
+@pytest.mark.parametrize("suffix", TWO_PART_SUFFIXES + TENANT_SUFFIXES)
+def test_a_name_that_is_only_a_suffix_is_not_grouped_with_anything(suffix):
+    assert group_domain(suffix) == {"key": "domain:" + suffix, "name": suffix}
+    assert registrable_domain(suffix) == suffix
+
+
+def test_the_korean_shops_from_the_review_are_different_groups():
+    coupang = group_domain("www.coupang.co.kr")
+    naver = group_domain("www.naver.co.kr")
+    assert coupang["key"] == "domain:coupang.co.kr"
+    assert naver["key"] == "domain:naver.co.kr"
+
+
+def test_two_github_pages_and_two_heroku_apps_are_different_groups():
+    assert group_domain("a.github.io")["key"] == "domain:a.github.io"
+    assert group_domain("b.github.io")["key"] == "domain:b.github.io"
+    assert group_domain("foo.herokuapp.com")["key"] != group_domain("bar.herokuapp.com")["key"]
+
+
+def test_deeper_names_under_a_tenant_still_belong_to_that_tenant():
+    assert registrable_domain("a.b.c.herokuapp.com") == "c.herokuapp.com"
+    assert registrable_domain("bucket.s3.amazonaws.com") == "bucket.s3.amazonaws.com"
+    assert registrable_domain("x.bucket.s3.amazonaws.com") == "bucket.s3.amazonaws.com"
+    assert registrable_domain("d111abcdef8.cloudfront.net") == "d111abcdef8.cloudfront.net"
+
+
+def test_the_longest_matching_suffix_decides_for_hosting_under_amazonaws():
+    # amazonaws.com itself is not a tenant suffix so other names keep two labels.
+    assert registrable_domain("sqs.us-east-1.amazonaws.com") == "amazonaws.com"
+    assert group_domain("x.execute-api.amazonaws.com")["key"] == "domain:x.execute-api.amazonaws.com"
+
+
+def test_a_known_label_still_wins_over_the_registrable_grouping():
+    assert group_domain("logs.dradis.netflix.com")["key"] == "label:netflix"
+    assert group_domain("www.google.com")["key"] == "label:google"
+    assert group_domain("api.header.immobilienscout24.de")["key"] == "label:immoscout24"
+
+
+def test_an_unknown_tenant_is_labelled_with_its_tenant_name():
+    label = label_domain("foo.herokuapp.com")
+    assert (label.known, label.name) == (False, "foo.herokuapp.com")
