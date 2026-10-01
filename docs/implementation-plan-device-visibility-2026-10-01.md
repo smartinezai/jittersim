@@ -489,44 +489,79 @@ rejected state. The PR gets its own security-focused review.
 ## 10. Impact check
 
 **What the user sees.** An "Impact" card at the top of Diagnostics with one row per
-queue: the device name (piece 1) and direction and what is set and what happened
-in the last minute and a verdict.
+queue: the device name (piece 1) and direction (upload first) and a verdict chip and
+what is set and what the kernel queue did in the last minute.
 
-- Loss: `set 5% · actual 4.7% (31 of 660 packets dropped)`.
-- Speed cap: `set 2 Mbit/s · using 1.96 Mbit/s · cap reached`.
-- Queue wait: `about 320 ms waiting` only for a queue that has a speed cap and no
-  delay (a delay alone also fills the backlog so it would mislead).
-- Delay and jitter: `set 100 ms ± 20 · configured, not measured`.
-- Verdicts: `affected now` when drops grew or the cap is reached. `set but no
-  traffic yet` when no packets passed. `too few packets to judge` under 50 packets
-  offered. Protected clients are listed on one muted line as not affected.
+- Loss: `set 5% · actual 4.7% (31 of 660 packets dropped)`. A queue with duplicates
+  adds `(may read low because duplicated packets are counted)`. A queue that drops
+  without any loss setting reads `Dropped (queue full at the speed cap) · actual 10%
+  (10 of 100 packets dropped)`.
+- Speed cap: `set 2 Mbit/s · using 727 kbit/s · peak 2 Mbit/s · cap reached`. The
+  average divides by the time between the first and last sample. The peak is the
+  fastest pair of neighbouring samples. The cap counts as reached when any interval
+  with traffic reaches 90% of the limit so a burst is never averaged away.
+- Queue wait: `Queue wait now: about 320 ms` only for a queue that has a speed cap and
+  no delay and no jitter (a delay alone also fills the backlog so it would mislead).
+  It reads the backlog of the last sample and is hidden below 10 ms.
+- Not measured: delay and jitter and reorder and duplicate and corrupt show as
+  `Delay: set 100 ms ± 20 · configured, not measured` and
+  `Reorder: set 25% · configured, not measured` and so on.
+- Verdict chips:
+  - `Affected in the last minute`: drops grew or the cap was reached.
+  - `No traffic in the last minute`: no packets were offered.
+  - `Too few packets to judge`: under 50 packets offered. For a queue with loss also
+    while the packets times the loss percentage is below 3.
+  - `No drops or cap hit seen`: the queue has loss or a speed cap and enough packets.
+  - `Effect not measured here`: the queue has neither loss nor a cap (only delay or
+    jitter or reorder or duplicate or corrupt). The row says how many packets passed
+    in the last minute.
+  - `Collecting…`: fewer than two samples so far.
+- Protected clients are listed on one muted line (`Protected (not affected): <names>`)
+  and have no row.
 
 **Design.**
 
 - New read-only helper action `queue-stats`: `tc -s -j qdisc show dev <iface>` on
-  the uplink and test interfaces. It returns only qdiscs whose parent is the
-  project root and whose handle is in the project range:
-  `{interface, handle, kind, packets, bytes, drops, overlimits, requeues,
-  backlog_bytes, qlen}`. The client validates every field like `traffic_counters`.
-- New `GET /api/impact` (admin token). The server joins each counter to the
-  compiled plan's `QueueSpec` by `(interface, mark + 10)` and adds the device name
-  and the configured delay and jitter and loss and bandwidth. General and service
-  list and quota and assignment queues are labelled by kind and id (for example
-  `General profile` and `Service list streaming`). In the reset state it answers
-  `available: false` with the same message the Traffic card uses.
+  the uplink and test interfaces. The helper joins every queue of the plan it last
+  applied to the kernel queue with the handle and parent that `queue_handle(mark)`
+  and `queue_parent(mark)` of the renderer give (one source for the renderer and the
+  join). Each entry holds `{device_id, direction, interface, handle, kind,
+  impairment, packets, bytes, drops, overlimits, requeues, backlog_bytes, qlen,
+  generation}`. The client validates every field like `traffic_counters`.
+- The action takes the helper's operation lock like an apply. An apply in progress
+  answers `helper-busy` so the numbers never mix an old plan with new kernel queues.
+- `generation` is a boot nonce plus a count of applied plans (also counted when the
+  helper adopts the published plan after a restart). It changes on every apply even
+  when the settings stay the same.
+- New `GET /api/impact` (admin token). The server adds the device name and the kind
+  label and the names of protected devices. General and service list and quota and
+  assignment queues are labelled by kind and id (for example `General profile` and
+  `Service list streaming`). It answers `available: false` with a message for no
+  helper and a reset network and an old helper. Any other unreadable answer
+  (a busy helper and so on) is `available: false` with `paused: true`. The time is the
+  server clock as a float like the Traffic card.
 - The browser polls every 5 seconds while Diagnostics is visible and the tab is
-  visible. It keeps 12 samples per queue and works out the last minute from the
-  first and last sample. A counter that goes backwards means the queues were
-  replaced by an Apply so that queue's history restarts.
-- Cap reached means a measured rate of at least 90% of the limit. It does not use
-  backlog for queues that also have a delay.
+  visible. It keeps 13 samples per queue (60 seconds). A queue's history restarts
+  when a counter goes backwards or the generation or the device or the setting
+  changed or the clock stepped back.
+- A paused or failed update keeps the rows and the badge says `Update paused`. The
+  rows are cleared after a minute without a good answer. The history is cleared at
+  once for a reset network and no helper and an old helper and a cleared token.
+- The rows are updated in place by `interface/handle` so a text selection survives. The
+  list is not a live region. One hidden `role="status"` line announces a verdict
+  change (for example `Fixture phone upload: Affected in the last minute`) and a new
+  state message once.
 - Old helper: the card says the helper needs updating and shows nothing else.
 
-**Tests.** Parser and validator unit tests including hostile output. The join with
-every queue kind. A real-kernel Docker test in the style of the existing
-`tests/integration/linux_*` checks: apply 20% loss and send packets then assert
-that drops track about 20% and grow. Mutation checks on the join and the counter
-restart rule. Node tests for each verdict and the restart case.
+**Tests.** Parser and validator unit tests including hostile output and every limit.
+The join with every queue kind and every mark up to the limit of 15 (including the
+hexadecimal bands `10:a` and `10:10`) rendered by `render_command_plan`. A real-kernel
+Docker test in the style of the existing `tests/integration/linux_*` checks: apply 20%
+loss and send packets then assert that drops track about 20% and grow. The same
+script joins a plan with 15 devices against the real `tc -j` output. Mutation checks on the join and
+the counter restart rule and the generation. Node tests for each verdict and the
+bursty cap and the restart cases and the fake-DOM tests for in-place updates and the
+status line and the paused state. One browser journey.
 
 ## After these ten (separate work)
 

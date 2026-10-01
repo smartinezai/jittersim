@@ -1,9 +1,11 @@
 """Check the Impact card in Diagnostics: live rows and a restart and reset and protected clients.
 
 The fixture's fake kernel answers every queue counter read with larger numbers: 100 more
-forwarded packets and 11 more dropped ones. A profile with 10% loss shows about 9.9% actual loss.
+forwarded packets and 11 more dropped ones and 150000 more bytes. A profile with 10% loss shows
+about 9.9% actual loss and the download cap of 250 kbit/s is reached at about 240 kbit/s.
 """
 
+import json
 import os
 import re
 import selectors
@@ -19,6 +21,18 @@ NAME = "Fixture phone"
 HEADERS = {"Authorization": "Bearer browser-test"}
 RESET_MESSAGE = "Network is reset. Apply the configuration to start impact checks."
 LOSS_LINE = re.compile(r"Loss: set 10% · actual 9\.9% \((\d+) of (\d+) packets dropped\)")
+SPEED_LINE = re.compile(
+    r"Speed: set 250 kbit/s · using \d+ kbit/s · peak \d+ kbit/s · cap reached"
+)
+AFFECTED = "Affected in the last minute"
+PAUSED = {
+    "available": False,
+    "paused": True,
+    "message": "Impact could not be read right now.",
+    "sampled_at": 0,
+    "queues": [],
+    "protected": [],
+}
 LIMIT = 25_000  # milliseconds to wait for a few 5 second polls
 
 
@@ -59,7 +73,7 @@ def check_width(browser, base, width, height, check_idle):
             "id": "lossy",
             "name": "Lossy",
             "upload": {"loss_percent": 10, "delay_ms": 100, "jitter_ms": 20},
-            "download": {"loss_percent": 10},
+            "download": {"loss_percent": 10, "bandwidth_kbit": 250},
         },
     )
     post(
@@ -88,13 +102,20 @@ def check_width(browser, base, width, height, check_idle):
     # first one sample only and then the figures of the last minute
     expect(rows).to_have_count(2)
     expect(listing).to_contain_text("Collecting…")
-    expect(upload).to_contain_text("Affected now", timeout=LIMIT)
-    expect(download).to_contain_text("Affected now", timeout=LIMIT)
+    expect(upload).to_contain_text(AFFECTED, timeout=LIMIT)
+    expect(download).to_contain_text(AFFECTED, timeout=LIMIT)
     expect(upload).to_contain_text(NAME)
     expect(upload.locator(".impact-lines")).to_contain_text(LOSS_LINE)
     expect(download.locator(".impact-lines")).to_contain_text(LOSS_LINE)
+    expect(download.locator(".impact-lines")).to_contain_text(SPEED_LINE)
     expect(state).to_have_text("Live")
-    expect(page.locator("#impact-note")).to_contain_text("Delay and jitter are shown as configured")
+    # screen readers hear the verdict change once and the list itself is not a live region
+    expect(page.locator("#impact-status")).to_contain_text(f"{NAME} upload: {AFFECTED}")
+    assert listing.get_attribute("aria-live") is None
+    assert page.locator("#impact-status").get_attribute("role") == "status"
+    expect(page.locator("#impact-note")).to_contain_text(
+        "Delay, jitter, reorder, duplicate and corrupt are shown as configured"
+    )
     # delay is shown as set and never as measured
     expect(upload.locator(".impact-lines")).to_contain_text(
         "Delay: set 100 ms ± 20 · configured, not measured"
@@ -105,6 +126,28 @@ def check_width(browser, base, width, height, check_idle):
     card.screenshot(path=f"test-results/impact-check-{width}.png")
     assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
 
+    # the rows are updated in place so a text selection and a screen reader are left alone
+    page.evaluate("document.querySelectorAll('#impact-list .impact-row')"
+                  ".forEach((row) => { row.dataset.mark = 'kept'; })")
+    before = upload.locator(".impact-lines").inner_text()
+    expect(upload.locator(".impact-lines")).not_to_have_text(before, timeout=LIMIT)
+    expect(listing.locator(".impact-row[data-mark='kept']")).to_have_count(2)
+
+    # a late answer keeps the rows and the badge says so
+    page.route(
+        "**/api/impact",
+        lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(PAUSED)
+        ),
+    )
+    expect(state).to_have_text("Update paused", timeout=LIMIT)
+    expect(rows).to_have_count(2)
+    expect(upload).to_contain_text(AFFECTED)
+    expect(listing.locator(".impact-row[data-mark='kept']")).to_have_count(2)
+    page.unroute("**/api/impact")
+    expect(state).to_have_text("Live", timeout=LIMIT)
+    expect(listing.locator(".impact-row[data-mark='kept']")).to_have_count(2)
+
     if check_idle:
         # polling stops when Diagnostics is not on screen
         page.locator('[data-page-link="devices"]').click()
@@ -114,12 +157,12 @@ def check_width(browser, base, width, height, check_idle):
         assert len(impact_requests) == seen, "the card kept polling on another page"
         page.locator('[data-page-link="diagnostics"]').click()
         expect(card).to_be_visible()
-        expect(upload).to_contain_text("Affected now", timeout=LIMIT)
+        expect(upload).to_contain_text(AFFECTED, timeout=LIMIT)
 
     # a new apply replaces the queues and the counters start again so the card starts again too
     post("/api/apply", {})
     expect(listing).to_contain_text("Collecting…", timeout=LIMIT)
-    expect(upload).to_contain_text("Affected now", timeout=LIMIT)
+    expect(upload).to_contain_text(AFFECTED, timeout=LIMIT)
     text = upload.locator(".impact-lines").inner_text()
     found = LOSS_LINE.search(text)
     assert found and int(found.group(1)) >= 0 and int(found.group(2)) > 0, text
