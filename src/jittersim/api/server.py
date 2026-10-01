@@ -378,9 +378,12 @@ DASHBOARD_HTML = """<!doctype html>
       margin: 0; color: #edf5ff;
     }
     .saved-profile-id { color: #91a8c1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
+    .saved-profile-name strong, .saved-profile-id { min-width: 0; overflow-wrap: anywhere; }
     .saved-profile-summary { margin: 0.15rem 0 0; color: #c6dbf4; font-size: 0.84rem; overflow-wrap: anywhere; }
     .saved-profile-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
     .saved-profile-actions button { margin: 0; white-space: nowrap; }
+    .saved-profile-actions button[aria-disabled="true"] { cursor: not-allowed; opacity: 0.55; }
+    .saved-profile-actions button[aria-busy="true"] { cursor: progress; }
     .general-badge { border-color: #2c9d73; background: #10372d; color: #8de2bc; }
     #profile-id[readonly] { background: #0d1b2d; color: #91a8c1; cursor: not-allowed; }
     select {
@@ -1840,6 +1843,8 @@ DASHBOARD_HTML = """<!doctype html>
       "connected-devices", "unaffected-devices", "uplink-details", "general-profile-status",
       "saved-profiles"
     ];
+    // Functions that clear private form state whenever the private panels are locked.
+    const privateDataLockHooks = [];
 
     function setDashboardUnlocked(allowed) {
       element("private-dashboard").hidden = !allowed;
@@ -1914,6 +1919,7 @@ DASHBOARD_HTML = """<!doctype html>
       privateDataPanelIds.forEach((panelId) => {
         element(panelId).textContent = message;
       });
+      privateDataLockHooks.forEach((hook) => hook());
       element("connected-count").textContent = state;
       element("connected-refresh-status").textContent =
         "Refreshes every 5 seconds once the admin token is accepted.";
@@ -4600,7 +4606,13 @@ DASHBOARD_HTML = """<!doctype html>
     function profileSummary(profile) {
       const upload = profileDirectionSummary(profile.upload);
       const download = profileDirectionSummary(profile.download);
-      return upload === download ? "↕ " + upload : "↑ " + upload + " · ↓ " + download;
+      const parts = [upload === download ? "↕ " + upload : "↑ " + upload + " · ↓ " + download];
+      if (profile.outage_probability > 0) parts.push("outages " + profile.outage_probability + "%");
+      if (profile.website_mode === "allow_only") {
+        const sites = profile.website_domains.length;
+        parts.push("allow-only " + sites + (sites === 1 ? " site" : " sites"));
+      }
+      return parts.join(" · ");
     }
 
     function profileDirectionSummary(direction) {
@@ -4611,9 +4623,12 @@ DASHBOARD_HTML = """<!doctype html>
       if (direction.loss_percent > 0) parts.push(direction.loss_percent + "% loss");
       if (direction.bandwidth_kbit) {
         parts.push(direction.bandwidth_kbit >= 1000
-          ? (direction.bandwidth_kbit / 1000).toFixed(1).replace(/\\.0$/, "") + " Mbit/s"
+          ? String(Math.round(direction.bandwidth_kbit / 10) / 100) + " Mbit/s"
           : direction.bandwidth_kbit + " kbit/s");
       }
+      if (direction.reorder_percent > 0) parts.push("reorder " + direction.reorder_percent + "%");
+      if (direction.duplicate_percent > 0) parts.push("duplicate " + direction.duplicate_percent + "%");
+      if (direction.corrupt_percent > 0) parts.push("corrupt " + direction.corrupt_percent + "%");
       return parts.length ? parts.join(" · ") : "no impairment";
     }
 
@@ -4704,19 +4719,58 @@ DASHBOARD_HTML = """<!doctype html>
       element("new-profile").hidden = true;
     }
 
+    let profileEditRequest = 0;
+
+    // Edit reloads the list first so a profile changed elsewhere is never saved back stale.
+    async function editSavedProfile(profileId) {
+      const thisRequest = ++profileEditRequest;
+      try {
+        await loadProfiles();
+      } catch (error) {
+        if (thisRequest === profileEditRequest) showMessage(error.message, "error");
+        return;
+      }
+      if (thisRequest !== profileEditRequest) return;
+      const current = profiles.find((item) => item.id === profileId);
+      if (!current) {
+        renderSavedProfiles();
+        showMessage("That profile no longer exists. The list was refreshed.", "error");
+        return;
+      }
+      // The browser reads JSON numbers as doubles so a seed above 2^53 - 1 would be saved back changed.
+      if (current.random_seed !== null && current.random_seed !== undefined &&
+          !Number.isSafeInteger(current.random_seed)) {
+        showMessage(
+          "This profile has a random seed too large to edit here. Change it through the API or the CLI.",
+          "error"
+        );
+        return;
+      }
+      startEditingProfile(current);
+    }
+
     function renderSavedProfiles() {
       if (!adminTokenVerified) return;
       const container = element("saved-profiles");
       const general = generalProfileState && generalProfileState.profile;
       const generalId = general ? general.id : null;
       const generalActive = Boolean(general && generalProfileState.active);
-      const actionsDisabled = networkActionBusy || !helperConfigured;
+      const generalBadge = generalActive ? "General · active"
+        : generalProfileState && generalProfileState.state &&
+          generalProfileState.state.observed_state === "reset" ? "General · paused"
+        : "General · saved";
+      const noHelper = !helperConfigured;
+      const actionsBusy = networkActionBusy;
       const signature = JSON.stringify([
         profiles.map((profile) => [profile.id, profile.name, profileSummary(profile)]),
-        generalId, generalActive, actionsDisabled, savedProfileBusy
+        generalId, generalActive, generalBadge, noHelper, actionsBusy, savedProfileBusy
       ]);
       if (container.dataset.signature === signature && container.children.length) return;
       container.dataset.signature = signature;
+      const focused = document.activeElement;
+      const focusedKey = focused && container.contains(focused) && focused.dataset.profileId
+        ? focused.dataset.profileId + "|" + focused.dataset.action : null;
+      const buttons = new Map();
       if (!profiles.length) {
         const empty = document.createElement("p");
         empty.className = "device-empty";
@@ -4740,7 +4794,7 @@ DASHBOARD_HTML = """<!doctype html>
         if (profile.id === generalId) {
           const badge = document.createElement("span");
           badge.className = "count-badge general-badge";
-          badge.textContent = generalActive ? "General · active" : "General · paused";
+          badge.textContent = generalBadge;
           heading.append(badge);
         }
         const summary = document.createElement("p");
@@ -4752,26 +4806,35 @@ DASHBOARD_HTML = """<!doctype html>
         const edit = document.createElement("button");
         edit.type = "button";
         edit.textContent = "Edit";
+        edit.dataset.profileId = profile.id;
+        edit.dataset.action = "edit";
         edit.setAttribute("aria-label", "Edit " + profile.name);
-        edit.addEventListener("click", () => {
-          const current = profiles.find((item) => item.id === profile.id);
-          if (current) startEditingProfile(current);
-        });
+        edit.addEventListener("click", () => editSavedProfile(profile.id));
         const stopping = profile.id === generalId && generalActive;
         const apply = document.createElement("button");
         apply.type = "button";
         apply.className = stopping ? "" : "primary";
         apply.textContent = stopping ? "Stop" : "Apply to all";
+        apply.dataset.profileId = profile.id;
+        apply.dataset.action = "general";
         apply.setAttribute("aria-label", (stopping ? "Stop " : "Apply to all: ") + profile.name);
-        apply.disabled = actionsDisabled;
+        // Without the helper the button is plainly disabled. While an action runs it stays
+        // focusable (aria-disabled) so that keyboard focus survives the redraw. The action
+        // function ignores clicks in both states.
+        apply.disabled = noHelper;
+        if (actionsBusy && !noHelper) apply.setAttribute("aria-disabled", "true");
         apply.addEventListener("click", () => runGeneralProfileAction(stopping, profile.id));
         if (savedProfileBusy && savedProfileBusy.id === profile.id && savedProfileBusy.stop === stopping) {
-          setButtonBusy(apply, true);
+          apply.setAttribute("aria-busy", "true");
         }
+        buttons.set(profile.id + "|edit", edit);
+        buttons.set(profile.id + "|general", apply);
         actions.append(edit, apply);
         row.append(text, actions);
         return row;
       }));
+      // A rebuild drops the focused button so put focus back on its replacement.
+      if (focusedKey && buttons.has(focusedKey)) buttons.get(focusedKey).focus();
     }
 
     element("profile-form").addEventListener("submit", async (event) => {
@@ -4779,7 +4842,6 @@ DASHBOARD_HTML = """<!doctype html>
       try {
         const body = profileFormPayload(editingProfile);
         await request("/api/profiles", "POST", body);
-        if (editingProfile) editingProfile = body;
         refreshAfterSuccess("Profile saved.");
       } catch (error) {
         showMessage(error.message, "error");
@@ -4790,6 +4852,11 @@ DASHBOARD_HTML = """<!doctype html>
       element("profile-form").reset();
       resetProfileEditing();
       element("profile-id").focus();
+    });
+
+    privateDataLockHooks.push(() => {
+      element("profile-form").reset();
+      resetProfileEditing();
     });
 
     element("device-form").addEventListener("submit", async (event) => {
