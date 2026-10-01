@@ -4553,32 +4553,97 @@ DASHBOARD_HTML = """<!doctype html>
 
     element("scan-observations").addEventListener("click", scanObservations);
 
+    function profileSummary(profile) {
+      const upload = profileDirectionSummary(profile.upload);
+      const download = profileDirectionSummary(profile.download);
+      return upload === download ? "↕ " + upload : "↑ " + upload + " · ↓ " + download;
+    }
+
+    function profileDirectionSummary(direction) {
+      const parts = [];
+      if (direction.delay_ms > 0 || direction.jitter_ms > 0) {
+        parts.push(direction.delay_ms + " ms" + (direction.jitter_ms > 0 ? " ±" + direction.jitter_ms : ""));
+      }
+      if (direction.loss_percent > 0) parts.push(direction.loss_percent + "% loss");
+      if (direction.bandwidth_kbit) {
+        parts.push(direction.bandwidth_kbit >= 1000
+          ? (direction.bandwidth_kbit / 1000).toFixed(1).replace(/\\.0$/, "") + " Mbit/s"
+          : direction.bandwidth_kbit + " kbit/s");
+      }
+      return parts.length ? parts.join(" · ") : "no impairment";
+    }
+
+    function fillProfileForm(profile) {
+      const set = (id, value) => {
+        element(id).value = value === null || value === undefined ? "" : String(value);
+      };
+      set("profile-id", profile.id);
+      set("profile-name", profile.name);
+      set("profile-seed", profile.random_seed);
+      set("profile-reroll", profile.reroll_interval_seconds);
+      set("profile-reroll-variation", profile.reroll_interval_randomness.variation_percent);
+      set("profile-outage-probability", profile.outage_probability);
+      set("profile-outage-duration", profile.outage_duration_seconds);
+      set("profile-outage-interval", profile.outage_interval_seconds);
+      set("profile-website-mode", profile.website_mode);
+      set("profile-website-domains", profile.website_domains.join(", "));
+      set("profile-website-enabled", profile.website_randomness.enabled_probability);
+      ["upload", "download"].forEach((prefix) => {
+        const direction = profile[prefix];
+        set(prefix + "-delay", direction.delay_ms);
+        set(prefix + "-jitter", direction.jitter_ms);
+        set(prefix + "-loss", direction.loss_percent);
+        set(prefix + "-bandwidth", direction.bandwidth_kbit);
+        set(prefix + "-reorder", direction.reorder_percent);
+        set(prefix + "-duplicate", direction.duplicate_percent);
+        set(prefix + "-corrupt", direction.corrupt_percent);
+        ["delay", "jitter", "loss", "bandwidth", "reorder", "duplicate", "corrupt"].forEach((feature) => {
+          const randomness = direction[feature + "_randomness"];
+          set(prefix + "-" + feature + "-random-variation", randomness.variation_percent);
+          set(prefix + "-" + feature + "-random-enabled", randomness.enabled_probability);
+        });
+      });
+    }
+
+    // The form has no inputs for some randomness details. A profile being edited keeps its own
+    // values for them so that saving never resets them. A new profile gets the defaults.
+    function profileFormPayload(base) {
+      const keep = (field) => base
+        ? Object.assign({}, base[field])
+        : { variation_percent: 0, enabled_probability: 100 };
+      return {
+        id: element("profile-id").value,
+        name: element("profile-name").value,
+        upload: impairment("upload"),
+        download: impairment("download"),
+        random_seed: optionalNumber("profile-seed"),
+        reroll_interval_seconds: Number(element("profile-reroll").value),
+        reroll_interval_randomness: {
+          variation_percent: Number(element("profile-reroll-variation").value),
+          enabled_probability: base ? base.reroll_interval_randomness.enabled_probability : 100
+        },
+        outage_probability: Number(element("profile-outage-probability").value),
+        outage_duration_seconds: Number(element("profile-outage-duration").value),
+        outage_interval_seconds: Number(element("profile-outage-interval").value),
+        outage_duration_randomness: keep("outage_duration_randomness"),
+        outage_interval_randomness: keep("outage_interval_randomness"),
+        website_mode: element("profile-website-mode").value,
+        website_domains: commaList("profile-website-domains"),
+        website_randomness: {
+          variation_percent: base ? base.website_randomness.variation_percent : 0,
+          enabled_probability: Number(element("profile-website-enabled").value)
+        }
+      };
+    }
+
+    let editingProfile = null;
+
     element("profile-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
-        await request("/api/profiles", "POST", {
-          id: element("profile-id").value,
-          name: element("profile-name").value,
-          upload: impairment("upload"),
-          download: impairment("download"),
-          random_seed: optionalNumber("profile-seed"),
-          reroll_interval_seconds: Number(element("profile-reroll").value),
-          reroll_interval_randomness: {
-            variation_percent: Number(element("profile-reroll-variation").value),
-            enabled_probability: 100
-          },
-          outage_probability: Number(element("profile-outage-probability").value),
-          outage_duration_seconds: Number(element("profile-outage-duration").value),
-          outage_interval_seconds: Number(element("profile-outage-interval").value),
-          outage_duration_randomness: { variation_percent: 0, enabled_probability: 100 },
-          outage_interval_randomness: { variation_percent: 0, enabled_probability: 100 },
-          website_mode: element("profile-website-mode").value,
-          website_domains: commaList("profile-website-domains"),
-          website_randomness: {
-            variation_percent: 0,
-            enabled_probability: Number(element("profile-website-enabled").value)
-          }
-        });
+        const body = profileFormPayload(editingProfile);
+        await request("/api/profiles", "POST", body);
+        if (editingProfile) editingProfile = body;
         refreshAfterSuccess("Profile saved.");
       } catch (error) {
         showMessage(error.message, "error");
