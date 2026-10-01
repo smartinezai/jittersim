@@ -143,3 +143,34 @@ def test_two_apps_at_the_same_distance_sort_by_name():
 
 def test_no_observations_gives_no_hints():
     assert seen_with([]) == {}
+
+
+@pytest.mark.parametrize(
+    ("child", "name", "category", "parent", "parent_name"),
+    [
+        ("px.ads.linkedin.com", "LinkedIn Insight", "Advertising", "www.linkedin.com", "LinkedIn"),
+        ("snap.licdn.com", "LinkedIn Insight", "Advertising", "media.licdn.com", "LinkedIn"),
+        ("analytics.tiktok.com", "TikTok Pixel", "Advertising", "www.tiktok.com", "TikTok"),
+        ("analytics.twitter.com", "X Ads", "Advertising", "www.twitter.com", "X (Twitter)"),
+        ("pixel.facebook.com", "Meta Pixel", "Advertising", "www.facebook.com", "Facebook"),
+        ("ct.pinterest.com", "Pinterest Tag", "Advertising", "www.pinterest.com", "Pinterest"),
+        ("ads.pinterest.com", "Pinterest Tag", "Advertising", "i.pinimg.com", "Pinterest"),
+        ("bat.bing.com", "Microsoft Advertising", "Advertising", "www.bing.com", "Bing"),
+        ("adservice.google.com", "Google Ads", "Advertising", "www.google.com", "Google"),
+        ("ads.google.com", "Google Ads", "Advertising", "mail.google.com", "Gmail"),
+    ],
+)
+def test_a_tag_endpoint_under_an_app_is_a_tracker_but_the_app_stays_an_app(
+    child, name, category, parent, parent_name
+):
+    label = label_domain(child)
+    assert (label.kind, label.name, label.category, label.known) == (
+        "tracker", name, category, True)
+    assert label_domain("x." + child).kind == "tracker"
+    assert label_domain(parent).name == parent_name
+    assert label_domain(parent).kind != "tracker"
+
+
+def test_a_tag_endpoint_under_a_social_app_is_not_a_seen_with_source():
+    pairs = [("px.ads.linkedin.com", 5), ("snap.licdn.com", 5), ("a.akamai.net", 5)]
+    assert seen_with(pairs) == {}

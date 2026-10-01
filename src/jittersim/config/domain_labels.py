@@ -164,6 +164,17 @@ _EXTRA: Tuple[Tuple[str, str, str, str], ...] = (
     ("trafficmanager.net", "Microsoft Azure", "cdn", "Cloud hosting"),
     ("edgecastcdn.net", "Edgecast", "cdn", "Shared CDN"),
     ("jsdelivr.net", "jsDelivr", "cdn", "Shared CDN"),
+    # Tag endpoints under an app. The longer suffix wins so the app itself stays an app.
+    ("px.ads.linkedin.com", "LinkedIn Insight", "tracker", "Advertising"),
+    ("snap.licdn.com", "LinkedIn Insight", "tracker", "Advertising"),
+    ("analytics.tiktok.com", "TikTok Pixel", "tracker", "Advertising"),
+    ("analytics.twitter.com", "X Ads", "tracker", "Advertising"),
+    ("pixel.facebook.com", "Meta Pixel", "tracker", "Advertising"),
+    ("ct.pinterest.com", "Pinterest Tag", "tracker", "Advertising"),
+    ("ads.pinterest.com", "Pinterest Tag", "tracker", "Advertising"),
+    ("bat.bing.com", "Microsoft Advertising", "tracker", "Advertising"),
+    ("adservice.google.com", "Google Ads", "tracker", "Advertising"),
+    ("ads.google.com", "Google Ads", "tracker", "Advertising"),
     # Trackers and ads and measurement
     ("adnxs.com", "Xandr", "tracker", "Advertising"),
     ("criteo.com", "Criteo", "tracker", "Advertising"),
