@@ -6,6 +6,8 @@ from hashlib import sha256
 from ipaddress import AddressValueError, IPv4Address, IPv4Network, ip_address
 from typing import Optional, Tuple, Union
 
+from .exemptions import normalize_exempt_mac
+
 
 class ValidationError(ValueError):
     """Raised when a jittersim configuration value is unsafe or malformed."""
@@ -280,10 +282,16 @@ class DomainObservation:
     query_count: int
     first_seen: int
     last_seen: int
+    mac_address: Optional[str] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "ipv4_address", _parse_test_address(self.ipv4_address))
         object.__setattr__(self, "domain", normalize_domain(self.domain))
+        if self.mac_address is not None:
+            try:
+                object.__setattr__(self, "mac_address", normalize_exempt_mac(self.mac_address))
+            except ValueError as error:
+                raise ValidationError("mac_address must identify one device") from error
         _validate_number(self.query_count, "query_count", 1, 1_000_000_000)
         _validate_number(self.first_seen, "first_seen", 0, 2**63 - 1)
         _validate_number(self.last_seen, "last_seen", 0, 2**63 - 1)

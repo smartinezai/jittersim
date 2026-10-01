@@ -40,7 +40,7 @@ LOGGER = logging.getLogger(__name__)
 
 HELPER_OUT_OF_DATE_MESSAGE = (
     "The networking helper is out of date and cannot skip protected devices. "
-    "Update it before scanning traffic."
+    "Restart the JitterSim services or reinstall the release."
 )
 MAX_MESSAGE_BYTES = 256 * 1024
 MAX_HELPER_CONNECTIONS = 8
@@ -139,7 +139,12 @@ class HelperService:
         if action == "ping":
             return {"ok": True, "action": "ping"}
         if action == "capabilities":
-            return {"ok": True, "general_profile": True, "service_lists": True}
+            return {
+                "ok": True,
+                "general_profile": True,
+                "service_lists": True,
+                "protected_dns_capture": True,
+            }
         if action == "dashboard-access":
             if not self._access_lock.acquire(blocking=False):
                 return {"ok": False, "error": "Device verification is busy. Try again.",
@@ -837,6 +842,18 @@ class HelperClient:
         if capabilities.get("service_lists") is not True:
             raise HelperClientError("Update the Pi helper before applying service lists")
 
+    def check_protected_dns_capture_support(self) -> None:
+        """Reject an older running helper before it can capture protected traffic."""
+
+        try:
+            capabilities = self._request({"action": "capabilities"})
+        except HelperClientError as error:
+            if error.reason == "helper-busy":
+                raise
+            raise HelperClientError(HELPER_OUT_OF_DATE_MESSAGE) from error
+        if capabilities.get("protected_dns_capture") is not True:
+            raise HelperClientError(HELPER_OUT_OF_DATE_MESSAGE)
+
     def service_addresses(self, addresses: Dict[str, Sequence[Any]]) -> int:
         """Send learned destination addresses for lists in the applied plan."""
 
@@ -998,6 +1015,8 @@ class HelperClient:
             raise HelperClientError("invalid excluded devices") from error
         if len(macs) > MAX_PROTECTED_MACS:
             raise HelperClientError("too many excluded devices")
+        if macs:
+            self.check_protected_dns_capture_support()
         response = self._request({"action": "observe-dns", "excluded_macs": macs})
         if macs and response.get("excluded_macs") != macs:
             raise HelperClientError(HELPER_OUT_OF_DATE_MESSAGE)

@@ -4,10 +4,12 @@ Run it only in a disposable container with --privileged (or in an empty separate
 namespace). It builds a Pi side with two veth pairs and checks two things.
 
 1. The DNS capture. A real tcpdump runs through NetworkApplier.capture_dns_queries. A protected
-   client and an ordinary client send DNS queries to a resolver on the Pi that answers both of
-   them. A capture that leaves out the protected MAC must show only the ordinary client in
-   either direction. A capture without the exclusion runs at the same time on the same traffic
-   and must show both so that the comparison means something.
+   client and an ordinary client send DNS queries over UDP and over TCP to a resolver on the Pi
+   that answers the UDP ones. A capture that leaves out the protected MAC must show only the
+   ordinary client in either direction. A capture without the exclusion runs at the same time
+   on the same traffic and must show every client so that the comparison means something. The
+   same check runs with the largest protected list (256 MACs) where the filter has to compile
+   and attach and where the first and the last MAC of the sorted list are both left out.
 2. The traffic counters. Every counter in the project nftables tables must stay exactly where
    it was while packets of a protected MAC cross the Pi in both directions. This includes a
    protected MAC that now uses an address that was assigned to an ordinary device before. Only
@@ -15,6 +17,7 @@ namespace). It builds a Pi side with two veth pairs and checks two things.
 """
 
 import json
+import re
 import socket
 import struct
 import subprocess
@@ -25,7 +28,7 @@ from pathlib import Path
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.engine.compiler import compile_plan
 from jittersim.engine.plan import GENERAL_QUEUE_ID, GeneralProfileRule
-from jittersim.networking.applier import NetworkApplier
+from jittersim.networking.applier import MAX_PROTECTED_MACS, NetworkApplier
 from jittersim.networking.executor import SubprocessExecutor
 from jittersim.networking.helper import _parse_dns_query_output
 from jittersim.networking.topology import Topology
@@ -38,6 +41,13 @@ PROTECTED_IP = "192.168.50.11"
 GENERAL_IP = "192.168.50.13"
 PI_IP = "192.168.50.1"
 REMOTE_IP = "198.18.0.2"
+LARGE_LIST = ["02:aa:00:00:00:%02x" % index for index in range(MAX_PROTECTED_MACS)]
+LARGE_CLIENTS = (
+    # Left out: the first and a middle and the last MAC of the sorted list.
+    (LARGE_LIST[0], "192.168.50.20", "first-listed.example.com"),
+    (LARGE_LIST[MAX_PROTECTED_MACS // 2], "192.168.50.22", "middle-listed.example.com"),
+    (LARGE_LIST[-1], "192.168.50.21", "last-listed.example.com"),
+)
 DEVICE_COUNTERS = {"usage-device affected upload", "usage-device affected download"}
 GENERAL_COUNTERS = {
     "usage-device %s upload" % GENERAL_QUEUE_ID,
@@ -53,7 +63,7 @@ def mac_bytes(value):
     return bytes.fromhex(value.replace(":", ""))
 
 
-def checksummed_header(source_ip, target_ip, payload_length):
+def checksummed_header(source_ip, target_ip, payload_length, protocol=17):
     header = struct.pack(
         "!BBHHHBBH4s4s",
         0x45,
@@ -62,7 +72,7 @@ def checksummed_header(source_ip, target_ip, payload_length):
         1,
         0,
         64,
-        17,
+        protocol,
         0,
         socket.inet_aton(source_ip),
         socket.inet_aton(target_ip),
@@ -79,6 +89,14 @@ def frame(source_mac, target_mac, source_ip, target_ip, payload, *, sport=32000,
     udp = struct.pack("!HHHH", sport, dport, 8 + len(payload), 0) + payload
     header = checksummed_header(source_ip, target_ip, len(udp))
     return mac_bytes(target_mac) + mac_bytes(source_mac) + b"\x08\x00" + header + udp
+
+
+def tcp_frame(source_mac, target_mac, source_ip, target_ip, payload, *, sport, dport):
+    """Build one Ethernet frame that carries a TCP segment with data."""
+
+    segment = struct.pack("!HHIIBBHHH", sport, dport, 1, 1, 5 << 4, 0x18, 8192, 0, 0) + payload
+    header = checksummed_header(source_ip, target_ip, len(segment), protocol=6)
+    return mac_bytes(target_mac) + mac_bytes(source_mac) + b"\x08\x00" + header + segment
 
 
 def encode_name(value):
@@ -196,8 +214,13 @@ def set_owner(address, mac):
     run("ip", "neigh", "replace", address, "lladdr", mac, "nud", "permanent", "dev", "jittersim0")
 
 
-def check_dns_capture(applier, test_mac, client):
-    """Run a leaking and a protecting capture side by side on the same DNS traffic."""
+def capture_side_by_side(applier, test_mac, client, clients, excluded):
+    """Run a leaking and a protecting capture side by side on the same DNS traffic.
+
+    Every client sends one UDP and one TCP query per round and the resolver on the Pi
+    answers the UDP queries. Returns the text of the open capture and of the capture
+    that leaves out the given MACs.
+    """
 
     resolver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     resolver.bind((PI_IP, 53))
@@ -214,26 +237,25 @@ def check_dns_capture(applier, test_mac, client):
 
     outputs = {}
 
-    def capture(name, excluded):
-        outputs[name] = applier.capture_dns_queries(excluded)
+    def capture(name, macs):
+        outputs[name] = applier.capture_dns_queries(macs)
 
     workers = [
         threading.Thread(target=answer),
         threading.Thread(target=capture, args=("open", [])),
-        threading.Thread(target=capture, args=("protecting", [PROTECTED])),
+        threading.Thread(target=capture, args=("protecting", excluded)),
     ]
     for worker in workers:
         worker.start()
     try:
         time.sleep(1.0)  # Let both tcpdump processes attach before the traffic starts.
-        for round_number in range(25):
-            for mac, address, name in (
-                (ORDINARY, ORDINARY_IP, "ordinary-client.example.com"),
-                (PROTECTED, PROTECTED_IP, "protected-client.example.com"),
-            ):
+        for round_number in range(15):
+            for mac, address, name in clients:
                 query = dns_query(name, 0x1000 + round_number)
+                client.send(frame(mac, test_mac, address, PI_IP, query, sport=40000, dport=53))
+                over_tcp = struct.pack("!H", len(query)) + query
                 client.send(
-                    frame(mac, test_mac, address, PI_IP, query, sport=40000, dport=53)
+                    tcp_frame(mac, test_mac, address, PI_IP, over_tcp, sport=40001, dport=53)
                 )
             time.sleep(0.1)
         stop.set()
@@ -243,31 +265,85 @@ def check_dns_capture(applier, test_mac, client):
     finally:
         stop.set()
         resolver.close()
+    return outputs["open"], outputs["protecting"]
 
-    def sources(output):
-        return {item["ipv4_address"] for item in _parse_dns_query_output(output, observed_at=0)}
 
-    open_capture = outputs["open"]
-    protecting_capture = outputs["protecting"]
-    assert sources(open_capture) == {ORDINARY_IP, PROTECTED_IP}, (
-        "The comparison capture must see both clients or the test proves nothing: "
-        + repr(sources(open_capture))
+def query_sources(output):
+    return {item["ipv4_address"] for item in _parse_dns_query_output(output, observed_at=0)}
+
+
+def tcp_sources(output):
+    """Return the clients whose TCP segments to port 53 appear in the capture."""
+
+    sources = set()
+    for line in output.splitlines():
+        match = re.search(r"\bIP (\d+\.\d+\.\d+\.\d+)\.\d+ > [\d.]+\.53: Flags", line)
+        if match:
+            sources.add(match.group(1))
+    return sources
+
+
+def check_capture(open_capture, protecting_capture, visible, hidden):
+    """Require that the protecting capture shows the visible clients and none of the hidden."""
+
+    everyone = {address for _, address, _ in visible} | {address for _, address, _ in hidden}
+    assert query_sources(open_capture) >= everyone, (
+        "The comparison capture must see every client or the test proves nothing: "
+        + repr(sorted(query_sources(open_capture)))
     )
-    assert "> %s." % PROTECTED_IP in open_capture, (
-        "The comparison capture must see the answers to the protected client"
+    assert tcp_sources(open_capture) == everyone, (
+        "The comparison capture must see the TCP queries of every client: "
+        + repr(sorted(tcp_sources(open_capture)))
     )
-    assert PROTECTED_IP not in sources(protecting_capture), (
-        "The capture saw DNS queries from the protected client " + PROTECTED_IP
+    for _, address, _ in hidden:
+        assert "> %s." % address in open_capture, (
+            "The comparison capture must see the answers to " + address
+        )
+    for _, address, _ in hidden:
+        assert address not in query_sources(protecting_capture), (
+            "The capture saw DNS queries from the protected client " + address
+        )
+        assert address not in tcp_sources(protecting_capture), (
+            "The capture saw TCP queries from the protected client " + address
+        )
+        assert address not in protecting_capture, (
+            "The capture saw DNS packets to or from the protected client " + address
+        )
+    for _, address, _ in visible:
+        assert address in query_sources(protecting_capture), (
+            "The capture lost the ordinary client " + address
+        )
+        assert address in tcp_sources(protecting_capture), (
+            "The capture lost the TCP queries of the ordinary client " + address
+        )
+        assert "> %s." % address in protecting_capture, (
+            "The capture lost the answers to the ordinary client " + address
+        )
+
+
+def check_dns_capture(applier, test_mac, client):
+    """One protected client and one ordinary client."""
+
+    ordinary = (ORDINARY, ORDINARY_IP, "ordinary-client.example.com")
+    protected = (PROTECTED, PROTECTED_IP, "protected-client.example.com")
+    open_capture, protecting_capture = capture_side_by_side(
+        applier, test_mac, client, [ordinary, protected], [PROTECTED]
     )
-    assert PROTECTED_IP not in protecting_capture, (
-        "The capture saw DNS packets to or from the protected client " + PROTECTED_IP
+    check_capture(open_capture, protecting_capture, [ordinary], [protected])
+
+
+def check_dns_capture_with_the_largest_list(applier, test_mac, client):
+    """The largest protected list compiles and still leaves out the first and the last MAC."""
+
+    assert len(LARGE_LIST) == MAX_PROTECTED_MACS == 256, len(LARGE_LIST)
+    assert ORDINARY not in LARGE_LIST
+    ordinary = (ORDINARY, ORDINARY_IP, "ordinary-client.example.com")
+    for mac, address, _ in LARGE_CLIENTS:
+        set_owner(address, mac)
+    open_capture, protecting_capture = capture_side_by_side(
+        applier, test_mac, client, [ordinary, *LARGE_CLIENTS], LARGE_LIST
     )
-    assert sources(protecting_capture) == {ORDINARY_IP}, (
-        "The capture lost the ordinary client: " + repr(sources(protecting_capture))
-    )
-    assert "> %s." % ORDINARY_IP in protecting_capture, (
-        "The capture lost the answers to the ordinary client"
-    )
+    check_capture(open_capture, protecting_capture, [ordinary], list(LARGE_CLIENTS))
 
 
 def send_both_ways(client, remote, test_mac, up_mac, mac, address, label):
@@ -356,6 +432,7 @@ def main():
     remote.bind(("remote0", 0))
     try:
         check_dns_capture(applier, test_mac, client)
+        check_dns_capture_with_the_largest_list(applier, test_mac, client)
         check_device_counters(applier, client, remote, test_mac, up_mac)
         check_general_counters(applier, client, remote, test_mac, up_mac)
         print("OK protected clients are not monitored")
