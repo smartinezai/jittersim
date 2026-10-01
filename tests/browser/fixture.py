@@ -22,6 +22,10 @@ from tests.wifi_support import WifiExecutor
 class DashboardWifiExecutor(WifiExecutor):
     def run(self, command):
         if command.executable == "ip":
+            if command.arguments[:4] == ("-4", "neigh", "show", "dev"):
+                return CommandResult(
+                    0, stdout="192.168.50.184 dev wlan0 lladdr 02:00:00:00:00:01 REACHABLE\n"
+                )
             if command.arguments[:4] == ("-j", "-4", "route", "get"):
                 return CommandResult(0, stdout=json.dumps([{"dev": "wlan0"}]))
             if command.arguments[:4] == ("-j", "-4", "neigh", "show"):

@@ -2521,6 +2521,104 @@ class ControlServerTests(unittest.TestCase):
         saved = self.repository.get_device_by_ipv4_address("192.168.50.178")
         self.assertEqual(saved.name, "MacBook-Pro")
 
+    PROTECTED_MAC_FORMS = (
+        "dc:1e:d5:3e:97:4c",
+        "DC:1E:D5:3E:97:4C",
+        "DC-1E-D5-3E-97-4C",
+        "  dc:1e:d5:3e:97:4c  ",
+    )
+
+    def _protect_the_fake_client(self) -> None:
+        from jittersim.config.exemptions import UnaffectedDevice
+
+        self.repository.save_unaffected_device(UnaffectedDevice("dc:1e:d5:3e:97:4c", "Mine", 1))
+
+    def test_a_protected_client_cannot_join_a_new_group(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self._protect_the_fake_client()
+
+        for mac_address in self.PROTECTED_MAC_FORMS:
+            with self.subTest(mac_address=mac_address):
+                status, _, body = self.server.write_response_for(
+                    "/api/groups",
+                    {
+                        "id": "lab",
+                        "name": "Lab",
+                        "profile_id": "slow",
+                        "connected_clients": [
+                            {"ipv4_address": "192.168.50.178", "mac_address": mac_address}
+                        ],
+                    },
+                )
+
+                self.assertEqual(status, 409, body)
+                self.assertIn("unaffected by profiles", json.loads(body)["error"])
+                self.assertIsNone(self.repository.get_device_by_mac_address("dc:1e:d5:3e:97:4c"))
+                self.assertIsNone(self.repository.get_device_group("lab"))
+
+    def test_a_protected_client_cannot_be_added_to_an_existing_group(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.repository.save_device_group(DeviceGroup("family", "Family", ("alice",), "slow"))
+        self._protect_the_fake_client()
+
+        for mac_address in self.PROTECTED_MAC_FORMS:
+            with self.subTest(mac_address=mac_address):
+                status, _, body = self.server.write_response_for(
+                    "/api/connected-devices/group",
+                    {
+                        "group_id": "family",
+                        "ipv4_address": "192.168.50.178",
+                        "mac_address": mac_address,
+                    },
+                )
+
+                self.assertEqual(status, 409, body)
+                self.assertIn("unaffected by profiles", json.loads(body)["error"])
+                self.assertIsNone(self.repository.get_device_by_mac_address("dc:1e:d5:3e:97:4c"))
+                self.assertEqual(
+                    self.repository.get_device_group("family").device_ids, ("alice",)
+                )
+
+    def test_a_protected_client_in_a_new_group_saves_nothing_for_the_others(self) -> None:
+        class TwoClients(FakeHelper):
+            def connected_devices(self):
+                ordinary = dict(super().connected_devices()[0])
+                ordinary.update(
+                    ipv4_address="192.168.50.179", mac_address="aa:bb:cc:dd:ee:02", hostname="Tab"
+                )
+                return super().connected_devices() + [ordinary]
+
+        self.server.helper_client = TwoClients()
+        self._protect_the_fake_client()
+        ordinary = {"ipv4_address": "192.168.50.179", "mac_address": "aa:bb:cc:dd:ee:02"}
+        protected = {"ipv4_address": "192.168.50.178", "mac_address": "dc:1e:d5:3e:97:4c"}
+
+        for clients in ([ordinary, protected], [protected, ordinary]):
+            with self.subTest(first=clients[0]["mac_address"]):
+                status, _, body = self.server.write_response_for(
+                    "/api/groups",
+                    {
+                        "id": "lab",
+                        "name": "Lab",
+                        "profile_id": "slow",
+                        "connected_clients": clients,
+                    },
+                )
+
+                self.assertEqual(status, 409, body)
+                self.assertIn("unaffected by profiles", json.loads(body)["error"])
+                self.assertIsNone(self.repository.get_device_by_mac_address("aa:bb:cc:dd:ee:02"))
+                self.assertIsNone(self.repository.get_device_by_mac_address("dc:1e:d5:3e:97:4c"))
+                self.assertIsNone(self.repository.get_device_group("lab"))
+
+        # the ordinary client alone is fine so the refusals above came from the protected one
+        status, _, body = self.server.write_response_for(
+            "/api/groups",
+            {"id": "lab", "name": "Lab", "profile_id": "slow", "connected_clients": [ordinary]},
+        )
+        self.assertEqual(status, 200, body)
+        self.assertIsNotNone(self.repository.get_device_by_mac_address("aa:bb:cc:dd:ee:02"))
+
     def _save_unlabelled_client(self, name: str = "Client 192.168.50.178") -> None:
         self.repository.save_device(
             Device(
