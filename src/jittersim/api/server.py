@@ -1562,7 +1562,7 @@ DASHBOARD_HTML = """<!doctype html>
         <button id="scan-observations" class="primary" type="button">Scan now</button>
       </div>
     </div>
-    <p id="observation-note" class="observation-note">Scanning is on demand. Results are local aggregates, not exact page visits.</p>
+    <p id="observation-note" class="observation-note">Scanning is on demand. Results are local aggregates, not exact page visits. Protected devices are never monitored and never appear here.</p>
     <div id="observations" class="observation-list" aria-live="polite">No observations yet.</div>
   </section>
     <section class="card analytics-card" data-collapse="closed">
@@ -2736,7 +2736,7 @@ DASHBOARD_HTML = """<!doctype html>
         );
         const assignmentInfo = document.createElement("p");
         assignmentInfo.className = "connected-meta";
-        assignmentInfo.textContent = device.unaffected ? "Unaffected by all profiles and quotas" :
+        assignmentInfo.textContent = device.unaffected ? "Unaffected by all profiles and quotas · Traffic is not monitored" :
           device.general_profile_name ? "General profile: " + device.general_profile_name +
             " · Shared speed limit · Saved device rules paused" :
           "Base profile: " + (device.assigned_profile_id || "Unassigned") +
