@@ -184,6 +184,33 @@ class DomainObservationTests(unittest.TestCase):
         self.assertEqual(observation.domain, "amazon.com")
         self.assertEqual(observation.query_count, 3)
 
+    def test_normalizes_the_client_hardware_address_when_one_is_given(self) -> None:
+        values = dict(ipv4_address="192.168.50.10", domain="example.com", query_count=1)
+
+        self.assertIsNone(DomainObservation(first_seen=1, last_seen=1, **values).mac_address)
+        self.assertIsNone(
+            DomainObservation(first_seen=1, last_seen=1, mac_address=None, **values).mac_address
+        )
+        self.assertEqual(
+            DomainObservation(
+                first_seen=1, last_seen=1, mac_address="AA-BB-CC-DD-EE-01", **values
+            ).mac_address,
+            "aa:bb:cc:dd:ee:01",
+        )
+
+    def test_rejects_an_invalid_client_hardware_address(self) -> None:
+        for value in ("not-a-mac", 5, "01:00:5e:00:00:01", "00:00:00:00:00:00", ""):
+            with self.subTest(value=value):
+                with self.assertRaises(ValidationError):
+                    DomainObservation(
+                        ipv4_address="192.168.50.10",
+                        domain="example.com",
+                        query_count=1,
+                        first_seen=1,
+                        last_seen=1,
+                        mac_address=value,
+                    )
+
     def test_rejects_invalid_dns_names_and_time_bounds(self) -> None:
         invalid_values = (
             {"domain": "-not-a-domain.com"},

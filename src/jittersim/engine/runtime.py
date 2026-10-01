@@ -18,7 +18,12 @@ from jittersim.config.models import (
     TimeQuota,
     time_quota_counter_id,
 )
-from jittersim.config.protection import protected_addresses, protected_macs
+from jittersim.config.protection import (
+    observation_is_protected,
+    protected_addresses,
+    protected_macs,
+    station_macs_by_address,
+)
 from jittersim.config.storage import (
     MAX_RANDOM_WEBSITE_ANALYTICS_BATCH,
     ConfigRepository,
@@ -718,22 +723,30 @@ class RuntimeScheduler:
         try:
             macs = protected_macs(repository)
             observations = observe_dns_queries(macs)
-            stations = station_snapshot(self._helper_client).get("devices", ()) if macs else ()
-            blocked = protected_addresses(
-                repository, [station for station in stations if isinstance(station, dict)]
-            )
+            stations = [
+                station
+                for station in station_snapshot(self._helper_client).get("devices", ())
+                if isinstance(station, dict)
+            ]
+            blocked = protected_addresses(repository, stations)
+            macs_by_address = station_macs_by_address(stations)
             observed_at = int(now)
+            sampled = tuple(
+                DomainObservation(
+                    ipv4_address=observation["ipv4_address"],
+                    domain=observation["domain"],
+                    query_count=observation["query_count"],
+                    first_seen=observed_at,
+                    last_seen=observed_at,
+                    mac_address=macs_by_address.get(str(observation["ipv4_address"])),
+                )
+                for observation in observations
+            )
             repository.save_domain_observations(
                 tuple(
-                    DomainObservation(
-                        ipv4_address=observation["ipv4_address"],
-                        domain=observation["domain"],
-                        query_count=observation["query_count"],
-                        first_seen=observed_at,
-                        last_seen=observed_at,
-                    )
-                    for observation in observations
-                    if str(observation["ipv4_address"]) not in blocked
+                    observation
+                    for observation in sampled
+                    if not observation_is_protected(observation, set(macs), blocked)
                 ),
                 now=observed_at,
             )

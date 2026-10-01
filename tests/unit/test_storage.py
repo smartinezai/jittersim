@@ -562,6 +562,67 @@ class ConfigRepositoryTests(unittest.TestCase):
         self.assertEqual(self.repository.delete_domain_observations(["192.168.50.99"]), 0)
         self.assertEqual(len(self.repository.list_domain_observations()), 1)
 
+    def test_observations_keep_the_client_hardware_address(self) -> None:
+        mac = "02:00:00:00:00:01"
+        other = "02:00:00:00:00:02"
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.20", "amazon.com", 1, 10, 10)], now=10
+        )
+        self.assertIsNone(self.repository.list_domain_observations()[0].mac_address)
+
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.20", "amazon.com", 1, 11, 11, mac_address=mac)], now=11
+        )
+        self.assertEqual(self.repository.list_domain_observations()[0].mac_address, mac)
+
+        # A later sample that could not name the client keeps what is known.
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.20", "amazon.com", 1, 12, 12)], now=12
+        )
+        self.assertEqual(self.repository.list_domain_observations()[0].mac_address, mac)
+
+        # The address went to another client so the newest owner is recorded.
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.20", "amazon.com", 1, 13, 13, mac_address=other)],
+            now=13,
+        )
+        self.assertEqual(self.repository.list_domain_observations()[0].mac_address, other)
+        self.assertEqual(self.repository.total_domain_queries("192.168.50.20"), 4)
+
+    def test_deletes_domain_observations_by_hardware_address_or_by_address(self) -> None:
+        mac = "02:00:00:00:00:01"
+        self.repository.save_domain_observations(
+            [
+                DomainObservation("192.168.50.99", "a.example.com", 1, 10, 10, mac_address=mac),
+                DomainObservation("192.168.50.99", "b.example.com", 1, 10, 10, mac_address=mac),
+                DomainObservation("192.168.50.20", "c.example.com", 1, 10, 10),
+                DomainObservation(
+                    "192.168.50.21", "d.example.com", 1, 10, 10, mac_address="02:00:00:00:00:02"
+                ),
+                DomainObservation("192.168.50.22", "e.example.com", 1, 10, 10),
+            ],
+            now=10,
+        )
+
+        removed = self.repository.delete_domain_observations(["192.168.50.20"], [mac.upper()])
+
+        self.assertEqual(removed, 3)
+        self.assertEqual(
+            sorted(str(item.ipv4_address) for item in self.repository.list_domain_observations()),
+            ["192.168.50.21", "192.168.50.22"],
+        )
+
+    def test_deleting_by_hardware_address_alone_leaves_unnamed_rows(self) -> None:
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.20", "c.example.com", 1, 10, 10)], now=10
+        )
+
+        self.assertEqual(
+            self.repository.delete_domain_observations([], ["02:00:00:00:00:01"]), 0
+        )
+        self.assertEqual(self.repository.delete_domain_observations([], []), 0)
+        self.assertEqual(len(self.repository.list_domain_observations()), 1)
+
     def test_action_history_is_newest_first_and_keeps_only_500_entries(self) -> None:
         for index in range(501):
             action = "/api/apply" if index < 500 else "/api/reset"

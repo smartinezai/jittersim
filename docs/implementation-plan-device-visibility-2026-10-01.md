@@ -117,19 +117,25 @@ display. One layer is not enough so there are four.
   client's queries and the answers to it) are never captured. The helper
   validates every MAC and caps the list at 64. Both callers (the dashboard scan
   and progression sampling) pass the saved Unaffected list.
-- **Server drop.** Before saving a scan the server drops any observation whose IP
-  belongs to a protected MAC. The IP comes from the connected-client snapshot and
-  from saved devices with that MAC. `/api/observations` also hides rows for those
-  IPs so old rows never show.
+- **Server drop.** Each observation is stored with the hardware address of the
+  client that owned its IP when it was scanned (read from the connected-client
+  snapshot; an unknown or shared IP stays empty). Before saving a scan the server
+  drops any observation whose MAC is protected or whose IP belongs to a protected
+  MAC. The IP comes from the connected-client snapshot and from saved devices with
+  that MAC. `/api/observations` hides rows by the same two keys so old rows never
+  show. The MAC is never sent to the browser.
 - **Fail closed.** If protected devices exist and the helper does not accept the
   MAC list (an older helper) the scan refuses to run and says the helper needs
   updating. It never captures protected traffic. The Unaffected list holds up to
   256 devices but the helper filter takes at most 64 so a scan refuses with a
   clear message while more than 64 devices are protected.
 - **Purge.** Making a device protected deletes its stored observations (a new
-  `delete_domain_observations` in storage keyed by IP) in the same transaction as
-  saving the protection. It also clears the totals used as progression baselines
-  for those IPs.
+  `delete_domain_observations` in storage keyed by MAC and by IP) in the same
+  transaction as saving the protection. A row goes when its recorded MAC is the
+  protected one or when its IP is one the device uses now or had assigned. This
+  also clears the totals used as progression baselines for those IPs. Rows saved
+  before the MAC was recorded have no MAC and can only be matched by IP so an old
+  row under an address the device no longer uses stays until it expires.
 - **DNS watcher.** The watcher skips frames whose destination MAC is protected
   before it parses them. It reads the protected MACs from the helper on its
   existing plan check. Nothing is lost because service lists never apply to
