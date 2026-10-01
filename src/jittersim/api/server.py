@@ -3274,14 +3274,25 @@ DASHBOARD_HTML = """<!doctype html>
     // A group action sends its names in one call and the server accepts this many.
     const GROUP_ACTION_MAX_NAMES = 64;
 
+    // Blocking every name of a group of these kinds could cut a device off the internet.
+    const RISKY_BLOCK_NOTE = "Blocking a whole system or shared hosting group could cut the device " +
+      "off the internet. Block single names instead.";
+
+    function isRiskyGroupKind(kind) {
+      return kind === "system" || kind === "cdn";
+    }
+
     function groupObservations(domains) {
       const groups = new Map();
       (domains || []).forEach((observation) => {
         const group = observation.group || { key: "domain:" + observation.domain, name: observation.domain };
         if (!groups.has(group.key)) {
-          groups.set(group.key, { key: group.key, name: group.name, names: [], totalQueries: 0, single: true });
+          groups.set(group.key, {
+            key: group.key, name: group.name, kind: group.kind || "", names: [], totalQueries: 0, single: true
+          });
         }
         const entry = groups.get(group.key);
+        if (!isRiskyGroupKind(entry.kind) && isRiskyGroupKind(group.kind)) entry.kind = group.kind;
         entry.names.push(observation);
         entry.totalQueries += Number(observation.query_count) || 0;
         entry.single = entry.names.length === 1;
@@ -3311,7 +3322,9 @@ DASHBOARD_HTML = """<!doctype html>
             domains: domains(open)
           };
       action.ariaLabel = action.label + " " + groupSubject(group, action.domains.length);
-      const note = groupLimitNote(action.domains.length);
+      const note = (!unblocking && isRiskyGroupKind(group.kind))
+        ? RISKY_BLOCK_NOTE
+        : groupLimitNote(action.domains.length);
       action.disabled = note !== "";
       action.title = note || action.ariaLabel;
       return action;

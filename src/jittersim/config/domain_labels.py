@@ -390,13 +390,17 @@ def label_domain(domain: str) -> DomainLabel:
 
 
 def group_domain(domain: str) -> Dict[str, str]:
-    """Return the group a name belongs to for display."""
+    """Return the group a name belongs to for display.
+
+    The group has a key and a name and the label kind of this name. The dashboard offers no
+    block-all button for a group of system or cdn names because it could cut a device off.
+    """
 
     label = label_domain(domain)
     if label.known and label.kind in _GROUPED_KINDS:
-        return {"key": "label:" + label.name.lower(), "name": label.name}
+        return {"key": "label:" + label.name.lower(), "name": label.name, "kind": label.kind}
     registrable = registrable_domain(domain)
-    return {"key": "domain:" + registrable, "name": registrable}
+    return {"key": "domain:" + registrable, "name": registrable, "kind": label.kind}
 
 
 def seen_with(observations: Iterable[Tuple[str, int]]) -> Dict[str, List[str]]:

@@ -315,9 +315,14 @@ def test_other_trackers_still_get_the_facebook_hint():
     assert seen_with(pairs) == {"tags-eu.tiqcdn.com": ["Facebook"]}
 
 
+def key_and_name(domain):
+    group = group_domain(domain)
+    return {"key": group["key"], "name": group["name"]}
+
+
 def test_two_netflix_domains_share_a_group():
-    a = group_domain("logs.dradis.netflix.com")
-    b = group_domain("ipv4-c179-fra002-ix.1.oca.nflxvideo.net")
+    a = key_and_name("logs.dradis.netflix.com")
+    b = key_and_name("ipv4-c179-fra002-ix.1.oca.nflxvideo.net")
     assert a == b == {"key": "label:netflix", "name": "Netflix"}
 
 
@@ -335,14 +340,14 @@ def test_every_immoscout_name_shares_a_group():
 
 
 def test_shared_infrastructure_groups_by_registrable_domain():
-    assert group_domain("a1051.dscg4.akamai.net") == {
+    assert key_and_name("a1051.dscg4.akamai.net") == {
         "key": "domain:akamai.net", "name": "akamai.net"}
-    assert group_domain("tags-eu.tiqcdn.com") == {
+    assert key_and_name("tags-eu.tiqcdn.com") == {
         "key": "domain:tiqcdn.com", "name": "tiqcdn.com"}
 
 
 def test_unknown_names_group_by_registrable_domain():
-    assert group_domain("a.b.somesmallsite.co.uk") == {
+    assert key_and_name("a.b.somesmallsite.co.uk") == {
         "key": "domain:somesmallsite.co.uk", "name": "somesmallsite.co.uk"}
 
 
@@ -369,16 +374,16 @@ TENANT_SUFFIXES = [
 def test_names_under_a_two_part_suffix_keep_their_registered_name(suffix):
     assert registrable_domain("www.alpha." + suffix) == "alpha." + suffix
     assert registrable_domain("alpha." + suffix) == "alpha." + suffix
-    alpha = group_domain("www.alpha." + suffix)
-    beta = group_domain("www.beta." + suffix)
+    alpha = key_and_name("www.alpha." + suffix)
+    beta = key_and_name("www.beta." + suffix)
     assert alpha == {"key": "domain:alpha." + suffix, "name": "alpha." + suffix}
     assert alpha["key"] != beta["key"]
 
 
 @pytest.mark.parametrize("suffix", TENANT_SUFFIXES)
 def test_tenants_of_a_shared_host_are_different_groups(suffix):
-    alpha = group_domain("api.alpha." + suffix)
-    beta = group_domain("api.beta." + suffix)
+    alpha = key_and_name("api.alpha." + suffix)
+    beta = key_and_name("api.beta." + suffix)
     assert alpha == {"key": "domain:alpha." + suffix, "name": "alpha." + suffix}
     assert beta["key"] == "domain:beta." + suffix
     assert group_domain("alpha." + suffix)["key"] == alpha["key"]
@@ -386,7 +391,7 @@ def test_tenants_of_a_shared_host_are_different_groups(suffix):
 
 @pytest.mark.parametrize("suffix", TWO_PART_SUFFIXES + TENANT_SUFFIXES)
 def test_a_name_that_is_only_a_suffix_is_not_grouped_with_anything(suffix):
-    assert group_domain(suffix) == {"key": "domain:" + suffix, "name": suffix}
+    assert key_and_name(suffix) == {"key": "domain:" + suffix, "name": suffix}
     assert registrable_domain(suffix) == suffix
 
 
@@ -425,3 +430,58 @@ def test_a_known_label_still_wins_over_the_registrable_grouping():
 def test_an_unknown_tenant_is_labelled_with_its_tenant_name():
     label = label_domain("foo.herokuapp.com")
     assert (label.known, label.name) == (False, "foo.herokuapp.com")
+
+
+@pytest.mark.parametrize(
+    ("domain", "kind"),
+    [
+        ("logs.dradis.netflix.com", "app"),
+        ("config.extension.grammarly.com", "app"),
+        ("www.google.com", "system"),
+        ("connectivitycheck.gstatic.com", "system"),
+        ("www.msftncsi.com", "system"),
+        ("gateway.icloud.com", "system"),
+        ("10000.mt.eu.iot.dreame.tech", "iot"),
+        ("a1051.dscg4.akamai.net", "cdn"),
+        ("d111abcdef8.cloudfront.net", "cdn"),
+        ("tags-eu.tiqcdn.com", "tracker"),
+        ("cdn.somesmallsite.io", "unknown"),
+        ("a.b.somesmallsite.co.uk", "unknown"),
+        ("co.kr", "unknown"),
+    ],
+)
+def test_the_group_carries_the_label_kind_of_the_name(domain, kind):
+    assert group_domain(domain)["kind"] == kind
+
+
+def test_the_group_of_an_app_is_the_whole_object():
+    assert group_domain("logs.dradis.netflix.com") == {
+        "key": "label:netflix", "name": "Netflix", "kind": "app"}
+    assert group_domain("tags-eu.tiqcdn.com") == {
+        "key": "domain:tiqcdn.com", "name": "tiqcdn.com", "kind": "tracker"}
+
+
+# What survives when one grouping rule is taken away. System and iot names group by their label
+# and a tie in the query count breaks by the name without looking at the case.
+def test_system_names_group_by_their_label():
+    assert key_and_name("www.google.com") == {"key": "label:google", "name": "Google"}
+    assert key_and_name("clients4.google.com")["key"] == "label:google"
+    assert key_and_name("gateway.icloud.com") == {"key": "label:icloud", "name": "iCloud"}
+    assert key_and_name("init.itunes.apple.com")["key"] == "label:apple"
+    assert key_and_name("a.apple.com")["key"] == "label:apple"
+    assert key_and_name("connectivitycheck.gstatic.com")["key"] == "label:google"
+    assert key_and_name("www.msftncsi.com") == {"key": "label:windows", "name": "Windows"}
+
+
+def test_iot_names_group_by_their_label():
+    assert key_and_name("10000.mt.eu.iot.dreame.tech") == {
+        "key": "label:dreame", "name": "Dreame"}
+    assert key_and_name("other.dreame.tech")["key"] == "label:dreame"
+    assert key_and_name("a.meethue.com") == {"key": "label:philips hue", "name": "Philips Hue"}
+
+
+def test_cdn_and_tracker_names_never_group_by_their_label():
+    # Two sites behind one CDN or one tag manager are not one app.
+    assert key_and_name("a.akamaihd.net")["key"] == "domain:akamaihd.net"
+    assert key_and_name("tags.tiqcdn.com")["key"] == "domain:tiqcdn.com"
+    assert key_and_name("www.google-analytics.com")["key"] == "domain:google-analytics.com"

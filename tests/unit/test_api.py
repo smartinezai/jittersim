@@ -2217,12 +2217,31 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(
             domains["sso.immobilienscout24.de"]["group"],
-            {"key": "label:immoscout24", "name": "ImmoScout24"},
+            {"key": "label:immoscout24", "name": "ImmoScout24", "kind": "app"},
         )
         self.assertEqual(
             domains["tracking.immobilienscout24.de"]["group"]["key"], "label:immoscout24"
         )
         self.assertEqual(domains["tags-eu.tiqcdn.com"]["group"]["key"], "domain:tiqcdn.com")
+
+    def test_the_group_kind_comes_with_the_observations(self) -> None:
+        names = {
+            "www.google.com": "system",
+            "connectivitycheck.gstatic.com": "system",
+            "a1051.dscg4.akamai.net": "cdn",
+            "tags-eu.tiqcdn.com": "tracker",
+            "10000.mt.eu.iot.dreame.tech": "iot",
+            "cdn.somesmallsite.io": "unknown",
+            "sso.immobilienscout24.de": "app",
+        }
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.124", name, 1, 100, 100) for name in names], now=100
+        )
+
+        _, _, body = self.server.response_for("/api/observations")
+        domains = {item["domain"]: item for item in json.loads(body)["devices"][0]["domains"]}
+
+        self.assertEqual({name: domains[name]["group"]["kind"] for name in names}, names)
 
     def test_seen_with_hints_never_cross_devices(self) -> None:
         self.repository.save_domain_observations(

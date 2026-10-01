@@ -43,12 +43,14 @@ def evaluate(expression, setup=""):
     return json.loads(run_node(program))
 
 
-def item(domain, count, key=None, name=None, blocked=None):
+def item(domain, count, key=None, name=None, blocked=None, kind=None):
     """Build one API item the way /api/observations sends it."""
 
     value = {"domain": domain, "query_count": count}
     if key is not None:
         value["group"] = {"key": key, "name": name}
+        if kind is not None:
+            value["group"]["kind"] = kind
     if blocked is not None:
         value["globally_blocked"] = blocked
     return value
@@ -74,8 +76,19 @@ def netflix(blocked=None):
     return [item(d, c, "label:netflix", "Netflix", blocked) for d, c in NETFLIX_NAMES]
 
 
-def group_of(items, name="ImmoScout24"):
-    return {"key": "label:" + name.lower(), "name": name, "names": items}
+def group_of(items, name="ImmoScout24", kind=None):
+    value = {"key": "label:" + name.lower(), "name": name, "names": items}
+    if kind is not None:
+        value["kind"] = kind
+    return value
+
+
+def kinded(items, kind):
+    """Give every API item the group kind the server would send."""
+
+    for value in items:
+        value["group"]["kind"] = kind
+    return items
 
 
 @NODE
@@ -171,8 +184,8 @@ def test_a_missing_query_count_counts_as_zero():
     assert groups[0]["totalQueries"] == 0
 
 
-def block_action(items):
-    return evaluate("groupBlockAction(" + json.dumps(group_of(items)) + ")")
+def block_action(items, kind=None):
+    return evaluate("groupBlockAction(" + json.dumps(group_of(items, kind=kind)) + ")")
 
 
 def only(action, *keys):
@@ -259,6 +272,92 @@ def test_a_group_of_exactly_the_call_limit_can_still_be_blocked():
     many = [item("h%d.example.com" % i, 1) for i in range(MAX_BATCH_DOMAINS)]
 
     assert block_action(many)["disabled"] is False
+
+
+RISK_NOTE = (
+    "Blocking a whole system or shared hosting group could cut the device off the internet. "
+    "Block single names instead."
+)
+
+
+@NODE
+@pytest.mark.parametrize("kind", ["system", "cdn"])
+def test_a_system_or_cdn_group_has_no_block_all(kind):
+    action = block_action(immo(blocked=False), kind=kind)
+
+    assert action["label"] == "Block all"
+    assert action["disabled"] is True
+    assert action["title"] == RISK_NOTE
+    assert action["ariaLabel"] == "Block all 7 ImmoScout24 names"
+
+
+@NODE
+@pytest.mark.parametrize("kind", ["system", "cdn"])
+def test_a_system_or_cdn_group_has_no_block_remaining_either(kind):
+    items = immo(blocked=False)
+    items[0]["globally_blocked"] = True
+
+    action = block_action(items, kind=kind)
+
+    assert action["label"] == "Block remaining"
+    assert action["disabled"] is True
+    assert action["title"] == RISK_NOTE
+
+
+@NODE
+@pytest.mark.parametrize("kind", ["system", "cdn"])
+def test_unblocking_a_whole_system_or_cdn_group_stays_possible(kind):
+    action = block_action(immo(blocked=True), kind=kind)
+
+    assert action["label"] == "Unblock all"
+    assert action["disabled"] is False
+    assert action["title"] == "Unblock all 7 ImmoScout24 names"
+
+
+@NODE
+@pytest.mark.parametrize("kind", ["app", "iot", "tracker", "unknown", None, "something-new"])
+def test_other_kinds_keep_the_block_all_button(kind):
+    action = block_action(immo(blocked=False), kind=kind)
+
+    assert action["disabled"] is False
+    assert action["title"] == "Block all 7 ImmoScout24 names"
+
+
+@NODE
+def test_the_profile_button_stays_for_system_and_cdn_groups():
+    for kind in ("system", "cdn"):
+        group = json.dumps(group_of(immo(), kind=kind))
+        action = evaluate("groupProfileAction(%s, %s)" % (group, json.dumps(SLOW_PROFILE)))
+        assert action["disabled"] is False
+        assert len(action["domains"]) == 7
+
+
+@NODE
+def test_a_group_takes_the_kind_of_its_names():
+    domains = kinded(immo(), "app") + kinded(netflix(), "system")
+
+    groups = evaluate("groupObservations(" + json.dumps(domains) + ")")
+
+    assert {g["name"]: g["kind"] for g in groups} == {"ImmoScout24": "app", "Netflix": "system"}
+
+
+@NODE
+def test_a_missing_group_kind_is_an_empty_kind():
+    groups = evaluate("groupObservations(" + json.dumps(immo()) + ")")
+
+    assert groups[0]["kind"] == ""
+
+
+@NODE
+def test_a_risky_name_makes_the_whole_group_risky_whatever_came_first():
+    items = kinded(immo(), "tracker")
+    items[3]["group"]["kind"] = "cdn"
+
+    groups = evaluate("groupObservations(" + json.dumps(items) + ")")
+    action = evaluate("groupBlockAction(" + json.dumps(groups[0]) + ")")
+
+    assert groups[0]["kind"] == "cdn"
+    assert action["disabled"] is True
 
 
 SLOW = {"id": "slow", "name": "Slow", "website_domains": ["sso.immobilienscout24.de", "a.test"]}
@@ -1057,6 +1156,47 @@ def test_the_group_row_has_styles_for_the_header_the_toggle_and_the_body():
     ):
         assert selector in DASHBOARD_HTML, selector
     assert ".observation-group-body[hidden]" in DASHBOARD_HTML
+
+
+@NODE
+def test_a_system_group_has_a_disabled_block_all_but_keeps_its_other_buttons():
+    steps = """
+      const parts = groupParts(cards()[0], 0);
+      await click(parts.blockButton);
+      console.log(JSON.stringify({
+        block: [parts.blockButton.textContent, parts.blockButton.disabled, parts.blockButton.title],
+        profile: [parts.profileButton.textContent, parts.profileButton.disabled],
+        rowBlock: parts.rows.map((row) => [row.children[3].textContent, row.children[3].disabled]),
+        rowProfile: parts.rows.map((row) => row.children[2].disabled),
+        calls
+      }));
+    """
+    google = with_labels(
+        [item("n%d.google.com" % i, 1, "label:google", "Google", None, "system") for i in range(3)]
+    )
+
+    out = run_dashboard(steps, [device("192.168.50.124", google)])
+
+    assert out["block"] == ["Block all", True, RISK_NOTE]
+    assert out["profile"] == ["Add all to profile", False]
+    assert out["rowBlock"] == [["Block globally", False]] * 3
+    assert out["rowProfile"] == [False] * 3
+    assert out["calls"] == []
+
+
+@NODE
+def test_a_group_of_apps_still_blocks_all_in_one_call():
+    steps = """
+      const parts = groupParts(cards()[0], 0);
+      await click(parts.blockButton);
+      console.log(JSON.stringify({header: parts.blockButton.textContent, calls}));
+    """
+    items = with_labels(kinded(immo(), "app"))
+
+    out = run_dashboard(steps, [device("192.168.50.124", items)])
+
+    assert out["calls"][1][:3] == ["request", ADD_BLOCK, "POST"]
+    assert out["header"] == "Unblock all"
 
 
 # ---------------------------------------------------------------------------------------------
