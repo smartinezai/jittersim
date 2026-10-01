@@ -29,7 +29,7 @@ def served_functions():
             'element("refresh-diagnostics").addEventListener',
             'element("download-backup").addEventListener',
         )
-        + block("async function routerAction(", 'element("sync-router-ap").addEventListener')
+        + block("function renderRouterWifi()", 'element("sync-router-ap").addEventListener')
     )
 
 
@@ -88,8 +88,7 @@ function deferred() {
   const promise = new Promise(done => {resolve = done});
   return {promise, resolve};
 }
-const ROUTER_BUTTONS = ["check-router-password", "sync-router-ap", "disable-router-wifi",
-                        "enable-router-wifi"];
+const ROUTER_BUTTONS = ["check-router-password", "sync-router-ap", "router-wifi-toggle"];
 function tick(id, on) {
   element(id).checked = on;
   element(id).dispatchEvent(new Event("change"));
@@ -102,6 +101,51 @@ function enter(id, value) {
 
 
 CASES = {
+    "router_switch_tracks_confirmed_state_and_expires": r"""
+      helperConfigured = true;
+      enter("admin-token", "fixture token");
+      adminTokenVerified = true;
+      enter("router-admin-password", "fixture password");
+      network = async () => ({ok:true, json:async () => ({result: {
+        enabled:false, checked_at:clock/1000, busy:false, changing:false, retry_after:15}})});
+      await pollRouterWifi();
+      assert.equal(element("router-wifi-toggle").disabled, false);
+      assert.equal(element("router-wifi-toggle").getAttribute("aria-checked"), "false");
+      assert.match(element("router-wifi-status").textContent, /^Off/);
+      clock += 46000;
+      renderRouterWifi();
+      assert.equal(element("router-wifi-toggle").disabled, true);
+      assert.equal(element("router-wifi-toggle").getAttribute("data-unknown"), "true");
+    """,
+    "router_status_rejection_stops_automatic_checks": r"""
+      helperConfigured = true;
+      enter("admin-token", "fixture token");
+      adminTokenVerified = true;
+      enter("router-admin-password", "fixture password");
+      network = async () => ({ok:true, json:async () => ({result: {
+        enabled:null, busy:false, error:"Router login failed. Check the router admin password and try again."}})});
+      await pollRouterWifi();
+      assert.equal(routerPasswordRejected, true);
+      await pollRouterWifi();
+      assert.equal(networkCalls.length, 1);
+      assert.equal(element("router-wifi-toggle").disabled, true);
+    """,
+    "router_status_ignores_replaced_credentials": r"""
+      helperConfigured = true;
+      enter("admin-token", "fixture token");
+      adminTokenVerified = true;
+      enter("router-admin-password", "fixture password");
+      const pending = deferred();
+      network = () => pending.promise;
+      const polling = pollRouterWifi();
+      enter("router-admin-password", "replacement password");
+      pending.resolve({ok:true, json:async () => ({result: {enabled:true, checked_at:clock/1000, busy:false}})});
+      await polling;
+      assert.equal(routerWifiEnabled, null);
+      assert.equal(routerPasswordVerified, false);
+      assert.equal(element("router-wifi-toggle").disabled, true);
+    """,
+
     "panel_and_token_edits": r"""
       const opener = element("open-admin-credentials");
       enter("admin-token", "fixture token");
@@ -181,9 +225,9 @@ CASES = {
       network = () => pending.promise;
       const running = routerAction("/api/router/sync-ap", {}, "Importing", element("sync-router-ap"));
       assert.equal(routerActionPending, true);
-      for (const id of ["sync-router-ap", "disable-router-wifi", "enable-router-wifi"])
+      for (const id of ["sync-router-ap", "router-wifi-toggle"])
         assert.equal(element(id).disabled, true);
-      await routerAction("/api/router/wifi", {enabled:true}, "Enabling", element("enable-router-wifi"));
+      await routerAction("/api/router/wifi", {enabled:true}, "Enabling", element("router-wifi-toggle"));
       assert.equal(networkCalls.length, 1);
       enter("router-admin-password", "");
       enter("router-admin-password", "fixture password");
@@ -195,8 +239,8 @@ CASES = {
       await routerAction("/api/router/sync-ap", {}, "Importing", element("sync-router-ap"));
       assert.equal(element("router-admin-password").value, "fixture password");
       assert.equal(element("credential-router-status").textContent, "fixture failure");
-      for (const id of ["sync-router-ap", "disable-router-wifi", "enable-router-wifi"])
-        assert.equal(element(id).disabled, false);
+      assert.equal(element("sync-router-ap").disabled, false);
+      assert.equal(element("router-wifi-toggle").disabled, true);
       assert.equal(routerActionPending, false);
       enter("router-admin-password", "");
       await routerAction("/api/router/sync-ap", {}, "Importing", element("sync-router-ap"));
@@ -215,7 +259,7 @@ CASES = {
       assert.equal(networkCalls[0].options.method, "POST");
       assert.equal(networkCalls[0].options.headers.Authorization, "Bearer fixture token");
       assert.deepEqual(
-        JSON.parse(networkCalls[0].options.body), {admin_password:"fixture password"});
+        JSON.parse(networkCalls[0].options.body), {admin_password:"fixture password", background:true});
       assert.equal(element("router-credential-state").textContent, "Accepted");
       assert.equal(element("router-credential-state").className, "credential-state accepted");
       assert.match(element("credential-router-status").textContent, /accepted.*nothing.*changed/i);
@@ -274,7 +318,7 @@ CASES = {
       for (const id of ROUTER_BUTTONS)
         assert.equal(element(id).disabled, true, id);
       const blockedAction = routerAction(
-        "/api/router/wifi", {enabled:true}, "Enabling", element("enable-router-wifi"));
+        "/api/router/wifi", {enabled:true}, "Enabling", element("router-wifi-toggle"));
       const blockedCheck = checkRouterPassword();
       await new Promise(resolve => setTimeout(resolve, 0));
       assert.equal(networkCalls.length, 1);
@@ -284,7 +328,7 @@ CASES = {
       assert.equal(element("router-credential-state").textContent, "Entered");
       assert.ok(!/accepted/i.test(element("credential-router-status").textContent));
       for (const id of ROUTER_BUTTONS)
-        assert.equal(element(id).disabled, false, id);
+        assert.equal(element(id).disabled, id === "router-wifi-toggle", id);
     """,
     "router_operations_report_the_password_state_and_keep_it": r"""
       enter("admin-token", "fixture token");
@@ -538,7 +582,7 @@ CASES = {
       await checkRouterPassword();
       await routerAction("/api/router/sync-ap", {}, "Importing", element("sync-router-ap"));
       await routerAction(
-        "/api/router/wifi", {enabled: true}, "Enabling", element("enable-router-wifi"));
+        "/api/router/wifi", {enabled: true}, "Enabling", element("router-wifi-toggle"));
       assert.equal(networkCalls.length, 1);
       assert.match(messages.at(-1).text, /rejected.*change/i);
       assert.equal(messages.at(-1).kind, "error");

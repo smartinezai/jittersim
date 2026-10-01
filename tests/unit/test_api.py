@@ -65,6 +65,9 @@ class FakeHelper:
     def check_router_password(self, *, admin_password):
         return {"ok": True, "action": "router-check"}
 
+    def read_router_wifi_status(self, *, admin_password):
+        return {"ok": True, "enabled": False}
+
     def connected_devices(self):
         return [
             {
@@ -122,6 +125,64 @@ class FakeHelper:
 
 
 class ControlServerTests(unittest.TestCase):
+    def test_router_status_and_results_require_admin_and_own_site(self):
+        self.server.admin_token = "fixture-admin"
+        for path in ("/api/router/status", "/api/router/operation", "/api/router/wifi", "/api/router/check"):
+            for authorized, cross_site, expected in ((False, False, 401), (True, True, 403)):
+                handler = object.__new__(ControlRequestHandler)
+                handler.server = self.server
+                handler.path = path
+                handler.client_address = ("127.0.0.1", 12345)
+                handler.headers = Message()
+                handler.headers["Host"] = "127.0.0.1:8080"
+                if authorized:
+                    handler.headers["Authorization"] = "Bearer fixture-admin"
+                if cross_site:
+                    handler.headers["Origin"] = "https://different.example"
+                captured = []
+                handler._send_response = lambda **values: captured.append(values)
+                handler._handle_write()
+                self.assertEqual(captured[0]["status"], expected)
+
+    def test_background_router_change_keeps_dashboard_responsive_and_records_once(self):
+        release = threading.Event()
+
+        class SlowHelper(FakeHelper):
+            def set_router_wifi(self, *, admin_password, enabled):
+                assert release.wait(2)
+                return {"enabled": enabled}
+
+        self.server.helper_client = SlowHelper()
+        try:
+            status, _, body = self.server.write_response_for("/api/router/wifi", {
+                "admin_password": "private-password", "enabled": False,
+                "confirm_disable": True, "background": True})
+            self.assertEqual(status, 202)
+            operation = json.loads(body)["operation_id"]
+            self.assertEqual(self.server.response_for("/api/health")[0], 200)
+            state = json.loads(self.server.write_response_for("/api/router/status", {
+                "admin_password": "another-password"})[2])["result"]
+            self.assertTrue(state["changing"])
+            self.assertIsNone(state["enabled"])
+            release.set()
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                status, _, body = self.server.write_response_for("/api/router/operation", {
+                    "admin_password": "private-password", "operation_id": operation})
+                if status != 202:
+                    break
+                time.sleep(0.005)
+            self.assertEqual(status, 200)
+            self.assertFalse(json.loads(body)["result"]["enabled"])
+            self.server.write_response_for("/api/router/operation", {
+                "admin_password": "private-password", "operation_id": operation})
+            history = self.repository.list_recent_actions()
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]["action"], "/api/router/wifi")
+            self.assertNotIn("private-password", str(history) + body.decode())
+        finally:
+            release.set()
+
     def setUp(self) -> None:
         self.repository = ConfigRepository(":memory:")
         self.repository.save_profile(

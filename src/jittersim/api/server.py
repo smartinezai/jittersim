@@ -68,6 +68,7 @@ from jittersim.networking.router import (
     safe_router_wifi_message,
 )
 from jittersim.networking.wifi_security import SECURITY_MODES
+from jittersim.api.router_operations import RouterOperations
 
 LOGGER = logging.getLogger(__name__)
 MAX_JSON_BODY_BYTES = 64 * 1024
@@ -110,6 +111,8 @@ WRITE_PATHS = frozenset(
         "/api/router/preview-ap",
         "/api/router/wifi",
         "/api/router/check",
+        "/api/router/status",
+        "/api/router/operation",
         "/api/connected-devices/apply-profile",
         "/api/connected-device-labels",
         "/api/connected-device-labels/delete",
@@ -147,8 +150,8 @@ DASHBOARD_HTML = """<!doctype html>
     .dashboard-locked .credential-dock > :not(#open-admin-credentials) { display: none; }
     body {
       margin: 0 auto;
-      max-width: 72rem;
-      padding: 1.5rem 1rem 4rem;
+      max-width: 86rem;
+      padding: 1.5rem 13rem 4rem 1.25rem;
       background: radial-gradient(circle at top right, #15345a 0, #0b1220 34rem);
       line-height: 1.5;
     }
@@ -231,23 +234,28 @@ DASHBOARD_HTML = """<!doctype html>
     button {
       margin-top: 1rem;
       padding: 0.62rem 0.9rem;
-      border: 1px solid #46627f;
-      border-radius: 0.55rem;
-      background: #1a2d46;
-      color: #edf5ff;
+      border: 1px solid #31465d;
+      border-radius: 0.5rem;
+      background: #192b40;
+      color: #e4edf7;
       font: inherit;
-      font-weight: 700;
+      font-size: 0.88rem;
+      font-weight: 550;
       cursor: pointer;
-      transition: transform 120ms ease, filter 120ms ease, opacity 120ms ease;
+      transition: background 160ms ease, border-color 160ms ease, opacity 160ms ease;
     }
-    button:hover:not(:disabled) { filter: brightness(1.18); transform: translateY(-1px); }
+    button:hover:not(:disabled) { background: #233b55; border-color: #557391; }
+    button:active:not(:disabled) { background: #132238; }
     button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible, .help-icon:focus-visible {
       outline: 2px solid #70b7ff;
       outline-offset: 2px;
     }
-    button:disabled { cursor: wait; opacity: 0.55; }
-    button.primary { border-color: #4c9fe8; background: #2479bd; }
-    button.danger { border-color: #a9565d; background: #642b38; }
+    button:disabled { cursor: not-allowed; opacity: 0.55; }
+    button[aria-busy="true"] { cursor: progress; }
+    button.primary { border-color: #397bb0; background: #246699; color: #f6fbff; }
+    button.primary:hover:not(:disabled) { background: #2c77ad; }
+    button.danger { border-color: #75404b; background: #482b35; color: #ffcad0; }
+    button.danger:hover:not(:disabled) { background: #60333f; border-color: #a35a67; }
     .action-message {
       grid-column: 1 / -1;
       min-height: 1.5rem;
@@ -291,7 +299,6 @@ DASHBOARD_HTML = """<!doctype html>
       animation: toast-spin 0.8s linear infinite;
     }
     .toast button { margin: 0; padding: 0.25rem 0.45rem; }
-    button:active:not(:disabled) { transform: translateY(1px) scale(0.98); }
     button[aria-busy="true"] { position: relative; }
     button[aria-busy="true"]::after {
       display: inline-block;
@@ -394,8 +401,8 @@ DASHBOARD_HTML = """<!doctype html>
     .uplink-value { padding: 0.75rem; border: 1px solid #2b435f; border-radius: 0.6rem; background: #0d1b2d; }
     .uplink-value strong { display: block; color: #edf5ff; font-size: 0.95rem; overflow-wrap: anywhere; }
     .uplink-value span { display: block; margin-bottom: 0.2rem; color: #91a8c1; font-size: 0.76rem; }
-    .button-link { display: inline-block; margin-top: 1rem; padding: 0.62rem 0.9rem; border: 1px solid #46627f; border-radius: 0.55rem; background: #1a2d46; color: #edf5ff; font-weight: 700; text-decoration: none; }
-    .button-link:hover { filter: brightness(1.18); }
+    .button-link { display: inline-block; margin-top: 1rem; padding: 0.62rem 0.9rem; border: 1px solid #31465d; border-radius: 0.5rem; background: #192b40; color: #e4edf7; font-size: 0.88rem; font-weight: 550; text-decoration: none; }
+    .button-link:hover { background: #233b55; border-color: #557391; }
     .router-controls { display: grid; gap: 0.75rem; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #2b435f; }
     .router-controls .action-buttons { flex-wrap: wrap; }
     .router-controls .action-buttons button { margin-top: 0; }
@@ -532,15 +539,37 @@ DASHBOARD_HTML = """<!doctype html>
     }
     .credential-dock {
       position: fixed; right: 1rem; top: 50%; transform: translateY(-50%);
-      z-index: 30; display: grid; gap: 0.6rem; width: 9.5rem;
+      z-index: 30; display: grid; gap: 0.5rem; width: 10.75rem;
+      max-height: calc(100dvh - 2rem); overflow-y: auto;
+      padding: 0.65rem; background: #101e30; border: 1px solid #293e55;
+      border-radius: 0.9rem; box-shadow: 0 1rem 2.5rem rgba(0, 0, 0, 0.28);
     }
-    .credential-dock button { margin: 0; min-height: 3.5rem; text-align: left; }
+    .credential-dock button { margin: 0; min-height: 3rem; text-align: left; }
     .credential-dock span { display: block; }
-    .credential-dock #reset-wifi-name { grid-column: 1 / -1; }
-    .credential-dock #wifi-reset-status { grid-column: 1 / -1; margin: 0; max-height: 5rem; overflow-y: auto; }
-    .credential-state { margin-top: 0.15rem; color: #c7d7eb; font-size: 0.78rem; font-weight: 400; }
+    .credential-dock #wifi-reset-status { margin: 0 0.25rem; font-size: 0.7rem; }
+    .credential-state { margin-top: 0.15rem; color: #b6c8db; font-size: 0.75rem; font-weight: 400; }
     .credential-state.accepted { color: #8de2bc; }
-    .credential-dock .panic-button { min-height: 3rem; text-align: center; font-weight: 700; }
+    .credential-dock .panic-button { min-height: 3rem; font-weight: 550; }
+    .router-wifi-control {
+      display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
+      padding: 0.7rem 0.3rem; border-block: 1px solid #293e55;
+    }
+    .router-wifi-label { font-size: 0.85rem; font-weight: 550; }
+    .router-wifi-status { margin: 0.2rem 0 0; font-size: 0.7rem; color: #b6c8db; }
+    .credential-dock .router-wifi-toggle {
+      display: grid; place-items: center; flex: 0 0 2.8rem; min-height: 2.75rem;
+      padding: 0; border: 0; background: transparent; border-radius: 0.5rem;
+    }
+    .credential-dock .router-wifi-toggle:hover:not(:disabled) { background: #233b55; }
+    .switch-track {
+      width: 2.5rem; height: 1.4rem; padding: 0.18rem; border-radius: 1rem;
+      background: #40546b; transition: background 160ms ease;
+    }
+    .switch-thumb { width: 1.04rem; height: 1.04rem; border-radius: 50%; background: #f4f8fc; transition: transform 160ms ease; }
+    .router-wifi-toggle[aria-checked="true"] .switch-track { background: #2e926e; }
+    .router-wifi-toggle[aria-checked="true"] .switch-thumb { transform: translateX(1.1rem); }
+    .router-wifi-toggle[data-unknown="true"] .switch-track { background: #26394e; }
+    .router-wifi-toggle[aria-busy="true"]::after { display: none; }
     .credentials-panel {
       position: fixed; z-index: 110; right: 1rem;
       top: calc(var(--credential-viewport-top, 0px) + 1rem);
@@ -565,20 +594,21 @@ DASHBOARD_HTML = """<!doctype html>
     .remember-choice { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.65rem; }
     .remember-choice input { width: auto; margin: 0; padding: 0; }
     .remember-note:empty { display: none; }
-    @media (max-width: 1500px) {
-      body { padding-bottom: calc(19rem + env(safe-area-inset-bottom, 0px)); }
-      html { scroll-padding-bottom: 19rem; }
+    @media (max-width: 850px) {
+      body { padding: 1rem 1rem calc(10rem + env(safe-area-inset-bottom, 0px)); }
+      html { scroll-padding-bottom: 10rem; }
       .credential-dock {
-        top: auto; bottom: calc(var(--credential-viewport-bottom, 0px) + 0.75rem + env(safe-area-inset-bottom, 0px));
+        top: auto; bottom: calc(var(--credential-viewport-bottom, 0px) + 0.5rem + env(safe-area-inset-bottom, 0px));
         left: 50%; right: auto; transform: translateX(-50%);
-        grid-template-columns: repeat(2, minmax(0, 1fr)); width: min(25rem, calc(100vw - 2rem));
-        padding: 0.5rem; border-radius: 0.75rem; background: #0b1727;
+        grid-template-columns: repeat(4, minmax(0, 1fr)); width: min(34rem, calc(100vw - 1rem));
+        padding: 0.5rem; gap: 0.35rem; max-height: min(12rem, 45dvh);
       }
-      .credential-dock .panic-button {
-        grid-column: 1 / -1; min-height: 2.75rem; padding-block: 0.5rem;
-        display: flex; align-items: baseline; justify-content: center; gap: 0.6rem;
-      }
-      .credential-dock .panic-button span { display: inline; margin-top: 0; }
+      .credential-dock > button { min-height: 2.9rem; padding: 0.4rem; font-size: 0.72rem; }
+      .credential-dock > button .credential-state { font-size: 0.64rem; }
+      .credential-dock #wifi-reset-status { display: none; }
+      .router-wifi-control { grid-column: 1 / -1; grid-row: 2; border-bottom: 0; padding: 0.15rem 0.4rem 0; }
+      .router-wifi-control > div { display: flex; align-items: baseline; gap: 0.65rem; }
+      .router-wifi-status { margin: 0; }
     }
     .token-check-status { min-height: 1.25rem; margin: 0.65rem 0 0; color: #91a8c1; }
     .token-check-status.success { color: #8de2bc; }
@@ -646,6 +676,15 @@ DASHBOARD_HTML = """<!doctype html>
     <button id="open-router-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
       <span>Router password</span><span id="router-credential-state" class="credential-state">Not entered</span>
     </button>
+    <div class="router-wifi-control">
+      <div><span id="router-wifi-label" class="router-wifi-label">Router Wi-Fi</span>
+        <p id="router-wifi-status" class="router-wifi-status" role="status" aria-live="polite">Enter router password</p>
+      </div>
+      <button id="router-wifi-toggle" class="router-wifi-toggle" type="button" role="switch"
+        aria-checked="false" aria-labelledby="router-wifi-label" aria-describedby="router-wifi-status" data-unknown="true" disabled>
+        <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+      </button>
+    </div>
     <button id="panic-button" class="danger panic-button" type="button"
       title="Remove all traffic shaping now. Choose Apply current configuration to resume.">
       <span>Panic</span><span id="panic-state" class="credential-state">Turn all profiles off</span>
@@ -828,8 +867,6 @@ DASHBOARD_HTML = """<!doctype html>
       <button id="open-router-credentials-inline" type="button" aria-controls="credentials-panel" aria-expanded="false">Enter router password</button>
       <div class="action-buttons">
         <button id="sync-router-ap" class="primary" type="button">Copy router Wi-Fi to Pi</button>
-        <button id="disable-router-wifi" class="danger" type="button">Turn off router Wi-Fi</button>
-        <button id="enable-router-wifi" type="button">Turn on router Wi-Fi</button>
       </div>
       <p id="router-action-message" class="policy-note" role="status" aria-live="polite">Keep the Pi connected to the router by Ethernet before changing the router Wi-Fi.</p>
     </div>
@@ -1764,6 +1801,14 @@ DASHBOARD_HTML = """<!doctype html>
     let routerPasswordRejected = false;
     let routerPasswordChecking = false;
     let routerActionPending = false;
+    let routerWifiEnabled = null;
+    let routerWifiCheckedAt = null;
+    let routerWifiPolling = false;
+    let routerWifiTimer = null;
+    let routerWifiRemoteBusy = false;
+    let routerWifiRemoteChanging = false;
+    let routerWifiError = "";
+    let routerWifiMinimumCheck = 0;
     let credentialOpener = null;
     const REMEMBER_MS = 24 * 60 * 60 * 1000;
     const REMEMBERED = {
@@ -1794,6 +1839,8 @@ DASHBOARD_HTML = """<!doctype html>
         element("router-admin-password").value ? "Entered" : "Not entered";
       router.className = "credential-state" + (routerPasswordVerified ? " accepted" : "");
       syncRememberedCredentials();
+      renderRouterWifi();
+      scheduleRouterWifiPoll();
     }
 
     function openCredentials(kind, opener) {
@@ -1859,6 +1906,10 @@ DASHBOARD_HTML = """<!doctype html>
     });
     element("router-admin-password").addEventListener("input", () => {
       routerPasswordRevision += 1;
+      routerWifiEnabled = null;
+      routerWifiCheckedAt = null;
+      routerWifiError = "";
+      routerWifiMinimumCheck = 0;
       routerPasswordVerified = false;
       routerPasswordRejected = false;
       updateCredentialStatus();
@@ -4647,6 +4698,97 @@ DASHBOARD_HTML = """<!doctype html>
       }
     });
 
+    function renderRouterWifi() {
+      const button = element("router-wifi-toggle");
+      const status = element("router-wifi-status");
+      const password = element("router-admin-password").value;
+      const fresh = routerWifiCheckedAt && Date.now() / 1000 - routerWifiCheckedAt < 45;
+      const known = typeof routerWifiEnabled === "boolean" && fresh && adminTokenVerified && !routerPasswordRejected;
+      const busy = routerActionPending || routerPasswordChecking || routerWifiRemoteBusy || routerWifiPolling;
+      element("sync-router-ap").disabled = busy;
+      element("check-router-password").disabled = busy;
+      button.disabled = !helperConfigured || !known || busy;
+      button.setAttribute("aria-checked", String(known && routerWifiEnabled));
+      button.setAttribute("data-unknown", String(!known));
+      button.setAttribute("aria-busy", String(busy));
+      status.textContent = !adminTokenVerified ? "Check admin token" : !helperConfigured ? "Needs Pi helper" :
+        !password ? "Enter router password" : routerPasswordRejected ? "Password rejected" :
+        routerActionPending || routerWifiRemoteChanging ? "Changing…" : busy ? "Checking…" :
+        known ? (routerWifiEnabled ? "On" : "Off") + " · " + new Date(routerWifiCheckedAt * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"}) : routerWifiError ? "Status unavailable" : "Checking…";
+      status.title = routerWifiError || (known ? "Last checked " + new Date(routerWifiCheckedAt * 1000).toLocaleTimeString() : status.textContent);
+    }
+
+    function scheduleRouterWifiPoll(delay = 0) {
+      if (typeof window.setTimeout !== "function") return;
+      if (routerWifiTimer !== null) window.clearTimeout(routerWifiTimer);
+      routerWifiTimer = null;
+      if (document.hidden || !adminTokenVerified || !helperConfigured || routerPasswordRejected ||
+          !element("router-admin-password").value || routerActionPending || routerPasswordChecking || routerWifiPolling) return;
+      routerWifiTimer = window.setTimeout(pollRouterWifi, delay);
+    }
+
+    async function pollRouterWifi() {
+      routerWifiTimer = null;
+      if (document.hidden || !adminTokenVerified || routerPasswordRejected || routerActionPending || routerPasswordChecking || routerWifiPolling) return;
+      const password = element("router-admin-password").value;
+      if (!password || !helperConfigured) return;
+      const passwordRevision = routerPasswordRevision;
+      const tokenRevision = adminTokenRevision;
+      routerWifiPolling = true;
+      renderRouterWifi();
+      let delay = 15000;
+      try {
+        const response = await request("/api/router/status", "POST", {admin_password: password});
+        if (passwordRevision !== routerPasswordRevision || tokenRevision !== adminTokenRevision) return;
+        const result = response.result;
+        routerWifiRemoteBusy = result.busy === true;
+        routerWifiRemoteChanging = result.changing === true;
+        routerWifiEnabled = typeof result.enabled === "boolean" && result.checked_at >= routerWifiMinimumCheck ? result.enabled : null;
+        routerWifiCheckedAt = result.checked_at;
+        routerWifiError = result.error || "";
+        delay = Math.min(60000, Math.max(1000, (result.retry_after || 15) * 1000));
+        if (routerWifiEnabled !== null) {
+          routerPasswordVerified = true;
+          routerPasswordRejected = false;
+        } else if (/^Router login failed/.test(routerWifiError)) {
+          routerPasswordVerified = false;
+          routerPasswordRejected = true;
+        }
+      } catch (error) {
+        if (passwordRevision !== routerPasswordRevision || tokenRevision !== adminTokenRevision) return;
+        routerWifiEnabled = null;
+        routerWifiError = error.message;
+        routerWifiRemoteBusy = false;
+        routerWifiRemoteChanging = false;
+        delay = 30000;
+      } finally {
+        routerWifiPolling = false;
+        renderRouterWifi();
+        scheduleRouterWifiPoll(delay);
+      }
+    }
+
+    async function routerRequest(path, body) {
+      const passwordRevision = routerPasswordRevision;
+      const tokenRevision = adminTokenRevision;
+      let response = await request(path, "POST", {...body, background: true});
+      const deadline = Date.now() + 210000;
+      while (response.pending) {
+        if (Date.now() >= deadline) throw new Error("Router result timed out. Check the current state before another change.");
+        await new Promise(resolve => window.setTimeout(resolve, 1000));
+        if (passwordRevision !== routerPasswordRevision || tokenRevision !== adminTokenRevision) {
+          throw new Error("Credentials changed. Check router state before another change.");
+        }
+        response = await request("/api/router/operation", "POST", {
+          admin_password: body.admin_password, operation_id: response.operation_id
+        });
+      }
+      if (passwordRevision !== routerPasswordRevision || tokenRevision !== adminTokenRevision) {
+        throw new Error("Credentials changed. Check router state before another change.");
+      }
+      return response;
+    }
+
     async function routerAction(path, body, message, button) {
       if (routerActionPending || routerPasswordChecking) return;
       if (!requireAdminToken(button)) return;
@@ -4662,7 +4804,8 @@ DASHBOARD_HTML = """<!doctype html>
       }
       if (routerPasswordBlocked(button)) return;
       routerActionPending = true;
-      ["sync-router-ap", "disable-router-wifi", "enable-router-wifi"].forEach((id) => { element(id).disabled = true; });
+      if (path === "/api/router/wifi") routerWifiMinimumCheck = Date.now() / 1000;
+      ["sync-router-ap", "router-wifi-toggle"].forEach((id) => { element(id).disabled = true; });
       setButtonBusy(button, true);
       updateCredentialStatus();
       status.textContent = message;
@@ -4670,7 +4813,7 @@ DASHBOARD_HTML = """<!doctype html>
       showMessage(message, "working");
       try {
         if (path === "/api/router/sync-ap") {
-          const previewResponse = await request("/api/router/preview-ap", "POST", { admin_password: password });
+          const previewResponse = await routerRequest("/api/router/preview-ap", { admin_password: password });
           const preview = previewResponse.result;
           if (passwordRevision !== routerPasswordRevision) throw new Error("Router password changed. Check Wi-Fi security again.");
           status.textContent = "Router Wi-Fi uses " + preview.security + " on " + preview.band + ".";
@@ -4682,8 +4825,13 @@ DASHBOARD_HTML = """<!doctype html>
           }
           body = { ...body, expected_fingerprint: preview.fingerprint, confirm_legacy: preview.legacy };
         }
-        const response = await request(path, "POST", { admin_password: password, ...body });
+        const response = await routerRequest(path, { admin_password: password, ...body });
         const result = response.result || response;
+        if (typeof result.enabled === "boolean") {
+          routerWifiEnabled = result.enabled;
+          routerWifiCheckedAt = Date.now() / 1000;
+          routerWifiError = "";
+        }
         status.textContent = result.ssid
           ? "Copied " + result.ssid + " using " + result.security + ". Join with the router's Wi-Fi password."
           : (result.enabled ? "Router Wi-Fi is on." : "Router Wi-Fi is off.");
@@ -4694,6 +4842,7 @@ DASHBOARD_HTML = """<!doctype html>
           routerPasswordRejected = false;
         }
       } catch (error) {
+        if (path === "/api/router/wifi") { routerWifiEnabled = null; routerWifiError = error.message; }
         status.textContent = error.message;
         element("credential-router-status").textContent = status.textContent;
         showMessage(error.message, "error");
@@ -4703,7 +4852,7 @@ DASHBOARD_HTML = """<!doctype html>
         }
       } finally {
         routerActionPending = false;
-        ["sync-router-ap", "disable-router-wifi", "enable-router-wifi"].forEach((id) => { element(id).disabled = false; });
+        ["sync-router-ap", "router-wifi-toggle"].forEach((id) => { element(id).disabled = false; });
         setButtonBusy(button, false);
         updateCredentialStatus();
       }
@@ -4736,7 +4885,7 @@ DASHBOARD_HTML = """<!doctype html>
         return;
       }
       if (routerPasswordBlocked(button)) return;
-      const routerButtons = ["sync-router-ap", "disable-router-wifi", "enable-router-wifi"];
+      const routerButtons = ["sync-router-ap", "router-wifi-toggle"];
       routerPasswordChecking = true;
       routerPasswordVerified = false;
       routerPasswordRejected = false;
@@ -4747,7 +4896,7 @@ DASHBOARD_HTML = """<!doctype html>
       status.textContent = "Signing in to the router...";
       showMessage("Checking the router password...", "working");
       try {
-        await request("/api/router/check", "POST", { admin_password: password });
+        await routerRequest("/api/router/check", { admin_password: password });
         if (passwordRevision !== routerPasswordRevision) return;
         routerPasswordVerified = true;
         status.textContent = "Router password accepted. Nothing on the router was changed.";
@@ -4772,18 +4921,16 @@ DASHBOARD_HTML = """<!doctype html>
       routerAction("/api/router/sync-ap", {}, "Checking the router Wi-Fi security...", event.currentTarget);
     });
 
-    element("disable-router-wifi").addEventListener("click", (event) => {
-      if (!window.confirm("Turn off router Wi-Fi, including guest Wi-Fi? Keep the Pi connected by Ethernet.")) return;
-      routerAction(
-        "/api/router/wifi",
-        { enabled: false, confirm_disable: true },
-        "Turning off router Wi-Fi...",
-        event.currentTarget
-      );
+    element("router-wifi-toggle").addEventListener("click", (event) => {
+      if (typeof routerWifiEnabled !== "boolean" || event.currentTarget.disabled) return;
+      const enabled = !routerWifiEnabled;
+      if (!enabled && !window.confirm("Turn off router Wi-Fi, including guest Wi-Fi? Keep the Pi connected by Ethernet.")) return;
+      routerAction("/api/router/wifi", {enabled, confirm_disable: !enabled},
+        enabled ? "Turning on router Wi-Fi..." : "Turning off router Wi-Fi...", event.currentTarget);
     });
-
-    element("enable-router-wifi").addEventListener("click", (event) => {
-      routerAction("/api/router/wifi", { enabled: true }, "Turning on router Wi-Fi...", event.currentTarget);
+    document.addEventListener("visibilitychange", () => {
+      renderRouterWifi();
+      scheduleRouterWifiPoll();
     });
 
     element("random-website-device").addEventListener("change", loadRandomWebsiteAnalytics);
@@ -5122,6 +5269,9 @@ class ControlServer(HTTPServer):
         self.admin_token = admin_token
         self.helper_client = helper_client
         self.scheduler = scheduler
+        self.router_operations = RouterOperations(
+            self._router_response_for, str(admin_token) + "\0" + str(getattr(helper_client, "socket_path", "local")),
+        )
         self.secure_transport = tls_context is not None
         self._tls_context = tls_context
         super().__init__(server_address, ControlRequestHandler)
@@ -6134,6 +6284,83 @@ class ControlServer(HTTPServer):
                 )
             return HTTPStatus.OK, "application/json", _json_bytes({"result": result})
 
+        if path.startswith("/api/router/"):
+            return self._handle_router_request(path, payload)
+
+        if path == "/api/connected-devices/apply-profile":
+            return self._apply_profile_to_connected_device(payload)
+
+        if path == "/api/observations/scan":
+            return self._scan_dns_observations()
+
+        if path == "/api/observations/add-to-profile":
+            return self._add_observation_to_profile(payload)
+
+        if path == "/api/observations/add-global-block":
+            return self._add_observation_to_global_block(payload)
+
+        if path == "/api/apply":
+            return self._apply_configuration()
+
+        if path == "/api/reset":
+            return self._reset_network()
+
+        return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
+
+    def server_close(self) -> None:
+        self.router_operations.close()
+        super().server_close()
+
+    def _record_router_outcome(self) -> None:
+        outcome = self.router_operations.completed_action()
+        if outcome:
+            self.repository.record_action(action=outcome[0], status_code=outcome[1])
+
+    def _handle_router_request(self, path, payload):
+        self._record_router_outcome()
+        password = payload.get("admin_password")
+        if not isinstance(password, str) or not password or len(password) > 1024:
+            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                {"error": "router admin password is required"})
+        if self.helper_client is None:
+            return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                {"error": "network helper is not configured"})
+        if path == "/api/router/operation":
+            identifier = payload.get("operation_id")
+            if not isinstance(identifier, str) or len(identifier) > 64:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes({"error": "invalid router operation"})
+            status, data = self.router_operations.result(identifier, password)
+            return status, "application/json", _json_bytes(data)
+        if path == "/api/router/status":
+            data = self.router_operations.status(password)
+            return HTTPStatus.OK, "application/json", _json_bytes({"result": data})
+        if path == "/api/router/wifi":
+            if type(payload.get("enabled")) is not bool:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes({"error": "router Wi-Fi state is invalid"})
+            if not payload["enabled"] and payload.get("confirm_disable") is not True:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "turning off router Wi-Fi requires confirmation"})
+        if payload.get("background") is True:
+            fields = {key: payload[key] for key in (
+                "admin_password", "enabled", "confirm_disable", "expected_fingerprint", "confirm_legacy") if key in payload}
+            status, data = self.router_operations.start(path, fields)
+            return status, "application/json", _json_bytes(data)
+        return self._router_response_for(path, payload)
+
+    def _router_response_for(self, path, payload):
+        if path == "/api/router/status":
+            try:
+                reader = getattr(self.helper_client, "read_router_wifi_status", None)
+                if not callable(reader):
+                    raise HelperClientError("The networking helper is out of date. Restart the JitterSim services or reinstall the release.")
+                result = reader(admin_password=payload["admin_password"])
+                if type(result.get("enabled")) is not bool:
+                    raise HelperClientError("Could not check the router password. Try again in a moment.")
+                result = {"enabled": result["enabled"]}
+            except HelperClientError as error:
+                return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
+                    {"error": safe_router_check_message(str(error))})
+            return HTTPStatus.OK, "application/json", _json_bytes({"result": result})
         if path in ("/api/router/sync-ap", "/api/router/preview-ap"):
             if self.helper_client is None:
                 return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
@@ -6216,29 +6443,15 @@ class ControlServer(HTTPServer):
                     admin_password=admin_password,
                     enabled=enabled,
                 )
+                if result.get("enabled") is not enabled:
+                    raise HelperClientError(
+                        "The router may have changed Wi-Fi, but JitterSim could not confirm both radios. "
+                        "Check the router over Ethernet before retrying.")
             except HelperClientError as error:
                 message = safe_router_wifi_message(str(error))
                 LOGGER.warning("router Wi-Fi change failed: %s", message)
                 return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes({"error": message})
             return HTTPStatus.OK, "application/json", _json_bytes({"result": result})
-
-        if path == "/api/connected-devices/apply-profile":
-            return self._apply_profile_to_connected_device(payload)
-
-        if path == "/api/observations/scan":
-            return self._scan_dns_observations()
-
-        if path == "/api/observations/add-to-profile":
-            return self._add_observation_to_profile(payload)
-
-        if path == "/api/observations/add-global-block":
-            return self._add_observation_to_global_block(payload)
-
-        if path == "/api/apply":
-            return self._apply_configuration()
-
-        if path == "/api/reset":
-            return self._reset_network()
 
         return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
 
@@ -6901,8 +7114,8 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
 
         origin = self.headers.get("Origin")
         host = self.headers.get("Host", "")
-        if path in ("/api/access-point/reset-name", "/api/router/sync-ap", "/api/router/preview-ap",
-                    "/api/dashboard-access/register-self", "/api/dashboard-access/remove") and (
+        if (path.startswith("/api/router/") or path in ("/api/access-point/reset-name",
+                    "/api/dashboard-access/register-self", "/api/dashboard-access/remove")) and (
             self.headers.get("Sec-Fetch-Site") == "cross-site"
             or (origin is not None and origin not in ("http://" + host, "https://" + host))
         ):
@@ -6936,7 +7149,8 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             content_type = "application/json"
             body = _json_bytes({"error": "configuration could not be saved"})
         try:
-            self.server.repository.record_action(action=path, status_code=int(status))
+            if path not in ("/api/router/status", "/api/router/operation") and status != HTTPStatus.ACCEPTED:
+                self.server.repository.record_action(action=path, status_code=int(status))
         except StorageError:
             LOGGER.exception("could not record action history for %s", path)
         self._send_response(status=status, content_type=content_type, body=body)

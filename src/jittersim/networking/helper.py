@@ -38,6 +38,7 @@ LOGGER = logging.getLogger(__name__)
 MAX_MESSAGE_BYTES = 256 * 1024
 MAX_HELPER_CONNECTIONS = 8
 WIFI_ACTIONS = ("configure-ap", "router-sync-ap", "router-preview-ap", "wifi-reset")
+ROUTER_ACTIONS = ("router-sync-ap", "router-preview-ap", "router-wifi", "router-check", "router-status")
 MAX_LOG_DETAIL_CHARS = 512
 MAX_CONNECTED_CLIENTS = 256
 _MAC_ADDRESS_PATTERN = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
@@ -95,6 +96,7 @@ class HelperService:
         self._active_plan_path = active_plan_path
         self._network_lock = threading.Lock()
         self._wifi_lock = threading.Lock()
+        self._router_lock = threading.Lock()
         self._access_store = access_store
         self._access_lock = threading.Lock()
         self._peer_cache: Dict[str, Any] = {}
@@ -104,6 +106,18 @@ class HelperService:
 
     def handle_payload(self, payload: Any) -> Dict[str, Any]:
         """Handle one decoded request without exposing command execution details."""
+
+        if isinstance(payload, dict) and payload.get("action") in ROUTER_ACTIONS:
+            if not self._router_lock.acquire(blocking=False):
+                return {"ok": False, "error": "Another router operation is running. Try again shortly.",
+                        "reason": "helper-busy"}
+            try:
+                return self._handle_payload(payload)
+            finally:
+                self._router_lock.release()
+        return self._handle_payload(payload)
+
+    def _handle_payload(self, payload: Any) -> Dict[str, Any]:
 
         if not isinstance(payload, dict):
             return {"ok": False, "error": "request must be an object"}
@@ -157,6 +171,8 @@ class HelperService:
             return self._handle_router_wifi(payload)
         if action == "router-check":
             return self._handle_router_check(payload)
+        if action == "router-status":
+            return self._handle_router_status(payload)
         return {"ok": False, "error": "unknown action"}
 
     def _handle_dashboard_access(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -461,6 +477,36 @@ class HelperService:
             "enabled": settings.enabled,
         }
 
+    def _handle_router_status(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        router = None
+        deadline = time.monotonic() + 35.0
+        try:
+            password = payload["admin_password"]
+            if not isinstance(password, str) or not password:
+                raise ValueError("invalid router password")
+            gateway = self._applier.uplink_info().get("gateway")
+            if not gateway:
+                raise RouterError("router gateway is unavailable", reason="unreachable")
+            router = self._router_factory(gateway, password)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RouterError("router status deadline expired", reason="unreachable")
+            router.limit_operation(min(15.0, remaining))
+            router.login(preserve_deadline=True)
+            enabled = router.read_wifi_enabled()
+            if type(enabled) is not bool:
+                raise RouterError("router state is unknown", reason="unsupported")
+            return {"ok": True, "action": "router-status", "enabled": enabled}
+        except (KeyError, TypeError, ValueError):
+            return {"ok": False, "error": "invalid router status request"}
+        except RouterError as error:
+            return {"ok": False, "error": error.check_message, "reason": error.reason}
+        except CommandExecutionError:
+            return {"ok": False, "error": ROUTER_CHECK_MESSAGES["unreachable"]}
+        finally:
+            if router is not None:
+                router.close()
+
     def _handle_router_check(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         router = None
         try:
@@ -521,7 +567,7 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
             self._send_response({"ok": False, "error": "request must be valid JSON"})
             return
         action = payload.get("action") if isinstance(payload, dict) else None
-        if action in ("ping", "dashboard-access") or action in WIFI_ACTIONS:
+        if action in ("ping", "dashboard-access") or action in WIFI_ACTIONS or action in ROUTER_ACTIONS:
             self._send_response(self.server.service.handle_payload(payload))
             return
         if not self.server.operation_lock.acquire(blocking=False):
@@ -699,6 +745,11 @@ class HelperClient:
             {"action": "router-check", "admin_password": admin_password},
             timeout_seconds=90.0,
         )
+
+    def read_router_wifi_status(self, *, admin_password: str) -> Dict[str, Any]:
+        """Read current Wi-Fi activity without changing router settings."""
+        return self._request({"action": "router-status", "admin_password": admin_password},
+                             timeout_seconds=45.0)
 
     def connected_device_snapshot(self) -> Dict[str, Any]:
         """Return current client details and whether association status is known."""

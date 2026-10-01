@@ -235,6 +235,32 @@ class FirmwareHandler(BaseHTTPRequestHandler):
 
 
 class RouterProtocolTests(unittest.TestCase):
+    def test_status_reads_all_bands_off_without_wifi_credentials(self):
+        self.firmware.settings.update(Enable=False, Enable5G=False, EnableWiFiFunction=False,
+                                      SSID="", SSID5G="", Passphrase="", Passphrase5G="",
+                                      ModeEnabled="None", ModeEnabled5G="None")
+        self.firmware.omit_wifi_master = True
+        self.router.limit_operation(5)
+        self.router.login(preserve_deadline=True)
+        self.assertIs(self.router.read_wifi_enabled(), False)
+        self.assertEqual(self.firmware.writes, [])
+
+    def test_status_rejects_unknown_band_activity(self):
+        self.firmware.settings["Enable5G"] = "unknown"
+        self.router.login()
+        with self.assertRaises(RouterError):
+            self.router.read_wifi_enabled()
+        self.assertEqual(self.firmware.writes, [])
+
+    def test_status_reads_effective_master_and_single_active_band(self):
+        self.firmware.omit_wifi_master = True
+        self.firmware.settings["Enable"] = False
+        self.router.login()
+        self.assertIs(self.router.read_wifi_enabled(), True)
+        self.firmware.settings["EnableWiFiFunction"] = False
+        self.assertIs(self.router.read_wifi_enabled(), False)
+        self.assertEqual(self.firmware.writes, [])
+
     def setUp(self):
         self.firmware = FirmwareServer()
         self.thread = threading.Thread(

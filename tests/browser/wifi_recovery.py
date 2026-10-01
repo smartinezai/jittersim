@@ -58,6 +58,7 @@ def check_router_copy(page):
     page.locator("#router-admin-password").fill("browser-router-password")
     page.locator("#check-router-password").click()
     expect(page.locator("#router-credential-state")).to_contain_text("Accepted")
+    page.locator("#remember-router-password").check()
     page.locator("#close-credentials").click()
     button = page.locator("#sync-router-ap")
     copies = []
@@ -78,6 +79,39 @@ def check_router_copy(page):
     expect(page.locator("#router-action-message")).to_contain_text("Copied Browser home using WPA2")
     assert len(copies) == 1
     assert len(copies[0].post_data_json["expected_fingerprint"]) == 64
+
+
+def check_router_switch(page):
+    button = page.locator("#router-wifi-toggle")
+    state = page.locator("#router-wifi-status")
+    expect(button).to_be_enabled(timeout=10000)
+    expect(button).to_have_attribute("aria-checked", "true")
+    expect(button).to_be_in_viewport()
+    writes = []
+    page.on("request", lambda request: writes.append(request)
+            if request.url.endswith("/api/router/wifi") else None)
+    page.once("dialog", lambda dialog: dialog.dismiss())
+    button.click()
+    assert not writes
+    expect(button).to_have_attribute("aria-checked", "true")
+
+    held = []
+    page.route("**/api/router/wifi", lambda route: held.append(route))
+    page.once("dialog", lambda dialog: dialog.accept())
+    button.click()
+    expect(button).to_be_disabled()
+    expect(state).to_contain_text("Changing")
+    assert len(held) == 1 and held[0].request.post_data_json["background"] is True
+    assert page.request.get(page.url + "api/health").status == 200
+    held[0].continue_()
+    expect(button).to_have_attribute("aria-checked", "false", timeout=10000)
+    expect(state).to_contain_text("Off")
+    expect(button).to_be_enabled()
+    page.unroute("**/api/router/wifi")
+    button.click()
+    expect(button).to_have_attribute("aria-checked", "true", timeout=10000)
+    expect(state).to_contain_text("On")
+    assert len(writes) == 2
 
 
 def run():
@@ -107,12 +141,19 @@ def run():
                 page.locator("#remember-admin-token").check()
                 page.locator("#close-credentials").click()
                 check_router_copy(page)
+                check_router_switch(page)
                 check_wifi_recovery(page)
                 expect(page.locator("#reset-wifi-name")).to_be_in_viewport()
-                page.screenshot(path="test-results/wifi-pi-desktop.png")
+                expect(page.locator("#router-wifi-toggle")).to_be_enabled(timeout=10000)
+                page.screenshot(path="test-results/wifi-pi-desktop.png", animations="disabled")
+                page.set_viewport_size({"width": 1280, "height": 800})
+                expect(page.locator("#router-wifi-toggle")).to_be_in_viewport()
+                dock = page.locator(".credential-dock").bounding_box()
+                assert dock["x"] > 1000
+                page.screenshot(path="test-results/wifi-pi-laptop.png", animations="disabled")
                 page.set_viewport_size({"width": 390, "height": 844})
                 expect(page.locator("#reset-wifi-name")).to_be_in_viewport()
-                page.screenshot(path="test-results/wifi-pi-phone.png")
+                page.screenshot(path="test-results/wifi-pi-phone.png", animations="disabled")
                 assert page.evaluate("document.documentElement.scrollWidth") <= 391
                 page.set_viewport_size({"width": 390, "height": 360})
                 page.locator("#open-admin-credentials").click()

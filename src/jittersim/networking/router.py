@@ -357,6 +357,28 @@ class TG3442DERouter:
             return self._settings_from_form(form, html)
         return _settings_from_wifi_data(data)
 
+    def limit_operation(self, seconds: float) -> None:
+        """Bound the entire next read including login and logout."""
+        if not 0 < seconds <= self._OPERATION_TIMEOUT_SECONDS:
+            raise ValueError("invalid router operation limit")
+        self._deadline = time.monotonic() + seconds
+
+    def read_wifi_enabled(self) -> bool:
+        """Read radio activity without requiring importable Wi-Fi credentials."""
+        try:
+            data = self._read_verified_wifi_data()
+        except _EndpointUnavailable:
+            form, _ = self._wifi_form()
+            state = _wifi_enabled(form.controls)
+            if state is None:
+                raise RouterError("router radio state is unknown", reason="unsupported")
+            return state
+        master = _radio_state(data.get("EnableWiFiFunction"))
+        bands = [_radio_state(data.get(name)) for name in ("Enable", "Enable5G")]
+        if master is None or any(state is None for state in bands):
+            raise RouterError("router radio state is unknown", reason="unsupported")
+        return master and any(bands)
+
     def _read_wifi_data(self) -> Dict[str, Any]:
         if self._session_key is None or self._session_iv is None:
             raise RouterError("router login is required", reason="login")

@@ -83,11 +83,17 @@ class FakeRouter:
         self.closed = False
         self.enabled = True
 
-    def login(self) -> None:
+    def limit_operation(self, seconds) -> None:
+        self.limit = seconds
+
+    def login(self, **kwargs) -> None:
         self.logged_in = True
 
     def read_wifi_settings(self) -> RouterWifiSettings:
         return RouterWifiSettings("Vodafone-Test", "router-wifi-password", self.enabled, "WPA2", "2.4 GHz")
+
+    def read_wifi_enabled(self):
+        return self.enabled
 
     def set_wifi_enabled(self, *, enabled: bool) -> RouterWifiSettings:
         self.enabled = enabled
@@ -98,6 +104,30 @@ class FakeRouter:
 
 
 class HelperServiceTests(unittest.TestCase):
+    def test_router_status_reads_without_writing_and_closes_session(self):
+        routers = []
+
+        def factory(address, password):
+            router = FakeRouter(address, password)
+            router.enabled = False
+            routers.append(router)
+            return router
+
+        service = HelperService(NetworkApplier(executor=self.executor,
+                                topology=Topology("eth0", "wlan0")), router_factory=factory)
+        service._applier.uplink_info = lambda: {"gateway": "192.168.0.1"}
+        result = service.handle_payload({"action": "router-status", "admin_password": "fixture"})
+        self.assertEqual(result, {"ok": True, "action": "router-status", "enabled": False})
+        self.assertTrue(routers[0].closed)
+        self.assertLessEqual(routers[0].limit, 15)
+
+    def test_all_router_operations_share_one_session_lock(self):
+        self.service._router_lock.acquire()
+        try:
+            for action in ("router-check", "router-wifi", "router-sync-ap", "router-preview-ap", "router-status"):
+                self.assertEqual(self.service.handle_payload({"action": action})["reason"], "helper-busy")
+        finally:
+            self.service._router_lock.release()
     def setUp(self) -> None:
         self.executor = WifiExecutor()
         self.service = HelperService(

@@ -79,6 +79,13 @@ bytes.
 
 ### Pi and router controls
 
+The floating **Quick actions** panel includes one **Router Wi-Fi** switch.
+It shows the router's confirmed On or Off state and the last check time.
+Enter the router admin password to start automatic checks while the page is
+visible. A change shows **Changing** until the router confirms it. An
+unavailable status disables the switch instead of guessing. Keep the Pi
+connected by Ethernet when changing router Wi-Fi.
+
 **Copy router Wi-Fi to Pi** checks the router's security before copying its
 name and password. The confirmation shows the source band and security type.
 JitterSim copies personal WPA, WPA2, WPA3 and mixed modes when the Pi can

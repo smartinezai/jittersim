@@ -38,8 +38,20 @@ class DashboardWifiExecutor(WifiExecutor):
 
 
 class DashboardRouter:
-    def login(self):
+    enabled = True
+
+    def limit_operation(self, seconds):
         pass
+
+    def login(self, **kwargs):
+        pass
+
+    def read_wifi_enabled(self):
+        return type(self).enabled
+
+    def set_wifi_enabled(self, *, enabled):
+        type(self).enabled = enabled
+        return RouterWifiSettings("", "", enabled)
 
     def read_wifi_settings(self):
         return RouterWifiSettings("Browser home", "browser-wifi-password", True, "WPA2", "2.4 GHz")

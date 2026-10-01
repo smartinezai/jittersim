@@ -1,6 +1,12 @@
 # Raspberry Pi deployment
 
 This directory contains the versioned deployment pieces for the Pi appliance.
+
+Install the helper and dashboard from the same release. The floating Router
+Wi-Fi switch needs the helper's read-only status action. It refreshes while
+the dashboard is visible and uses background operations for slow router
+changes. An older helper shows unavailable status. No router password is
+saved on the Pi by these checks.
 The installer keeps credentials out of the repository and generates them on
 the Pi the first time it runs.
 
