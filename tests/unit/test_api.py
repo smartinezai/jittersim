@@ -1797,6 +1797,63 @@ class ControlServerTests(unittest.TestCase):
         _, _, body = self.server.response_for("/api/data-limits")
         self.assertEqual(json.loads(body)["data_limits"][0]["device_name"], "Unknown device")
 
+    def test_observations_name_a_client_by_its_hostname(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/observations/scan", {})
+
+        _, _, body = self.server.response_for("/api/observations")
+        group = json.loads(body)["devices"][0]
+
+        self.assertEqual(group["ipv4_address"], "192.168.50.178")
+        self.assertEqual(group["display_name"], "MacBook-Pro")
+        self.assertEqual(group["hostname"], "MacBook-Pro")
+
+    def test_observations_prefer_a_saved_label(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/observations/scan", {})
+        self.repository.save_connected_device_label(
+            mac_address="dc:1e:d5:3e:97:4c", display_name="Sam MacBook", device_type="laptop"
+        )
+
+        _, _, body = self.server.response_for("/api/observations")
+
+        self.assertEqual(json.loads(body)["devices"][0]["display_name"], "Sam MacBook")
+
+    def test_observations_work_without_the_helper(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/observations/scan", {})
+        self.server.helper_client = None
+        self.repository.save_device(
+            Device(
+                id="client-dc1ed53e974c",
+                name="Client 192.168.50.178",
+                ipv4_address="192.168.50.178",
+                profile_id="slow",
+                mac_address="dc:1e:d5:3e:97:4c",
+            )
+        )
+
+        status, _, body = self.server.response_for("/api/observations")
+
+        self.assertEqual(status, 200)
+        group = json.loads(body)["devices"][0]
+        self.assertEqual(group["display_name"], "Unknown device")
+        self.assertEqual(group["assigned_device_name"], "Client 192.168.50.178")
+
+    def test_observations_survive_a_failing_station_scan(self) -> None:
+        class BrokenSnapshot(FakeHelper):
+            def connected_device_snapshot(self):
+                raise HelperClientError("simulated failure")
+
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/observations/scan", {})
+        self.server.helper_client = BrokenSnapshot()
+
+        status, _, body = self.server.response_for("/api/observations")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["devices"][0]["display_name"], "Unknown device")
+
 
 if __name__ == "__main__":
     unittest.main()

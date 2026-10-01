@@ -5416,6 +5416,22 @@ def _device_payload(
     }
 
 
+def _observation_display_name(
+    station: Dict[str, Optional[str]],
+    saved: Optional[Device],
+    labels_by_mac: Dict[str, Dict[str, str]],
+) -> str:
+    """Resolve the name shown for one client in Traffic discovery."""
+
+    mac_address = station.get("mac_address") or (saved.mac_address if saved else None)
+    label = labels_by_mac.get(mac_address or "", {}).get("display_name")
+    return resolve_device_name(
+        saved_label=label,
+        saved_name=saved.name if saved else None,
+        hostname=station.get("hostname"),
+    )
+
+
 def _connected_device_payload(
     device: Dict[str, Any],
     *,
@@ -5896,6 +5912,25 @@ class ControlServer(HTTPServer):
             raise HelperClientError("Device verification returned an invalid response.")
         return result
 
+    def _station_identities(self) -> Dict[str, Dict[str, Optional[str]]]:
+        """Map each visible client address to its MAC and announced hostname."""
+
+        if self.helper_client is None:
+            return {}
+        try:
+            snapshot = self.helper_client.connected_device_snapshot()
+            stations = snapshot["devices"]
+        except (HelperClientError, AttributeError, KeyError, TypeError):
+            return {}
+        return {
+            station["ipv4_address"]: {
+                "mac_address": station.get("mac_address"),
+                "hostname": station.get("hostname"),
+            }
+            for station in stations
+            if isinstance(station, dict) and station.get("ipv4_address")
+        }
+
     def response_for(self, path: str, query: str = "") -> Tuple[int, str, bytes]:
         """Build the response body for a supported GET path."""
 
@@ -6170,9 +6205,17 @@ class ControlServer(HTTPServer):
             for observation in observations:
                 address = str(observation.ipv4_address)
                 grouped.setdefault(address, []).append(_domain_observation_payload(observation))
+            stations = self._station_identities()
+            labels_by_mac = self.repository.list_connected_device_labels()
             devices = [
                 {
                     "ipv4_address": address,
+                    "display_name": _observation_display_name(
+                        stations.get(address, {}),
+                        assignments_by_address.get(address),
+                        labels_by_mac,
+                    ),
+                    "hostname": stations.get(address, {}).get("hostname"),
                     "assigned_device_id": (
                         assignments_by_address[address].id
                         if address in assignments_by_address
