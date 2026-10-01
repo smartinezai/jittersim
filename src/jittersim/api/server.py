@@ -6119,6 +6119,15 @@ class ControlServer(HTTPServer):
             if station.get("ipv4_address")
         }
 
+    def _runtime_state_with_running(self, state: Optional[RuntimeState] = None) -> Dict[str, Any]:
+        """Return the runtime state plus whether the scheduler keeps applying changes."""
+
+        payload = _runtime_state_payload(
+            self.repository.get_runtime_state() if state is None else state
+        )
+        payload["running"] = self.scheduler is not None and self.scheduler.is_active
+        return payload
+
     def response_for(self, path: str, query: str = "") -> Tuple[int, str, bytes]:
         """Build the response body for a supported GET path."""
 
@@ -6454,7 +6463,7 @@ class ControlServer(HTTPServer):
             return (
                 HTTPStatus.OK,
                 "application/json",
-                _json_bytes({"state": _runtime_state_payload(self.repository.get_runtime_state())}),
+                _json_bytes({"state": self._runtime_state_with_running()}),
             )
         if path == "/api/action-history":
             return (
@@ -6565,7 +6574,7 @@ class ControlServer(HTTPServer):
             runtime = self.repository.get_runtime_state()
             diagnostics = {
                 "checked_at": int(time.time()),
-                "runtime": _runtime_state_payload(runtime),
+                "runtime": self._runtime_state_with_running(runtime),
                 "helper_available": self.helper_client is not None,
                 "connected_clients": None,
                 "traffic_counters": None,

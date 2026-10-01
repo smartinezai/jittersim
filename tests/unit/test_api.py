@@ -1406,8 +1406,58 @@ class ControlServerTests(unittest.TestCase):
                 "last_error": None,
                 "last_result": None,
                 "observed_state": "unknown",
+                "running": False,
             },
         )
+
+    def _runtime_with_scheduler(self):
+        from jittersim.engine.runtime import RuntimeScheduler
+
+        helper = FakeHelper()
+        self.server.helper_client = helper
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=helper)
+        self.server.scheduler = scheduler
+        self.addCleanup(scheduler.stop)
+        return scheduler
+
+    def test_state_reports_running_only_while_the_scheduler_is_active(self) -> None:
+        def running():
+            _, _, body = self.server.response_for("/api/state")
+            return json.loads(body)["state"]["running"]
+
+        self.assertFalse(running())
+
+        scheduler = self._runtime_with_scheduler()
+        self.assertFalse(running())
+
+        status, _, _ = self.server.write_response_for("/api/apply", {})
+        self.assertEqual(status, 200)
+        self.assertTrue(running())
+
+        scheduler.pause()
+        self.assertFalse(running())
+
+    def test_reset_stops_the_running_flag(self) -> None:
+        self._runtime_with_scheduler()
+        self.server.write_response_for("/api/apply", {})
+        _, _, body = self.server.response_for("/api/state")
+        self.assertTrue(json.loads(body)["state"]["running"])
+
+        status, _, body = self.server.write_response_for("/api/reset", {})
+
+        self.assertEqual(status, 200)
+        _, _, state_body = self.server.response_for("/api/state")
+        self.assertFalse(json.loads(state_body)["state"]["running"])
+
+    def test_diagnostics_runtime_carries_the_running_flag(self) -> None:
+        self.server.helper_client = FakeHelper()
+        _, _, body = self.server.response_for("/api/diagnostics")
+        self.assertFalse(json.loads(body)["runtime"]["running"])
+
+        self._runtime_with_scheduler()
+        self.server.write_response_for("/api/apply", {})
+        _, _, body = self.server.response_for("/api/diagnostics")
+        self.assertTrue(json.loads(body)["runtime"]["running"])
 
     def test_unknown_paths_return_json_not_found(self) -> None:
         status, content_type, body = self.server.response_for("/missing")
