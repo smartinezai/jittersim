@@ -18,7 +18,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from ipaddress import IPv4Network
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Collection, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, urlsplit
 
 from jittersim.config.device_labels import (
@@ -33,9 +33,10 @@ from jittersim.config.device_names import (
     has_hidden_characters,
     resolve_device_name,
 )
-from jittersim.config.domain_labels import label_domain, seen_with
+from jittersim.config.domain_labels import group_domain, label_domain, seen_with
 from jittersim.config.exemptions import UnaffectedDevice, normalize_exempt_mac
 from jittersim.config.models import (
+    MAX_LISTED_DOMAINS,
     DataLimit,
     Device,
     DeviceGroup,
@@ -96,6 +97,8 @@ from jittersim.api.router_operations import RouterOperations
 
 LOGGER = logging.getLogger(__name__)
 MAX_JSON_BODY_BYTES = 64 * 1024
+# One block or profile call may carry this many names.
+MAX_BATCH_DOMAINS = 64
 TLS_HANDSHAKE_TIMEOUT_SECONDS = 5.0
 REQUEST_INPUT_TIMEOUT_SECONDS = 10.0
 MAX_PENDING_CONNECTION_LIFETIME_SECONDS = 30.0
@@ -150,6 +153,7 @@ WRITE_PATHS = frozenset(
         "/api/observations/scan",
         "/api/observations/add-to-profile",
         "/api/observations/add-global-block",
+        "/api/observations/remove-global-block",
         "/api/apply",
         "/api/reset",
         "/api/dashboard-access/register-self",
@@ -371,6 +375,29 @@ DASHBOARD_HTML = """<!doctype html>
     }
     .saved-device-labels h3 { margin-top: 0; }
     .saved-device-label-row { grid-template-columns: minmax(0, 1fr) auto auto; }
+    .saved-profile-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.75rem;
+      border: 1px solid #2b435f;
+      border-radius: 0.6rem;
+      background: #0d1b2d;
+    }
+    .saved-profile-name {
+      display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.6rem;
+      margin: 0; color: #edf5ff;
+    }
+    .saved-profile-id { color: #91a8c1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
+    .saved-profile-name strong, .saved-profile-id { min-width: 0; overflow-wrap: anywhere; }
+    .saved-profile-summary { margin: 0.15rem 0 0; color: #c6dbf4; font-size: 0.84rem; overflow-wrap: anywhere; }
+    .saved-profile-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+    .saved-profile-actions button { margin: 0; white-space: nowrap; }
+    .saved-profile-actions button[aria-disabled="true"] { cursor: not-allowed; opacity: 0.55; }
+    .saved-profile-actions button[aria-busy="true"] { cursor: progress; }
+    .general-badge { border-color: #2c9d73; background: #10372d; color: #8de2bc; }
+    #profile-id[readonly] { background: #0d1b2d; color: #91a8c1; cursor: not-allowed; }
     select {
       min-width: 0;
       max-width: 100%;
@@ -429,17 +456,35 @@ DASHBOARD_HTML = """<!doctype html>
     .observation-domain-list { display: grid; gap: 0.35rem; margin: 0.65rem 0 0; padding: 0; list-style: none; }
     .observation-domain { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem; padding: 0.45rem 0.55rem; border-radius: 0.35rem; background: #102238; color: #c7d7eb; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
     .observation-domain-name { flex: 1 1 14rem; min-width: 0; }
-    .observation-domain button { margin-top: 0; }
+    .observation-domain button { margin-top: 0; min-width: 9.5rem; }
+    .observation-domain .observation-profile-button { max-width: 16rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .observation-label, .observation-hint-line { font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     .observation-label { display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.5rem; color: #edf5ff; font-size: 0.88rem; }
     .observation-label strong { font-weight: 650; overflow-wrap: anywhere; }
     .observation-category { padding: 0.05rem 0.45rem; border: 1px solid #46627f; border-radius: 999px; color: #c6dbf4; font-size: 0.7rem; font-weight: 500; white-space: nowrap; }
     .observation-category[data-kind="unknown"] { border-style: dashed; color: #9fb3ca; }
-    .observation-domain-host { margin-top: 0.1rem; color: #9fb3ca; font-size: 0.76rem; overflow-wrap: anywhere; }
+    .observation-domain-host { display: flex; flex-wrap: wrap; align-items: center; gap: 0.15rem 0.5rem; margin-top: 0.1rem; color: #9fb3ca; font-size: 0.76rem; }
+    .observation-domain-host span:first-child { min-width: 0; overflow-wrap: anywhere; }
+    .observation-badge { padding: 0.05rem 0.5rem; border: 1px solid #75404b; border-radius: 999px; background: #482b35; color: #ffcad0; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 0.7rem; font-weight: 600; white-space: nowrap; }
     .observation-hint-line { display: flex; flex-wrap: wrap; gap: 0.1rem 0.75rem; margin-top: 0.2rem; font-size: 0.76rem; }
     .observation-hint { color: #b9c9dc; font-style: italic; }
     .observation-search-link { color: #8cc4ff; }
     .observation-domain-count { color: #8de2bc; white-space: nowrap; }
+    .observation-group-item { list-style: none; }
+    .observation-group { border-radius: 0.35rem; background: #102238; color: #c7d7eb; }
+    .observation-group-header { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem; padding: 0.45rem 0.55rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
+    .observation-group-header button { margin-top: 0; min-width: 9.5rem; }
+    .observation-group-header .observation-group-toggle { display: flex; flex: 1 1 18rem; align-items: center; gap: 0.5rem 1rem; min-width: 0; padding: 0.1rem 0; border: 0; border-radius: 0.35rem; background: none; color: inherit; font: inherit; font-weight: 400; text-align: left; }
+    .observation-group-header .observation-group-toggle:hover:not(:disabled) { background: none; }
+    .observation-group-chevron { flex: none; width: 0.45rem; height: 0.45rem; margin: 0 0.15rem 0 0.1rem; border-right: 2px solid #8cc4ff; border-bottom: 2px solid #8cc4ff; transform: rotate(-45deg); }
+    .observation-group-toggle[aria-expanded="true"] .observation-group-chevron { transform: rotate(45deg); }
+    .observation-group-title { flex: 1 1 10rem; min-width: 0; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .observation-group-name { display: block; color: #edf5ff; font-size: 0.88rem; font-weight: 650; overflow-wrap: anywhere; }
+    .observation-group-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0.15rem 0.5rem; margin-top: 0.1rem; color: #9fb3ca; font-size: 0.76rem; font-weight: 400; }
+    .observation-group-note { margin: 0; padding: 0 0.55rem 0.5rem 1.6rem; color: #f5ca78; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 0.78rem; }
+    .observation-group-note[hidden], .observation-group-header button[hidden] { display: none; }
+    .observation-group-body { margin: 0 0.55rem 0.55rem 1.1rem; padding-left: 0.6rem; border-left: 2px solid #2b435f; }
+    .observation-group-body[hidden] { display: none; }
     .policy-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
     .policy-grid > div { min-width: 0; }
     .policy-note, .form-note { margin: 0.7rem 0 0; color: #91a8c1; font-size: 0.82rem; }
@@ -711,6 +756,8 @@ DASHBOARD_HTML = """<!doctype html>
       .policy-grid { grid-template-columns: 1fr; }
       .uplink-grid { grid-template-columns: 1fr; }
       .connected-row { grid-template-columns: auto minmax(0, 1fr) auto; }
+      .saved-profile-row { grid-template-columns: minmax(0, 1fr); }
+      .saved-profile-actions button { flex: 1; }
       .connected-controls { grid-column: 1 / -1; }
       .connected-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
       .connected-controls select { width: 100%; }
@@ -913,8 +960,12 @@ DASHBOARD_HTML = """<!doctype html>
   </section>
   </section><!-- /page:devices -->
   <section class="page" id="page-profiles" data-page="profiles" aria-label="Profiles" hidden>
+    <section class="card" data-collapse="open" aria-labelledby="saved-profiles-title">
+      <h2 id="saved-profiles-title">Saved profiles</h2>
+      <div id="saved-profiles" class="connected-list" aria-live="polite">Check the admin token to view saved profiles.</div>
+    </section>
     <section class="card" data-collapse="open">
-      <h2>Save profile</h2>
+      <h2 id="profile-form-title">Save profile</h2>
       <form id="profile-form">
         <div class="fields">
           <label><span class="field-label">Profile ID<span class="help-icon" tabindex="0" role="img" aria-label="Profile ID help" data-help="A short code that devices and schedules use to find this profile. Saving with an existing ID updates that profile and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The Name is what people read.">?</span></span>
@@ -1102,6 +1153,7 @@ DASHBOARD_HTML = """<!doctype html>
           </div>
         </details>
         <button type="submit">Save profile</button>
+        <button id="new-profile" type="button" hidden>New profile</button>
       </form>
     </section>
     <section class="card">
@@ -1859,8 +1911,11 @@ DASHBOARD_HTML = """<!doctype html>
 
     const privateDataPanelIds = [
       "profiles", "devices", "plan", "state", "policies",
-      "connected-devices", "unaffected-devices", "uplink-details", "general-profile-status"
+      "connected-devices", "unaffected-devices", "uplink-details", "general-profile-status",
+      "saved-profiles"
     ];
+    // Functions that clear private form state whenever the private panels are locked.
+    const privateDataLockHooks = [];
 
     function setDashboardUnlocked(allowed) {
       element("private-dashboard").hidden = !allowed;
@@ -1935,6 +1990,7 @@ DASHBOARD_HTML = """<!doctype html>
       privateDataPanelIds.forEach((panelId) => {
         element(panelId).textContent = message;
       });
+      privateDataLockHooks.forEach((hook) => hook());
       element("connected-count").textContent = state;
       element("connected-refresh-status").textContent =
         "Refreshes every 5 seconds once the admin token is accepted.";
@@ -2216,6 +2272,7 @@ DASHBOARD_HTML = """<!doctype html>
     let generalProfileState = null;
     let lastRuntimeState = null;
     let serviceListsState = [];
+    let savedProfileBusy = null;
     let networkActionBusy = false;
     let groups = [];
     let savedDevices = [];
@@ -2225,6 +2282,10 @@ DASHBOARD_HTML = """<!doctype html>
     const clearConnectedDrafts = new Set();
     let observedDomainsByDevice = {};
     let observedNames = new Set();
+    // Keys of the open Traffic discovery groups. They survive the dashboard refresh.
+    const openObservationGroups = new Set();
+    // The profile picked in each Traffic discovery card. It survives the dashboard refresh.
+    const observationProfileChoice = new Map();
     let randomWebsiteAnalyticsRequestVersion = 0;
     let connectedDevicesRequestInFlight = false;
     let observationRequestInFlight = false;
@@ -2697,6 +2758,7 @@ DASHBOARD_HTML = """<!doctype html>
       element("general-profile-apply").disabled = select.disabled || !select.value;
       element("general-profile-stop").disabled = networkActionBusy || !helperConfigured ||
         !generalProfileState || !generalProfileState.profile;
+      renderSavedProfiles();
     }
 
     // Works out the three sidebar lines from data the page already holds.
@@ -3418,6 +3480,238 @@ DASHBOARD_HTML = """<!doctype html>
       };
     }
 
+    function blockButtonState(observation) {
+      const domain = observation.domain;
+      if (observation.globally_blocked === true) {
+        return {
+          label: "Unblock",
+          ariaLabel: "Unblock " + domain,
+          path: "/api/observations/remove-global-block",
+          busy: "Removing " + domain + " from the global block list...",
+          done: "Removed " + domain + " from the global block list. " + ENFORCE_NOTE
+        };
+      }
+      return {
+        label: "Block globally",
+        ariaLabel: "Block globally " + domain,
+        path: "/api/observations/add-global-block",
+        busy: "Adding " + domain + " to the global block list...",
+        done: "Added " + domain + " to the global block list. " + ENFORCE_NOTE
+      };
+    }
+
+    function profileButtonState(domain, profile) {
+      let label = "Add to profile";
+      let disabled = false;
+      if (!profile) {
+        disabled = true;
+      } else if ((profile.website_domains || []).indexOf(domain) !== -1) {
+        label = "Already in " + profile.name;
+        disabled = true;
+      }
+      return { label: label, disabled: disabled, ariaLabel: label + " " + domain };
+    }
+
+    // What the dashboard says after a change to the block list. The scheduler applies it.
+    const ENFORCE_NOTE = "It applies on its own while JitterSim is running. " +
+      "After Reset or Panic choose Apply current configuration.";
+
+    function queryCountText(count) {
+      return count + (count === 1 ? " query" : " queries");
+    }
+
+    // A group action sends its names in one call and the server accepts this many.
+    const GROUP_ACTION_MAX_NAMES = 64;
+
+    // Blocking every name of a group of these kinds could cut a device off the internet.
+    const RISKY_BLOCK_NOTE = "Blocking a whole group of system or content delivery names could cut " +
+      "the device off the internet. Block single names instead.";
+
+    function isRiskyGroupKind(kind) {
+      return kind === "system" || kind === "cdn";
+    }
+
+    function groupObservations(domains) {
+      const groups = new Map();
+      (domains || []).forEach((observation) => {
+        const group = observation.group || { key: "domain:" + observation.domain, name: observation.domain };
+        if (!groups.has(group.key)) {
+          groups.set(group.key, {
+            key: group.key, name: group.name, kind: group.kind || "", names: [], totalQueries: 0, single: true
+          });
+        }
+        const entry = groups.get(group.key);
+        if (!isRiskyGroupKind(entry.kind) && isRiskyGroupKind(group.kind)) entry.kind = group.kind;
+        entry.names.push(observation);
+        entry.totalQueries += Number(observation.query_count) || 0;
+        entry.single = entry.names.length === 1;
+      });
+      return Array.from(groups.values()).sort((a, b) => {
+        if (a.totalQueries !== b.totalQueries) return b.totalQueries - a.totalQueries;
+        const first = a.name.toLowerCase();
+        const second = b.name.toLowerCase();
+        return first < second ? -1 : first > second ? 1 : 0;
+      });
+    }
+
+    function groupBlockAction(group) {
+      const blocked = group.names.filter((observation) => observation.globally_blocked === true);
+      const open = group.names.filter((observation) => observation.globally_blocked !== true);
+      const domains = (list) => list.map((observation) => observation.domain);
+      const unblocking = blocked.length > 0 && open.length === 0;
+      const action = unblocking
+        ? {
+            label: "Unblock all",
+            path: blockButtonState({ globally_blocked: true }).path,
+            domains: domains(blocked)
+          }
+        : {
+            label: blocked.length > 0 ? "Block remaining" : "Block all",
+            path: blockButtonState({ globally_blocked: false }).path,
+            domains: domains(open)
+          };
+      action.ariaLabel = action.label + " " + groupSubject(group, action.domains.length);
+      const risky = isRiskyGroupKind(group.kind);
+      const limitNote = groupLimitNote(action.domains.length);
+      const reason = (risky && !unblocking) ? RISKY_BLOCK_NOTE : limitNote;
+      action.disabled = reason !== "";
+      action.title = reason || action.ariaLabel;
+      // The visible line under the header. It stays for a risky group and explains the button.
+      action.note = risky ? RISKY_BLOCK_NOTE : limitNote;
+      return action;
+    }
+
+    // The way back for a risky group that is only partly blocked. Block remaining is off there.
+    function groupUnblockAction(group) {
+      if (!isRiskyGroupKind(group.kind)) return null;
+      const blocked = group.names
+        .filter((observation) => observation.globally_blocked === true)
+        .map((observation) => observation.domain);
+      if (blocked.length === 0 || blocked.length === group.names.length) return null;
+      const text = "Unblock blocked names: " + groupSubject(group, blocked.length);
+      const note = groupLimitNote(blocked.length);
+      return {
+        label: "Unblock blocked names",
+        path: blockButtonState({ globally_blocked: true }).path,
+        domains: blocked,
+        disabled: note !== "",
+        ariaLabel: text,
+        title: note || text
+      };
+    }
+
+    function groupProfileAction(group, profile) {
+      const count = group.names.length;
+      if (!profile) {
+        const text = "Add all to profile: " + groupSubject(group, count) + " (no profile available)";
+        return { label: "Add all to profile", disabled: true, domains: [], ariaLabel: text, title: text };
+      }
+      const missing = group.names
+        .map((observation) => observation.domain)
+        .filter((domain) => !profileButtonState(domain, profile).disabled);
+      if (missing.length === 0) {
+        const text = "All already in " + profile.name + ": " + groupSubject(group, count);
+        return {
+          label: "All already in " + profile.name,
+          disabled: true,
+          domains: [],
+          ariaLabel: text,
+          title: text
+        };
+      }
+      const text = "Add all to profile: " + groupSubject(group, missing.length) + " to " + profile.name;
+      const note = groupLimitNote(missing.length);
+      return {
+        label: "Add all to profile",
+        disabled: note !== "",
+        domains: missing,
+        ariaLabel: text,
+        title: note || text
+      };
+    }
+
+    // True when every row of the group has the same category so the group header says it all.
+    function groupCategoriesUniform(group) {
+      const category = (observation) => (observation.label && observation.label.category) || "";
+      return group.names.every((observation) => category(observation) === category(group.names[0]));
+    }
+
+    // What a row shows in its label line. A row in a group skips a name that only repeats the
+    // group name and skips the category when the whole group has the same one.
+    function rowLabelParts(parts, groupName, categoriesUniform) {
+      const repeated = Boolean(groupName) && parts.labelName === groupName;
+      return {
+        showName: Boolean(parts.labelName) && !repeated,
+        showCategory: Boolean(parts.category) && !(repeated && categoriesUniform)
+      };
+    }
+
+    function groupNamesText(count) {
+      return count + (count === 1 ? " name" : " names");
+    }
+
+    function groupSubject(group, count) {
+      return count + " " + group.name + (count === 1 ? " name" : " names");
+    }
+
+    function isUnblockAction(action) {
+      return action.path === blockButtonState({ globally_blocked: true }).path;
+    }
+
+    function groupBlockMessages(group, action) {
+      const subject = groupSubject(group, action.domains.length);
+      if (isUnblockAction(action)) {
+        return {
+          busy: "Removing " + subject + " from the global block list...",
+          done: "Removed " + subject + " from the global block list. " + ENFORCE_NOTE
+        };
+      }
+      return {
+        busy: "Adding " + subject + " to the global block list...",
+        done: "Added " + subject + " to the global block list. " + ENFORCE_NOTE
+      };
+    }
+
+    function groupProfileMessages(group, action) {
+      const subject = groupSubject(group, action.domains.length);
+      return {
+        busy: "Adding " + subject + " to the profile...",
+        done: "Added " + subject + " to the profile."
+      };
+    }
+
+    function groupBlockedText(group) {
+      const blocked = group.names.filter((observation) => observation.globally_blocked === true).length;
+      if (blocked === 0) return "";
+      return blocked === group.names.length ? "All blocked" : blocked + " blocked";
+    }
+
+    function groupLimitNote(count) {
+      if (count <= GROUP_ACTION_MAX_NAMES) return "";
+      return "This group needs " + count + " names changed and one step takes at most " +
+        GROUP_ACTION_MAX_NAMES + ". Use the buttons on the names instead.";
+    }
+
+    function observationGroupOpenKey(address, groupKey) {
+      return address + "|" + groupKey;
+    }
+
+    // An id that is unique for one device and group and holds no spaces so aria-controls works.
+    function observationGroupDomId(address, groupKey) {
+      const encoded = Array.from(observationGroupOpenKey(address, groupKey)).map((character) =>
+        /[A-Za-z0-9-]/.test(character) ? character : "_" + character.codePointAt(0).toString(16) + "_"
+      );
+      return "observation-group-" + encoded.join("");
+    }
+
+    function chosenObservationProfile(choices, deviceKey, profiles, assignedId) {
+      const ids = (profiles || []).map((profile) => profile.id);
+      const remembered = choices.get(deviceKey);
+      if (remembered !== undefined && ids.indexOf(remembered) !== -1) return remembered;
+      if (assignedId && ids.indexOf(assignedId) !== -1) return assignedId;
+      return ids.length > 0 ? ids[0] : "";
+    }
+
     function domainRowParts(observation) {
       const label = observation.label || {};
       const hint = domainHint(observation);
@@ -3474,12 +3768,24 @@ DASHBOARD_HTML = """<!doctype html>
         heading.append(title, address);
         const targetProfile = document.createElement("select");
         targetProfile.setAttribute("aria-label", "Profile for discovered domains");
+        const chosenProfileId = chosenObservationProfile(
+          observationProfileChoice,
+          device.ipv4_address,
+          profiles,
+          device.assigned_profile_id
+        );
         profiles.forEach((profile) => {
           const option = document.createElement("option");
           option.value = profile.id;
           option.textContent = "Add to " + profile.name;
-          option.selected = profile.id === device.assigned_profile_id;
+          option.selected = profile.id === chosenProfileId;
           targetProfile.appendChild(option);
+        });
+        const profileSyncs = [];
+        const syncProfileButtons = () => profileSyncs.forEach((sync) => sync());
+        targetProfile.addEventListener("change", () => {
+          observationProfileChoice.set(device.ipv4_address, targetProfile.value);
+          syncProfileButtons();
         });
         const targetRow = document.createElement("div");
         targetRow.className = "observation-actions";
@@ -3487,27 +3793,45 @@ DASHBOARD_HTML = """<!doctype html>
         card.append(heading, targetRow);
         const list = document.createElement("ul");
         list.className = "observation-domain-list";
-        (device.domains || []).forEach((observation) => {
+        // One name. A row of a group also gets its block button in blockSyncs so the group can
+        // refresh it and calls afterBlockChange when its own block state changes. A row in a
+        // group skips what its label line only repeats from the group header.
+        const buildRow = (observation, blockSyncs, afterBlockChange, inGroup) => {
           const item = document.createElement("li");
           item.className = "observation-domain";
           const domain = document.createElement("div");
           domain.className = "observation-domain-name";
           const parts = domainRowParts(observation);
-          if (parts.labelName) {
+          const labelShown = rowLabelParts(
+            parts,
+            inGroup ? inGroup.name : "",
+            inGroup ? inGroup.categoriesUniform : false
+          );
+          if (labelShown.showName || labelShown.showCategory) {
             const labelLine = document.createElement("div");
             labelLine.className = "observation-label";
-            const labelName = document.createElement("strong");
-            labelName.textContent = parts.labelName;
-            const category = document.createElement("span");
-            category.className = "observation-category";
-            category.dataset.kind = parts.kind;
-            category.textContent = parts.category;
-            labelLine.append(labelName, category);
+            if (labelShown.showName) {
+              const labelName = document.createElement("strong");
+              labelName.textContent = parts.labelName;
+              labelLine.appendChild(labelName);
+            }
+            if (labelShown.showCategory) {
+              const category = document.createElement("span");
+              category.className = "observation-category";
+              category.dataset.kind = parts.kind;
+              category.textContent = parts.category;
+              labelLine.appendChild(category);
+            }
             domain.appendChild(labelLine);
           }
           const host = document.createElement("div");
           host.className = "observation-domain-host";
-          host.textContent = parts.domain;
+          const hostName = document.createElement("span");
+          hostName.textContent = parts.domain;
+          const badge = document.createElement("span");
+          badge.className = "observation-badge";
+          badge.textContent = "Blocked";
+          host.append(hostName, badge);
           domain.appendChild(host);
           const hintLine = document.createElement("div");
           hintLine.className = "observation-hint-line";
@@ -3530,58 +3854,267 @@ DASHBOARD_HTML = """<!doctype html>
           if (hintLine.childNodes.length > 0) domain.appendChild(hintLine);
           const queryCount = document.createElement("span");
           queryCount.className = "observation-domain-count";
-          queryCount.textContent = observation.query_count + " queries";
+          queryCount.textContent = queryCountText(observation.query_count);
           const profileButton = document.createElement("button");
           profileButton.type = "button";
-          profileButton.textContent = "Add to profile";
-          profileButton.disabled = profiles.length === 0;
+          profileButton.className = "observation-profile-button";
+          const syncProfileButton = () => {
+            // A request in flight keeps the button disabled. Its finally block syncs again.
+            if (profileButton.getAttribute("aria-busy") === "true") return;
+            const selectedProfile = profiles.find((profile) => profile.id === targetProfile.value);
+            const state = profileButtonState(observation.domain, selectedProfile);
+            profileButton.textContent = state.label;
+            profileButton.title = state.label;
+            profileButton.setAttribute("aria-label", state.ariaLabel);
+            profileButton.disabled = state.disabled;
+          };
+          profileSyncs.push(syncProfileButton);
+          syncProfileButton();
           profileButton.addEventListener("click", () => addDomainToProfile(
             observation.domain,
             targetProfile.value,
-            profileButton
+            profileButton,
+            syncProfileButtons
           ));
           const blockButton = document.createElement("button");
           blockButton.type = "button";
-          blockButton.textContent = "Block globally";
-          blockButton.addEventListener("click", () => addGlobalBlock(
-            observation.domain,
-            blockButton
+          const syncBlockButton = () => {
+            blockButton.textContent = blockButtonState(observation).label;
+            blockButton.setAttribute("aria-label", blockButtonState(observation).ariaLabel);
+            badge.hidden = observation.globally_blocked !== true;
+          };
+          syncBlockButton();
+          blockSyncs.push(syncBlockButton);
+          const onBlockChange = () => {
+            syncBlockButton();
+            if (afterBlockChange) afterBlockChange();
+          };
+          blockButton.addEventListener("click", () => changeGlobalBlock(
+            observation,
+            blockButton,
+            onBlockChange
           ));
           item.append(domain, queryCount, profileButton, blockButton);
-          list.appendChild(item);
+          return item;
+        };
+        // Two or more names of one app. Closed by default. The header holds a toggle button and
+        // the action buttons side by side. The action buttons act on every name of the group.
+        const buildGroup = (group) => {
+          const item = document.createElement("li");
+          item.className = "observation-group-item";
+          const wrapper = document.createElement("div");
+          wrapper.className = "observation-group";
+          const openKey = observationGroupOpenKey(device.ipv4_address, group.key);
+          const header = document.createElement("div");
+          header.className = "observation-group-header";
+          const body = document.createElement("div");
+          body.className = "observation-group-body";
+          body.id = observationGroupDomId(device.ipv4_address, group.key);
+          const toggle = document.createElement("button");
+          toggle.type = "button";
+          toggle.className = "observation-group-toggle";
+          toggle.setAttribute("aria-controls", body.id);
+          const setOpen = (open) => {
+            toggle.setAttribute("aria-expanded", open ? "true" : "false");
+            body.hidden = !open;
+            if (open) openObservationGroups.add(openKey);
+            else openObservationGroups.delete(openKey);
+          };
+          setOpen(openObservationGroups.has(openKey));
+          toggle.addEventListener("click", () => setOpen(body.hidden));
+          const chevron = document.createElement("span");
+          chevron.className = "observation-group-chevron";
+          chevron.setAttribute("aria-hidden", "true");
+          const title = document.createElement("span");
+          title.className = "observation-group-title";
+          const groupName = document.createElement("strong");
+          groupName.className = "observation-group-name";
+          groupName.textContent = group.name;
+          const meta = document.createElement("span");
+          meta.className = "observation-group-meta";
+          const nameCount = document.createElement("span");
+          nameCount.className = "observation-group-count";
+          nameCount.textContent = groupNamesText(group.names.length);
+          const groupBadge = document.createElement("span");
+          groupBadge.className = "observation-badge";
+          meta.append(nameCount, groupBadge);
+          title.append(groupName, meta);
+          const totalQueries = document.createElement("span");
+          totalQueries.className = "observation-domain-count";
+          totalQueries.textContent = queryCountText(group.totalQueries);
+          toggle.append(chevron, title, totalQueries);
+          const groupProfileButton = document.createElement("button");
+          groupProfileButton.type = "button";
+          groupProfileButton.className = "observation-group-profile-button";
+          const groupBlockButton = document.createElement("button");
+          groupBlockButton.type = "button";
+          groupBlockButton.className = "observation-group-block-button";
+          const groupUndoButton = document.createElement("button");
+          groupUndoButton.type = "button";
+          groupUndoButton.className = "observation-group-unblock-button";
+          groupUndoButton.hidden = true;
+          const groupNote = document.createElement("p");
+          groupNote.className = "observation-group-note";
+          groupNote.id = body.id + "-note";
+          groupNote.hidden = true;
+          const syncGroupProfile = () => {
+            // A request in flight keeps the button disabled. Its finally block syncs again.
+            if (groupProfileButton.getAttribute("aria-busy") === "true") return;
+            const selectedProfile = profiles.find((profile) => profile.id === targetProfile.value);
+            const action = groupProfileAction(group, selectedProfile);
+            groupProfileButton.textContent = action.label;
+            groupProfileButton.title = action.title;
+            groupProfileButton.setAttribute("aria-label", action.ariaLabel);
+            groupProfileButton.disabled = action.disabled;
+          };
+          const syncGroupBlock = () => {
+            const blockedText = groupBlockedText(group);
+            groupBadge.textContent = blockedText;
+            groupBadge.hidden = blockedText === "";
+            const action = groupBlockAction(group);
+            groupNote.textContent = action.note;
+            groupNote.hidden = action.note === "";
+            if (groupBlockButton.getAttribute("aria-busy") !== "true") {
+              groupBlockButton.textContent = action.label;
+              groupBlockButton.title = action.title;
+              groupBlockButton.setAttribute("aria-label", action.ariaLabel);
+              groupBlockButton.disabled = action.disabled;
+              if (action.disabled && action.note) {
+                groupBlockButton.setAttribute("aria-describedby", groupNote.id);
+              } else {
+                groupBlockButton.removeAttribute("aria-describedby");
+              }
+            }
+            const undo = groupUnblockAction(group);
+            groupUndoButton.hidden = undo === null;
+            if (undo !== null && groupUndoButton.getAttribute("aria-busy") !== "true") {
+              groupUndoButton.textContent = undo.label;
+              groupUndoButton.title = undo.title;
+              groupUndoButton.setAttribute("aria-label", undo.ariaLabel);
+              groupUndoButton.disabled = undo.disabled;
+            }
+          };
+          const rowSyncs = [];
+          const syncRowsAndHeader = () => {
+            rowSyncs.forEach((sync) => sync());
+            syncGroupBlock();
+          };
+          profileSyncs.push(syncGroupProfile);
+          syncGroupProfile();
+          syncGroupBlock();
+          groupProfileButton.addEventListener("click", () => addGroupToProfile(
+            group,
+            profiles.find((profile) => profile.id === targetProfile.value),
+            groupProfileButton,
+            syncProfileButtons
+          ));
+          groupBlockButton.addEventListener("click", () => changeGroupBlock(
+            group,
+            groupBlockButton,
+            syncRowsAndHeader
+          ));
+          groupUndoButton.addEventListener("click", () => changeGroupBlock(
+            group,
+            groupUndoButton,
+            syncRowsAndHeader,
+            groupUnblockAction
+          ));
+          header.append(toggle, groupProfileButton, groupBlockButton, groupUndoButton);
+          const rows = document.createElement("ul");
+          rows.className = "observation-domain-list";
+          const inGroup = { name: group.name, categoriesUniform: groupCategoriesUniform(group) };
+          group.names.forEach((observation) => {
+            rows.appendChild(buildRow(observation, rowSyncs, syncGroupBlock, inGroup));
+          });
+          body.appendChild(rows);
+          wrapper.append(header, groupNote, body);
+          item.appendChild(wrapper);
+          return item;
+        };
+        groupObservations(device.domains).forEach((group) => {
+          list.appendChild(group.single ? buildRow(group.names[0], [], null) : buildGroup(group));
         });
         card.append(list);
         container.appendChild(card);
       });
     }
 
-    async function addDomainToProfile(domain, profileId, button) {
+    async function addDomainToProfile(domain, profileId, button, onChange) {
       if (!profileId) return;
       setButtonBusy(button, true);
       showMessage("Adding " + domain + " to the profile...", "working");
       try {
-        await request("/api/observations/add-to-profile", "POST", {
+        const result = await request("/api/observations/add-to-profile", "POST", {
           domain: domain,
           profile_id: profileId
         });
+        const index = profiles.findIndex((profile) => profile.id === profileId);
+        if (index !== -1 && result.profile) profiles[index] = result.profile;
         refreshAfterSuccess("Added " + domain + " to the profile.");
       } catch (error) {
         showMessage(error.message, "error");
       } finally {
         setButtonBusy(button, false);
+        if (onChange) onChange();
       }
     }
 
-    async function addGlobalBlock(domain, button) {
+    async function changeGlobalBlock(observation, button, onChange) {
+      const state = blockButtonState(observation);
       setButtonBusy(button, true);
-      showMessage("Adding " + domain + " to the global block list...", "working");
+      showMessage(state.busy, "working");
       try {
-        await request("/api/observations/add-global-block", "POST", { domain: domain });
-        refreshAfterSuccess("Added " + domain + " to the global block list.");
+        await request(state.path, "POST", { domain: observation.domain });
+        observation.globally_blocked = observation.globally_blocked !== true;
+        refreshAfterSuccess(state.done);
       } catch (error) {
         showMessage(error.message, "error");
       } finally {
         setButtonBusy(button, false);
+        onChange();
+      }
+    }
+
+    async function changeGroupBlock(group, button, onChange, pickAction) {
+      const action = (pickAction || groupBlockAction)(group);
+      if (!action || action.disabled || action.domains.length === 0) return;
+      const messages = groupBlockMessages(group, action);
+      setButtonBusy(button, true);
+      showMessage(messages.busy, "working");
+      try {
+        await request(action.path, "POST", { domains: action.domains });
+        const blocked = !isUnblockAction(action);
+        group.names.forEach((observation) => {
+          if (action.domains.indexOf(observation.domain) !== -1) observation.globally_blocked = blocked;
+        });
+        refreshAfterSuccess(messages.done);
+      } catch (error) {
+        showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
+        onChange();
+      }
+    }
+
+    async function addGroupToProfile(group, profile, button, onChange) {
+      const action = groupProfileAction(group, profile);
+      if (action.disabled) return;
+      const messages = groupProfileMessages(group, action);
+      setButtonBusy(button, true);
+      showMessage(messages.busy, "working");
+      try {
+        const result = await request("/api/observations/add-to-profile", "POST", {
+          domains: action.domains,
+          profile_id: profile.id
+        });
+        const index = profiles.findIndex((item) => item.id === profile.id);
+        if (index !== -1 && result.profile) profiles[index] = result.profile;
+        refreshAfterSuccess(messages.done);
+      } catch (error) {
+        showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
+        if (onChange) onChange();
       }
     }
 
@@ -4830,11 +5363,12 @@ DASHBOARD_HTML = """<!doctype html>
       );
     });
 
-    async function runGeneralProfileAction(stop) {
+    async function runGeneralProfileAction(stop, rowProfileId) {
       if (networkActionBusy || !helperConfigured) return;
-      const profileId = element("general-profile-select").value;
+      const profileId = rowProfileId || element("general-profile-select").value;
       if (!stop && !profileId) return;
       const path = stop ? "/api/general-profile/stop" : "/api/general-profile";
+      savedProfileBusy = rowProfileId ? { id: rowProfileId, stop: stop } : null;
       setActionBusy(true, path);
       showMessage(stop ? "Stopping the general profile..." : "Applying the profile to all unprotected devices...", "working");
       try {
@@ -4846,6 +5380,7 @@ DASHBOARD_HTML = """<!doctype html>
         showMessage(error.message, "error");
       } finally {
         await loadPrivateDataPanel("general-profile-status", loadGeneralProfile);
+        savedProfileBusy = null;
         setActionBusy(false, path);
       }
     }
@@ -4856,36 +5391,260 @@ DASHBOARD_HTML = """<!doctype html>
 
     element("scan-observations").addEventListener("click", scanObservations);
 
+    function profileSummary(profile) {
+      const upload = profileDirectionSummary(profile.upload);
+      const download = profileDirectionSummary(profile.download);
+      const parts = [upload === download ? "↕ " + upload : "↑ " + upload + " · ↓ " + download];
+      if (profile.outage_probability > 0) parts.push("outages " + profile.outage_probability + "%");
+      if (profile.website_mode === "allow_only") {
+        const sites = profile.website_domains.length;
+        parts.push("allow-only " + sites + (sites === 1 ? " site" : " sites"));
+      }
+      return parts.join(" · ");
+    }
+
+    function profileDirectionSummary(direction) {
+      const parts = [];
+      if (direction.delay_ms > 0 || direction.jitter_ms > 0) {
+        parts.push(direction.delay_ms + " ms" + (direction.jitter_ms > 0 ? " ±" + direction.jitter_ms : ""));
+      }
+      if (direction.loss_percent > 0) parts.push(direction.loss_percent + "% loss");
+      if (direction.bandwidth_kbit) {
+        parts.push(direction.bandwidth_kbit >= 1000
+          ? String(Math.round(direction.bandwidth_kbit / 10) / 100) + " Mbit/s"
+          : direction.bandwidth_kbit + " kbit/s");
+      }
+      if (direction.reorder_percent > 0) parts.push("reorder " + direction.reorder_percent + "%");
+      if (direction.duplicate_percent > 0) parts.push("duplicate " + direction.duplicate_percent + "%");
+      if (direction.corrupt_percent > 0) parts.push("corrupt " + direction.corrupt_percent + "%");
+      return parts.length ? parts.join(" · ") : "no impairment";
+    }
+
+    function fillProfileForm(profile) {
+      const set = (id, value) => {
+        element(id).value = value === null || value === undefined ? "" : String(value);
+      };
+      set("profile-id", profile.id);
+      set("profile-name", profile.name);
+      set("profile-seed", profile.random_seed);
+      set("profile-reroll", profile.reroll_interval_seconds);
+      set("profile-reroll-variation", profile.reroll_interval_randomness.variation_percent);
+      set("profile-outage-probability", profile.outage_probability);
+      set("profile-outage-duration", profile.outage_duration_seconds);
+      set("profile-outage-interval", profile.outage_interval_seconds);
+      set("profile-website-mode", profile.website_mode);
+      set("profile-website-domains", profile.website_domains.join(", "));
+      set("profile-website-enabled", profile.website_randomness.enabled_probability);
+      ["upload", "download"].forEach((prefix) => {
+        const direction = profile[prefix];
+        set(prefix + "-delay", direction.delay_ms);
+        set(prefix + "-jitter", direction.jitter_ms);
+        set(prefix + "-loss", direction.loss_percent);
+        set(prefix + "-bandwidth", direction.bandwidth_kbit);
+        set(prefix + "-reorder", direction.reorder_percent);
+        set(prefix + "-duplicate", direction.duplicate_percent);
+        set(prefix + "-corrupt", direction.corrupt_percent);
+        ["delay", "jitter", "loss", "bandwidth", "reorder", "duplicate", "corrupt"].forEach((feature) => {
+          const randomness = direction[feature + "_randomness"];
+          set(prefix + "-" + feature + "-random-variation", randomness.variation_percent);
+          set(prefix + "-" + feature + "-random-enabled", randomness.enabled_probability);
+        });
+      });
+    }
+
+    // The form has no inputs for some randomness details. A profile being edited keeps its own
+    // values for them so that saving never resets them. A new profile gets the defaults.
+    function profileFormPayload(base) {
+      const keep = (field) => base
+        ? Object.assign({}, base[field])
+        : { variation_percent: 0, enabled_probability: 100 };
+      return {
+        id: element("profile-id").value,
+        name: element("profile-name").value,
+        upload: impairment("upload"),
+        download: impairment("download"),
+        random_seed: optionalNumber("profile-seed"),
+        reroll_interval_seconds: Number(element("profile-reroll").value),
+        reroll_interval_randomness: {
+          variation_percent: Number(element("profile-reroll-variation").value),
+          enabled_probability: base ? base.reroll_interval_randomness.enabled_probability : 100
+        },
+        outage_probability: Number(element("profile-outage-probability").value),
+        outage_duration_seconds: Number(element("profile-outage-duration").value),
+        outage_interval_seconds: Number(element("profile-outage-interval").value),
+        outage_duration_randomness: keep("outage_duration_randomness"),
+        outage_interval_randomness: keep("outage_interval_randomness"),
+        website_mode: element("profile-website-mode").value,
+        website_domains: commaList("profile-website-domains"),
+        website_randomness: {
+          variation_percent: base ? base.website_randomness.variation_percent : 0,
+          enabled_probability: Number(element("profile-website-enabled").value)
+        }
+      };
+    }
+
+    let editingProfile = null;
+
+    function setProfileFormTitle(text) {
+      const title = element("profile-form-title");
+      (title.querySelector(".card-toggle") || title).textContent = text;
+    }
+
+    function startEditingProfile(profile) {
+      editingProfile = profile;
+      fillProfileForm(profile);
+      element("profile-id").readOnly = true;
+      setProfileFormTitle("Edit profile");
+      element("new-profile").hidden = false;
+      revealElement(element("profile-form-title"));
+      element("profile-name").focus({ preventScroll: true });
+    }
+
+    function resetProfileEditing() {
+      editingProfile = null;
+      element("profile-id").readOnly = false;
+      setProfileFormTitle("Save profile");
+      element("new-profile").hidden = true;
+    }
+
+    let profileEditRequest = 0;
+
+    // Edit reloads the list first so a profile changed elsewhere is never saved back stale.
+    async function editSavedProfile(profileId) {
+      const thisRequest = ++profileEditRequest;
+      try {
+        await loadProfiles();
+      } catch (error) {
+        if (thisRequest === profileEditRequest) showMessage(error.message, "error");
+        return;
+      }
+      if (thisRequest !== profileEditRequest) return;
+      const current = profiles.find((item) => item.id === profileId);
+      if (!current) {
+        renderSavedProfiles();
+        showMessage("That profile no longer exists. The list was refreshed.", "error");
+        return;
+      }
+      // The browser reads JSON numbers as doubles so a seed above 2^53 - 1 would be saved back changed.
+      if (current.random_seed !== null && current.random_seed !== undefined &&
+          !Number.isSafeInteger(current.random_seed)) {
+        showMessage(
+          "This profile has a random seed too large to edit here. Change it through the API or the CLI.",
+          "error"
+        );
+        return;
+      }
+      startEditingProfile(current);
+    }
+
+    function renderSavedProfiles() {
+      if (!adminTokenVerified) return;
+      const container = element("saved-profiles");
+      const general = generalProfileState && generalProfileState.profile;
+      const generalId = general ? general.id : null;
+      const generalActive = Boolean(general && generalProfileState.active);
+      const generalBadge = generalActive ? "General · active"
+        : generalProfileState && generalProfileState.state &&
+          generalProfileState.state.observed_state === "reset" ? "General · paused"
+        : "General · saved";
+      const noHelper = !helperConfigured;
+      const actionsBusy = networkActionBusy;
+      const signature = JSON.stringify([
+        profiles.map((profile) => [profile.id, profile.name, profileSummary(profile)]),
+        generalId, generalActive, generalBadge, noHelper, actionsBusy, savedProfileBusy
+      ]);
+      if (container.dataset.signature === signature && container.children.length) return;
+      container.dataset.signature = signature;
+      const focused = document.activeElement;
+      const focusedKey = focused && container.contains(focused) && focused.dataset.profileId
+        ? focused.dataset.profileId + "|" + focused.dataset.action : null;
+      const buttons = new Map();
+      if (!profiles.length) {
+        const empty = document.createElement("p");
+        empty.className = "device-empty";
+        empty.textContent = "No saved profiles yet. Create one below.";
+        container.replaceChildren(empty);
+        return;
+      }
+      container.replaceChildren(...profiles.map((profile) => {
+        const row = document.createElement("div");
+        row.className = "saved-profile-row";
+        row.dataset.profileId = profile.id;
+        const text = document.createElement("div");
+        const heading = document.createElement("p");
+        heading.className = "saved-profile-name";
+        const name = document.createElement("strong");
+        name.textContent = profile.name;
+        const id = document.createElement("span");
+        id.className = "saved-profile-id";
+        id.textContent = profile.id;
+        heading.append(name, id);
+        if (profile.id === generalId) {
+          const badge = document.createElement("span");
+          badge.className = "count-badge general-badge";
+          badge.textContent = generalBadge;
+          heading.append(badge);
+        }
+        const summary = document.createElement("p");
+        summary.className = "saved-profile-summary";
+        summary.textContent = profileSummary(profile);
+        text.append(heading, summary);
+        const actions = document.createElement("div");
+        actions.className = "saved-profile-actions";
+        const edit = document.createElement("button");
+        edit.type = "button";
+        edit.textContent = "Edit";
+        edit.dataset.profileId = profile.id;
+        edit.dataset.action = "edit";
+        edit.setAttribute("aria-label", "Edit " + profile.name);
+        edit.addEventListener("click", () => editSavedProfile(profile.id));
+        const stopping = profile.id === generalId && generalActive;
+        const apply = document.createElement("button");
+        apply.type = "button";
+        apply.className = stopping ? "" : "primary";
+        apply.textContent = stopping ? "Stop" : "Apply to all";
+        apply.dataset.profileId = profile.id;
+        apply.dataset.action = "general";
+        apply.setAttribute("aria-label", (stopping ? "Stop " : "Apply to all: ") + profile.name);
+        // Without the helper the button is plainly disabled. While an action runs it stays
+        // focusable (aria-disabled) so that keyboard focus survives the redraw. The action
+        // function ignores clicks in both states.
+        apply.disabled = noHelper;
+        if (actionsBusy && !noHelper) apply.setAttribute("aria-disabled", "true");
+        apply.addEventListener("click", () => runGeneralProfileAction(stopping, profile.id));
+        if (savedProfileBusy && savedProfileBusy.id === profile.id && savedProfileBusy.stop === stopping) {
+          apply.setAttribute("aria-busy", "true");
+        }
+        buttons.set(profile.id + "|edit", edit);
+        buttons.set(profile.id + "|general", apply);
+        actions.append(edit, apply);
+        row.append(text, actions);
+        return row;
+      }));
+      // A rebuild drops the focused button so put focus back on its replacement.
+      if (focusedKey && buttons.has(focusedKey)) buttons.get(focusedKey).focus();
+    }
+
     element("profile-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
-        await request("/api/profiles", "POST", {
-          id: element("profile-id").value,
-          name: element("profile-name").value,
-          upload: impairment("upload"),
-          download: impairment("download"),
-          random_seed: optionalNumber("profile-seed"),
-          reroll_interval_seconds: Number(element("profile-reroll").value),
-          reroll_interval_randomness: {
-            variation_percent: Number(element("profile-reroll-variation").value),
-            enabled_probability: 100
-          },
-          outage_probability: Number(element("profile-outage-probability").value),
-          outage_duration_seconds: Number(element("profile-outage-duration").value),
-          outage_interval_seconds: Number(element("profile-outage-interval").value),
-          outage_duration_randomness: { variation_percent: 0, enabled_probability: 100 },
-          outage_interval_randomness: { variation_percent: 0, enabled_probability: 100 },
-          website_mode: element("profile-website-mode").value,
-          website_domains: commaList("profile-website-domains"),
-          website_randomness: {
-            variation_percent: 0,
-            enabled_probability: Number(element("profile-website-enabled").value)
-          }
-        });
+        const body = profileFormPayload(editingProfile);
+        await request("/api/profiles", "POST", body);
         refreshAfterSuccess("Profile saved.");
       } catch (error) {
         showMessage(error.message, "error");
       }
+    });
+
+    element("new-profile").addEventListener("click", () => {
+      element("profile-form").reset();
+      resetProfileEditing();
+      element("profile-id").focus();
+    });
+
+    privateDataLockHooks.push(() => {
+      element("profile-form").reset();
+      resetProfileEditing();
     });
 
     element("device-form").addEventListener("submit", async (event) => {
@@ -6015,6 +6774,20 @@ def _policies_payload(repository: ConfigRepository) -> Dict[str, Any]:
     }
 
 
+def _domains_from_payload(payload: Dict[str, Any]) -> Tuple[str, ...]:
+    """Return the unique normalized names of a call that sends domain or domains but not both.
+
+    Every name is checked before the caller saves anything so one bad name rejects the call.
+    """
+
+    if not isinstance(payload, dict) or ("domain" in payload) == ("domains" in payload):
+        raise ValueError("send either domain or domains")
+    raw = [payload["domain"]] if "domain" in payload else payload["domains"]
+    if not isinstance(raw, list) or not 1 <= len(raw) <= MAX_BATCH_DOMAINS:
+        raise ValueError("send between 1 and %d names" % MAX_BATCH_DOMAINS)
+    return tuple(dict.fromkeys(normalize_domain(item) for item in raw))
+
+
 def _domain_observation_payload(observation: DomainObservation) -> Dict[str, Any]:
     return {
         "domain": observation.domain,
@@ -6024,15 +6797,23 @@ def _domain_observation_payload(observation: DomainObservation) -> Dict[str, Any
     }
 
 
-def _labelled_domain_payloads(rows: Sequence[DomainObservation]) -> List[Dict[str, Any]]:
-    """Add a plain-language label and a seen-with guess to one device's observed names."""
+def _labelled_domain_payloads(
+    rows: Sequence[DomainObservation], blocked_domains: Collection[str] = ()
+) -> List[Dict[str, Any]]:
+    """Add a label and a group and a seen-with guess and the global block state to observed names.
+
+    A name counts as blocked only when it is an exact entry of the global block list because
+    the engine resolves each listed name on its own and does not match subdomains.
+    """
 
     hints = seen_with([(row.domain, row.first_seen) for row in rows])
     return [
         {
             **_domain_observation_payload(row),
             "label": label_domain(row.domain).as_dict(),
+            "group": group_domain(row.domain),
             "seen_with": hints.get(row.domain, []),
+            "globally_blocked": row.domain in blocked_domains,
         }
         for row in rows
     ]
@@ -6572,6 +7353,7 @@ class ControlServer(HTTPServer):
                 grouped.setdefault(address, []).append(observation)
             stations = self._station_identities(station_devices)
             labels_by_mac = self.repository.list_connected_device_labels()
+            blocked_names = frozenset(self.repository.get_website_policy().blocked_domains)
             devices = [
                 {
                     "ipv4_address": address,
@@ -6591,7 +7373,12 @@ class ControlServer(HTTPServer):
                         if address in assignments_by_address
                         else None
                     ),
-                    "domains": _labelled_domain_payloads(rows),
+                    "assigned_profile_id": (
+                        assignments_by_address[address].profile_id
+                        if address in assignments_by_address
+                        else None
+                    ),
+                    "domains": _labelled_domain_payloads(rows, blocked_names),
                 }
                 for address, rows in sorted(grouped.items())
             ]
@@ -7347,6 +8134,9 @@ class ControlServer(HTTPServer):
         if path == "/api/observations/add-global-block":
             return self._add_observation_to_global_block(payload)
 
+        if path == "/api/observations/remove-global-block":
+            return self._remove_observation_from_global_block(payload)
+
         if path == "/api/apply":
             return self._apply_configuration()
 
@@ -7570,15 +8360,16 @@ class ControlServer(HTTPServer):
     ) -> Tuple[int, str, bytes]:
         try:
             profile_id = payload["profile_id"]
-            domain = normalize_domain(payload["domain"])
+            names = _domains_from_payload(payload)
             profile = self.repository.get_profile(profile_id)
             if profile is None:
                 raise ValueError("profile does not exist")
-            updated = replace(
-                profile,
-                website_mode="allow_only",
-                website_domains=tuple(dict.fromkeys(profile.website_domains + (domain,))),
-            )
+            listed = tuple(dict.fromkeys(profile.website_domains + names))
+            if len(listed) > MAX_LISTED_DOMAINS:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "A profile can list %d websites. Remove some first." % MAX_LISTED_DOMAINS}
+                )
+            updated = replace(profile, website_mode="allow_only", website_domains=listed)
             self.repository.save_profile(updated)
         except (KeyError, TypeError, ValueError, StorageError):
             return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
@@ -7592,16 +8383,38 @@ class ControlServer(HTTPServer):
         self, payload: Dict[str, Any]
     ) -> Tuple[int, str, bytes]:
         try:
-            domain = normalize_domain(payload["domain"])
+            names = _domains_from_payload(payload)
             policy = self.repository.get_website_policy()
-            updated = replace(
-                policy,
-                blocked_domains=tuple(dict.fromkeys(policy.blocked_domains + (domain,))),
-            )
+            listed = tuple(dict.fromkeys(policy.blocked_domains + names))
+            if len(listed) > MAX_LISTED_DOMAINS:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {
+                        "error": "The global block list can hold %d names. Remove some first."
+                        % MAX_LISTED_DOMAINS
+                    }
+                )
+            updated = replace(policy, blocked_domains=listed)
             self.repository.save_website_policy(updated)
         except (KeyError, TypeError, ValueError, StorageError):
             return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
                 {"error": "could not add domain to global block list"}
+            )
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {"policies": _policies_payload(self.repository)}
+        )
+
+    def _remove_observation_from_global_block(
+        self, payload: Dict[str, Any]
+    ) -> Tuple[int, str, bytes]:
+        try:
+            names = _domains_from_payload(payload)
+            policy = self.repository.get_website_policy()
+            remaining = tuple(item for item in policy.blocked_domains if item not in names)
+            if remaining != policy.blocked_domains:
+                self.repository.save_website_policy(replace(policy, blocked_domains=remaining))
+        except (KeyError, TypeError, ValueError, StorageError):
+            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                {"error": "could not remove domain from global block list"}
             )
         return HTTPStatus.OK, "application/json", _json_bytes(
             {"policies": _policies_payload(self.repository)}

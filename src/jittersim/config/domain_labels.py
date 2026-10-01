@@ -6,9 +6,10 @@ teams.microsoft.com beats its parent microsoft.com. A name nobody can place is l
 registrable domain.
 """
 
+import re
 from dataclasses import dataclass
 from ipaddress import IPv4Address
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Pattern, Tuple
 
 from .models import normalize_domain
 from .service_catalogue import SERVICE_CATALOGUE
@@ -20,15 +21,47 @@ SEEN_WITH_WINDOW_SECONDS = 10
 # A shared name is only guessed to belong to an app when at most this many apps qualify.
 _SEEN_WITH_MAX_APPS = 2
 _SEEN_WITH_KINDS = frozenset({"cdn", "tracker", "unknown"})
+# Only these label kinds group by the label. Shared infrastructure never joins an app by guesswork.
+_GROUPED_KINDS = frozenset({"app", "system", "iot"})
 _FALLBACK_CATALOGUE_CATEGORY = "Online service"
 
-# Second-level suffixes under which the registrable domain has three labels.
+# Two-part public suffixes under which the registrable domain has three labels.
 _SECOND_LEVEL = frozenset({
     "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.nz", "co.jp",
     "co.in", "com.br", "com.mx", "co.za", "com.tr", "com.cn", "com.hk", "com.sg",
     "co.kr", "or.kr", "com.ar", "com.tw", "com.pl", "ne.jp", "or.jp", "co.id", "co.il",
     "com.my", "com.ph", "com.vn", "com.ua", "org.nz", "net.nz", "co.th",
+    "co.at", "or.at", "com.co", "com.pe", "com.ve", "co.ve", "com.ec", "com.uy", "com.pk",
+    "com.bd", "com.ng", "com.eg", "com.sa", "co.ke", "com.gh", "co.tz", "net.cn", "org.cn",
+    "gov.cn", "edu.au", "gov.au", "ac.nz", "govt.nz", "ac.jp", "go.jp", "gr.jp", "com.pt",
+    "com.gr", "com.ro", "com.es", "com.fr", "co.hu", "com.ru",
+    "gov.br", "org.br", "net.br", "edu.br", "sch.uk", "nhs.uk", "ltd.uk", "me.uk", "edu.sg",
+    "edu.my", "ed.jp", "gv.at",
 })
+# Hosting suffixes where every tenant is a different owner. The tenant label stays in the
+# registrable domain so two tenants never share a group.
+_TENANT_SUFFIXES = frozenset({
+    "github.io", "gitlab.io", "herokuapp.com", "vercel.app", "netlify.app", "pages.dev",
+    "workers.dev", "web.app", "firebaseapp.com", "appspot.com", "azurewebsites.net",
+    "blogspot.com", "wordpress.com", "onrender.com", "fly.dev", "myshopify.com",
+    "cloudfront.net", "trafficmanager.net", "azureedge.net", "akamaized.net", "b-cdn.net",
+})
+# Amazon names carry a region between the customer and the service so a suffix cannot find the
+# customer. Each pattern keeps the customer label and the service and drops the region.
+_AWS_SHAPES: Tuple[Tuple[Pattern, str], ...] = (
+    # <bucket>.s3.amazonaws.com and <bucket>.s3.<region>.amazonaws.com and <bucket>.s3-<region>...
+    (re.compile(r"^(?P<customer>.+?)\.s3(?:[.-][a-z0-9-]+)*\.amazonaws\.com$"),
+     "{customer}.s3.amazonaws.com"),
+    (re.compile(r"^(?P<customer>[^.]+)\.execute-api\.[a-z0-9-]+\.amazonaws\.com$"),
+     "{customer}.execute-api.amazonaws.com"),
+    # <lb>.<region>.elb.amazonaws.com and the newer <lb>.elb.<region>.amazonaws.com
+    (re.compile(
+        r"^(?P<customer>[^.]+)\.(?:[a-z0-9-]+\.)?elb(?:\.[a-z0-9-]+)?\.amazonaws\.com$"),
+     "{customer}.elb.amazonaws.com"),
+    # ec2-1-2-3-4.<region>.compute.amazonaws.com and ec2-1-2-3-4.compute-1.amazonaws.com
+    (re.compile(r"^(?P<customer>[^.]+)\.(?:[a-z0-9-]+\.)?compute(?:-1)?\.amazonaws\.com$"),
+     "{customer}.compute.amazonaws.com"),
+)
 # Reverse lookup names are shown whole because their labels are the address digits.
 _REVERSE_SUFFIXES = ("in-addr.arpa", "ip6.arpa")
 
@@ -338,15 +371,27 @@ def _is_reverse_name(name: str) -> bool:
 
 
 def registrable_domain(domain: str) -> str:
-    """Return the last two labels or the last three under a known second-level suffix.
+    """Return the owner's part of a name.
 
-    A bare IPv4 address and a reverse lookup name are returned whole.
+    That is the last two labels or the last three under a known two-part suffix. Under a hosting
+    suffix such as herokuapp.com it is the tenant label plus the suffix. A name that is only a
+    suffix and a bare IPv4 address and a reverse lookup name are returned whole.
     """
 
     normalized = normalize_domain(domain)
     if _is_ipv4_address(normalized) or _is_reverse_name(normalized):
         return normalized
+    if normalized.endswith(".amazonaws.com"):
+        for pattern, template in _AWS_SHAPES:
+            match = pattern.match(normalized)
+            if match:
+                return template.format(customer=match.group("customer"))
+    if normalized in _TENANT_SUFFIXES:
+        return normalized
     labels = normalized.split(".")
+    for start in range(1, len(labels)):
+        if ".".join(labels[start:]) in _TENANT_SUFFIXES:
+            return ".".join(labels[start - 1 :])
     if len(labels) <= 2:
         return ".".join(labels)
     if ".".join(labels[-2:]) in _SECOND_LEVEL:
@@ -364,6 +409,20 @@ def label_domain(domain: str) -> DomainLabel:
             name, kind, category = entry
             return DomainLabel(kind, name, category, True)
     return DomainLabel("unknown", registrable_domain(domain), UNKNOWN_CATEGORY, False)
+
+
+def group_domain(domain: str) -> Dict[str, str]:
+    """Return the group a name belongs to for display.
+
+    The group has a key and a name and the label kind of this name. The dashboard offers no
+    block-all button for a group of system or cdn names because it could cut a device off.
+    """
+
+    label = label_domain(domain)
+    if label.known and label.kind in _GROUPED_KINDS:
+        return {"key": "label:" + label.name.lower(), "name": label.name, "kind": label.kind}
+    registrable = registrable_domain(domain)
+    return {"key": "domain:" + registrable, "name": registrable, "kind": label.kind}
 
 
 def seen_with(observations: Iterable[Tuple[str, int]]) -> Dict[str, List[str]]:
