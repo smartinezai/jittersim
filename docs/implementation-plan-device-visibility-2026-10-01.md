@@ -254,7 +254,17 @@ one by one hides what the device is doing.
   existing endpoints with a `domains` list of up to 64 names. The call saves once
   so it is all or nothing and one invalid name rejects the whole call.
 - Open groups stay open across the dashboard refresh. The open keys are kept per
-  device address and group key the way the connected rows keep open label editors.
+  device address and group key (`<address>|<group key>`) in a module-level set that
+  the `<details>` `toggle` event updates. A render reads the set so a re-rendered
+  group opens again.
+- The header also says how many of its names are blocked (`All blocked` or `2 blocked`)
+  because a collapsed group hides the per-name Blocked badges.
+- A call takes at most 64 names. When a group needs more than 64 names changed the
+  header buttons are disabled with a note on the button. The per-name buttons still
+  work. The calls are not split into chunks because that would break all or nothing.
+- Each card keeps the profile picked in its select across refreshes (a pre-existing
+  defect that reset the select on every re-render). The remembered choice falls back
+  to the assigned profile and then the first profile when its profile is deleted.
 - A third-party name with no group of its own (for example `tags-eu.tiqcdn.com`)
   is not merged into an app by guesswork. It keeps its own row and the "seen with"
   hint from piece 3.
@@ -263,9 +273,13 @@ one by one hides what the device is doing.
 **Tests.** `group_domain` for Netflix across two registrable domains and
 ImmoScout24 across several subdomains including `s24-media` and a `co.uk` style
 suffix and a single-name group. The endpoints with a `domains` list: the bound of
-64 and duplicates and atomicity and one invalid name. A node test of the group
-row: collapsed by default and counts and order and open state surviving a
-re-render and the header buttons' states and request bodies.
+64 and duplicates and atomicity and one invalid name. Node tests of the pure group
+functions and of the real `renderObservations` and click handlers on a small fake
+DOM: collapsed by default and counts and order and open state surviving a
+re-render and the header buttons' states and request bodies. The fixture seed
+(`JITTERSIM_BROWSER_TEST_OBSERVATIONS=1`) holds the seven ImmoScout24 names and the
+two Netflix names for a look in a browser. There is no Playwright journey for this
+piece.
 
 ## 6. Protected clients look protected
 
