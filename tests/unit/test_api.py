@@ -2072,7 +2072,12 @@ class ControlServerTests(unittest.TestCase):
             with self.subTest(first=clients[0]["mac_address"]):
                 status, _, body = self.server.write_response_for(
                     "/api/groups",
-                    {"id": "lab", "name": "Lab", "profile_id": "slow", "connected_clients": clients},
+                    {
+                        "id": "lab",
+                        "name": "Lab",
+                        "profile_id": "slow",
+                        "connected_clients": clients,
+                    },
                 )
 
                 self.assertEqual(status, 409, body)
