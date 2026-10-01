@@ -29,7 +29,7 @@ def served_functions():
             'element("refresh-diagnostics").addEventListener',
             'element("download-backup").addEventListener',
         )
-        + block("function renderRouterWifi()", 'element("sync-router-ap").addEventListener')
+        + block("async function copyText(", 'element("sync-router-ap").addEventListener')
     )
 
 
