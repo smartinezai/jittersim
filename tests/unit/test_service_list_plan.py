@@ -151,9 +151,7 @@ class ServiceListCodecTests(unittest.TestCase):
             devices=() if general else (Device("alice", "Alice", "192.168.50.10", "slow"),),
             profiles={"slow": SLOW},
             general_profile=GeneralProfileRule(profile_id="slow") if general else None,
-            service_list_rules=rules or (
-                rule("streaming", "netflix.com", "nflxvideo.net"),
-            ),
+            service_list_rules=rules or (rule("streaming", "netflix.com", "nflxvideo.net"),),
         )
 
     def test_round_trips_beside_devices_and_beside_the_general_profile(self) -> None:

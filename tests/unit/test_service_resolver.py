@@ -35,9 +35,11 @@ class Clock:
 
 
 def payload(*lists):
-    return {"service_list_rules": [
-        {"list_id": list_id, "domains": list(domains)} for list_id, domains in lists
-    ]}
+    return {
+        "service_list_rules": [
+            {"list_id": list_id, "domains": list(domains)} for list_id, domains in lists
+        ]
+    }
 
 
 class RefresherTests(unittest.TestCase):
@@ -49,7 +51,9 @@ class RefresherTests(unittest.TestCase):
             "nflxvideo.net": [ip("203.0.113.2"), ip("203.0.113.3")],
             "claude.ai": [ip("198.51.100.7")],
         }
-        self.applied = payload(("streaming", ["netflix.com", "nflxvideo.net"]), ("ai", ["claude.ai"]))
+        self.applied = payload(
+            ("streaming", ["netflix.com", "nflxvideo.net"]), ("ai", ["claude.ai"])
+        )
         self.refresher = ServiceAddressRefresher(
             applied_plan=lambda: self.applied,
             helper_client=self.helper,
@@ -124,8 +128,10 @@ class RefresherTests(unittest.TestCase):
             return self.dns.get(domain, ())
 
         refresher = ServiceAddressRefresher(
-            applied_plan=lambda: self.applied, helper_client=self.helper,
-            resolver=resolver, clock=self.clock,
+            applied_plan=lambda: self.applied,
+            helper_client=self.helper,
+            resolver=resolver,
+            clock=self.clock,
         )
 
         self.assertTrue(refresher.refresh())
@@ -143,8 +149,10 @@ class RefresherTests(unittest.TestCase):
         original = self.helper.service_addresses
         self.helper.service_addresses = lambda addresses: (original(addresses), sent.set())[0]
         refresher = ServiceAddressRefresher(
-            applied_plan=lambda: self.applied, helper_client=self.helper,
-            resolver=lambda domain: self.dns.get(domain, ()), clock=self.clock,
+            applied_plan=lambda: self.applied,
+            helper_client=self.helper,
+            resolver=lambda domain: self.dns.get(domain, ()),
+            clock=self.clock,
             poll_seconds=0.01,
         )
 

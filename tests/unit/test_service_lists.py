@@ -21,9 +21,7 @@ class ServiceCatalogueTests(unittest.TestCase):
             with self.subTest(service=service.key):
                 self.assertTrue(service.name)
                 self.assertTrue(service.domains)
-                ServiceList(
-                    id="check", name="Check", profile_id="slow", hostnames=service.domains
-                )
+                ServiceList(id="check", name="Check", profile_id="slow", hostnames=service.domains)
 
     def test_no_hostname_belongs_to_two_services_so_any_mix_can_be_listed(self) -> None:
         owners = {}
@@ -47,8 +45,10 @@ class ServiceCatalogueTests(unittest.TestCase):
     def test_expansion_keeps_catalogue_order_then_custom_names_without_duplicates(self) -> None:
         domains = expand_service_domains(("netflix",), ("Example.com", "netflix.com"))
 
-        self.assertEqual(domains[: len(catalogue_service("netflix").domains)],
-                         catalogue_service("netflix").domains)
+        self.assertEqual(
+            domains[: len(catalogue_service("netflix").domains)],
+            catalogue_service("netflix").domains,
+        )
         self.assertEqual(domains[-1], "example.com")
         self.assertEqual(len(domains), len(set(domains)))
 
@@ -154,7 +154,9 @@ class ServiceListStorageTests(unittest.TestCase):
 
         self.assertGreater(repository.get_runtime_state().configuration_version, before)
         (saved,) = repository.list_service_lists()
-        self.assertEqual((saved.name, saved.profile_id, saved.services), ("S2", "slower", ("claude",)))
+        self.assertEqual(
+            (saved.name, saved.profile_id, saved.services), ("S2", "slower", ("claude",))
+        )
 
     def test_a_list_cannot_reference_a_missing_profile(self) -> None:
         from jittersim.config.storage import StorageError

@@ -31,7 +31,9 @@ def list_rule(list_id: str, *domains: str) -> ServiceListRule:
 
 
 def render(plan, service_addresses=None):
-    commands = render_command_plan(plan=plan, topology=TOPOLOGY, service_addresses=service_addresses)
+    commands = render_command_plan(
+        plan=plan, topology=TOPOLOGY, service_addresses=service_addresses
+    )
     return commands[0].stdin, commands[1:]
 
 
@@ -95,15 +97,21 @@ class ServiceListRenderTests(unittest.TestCase):
         script = render(self.device_plan())[0].splitlines()
 
         device_rule = next(
-            i for i, line in enumerate(script)
+            i
+            for i, line in enumerate(script)
             if "ip daddr 192.168.50.10 meta mark 0 meta mark set 1" in line
         )
-        rewrite = next(i for i, line in enumerate(script) if "meta mark set 2" in line
-                       and line.startswith("add rule netdev"))
+        rewrite = next(
+            i
+            for i, line in enumerate(script)
+            if "meta mark set 2" in line and line.startswith("add rule netdev")
+        )
         self.assertLess(device_rule, rewrite)
 
     def test_known_addresses_are_added_in_the_same_batch(self) -> None:
-        plan = self.device_plan(list_rule("streaming", "netflix.com"), list_rule("work", "a.example"))
+        plan = self.device_plan(
+            list_rule("streaming", "netflix.com"), list_rule("work", "a.example")
+        )
 
         script, _ = render(
             plan,
@@ -122,11 +130,19 @@ class ServiceListRenderTests(unittest.TestCase):
     def test_every_list_has_traffic_control_queues_in_both_directions(self) -> None:
         _, commands = render(self.device_plan())
 
-        replacements = [command for command in commands if command.arguments[:2] == ("qdisc", "replace")
-                        and "netem" in command.arguments]
+        replacements = [
+            command
+            for command in commands
+            if command.arguments[:2] == ("qdisc", "replace") and "netem" in command.arguments
+        ]
         self.assertEqual(len(replacements), 4)
-        filters = [command.arguments for command in commands if command.arguments[0] == "filter"
-                   and "handle" in command.arguments and "2" in command.arguments]
+        filters = [
+            command.arguments
+            for command in commands
+            if command.arguments[0] == "filter"
+            and "handle" in command.arguments
+            and "2" in command.arguments
+        ]
         self.assertTrue(any("eth0" in arguments for arguments in filters))
         self.assertTrue(any("wlan0" in arguments for arguments in filters))
 

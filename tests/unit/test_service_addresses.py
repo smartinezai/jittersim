@@ -10,7 +10,12 @@ from jittersim.engine.compiler import compile_plan
 from jittersim.engine.plan import ServiceListRule
 from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.executor import FakeExecutor
-from jittersim.networking.helper import HelperClient, HelperClientError, HelperService, UnixHelperServer
+from jittersim.networking.helper import (
+    HelperClient,
+    HelperClientError,
+    HelperService,
+    UnixHelperServer,
+)
 from jittersim.networking.service_addresses import ServiceAddressBook
 from jittersim.networking.topology import Topology
 
@@ -90,7 +95,9 @@ class ServiceAddressBookTests(unittest.TestCase):
         )
 
         self.assertEqual(len(self.book.snapshot(["streaming"])["streaming"]), 3)
-        self.assertEqual(set(fresh) - set(evicted), set(self.book.snapshot(["streaming"])["streaming"]))
+        self.assertEqual(
+            set(fresh) - set(evicted), set(self.book.snapshot(["streaming"])["streaming"])
+        )
 
     def test_discard_forgets_addresses_that_never_reached_the_kernel(self) -> None:
         self.book.record("streaming", [ip("203.0.113.1"), ip("203.0.113.2")])
@@ -117,7 +124,8 @@ class ServiceAddressHelperTests(unittest.TestCase):
         self.plan_path = Path(self.directory.name) / "active-plan.json"
         self.service = HelperService(
             NetworkApplier(
-                executor=self.executor, topology=Topology(uplink_interface="eth0", test_interface="wlan0")
+                executor=self.executor,
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
             ),
             active_plan_path=self.plan_path,
             service_address_clock=self.clock,
@@ -131,11 +139,16 @@ class ServiceAddressHelperTests(unittest.TestCase):
         return self.service.handle_payload({"action": "service-addresses", "addresses": addresses})
 
     def nft_scripts(self):
-        return [command.stdin for command in self.executor.commands
-                if command.executable == "nft" and command.stdin]
+        return [
+            command.stdin
+            for command in self.executor.commands
+            if command.executable == "nft" and command.stdin
+        ]
 
     def test_the_helper_announces_service_list_support(self) -> None:
-        self.assertIs(self.service.handle_payload({"action": "capabilities"})["service_lists"], True)
+        self.assertIs(
+            self.service.handle_payload({"action": "capabilities"})["service_lists"], True
+        )
 
     def test_nothing_is_added_while_no_plan_has_lists(self) -> None:
         self.assertEqual(self.send({"streaming": ["203.0.113.1"]})["added"], 0)
@@ -177,16 +190,23 @@ class ServiceAddressHelperTests(unittest.TestCase):
 
         response = self.send(
             {
-                "streaming": ["127.0.0.1", "192.168.50.1", "10.1.2.3", "172.16.0.9", "169.254.1.1",
-                              "224.0.0.1", "0.0.0.0", "240.0.0.1", "203.0.113.5"],
+                "streaming": [
+                    "127.0.0.1",
+                    "192.168.50.1",
+                    "10.1.2.3",
+                    "172.16.0.9",
+                    "169.254.1.1",
+                    "224.0.0.1",
+                    "0.0.0.0",
+                    "240.0.0.1",
+                    "203.0.113.5",
+                ],
                 "other": ["203.0.113.6"],
             }
         )
 
         self.assertEqual(response["added"], 1)
-        self.assertEqual(
-            self.nft_scripts(), ["add element inet jittersim svc_2 { 203.0.113.5 }\n"]
-        )
+        self.assertEqual(self.nft_scripts(), ["add element inet jittersim svc_2 { 203.0.113.5 }\n"])
 
     def test_malformed_requests_are_rejected_before_any_command_runs(self) -> None:
         self.apply(list_plan())
@@ -236,8 +256,11 @@ class ServiceAddressHelperTests(unittest.TestCase):
         response = self.send({"streaming": ["203.0.113.2"]})
 
         self.assertEqual(response["added"], 1)
-        deletes = [c for c in self.executor.commands if c.arguments[:2] == ("-f", "-")
-                   and "delete element" in (c.stdin or "")]
+        deletes = [
+            c
+            for c in self.executor.commands
+            if c.arguments[:2] == ("-f", "-") and "delete element" in (c.stdin or "")
+        ]
         self.assertEqual(len(deletes), 1)
         self.assertEqual(deletes[0].stdin, "delete element inet jittersim svc_2 { 203.0.113.1 }\n")
         self.assertTrue(deletes[0].ignore_failure)
@@ -258,7 +281,8 @@ class ServiceAddressHelperTests(unittest.TestCase):
         self.apply(list_plan())
         restarted = HelperService(
             NetworkApplier(
-                executor=self.executor, topology=Topology(uplink_interface="eth0", test_interface="wlan0")
+                executor=self.executor,
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
             ),
             active_plan_path=self.plan_path,
         )
@@ -308,7 +332,8 @@ class ServiceAddressClientTests(unittest.TestCase):
         self.executor = FakeExecutor()
         self.service = HelperService(
             NetworkApplier(
-                executor=self.executor, topology=Topology(uplink_interface="eth0", test_interface="wlan0")
+                executor=self.executor,
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
             )
         )
         self.socket_path = Path(self.directory.name) / "helper.sock"

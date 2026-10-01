@@ -48,7 +48,9 @@ class ServiceListApiTests(unittest.TestCase):
         }
 
     def post(self, path="/api/service-lists", body=None):
-        status, _, payload = self.server.write_response_for(path, self.body if body is None else body)
+        status, _, payload = self.server.write_response_for(
+            path, self.body if body is None else body
+        )
         return status, json.loads(payload)
 
     def test_the_routes_are_private(self) -> None:
@@ -87,7 +89,9 @@ class ServiceListApiTests(unittest.TestCase):
     def test_a_list_needs_no_saved_device_and_works_with_the_general_profile(self) -> None:
         repository = ConfigRepository(":memory:")
         self.addCleanup(repository.close)
-        repository.save_profile(Profile(id="choppy", name="Choppy", upload=Impairment(delay_ms=300)))
+        repository.save_profile(
+            Profile(id="choppy", name="Choppy", upload=Impairment(delay_ms=300))
+        )
         server = ControlServer(("127.0.0.1", 0), repository)
         self.addCleanup(server.server_close)
         server.helper_client = Helper()
@@ -128,8 +132,13 @@ class ServiceListApiTests(unittest.TestCase):
         self.post()
 
         status, payload = self.post(
-            body={**self.body, "id": "work", "name": "Work", "services": [],
-                  "hostnames": ["www.netflix.com"]}
+            body={
+                **self.body,
+                "id": "work",
+                "name": "Work",
+                "services": [],
+                "hostnames": ["www.netflix.com"],
+            }
         )
 
         self.assertEqual(status, 409)
@@ -139,9 +148,7 @@ class ServiceListApiTests(unittest.TestCase):
     def test_a_disabled_list_may_overlap_until_it_is_enabled(self) -> None:
         self.post()
 
-        status, _ = self.post(
-            body={**self.body, "id": "spare", "name": "Spare", "enabled": False}
-        )
+        status, _ = self.post(body={**self.body, "id": "spare", "name": "Spare", "enabled": False})
         self.assertEqual(status, 200)
         status, payload = self.post(body={**self.body, "id": "spare", "name": "Spare"})
         self.assertEqual(status, 409)

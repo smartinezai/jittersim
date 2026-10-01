@@ -20,6 +20,8 @@ is a private lab tool, not a replacement for a home router.
 - Hardware mode with a protected Pi helper that applies and resets plans.
 - Browser service profiles that shape selected HTTPS hostnames on a managed Mac
   browser while other proxied sites keep the device's ordinary profile.
+- Service lists that give chosen apps and sites their own profile on every
+  affected device with no per-device setup.
 
 ### Schedules, timers and randomness
 
@@ -232,6 +234,40 @@ packets or measure download bytes. Device-data mode counts IPv4 upload and
 download bytes for the selected device, so a long Netflix stream can advance a
 progression even when it creates few new DNS queries.
 
+### Service lists
+
+A **Service list** applies a profile to chosen apps and sites on every affected
+device. Tick services from the catalogue (LinkedIn, Microsoft Teams, ChatGPT,
+Claude, Netflix, YouTube and more) and add any extra hostnames then choose the
+profile for them. You can keep several lists with a different profile each.
+
+While a list is enabled, traffic from an affected device to its services gets
+that profile instead of whatever the device would otherwise get. That
+includes no profile at all, a device, group, schedule, timer, progression or
+quota profile, a browser service profile and the general profile. A device with
+no profile browses normally until it opens one of the listed services. All
+other traffic is untouched. The list applies to upload and download traffic of
+any protocol including QUIC. Devices in **Unaffected by profiles** are never
+touched. Global MAC and website rules still apply. A random outage or website
+list from the device's own profile does not cut a listed service.
+
+Only the profile's delay, jitter, loss, speed limit, reordering, duplication and
+corruption settings are used. Its website list and random outages are not. A
+service list uses the saved profile as it is, so random variation in that
+profile is not rerolled. All affected devices share one speed limit for each
+list in the same way the general profile shares its limit. Delay, jitter and
+loss apply to each packet.
+
+Matching is by destination address. The Pi resolves the hostnames of every
+enabled list about once a minute and keeps those addresses in a set per list.
+The browser proxy also checks the lists first by exact hostname. A hostname
+also matches its subdomains and can only be in one enabled list. Hostnames
+that share a server with other sites can slow those sites too. Names resolved
+by the Pi can differ from the names a device receives from a content network,
+so verify a real session and add the hostnames it actually uses. Encrypted DNS,
+VPNs and fixed server addresses are not covered. One applied plan supports at
+most 15 combined devices, service rules and service lists.
+
 ### General profile
 
 Choose a saved profile under **General profile** then click **Apply to all**.
@@ -247,6 +283,7 @@ apply to all clients.
 
 While the general profile is active it takes priority over saved device,
 group, schedule, timer, progression, browser service and quota profile rules.
+Service lists still take priority over the general profile for their services.
 Those settings remain saved. Quota charging pauses during this mode. Timers
 and schedules keep their original times. The traffic chart shows the shared
 limit and combined affected traffic rather than an individual device limit.

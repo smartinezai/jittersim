@@ -46,8 +46,9 @@ class ServiceListProxyTests(unittest.TestCase):
             devices=(Device("alice", "Alice", str(ALICE), "slow"),),
             profiles={"slow": SLOW},
             service_assignment_rules=(
-                ServiceAssignmentRule("video", "alice", ALICE, ("netflix.com",), 0,
-                                      SLOW.upload, SLOW.download),
+                ServiceAssignmentRule(
+                    "video", "alice", ALICE, ("netflix.com",), 0, SLOW.upload, SLOW.download
+                ),
             ),
             service_list_rules=(listed("streaming", "netflix.com"),),
         )
@@ -113,12 +114,14 @@ class ServiceListProxyTests(unittest.TestCase):
                 )
                 if outage:
                     with self.assertRaisesRegex(ProxyError, "temporarily disconnected"):
-                        select_mark(plan, client_ip=STRANGER, host="example.com",
-                                    client_mac=AFFECTED)
+                        select_mark(
+                            plan, client_ip=STRANGER, host="example.com", client_mac=AFFECTED
+                        )
                 else:
                     self.assertEqual(
-                        select_mark(plan, client_ip=STRANGER, host="example.com",
-                                    client_mac=AFFECTED),
+                        select_mark(
+                            plan, client_ip=STRANGER, host="example.com", client_mac=AFFECTED
+                        ),
                         (1, "general-profile"),
                     )
 

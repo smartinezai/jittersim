@@ -49,7 +49,9 @@ class ServiceListEngineTests(unittest.TestCase):
         self.save_list("on")
         self.save_list("off", services=("claude",), enabled=False)
 
-        self.assertEqual([rule.list_id for rule in build_service_list_rules(self.repository)], ["on"])
+        self.assertEqual(
+            [rule.list_id for rule in build_service_list_rules(self.repository)], ["on"]
+        )
 
     def test_a_list_with_a_missing_profile_cannot_be_applied(self) -> None:
         self.save_list()
@@ -122,8 +124,9 @@ class RuntimeServiceListTests(unittest.TestCase):
         self.repository.save_profile(Profile(id="normal", name="Normal"))
         self.repository.save_profile(CHOPPY)
         self.repository.save_service_list(
-            ServiceList(id="streaming", name="Streaming", profile_id="choppy",
-                        services=("netflix",))
+            ServiceList(
+                id="streaming", name="Streaming", profile_id="choppy", services=("netflix",)
+            )
         )
         self.helper = _Helper()
 
