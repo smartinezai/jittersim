@@ -2,10 +2,12 @@
 
 import subprocess
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from jittersim.networking.applier import NetworkApplier
-from jittersim.networking.dashboard_access import identify_peer
+from jittersim.networking.dashboard_access import AccessStore, identify_peer
 from jittersim.networking.executor import SubprocessExecutor
+from jittersim.networking.helper import HelperService
 from jittersim.networking.topology import Topology
 
 
@@ -30,7 +32,33 @@ def main():
         assert identity == {"network": "management", "mac_address": mac, "can_register": True}, identity
         run("ip", "neigh", "replace", peer, "lladdr", mac, "nud", "stale", "dev", interface)
         assert identify_peer(applier, peer)["can_register"] is False
-        print("Real Linux peer lookup verifies the interface and rejects stale identity.")
+        refreshed = identify_peer(applier, peer, require_reachable=False)
+        assert refreshed["mac_address"] == mac and not refreshed["can_register"]
+
+        class WifiPeerApplier(NetworkApplier):
+            def list_connected_stations(self):
+                return f"Station {mac} (on {interface})\n"
+
+        wifi_applier = WifiPeerApplier(
+            executor=SubprocessExecutor(), topology=Topology("uplink-id0", interface)
+        )
+        with TemporaryDirectory() as directory:
+            store = AccessStore(Path(directory) / "access.json")
+            store.add(mac)
+            request = {"action": "dashboard-access", "peer": peer}
+            for state in ("stale", "delay", "probe"):
+                run("ip", "neigh", "del", peer, "dev", interface)
+                run("ip", "neigh", "replace", peer, "lladdr", mac, "nud", state, "dev", interface)
+                service = HelperService(wifi_applier, access_store=store)
+                status = service.handle_payload(request)
+                assert status["allowed"] and not status["can_register"], status
+                assert not service.handle_payload({**request, "operation": "register-self"})["ok"]
+            for state in ("failed", "incomplete"):
+                run("ip", "neigh", "del", peer, "dev", interface)
+                run("ip", "neigh", "replace", peer, "nud", state, "dev", interface)
+                service = HelperService(wifi_applier, access_store=store)
+                assert not service.handle_payload(request)["allowed"]
+        print("Real Linux peer lookup preserves saved access during address refresh and requires fresh enrollment.")
     finally:
         run("ip", "link", "delete", interface)
 

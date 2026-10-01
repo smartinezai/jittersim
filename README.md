@@ -159,6 +159,8 @@ reboot and upgrades in root-owned `/etc/jittersim/dashboard-access.json`.
 Include this file in private Pi backups. Dashboard SQLite downloads do not
 contain it. The file contains device addresses, optional names and addition
 times. It contains no tokens or traffic history and removal deletes the entry.
+Saved access remains usable while the Pi refreshes a connected device's
+address. Adding access requires a freshly confirmed device address.
 
 An initial upgrade of an older release still needs wireless access through
 the real router or a local Pi terminal because its firewall predates sign-in.

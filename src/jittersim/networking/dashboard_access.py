@@ -143,7 +143,7 @@ class AccessStore:
                 Path(temporary).unlink(missing_ok=True)
 
 
-def identify_peer(applier: Any, peer: str) -> Dict[str, Any]:
+def identify_peer(applier: Any, peer: str, *, require_reachable: bool = True) -> Dict[str, Any]:
     """Resolve only a direct peer using kernel routes and current Wi-Fi stations."""
     address = IPv4Address(peer)
     if address.is_loopback:
@@ -161,7 +161,13 @@ def identify_peer(applier: Any, peer: str) -> Dict[str, Any]:
     neighbors = applier.dashboard_peer_neighbors(str(address), interface)
     matches = [item for item in neighbors if item.get("dst") == str(address)
                and item.get("dev") == interface]
-    if len(matches) != 1 or matches[0].get("state") != ["REACHABLE"]:
+    if len(matches) != 1:
+        return result
+    state = matches[0].get("state")
+    reachable = state == ["REACHABLE"]
+    # Saved access can use a valid mapping while Linux refreshes reachability.
+    # Adding access still requires a freshly confirmed mapping.
+    if not reachable and (require_reachable or state not in (["STALE"], ["DELAY"], ["PROBE"])):
         return result
     mac = normalize_mac(matches[0].get("lladdr"))
     if test_peer:
@@ -172,5 +178,5 @@ def identify_peer(applier: Any, peer: str) -> Dict[str, Any]:
                               station_output, re.MULTILINE)
         if [value.lower() for value in stations].count(mac) != 1:
             return result
-    result.update(mac_address=mac, can_register=True)
+    result.update(mac_address=mac, can_register=reachable)
     return result

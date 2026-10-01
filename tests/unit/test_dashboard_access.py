@@ -35,7 +35,8 @@ class PeerApplier:
         return self.stations
 
 
-def test_saved_identity_survives_restart_and_ip_changes(tmp_path):
+@pytest.mark.parametrize("state", ["REACHABLE", "STALE", "DELAY", "PROBE"])
+def test_saved_identity_survives_restart_and_ip_changes(tmp_path, state):
     store = AccessStore(tmp_path / "access.json")
     applier = PeerApplier()
     service = HelperService(applier, access_store=store)
@@ -45,6 +46,7 @@ def test_saved_identity_survives_restart_and_ip_changes(tmp_path):
     restarted = HelperService(applier, access_store=AccessStore(store.path))
     new_ip = "192.168.50.180"
     applier.neighbors[0]["dst"] = new_ip
+    applier.neighbors[0]["state"] = [state]
     assert restarted.handle_payload({**request, "operation": "status", "peer": new_ip})["allowed"]
     # Reusing the old IP does not inherit the saved hardware address.
     applier.neighbors[0].update(dst=PEER, lladdr="02:00:00:00:00:02")
@@ -83,6 +85,53 @@ def test_routed_management_caller_cannot_enroll_its_gateway():
     identity = identify_peer(applier, "10.20.30.40")
     assert identity["network"] == "management"
     assert not identity["can_register"]
+
+
+@pytest.mark.parametrize("state", ["STALE", "DELAY", "PROBE"])
+def test_saved_wifi_access_survives_neighbor_refresh_without_enrollment(tmp_path, state):
+    applier = PeerApplier()
+    applier.neighbors[0]["state"] = [state]
+    store = AccessStore(tmp_path / "access.json")
+    store.add(MAC)
+    service = HelperService(applier, access_store=store)
+    request = {"action": "dashboard-access", "peer": PEER}
+
+    status = service.handle_payload(request)
+    assert status["allowed"] is True
+    assert status["can_register"] is False
+    assert status["mac_address"] == MAC
+    assert not service.handle_payload({**request, "operation": "register-self"})["ok"]
+    assert service.handle_payload({**request, "operation": "remove", "mac_address": MAC})["ok"]
+    assert not service.handle_payload(request)["allowed"]
+
+
+@pytest.mark.parametrize("state", ["STALE", "DELAY", "PROBE"])
+def test_neighbor_refresh_does_not_grant_unsaved_or_unassociated_access(tmp_path, state):
+    applier = PeerApplier()
+    applier.neighbors[0]["state"] = [state]
+    store = AccessStore(tmp_path / "access.json")
+    service = HelperService(applier, access_store=store)
+    request = {"action": "dashboard-access", "peer": PEER}
+
+    with patch("jittersim.networking.helper.time.monotonic", return_value=10):
+        assert not service.handle_payload(request)["allowed"]
+    store.add(MAC)
+    applier.stations = ""
+    with patch("jittersim.networking.helper.time.monotonic", return_value=11.1):
+        assert not service.handle_payload(request)["allowed"]
+
+
+@pytest.mark.parametrize(
+    "state", [["FAILED"], ["INCOMPLETE"], ["PERMANENT"], ["NOARP"], [], None,
+              ["REACHABLE", "FAILED"]],
+)
+def test_saved_wifi_access_rejects_unusable_neighbor_states(tmp_path, state):
+    applier = PeerApplier()
+    applier.neighbors[0]["state"] = state
+    store = AccessStore(tmp_path / "access.json")
+    store.add(MAC)
+    service = HelperService(applier, access_store=store)
+    assert not service.handle_payload({"action": "dashboard-access", "peer": PEER})["allowed"]
 
 
 def test_registration_revalidates_and_removal_is_immediate(tmp_path):

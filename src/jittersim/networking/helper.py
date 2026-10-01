@@ -196,7 +196,9 @@ class HelperService:
             if operation == "status" and cached is not None and now - cached[0] < 1:
                 identity = dict(cached[1])
             else:
-                identity = identify_peer(self._applier, peer)
+                identity = identify_peer(
+                    self._applier, peer, require_reachable=operation == "register-self"
+                )
                 self._peer_cache = {key: value for key, value in self._peer_cache.items()
                                     if now - value[0] < 1}
                 if len(self._peer_cache) < MAX_CONNECTED_CLIENTS:
