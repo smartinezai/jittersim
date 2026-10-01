@@ -439,16 +439,18 @@ DASHBOARD_HTML = """<!doctype html>
     .observation-search-link { color: #8cc4ff; }
     .observation-domain-count { color: #8de2bc; white-space: nowrap; }
     .observation-group-item { list-style: none; }
-    .observation-group { margin-top: 0; padding-top: 0; border-top: 0; border-radius: 0.35rem; background: #102238; color: #c7d7eb; }
-    .observation-group-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem; padding: 0.45rem 0.55rem; border-radius: 0.35rem; color: #c7d7eb; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; font-weight: 400; list-style: none; }
-    .observation-group-summary::-webkit-details-marker { display: none; }
-    .observation-group-summary::before { content: ""; flex: none; width: 0.45rem; height: 0.45rem; margin: 0 0.15rem 0 0.1rem; border-right: 2px solid #8cc4ff; border-bottom: 2px solid #8cc4ff; transform: rotate(-45deg); }
-    .observation-group[open] > .observation-group-summary::before { transform: rotate(45deg); }
-    .observation-group-title { flex: 1 1 12rem; min-width: 0; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .observation-group { border-radius: 0.35rem; background: #102238; color: #c7d7eb; }
+    .observation-group-header { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem; padding: 0.45rem 0.55rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
+    .observation-group-header button { margin-top: 0; min-width: 9.5rem; }
+    .observation-group-header .observation-group-toggle { display: flex; flex: 1 1 18rem; align-items: center; gap: 0.5rem 1rem; min-width: 0; padding: 0.1rem 0; border: 0; border-radius: 0.35rem; background: none; color: inherit; font: inherit; font-weight: 400; text-align: left; }
+    .observation-group-header .observation-group-toggle:hover:not(:disabled) { background: none; }
+    .observation-group-chevron { flex: none; width: 0.45rem; height: 0.45rem; margin: 0 0.15rem 0 0.1rem; border-right: 2px solid #8cc4ff; border-bottom: 2px solid #8cc4ff; transform: rotate(-45deg); }
+    .observation-group-toggle[aria-expanded="true"] .observation-group-chevron { transform: rotate(45deg); }
+    .observation-group-title { flex: 1 1 10rem; min-width: 0; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     .observation-group-name { display: block; color: #edf5ff; font-size: 0.88rem; font-weight: 650; overflow-wrap: anywhere; }
-    .observation-group-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0.15rem 0.5rem; margin-top: 0.1rem; color: #9fb3ca; font-size: 0.76rem; }
-    .observation-group-summary button { margin-top: 0; min-width: 9.5rem; }
+    .observation-group-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0.15rem 0.5rem; margin-top: 0.1rem; color: #9fb3ca; font-size: 0.76rem; font-weight: 400; }
     .observation-group-body { margin: 0 0.55rem 0.55rem 1.1rem; padding-left: 0.6rem; border-left: 2px solid #2b435f; }
+    .observation-group-body[hidden] { display: none; }
     .policy-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
     .policy-grid > div { min-width: 0; }
     .policy-note, .form-note { margin: 0.7rem 0 0; color: #91a8c1; font-size: 0.82rem; }
@@ -3296,29 +3298,53 @@ DASHBOARD_HTML = """<!doctype html>
       const blocked = group.names.filter((observation) => observation.globally_blocked === true);
       const open = group.names.filter((observation) => observation.globally_blocked !== true);
       const domains = (list) => list.map((observation) => observation.domain);
-      if (blocked.length > 0 && open.length === 0) {
-        return {
-          label: "Unblock all",
-          path: blockButtonState({ globally_blocked: true }).path,
-          domains: domains(blocked)
-        };
-      }
-      return {
-        label: blocked.length > 0 ? "Block remaining" : "Block all",
-        path: blockButtonState({ globally_blocked: false }).path,
-        domains: domains(open)
-      };
+      const unblocking = blocked.length > 0 && open.length === 0;
+      const action = unblocking
+        ? {
+            label: "Unblock all",
+            path: blockButtonState({ globally_blocked: true }).path,
+            domains: domains(blocked)
+          }
+        : {
+            label: blocked.length > 0 ? "Block remaining" : "Block all",
+            path: blockButtonState({ globally_blocked: false }).path,
+            domains: domains(open)
+          };
+      action.ariaLabel = action.label + " " + groupSubject(group, action.domains.length);
+      const note = groupLimitNote(action.domains.length);
+      action.disabled = note !== "";
+      action.title = note || action.ariaLabel;
+      return action;
     }
 
     function groupProfileAction(group, profile) {
-      if (!profile) return { label: "Add all to profile", disabled: true, domains: [] };
+      const count = group.names.length;
+      if (!profile) {
+        const text = "Add all " + groupSubject(group, count) + " to a profile";
+        return { label: "Add all to profile", disabled: true, domains: [], ariaLabel: text, title: text };
+      }
       const missing = group.names
         .map((observation) => observation.domain)
         .filter((domain) => !profileButtonState(domain, profile).disabled);
       if (missing.length === 0) {
-        return { label: "All already in " + profile.name, disabled: true, domains: [] };
+        const text = "All " + groupSubject(group, count) + " are already in " + profile.name;
+        return {
+          label: "All already in " + profile.name,
+          disabled: true,
+          domains: [],
+          ariaLabel: text,
+          title: text
+        };
       }
-      return { label: "Add all to profile", disabled: false, domains: missing };
+      const text = "Add all " + groupSubject(group, missing.length) + " to " + profile.name;
+      const note = groupLimitNote(missing.length);
+      return {
+        label: "Add all to profile",
+        disabled: note !== "",
+        domains: missing,
+        ariaLabel: text,
+        title: note || text
+      };
     }
 
     function groupNamesText(count) {
@@ -3369,6 +3395,14 @@ DASHBOARD_HTML = """<!doctype html>
 
     function observationGroupOpenKey(address, groupKey) {
       return address + "|" + groupKey;
+    }
+
+    // An id that is unique for one device and group and holds no spaces so aria-controls works.
+    function observationGroupDomId(address, groupKey) {
+      const encoded = Array.from(observationGroupOpenKey(address, groupKey)).map((character) =>
+        /[A-Za-z0-9-]/.test(character) ? character : "_" + character.codePointAt(0).toString(16) + "_"
+      );
+      return "observation-group-" + encoded.join("");
     }
 
     function chosenObservationProfile(choices, deviceKey, profiles, assignedId) {
@@ -3553,26 +3587,40 @@ DASHBOARD_HTML = """<!doctype html>
           item.append(domain, queryCount, profileButton, blockButton);
           return item;
         };
-        // Two or more names of one app. Closed by default. The header buttons act on every name.
+        // Two or more names of one app. Closed by default. The header holds a toggle button and
+        // the action buttons side by side. The action buttons act on every name of the group.
         const buildGroup = (group) => {
           const item = document.createElement("li");
           item.className = "observation-group-item";
-          const details = document.createElement("details");
-          details.className = "observation-group";
+          const wrapper = document.createElement("div");
+          wrapper.className = "observation-group";
           const openKey = observationGroupOpenKey(device.ipv4_address, group.key);
-          details.open = openObservationGroups.has(openKey);
-          details.addEventListener("toggle", () => {
-            if (details.open) openObservationGroups.add(openKey);
+          const header = document.createElement("div");
+          header.className = "observation-group-header";
+          const body = document.createElement("div");
+          body.className = "observation-group-body";
+          body.id = observationGroupDomId(device.ipv4_address, group.key);
+          const toggle = document.createElement("button");
+          toggle.type = "button";
+          toggle.className = "observation-group-toggle";
+          toggle.setAttribute("aria-controls", body.id);
+          const setOpen = (open) => {
+            toggle.setAttribute("aria-expanded", open ? "true" : "false");
+            body.hidden = !open;
+            if (open) openObservationGroups.add(openKey);
             else openObservationGroups.delete(openKey);
-          });
-          const summary = document.createElement("summary");
-          summary.className = "observation-group-summary";
-          const title = document.createElement("div");
+          };
+          setOpen(openObservationGroups.has(openKey));
+          toggle.addEventListener("click", () => setOpen(body.hidden));
+          const chevron = document.createElement("span");
+          chevron.className = "observation-group-chevron";
+          chevron.setAttribute("aria-hidden", "true");
+          const title = document.createElement("span");
           title.className = "observation-group-title";
           const groupName = document.createElement("strong");
           groupName.className = "observation-group-name";
           groupName.textContent = group.name;
-          const meta = document.createElement("div");
+          const meta = document.createElement("span");
           meta.className = "observation-group-meta";
           const nameCount = document.createElement("span");
           nameCount.className = "observation-group-count";
@@ -3584,6 +3632,7 @@ DASHBOARD_HTML = """<!doctype html>
           const totalQueries = document.createElement("span");
           totalQueries.className = "observation-domain-count";
           totalQueries.textContent = queryCountText(group.totalQueries);
+          toggle.append(chevron, title, totalQueries);
           const groupProfileButton = document.createElement("button");
           groupProfileButton.type = "button";
           groupProfileButton.className = "observation-group-profile-button";
@@ -3591,24 +3640,25 @@ DASHBOARD_HTML = """<!doctype html>
           groupBlockButton.type = "button";
           groupBlockButton.className = "observation-group-block-button";
           const syncGroupProfile = () => {
+            // A request in flight keeps the button disabled. Its finally block syncs again.
+            if (groupProfileButton.getAttribute("aria-busy") === "true") return;
             const selectedProfile = profiles.find((profile) => profile.id === targetProfile.value);
             const action = groupProfileAction(group, selectedProfile);
-            const note = groupLimitNote(action.domains.length);
             groupProfileButton.textContent = action.label;
-            groupProfileButton.title = note || (action.domains.length
-              ? action.label + ": " + groupSubject(group, action.domains.length)
-              : action.label);
-            groupProfileButton.disabled = action.disabled || note !== "";
+            groupProfileButton.title = action.title;
+            groupProfileButton.setAttribute("aria-label", action.ariaLabel);
+            groupProfileButton.disabled = action.disabled;
           };
           const syncGroupBlock = () => {
-            const action = groupBlockAction(group);
-            const note = groupLimitNote(action.domains.length);
-            groupBlockButton.textContent = action.label;
-            groupBlockButton.title = note || action.label + ": " + groupSubject(group, action.domains.length);
-            groupBlockButton.disabled = note !== "";
             const blockedText = groupBlockedText(group);
             groupBadge.textContent = blockedText;
             groupBadge.hidden = blockedText === "";
+            if (groupBlockButton.getAttribute("aria-busy") === "true") return;
+            const action = groupBlockAction(group);
+            groupBlockButton.textContent = action.label;
+            groupBlockButton.title = action.title;
+            groupBlockButton.setAttribute("aria-label", action.ariaLabel);
+            groupBlockButton.disabled = action.disabled;
           };
           const rowSyncs = [];
           const syncRowsAndHeader = () => {
@@ -3618,27 +3668,26 @@ DASHBOARD_HTML = """<!doctype html>
           profileSyncs.push(syncGroupProfile);
           syncGroupProfile();
           syncGroupBlock();
-          groupProfileButton.addEventListener("click", (event) => {
-            event.stopPropagation();
-            addGroupToProfile(
-              group,
-              profiles.find((profile) => profile.id === targetProfile.value),
-              groupProfileButton,
-              syncProfileButtons
-            );
-          });
-          groupBlockButton.addEventListener("click", (event) => {
-            event.stopPropagation();
-            changeGroupBlock(group, groupBlockButton, syncRowsAndHeader);
-          });
-          summary.append(title, totalQueries, groupProfileButton, groupBlockButton);
-          const body = document.createElement("ul");
-          body.className = "observation-domain-list observation-group-body";
+          groupProfileButton.addEventListener("click", () => addGroupToProfile(
+            group,
+            profiles.find((profile) => profile.id === targetProfile.value),
+            groupProfileButton,
+            syncProfileButtons
+          ));
+          groupBlockButton.addEventListener("click", () => changeGroupBlock(
+            group,
+            groupBlockButton,
+            syncRowsAndHeader
+          ));
+          header.append(toggle, groupProfileButton, groupBlockButton);
+          const rows = document.createElement("ul");
+          rows.className = "observation-domain-list";
           group.names.forEach((observation) => {
-            body.appendChild(buildRow(observation, rowSyncs, syncGroupBlock));
+            rows.appendChild(buildRow(observation, rowSyncs, syncGroupBlock));
           });
-          details.append(summary, body);
-          item.appendChild(details);
+          body.appendChild(rows);
+          wrapper.append(header, body);
+          item.appendChild(wrapper);
           return item;
         };
         groupObservations(device.domains).forEach((group) => {
@@ -3687,7 +3736,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     async function changeGroupBlock(group, button, onChange) {
       const action = groupBlockAction(group);
-      if (action.domains.length === 0 || groupLimitNote(action.domains.length)) return;
+      if (action.disabled || action.domains.length === 0) return;
       const messages = groupBlockMessages(group, action);
       setButtonBusy(button, true);
       showMessage(messages.busy, "working");
@@ -3708,7 +3757,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     async function addGroupToProfile(group, profile, button, onChange) {
       const action = groupProfileAction(group, profile);
-      if (action.disabled || groupLimitNote(action.domains.length)) return;
+      if (action.disabled) return;
       const messages = groupProfileMessages(group, action);
       setButtonBusy(button, true);
       showMessage(messages.busy, "working");

@@ -175,6 +175,10 @@ def block_action(items):
     return evaluate("groupBlockAction(" + json.dumps(group_of(items)) + ")")
 
 
+def only(action, *keys):
+    return {key: action[key] for key in keys}
+
+
 @NODE
 def test_no_blocked_name_offers_block_all_with_every_name():
     action = block_action(immo(blocked=False))
@@ -183,6 +187,9 @@ def test_no_blocked_name_offers_block_all_with_every_name():
         "label": "Block all",
         "path": ADD_BLOCK,
         "domains": [d for d, _ in IMMO_NAMES],
+        "disabled": False,
+        "ariaLabel": "Block all 7 ImmoScout24 names",
+        "title": "Block all 7 ImmoScout24 names",
     }
 
 
@@ -197,6 +204,8 @@ def test_some_blocked_names_offer_block_remaining_with_only_the_open_ones():
     assert action["label"] == "Block remaining"
     assert action["path"] == ADD_BLOCK
     assert action["domains"] == [d for i, (d, _) in enumerate(IMMO_NAMES) if i not in (0, 4)]
+    assert action["ariaLabel"] == "Block remaining 5 ImmoScout24 names"
+    assert action["disabled"] is False
 
 
 @NODE
@@ -207,7 +216,18 @@ def test_all_blocked_names_offer_unblock_all_with_every_name():
         "label": "Unblock all",
         "path": REMOVE_BLOCK,
         "domains": [d for d, _ in IMMO_NAMES],
+        "disabled": False,
+        "ariaLabel": "Unblock all 7 ImmoScout24 names",
+        "title": "Unblock all 7 ImmoScout24 names",
     }
+
+
+@NODE
+def test_the_block_button_name_uses_the_singular_for_one_name():
+    items = immo(blocked=True)
+    items[0]["globally_blocked"] = False
+
+    assert block_action(items)["ariaLabel"] == "Block remaining 1 ImmoScout24 name"
 
 
 @NODE
@@ -223,6 +243,24 @@ def test_a_missing_or_loose_flag_counts_as_not_blocked_like_the_row_button():
     assert action["domains"] == ["a.example.com", "b.example.com"]
 
 
+@NODE
+def test_a_group_over_the_call_limit_has_a_disabled_block_action_with_the_note():
+    many = [item("h%d.example.com" % i, 1) for i in range(MAX_BATCH_DOMAINS + 1)]
+
+    action = block_action(many)
+
+    assert action["disabled"] is True
+    assert "65" in action["title"] and str(MAX_BATCH_DOMAINS) in action["title"]
+    assert action["ariaLabel"] == "Block all 65 ImmoScout24 names"
+
+
+@NODE
+def test_a_group_of_exactly_the_call_limit_can_still_be_blocked():
+    many = [item("h%d.example.com" % i, 1) for i in range(MAX_BATCH_DOMAINS)]
+
+    assert block_action(many)["disabled"] is False
+
+
 SLOW = {"id": "slow", "name": "Slow", "website_domains": ["sso.immobilienscout24.de", "a.test"]}
 
 
@@ -234,7 +272,13 @@ def profile_action(items, profile):
 
 @NODE
 def test_no_profile_disables_add_all():
-    expected = {"label": "Add all to profile", "disabled": True, "domains": []}
+    expected = {
+        "label": "Add all to profile",
+        "disabled": True,
+        "domains": [],
+        "ariaLabel": "Add all 7 ImmoScout24 names to a profile",
+        "title": "Add all 7 ImmoScout24 names to a profile",
+    }
 
     assert profile_action(immo(), None) == expected
     group = json.dumps(group_of(immo()))
@@ -249,6 +293,8 @@ def test_every_name_already_in_the_profile_disables_the_button_and_says_so():
         "label": "All already in Slow",
         "disabled": True,
         "domains": [],
+        "ariaLabel": "All 7 ImmoScout24 names are already in Slow",
+        "title": "All 7 ImmoScout24 names are already in Slow",
     }
 
 
@@ -259,6 +305,7 @@ def test_missing_names_are_offered_and_the_ones_already_in_are_left_out():
     assert action["label"] == "Add all to profile"
     assert action["disabled"] is False
     assert action["domains"] == [d for d, _ in IMMO_NAMES if d != "sso.immobilienscout24.de"]
+    assert action["ariaLabel"] == "Add all 6 ImmoScout24 names to Slow"
 
 
 @NODE
@@ -277,6 +324,17 @@ def test_a_profile_without_a_website_list_can_take_every_name():
 
     assert action["disabled"] is False
     assert len(action["domains"]) == 7
+
+
+@NODE
+def test_a_group_over_the_call_limit_has_a_disabled_profile_action_with_the_note():
+    many = [item("h%d.example.com" % i, 1) for i in range(MAX_BATCH_DOMAINS + 1)]
+
+    action = profile_action(many, {"id": "p", "name": "P", "website_domains": []})
+
+    assert action["disabled"] is True
+    assert len(action["domains"]) == 65
+    assert "65" in action["title"] and str(MAX_BATCH_DOMAINS) in action["title"]
 
 
 @NODE
@@ -360,6 +418,26 @@ def test_the_open_key_joins_the_device_address_and_the_group_key():
     assert one != other
 
 
+@NODE
+def test_the_group_dom_id_is_unique_per_device_and_group_and_holds_no_spaces():
+    keys = [
+        ("192.168.50.124", "label:x (twitter)"),
+        ("192.168.50.124", "label:x_28_twitter_29_"),
+        ("192.168.50.124", "label:netflix"),
+        ("192.168.50.125", "label:netflix"),
+        ("192.168.50.1", "24|label:netflix"),
+        ("192.168.50.12", "4|label:netflix"),
+    ]
+    expression = "[%s]" % ", ".join(
+        "observationGroupDomId(%s, %s)" % (json.dumps(a), json.dumps(k)) for a, k in keys
+    )
+
+    ids = evaluate(expression)
+
+    assert len(set(ids)) == len(keys)
+    assert all(re.fullmatch(r"observation-group-[A-Za-z0-9_-]+", value) for value in ids)
+
+
 def test_the_group_limit_matches_the_server_limit():
     assert "const GROUP_ACTION_MAX_NAMES = %d;" % MAX_BATCH_DOMAINS in served_functions()
 
@@ -436,27 +514,30 @@ function cards() { return elements.observations.children; }
 function topList(card) { return findAll(card, (n) => n.tagName === "ul" && hasClass(n, "observation-domain-list"))[0]; }
 function groupParts(card, index) {
   const item = topList(card).children[index];
-  const details = findAll(item, (n) => n.tagName === "details")[0];
+  const toggle = byClass(item, "observation-group-toggle")[0];
+  const body = byClass(item, "observation-group-body")[0];
   return {
-    item, details,
-    name: byClass(details, "observation-group-name")[0],
-    count: byClass(details, "observation-group-count")[0],
-    queries: byClass(details, "observation-domain-count")[0],
-    badge: byClass(details, "observation-badge")[0],
-    profileButton: byClass(details, "observation-group-profile-button")[0],
-    blockButton: byClass(details, "observation-group-block-button")[0],
-    rows: byClass(details, "observation-domain")
+    item, toggle, body,
+    header: byClass(item, "observation-group-header")[0],
+    name: byClass(item, "observation-group-name")[0],
+    count: byClass(item, "observation-group-count")[0],
+    queries: byClass(toggle, "observation-domain-count")[0],
+    badge: byClass(toggle, "observation-badge")[0],
+    profileButton: byClass(item, "observation-group-profile-button")[0],
+    blockButton: byClass(item, "observation-group-block-button")[0],
+    rows: byClass(body, "observation-domain"),
+    isOpen: () => toggle.attrs["aria-expanded"] === "true" && body.hidden === false
   };
 }
 function describeTop(card) {
   return topList(card).children.map((item, index) => {
-    if (findAll(item, (n) => n.tagName === "details").length === 0) {
+    if (byClass(item, "observation-group-toggle").length === 0) {
       return { kind: "row", host: byClass(item, "observation-domain-host")[0].children[0].textContent };
     }
     const parts = groupParts(card, index);
     return {
       kind: "group", name: parts.name.textContent, names: parts.count.textContent,
-      queries: parts.queries.textContent, open: parts.details.open, rows: parts.rows.length
+      queries: parts.queries.textContent, open: parts.isOpen(), rows: parts.rows.length
     };
   });
 }
@@ -554,7 +635,7 @@ def test_a_single_name_row_is_the_row_the_code_always_drew():
     steps = """
       const item = topList(cards()[0]).children[0];
       console.log(JSON.stringify({
-        tag: item.tagName, cls: item.className, details: findAll(item, (n) => n.tagName === "details").length,
+        tag: item.tagName, cls: item.className, toggles: byClass(item, "observation-group-toggle").length,
         children: item.children.map((child) => child.tagName + "." + child.className),
         buttons: findAll(item, (n) => n.tagName === "button").map((b) => b.textContent)
       }));
@@ -566,7 +647,7 @@ def test_a_single_name_row_is_the_row_the_code_always_drew():
 
     assert out["tag"] == "li"
     assert out["cls"] == "observation-domain"
-    assert out["details"] == 0
+    assert out["toggles"] == 0
     assert out["children"] == [
         "div.observation-domain-name", "span.observation-domain-count",
         "button.observation-profile-button", "button.",
@@ -575,23 +656,29 @@ def test_a_single_name_row_is_the_row_the_code_always_drew():
 
 
 @NODE
-def test_an_open_group_stays_open_when_the_dashboard_renders_again():
+def test_the_toggle_opens_and_closes_a_group_and_an_open_group_survives_a_render():
     steps = """
-      const first = groupParts(cards()[0], 1);
-      first.details.open = true;
-      fire(first.details, "toggle");
+      await click(groupParts(cards()[0], 1).toggle);
+      const justOpened = describeTop(cards()[0]).map((entry) => entry.open);
+      const keysOpen = Array.from(openObservationGroups);
       render();
       const afterOpen = describeTop(cards()[0]).map((entry) => entry.open);
-      groupParts(cards()[0], 1).details.open = false;
-      fire(groupParts(cards()[0], 1).details, "toggle");
+      await click(groupParts(cards()[0], 1).toggle);
+      const justClosed = describeTop(cards()[0]).map((entry) => entry.open);
       render();
       const afterClose = describeTop(cards()[0]).map((entry) => entry.open);
-      console.log(JSON.stringify({afterOpen, afterClose, keys: Array.from(openObservationGroups)}));
+      console.log(JSON.stringify({
+        justOpened, keysOpen, afterOpen, justClosed, afterClose,
+        keys: Array.from(openObservationGroups)
+      }));
     """
 
     out = run_dashboard(steps, [example_device()])
 
+    assert out["justOpened"] == [False, True, None, None, None]
+    assert out["keysOpen"] == ["192.168.50.124|label:immoscout24"]
     assert out["afterOpen"] == [False, True, None, None, None]
+    assert out["justClosed"] == [False, False, None, None, None]
     assert out["afterClose"] == [False, False, None, None, None]
     assert out["keys"] == []
 
@@ -599,9 +686,7 @@ def test_an_open_group_stays_open_when_the_dashboard_renders_again():
 @NODE
 def test_the_open_state_belongs_to_one_group_on_one_device():
     steps = """
-      const first = groupParts(cards()[0], 1);
-      first.details.open = true;
-      fire(first.details, "toggle");
+      await click(groupParts(cards()[0], 1).toggle);
       render();
       console.log(JSON.stringify({
         keys: Array.from(openObservationGroups),
@@ -624,7 +709,7 @@ def test_the_header_block_button_blocks_every_name_in_one_call_and_turns_into_un
     steps = """
       const before = groupParts(cards()[0], 1);
       const labelBefore = before.blockButton.textContent;
-      const event = await click(before.blockButton);
+      await click(before.blockButton);
       const after = groupParts(cards()[0], 1);
       const afterBlock = {
         header: before.blockButton.textContent, badge: before.badge.textContent,
@@ -632,7 +717,7 @@ def test_the_header_block_button_blocks_every_name_in_one_call_and_turns_into_un
       };
       await click(before.blockButton);
       console.log(JSON.stringify({
-        labelBefore, stopped: event.stopped, afterBlock, calls,
+        labelBefore, afterBlock, calls,
         last: {header: before.blockButton.textContent, badgeHidden: before.badge.hidden,
                rows: before.rows.map((row) => row.children[3].textContent)}
       }));
@@ -642,7 +727,6 @@ def test_the_header_block_button_blocks_every_name_in_one_call_and_turns_into_un
     out = run_dashboard(steps, [example_device()])
 
     assert out["labelBefore"] == "Block all"
-    assert out["stopped"] is True
     assert out["calls"] == [
         ["message", "Adding 7 ImmoScout24 names to the global block list...", "working"],
         ["request", ADD_BLOCK, "POST", {"domains": names}],
@@ -711,9 +795,9 @@ def test_the_header_profile_button_adds_the_missing_names_to_the_selected_profil
       const select = byClass(cards()[0], "observation-actions")[0].children[0];
       const labelBefore = parts.profileButton.textContent;
       requestResult = {profile: {id: "slow", name: "Slow", website_domains: INCLUDED.concat(ALL)}};
-      const event = await click(parts.profileButton);
+      await click(parts.profileButton);
       console.log(JSON.stringify({
-        labelBefore, stopped: event.stopped, calls, select: select.value,
+        labelBefore, calls, select: select.value,
         header: parts.profileButton.textContent, disabled: parts.profileButton.disabled,
         rows: parts.rows.map((row) => row.children[2].textContent),
         stored: profiles[0].website_domains.length
@@ -726,7 +810,6 @@ def test_the_header_profile_button_adds_the_missing_names_to_the_selected_profil
     out = run_dashboard(steps, [example_device()], profiles=[profile, FAST_PROFILE])
 
     assert out["labelBefore"] == "Add all to profile"
-    assert out["stopped"] is True
     assert out["select"] == "slow"
     assert out["calls"] == [
         ["message", "Adding 7 ImmoScout24 names to the profile...", "working"],
@@ -824,33 +907,156 @@ def test_a_group_with_no_profile_available_disables_add_all():
     assert out == {"label": "Add all to profile", "disabled": True}
 
 
-def test_the_open_state_is_a_module_level_set_updated_on_toggle():
+@NODE
+def test_a_group_is_a_disclosure_button_and_its_actions_are_siblings_of_it():
+    steps = """
+      const first = groupParts(cards()[0], 0);
+      const second = groupParts(cards()[0], 1);
+      const other = groupParts(cards()[1], 0);
+      const buttonsInside = (node) => findAll(node, (n) => n.tagName === "button" && n !== node);
+      const parentOf = (target) => findAll(elements.observations, (n) => n.children.indexOf(target) !== -1)[0];
+      const describe = (parts) => ({
+        toggleTag: parts.toggle.tagName, toggleType: parts.toggle.type,
+        expanded: parts.toggle.attrs["aria-expanded"], controls: parts.toggle.attrs["aria-controls"],
+        bodyId: parts.body.id, bodyHidden: parts.body.hidden, bodyTag: parts.body.tagName,
+        actionTags: [parts.profileButton.tagName, parts.blockButton.tagName],
+        actionTypes: [parts.profileButton.type, parts.blockButton.type],
+        buttonsInsideToggle: buttonsInside(parts.toggle).length,
+        sameRow: parentOf(parts.toggle) === parts.header && parentOf(parts.profileButton) === parts.header
+          && parentOf(parts.blockButton) === parts.header,
+        bodyOutsideHeader: findAll(parts.header, (n) => n === parts.body).length === 0,
+        chevronHidden: byClass(parts.toggle, "observation-group-chevron")[0].attrs["aria-hidden"],
+        nameInsideToggle: byClass(parts.toggle, "observation-group-name").length,
+        countInsideToggle: byClass(parts.toggle, "observation-group-count").length,
+        domainsInsideBody: parts.rows.length
+      });
+      console.log(JSON.stringify({
+        first: describe(first), second: describe(second),
+        ids: [first.body.id, second.body.id, other.body.id]
+      }));
+    """
+
+    out = run_dashboard(steps, [example_device("192.168.50.124"), example_device("192.168.50.125")])
+
+    for key, rows in (("first", 2), ("second", 7)):
+        part = out[key]
+        assert part["toggleTag"] == "button"
+        assert part["toggleType"] == "button"
+        assert part["expanded"] == "false"
+        assert part["controls"] == part["bodyId"] != ""
+        assert part["bodyHidden"] is True
+        assert part["bodyTag"] == "div"
+        assert part["actionTags"] == ["button", "button"]
+        assert part["actionTypes"] == ["button", "button"]
+        assert part["buttonsInsideToggle"] == 0
+        assert part["sameRow"] is True
+        assert part["bodyOutsideHeader"] is True
+        assert part["chevronHidden"] == "true"
+        assert part["nameInsideToggle"] == 1
+        assert part["countInsideToggle"] == 1
+        assert part["domainsInsideBody"] == rows
+    assert len(set(out["ids"])) == 3
+    assert all(" " not in value for value in out["ids"])
+
+
+@NODE
+def test_clicking_an_action_button_does_not_open_or_close_the_group():
+    steps = """
+      const parts = groupParts(cards()[0], 1);
+      const closed = parts.isOpen();
+      await click(parts.blockButton);
+      await click(parts.profileButton);
+      const stillClosed = parts.isOpen();
+      await click(parts.toggle);
+      const opened = parts.isOpen();
+      await click(parts.blockButton);
+      const stillOpen = parts.isOpen();
+      console.log(JSON.stringify({
+        closed, stillClosed, opened, stillOpen,
+        requests: calls.filter((call) => call[0] === "request").length
+      }));
+    """
+
+    out = run_dashboard(steps, [example_device()])
+
+    assert out == {"closed": False, "stillClosed": False, "opened": True,
+                   "stillOpen": True, "requests": 3}
+
+
+@NODE
+def test_the_toggle_sends_no_request_and_needs_no_key_handlers():
+    steps = """
+      const parts = groupParts(cards()[0], 1);
+      await click(parts.toggle);
+      await click(parts.toggle);
+      console.log(JSON.stringify({
+        calls, toggleHandlers: (parts.toggle.listeners.click || []).length,
+        keyboardHandlers: Object.keys(parts.toggle.listeners).filter((name) => name.startsWith("key"))
+      }));
+    """
+
+    out = run_dashboard(steps, [example_device()])
+
+    assert out["calls"] == []
+    assert out["toggleHandlers"] == 1
+    # Enter and Space on a native button fire a click so nothing extra is needed.
+    assert out["keyboardHandlers"] == []
+
+
+@NODE
+def test_the_action_buttons_are_named_by_the_group_and_the_count():
+    steps = """
+      const parts = groupParts(cards()[0], 1);
+      const names = () => [parts.profileButton.attrs["aria-label"], parts.blockButton.attrs["aria-label"]];
+      const start = names();
+      requestResult = {profile: {id: "slow", name: "Slow", website_domains: ALL}};
+      await click(parts.profileButton);
+      await click(parts.blockButton);
+      console.log(JSON.stringify({start, after: names()}));
+    """
+    names = [d for d, _ in IMMO_NAMES]
+    steps = "const ALL = %s;\n" % json.dumps(names) + steps
+
+    out = run_dashboard(steps, [example_device()])
+
+    assert out["start"] == ["Add all 7 ImmoScout24 names to Slow", "Block all 7 ImmoScout24 names"]
+    assert out["after"] == [
+        "All 7 ImmoScout24 names are already in Slow",
+        "Unblock all 7 ImmoScout24 names",
+    ]
+
+
+def test_the_open_state_is_a_module_level_set_updated_when_the_toggle_is_clicked():
     assert re.search(r"\n    const openObservationGroups = new Set\(\);", SCRIPT)
     body = function_body("renderObservations")
     assert "openObservationGroups.has(" in body
     assert "openObservationGroups.add(" in body
     assert "openObservationGroups.delete(" in body
-    assert '"toggle"' in body
     assert "observationGroupOpenKey(device.ipv4_address, group.key)" in body
 
 
-def test_the_header_buttons_do_not_toggle_the_group_and_nothing_uses_innerhtml():
+def test_a_group_is_built_without_details_and_summary_and_without_innerhtml():
     body = function_body("renderObservations")
-    assert body.count("event.stopPropagation()") >= 2
+    assert 'createElement("details")' not in body
+    assert 'createElement("summary")' not in body
     assert "innerHTML" not in body
+    assert "stopPropagation" not in body
     assert "groupObservations(device.domains" in body
     assert "group.single" in body
+    assert '"aria-expanded"' in body and '"aria-controls"' in body
 
 
-def test_the_group_row_has_a_style_that_beats_the_plain_details_rule():
+def test_the_group_row_has_styles_for_the_header_the_toggle_and_the_body():
     for selector in (
         ".observation-group {",
-        ".observation-group-summary {",
+        ".observation-group-header {",
+        ".observation-group-toggle {",
         ".observation-group-body {",
-        ".observation-group-summary::before",
+        ".observation-group-chevron {",
+        '.observation-group-toggle[aria-expanded="true"] .observation-group-chevron',
     ):
         assert selector in DASHBOARD_HTML, selector
-    assert ".observation-group[open] > .observation-group-summary::before" in DASHBOARD_HTML
+    assert ".observation-group-body[hidden]" in DASHBOARD_HTML
 
 
 # ---------------------------------------------------------------------------------------------
