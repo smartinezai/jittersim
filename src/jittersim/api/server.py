@@ -8844,11 +8844,13 @@ class ControlServer(HTTPServer):
     def _impact_status(self) -> Dict[str, Any]:
         """Name what each applied queue did so far and list the protected devices."""
 
-        def unavailable(message: str) -> Dict[str, Any]:
+        def unavailable(message: str, *, paused: bool = False) -> Dict[str, Any]:
+            # `paused` means the answer is only late: the page keeps what it shows.
             return {
                 "available": False,
+                "paused": paused,
                 "message": message,
-                "sampled_at": int(time.time()),
+                "sampled_at": time.time(),
                 "queues": [],
                 "protected": [],
             }
@@ -8867,7 +8869,7 @@ class ControlServer(HTTPServer):
             if str(error) == "unknown action":
                 return unavailable(IMPACT_OUT_OF_DATE_MESSAGE)
             LOGGER.warning("could not read queue statistics for the impact check")
-            return unavailable(IMPACT_UNREADABLE_MESSAGE)
+            return unavailable(IMPACT_UNREADABLE_MESSAGE, paused=True)
         devices_by_id = {device.id: device for device in self.repository.list_devices()}
         labels_by_mac = self.repository.list_connected_device_labels()
         list_names = {item.id: item.name for item in self.repository.list_service_lists()}
@@ -8888,8 +8890,9 @@ class ControlServer(HTTPServer):
             entries.append({**queue, "name": name, "kind_label": kind_label})
         return {
             "available": True,
+            "paused": False,
             "message": None,
-            "sampled_at": int(time.time()),
+            "sampled_at": time.time(),
             "queues": entries,
             "protected": sorted(
                 (item.display_name or item.mac_address for item in protected),

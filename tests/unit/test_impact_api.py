@@ -38,6 +38,7 @@ def queue(device_id, direction="upload", **changes):
         "requeues": 0,
         "backlog_bytes": 0,
         "qlen": 0,
+        "generation": "0a1b2c3d-1",
     }
     entry.update(changes)
     return entry
@@ -101,7 +102,8 @@ class ImpactApiTests(unittest.TestCase):
 
         self.assertTrue(response["available"])
         self.assertIsNone(response["message"])
-        self.assertIsInstance(response["sampled_at"], int)
+        self.assertIsInstance(response["sampled_at"], float)
+        self.assertIs(response["paused"], False)
         self.assertEqual(
             [(item["device_id"], item["name"], item["kind_label"]) for item in response["queues"]],
             [
@@ -155,6 +157,7 @@ class ImpactApiTests(unittest.TestCase):
         response = self.impact()
 
         self.assertFalse(response["available"])
+        self.assertIs(response["paused"], False)
         self.assertEqual(response["message"], RESET_MESSAGE)
         self.assertEqual((response["queues"], response["protected"]), ([], []))
 
@@ -162,6 +165,7 @@ class ImpactApiTests(unittest.TestCase):
         response = self.impact()
 
         self.assertFalse(response["available"])
+        self.assertIs(response["paused"], False)
         self.assertEqual(response["message"], NO_HELPER_MESSAGE)
         self.assertEqual(response["queues"], [])
 
@@ -176,6 +180,7 @@ class ImpactApiTests(unittest.TestCase):
                 response = self.impact()
 
                 self.assertFalse(response["available"])
+                self.assertIs(response["paused"], False)
                 self.assertEqual(response["message"], OUT_OF_DATE_MESSAGE)
                 self.assertEqual((response["queues"], response["protected"]), ([], []))
 
@@ -189,9 +194,10 @@ class ImpactApiTests(unittest.TestCase):
         response = self.impact()
 
         self.assertFalse(response["available"])
+        self.assertIs(response["paused"], False)
         self.assertEqual(response["message"], OUT_OF_DATE_MESSAGE)
 
-    def test_a_failing_helper_answers_could_not_read_and_leaks_nothing(self) -> None:
+    def test_a_failing_helper_pauses_the_card_and_leaks_nothing(self) -> None:
         class FailingHelper(FakeHelper):
             def queue_stats(self):
                 raise HelperClientError("private socket detail /run/jittersim.sock")
@@ -201,8 +207,32 @@ class ImpactApiTests(unittest.TestCase):
         response = self.impact()
 
         self.assertFalse(response["available"])
+        self.assertIs(response["paused"], True)
         self.assertEqual(response["message"], UNREADABLE_MESSAGE)
+        self.assertEqual((response["queues"], response["protected"]), ([], []))
         self.assertNotIn("socket", json.dumps(response))
+
+    def test_every_unreadable_answer_except_out_of_date_only_pauses(self) -> None:
+        for error in (
+            HelperClientError("Pi networking is busy. Try again later.", reason="helper-busy"),
+            HelperClientError("could not contact the networking helper"),
+            HelperClientError("helper returned invalid queue statistics"),
+            HelperClientError("queue statistics unavailable"),
+        ):
+            with self.subTest(error=str(error)):
+
+                class UnreadableHelper(FakeHelper):
+                    def queue_stats(self):
+                        raise error
+
+                self.server.helper_client = UnreadableHelper()
+
+                response = self.impact()
+
+                self.assertEqual(
+                    (response["available"], response["paused"], response["message"]),
+                    (False, True, UNREADABLE_MESSAGE),
+                )
 
     def test_the_endpoint_needs_the_admin_token_like_diagnostics(self) -> None:
         self.server.admin_token = "admin-token"
