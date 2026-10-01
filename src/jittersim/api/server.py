@@ -76,7 +76,7 @@ from jittersim.config.storage import (
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN, PlanError
 from jittersim.engine.eligibility import eligible_clients, station_snapshot
-from jittersim.engine.plan import GENERAL_QUEUE_ID
+from jittersim.engine.plan import GENERAL_QUEUE_ID, NetworkPlan
 from jittersim.engine.progression import progression_factor
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.schedules import active_schedule
@@ -7073,6 +7073,26 @@ class ControlServer(HTTPServer):
         payload["running"] = self.scheduler is not None and self.scheduler.is_active
         return payload
 
+    def _applied_summary(self, plan: NetworkPlan) -> Dict[str, Any]:
+        """Count what an apply sent so the dashboard can say what is now running."""
+
+        device_ids = {rule.device_id for rule in plan.mark_rules}
+        general_name = None
+        if plan.general_profile is not None:
+            general = self.repository.get_profile(plan.general_profile.profile_id)
+            general_name = general.name if general is not None else None
+        return {
+            "devices": len(plan.mark_rules),
+            "groups": sum(
+                1
+                for group in self.repository.list_device_groups()
+                if device_ids.intersection(group.device_ids)
+            ),
+            "service_lists": len(plan.service_list_rules),
+            "protected": len(plan.protected_mac_addresses),
+            "general_profile": general_name,
+        }
+
     def response_for(self, path: str, query: str = "") -> Tuple[int, str, bytes]:
         """Build the response body for a supported GET path."""
 
@@ -8954,6 +8974,7 @@ class ControlServer(HTTPServer):
                 {
                     "result": result,
                     "state": self._runtime_state_with_running(state),
+                    "applied": self._applied_summary(plan),
                     "unverified_device_ids": list(plan.unverified_device_ids),
                     "warning": (
                         "Profiles were skipped for devices whose current Wi-Fi identity could not be verified: "

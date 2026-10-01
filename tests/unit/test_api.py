@@ -23,6 +23,7 @@ from jittersim.config.models import (
     Impairment,
     Profile,
     RandomWebsiteOutcome,
+    ServiceList,
 )
 from jittersim.config.storage import ConfigRepository, StorageError
 from jittersim.engine.runtime import RuntimeScheduler
@@ -1471,6 +1472,79 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertIs(json.loads(apply_body)["state"]["running"], True)
         self.assertIs(json.loads(reset_body)["state"]["running"], False)
+
+    def test_apply_reports_what_it_sent(self) -> None:
+        self.server.helper_client = FakeHelper()
+
+        status, _, body = self.server.write_response_for("/api/apply", {})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            json.loads(body)["applied"],
+            {
+                "devices": 1,
+                "groups": 0,
+                "service_lists": 0,
+                "protected": 0,
+                "general_profile": None,
+            },
+        )
+
+    def test_apply_counts_groups_protected_devices_and_service_lists(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.repository.save_device(
+            Device(
+                id="laptop",
+                name="Laptop",
+                ipv4_address="192.168.50.178",
+                profile_id="slow",
+                mac_address="dc:1e:d5:3e:97:4c",
+            )
+        )
+        self.repository.save_device_group(DeviceGroup("family", "Family", ("laptop",), "slow"))
+        self.repository.save_device_group(DeviceGroup("others", "Others", ("alice",), "slow"))
+        self.repository.save_service_list(
+            ServiceList("video", "Video", "slow", hostnames=("video.example.com",))
+        )
+        self.repository.save_service_list(
+            ServiceList("paused", "Paused", "slow", hostnames=("paused.example.com",), enabled=False)
+        )
+        self.protect("02:00:00:00:00:01")
+
+        status, _, body = self.server.write_response_for("/api/apply", {})
+
+        self.assertEqual(status, 200, body)
+        # The unverified device alice is left out of the plan so her group is not counted.
+        self.assertEqual(
+            json.loads(body)["applied"],
+            {
+                "devices": 1,
+                "groups": 1,
+                "service_lists": 1,
+                "protected": 1,
+                "general_profile": None,
+            },
+        )
+
+    def test_apply_names_the_general_profile_instead_of_counting_devices(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.repository.save_device_group(DeviceGroup("family", "Family", ("alice",), "slow"))
+        self.repository.save_general_profile("slow")
+        self.protect()
+
+        status, _, body = self.server.write_response_for("/api/apply", {})
+
+        self.assertEqual(status, 200, body)
+        self.assertEqual(
+            json.loads(body)["applied"],
+            {
+                "devices": 0,
+                "groups": 0,
+                "service_lists": 0,
+                "protected": 1,
+                "general_profile": "Slow",
+            },
+        )
 
     def test_diagnostics_runtime_carries_the_running_flag(self) -> None:
         self.server.helper_client = FakeHelper()
