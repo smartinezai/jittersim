@@ -123,7 +123,9 @@ display. One layer is not enough so there are four.
   IPs so old rows never show.
 - **Fail closed.** If protected devices exist and the helper does not accept the
   MAC list (an older helper) the scan refuses to run and says the helper needs
-  updating. It never captures protected traffic.
+  updating. It never captures protected traffic. The Unaffected list holds up to
+  256 devices but the helper filter takes at most 64 so a scan refuses with a
+  clear message while more than 64 devices are protected.
 - **Purge.** Making a device protected deletes its stored observations (a new
   `delete_domain_observations` in storage keyed by IP) in the same transaction as
   saving the protection. It also clears the totals used as progression baselines
