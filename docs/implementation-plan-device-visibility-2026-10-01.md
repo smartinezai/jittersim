@@ -127,11 +127,14 @@ display. One layer is not enough so there are four.
   drops any observation whose MAC is protected or whose IP belongs to a protected
   MAC. The IP comes from the connected-client snapshot and from saved devices with
   that MAC. `/api/observations` hides rows by the same two keys so old rows never
-  show. The MAC is never sent to the browser.
+  show. A row with no recorded MAC is matched by its IP alone (see Purge for the
+  rows that predate the MAC). The MAC is never sent to the browser.
 - **Fail closed.** If protected devices exist the client first asks the helper for
   its `protected_dns_capture` capability and refuses to scan when the helper does
-  not advertise it or cannot answer (an older helper). The message says to restart
-  the JitterSim services or reinstall the release. No capture runs in that case.
+  not advertise it or does not know the request (an older helper). The message says
+  to restart the JitterSim services or reinstall the release. A helper that is busy
+  or cannot be reached also blocks the scan but keeps its own message. No capture
+  runs in any of these cases.
   The helper also echoes the MAC list it used and the client checks the echo as a
   second layer. It never captures protected traffic. If the saved list ever held
   more devices than the helper can skip the scan refuses with a clear message
@@ -141,8 +144,12 @@ display. One layer is not enough so there are four.
   transaction as saving the protection. A row goes when its recorded MAC is the
   protected one or when its IP is one the device uses now or had assigned. This
   also clears the totals used as progression baselines for those IPs. Rows saved
-  before the MAC was recorded have no MAC and can only be matched by IP so an old
-  row under an address the device no longer uses stays until it expires.
+  before the MAC was recorded have no MAC. When an existing database gains the MAC
+  column while the Unaffected list is not empty the upgrade clears every such row
+  once in the same step because a device that was protected already may have moved
+  and the rows are a cache that learns again. When the list is empty at upgrade the
+  old rows stay and can only be matched by IP so one under an address a device
+  later stops using stays until it expires.
 - **DNS watcher.** The watcher skips frames whose destination MAC is protected
   before it parses them. It reads the protected MACs from the helper on its
   existing plan check. Nothing is lost because service lists never apply to

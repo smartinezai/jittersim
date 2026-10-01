@@ -2136,6 +2136,81 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(self.shown_addresses(), [])
 
+    UPPERCASE_PHONE = "DC:1E:D5:3E:97:4C"
+
+    def test_a_scan_drops_a_protected_client_that_the_snapshot_names_in_capitals(self) -> None:
+        # The saved protection is lower case and the snapshot is not. The row is under an
+        # address that is not the one the saved device was assigned.
+        self.repository.save_device(
+            Device(
+                id="client-dc1ed53e974c",
+                name="Client",
+                ipv4_address="192.168.50.50",
+                profile_id="slow",
+                mac_address=self.UPPERCASE_PHONE,
+            )
+        )
+        self.protect(self.UPPERCASE_PHONE)
+        helper = MovingClientHelper(self.UPPERCASE_PHONE, "192.168.50.178")
+
+        self.scan_with(helper)
+
+        self.assertEqual(self.repository.list_domain_observations(), ())
+
+    def test_protecting_a_client_that_the_snapshot_names_in_capitals_purges_its_old_rows(
+        self,
+    ) -> None:
+        self.server.helper_client = MovingClientHelper(self.UPPERCASE_PHONE, "192.168.50.178")
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.178", "amazon.com", 2, 10, 10)], now=10
+        )
+        self.assertEqual(self.stored_macs(), {("192.168.50.178", None)})
+
+        status, _, _ = self.server.write_response_for(
+            "/api/unaffected-devices", {"mac_address": self.UPPERCASE_PHONE}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self.repository.list_domain_observations(), ())
+
+    def test_a_corrupt_stored_observation_gets_the_normal_storage_error_response(self) -> None:
+        self.server.admin_token = "admin-token"
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.20", "amazon.com", 2, 10, 10)], now=10
+        )
+        self.repository._connection.execute(
+            "UPDATE domain_observations SET mac_address = 'garbage'"
+        )
+        handler = object.__new__(ControlRequestHandler)
+        handler.server = self.server
+        handler.client_address = ("127.0.0.1", 45000)
+        handler.path = "/api/observations"
+        handler.headers = Message()
+        handler.headers["Authorization"] = "Bearer admin-token"
+        response = {}
+        handler._send_response = lambda **values: response.update(values)
+
+        handler.do_GET()
+
+        self.assertEqual(response["status"], 500)
+        self.assertEqual(
+            json.loads(response["body"]), {"error": "stored configuration could not be read"}
+        )
+
+    def test_a_scan_records_a_capital_snapshot_address_in_its_normal_form(self) -> None:
+        self.scan_with(MovingClientHelper(self.UPPERCASE_PHONE, "192.168.50.99"))
+
+        self.assertEqual(self.stored_macs(), {("192.168.50.99", self.UPPERCASE_PHONE.lower())})
+
+    def test_rows_recorded_from_a_capital_snapshot_are_hidden_by_the_normal_form(self) -> None:
+        helper = MovingClientHelper(self.UPPERCASE_PHONE, "192.168.50.99")
+        self.scan_with(helper)
+        helper.address = "192.168.50.178"  # The rows are now under an address it left.
+        self.assertEqual(self.shown_addresses(), ["192.168.50.99"])
+        self.protect(self.UPPERCASE_PHONE.lower())
+
+        self.assertEqual(self.shown_addresses(), [])
+
     def test_scan_keeps_the_generic_error_for_other_helper_failures(self) -> None:
         class Failing(FakeHelper):
             def observe_dns_queries(self, excluded_macs=()):

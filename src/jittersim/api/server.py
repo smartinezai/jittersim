@@ -62,6 +62,7 @@ from jittersim.config.protection import (
     observation_is_protected,
     protected_addresses,
     protected_macs,
+    station_mac,
     station_macs_by_address,
 )
 from jittersim.config.service_catalogue import SERVICE_CATALOGUE
@@ -7558,7 +7559,7 @@ class ControlServer(HTTPServer):
                     purge = {
                         str(station["ipv4_address"])
                         for station in self._station_devices()
-                        if station.get("mac_address") == item.mac_address
+                        if station_mac(station) == item.mac_address
                         and station.get("ipv4_address")
                     } | {
                         str(device.ipv4_address)

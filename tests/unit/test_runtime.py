@@ -591,19 +591,24 @@ class RuntimeSchedulerTests(unittest.TestCase):
             },
         )
 
-    def test_traffic_sampling_drops_rows_of_a_protected_client_at_any_address(self) -> None:
+    def test_traffic_sampling_drops_a_protected_client_that_the_snapshot_names_in_capitals(
+        self,
+    ) -> None:
         class WithStation(RecordingHelper):
             def connected_device_snapshot(self):
                 return {
                     "devices": [
-                        {"mac_address": "02:00:00:00:00:01", "ipv4_address": "192.168.50.30"},
+                        {"mac_address": "DC:1E:D5:3E:97:4C", "ipv4_address": "192.168.50.30"},
                     ],
                     "association_status_available": True,
                 }
 
         self.helper = WithStation()
         self._traffic_progression_for_bob()
-        self.repository.save_unaffected_device(UnaffectedDevice("02:00:00:00:00:01", "Phone", 1))
+        self.repository.save_device(
+            Device("phone", "Phone", "192.168.50.50", "normal", mac_address="dc:1e:d5:3e:97:4c")
+        )
+        self.repository.save_unaffected_device(UnaffectedDevice("dc:1e:d5:3e:97:4c", "Phone", 1))
         scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
         scheduler.activate(applied_payload={})
 
@@ -611,6 +616,29 @@ class RuntimeSchedulerTests(unittest.TestCase):
 
         stored = {str(item.ipv4_address) for item in self.repository.list_domain_observations()}
         self.assertEqual(stored, {"192.168.50.10", "192.168.50.11"})
+
+    def test_traffic_sampling_records_a_capital_snapshot_address_in_its_normal_form(self) -> None:
+        class WithStation(RecordingHelper):
+            def connected_device_snapshot(self):
+                return {
+                    "devices": [
+                        {"mac_address": "DC:1E:D5:3E:97:4C", "ipv4_address": "192.168.50.30"},
+                    ],
+                    "association_status_available": True,
+                }
+
+        self.helper = WithStation()
+        self._traffic_progression_for_bob()
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+
+        scheduler.tick(repository=self.repository, now=100)
+
+        stored = {
+            str(item.ipv4_address): item.mac_address
+            for item in self.repository.list_domain_observations()
+        }
+        self.assertEqual(stored["192.168.50.30"], "dc:1e:d5:3e:97:4c")
 
     def test_traffic_sampling_never_captures_through_an_old_helper(self) -> None:
         protected = "02:00:00:00:00:01"
