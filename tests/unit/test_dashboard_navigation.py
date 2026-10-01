@@ -17,7 +17,8 @@ HTML = DASHBOARD_HTML.split("<script>")[0]
 CARD_PAGES = {
     "General profile": "devices", "Connected clients": "devices",
     "Unaffected by profiles": "devices",
-    "Save profile": "profiles", "Assign a device": "profiles", "Group devices": "profiles",
+    "Saved profiles": "profiles", "Save profile": "profiles",
+    "Assign a device": "profiles", "Group devices": "profiles",
     "Schedule a profile": "schedules", "Run a profile timer": "schedules",
     "Progression mode": "schedules", "Device data limit": "schedules",
     "Shared group data limit": "schedules", "Service lists": "schedules",

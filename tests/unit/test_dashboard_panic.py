@@ -56,6 +56,7 @@ function openCredentials(kind) {openedCredentials.push(kind)}
 function setButtonBusy(button, busy) {button.disabled = busy}
 function renderRuntimeSummary(state) {runtimeStates.push(state)}
 function refreshAfterSuccess(message) {refreshMessages.push(message)}
+function renderSavedProfiles() {}
 async function fetch(path, options) {networkCalls.push({path, options}); return await network()}
 function deferred() {
   let resolve;
