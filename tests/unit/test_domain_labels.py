@@ -174,3 +174,36 @@ def test_a_tag_endpoint_under_an_app_is_a_tracker_but_the_app_stays_an_app(
 def test_a_tag_endpoint_under_a_social_app_is_not_a_seen_with_source():
     pairs = [("px.ads.linkedin.com", 5), ("snap.licdn.com", 5), ("a.akamai.net", 5)]
     assert seen_with(pairs) == {}
+
+
+@pytest.mark.parametrize(
+    ("domain", "name"),
+    [
+        ("storage.googleapis.com", "Google Cloud Storage"),
+        ("my-bucket.storage.googleapis.com", "Google Cloud Storage"),
+        ("1-2-3-4.bc.googleusercontent.com", "Google Cloud"),
+    ],
+)
+def test_google_shared_platforms_are_cdn_names(domain, name):
+    label = label_domain(domain)
+    assert (label.kind, label.name, label.category) == ("cdn", name, "Cloud hosting")
+
+
+def test_the_google_parents_stay_system_names():
+    assert label_domain("www.google.com").kind == "system"
+    assert label_domain("fonts.googleapis.com").kind == "system"
+    assert label_domain("lh3.googleusercontent.com").kind == "system"
+
+
+@pytest.mark.parametrize(
+    "domain", ["amazon.com", "www.amazon.de", "m.media-amazon.com", "x.ssl-images-amazon.com"]
+)
+def test_the_amazon_apex_names_say_amazon_services(domain):
+    label = label_domain(domain)
+    assert (label.kind, label.name, label.category) == ("app", "Amazon", "Amazon services")
+
+
+def test_alexa_com_is_not_a_smart_home_name_but_the_alexa_service_is():
+    assert label_domain("alexa.com").known is False
+    label = label_domain("device-metrics-us.amazonalexa.com")
+    assert (label.kind, label.name) == ("iot", "Amazon Alexa")
