@@ -255,7 +255,7 @@ addresses. Disable the browser proxy setting when finished.
 
 A service list shapes traffic to chosen services for every affected client.
 It needs no proxy or setting on the client. Create one in the dashboard under
-**Service lists**. Use a simple profile with a visible delay for the first
+**Schedules and limits** in the **Service lists** card. Use a simple profile with a visible delay for the first
 check.
 
 1. Apply the configuration. Connect a test client that is not in **Unaffected

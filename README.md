@@ -237,7 +237,7 @@ progression even when it creates few new DNS queries.
 ### Service lists
 
 A **Service list** applies a profile to chosen apps and sites on every affected
-device. Tick services from the catalogue (LinkedIn, Microsoft Teams, ChatGPT,
+device. Find it under **Schedules and limits**. Tick services from the catalogue (LinkedIn, Microsoft Teams, ChatGPT,
 Claude, Netflix, YouTube and more) and add any extra hostnames then choose the
 profile for them. You can keep several lists with a different profile each.
 
