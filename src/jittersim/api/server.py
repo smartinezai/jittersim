@@ -675,31 +675,6 @@ DASHBOARD_HTML = """<!doctype html>
     <span id="toast-message"></span>
     <button id="toast-dismiss" type="button" aria-label="Dismiss message">Dismiss</button>
   </div>
-  <nav class="credential-dock" aria-label="Quick actions">
-    <button id="open-admin-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
-      <span>Admin token</span><span id="admin-credential-state" class="credential-state">Needed</span>
-    </button>
-    <button id="open-router-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
-      <span>Router password</span><span id="router-credential-state" class="credential-state">Not entered</span>
-    </button>
-    <div class="router-wifi-control">
-      <div><span id="router-wifi-label" class="router-wifi-label">Router Wi-Fi</span>
-        <p id="router-wifi-status" class="router-wifi-status" role="status" aria-live="polite">Enter router password</p>
-      </div>
-      <button id="router-wifi-toggle" class="router-wifi-toggle" type="button" role="switch"
-        aria-checked="false" aria-labelledby="router-wifi-label" aria-describedby="router-wifi-status" data-unknown="true" disabled>
-        <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
-      </button>
-    </div>
-    <button id="panic-button" class="danger panic-button" type="button"
-      title="Remove all traffic shaping now. Choose Apply current configuration to resume.">
-      <span>Panic</span><span id="panic-state" class="credential-state">Turn all profiles off</span>
-    </button>
-    <button id="reset-wifi-name" type="button" disabled aria-describedby="wifi-reset-status">
-      <span>Reset Wi-Fi name</span><span class="credential-state">Restore JitterSim</span>
-    </button>
-    <p id="wifi-reset-status" class="credential-state" role="status" aria-live="polite">Keep password and security</p>
-  </nav>
   <section id="credentials-panel" class="credentials-panel" aria-labelledby="credentials-title" hidden>
     <div class="credential-heading">
       <h2 id="credentials-title">Credentials</h2>
@@ -744,6 +719,57 @@ DASHBOARD_HTML = """<!doctype html>
     </p>
     </div>
   </section>
+  <div class="app">
+  <aside class="sidebar" aria-label="JitterSim">
+    <div class="sidebar-brand">
+      <p class="eyebrow">NETWORK TEST LAB</p>
+      <h1>JitterSim</h1>
+      <span id="mode-badge" class="badge pending">Checking mode...</span>
+    </div>
+    <nav class="sidebar-nav" aria-label="Sections">
+      <ul>
+        <li><a href="#devices" data-page-link="devices">Devices <span id="nav-devices-count" class="nav-chip" hidden></span></a></li>
+        <li><a href="#profiles" data-page-link="profiles">Profiles</a></li>
+        <li><a href="#schedules" data-page-link="schedules">Schedules and limits</a></li>
+        <li><a href="#router" data-page-link="router">Router and Wi-Fi</a></li>
+        <li><a href="#traffic" data-page-link="traffic">Traffic</a></li>
+        <li><a href="#access" data-page-link="access">Access and rules</a></li>
+        <li><a href="#diagnostics" data-page-link="diagnostics">Diagnostics</a></li>
+      </ul>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="sidebar-operate">
+        <div class="sidebar-actions">
+          <button id="apply-button" class="primary" type="button">Apply current configuration</button>
+          <button id="reset-button" class="danger" type="button">Reset network</button>
+        </div>
+        <p id="runtime-summary" class="runtime-summary unknown">Check the admin token to view the network state.</p>
+        <p id="message" class="action-message" role="status" aria-live="polite">Ready.</p>
+        <button id="panic-button" class="danger panic-button" type="button"
+          title="Remove all traffic shaping now. Choose Apply current configuration to resume.">
+          <span>Panic</span><span id="panic-state" class="credential-state">Turn all profiles off</span>
+        </button>
+        <div class="router-wifi-control">
+          <div><span id="router-wifi-label" class="router-wifi-label">Router Wi-Fi</span>
+            <p id="router-wifi-status" class="router-wifi-status" role="status" aria-live="polite">Enter router password</p>
+          </div>
+          <button id="router-wifi-toggle" class="router-wifi-toggle" type="button" role="switch"
+            aria-checked="false" aria-labelledby="router-wifi-label" aria-describedby="router-wifi-status" data-unknown="true" disabled>
+            <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+          </button>
+        </div>
+      </div>
+      <div class="sidebar-credentials">
+        <button id="open-admin-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
+          <span>Admin token</span><span id="admin-credential-state" class="credential-state">Needed</span>
+        </button>
+        <button id="open-router-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
+          <span>Router password</span><span id="router-credential-state" class="credential-state">Not entered</span>
+        </button>
+      </div>
+    </div>
+  </aside>
+  <main class="content" id="content">
   <section class="card" id="dashboard-access-panel" aria-labelledby="dashboard-access-title">
     <h2 id="dashboard-access-title">Dashboard access</h2>
     <p id="dashboard-access-status" role="status">Open Admin token and choose Check token to sign in.</p>
@@ -754,27 +780,8 @@ DASHBOARD_HTML = """<!doctype html>
     <div id="dashboard-access-list" hidden></div>
   </section>
   <div id="private-dashboard" hidden>
-  <header class="page-header">
-    <div>
-      <p class="eyebrow">NETWORK TEST LAB</p>
-      <h1>JitterSim</h1>
-      <p class="subtitle">Shape the test network then observe the result from a connected device.</p>
-    </div>
-    <span id="mode-badge" class="badge pending">Checking mode...</span>
-  </header>
   <p id="mode-notice" class="notice" role="status">Checking control mode...</p>
-  <section class="card action-bar" aria-label="Network actions">
-    <div class="action-copy">
-      <h2>Network controls</h2>
-      <p>Apply the saved configuration or return the test network to its normal state.</p>
-      <p id="runtime-summary" class="runtime-summary unknown">Check the admin token to view the network state.</p>
-    </div>
-    <div class="action-buttons">
-      <button id="apply-button" class="primary" type="button">Apply current configuration</button>
-      <button id="reset-button" class="danger" type="button">Reset network</button>
-    </div>
-    <p id="message" class="action-message" role="status" aria-live="polite">Ready.</p>
-  </section>
+  <section class="page" id="page-devices" data-page="devices" aria-label="devices">
   <section class="card" aria-labelledby="general-profile-title">
     <h2 id="general-profile-title">General profile</h2>
     <p>Apply a saved profile to every device on JitterSim Wi-Fi except those in Unaffected by profiles. New arrivals are included.</p>
@@ -828,87 +835,8 @@ DASHBOARD_HTML = """<!doctype html>
     </details>
     <p class="form-note">Use “Make unaffected” beside a connected device to add it without typing an address. If a device changes its private Wi-Fi MAC, add its new address.</p>
   </section>
-  <section class="card traffic-card" aria-labelledby="traffic-title">
-    <div class="section-heading">
-      <div>
-        <h2 id="traffic-title">Live traffic</h2>
-        <p>Recent traffic rates for assigned test devices</p>
-      </div>
-      <span id="traffic-window" class="count-badge">Last 60 seconds</span>
-    </div>
-    <div class="traffic-controls">
-      <label>Device
-        <select id="traffic-device">
-          <option value="all">All assigned devices</option>
-        </select>
-      </label>
-      <p id="traffic-status" class="traffic-status" role="status" aria-live="polite">Check the admin token to start live traffic sampling.</p>
-    </div>
-    <form id="traffic-rate-form" class="traffic-rate-form">
-      <label>ISP download maximum (Mbit/s)
-        <input id="traffic-isp-download" type="number" min="0.1" max="1000" step="0.1" value="100.0">
-      </label>
-      <label>ISP upload maximum (Mbit/s)
-        <input id="traffic-isp-upload" type="number" min="0.1" max="1000" step="0.1" placeholder="Unknown">
-      </label>
-      <button class="primary" type="submit">Save speed references</button>
-      <p id="traffic-rate-status" class="traffic-rate-help" role="status" aria-live="polite"></p>
-      <p class="traffic-rate-help">These reference lines do not limit traffic. The ISP plan maximum is shared with other home devices.</p>
-    </form>
-    <div class="traffic-metrics">
-      <div class="traffic-metric"><span>Upload rate</span><strong id="traffic-upload-rate">—</strong></div>
-      <div class="traffic-metric"><span>Download rate</span><strong id="traffic-download-rate">—</strong></div>
-      <div class="traffic-metric"><span>Upload packet rate</span><strong id="traffic-upload-packets">—</strong></div>
-      <div class="traffic-metric"><span>Download packet rate</span><strong id="traffic-download-packets">—</strong></div>
-    </div>
-    <div class="traffic-chart-wrap">
-      <canvas id="traffic-chart" width="900" height="320" role="img" aria-label="Live upload and download rates at JitterSim with configured ISP and device queue limits over the last 60 seconds">Live traffic chart. Check the admin token to begin sampling.</canvas>
-      <div class="traffic-legend" aria-label="Graph legend">
-        <span><i class="traffic-key"></i>Upload rate at Pi</span>
-        <span><i class="traffic-key download"></i>Download rate at Pi</span>
-        <span><i class="traffic-key isp-upload"></i>ISP upload plan</span>
-        <span><i class="traffic-key isp-download"></i>ISP download plan</span>
-        <span id="traffic-profile-upload-legend"><i class="traffic-key profile-upload"></i>Default queue upload limit</span>
-        <span id="traffic-profile-download-legend"><i class="traffic-key profile-download"></i>Default queue download limit</span>
-      </div>
-    </div>
-    <p id="traffic-profile-status" class="traffic-profile-status" role="status" aria-live="polite">Select one device to show its applied default queue limits.</p>
-    <p class="traffic-note">Traffic lines count bytes at JitterSim before its queues. They do not show the speed a device receives. Dashed lines show configured limits. The ISP plan line is shared with household traffic and is not a live measurement of spare capacity. Service-specific queues may use different limits. Only assigned devices are included. Check the admin token to start; sampling pauses when this tab is hidden.</p>
-  </section>
-  <section class="card uplink-card">
-    <div class="section-heading">
-      <div>
-        <h2>Upstream router connection</h2>
-        <p>What the Pi can see through Ethernet</p>
-      </div>
-      <span id="uplink-state" class="count-badge">Check token</span>
-    </div>
-    <div id="uplink-details" class="uplink-grid" aria-live="polite">Enter the admin token and choose Check token to view the router connection.</div>
-    <p id="uplink-note" class="policy-note">The router controls use the TG3442DE local web interface. The router admin password is used for one request and is not saved.</p>
-    <a id="router-settings-link" class="button-link" href="http://192.168.0.1" target="_blank" rel="noreferrer">Open router Wi-Fi settings</a>
-    <div class="router-controls">
-      <button id="open-router-credentials-inline" type="button" aria-controls="credentials-panel" aria-expanded="false">Enter router password</button>
-      <div class="action-buttons">
-        <button id="sync-router-ap" class="primary" type="button">Copy router Wi-Fi to Pi</button>
-      </div>
-      <p id="router-action-message" class="policy-note" role="status" aria-live="polite">Keep the Pi connected to the router by Ethernet before changing the router Wi-Fi.</p>
-    </div>
-  </section>
-  <section class="card observations-card">
-    <div class="section-heading">
-      <div>
-        <h2>Traffic discovery</h2>
-        <p>Review DNS names observed from devices on the test network</p>
-      </div>
-      <div class="observation-actions">
-        <span id="observation-count" class="count-badge">No scan yet</span>
-        <button id="scan-observations" class="primary" type="button">Scan now</button>
-      </div>
-    </div>
-    <p id="observation-note" class="observation-note">Scanning is on demand. Results are local aggregates, not exact page visits.</p>
-    <div id="observations" class="observation-list" aria-live="polite">No observations yet.</div>
-  </section>
-  <div class="content-grid">
+  </section><!-- /page:devices -->
+  <section class="page" id="page-profiles" data-page="profiles" aria-label="profiles" hidden>
     <section class="card">
       <h2>Save profile</h2>
       <form id="profile-form">
@@ -1135,52 +1063,8 @@ DASHBOARD_HTML = """<!doctype html>
       </form>
       <div id="group-list" class="quota-list" aria-live="polite">No groups saved.</div>
     </section>
-  </div>
-  <div class="content-grid">
-    <section class="card">
-      <h2>Network access rules</h2>
-      <form id="policy-form">
-        <div class="policy-grid">
-          <div>
-            <h3>MAC filtering</h3>
-            <div class="fields">
-              <label>Mode
-                <select id="mac-mode">
-                  <option value="disabled">Disabled</option>
-                  <option value="allowlist">Allow only these MAC addresses</option>
-                  <option value="denylist">Block these MAC addresses</option>
-                </select>
-              </label>
-              <label>Allowlist (comma separated)
-                <textarea id="mac-allowlist" placeholder="aa:bb:cc:dd:ee:ff"></textarea>
-              </label>
-              <label>Denylist (comma separated)
-                <textarea id="mac-denylist" placeholder="11:22:33:44:55:66"></textarea>
-              </label>
-            </div>
-          </div>
-          <div>
-            <h3>Website filtering</h3>
-            <div class="fields">
-              <label>Global mode
-                <select id="website-mode">
-                  <option value="unrestricted">Unrestricted</option>
-                  <option value="allow_only">Allow only these domains</option>
-                </select>
-              </label>
-              <label>Global allowed domains (comma separated)
-                <textarea id="website-allowlist" placeholder="example.com"></textarea>
-              </label>
-              <label>Global blocked domains (comma separated)
-                <textarea id="website-blocklist" placeholder="ads.example.com"></textarea>
-              </label>
-            </div>
-          </div>
-        </div>
-        <p class="policy-note">Website rules use resolved IPv4 destinations and are best effort. VPNs, encrypted DNS and direct IP connections can bypass them.</p>
-        <button id="save-policies" type="submit">Save access rules</button>
-      </form>
-    </section>
+  </section><!-- /page:profiles -->
+  <section class="page" id="page-schedules" data-page="schedules" aria-label="schedules" hidden>
     <section class="card">
       <h2>Schedule a profile</h2>
       <form id="schedule-form">
@@ -1213,7 +1097,6 @@ DASHBOARD_HTML = """<!doctype html>
       </form>
       <div id="schedule-list" class="schedule-list" aria-live="polite">No schedules yet.</div>
     </section>
-  </div>
   <section class="card timer-card">
     <div class="section-heading">
       <div>
@@ -1519,6 +1402,35 @@ DASHBOARD_HTML = """<!doctype html>
     </form>
     <div id="time-quota-list" class="quota-list" aria-live="polite">Enter the admin token to view time limits.</div>
   </section>
+  </section><!-- /page:schedules -->
+  <section class="page" id="page-router" data-page="router" aria-label="router" hidden>
+    <section class="card wifi-name-card">
+    <h2>Wi-Fi name</h2>
+    <p>Restore the Pi's test network name to JitterSim. It keeps the password and security type. Test devices disconnect while Wi-Fi restarts. Use management access.</p>
+    <button id="reset-wifi-name" type="button" disabled aria-describedby="wifi-reset-status">
+      <span>Reset Wi-Fi name</span><span class="credential-state">Restore JitterSim</span>
+    </button>
+    <p id="wifi-reset-status" class="credential-state" role="status" aria-live="polite">Keep password and security</p>
+  </section>
+  <section class="card uplink-card">
+    <div class="section-heading">
+      <div>
+        <h2>Upstream router connection</h2>
+        <p>What the Pi can see through Ethernet</p>
+      </div>
+      <span id="uplink-state" class="count-badge">Check token</span>
+    </div>
+    <div id="uplink-details" class="uplink-grid" aria-live="polite">Enter the admin token and choose Check token to view the router connection.</div>
+    <p id="uplink-note" class="policy-note">The router controls use the TG3442DE local web interface. The router admin password is used for one request and is not saved.</p>
+    <a id="router-settings-link" class="button-link" href="http://192.168.0.1" target="_blank" rel="noreferrer">Open router Wi-Fi settings</a>
+    <div class="router-controls">
+      <button id="open-router-credentials-inline" type="button" aria-controls="credentials-panel" aria-expanded="false">Enter router password</button>
+      <div class="action-buttons">
+        <button id="sync-router-ap" class="primary" type="button">Copy router Wi-Fi to Pi</button>
+      </div>
+      <p id="router-action-message" class="policy-note" role="status" aria-live="polite">Keep the Pi connected to the router by Ethernet before changing the router Wi-Fi.</p>
+    </div>
+  </section>
   <section class="card">
     <h2>Manual Pi access-point fallback</h2>
     <form id="access-point-form">
@@ -1533,29 +1445,71 @@ DASHBOARD_HTML = """<!doctype html>
       <p class="policy-note">These values configure the Pi with WPA3. To keep the router's security type use Copy router Wi-Fi to Pi. To join the copied network use the router's Wi-Fi password. The password is not saved in the dashboard database.</p>
       <button type="submit">Use these values on the Pi</button>
     </form>
-    <p class="policy-note">Reset Wi-Fi name is in Quick actions. It keeps the password and security type. Test devices disconnect while Wi-Fi restarts. Use management access.</p>
+    <p class="policy-note">To restore the JitterSim name without changing the password, use Reset Wi-Fi name above.</p>
   </section>
-  <div class="data-grid">
-    <section class="card">
-      <div class="section-heading"><h2>Profiles</h2><p>Saved network behavior</p></div>
-      <pre id="profiles">Enter the admin token and choose Check token to load.</pre>
-    </section>
-    <section class="card">
-      <div class="section-heading"><h2>Devices</h2><p>Assigned test clients</p></div>
-      <pre id="devices">Enter the admin token and choose Check token to load.</pre>
-    </section>
-    <section class="card">
-      <div class="section-heading"><h2>Compiled plan</h2><p>Current traffic rules</p></div>
-      <pre id="plan">Enter the admin token and choose Check token to load.</pre>
-    </section>
-    <section class="card">
-      <div class="section-heading"><h2>Runtime state</h2><p>Last helper result</p></div>
-      <pre id="state">Enter the admin token and choose Check token to load.</pre>
-    </section>
-    <section class="card">
-      <div class="section-heading"><h2>Access rules</h2><p>Saved MAC and website policy</p></div>
-      <pre id="policies">Enter the admin token and choose Check token to load.</pre>
-    </section>
+  </section><!-- /page:router -->
+  <section class="page" id="page-traffic" data-page="traffic" aria-label="traffic" hidden>
+  <section class="card traffic-card" aria-labelledby="traffic-title">
+    <div class="section-heading">
+      <div>
+        <h2 id="traffic-title">Live traffic</h2>
+        <p>Recent traffic rates for assigned test devices</p>
+      </div>
+      <span id="traffic-window" class="count-badge">Last 60 seconds</span>
+    </div>
+    <div class="traffic-controls">
+      <label>Device
+        <select id="traffic-device">
+          <option value="all">All assigned devices</option>
+        </select>
+      </label>
+      <p id="traffic-status" class="traffic-status" role="status" aria-live="polite">Check the admin token to start live traffic sampling.</p>
+    </div>
+    <form id="traffic-rate-form" class="traffic-rate-form">
+      <label>ISP download maximum (Mbit/s)
+        <input id="traffic-isp-download" type="number" min="0.1" max="1000" step="0.1" value="100.0">
+      </label>
+      <label>ISP upload maximum (Mbit/s)
+        <input id="traffic-isp-upload" type="number" min="0.1" max="1000" step="0.1" placeholder="Unknown">
+      </label>
+      <button class="primary" type="submit">Save speed references</button>
+      <p id="traffic-rate-status" class="traffic-rate-help" role="status" aria-live="polite"></p>
+      <p class="traffic-rate-help">These reference lines do not limit traffic. The ISP plan maximum is shared with other home devices.</p>
+    </form>
+    <div class="traffic-metrics">
+      <div class="traffic-metric"><span>Upload rate</span><strong id="traffic-upload-rate">—</strong></div>
+      <div class="traffic-metric"><span>Download rate</span><strong id="traffic-download-rate">—</strong></div>
+      <div class="traffic-metric"><span>Upload packet rate</span><strong id="traffic-upload-packets">—</strong></div>
+      <div class="traffic-metric"><span>Download packet rate</span><strong id="traffic-download-packets">—</strong></div>
+    </div>
+    <div class="traffic-chart-wrap">
+      <canvas id="traffic-chart" width="900" height="320" role="img" aria-label="Live upload and download rates at JitterSim with configured ISP and device queue limits over the last 60 seconds">Live traffic chart. Check the admin token to begin sampling.</canvas>
+      <div class="traffic-legend" aria-label="Graph legend">
+        <span><i class="traffic-key"></i>Upload rate at Pi</span>
+        <span><i class="traffic-key download"></i>Download rate at Pi</span>
+        <span><i class="traffic-key isp-upload"></i>ISP upload plan</span>
+        <span><i class="traffic-key isp-download"></i>ISP download plan</span>
+        <span id="traffic-profile-upload-legend"><i class="traffic-key profile-upload"></i>Default queue upload limit</span>
+        <span id="traffic-profile-download-legend"><i class="traffic-key profile-download"></i>Default queue download limit</span>
+      </div>
+    </div>
+    <p id="traffic-profile-status" class="traffic-profile-status" role="status" aria-live="polite">Select one device to show its applied default queue limits.</p>
+    <p class="traffic-note">Traffic lines count bytes at JitterSim before its queues. They do not show the speed a device receives. Dashed lines show configured limits. The ISP plan line is shared with household traffic and is not a live measurement of spare capacity. Service-specific queues may use different limits. Only assigned devices are included. Check the admin token to start; sampling pauses when this tab is hidden.</p>
+  </section>
+  <section class="card observations-card">
+    <div class="section-heading">
+      <div>
+        <h2>Traffic discovery</h2>
+        <p>Review DNS names observed from devices on the test network</p>
+      </div>
+      <div class="observation-actions">
+        <span id="observation-count" class="count-badge">No scan yet</span>
+        <button id="scan-observations" class="primary" type="button">Scan now</button>
+      </div>
+    </div>
+    <p id="observation-note" class="observation-note">Scanning is on demand. Results are local aggregates, not exact page visits.</p>
+    <div id="observations" class="observation-list" aria-live="polite">No observations yet.</div>
+  </section>
     <section class="card analytics-card">
       <div class="section-heading">
         <div><h2>Random website choices</h2><p>Scheduled profile rerolls</p></div>
@@ -1581,6 +1535,74 @@ DASHBOARD_HTML = """<!doctype html>
         </table>
       </div>
     </section>
+  </section><!-- /page:traffic -->
+  <section class="page" id="page-access" data-page="access" aria-label="access" hidden>
+    <section class="card">
+      <h2>Network access rules</h2>
+      <form id="policy-form">
+        <div class="policy-grid">
+          <div>
+            <h3>MAC filtering</h3>
+            <div class="fields">
+              <label>Mode
+                <select id="mac-mode">
+                  <option value="disabled">Disabled</option>
+                  <option value="allowlist">Allow only these MAC addresses</option>
+                  <option value="denylist">Block these MAC addresses</option>
+                </select>
+              </label>
+              <label>Allowlist (comma separated)
+                <textarea id="mac-allowlist" placeholder="aa:bb:cc:dd:ee:ff"></textarea>
+              </label>
+              <label>Denylist (comma separated)
+                <textarea id="mac-denylist" placeholder="11:22:33:44:55:66"></textarea>
+              </label>
+            </div>
+          </div>
+          <div>
+            <h3>Website filtering</h3>
+            <div class="fields">
+              <label>Global mode
+                <select id="website-mode">
+                  <option value="unrestricted">Unrestricted</option>
+                  <option value="allow_only">Allow only these domains</option>
+                </select>
+              </label>
+              <label>Global allowed domains (comma separated)
+                <textarea id="website-allowlist" placeholder="example.com"></textarea>
+              </label>
+              <label>Global blocked domains (comma separated)
+                <textarea id="website-blocklist" placeholder="ads.example.com"></textarea>
+              </label>
+            </div>
+          </div>
+        </div>
+        <p class="policy-note">Website rules use resolved IPv4 destinations and are best effort. VPNs, encrypted DNS and direct IP connections can bypass them.</p>
+        <button id="save-policies" type="submit">Save access rules</button>
+      </form>
+    </section>
+  </section><!-- /page:access -->
+  <section class="page" id="page-diagnostics" data-page="diagnostics" aria-label="diagnostics" hidden>
+    <section class="card">
+      <div class="section-heading"><h2>Profiles</h2><p>Saved network behavior</p></div>
+      <pre id="profiles">Enter the admin token and choose Check token to load.</pre>
+    </section>
+    <section class="card">
+      <div class="section-heading"><h2>Devices</h2><p>Assigned test clients</p></div>
+      <pre id="devices">Enter the admin token and choose Check token to load.</pre>
+    </section>
+    <section class="card">
+      <div class="section-heading"><h2>Compiled plan</h2><p>Current traffic rules</p></div>
+      <pre id="plan">Enter the admin token and choose Check token to load.</pre>
+    </section>
+    <section class="card">
+      <div class="section-heading"><h2>Runtime state</h2><p>Last helper result</p></div>
+      <pre id="state">Enter the admin token and choose Check token to load.</pre>
+    </section>
+    <section class="card">
+      <div class="section-heading"><h2>Access rules</h2><p>Saved MAC and website policy</p></div>
+      <pre id="policies">Enter the admin token and choose Check token to load.</pre>
+    </section>
     <section class="card">
       <div class="section-heading">
         <div><h2>Diagnostics</h2><p>Runtime state and available traffic counters</p></div>
@@ -1595,7 +1617,9 @@ DASHBOARD_HTML = """<!doctype html>
       </div>
       <pre id="action-history">Enter the admin token to view recent actions.</pre>
     </section>
+  </section><!-- /page:diagnostics -->
   </div>
+  </main>
   </div>
   <script>
     const element = (id) => document.getElementById(id);
