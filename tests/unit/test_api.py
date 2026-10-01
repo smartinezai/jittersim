@@ -96,7 +96,7 @@ class FakeHelper:
             "gateway": "192.168.0.1",
         }
 
-    def observe_dns_queries(self):
+    def observe_dns_queries(self, excluded_macs=()):
         return [
             {
                 "ipv4_address": "192.168.50.178",

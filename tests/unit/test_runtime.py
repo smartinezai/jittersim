@@ -37,7 +37,7 @@ class RecordingHelper:
         self.plans.append(plan)
         return {"commands_run": 1}
 
-    def observe_dns_queries(self):
+    def observe_dns_queries(self, excluded_macs=()):
         return self.observations
 
     def traffic_counters(self):

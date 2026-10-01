@@ -16,11 +16,12 @@ from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from jittersim.config.exemptions import normalize_exempt_mac
 from jittersim.config.models import ValidationError, normalize_domain
 from jittersim.engine.codec import PlanCodecError, plan_from_payload, plan_to_payload
 from jittersim.engine.plan import NetworkPlan
 
-from .applier import ApplyError, NetworkApplier
+from .applier import MAX_PROTECTED_MACS, ApplyError, NetworkApplier
 from .dashboard_access import ACCESS_FILE, AccessError, AccessStore, identify_peer
 from .executor import CommandExecutionError, SubprocessExecutor
 from .router import (
@@ -158,7 +159,7 @@ class HelperService:
         if action == "uplink-info":
             return self._handle_uplink_info()
         if action == "observe-dns":
-            return self._handle_dns_observation()
+            return self._handle_dns_observation(payload)
         if action == "traffic-counters":
             return self._handle_traffic_counters()
         if action in WIFI_ACTIONS:
@@ -284,15 +285,23 @@ class HelperService:
             return {"ok": False, "error": "upstream connection inspection failed"}
         return {"ok": True, "action": "uplink-info", "uplink": uplink}
 
-    def _handle_dns_observation(self) -> Dict[str, Any]:
+    def _handle_dns_observation(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        raw = payload.get("excluded_macs", [])
         try:
-            output = self._applier.capture_dns_queries()
+            if not isinstance(raw, list) or len(raw) > MAX_PROTECTED_MACS:
+                raise ValueError("bad list")
+            macs = sorted({normalize_exempt_mac(mac) for mac in raw})
+        except ValueError:
+            return {"ok": False, "error": "invalid excluded devices"}
+        try:
+            output = self._applier.capture_dns_queries(macs)
         except CommandExecutionError:
             LOGGER.exception("DNS observation failed")
             return {"ok": False, "error": "DNS observation failed"}
         return {
             "ok": True,
             "action": "observe-dns",
+            "excluded_macs": macs,
             "observations": _parse_dns_query_output(output, observed_at=int(time.time())),
         }
 
@@ -975,10 +984,21 @@ class HelperClient:
             "gateway": gateway,
         }
 
-    def observe_dns_queries(self) -> List[Dict[str, Any]]:
-        """Capture one bounded DNS sample from the test interface."""
+    def observe_dns_queries(self, excluded_macs: Sequence[str] = ()) -> List[Dict[str, Any]]:
+        """Capture one bounded DNS sample that leaves out the given devices."""
 
-        response = self._request({"action": "observe-dns"})
+        try:
+            macs = sorted({normalize_exempt_mac(mac) for mac in excluded_macs})
+        except ValueError as error:
+            raise HelperClientError("invalid excluded devices") from error
+        if len(macs) > MAX_PROTECTED_MACS:
+            raise HelperClientError("too many excluded devices")
+        response = self._request({"action": "observe-dns", "excluded_macs": macs})
+        if macs and response.get("excluded_macs") != macs:
+            raise HelperClientError(
+                "The networking helper is out of date and cannot skip protected devices. "
+                "Update it before scanning traffic."
+            )
         observations = response.get("observations")
         if not isinstance(observations, list) or any(
             not isinstance(observation, dict) for observation in observations

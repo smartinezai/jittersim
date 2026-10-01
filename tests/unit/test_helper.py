@@ -13,6 +13,7 @@ from jittersim.networking.executor import CommandExecutionError, FakeExecutor
 from tests.wifi_support import WifiExecutor
 from jittersim.networking.helper import (
     HelperClient,
+    HelperClientError,
     HelperError,
     HelperService,
     UnixHelperServer,
@@ -712,6 +713,58 @@ class HelperServiceTests(unittest.TestCase):
         self.assertEqual(executor.commands[0].timeout_seconds, 5.0)
         self.assertTrue(executor.commands[0].timeout_is_success)
 
+    def test_dns_observation_echoes_the_sorted_excluded_addresses(self) -> None:
+        executor = OutputExecutor("")
+        service = HelperService(
+            NetworkApplier(
+                executor=executor,
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            )
+        )
+
+        response = service.handle_payload(
+            {
+                "action": "observe-dns",
+                "excluded_macs": ["02:00:00:00:00:02", "02-00-00-00-00-01", "02:00:00:00:00:02"],
+            }
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["excluded_macs"], ["02:00:00:00:00:01", "02:00:00:00:00:02"])
+        arguments = executor.commands[0].arguments
+        self.assertEqual(arguments.count("ether"), 2)
+        self.assertLess(
+            arguments.index("02:00:00:00:00:01"), arguments.index("02:00:00:00:00:02")
+        )
+
+    def test_dns_observation_without_exclusions_echoes_an_empty_list(self) -> None:
+        service = HelperService(
+            NetworkApplier(
+                executor=OutputExecutor(""),
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            )
+        )
+
+        response = service.handle_payload({"action": "observe-dns"})
+
+        self.assertEqual(response["excluded_macs"], [])
+
+    def test_dns_observation_rejects_invalid_or_too_many_excluded_addresses(self) -> None:
+        executor = OutputExecutor("")
+        service = HelperService(
+            NetworkApplier(
+                executor=executor,
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            )
+        )
+        too_many = ["02:00:00:00:%02x:%02x" % (index // 256, index % 256) for index in range(65)]
+        for bad in (["not-a-mac"], too_many, "02:00:00:00:00:01", [5], ["00:00:00:00:00:00"]):
+            with self.subTest(bad=bad if len(bad) < 5 else "65 addresses"):
+                response = service.handle_payload({"action": "observe-dns", "excluded_macs": bad})
+                self.assertEqual(response, {"ok": False, "error": "invalid excluded devices"})
+
+        self.assertEqual(executor.commands, [])
+
     def test_reads_device_and_service_traffic_counters(self) -> None:
         executor = OutputExecutor(
             '{"nftables":['
@@ -780,6 +833,64 @@ class HelperServiceTests(unittest.TestCase):
         response = self.service.handle_payload({"action": "shell"})
 
         self.assertEqual(response, {"ok": False, "error": "unknown action"})
+
+
+class RecordingHelperClient(HelperClient):
+    """A client that answers from a canned response instead of a socket."""
+
+    def __init__(self, response):
+        super().__init__(socket_path=Path("unused.sock"))
+        self.response = response
+        self.sent = []
+
+    def _request(self, payload, *, timeout_seconds=None):
+        self.sent.append(payload)
+        return self.response
+
+
+class ObserveDnsClientTests(unittest.TestCase):
+    MACS = ["02:00:00:00:00:01", "02:00:00:00:00:02"]
+
+    def test_sends_the_normalized_sorted_list_and_accepts_the_echo(self) -> None:
+        client = RecordingHelperClient({"ok": True, "observations": [], "excluded_macs": self.MACS})
+
+        observations = client.observe_dns_queries(["02-00-00-00-00-02", self.MACS[0]])
+
+        self.assertEqual(observations, [])
+        self.assertEqual(
+            client.sent, [{"action": "observe-dns", "excluded_macs": self.MACS}]
+        )
+
+    def test_an_old_helper_that_does_not_echo_the_list_fails_closed(self) -> None:
+        client = RecordingHelperClient({"ok": True, "observations": [{"ipv4_address": "1.2.3.4"}]})
+
+        with self.assertRaisesRegex(HelperClientError, "out of date"):
+            client.observe_dns_queries(self.MACS)
+
+    def test_a_helper_that_echoes_a_different_list_fails_closed(self) -> None:
+        client = RecordingHelperClient(
+            {"ok": True, "observations": [], "excluded_macs": self.MACS[:1]}
+        )
+
+        with self.assertRaisesRegex(HelperClientError, "out of date"):
+            client.observe_dns_queries(self.MACS)
+
+    def test_no_exclusions_needs_no_echo(self) -> None:
+        client = RecordingHelperClient({"ok": True, "observations": []})
+
+        self.assertEqual(client.observe_dns_queries(), [])
+        self.assertEqual(client.sent, [{"action": "observe-dns", "excluded_macs": []}])
+
+    def test_rejects_a_bad_or_oversized_list_before_contacting_the_helper(self) -> None:
+        client = RecordingHelperClient({"ok": True, "observations": [], "excluded_macs": []})
+
+        with self.assertRaises(HelperClientError):
+            client.observe_dns_queries(["not-a-mac"])
+        with self.assertRaises(HelperClientError):
+            client.observe_dns_queries(
+                ["02:00:00:00:%02x:%02x" % (index // 256, index % 256) for index in range(65)]
+            )
+        self.assertEqual(client.sent, [])
 
 
 class UnixHelperServerTests(unittest.TestCase):
@@ -854,6 +965,17 @@ class UnixHelperServerTests(unittest.TestCase):
                 "download_packets": 0,
             },
         )
+
+    def test_client_excludes_protected_devices_over_the_socket(self) -> None:
+        protected = ["02:00:00:00:00:01", "02:00:00:00:00:02"]
+        client = HelperClient(socket_path=self.socket_path)
+
+        self.assertEqual(client.observe_dns_queries(protected), [])
+
+        arguments = [
+            command for command in self.executor.commands if command.executable == "tcpdump"
+        ][-1].arguments
+        self.assertEqual(arguments.count("ether"), 2)
 
     def test_existing_regular_file_is_never_replaced_by_a_socket(self) -> None:
         self.server.shutdown()

@@ -7,6 +7,7 @@ from ipaddress import IPv4Address
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence
 
+from jittersim.config.exemptions import normalize_exempt_mac
 from jittersim.config.models import ValidationError
 from jittersim.engine.plan import NetworkPlan
 
@@ -22,6 +23,9 @@ from .renderer import (
 )
 from .topology import Topology
 from .wifi import WifiController
+
+
+MAX_PROTECTED_MACS = 64
 
 
 @dataclass(frozen=True)
@@ -310,9 +314,20 @@ class NetworkApplier:
             "gateway": gateway_match.group(1) if gateway_match else None,
         }
 
-    def capture_dns_queries(self) -> str:
-        """Capture a bounded sample of DNS packets arriving from the test network."""
+    def capture_dns_queries(self, excluded_macs: Sequence[str] = ()) -> str:
+        """Capture a bounded sample of DNS packets arriving from the test network.
 
+        Frames to or from an excluded hardware address are never captured.
+        """
+
+        macs = sorted({normalize_exempt_mac(mac) for mac in excluded_macs})
+        if len(macs) > MAX_PROTECTED_MACS:
+            raise ValueError("too many excluded devices")
+        expression = ["udp", "port", "53", "or", "tcp", "port", "53"]
+        if macs:
+            expression = ["("] + expression + [")"]
+            for mac in macs:
+                expression += ["and", "not", "ether", "host", mac]
         result = self._executor.run(
             Command(
                 executable="tcpdump",
@@ -325,13 +340,7 @@ class NetworkApplier:
                     "256",
                     "-c",
                     "128",
-                    "udp",
-                    "port",
-                    "53",
-                    "or",
-                    "tcp",
-                    "port",
-                    "53",
+                    *expression,
                 ),
                 purpose=f"sample DNS queries on {self._topology.test_interface}",
                 timeout_seconds=5.0,

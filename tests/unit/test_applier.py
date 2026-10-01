@@ -57,6 +57,60 @@ class NetworkApplierTests(unittest.TestCase):
         self.assertEqual(report.commands_run, len(executor.commands) - 2)
         self.assertGreater(report.commands_run, 0)
 
+    def test_dns_capture_without_exclusions_keeps_the_old_filter(self) -> None:
+        executor = FakeExecutor()
+        NetworkApplier(executor=executor, topology=self.topology).capture_dns_queries()
+
+        arguments = executor.commands[-1].arguments
+
+        self.assertEqual(arguments[-7:], ("udp", "port", "53", "or", "tcp", "port", "53"))
+        self.assertNotIn("ether", arguments)
+        self.assertNotIn("(", arguments)
+
+    def test_dns_capture_never_sees_protected_clients(self) -> None:
+        executor = FakeExecutor()
+        NetworkApplier(executor=executor, topology=self.topology).capture_dns_queries(
+            ["02:00:00:00:00:02", "02:00:00:00:00:01"]
+        )
+
+        arguments = executor.commands[-1].arguments
+        tail = arguments[arguments.index("(") :]
+
+        self.assertEqual(
+            tail,
+            (
+                "(", "udp", "port", "53", "or", "tcp", "port", "53", ")",
+                "and", "not", "ether", "host", "02:00:00:00:00:01",
+                "and", "not", "ether", "host", "02:00:00:00:00:02",
+            ),
+        )
+
+    def test_dns_capture_normalizes_and_deduplicates_excluded_addresses(self) -> None:
+        executor = FakeExecutor()
+        NetworkApplier(executor=executor, topology=self.topology).capture_dns_queries(
+            ["02-00-00-00-00-01", "02:00:00:00:00:01", "02:00:00:00:00:AA"]
+        )
+
+        arguments = executor.commands[-1].arguments
+
+        self.assertEqual(arguments.count("ether"), 2)
+        self.assertIn("02:00:00:00:00:aa", arguments)
+
+    def test_dns_capture_rejects_a_bad_or_oversized_exclusion_list(self) -> None:
+        executor = FakeExecutor()
+        applier = NetworkApplier(executor=executor, topology=self.topology)
+
+        with self.assertRaises(ValueError):
+            applier.capture_dns_queries(["not-a-mac"])
+        with self.assertRaises(ValueError):
+            applier.capture_dns_queries(
+                ["02:00:00:00:%02x:%02x" % (index // 256, index % 256) for index in range(65)]
+            )
+        applier.capture_dns_queries(
+            ["02:00:00:00:%02x:%02x" % (index // 256, index % 256) for index in range(64)]
+        )
+        self.assertEqual(len(executor.commands), 1)
+
     def test_reset_runs_project_cleanup_commands(self) -> None:
         executor = RootQueueExecutor()
         commands_run = NetworkApplier(executor=executor, topology=self.topology).reset()
