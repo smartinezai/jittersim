@@ -90,6 +90,8 @@ from jittersim.api.router_operations import RouterOperations
 
 LOGGER = logging.getLogger(__name__)
 MAX_JSON_BODY_BYTES = 64 * 1024
+# One block or profile call may carry this many names.
+MAX_BATCH_DOMAINS = 64
 TLS_HANDSHAKE_TIMEOUT_SECONDS = 5.0
 REQUEST_INPUT_TIMEOUT_SECONDS = 10.0
 MAX_PENDING_CONNECTION_LIFETIME_SECONDS = 30.0
@@ -5839,6 +5841,20 @@ def _policies_payload(repository: ConfigRepository) -> Dict[str, Any]:
     }
 
 
+def _domains_from_payload(payload: Dict[str, Any]) -> Tuple[str, ...]:
+    """Return the unique normalized names of a call that sends domain or domains but not both.
+
+    Every name is checked before the caller saves anything so one bad name rejects the call.
+    """
+
+    if not isinstance(payload, dict) or ("domain" in payload) == ("domains" in payload):
+        raise ValueError("send either domain or domains")
+    raw = [payload["domain"]] if "domain" in payload else payload["domains"]
+    if not isinstance(raw, list) or not 1 <= len(raw) <= MAX_BATCH_DOMAINS:
+        raise ValueError("send between 1 and %d names" % MAX_BATCH_DOMAINS)
+    return tuple(dict.fromkeys(normalize_domain(item) for item in raw))
+
+
 def _domain_observation_payload(observation: DomainObservation) -> Dict[str, Any]:
     return {
         "domain": observation.domain,
@@ -7391,14 +7407,14 @@ class ControlServer(HTTPServer):
     ) -> Tuple[int, str, bytes]:
         try:
             profile_id = payload["profile_id"]
-            domain = normalize_domain(payload["domain"])
+            names = _domains_from_payload(payload)
             profile = self.repository.get_profile(profile_id)
             if profile is None:
                 raise ValueError("profile does not exist")
             updated = replace(
                 profile,
                 website_mode="allow_only",
-                website_domains=tuple(dict.fromkeys(profile.website_domains + (domain,))),
+                website_domains=tuple(dict.fromkeys(profile.website_domains + names)),
             )
             self.repository.save_profile(updated)
         except (KeyError, TypeError, ValueError, StorageError):
@@ -7413,11 +7429,11 @@ class ControlServer(HTTPServer):
         self, payload: Dict[str, Any]
     ) -> Tuple[int, str, bytes]:
         try:
-            domain = normalize_domain(payload["domain"])
+            names = _domains_from_payload(payload)
             policy = self.repository.get_website_policy()
             updated = replace(
                 policy,
-                blocked_domains=tuple(dict.fromkeys(policy.blocked_domains + (domain,))),
+                blocked_domains=tuple(dict.fromkeys(policy.blocked_domains + names)),
             )
             self.repository.save_website_policy(updated)
         except (KeyError, TypeError, ValueError, StorageError):
@@ -7432,9 +7448,9 @@ class ControlServer(HTTPServer):
         self, payload: Dict[str, Any]
     ) -> Tuple[int, str, bytes]:
         try:
-            domain = normalize_domain(payload["domain"])
+            names = _domains_from_payload(payload)
             policy = self.repository.get_website_policy()
-            remaining = tuple(item for item in policy.blocked_domains if item != domain)
+            remaining = tuple(item for item in policy.blocked_domains if item not in names)
             if remaining != policy.blocked_domains:
                 self.repository.save_website_policy(replace(policy, blocked_domains=remaining))
         except (KeyError, TypeError, ValueError, StorageError):

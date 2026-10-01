@@ -1702,6 +1702,172 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertIn("/api/observations/remove-global-block", WRITE_PATHS)
 
+    def test_block_many_names_in_one_call(self) -> None:
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/add-global-block",
+            {
+                "domains": [
+                    "sso.immobilienscout24.de",
+                    "Tracking.immobilienscout24.de",
+                    "sso.immobilienscout24.de",
+                ]
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            self.repository.get_website_policy().blocked_domains,
+            ("sso.immobilienscout24.de", "tracking.immobilienscout24.de"),
+        )
+
+    def test_block_many_names_keeps_the_existing_list_and_saves_once(self) -> None:
+        from dataclasses import replace
+
+        policy = self.repository.get_website_policy()
+        self.repository.save_website_policy(replace(policy, blocked_domains=("old.example.com",)))
+        saves = []
+        original = self.repository.save_website_policy
+        self.repository.save_website_policy = lambda value: (saves.append(value), original(value))
+
+        status, _, body = self.server.write_response_for(
+            "/api/observations/add-global-block",
+            {"domains": ["a.example.com", "old.example.com", "b.example.com"]},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(saves), 1)
+        self.assertEqual(
+            self.repository.get_website_policy().blocked_domains,
+            ("old.example.com", "a.example.com", "b.example.com"),
+        )
+        self.assertEqual(
+            json.loads(body)["policies"]["websites"]["blocked_domains"],
+            ["old.example.com", "a.example.com", "b.example.com"],
+        )
+
+    def test_one_bad_name_rejects_the_whole_batch(self) -> None:
+        for path, text in (
+            ("/api/observations/add-global-block", "could not add domain to global block list"),
+            (
+                "/api/observations/remove-global-block",
+                "could not remove domain from global block list",
+            ),
+        ):
+            status, _, body = self.server.write_response_for(
+                path, {"domains": ["fine.example.com", "bad name"]}
+            )
+            self.assertEqual(status, 400, path)
+            self.assertEqual(json.loads(body)["error"], text)
+        self.assertEqual(self.repository.get_website_policy().blocked_domains, ())
+
+        status, _, body = self.server.write_response_for(
+            "/api/observations/add-to-profile",
+            {"profile_id": "slow", "domains": ["fine.example.com", 5]},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body)["error"], "could not add domain to profile")
+        self.assertEqual(self.repository.get_profile("slow").website_domains, ())
+
+    def test_one_bad_name_leaves_the_block_list_as_it_was(self) -> None:
+        from dataclasses import replace
+
+        policy = self.repository.get_website_policy()
+        self.repository.save_website_policy(replace(policy, blocked_domains=("a.example.com",)))
+
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/remove-global-block", {"domains": ["a.example.com", "bad name"]}
+        )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(self.repository.get_website_policy().blocked_domains, ("a.example.com",))
+
+    def test_batch_bounds_and_exclusivity(self) -> None:
+        many = ["h%d.example.com" % i for i in range(65)]
+        payloads = (
+            {"domains": many},
+            {"domains": []},
+            {"domains": "x.example.com"},
+            {"domains": None},
+            {"domain": "a.example.com", "domains": ["b.example.com"]},
+            {},
+        )
+        for payload in payloads:
+            status, _, _ = self.server.write_response_for(
+                "/api/observations/add-global-block", payload
+            )
+            self.assertEqual(status, 400, payload)
+        self.assertEqual(self.repository.get_website_policy().blocked_domains, ())
+        sixty_four = ["h%d.example.com" % i for i in range(64)]
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/add-global-block", {"domains": sixty_four}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(len(self.repository.get_website_policy().blocked_domains), 64)
+
+    def test_the_bound_counts_names_before_duplicates_collapse(self) -> None:
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/add-global-block", {"domains": ["same.example.com"] * 65}
+        )
+        self.assertEqual(status, 400)
+
+    def test_unblock_many_and_add_many_to_a_profile(self) -> None:
+        from dataclasses import replace
+
+        policy = self.repository.get_website_policy()
+        self.repository.save_website_policy(
+            replace(policy, blocked_domains=("a.example.com", "b.example.com", "c.example.com"))
+        )
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/remove-global-block",
+            {"domains": ["a.example.com", "c.example.com"]},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(self.repository.get_website_policy().blocked_domains, ("b.example.com",))
+
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/add-to-profile",
+            {"profile_id": "slow", "domains": ["x.example.com", "y.example.com"]},
+        )
+        self.assertEqual(status, 200)
+        profile = self.repository.get_profile("slow")
+        self.assertEqual(profile.website_mode, "allow_only")
+        self.assertEqual(profile.website_domains[-2:], ("x.example.com", "y.example.com"))
+
+    def test_adding_many_names_to_a_profile_keeps_what_it_has_and_skips_duplicates(self) -> None:
+        self.server.write_response_for(
+            "/api/observations/add-to-profile", {"profile_id": "slow", "domain": "one.example.com"}
+        )
+
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/add-to-profile",
+            {"profile_id": "slow", "domains": ["Two.example.com", "one.example.com"]},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            self.repository.get_profile("slow").website_domains,
+            ("one.example.com", "two.example.com"),
+        )
+
+    def test_adding_many_names_to_a_missing_profile_is_rejected(self) -> None:
+        status, _, body = self.server.write_response_for(
+            "/api/observations/add-to-profile",
+            {"profile_id": "nope", "domains": ["x.example.com"]},
+        )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body)["error"], "could not add domain to profile")
+
+    def test_unblocking_names_that_are_not_listed_changes_nothing(self) -> None:
+        version = self.repository.get_runtime_state().configuration_version
+
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/remove-global-block",
+            {"domains": ["never.example.com", "listed.example.com"]},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self.repository.get_runtime_state().configuration_version, version)
+
     def test_changing_the_global_block_list_only_saves_it(self) -> None:
         # The dashboard words its success message from this. Enforcement waits for Apply.
         helper = FakeHelper()
