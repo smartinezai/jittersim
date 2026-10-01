@@ -45,7 +45,14 @@ HELPER_OUT_OF_DATE_MESSAGE = (
 MAX_MESSAGE_BYTES = 256 * 1024
 MAX_HELPER_CONNECTIONS = 8
 WIFI_ACTIONS = ("configure-ap", "router-sync-ap", "router-preview-ap", "wifi-reset")
-ROUTER_ACTIONS = ("router-sync-ap", "router-preview-ap", "router-wifi", "router-check", "router-status")
+ROUTER_ACTIONS = (
+    "router-sync-ap",
+    "router-preview-ap",
+    "router-wifi",
+    "router-check",
+    "router-status",
+    "router-wifi-credentials",
+)
 MAX_LOG_DETAIL_CHARS = 512
 MAX_CONNECTED_CLIENTS = 256
 MAX_SERVICE_ADDRESS_LISTS = 15
@@ -196,6 +203,8 @@ class HelperService:
             return self._handle_router_check(payload)
         if action == "router-status":
             return self._handle_router_status(payload)
+        if action == "router-wifi-credentials":
+            return self._handle_router_wifi_credentials(payload)
         return {"ok": False, "error": "unknown action"}
 
     def _handle_dashboard_access(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -547,6 +556,43 @@ class HelperService:
         except RouterError as error:
             return {"ok": False, "error": error.check_message, "reason": error.reason}
         except CommandExecutionError:
+            return {"ok": False, "error": ROUTER_CHECK_MESSAGES["unreachable"]}
+        finally:
+            if router is not None:
+                router.close()
+
+    def _handle_router_wifi_credentials(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Read the router's own Wi-Fi name and optionally its password for one copy.
+
+        The password leaves this method only inside the response and only when the request
+        asks for it. It is never logged and never stored.
+        """
+
+        router = None
+        try:
+            password = payload["admin_password"]
+            include_password = payload.get("include_password", False)
+            if not isinstance(password, str) or not password or type(include_password) is not bool:
+                raise ValueError("invalid router credentials")
+            gateway = self._applier.uplink_info().get("gateway")
+            if not gateway:
+                raise RouterError("router gateway is unavailable", reason="unreachable")
+            router = self._router_factory(gateway, password)
+            # A click should not hold the router session for the router's full two minutes.
+            router.limit_operation(30.0)
+            router.login(preserve_deadline=True)
+            settings = router.read_wifi_settings()
+            response = {"ok": True, "action": "router-wifi-credentials", "ssid": settings.ssid}
+            if include_password:
+                response["password"] = settings.password
+            return response
+        except (KeyError, TypeError, ValueError):
+            return {"ok": False, "error": "invalid router credentials"}
+        except RouterError as error:
+            LOGGER.warning("router Wi-Fi credential read failed (%s)", error.reason)
+            return {"ok": False, "error": error.check_message, "reason": error.reason}
+        except CommandExecutionError:
+            LOGGER.warning("router Wi-Fi credential read failed while inspecting the wired connection")
             return {"ok": False, "error": ROUTER_CHECK_MESSAGES["unreachable"]}
         finally:
             if router is not None:
@@ -941,6 +987,31 @@ class HelperClient:
         """Read current Wi-Fi activity without changing router settings."""
         return self._request({"action": "router-status", "admin_password": admin_password},
                              timeout_seconds=45.0)
+
+    def read_router_wifi_credentials(
+        self, *, admin_password: str, include_password: bool
+    ) -> Dict[str, Any]:
+        """Read the router's own Wi-Fi name and optionally its password for one copy."""
+
+        response = self._request(
+            {"action": "router-wifi-credentials", "admin_password": admin_password,
+             "include_password": include_password},
+            timeout_seconds=60.0,
+        )
+        ssid = response.get("ssid")
+        if not isinstance(ssid, str) or not 1 <= len(ssid.encode("utf-8")) <= 32:
+            raise HelperClientError("The router did not return a Wi-Fi name.")
+        result = {"ssid": ssid}
+        if include_password:
+            password = response.get("password")
+            if (
+                not isinstance(password, str)
+                or not 8 <= len(password) <= 63
+                or any(ord(char) < 32 for char in password)
+            ):
+                raise HelperClientError("The router did not return a usable Wi-Fi password.")
+            result["password"] = password
+        return result
 
     def connected_device_snapshot(self) -> Dict[str, Any]:
         """Return current client details and whether association status is known."""
