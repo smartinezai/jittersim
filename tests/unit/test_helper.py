@@ -2,12 +2,21 @@ import json
 import logging
 import tempfile
 import threading
+import re
 import unittest
+from ipaddress import IPv4Address
 from pathlib import Path
+from unittest import mock
 
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import compile_plan
+from jittersim.engine.plan import (
+    GeneralProfileRule,
+    ServiceAssignmentRule,
+    ServiceListRule,
+    ServiceQuotaRule,
+)
 from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.browser_proxy import load_active_plan
 from jittersim.networking.commands import CommandResult
@@ -36,6 +45,7 @@ from jittersim.networking.router import (
     RouterError,
     RouterWifiSettings,
 )
+from jittersim.networking.renderer import render_command_plan
 from jittersim.networking.topology import Topology
 
 
@@ -1590,7 +1600,7 @@ class QueueStatsHelperTests(unittest.TestCase):
 
         self.assertEqual(response, {"ok": False, "error": "queue statistics unavailable"})
 
-    def test_a_restarted_helper_reads_the_published_plan_without_adopting_it(self) -> None:
+    def test_a_restarted_helper_reads_and_adopts_the_published_plan(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             plan_path = Path(directory) / "active-plan.json"
             stats = {"eth0": [qdisc("11:", "10:2", packets=1)], "wlan0": []}
@@ -1600,7 +1610,161 @@ class QueueStatsHelperTests(unittest.TestCase):
             response = restarted.handle_payload({"action": "queue-stats"})
 
             self.assertEqual([q["device_id"] for q in response["queues"]], ["lab"])
-            self.assertIsNone(restarted._active_plan)
+            self.assertIsNotNone(restarted._active_plan)
+
+    def test_queue_stats_waits_for_the_operation_lock_like_an_apply(self) -> None:
+        service, executor = self.helper({"eth0": [qdisc("11:", "10:2")], "wlan0": []})
+
+        self.assertTrue(service._network_lock.acquire(blocking=False))
+        try:
+            response = service.handle_payload({"action": "queue-stats"})
+        finally:
+            service._network_lock.release()
+
+        self.assertEqual(
+            response,
+            {"ok": False, "error": "Pi networking is busy. Try again later.",
+             "reason": "helper-busy"},
+        )
+        self.assertEqual(executor.commands, [])
+        self.assertTrue(service.handle_payload({"action": "queue-stats"})["ok"])
+        self.assertFalse(service._network_lock.locked())
+
+    def test_the_client_reports_a_busy_helper_with_its_reason(self) -> None:
+        service, _ = self.helper({"eth0": [qdisc("11:", "10:2")], "wlan0": []})
+        service._network_lock.acquire(blocking=False)
+        self.addCleanup(service._network_lock.release)
+
+        class Direct(HelperClient):
+            def _request(self, payload, *, timeout_seconds=None):
+                response = service.handle_payload(payload)
+                if not response.get("ok", False):
+                    raise HelperClientError(response["error"], reason=response.get("reason"))
+                return response
+
+        with self.assertRaises(HelperClientError) as caught:
+            Direct(socket_path=Path("unused.sock")).queue_stats()
+
+        self.assertEqual(caught.exception.reason, "helper-busy")
+
+    def test_every_entry_carries_the_generation_of_the_applied_plan(self) -> None:
+        stats = {"eth0": [qdisc("11:", "10:2")], "wlan0": [qdisc("11:", "10:2")]}
+        with mock.patch("jittersim.networking.helper.secrets.token_hex", return_value="0a1b2c3d"):
+            service, _ = self.helper(stats)
+            first = service.handle_payload({"action": "queue-stats"})["queues"]
+            self.assertTrue(
+                service.handle_payload({"action": "apply", "plan": plan_to_payload(lossy_plan())})["ok"]
+            )
+            second = service.handle_payload({"action": "queue-stats"})["queues"]
+            self.assertEqual(
+                service.handle_payload({"action": "queue-stats"})["queues"][0]["generation"],
+                second[0]["generation"],
+            )
+
+        self.assertEqual({item["generation"] for item in first}, {"0a1b2c3d-1"})
+        self.assertEqual({item["generation"] for item in second}, {"0a1b2c3d-2"})
+
+    def test_a_failed_apply_does_not_change_the_generation(self) -> None:
+        stats = {"eth0": [qdisc("11:", "10:2")], "wlan0": [qdisc("11:", "10:2")]}
+        service, _ = self.helper(stats)
+        before = service.handle_payload({"action": "queue-stats"})["queues"][0]["generation"]
+
+        refused = service.handle_payload({"action": "apply", "plan": {"mark_rules": "bad"}})
+
+        self.assertFalse(refused["ok"])
+        after = service.handle_payload({"action": "queue-stats"})["queues"][0]["generation"]
+        self.assertEqual(before, after)
+
+    def test_a_restarted_helper_has_a_new_boot_nonce_and_counts_the_adopted_plan(self) -> None:
+        stats = {"eth0": [qdisc("11:", "10:2")], "wlan0": [qdisc("11:", "10:2")]}
+        with tempfile.TemporaryDirectory() as directory:
+            plan_path = Path(directory) / "active-plan.json"
+            with mock.patch(
+                "jittersim.networking.helper.secrets.token_hex", side_effect=["aaaa0001", "bbbb0002"]
+            ):
+                first, _ = self.helper(stats, plan_path=plan_path)
+                restarted, _ = self.helper(stats, plan=None, plan_path=plan_path)
+
+            before = first.handle_payload({"action": "queue-stats"})["queues"][0]["generation"]
+            after = restarted.handle_payload({"action": "queue-stats"})["queues"][0]["generation"]
+
+        self.assertEqual(before, "aaaa0001-1")
+        self.assertEqual(after, "bbbb0002-1")
+
+    def test_every_queue_kind_joins_at_marks_above_one(self) -> None:
+        """Join a plan whose marks run from 1 to 6 against the queues the renderer installs."""
+
+        impairment = Impairment(loss_percent=7)
+        profile = Profile("p", "P", upload=impairment, download=impairment)
+        plain = Profile("plain", "Plain")
+        devices = (
+            Device("d0", "D0", "192.168.50.10", "p", "02:00:00:00:00:01"),
+            Device("d1", "D1", "192.168.50.11", "plain", "02:00:00:00:00:02"),
+            Device("d2", "D2", "192.168.50.12", "p", "02:00:00:00:00:03"),
+        )
+        plans = (
+            compile_plan(
+                devices=devices,
+                profiles={"p": profile, "plain": plain},
+                service_quota_rules=(
+                    ServiceQuotaRule(
+                        "q1", "d2", devices[2].ipv4_address, (IPv4Address("198.18.0.2"),),
+                        0, impairment, impairment, True,
+                    ),
+                ),
+                service_assignment_rules=(
+                    ServiceAssignmentRule(
+                        "a1", "d0", devices[0].ipv4_address, ("example.com",),
+                        0, impairment, impairment,
+                    ),
+                ),
+                service_list_rules=(ServiceListRule("s1", ("x.example",), 0, impairment, impairment),),
+            ),
+            compile_plan(
+                devices=(),
+                profiles={"p": profile},
+                general_profile=GeneralProfileRule("p"),
+                service_list_rules=(ServiceListRule("s1", ("x.example",), 0, impairment, impairment),),
+            ),
+        )
+        topology = Topology(uplink_interface="eth0", test_interface="wlan0")
+        installed = re.compile(r"(?:apply \w+ impairment for|preserve fair queuing for) device (\S+) on (\S+)$")
+        for plan in plans:
+            self.assertGreaterEqual(max(queue.mark for queue in plan.queues), 2)
+            expected = {}
+            kernel = {"eth0": [ROOT_QDISC], "wlan0": [ROOT_QDISC]}
+            counter = 100
+            for command in render_command_plan(plan=plan, topology=topology):
+                if command.executable != "tc" or command.arguments[:2] != ("qdisc", "replace"):
+                    continue
+                if "parent" not in command.arguments:
+                    continue
+                arguments = command.arguments
+                interface = arguments[arguments.index("dev") + 1]
+                parent = arguments[arguments.index("parent") + 1]
+                handle = arguments[arguments.index("handle") + 1]
+                kind = arguments[arguments.index("handle") + 2]
+                counter += 1
+                entry = qdisc(handle, parent, packets=counter, drops=counter // 10)
+                entry["kind"] = kind
+                kernel[interface].append(entry)
+                found = installed.search(command.purpose)
+                if found:
+                    expected[(found.group(1), interface)] = (handle, kind, counter)
+            self.assertEqual(len(expected), len(plan.queues))
+            service, _ = self.helper(kernel, plan=plan)
+
+            response = service.handle_payload({"action": "queue-stats"})
+
+            self.assertTrue(response["ok"])
+            joined = {(item["device_id"], item["interface"]): item for item in response["queues"]}
+            self.assertEqual(set(joined), set(expected))
+            for key, (handle, kind, counter) in expected.items():
+                self.assertEqual(
+                    (joined[key]["handle"], joined[key]["kind"], joined[key]["packets"]),
+                    (handle, kind, counter),
+                    key,
+                )
 
     def test_after_a_reset_it_reports_no_queues(self) -> None:
         service, _ = self.helper({"eth0": [qdisc("11:", "10:2", packets=1)], "wlan0": []})
@@ -1643,7 +1807,7 @@ def good_queue(**changes):
             "reorder_percent": 0, "duplicate_percent": 0, "corrupt_percent": 0,
         },
         "packets": 10, "bytes": 1500, "drops": 3, "overlimits": 0, "requeues": 0,
-        "backlog_bytes": 0, "qlen": 0,
+        "backlog_bytes": 0, "qlen": 0, "generation": "a1b2c3d4-1",
     }
     entry.update(changes)
     return entry
@@ -1704,6 +1868,35 @@ class QueueStatsClientTests(unittest.TestCase):
             "too many entries": [good_queue() for _ in range(601)],
             "not a list": {"lab": good_queue()},
             "missing field": [{key: value for key, value in good_queue().items() if key != "qlen"}],
+            "missing generation": [{key: value for key, value in good_queue().items()
+                                    if key != "generation"}],
+            "empty generation": [good_queue(generation="")],
+            "upper case generation": [good_queue(generation="A1B2C3D4-1")],
+            "long generation": [good_queue(generation="a" * 25)],
+            "generation with a space": [good_queue(generation="a1 b2")],
+            "numeric generation": [good_queue(generation=7)],
+            "delay above the limit": [good_queue(impairment=dict(
+                good_queue()["impairment"], delay_ms=60_001))],
+            "jitter above the limit": [good_queue(impairment=dict(
+                good_queue()["impairment"], jitter_ms=60_001))],
+            "negative delay": [good_queue(impairment=dict(
+                good_queue()["impairment"], delay_ms=-1))],
+            "loss above 100": [good_queue(impairment=dict(
+                good_queue()["impairment"], loss_percent=101))],
+            "reorder above 100": [good_queue(impairment=dict(
+                good_queue()["impairment"], reorder_percent=101))],
+            "duplicate above 100": [good_queue(impairment=dict(
+                good_queue()["impairment"], duplicate_percent=101))],
+            "corrupt above 100": [good_queue(impairment=dict(
+                good_queue()["impairment"], corrupt_percent=101))],
+            "boolean bandwidth": [good_queue(impairment=dict(
+                good_queue()["impairment"], bandwidth_kbit=True))],
+            "zero bandwidth": [good_queue(impairment=dict(
+                good_queue()["impairment"], bandwidth_kbit=0))],
+            "bandwidth above the limit": [good_queue(impairment=dict(
+                good_queue()["impairment"], bandwidth_kbit=1_000_001))],
+            "string bandwidth": [good_queue(impairment=dict(
+                good_queue()["impairment"], bandwidth_kbit="2000"))],
         }
         for name, queues in cases.items():
             with self.subTest(name):
@@ -1711,6 +1904,18 @@ class QueueStatsClientTests(unittest.TestCase):
                     HelperClientError, "^helper returned invalid queue statistics$"
                 ):
                     self.read(queues)
+
+    def test_accepts_the_largest_allowed_impairment_values(self) -> None:
+        largest = dict(
+            good_queue()["impairment"], delay_ms=60_000, jitter_ms=60_000, loss_percent=100,
+            reorder_percent=100, duplicate_percent=100, corrupt_percent=100,
+            bandwidth_kbit=1_000_000,
+        )
+
+        (entry,) = self.read([good_queue(impairment=largest, generation="0a-" + "f" * 21)])
+
+        self.assertEqual(entry["impairment"], largest)
+        self.assertEqual(entry["generation"], "0a-" + "f" * 21)
 
     def test_accepts_exactly_600_entries(self) -> None:
         self.assertEqual(len(self.read([good_queue() for _ in range(600)])), 600)

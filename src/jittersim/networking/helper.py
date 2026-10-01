@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import socket
 import socketserver
 import stat
@@ -67,6 +68,7 @@ QUEUE_STATS_COUNTERS = (
 )
 _QUEUE_DEVICE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_:-]{0,127}$")
 _QUEUE_HANDLE_PATTERN = re.compile(r"^[0-9]{1,5}:$")
+_QUEUE_GENERATION_PATTERN = re.compile(r"^[0-9a-f-]{1,24}$")
 _QUEUE_IMPAIRMENT_LIMITS = {
     "delay_ms": 60_000,
     "jitter_ms": 60_000,
@@ -131,6 +133,10 @@ class HelperService:
         self._applier = applier
         self._active_plan_path = active_plan_path
         self._active_plan: Optional[NetworkPlan] = None
+        # A new boot nonce and a count of applied plans tell the dashboard when the
+        # queues were replaced even if the settings stayed the same.
+        self._boot_nonce = secrets.token_hex(4)
+        self._plan_count = 0
         self._service_addresses = ServiceAddressBook(clock=service_address_clock)
         self._list_domains: Dict[str, tuple] = {}
         self._network_lock = threading.Lock()
@@ -198,7 +204,13 @@ class HelperService:
         if action == "traffic-counters":
             return self._handle_traffic_counters()
         if action == "queue-stats":
-            return self._handle_queue_stats()
+            if not self._network_lock.acquire(blocking=False):
+                return {"ok": False, "error": "Pi networking is busy. Try again later.",
+                        "reason": "helper-busy"}
+            try:
+                return self._handle_queue_stats()
+            finally:
+                self._network_lock.release()
         if action in WIFI_ACTIONS:
             if not self._wifi_lock.acquire(blocking=False):
                 return {"ok": False, "error": "Another Pi Wi-Fi change is running. Try again later.",
@@ -354,9 +366,13 @@ class HelperService:
         return {"ok": True, "action": "traffic-counters", "counters": counters}
 
     def _handle_queue_stats(self) -> Dict[str, Any]:
-        """Report what each applied queue did so far without changing or locking anything."""
+        """Report what each applied queue did so far without changing anything.
 
-        plan = self._active_plan or self._published_plan()
+        The caller holds the operation lock so an apply in progress never mixes old
+        plan data with new kernel queues.
+        """
+
+        plan = self._current_plan()
         if plan is None:
             return {"ok": True, "action": "queue-stats", "queues": []}
         try:
@@ -368,6 +384,7 @@ class HelperService:
             "upload": self._applier.uplink_interface,
             "download": self._applier.test_interface,
         }
+        generation = f"{self._boot_nonce}-{self._plan_count}"
         entries = []
         for queue in plan.queues:
             interface = interfaces[queue.direction.value]
@@ -400,6 +417,7 @@ class HelperService:
                     "requeues": match.get("requeues", 0),
                     "backlog_bytes": match.get("backlog", 0),
                     "qlen": match.get("qlen", 0),
+                    "generation": generation,
                 }
             )
         return {"ok": True, "action": "queue-stats", "queues": entries}
@@ -464,6 +482,7 @@ class HelperService:
                 self._active_plan = None
                 return {"ok": False, "error": "network plan state could not be published"}
         self._active_plan = plan
+        self._plan_count += 1
         self._list_domains = {rule.list_id: rule.domains for rule in plan.service_list_rules}
         return {"ok": True, "action": "apply", "commands_run": report.commands_run}
 
@@ -732,6 +751,7 @@ class HelperService:
         if plan is None:
             return None
         self._active_plan = plan
+        self._plan_count += 1
         self._list_domains = {rule.list_id: rule.domains for rule in plan.service_list_rules}
         return plan
 
@@ -1191,8 +1211,11 @@ class HelperClient:
             device_id = entry.get("device_id")
             handle = entry.get("handle")
             interface = entry.get("interface")
+            generation = entry.get("generation")
             if (
-                not isinstance(device_id, str)
+                not isinstance(generation, str)
+                or not _QUEUE_GENERATION_PATTERN.fullmatch(generation)
+                or not isinstance(device_id, str)
                 or not _QUEUE_DEVICE_ID_PATTERN.fullmatch(device_id)
                 or not isinstance(handle, str)
                 or not _QUEUE_HANDLE_PATTERN.fullmatch(handle)
@@ -1208,6 +1231,7 @@ class HelperClient:
                 "interface": interface,
                 "handle": handle,
                 "kind": entry["kind"],
+                "generation": generation,
                 "impairment": _clean_queue_impairment(entry.get("impairment")),
             }
             for key in QUEUE_STATS_COUNTERS:
