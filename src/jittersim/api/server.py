@@ -3438,7 +3438,7 @@ DASHBOARD_HTML = """<!doctype html>
           : "Each device keeps its profile";
         heading.append(title, profile);
         const members = document.createElement("span");
-        members.textContent = "Devices: " + group.devices.map((device) => device.name).join(", ");
+        members.textContent = "Devices: " + group.devices.map((device) => deviceDisplayName(device)).join(", ");
         const actions = document.createElement("div");
         actions.className = "quota-actions";
         const editButton = document.createElement("button");
@@ -4249,7 +4249,7 @@ DASHBOARD_HTML = """<!doctype html>
       (data.rows || []).forEach((item) => {
         const row = document.createElement("tr");
         const device = document.createElement("td");
-        device.textContent = item.device_name + " (" + item.device_id + ")";
+        device.textContent = (item.display_name || item.device_name) + " (" + item.device_id + ")";
         const domain = document.createElement("td");
         domain.className = "analytics-domain";
         domain.textContent = item.domain;
@@ -4302,7 +4302,7 @@ DASHBOARD_HTML = """<!doctype html>
         (deviceData.devices || []).forEach((device) => {
           const option = document.createElement("option");
           option.value = device.id;
-          option.textContent = device.name + " (" + device.id + ")";
+          option.textContent = deviceDisplayName(device) + " (" + device.id + ")";
           option.selected = device.id === selectedDevice;
           deviceSelect.appendChild(option);
         });
@@ -6321,6 +6321,12 @@ class ControlServer(HTTPServer):
                 days=days,
                 device_id=device_id,
             )
+            labels_by_mac = self.repository.list_connected_device_labels()
+            devices_by_id = {device.id: device for device in self.repository.list_devices()}
+            for row in report["rows"]:
+                row["display_name"] = _device_display_name(
+                    devices_by_id.get(row["device_id"]), labels_by_mac
+                )
             return HTTPStatus.OK, "application/json", _json_bytes(report)
         if path == "/api/backup":
             return HTTPStatus.OK, "application/vnd.sqlite3", self.repository.backup_bytes()

@@ -2074,6 +2074,38 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(device["name"], "Alice phone")
         self.assertEqual(device["display_name"], "Sam MacBook")
 
+    def test_random_website_analytics_rows_carry_a_display_name(self) -> None:
+        self._save_unlabelled_client()
+        self.repository.save_device(
+            Device(
+                id="client-aabbccddeeff",
+                name="Client 192.168.50.180",
+                ipv4_address="192.168.50.180",
+                profile_id="slow",
+                mac_address="aa:bb:cc:dd:ee:00",
+            )
+        )
+        now = int(time.time())
+        self.repository.save_random_website_outcomes(
+            [
+                RandomWebsiteOutcome("client-dc1ed53e974c", "labelled.example", True, now),
+                RandomWebsiteOutcome("client-aabbccddeeff", "plain.example", True, now),
+                RandomWebsiteOutcome("alice", "named.example", True, now),
+            ],
+            now=now,
+        )
+
+        status, _, body = self.server.response_for(
+            "/api/random-website-analytics", query="days=1"
+        )
+
+        self.assertEqual(status, 200)
+        rows = {row["domain"]: row for row in json.loads(body)["rows"]}
+        self.assertEqual(rows["labelled.example"]["display_name"], "Sam MacBook")
+        self.assertEqual(rows["labelled.example"]["device_name"], "Client 192.168.50.178")
+        self.assertEqual(rows["plain.example"]["display_name"], "Unknown device")
+        self.assertEqual(rows["named.example"]["display_name"], "Alice's laptop")
+
 
 if __name__ == "__main__":
     unittest.main()
