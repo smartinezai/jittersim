@@ -40,7 +40,9 @@ def _format_impairment_arguments(queue: QueueSpec) -> List[str]:
             arguments.append(f"{impairment.jitter_ms}ms")
     if impairment.loss_percent:
         arguments.extend(["loss", "random", f"{impairment.loss_percent}%"])
-    if impairment.reorder_percent:
+    # netem reorders by sending some packets without the configured delay, so tc
+    # rejects reordering without one. Randomness can also switch the delay off.
+    if impairment.reorder_percent and impairment.delay_ms:
         arguments.extend(["reorder", f"{impairment.reorder_percent}%"])
     if impairment.duplicate_percent:
         arguments.extend(["duplicate", f"{impairment.duplicate_percent}%"])
