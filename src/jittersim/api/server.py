@@ -433,6 +433,17 @@ DASHBOARD_HTML = """<!doctype html>
     .observation-hint { color: #b9c9dc; font-style: italic; }
     .observation-search-link { color: #8cc4ff; }
     .observation-domain-count { color: #8de2bc; white-space: nowrap; }
+    .observation-group-item { list-style: none; }
+    .observation-group { margin-top: 0; padding-top: 0; border-top: 0; border-radius: 0.35rem; background: #102238; color: #c7d7eb; }
+    .observation-group-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem; padding: 0.45rem 0.55rem; border-radius: 0.35rem; color: #c7d7eb; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; font-weight: 400; list-style: none; }
+    .observation-group-summary::-webkit-details-marker { display: none; }
+    .observation-group-summary::before { content: ""; flex: none; width: 0.45rem; height: 0.45rem; margin: 0 0.15rem 0 0.1rem; border-right: 2px solid #8cc4ff; border-bottom: 2px solid #8cc4ff; transform: rotate(-45deg); }
+    .observation-group[open] > .observation-group-summary::before { transform: rotate(45deg); }
+    .observation-group-title { flex: 1 1 12rem; min-width: 0; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .observation-group-name { display: block; color: #edf5ff; font-size: 0.88rem; font-weight: 650; overflow-wrap: anywhere; }
+    .observation-group-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0.15rem 0.5rem; margin-top: 0.1rem; color: #9fb3ca; font-size: 0.76rem; }
+    .observation-group-summary button { margin-top: 0; min-width: 9.5rem; }
+    .observation-group-body { margin: 0 0.55rem 0.55rem 1.1rem; padding-left: 0.6rem; border-left: 2px solid #2b435f; }
     .policy-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
     .policy-grid > div { min-width: 0; }
     .policy-note, .form-note { margin: 0.7rem 0 0; color: #91a8c1; font-size: 0.82rem; }
@@ -2185,6 +2196,8 @@ DASHBOARD_HTML = """<!doctype html>
     const clearConnectedDrafts = new Set();
     let observedDomainsByDevice = {};
     let observedNames = new Set();
+    // Keys of the open Traffic discovery groups. They survive the dashboard refresh.
+    const openObservationGroups = new Set();
     let randomWebsiteAnalyticsRequestVersion = 0;
     let connectedDevicesRequestInFlight = false;
     let observationRequestInFlight = false;
@@ -3302,9 +3315,13 @@ DASHBOARD_HTML = """<!doctype html>
       return count + " " + group.name + (count === 1 ? " name" : " names");
     }
 
+    function isUnblockAction(action) {
+      return action.path === blockButtonState({ globally_blocked: true }).path;
+    }
+
     function groupBlockMessages(group, action) {
       const subject = groupSubject(group, action.domains.length);
-      if (action.path === blockButtonState({ globally_blocked: true }).path) {
+      if (isUnblockAction(action)) {
         return {
           busy: "Removing " + subject + " from the global block list...",
           done: "Removed " + subject + " from the global block list. " + ENFORCE_NOTE
@@ -3396,7 +3413,9 @@ DASHBOARD_HTML = """<!doctype html>
         card.append(heading, targetRow);
         const list = document.createElement("ul");
         list.className = "observation-domain-list";
-        (device.domains || []).forEach((observation) => {
+        // One name. A row of a group also gets its block button in blockSyncs so the group can
+        // refresh it and calls afterBlockChange when its own block state changes.
+        const buildRow = (observation, blockSyncs, afterBlockChange) => {
           const item = document.createElement("li");
           item.className = "observation-domain";
           const domain = document.createElement("div");
@@ -3469,13 +3488,109 @@ DASHBOARD_HTML = """<!doctype html>
             badge.hidden = observation.globally_blocked !== true;
           };
           syncBlockButton();
+          blockSyncs.push(syncBlockButton);
+          const onBlockChange = () => {
+            syncBlockButton();
+            if (afterBlockChange) afterBlockChange();
+          };
           blockButton.addEventListener("click", () => changeGlobalBlock(
             observation,
             blockButton,
-            syncBlockButton
+            onBlockChange
           ));
           item.append(domain, queryCount, profileButton, blockButton);
-          list.appendChild(item);
+          return item;
+        };
+        // Two or more names of one app. Closed by default. The header buttons act on every name.
+        const buildGroup = (group) => {
+          const item = document.createElement("li");
+          item.className = "observation-group-item";
+          const details = document.createElement("details");
+          details.className = "observation-group";
+          const openKey = observationGroupOpenKey(device.ipv4_address, group.key);
+          details.open = openObservationGroups.has(openKey);
+          details.addEventListener("toggle", () => {
+            if (details.open) openObservationGroups.add(openKey);
+            else openObservationGroups.delete(openKey);
+          });
+          const summary = document.createElement("summary");
+          summary.className = "observation-group-summary";
+          const title = document.createElement("div");
+          title.className = "observation-group-title";
+          const groupName = document.createElement("strong");
+          groupName.className = "observation-group-name";
+          groupName.textContent = group.name;
+          const meta = document.createElement("div");
+          meta.className = "observation-group-meta";
+          const nameCount = document.createElement("span");
+          nameCount.className = "observation-group-count";
+          nameCount.textContent = groupNamesText(group.names.length);
+          const groupBadge = document.createElement("span");
+          groupBadge.className = "observation-badge";
+          meta.append(nameCount, groupBadge);
+          title.append(groupName, meta);
+          const totalQueries = document.createElement("span");
+          totalQueries.className = "observation-domain-count";
+          totalQueries.textContent = queryCountText(group.totalQueries);
+          const groupProfileButton = document.createElement("button");
+          groupProfileButton.type = "button";
+          groupProfileButton.className = "observation-group-profile-button";
+          const groupBlockButton = document.createElement("button");
+          groupBlockButton.type = "button";
+          groupBlockButton.className = "observation-group-block-button";
+          const syncGroupProfile = () => {
+            const selectedProfile = profiles.find((profile) => profile.id === targetProfile.value);
+            const action = groupProfileAction(group, selectedProfile);
+            const note = groupLimitNote(action.domains.length);
+            groupProfileButton.textContent = action.label;
+            groupProfileButton.title = note || (action.domains.length
+              ? action.label + ": " + groupSubject(group, action.domains.length)
+              : action.label);
+            groupProfileButton.disabled = action.disabled || note !== "";
+          };
+          const syncGroupBlock = () => {
+            const action = groupBlockAction(group);
+            const note = groupLimitNote(action.domains.length);
+            groupBlockButton.textContent = action.label;
+            groupBlockButton.title = note || action.label + ": " + groupSubject(group, action.domains.length);
+            groupBlockButton.disabled = note !== "";
+            const blockedText = groupBlockedText(group);
+            groupBadge.textContent = blockedText;
+            groupBadge.hidden = blockedText === "";
+          };
+          const rowSyncs = [];
+          const syncRowsAndHeader = () => {
+            rowSyncs.forEach((sync) => sync());
+            syncGroupBlock();
+          };
+          profileSyncs.push(syncGroupProfile);
+          syncGroupProfile();
+          syncGroupBlock();
+          groupProfileButton.addEventListener("click", (event) => {
+            event.stopPropagation();
+            addGroupToProfile(
+              group,
+              profiles.find((profile) => profile.id === targetProfile.value),
+              groupProfileButton,
+              syncProfileButtons
+            );
+          });
+          groupBlockButton.addEventListener("click", (event) => {
+            event.stopPropagation();
+            changeGroupBlock(group, groupBlockButton, syncRowsAndHeader);
+          });
+          summary.append(title, totalQueries, groupProfileButton, groupBlockButton);
+          const body = document.createElement("ul");
+          body.className = "observation-domain-list observation-group-body";
+          group.names.forEach((observation) => {
+            body.appendChild(buildRow(observation, rowSyncs, syncGroupBlock));
+          });
+          details.append(summary, body);
+          item.appendChild(details);
+          return item;
+        };
+        groupObservations(device.domains).forEach((group) => {
+          list.appendChild(group.single ? buildRow(group.names[0], [], null) : buildGroup(group));
         });
         card.append(list);
         container.appendChild(card);
@@ -3515,6 +3630,49 @@ DASHBOARD_HTML = """<!doctype html>
       } finally {
         setButtonBusy(button, false);
         onChange();
+      }
+    }
+
+    async function changeGroupBlock(group, button, onChange) {
+      const action = groupBlockAction(group);
+      if (action.domains.length === 0 || groupLimitNote(action.domains.length)) return;
+      const messages = groupBlockMessages(group, action);
+      setButtonBusy(button, true);
+      showMessage(messages.busy, "working");
+      try {
+        await request(action.path, "POST", { domains: action.domains });
+        const blocked = !isUnblockAction(action);
+        group.names.forEach((observation) => {
+          if (action.domains.indexOf(observation.domain) !== -1) observation.globally_blocked = blocked;
+        });
+        refreshAfterSuccess(messages.done);
+      } catch (error) {
+        showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
+        onChange();
+      }
+    }
+
+    async function addGroupToProfile(group, profile, button, onChange) {
+      const action = groupProfileAction(group, profile);
+      if (action.disabled || groupLimitNote(action.domains.length)) return;
+      const messages = groupProfileMessages(group, action);
+      setButtonBusy(button, true);
+      showMessage(messages.busy, "working");
+      try {
+        const result = await request("/api/observations/add-to-profile", "POST", {
+          domains: action.domains,
+          profile_id: profile.id
+        });
+        const index = profiles.findIndex((item) => item.id === profile.id);
+        if (index !== -1 && result.profile) profiles[index] = result.profile;
+        refreshAfterSuccess(messages.done);
+      } catch (error) {
+        showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
+        if (onChange) onChange();
       }
     }
 
