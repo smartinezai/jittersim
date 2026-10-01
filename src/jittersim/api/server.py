@@ -3203,6 +3203,19 @@ DASHBOARD_HTML = """<!doctype html>
       };
     }
 
+    function domainRowParts(observation) {
+      const label = observation.label || {};
+      const hint = domainHint(observation);
+      return {
+        labelName: label.name || "",
+        category: label.category || "",
+        kind: label.kind || "",
+        domain: observation.domain,
+        hintText: hint.text,
+        searchUrl: hint.searchable ? domainSearchUrl(observation.domain) : ""
+      };
+    }
+
     function renderObservations(data) {
       const container = element("observations");
       const count = element("observation-count");
@@ -3261,35 +3274,35 @@ DASHBOARD_HTML = """<!doctype html>
           item.className = "observation-domain";
           const domain = document.createElement("div");
           domain.className = "observation-domain-name";
-          if (observation.label) {
+          const parts = domainRowParts(observation);
+          if (parts.labelName) {
             const labelLine = document.createElement("div");
             labelLine.className = "observation-label";
             const labelName = document.createElement("strong");
-            labelName.textContent = observation.label.name;
+            labelName.textContent = parts.labelName;
             const category = document.createElement("span");
             category.className = "observation-category";
-            category.dataset.kind = observation.label.kind;
-            category.textContent = observation.label.category;
+            category.dataset.kind = parts.kind;
+            category.textContent = parts.category;
             labelLine.append(labelName, category);
             domain.appendChild(labelLine);
           }
           const host = document.createElement("div");
           host.className = "observation-domain-host";
-          host.textContent = observation.domain;
+          host.textContent = parts.domain;
           domain.appendChild(host);
-          const hint = domainHint(observation);
           const hintLine = document.createElement("div");
           hintLine.className = "observation-hint-line";
-          if (hint.text) {
+          if (parts.hintText) {
             const hintText = document.createElement("span");
             hintText.className = "observation-hint";
-            hintText.textContent = hint.text;
+            hintText.textContent = parts.hintText;
             hintLine.appendChild(hintText);
           }
-          if (hint.searchable) {
+          if (parts.searchUrl) {
             const link = document.createElement("a");
             link.className = "observation-search-link";
-            link.href = domainSearchUrl(observation.domain);
+            link.href = parts.searchUrl;
             link.target = "_blank";
             link.rel = "noopener noreferrer";
             link.textContent = "What is this?";
