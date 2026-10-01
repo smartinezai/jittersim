@@ -216,20 +216,61 @@ def test_upload_and_download_get_a_copy_in_each_set():
         assert name in by_heading["Download variation"]
 
 
+NAME_SENTENCES = ("is what people read", "are what people read")
+# Two fields explain their ID in another way: a schedule has no name so its ID is the title in
+# the list and the device form's Profile ID points at a profile saved on another card.
+OTHER_SENTENCES = {
+    "schedule-id": ("schedule list", "list below"),
+    "device-profile": ("in parentheses after the name",),
+}
+CHARACTER_RULE = "Use only lowercase letters and digits and hyphens and underscores."
+
+
+def id_help(field):
+    icon = help_icon(field.nearest("label"))
+    return None if icon is None else icon.attrs.get("data-help") or ""
+
+
 def test_every_id_field_explains_what_an_id_is_next_to_a_name():
     inputs = id_inputs()
     assert len(inputs) >= 9
     problems = []
     for field in inputs:
-        label = field.nearest("label")
-        icon = help_icon(label)
-        if icon is None:
-            problems.append("%s has no help icon" % field.attrs.get("id"))
+        name = field.attrs.get("id")
+        text = id_help(field)
+        if text is None:
+            problems.append("%s has no help icon" % name)
             continue
-        text = icon.attrs.get("data-help") or ""
-        if "ID" not in text or "name" not in text.lower():
-            problems.append("%s help must mention ID and name: %s" % (field.attrs.get("id"), text))
+        # The verb in "names this schedule" must not count as the contrast with a Name.
+        sentences = OTHER_SENTENCES.get(name, NAME_SENTENCES)
+        if "ID" not in text or not any(sentence in text for sentence in sentences):
+            problems.append("%s help must mention ID and say %s: %s" % (name, sentences, text))
     assert problems == []
+
+
+def test_every_id_pattern_field_states_the_allowed_characters():
+    patterned = [field for field in id_inputs() if field.attrs.get("pattern")]
+    assert len(patterned) >= 8
+    problems = [
+        field.attrs.get("id")
+        for field in patterned
+        if CHARACTER_RULE not in (id_help(field) or "")
+    ]
+    assert problems == []
+
+
+def test_the_device_id_help_says_each_device_needs_its_own_ip_address():
+    field = next(node for node in id_inputs() if node.attrs.get("id") == "device-id")
+    assert "Each device needs its own IP address." in id_help(field)
+
+
+def test_reorder_help_says_it_needs_a_delay_and_jitter_alone_is_not_enough():
+    labels = [label for _heading, label in profile_form_labels() if field_name(label) == "Reorder"]
+    assert len(labels) == 2
+    for label in labels:
+        text = help_icon(label).attrs.get("data-help")
+        assert "unless the Delay in the same direction is above 0" in text
+        assert "Jitter alone is not enough." in text
 
 
 def test_no_two_different_fields_share_a_help_text():

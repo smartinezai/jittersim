@@ -861,7 +861,7 @@ DASHBOARD_HTML = """<!doctype html>
       <h2>Save profile</h2>
       <form id="profile-form">
         <div class="fields">
-          <label><span class="field-label">Profile ID<span class="help-icon" tabindex="0" role="img" aria-label="Profile ID help" data-help="A short code that devices and schedules use to find this profile. Saving with an existing ID updates that profile and a new ID creates a new one. Use only lowercase letters and digits plus - and _. The Name is what people read.">?</span></span>
+          <label><span class="field-label">Profile ID<span class="help-icon" tabindex="0" role="img" aria-label="Profile ID help" data-help="A short code that devices and schedules use to find this profile. Saving with an existing ID updates that profile and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The Name is what people read.">?</span></span>
             <input id="profile-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}">
           </label>
           <label><span class="field-label">Name<span class="help-icon" tabindex="0" role="img" aria-label="Profile name help" data-help="The name people read in lists and menus. Use any words you like. The Profile ID is the short code behind it.">?</span></span> <input id="profile-name" required></label>
@@ -869,7 +869,7 @@ DASHBOARD_HTML = """<!doctype html>
         <h3>Upload</h3>
         <div class="fields">
           <label><span class="field-label">Delay (ms)<span class="help-icon" tabindex="0" role="img" aria-label="Upload delay help" data-help="Extra waiting time added to every packet. 1000 ms is one second. Upload is traffic leaving the device and download is traffic arriving at it.">?</span></span> <input id="upload-delay" type="number" min="0" value="0" required></label>
-          <label><span class="field-label">Jitter (ms)<span class="help-icon" tabindex="0" role="img" aria-label="Upload jitter help" data-help="How unevenly packets are delayed. With a 100 ms delay and 20 ms jitter each packet waits somewhere between 80 and 120 ms. High jitter makes calls and games feel choppy.">?</span></span>
+          <label><span class="field-label">Jitter (ms)<span class="help-icon" tabindex="0" role="img" aria-label="Upload jitter help" data-help="How much each packet's delay can vary. With a 100 ms delay and 20 ms jitter each packet waits somewhere between 80 and 120 ms. High jitter makes calls and games feel choppy.">?</span></span>
             <input id="upload-jitter" type="number" min="0" value="0" required>
           </label>
           <label><span class="field-label">Loss (%)<span class="help-icon" tabindex="0" role="img" aria-label="Upload loss help" data-help="The chance that a packet is lost on the way. 5% means about 1 packet in 20 never arrives. Many apps notice and send it again which slows them down.">?</span></span>
@@ -884,7 +884,7 @@ DASHBOARD_HTML = """<!doctype html>
           <label><span class="field-label">Delay (ms)<span class="help-icon" tabindex="0" role="img" aria-label="Download delay help" data-help="Extra waiting time added to every packet. 1000 ms is one second. Upload is traffic leaving the device and download is traffic arriving at it.">?</span></span>
             <input id="download-delay" type="number" min="0" value="0" required>
           </label>
-          <label><span class="field-label">Jitter (ms)<span class="help-icon" tabindex="0" role="img" aria-label="Download jitter help" data-help="How unevenly packets are delayed. With a 100 ms delay and 20 ms jitter each packet waits somewhere between 80 and 120 ms. High jitter makes calls and games feel choppy.">?</span></span>
+          <label><span class="field-label">Jitter (ms)<span class="help-icon" tabindex="0" role="img" aria-label="Download jitter help" data-help="How much each packet's delay can vary. With a 100 ms delay and 20 ms jitter each packet waits somewhere between 80 and 120 ms. High jitter makes calls and games feel choppy.">?</span></span>
             <input id="download-jitter" type="number" min="0" value="0" required>
           </label>
           <label><span class="field-label">Loss (%)<span class="help-icon" tabindex="0" role="img" aria-label="Download loss help" data-help="The chance that a packet is lost on the way. 5% means about 1 packet in 20 never arrives. Many apps notice and send it again which slows them down.">?</span></span>
@@ -932,7 +932,7 @@ DASHBOARD_HTML = """<!doctype html>
           <h3>Upload variation</h3>
           <p class="form-note">Each card controls one feature. Value variation changes the base value. Enabled chance decides whether the feature is used after a reroll.</p>
           <div class="fields">
-            <label><span class="field-label">Reorder (%)<span class="help-icon" tabindex="0" role="img" aria-label="Upload reorder help" data-help="The chance that a packet skips the delay and overtakes earlier packets so they arrive out of order. It needs a delay above 0 in the same direction.">?</span></span> <input id="upload-reorder" type="number" min="0" max="100" value="0"></label>
+            <label><span class="field-label">Reorder (%)<span class="help-icon" tabindex="0" role="img" aria-label="Upload reorder help" data-help="The chance that a packet skips the delay and arrives ahead of packets sent before it. It does nothing unless the Delay in the same direction is above 0. Jitter alone is not enough.">?</span></span> <input id="upload-reorder" type="number" min="0" max="100" value="0"></label>
             <label><span class="field-label">Duplicate (%)<span class="help-icon" tabindex="0" role="img" aria-label="Upload duplicate help" data-help="The chance that a packet is delivered twice. Real networks do this occasionally and some apps handle it badly.">?</span></span> <input id="upload-duplicate" type="number" min="0" max="100" value="0"></label>
             <label><span class="field-label">Corrupt (%)<span class="help-icon" tabindex="0" role="img" aria-label="Upload corrupt help" data-help="The chance that a packet arrives with one damaged bit. Most devices spot the damage and throw the packet away so it behaves much like loss.">?</span></span> <input id="upload-corrupt" type="number" min="0" max="100" value="0"></label>
           </div>
@@ -989,7 +989,7 @@ DASHBOARD_HTML = """<!doctype html>
           </div>
           <h3>Download variation</h3>
           <div class="fields">
-            <label><span class="field-label">Reorder (%)<span class="help-icon" tabindex="0" role="img" aria-label="Download reorder help" data-help="The chance that a packet skips the delay and overtakes earlier packets so they arrive out of order. It needs a delay above 0 in the same direction.">?</span></span> <input id="download-reorder" type="number" min="0" max="100" value="0"></label>
+            <label><span class="field-label">Reorder (%)<span class="help-icon" tabindex="0" role="img" aria-label="Download reorder help" data-help="The chance that a packet skips the delay and arrives ahead of packets sent before it. It does nothing unless the Delay in the same direction is above 0. Jitter alone is not enough.">?</span></span> <input id="download-reorder" type="number" min="0" max="100" value="0"></label>
             <label><span class="field-label">Duplicate (%)<span class="help-icon" tabindex="0" role="img" aria-label="Download duplicate help" data-help="The chance that a packet is delivered twice. Real networks do this occasionally and some apps handle it badly.">?</span></span> <input id="download-duplicate" type="number" min="0" max="100" value="0"></label>
             <label><span class="field-label">Corrupt (%)<span class="help-icon" tabindex="0" role="img" aria-label="Download corrupt help" data-help="The chance that a packet arrives with one damaged bit. Most devices spot the damage and throw the packet away so it behaves much like loss.">?</span></span> <input id="download-corrupt" type="number" min="0" max="100" value="0"></label>
           </div>
@@ -1052,12 +1052,12 @@ DASHBOARD_HTML = """<!doctype html>
       <h2>Assign a device</h2>
       <form id="device-form">
         <div class="fields">
-          <label><span class="field-label">Device ID<span class="help-icon" tabindex="0" role="img" aria-label="Device ID help" data-help="A short code that schedules and groups use to find this device. Saving with an existing ID updates that device and a new ID adds a new one. Use only lowercase letters and digits plus - and _. The Name is what people read.">?</span></span> <input id="device-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}"></label>
+          <label><span class="field-label">Device ID<span class="help-icon" tabindex="0" role="img" aria-label="Device ID help" data-help="A short code that identifies this device. Saving with an existing ID updates that device and a new ID adds a new one. Use only lowercase letters and digits and hyphens and underscores. The Name is what people read. Each device needs its own IP address.">?</span></span> <input id="device-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}"></label>
           <label>Name <input id="device-name" required></label>
           <label>Reserved IPv4 address
             <input id="device-ip" required placeholder="192.168.50.10">
           </label>
-          <label><span class="field-label">Profile ID<span class="help-icon" tabindex="0" role="img" aria-label="Device profile ID help" data-help="The ID of a profile you already saved. It is the code you typed as Profile ID when saving that profile. Profile menus show it in brackets after the name.">?</span></span> <input id="device-profile" required></label>
+          <label><span class="field-label">Profile ID<span class="help-icon" tabindex="0" role="img" aria-label="Device profile ID help" data-help="The ID of a profile you already saved. It is the code you typed as Profile ID when saving that profile. Profile menus show it in parentheses after the name.">?</span></span> <input id="device-profile" required></label>
           <label>MAC address (optional)
             <input id="device-mac" placeholder="aa:bb:cc:dd:ee:ff">
           </label>
@@ -1070,7 +1070,7 @@ DASHBOARD_HTML = """<!doctype html>
       <p class="form-note">Select saved devices or connected clients. Choose a profile override when adding an unassigned client. A device can belong to one group.</p>
       <form id="group-form">
         <div class="fields">
-          <label><span class="field-label">Group ID<span class="help-icon" tabindex="0" role="img" aria-label="Group ID help" data-help="A short code that identifies this group. Saving with an existing ID updates that group and a new ID creates a new one. Use only lowercase letters and digits plus - and _. The Group name is what people read.">?</span></span> <input id="group-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="family"></label>
+          <label><span class="field-label">Group ID<span class="help-icon" tabindex="0" role="img" aria-label="Group ID help" data-help="A short code that identifies this group. Saving with an existing ID updates that group and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The Group name is what people read.">?</span></span> <input id="group-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="family"></label>
           <label>Group name <input id="group-name" required placeholder="Family devices"></label>
           <label>Profile override
             <select id="group-profile"><option value="">Use each device profile</option></select>
@@ -1089,7 +1089,7 @@ DASHBOARD_HTML = """<!doctype html>
       <h2>Schedule a profile</h2>
       <form id="schedule-form">
         <div class="fields">
-          <label><span class="field-label">Schedule ID<span class="help-icon" tabindex="0" role="img" aria-label="Schedule ID help" data-help="A short code that names this schedule in the list below. Saving with an existing ID updates that schedule and a new ID adds another one. Use only lowercase letters and digits plus - and _.">?</span></span> <input id="schedule-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}"></label>
+          <label><span class="field-label">Schedule ID<span class="help-icon" tabindex="0" role="img" aria-label="Schedule ID help" data-help="A short code that names this schedule in the list below. Saving with an existing ID updates that schedule and a new ID adds another one. Use only lowercase letters and digits and hyphens and underscores.">?</span></span> <input id="schedule-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}"></label>
           <label>Device
             <select id="schedule-device" required></select>
           </label>
@@ -1286,7 +1286,7 @@ DASHBOARD_HTML = """<!doctype html>
     </div>
     <form id="service-list-form">
       <div class="fields">
-        <label><span class="field-label">List ID<span class="help-icon" tabindex="0" role="img" aria-label="List ID help" data-help="A short code that identifies this service list. Saving with an existing ID updates that list and a new ID creates a new one. Use only lowercase letters and digits plus - and _. The List name is what people read.">?</span></span>
+        <label><span class="field-label">List ID<span class="help-icon" tabindex="0" role="img" aria-label="List ID help" data-help="A short code that identifies this service list. Saving with an existing ID updates that list and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The List name is what people read.">?</span></span>
           <input id="service-list-id" required pattern="[a-z0-9][a-z0-9_\\-]{0,63}" placeholder="work-apps">
         </label>
         <label>List name
@@ -1324,7 +1324,7 @@ DASHBOARD_HTML = """<!doctype html>
     </div>
     <form id="service-assignment-form">
       <div class="fields">
-        <label><span class="field-label">Service ID<span class="help-icon" tabindex="0" role="img" aria-label="Browser service profile ID help" data-help="A short code that identifies this browser service profile. Saving with an existing ID updates it and a new ID creates a new one. Use only lowercase letters and digits plus - and _. The Service name is what people read.">?</span></span>
+        <label><span class="field-label">Service ID<span class="help-icon" tabindex="0" role="img" aria-label="Browser service profile ID help" data-help="A short code that identifies this browser service profile. Saving with an existing ID updates it and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The Service name is what people read.">?</span></span>
           <input id="service-assignment-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="alice-video">
         </label>
         <label>Service name
@@ -1356,7 +1356,7 @@ DASHBOARD_HTML = """<!doctype html>
     </div>
     <form id="service-quota-form">
       <div class="fields">
-        <label><span class="field-label">Service ID<span class="help-icon" tabindex="0" role="img" aria-label="Service data limit ID help" data-help="A short code that identifies this service data limit. Saving with an existing ID updates it and a new ID creates a new one. Use only lowercase letters and digits plus - and _. The Service name is what people read.">?</span></span>
+        <label><span class="field-label">Service ID<span class="help-icon" tabindex="0" role="img" aria-label="Service data limit ID help" data-help="A short code that identifies this service data limit. Saving with an existing ID updates it and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The Service name is what people read.">?</span></span>
           <input id="service-quota-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="alice-netflix">
         </label>
         <label>Service name
@@ -1413,7 +1413,7 @@ DASHBOARD_HTML = """<!doctype html>
     </div>
     <form id="time-quota-form">
       <div class="fields">
-        <label><span class="field-label">Service ID<span class="help-icon" tabindex="0" role="img" aria-label="Service time limit ID help" data-help="A short code that identifies this service time limit. Saving with an existing ID updates it and a new ID creates a new one. Use only lowercase letters and digits plus - and _. The Service name is what people read.">?</span></span>
+        <label><span class="field-label">Service ID<span class="help-icon" tabindex="0" role="img" aria-label="Service time limit ID help" data-help="A short code that identifies this service time limit. Saving with an existing ID updates it and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The Service name is what people read.">?</span></span>
           <input id="time-quota-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="alice-netflix-time">
         </label>
         <label>Service name
