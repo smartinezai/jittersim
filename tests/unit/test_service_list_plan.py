@@ -111,6 +111,29 @@ class CompileServiceListTests(unittest.TestCase):
                         service_list_rules=(rule("one", first), rule("two", second)),
                     )
 
+    def test_one_list_may_hold_a_name_and_its_subdomain(self) -> None:
+        plan = compile_plan(
+            devices=(),
+            profiles={"slow": SLOW},
+            service_list_rules=(rule("work", "linkedin.com", "www.linkedin.com", "licdn.com"),),
+        )
+
+        self.assertEqual(
+            plan.service_list_rules[0].domains[:2], ("linkedin.com", "www.linkedin.com")
+        )
+        self.assertEqual(plan_from_payload(plan_to_payload(plan)), plan)
+
+    def test_the_overlap_error_names_both_lists(self) -> None:
+        with self.assertRaisesRegex(PlanError, "alpha and zeta overlap on www.netflix.com"):
+            compile_plan(
+                devices=(),
+                profiles={"slow": SLOW},
+                service_list_rules=(
+                    rule("zeta", "www.netflix.com"),
+                    rule("alpha", "netflix.com"),
+                ),
+            )
+
     def test_rejects_empty_duplicate_and_address_only_rules(self) -> None:
         for rules, message in (
             ((rule("empty"),), "no hostnames"),

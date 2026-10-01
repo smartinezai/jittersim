@@ -5,7 +5,9 @@ from ipaddress import IPv4Address
 from typing import Callable, Dict, Iterable, List, Sequence, Tuple
 
 DEFAULT_ADDRESS_TTL_SECONDS = 6 * 60 * 60
-DEFAULT_MAX_ADDRESSES_PER_LIST = 4096
+# nft -j lists every set element and the traffic counter read refuses more than
+# 512 KB, so 15 lists of this size must stay well below that.
+DEFAULT_MAX_ADDRESSES_PER_LIST = 1024
 
 
 class ServiceAddressBook:
@@ -46,6 +48,11 @@ class ServiceAddressBook:
             del entries[oldest]
             evicted.append(oldest)
         return tuple(fresh), tuple(evicted)
+
+    def forget(self, list_id: str) -> None:
+        """Drop everything known about a list whose hostnames changed or that was removed."""
+
+        self._seen.pop(list_id, None)
 
     def discard(self, list_id: str, addresses: Iterable[IPv4Address]) -> None:
         """Forget addresses that could not be added to the kernel set."""

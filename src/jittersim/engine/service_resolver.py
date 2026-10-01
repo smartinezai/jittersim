@@ -19,7 +19,7 @@ from jittersim.networking.helper import HelperClientError
 from .website import resolve_domains
 
 LOGGER = logging.getLogger(__name__)
-MAX_SEED_HOSTNAMES_PER_LIST = 32
+MAX_SEED_HOSTNAMES_PER_LIST = 100  # as many as a list can hold
 RESEND_SECONDS = 30 * 60
 RESOLVE_WAIT_SECONDS = 10.0
 RESOLVER_THREADS = 8
@@ -47,6 +47,7 @@ class ServiceAddressRefresher:
         self._clock = clock
         self._poll_seconds = poll_seconds
         self._last_signature: object = None
+        self._last_plan: Optional[dict] = None
         self._last_sent: Dict[str, List[IPv4Address]] = {}
         self._last_sent_at = 0.0
         self._stop_event = threading.Event()
@@ -83,6 +84,9 @@ class ServiceAddressRefresher:
         """Resolve and send when the lists or answers changed. Return whether it sent."""
 
         plan = self._applied_plan()
+        # Every apply publishes a new plan object and starts the sets over, so
+        # send again even when the answers have not changed.
+        reapplied = plan is not self._last_plan
         rules = plan.get("service_list_rules") if isinstance(plan, dict) else None
         lists = {
             rule["list_id"]: list(rule["domains"])[:MAX_SEED_HOSTNAMES_PER_LIST]
@@ -92,13 +96,15 @@ class ServiceAddressRefresher:
         if not lists:
             self._last_signature = signature
             self._last_sent = {}
+            self._last_plan = plan
             return False
         answers = self._resolve(lists)
         if not answers:
             return False
         now = self._clock()
         if (
-            signature == self._last_signature
+            not reapplied
+            and signature == self._last_signature
             and answers == self._last_sent
             and now - self._last_sent_at < RESEND_SECONDS
         ):
@@ -115,6 +121,7 @@ class ServiceAddressRefresher:
         self._last_signature = signature
         self._last_sent = answers
         self._last_sent_at = now
+        self._last_plan = plan
         return True
 
     def _resolve(self, lists: Dict[str, List[str]]) -> Dict[str, List[IPv4Address]]:

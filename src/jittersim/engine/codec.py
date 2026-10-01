@@ -372,7 +372,7 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
     ):
         raise PlanCodecError("a plan has too many shaped traffic classes")
     service_list_rules: List[ServiceListRule] = []
-    list_domains: List[str] = []
+    list_domains: List[tuple] = []
     for index, raw_rule in enumerate(list_data):
         rule_data = _as_mapping(raw_rule, f"service_list_rules[{index}]")
         try:
@@ -401,11 +401,16 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
             raise PlanCodecError(f"duplicate service list mark {mark}")
         for domain in domains:
             if any(
-                domain == prior or domain.endswith("." + prior) or prior.endswith("." + domain)
-                for prior in list_domains
+                owner != list_id
+                and (
+                    domain == prior
+                    or domain.endswith("." + prior)
+                    or prior.endswith("." + domain)
+                )
+                for prior, owner in list_domains
             ):
                 raise PlanCodecError(f"service list hostnames overlap on {domain}")
-            list_domains.append(domain)
+            list_domains.append((domain, list_id))
         service_marks[key] = mark
         service_list_rules.append(
             ServiceListRule(

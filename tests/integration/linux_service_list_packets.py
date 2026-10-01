@@ -16,7 +16,12 @@ from pathlib import Path
 
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.engine.compiler import compile_plan
-from jittersim.engine.plan import GeneralProfileRule, ServiceListRule, WebsiteFilter
+from jittersim.engine.plan import (
+    GeneralProfileRule,
+    ServiceListRule,
+    ServiceQuotaRule,
+    WebsiteFilter,
+)
 from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.executor import SubprocessExecutor
 from jittersim.networking.topology import Topology
@@ -240,6 +245,64 @@ def main():
             assert upload(AFFECTED, NEW_CLIENT, OTHER) is False, (
                 "the general profile stopped applying to other traffic"
             )
+
+        applier.apply(plan=general, service_addresses=addresses)
+        before = list_counter(applier, "usage-device general-profile download")
+        assert download(LISTED, NEW_CLIENT) is True
+        assert list_counter(applier, "usage-device general-profile download") > before, (
+            "a listed download was left out of the general usage counter"
+        )
+
+        # 6a. A list replaces an exhausted quota's fallback profile in both directions.
+        quota = ServiceQuotaRule(
+            "video",
+            "affected",
+            device.ipv4_address,
+            (IPv4Address(LISTED),),
+            0,
+            OFFLINE.upload,
+            OFFLINE.download,
+            True,
+        )
+        normal_device = Device("affected", "Affected", CLIENT, NORMAL.id, AFFECTED)
+        quota_only = compile_plan(
+            devices=(normal_device,),
+            profiles={"offline": OFFLINE, "normal": NORMAL},
+            service_quota_rules=(quota,),
+        )
+        applier.apply(plan=quota_only)
+        assert both(AFFECTED, CLIENT, LISTED) == (False, False), "the quota did not apply"
+        with_list = compile_plan(
+            devices=(normal_device,),
+            profiles={"offline": OFFLINE, "normal": NORMAL},
+            service_quota_rules=(quota,),
+            service_list_rules=(listed_rule(NORMAL),),
+        )
+        applier.apply(plan=with_list, service_addresses=addresses)
+        assert both(AFFECTED, CLIENT, LISTED) == (True, True), (
+            "an exhausted quota beat the list in one direction"
+        )
+
+        # 6b. Each list has its own queue.
+        two_lists = compile_plan(
+            devices=(device,),
+            profiles={"offline": OFFLINE, "normal": NORMAL},
+            service_list_rules=(
+                listed_rule(OFFLINE, "streaming"),
+                ServiceListRule("work", ("work.example",), 0, NORMAL.upload, NORMAL.download),
+            ),
+        )
+        applier.apply(
+            plan=two_lists,
+            service_addresses={
+                "streaming": [IPv4Address(LISTED)],
+                "work": [IPv4Address(OTHER)],
+            },
+        )
+        assert both(AFFECTED, CLIENT, LISTED) == (False, False), "the first list lost its queue"
+        assert both(AFFECTED, CLIENT, OTHER) == (True, True), (
+            "the second list used the device profile or the first list"
+        )
 
         # 6. Global access rules still win over a list.
         blocked = compile_plan(

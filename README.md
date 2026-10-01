@@ -249,7 +249,9 @@ no profile browses normally until it opens one of the listed services. All
 other traffic is untouched. The list applies to upload and download traffic of
 any protocol including QUIC. Devices in **Unaffected by profiles** are never
 touched. Global MAC and website rules still apply. A random outage or website
-list from the device's own profile does not cut a listed service.
+list from the device's own profile does not cut a listed service. A device in
+a random outage still loses the Pi's DNS and browser proxy so it reaches a
+listed service only through addresses it already has.
 
 Only the profile's delay, jitter, loss, speed limit, reordering, duplication and
 corruption settings are used. Its website list and random outages are not. A
@@ -259,14 +261,20 @@ list in the same way the general profile shares its limit. Delay, jitter and
 loss apply to each packet.
 
 Matching is by destination address. The Pi resolves the hostnames of every
-enabled list about once a minute and keeps those addresses in a set per list.
-The browser proxy also checks the lists first by exact hostname. A hostname
-also matches its subdomains and can only be in one enabled list. Hostnames
-that share a server with other sites can slow those sites too. Names resolved
-by the Pi can differ from the names a device receives from a content network,
-so verify a real session and add the hostnames it actually uses. Encrypted DNS,
-VPNs and fixed server addresses are not covered. One applied plan supports at
-most 15 combined devices, service rules and service lists.
+enabled list about once a minute and keeps those addresses in a set per list
+for six hours after it last saw them. A list holds up to 100 hostnames and
+remembers up to 1024 addresses. The browser proxy also checks the lists first
+by exact hostname. Browser tunnels to a listed service are not counted in the
+device's data counters because a list belongs to no single device.
+
+A hostname also matches its subdomains and can only be in one enabled list.
+A list may hold a name and its own subdomain. Other sites on the same server
+address as a listed service get the list's profile too and skip the device's
+own outages and website rules the same way. Names resolved by the Pi can differ
+from the names a device receives from a content network so verify a real
+session and add the hostnames it actually uses. Encrypted DNS, VPNs and fixed
+server addresses are not covered. One applied plan supports at most 15 combined
+devices, service rules and service lists.
 
 ### General profile
 

@@ -101,6 +101,7 @@ class HelperService:
         self._active_plan_path = active_plan_path
         self._active_plan: Optional[NetworkPlan] = None
         self._service_addresses = ServiceAddressBook(clock=service_address_clock)
+        self._list_domains: Dict[str, tuple] = {}
         self._network_lock = threading.Lock()
         self._wifi_lock = threading.Lock()
         self._router_lock = threading.Lock()
@@ -310,6 +311,7 @@ class HelperService:
         except PlanCodecError:
             return {"ok": False, "error": "invalid network plan"}
         try:
+            self._forget_changed_lists(plan)
             self._service_addresses.expire()
             report = self._applier.apply(
                 plan=plan,
@@ -363,6 +365,7 @@ class HelperService:
                 self._active_plan = None
                 return {"ok": False, "error": "network plan state could not be published"}
         self._active_plan = plan
+        self._list_domains = {rule.list_id: rule.domains for rule in plan.service_list_rules}
         return {"ok": True, "action": "apply", "commands_run": report.commands_run}
 
     def _write_active_plan(self, plan: NetworkPlan) -> None:
@@ -565,6 +568,14 @@ class HelperService:
             return {"ok": False, "error": "network reset failed"}
         return {"ok": True, "action": "reset", "commands_run": commands_run}
 
+    def _forget_changed_lists(self, plan: NetworkPlan) -> None:
+        """Drop learned addresses of lists that were removed or got other hostnames."""
+
+        wanted = {rule.list_id: rule.domains for rule in plan.service_list_rules}
+        for list_id, domains in self._list_domains.items():
+            if wanted.get(list_id) != domains:
+                self._service_addresses.forget(list_id)
+
     def _current_plan(self) -> Optional[NetworkPlan]:
         """Return the applied plan, reading the published copy after a helper restart."""
 
@@ -577,6 +588,9 @@ class HelperService:
             self._active_plan = plan_from_payload(payload)
         except (OSError, ValueError):
             return None
+        self._list_domains = {
+            rule.list_id: rule.domains for rule in self._active_plan.service_list_rules
+        }
         return self._active_plan
 
     def _handle_service_addresses(self, raw: Any) -> Dict[str, Any]:
@@ -803,6 +817,8 @@ class HelperClient:
         try:
             capabilities = self._request({"action": "capabilities"})
         except HelperClientError as error:
+            if error.reason == "helper-busy":
+                raise
             raise HelperClientError("Update the Pi helper before applying service lists") from error
         if capabilities.get("service_lists") is not True:
             raise HelperClientError("Update the Pi helper before applying service lists")

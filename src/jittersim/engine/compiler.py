@@ -319,12 +319,24 @@ def compile_plan(
         except ValidationError as error:
             raise PlanError("service list must contain only DNS hostnames") from error
         for domain in domains:
-            if any(
-                domain == prior or domain.endswith("." + prior) or prior.endswith("." + domain)
-                for prior in list_domains
-            ):
-                raise PlanError(f"service list hostnames overlap on {domain}")
-            list_domains.append(domain)
+            other = next(
+                (
+                    owner
+                    for prior, owner in list_domains
+                    if owner != list_rule.list_id
+                    and (
+                        domain == prior
+                        or domain.endswith("." + prior)
+                        or prior.endswith("." + domain)
+                    )
+                ),
+                None,
+            )
+            if other is not None:
+                raise PlanError(
+                    f"service lists {other} and {list_rule.list_id} overlap on {domain}"
+                )
+            list_domains.append((domain, list_rule.list_id))
         normalized_lists.append(
             ServiceListRule(
                 list_id=list_rule.list_id,

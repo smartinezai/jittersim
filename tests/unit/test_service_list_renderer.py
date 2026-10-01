@@ -3,7 +3,12 @@ from ipaddress import IPv4Address
 
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.engine.compiler import compile_plan
-from jittersim.engine.plan import GeneralProfileRule, ServiceListRule, WebsiteFilter
+from jittersim.engine.plan import (
+    GeneralProfileRule,
+    ServiceListRule,
+    ServiceQuotaRule,
+    WebsiteFilter,
+)
 from jittersim.networking.renderer import (
     SERVICE_DOWNLOAD_MARK_BASE,
     render_command_plan,
@@ -64,7 +69,7 @@ class ServiceListRenderTests(unittest.TestCase):
     def test_each_list_gets_a_set_and_marks_both_directions(self) -> None:
         script, _ = render(self.device_plan())
 
-        self.assertIn("add set inet jittersim svc_2 { type ipv4_addr; size 8192; }", script)
+        self.assertIn("add set inet jittersim svc_2 { type ipv4_addr; size 2048; }", script)
         download_mark = SERVICE_DOWNLOAD_MARK_BASE + 2
         self.assertIn(
             'add rule inet jittersim forward iifname "wlan0" ip daddr @svc_2 '
@@ -202,10 +207,78 @@ class ServiceListRenderTests(unittest.TestCase):
         script, _ = render(plan)
 
         for comment in ("general profile website allowlist", "general profile outage"):
-            upload = [line for line in only(script, comment) if "inet jittersim forward" in line]
+            upload = [
+                line
+                for line in only(script, f'comment "{comment}"')
+                if "inet jittersim forward" in line
+            ]
             self.assertEqual(len(upload), 1, comment)
             self.assertIn("ip daddr != @svc_2", upload[0])
         self.assertIn("@svc_2", only(script, "service-list streaming download")[0])
+
+    def test_a_general_outage_still_drops_ipv6_upload_when_lists_guard_the_ipv4_rule(self) -> None:
+        def outage_plan(*rules):
+            return compile_plan(
+                devices=(),
+                profiles={"slow": SLOW},
+                general_profile=GeneralProfileRule(profile_id="slow", outage_active=True),
+                service_list_rules=rules,
+            )
+
+        with_list, _ = render(outage_plan(list_rule("streaming", "netflix.com")))
+        without_list, _ = render(outage_plan())
+
+        (ipv6,) = only(with_list, "general profile outage over IPv6")
+        self.assertIn("meta nfproto ipv6 drop", ipv6)
+        self.assertNotIn("@svc", ipv6)
+        self.assertEqual(only(without_list, "over IPv6"), [])
+        self.assertNotIn("ip daddr !=", only(without_list, 'comment "general profile outage"')[0])
+
+    def test_an_exhausted_quota_does_not_overwrite_a_listed_download(self) -> None:
+        quota = ServiceQuotaRule(
+            "video",
+            "alice",
+            IPv4Address("192.168.50.10"),
+            (IPv4Address("203.0.113.5"),),
+            0,
+            SLOW.upload,
+            SLOW.download,
+            True,
+        )
+        plan = self.device_plan(service_quota_rules=(quota,))
+        plain = compile_plan(
+            devices=(Device("alice", "Alice", "192.168.50.10", "slow"),),
+            profiles={"slow": SLOW},
+            service_quota_rules=(quota,),
+        )
+
+        script, _ = render(plan)
+        plain_script, _ = render(plain)
+
+        (download,) = only(script, "apply-service-quota video download")
+        self.assertIn(f"meta mark and {SERVICE_DOWNLOAD_MARK_BASE} == 0 meta mark set", download)
+        (upload,) = only(script, "apply-service-quota video upload")
+        self.assertNotIn("meta mark and", upload)
+        self.assertNotIn(
+            "meta mark and", only(plain_script, "apply-service-quota video download")[0]
+        )
+
+    def test_general_usage_counts_listed_downloads_too(self) -> None:
+        general = compile_plan(
+            devices=(),
+            profiles={"slow": SLOW},
+            general_profile=GeneralProfileRule(profile_id="slow"),
+            service_list_rules=(list_rule("streaming", "netflix.com"),),
+        )
+
+        general_script, _ = render(general)
+        device_script, _ = render(self.device_plan())
+
+        rewrite = f"download meta mark {SERVICE_DOWNLOAD_MARK_BASE + 2} meta mark set 2"
+        (counted,) = only(general_script, rewrite)
+        self.assertIn('counter comment "usage-device general-profile download"', counted)
+        (uncounted,) = only(device_script, rewrite)
+        self.assertNotIn("counter", uncounted)
 
     def test_global_access_rules_still_apply_to_service_traffic(self) -> None:
         plan = compile_plan(

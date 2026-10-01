@@ -24,7 +24,7 @@ GENERAL_DOWNLOAD_MARK = 0x40000000
 # Forwarded downloads from a listed service carry this base plus the list's mark
 # until the download hook turns them back into the plain queue mark.
 SERVICE_DOWNLOAD_MARK_BASE = 0x20000000
-SERVICE_SET_SIZE = 8192
+SERVICE_SET_SIZE = 2048
 
 
 def _render_set(values: Sequence[object]) -> str:
@@ -184,6 +184,12 @@ def _render_nft_script(
                 f'add rule netdev {DOWNLOAD_TABLE} download {download_match}'
                 'drop comment "general profile outage"',
             ))
+            if guard:
+                # The guard only looks at IPv4 destinations, so IPv6 needs its own drop.
+                lines.append(
+                    f'add rule inet {PROJECT_TABLE} forward {upload_match}meta nfproto ipv6 '
+                    'drop comment "general profile outage over IPv6"'
+                )
         lines.extend((
             f'add rule inet {PROJECT_TABLE} forward {upload_match}meta nfproto ipv4 '
             f'meta mark set 1 counter comment "usage-device {GENERAL_QUEUE_ID} upload"',
@@ -247,6 +253,11 @@ def _render_nft_script(
             f'oifname "{topology.uplink_interface}" meta mark {mark} counter '
             f'comment "usage-device {device_id} upload"'
         )
+    # A service list replaces a quota's fallback profile, so leave the marker of
+    # a listed download alone until the download hook has turned it into a queue.
+    quota_download_guard = (
+        f"meta mark and {SERVICE_DOWNLOAD_MARK_BASE} == 0 " if plan.service_list_rules else ""
+    )
     for quota_rule in plan.service_quota_rules:
         destinations = _render_set(quota_rule.destination_addresses)
         lines.append(
@@ -269,9 +280,15 @@ def _render_nft_script(
             lines.append(
                 f"add rule netdev {DOWNLOAD_TABLE} download "
                 f"ip daddr {quota_rule.device_ip} ip saddr {destinations} "
-                f"meta mark set {quota_rule.mark} "
+                f"{quota_download_guard}meta mark set {quota_rule.mark} "
                 f"comment \"apply-service-quota {quota_rule.quota_id} download\""
             )
+    # The general profile's shared-limit chart counts all affected traffic.
+    general_download_count = (
+        f' counter comment "usage-device {GENERAL_QUEUE_ID} download"'
+        if plan.general_profile is not None
+        else ""
+    )
     for list_rule in plan.service_list_rules:
         set_name = service_list_set_name(list_rule)
         download_mark = SERVICE_DOWNLOAD_MARK_BASE + list_rule.mark
@@ -283,7 +300,7 @@ def _render_nft_script(
             f"ip saddr @{set_name} meta mark set {download_mark} counter "
             f'comment "service-list {list_rule.list_id} download"',
             f"add rule netdev {DOWNLOAD_TABLE} download meta mark {download_mark} "
-            f"meta mark set {list_rule.mark}",
+            f"meta mark set {list_rule.mark}{general_download_count}",
         ))
     return "\n".join(lines) + "\n"
 

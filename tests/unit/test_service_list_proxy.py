@@ -3,8 +3,13 @@ from ipaddress import IPv4Address
 
 from jittersim.config.models import Device, Impairment, MacPolicy, Profile
 from jittersim.engine.compiler import compile_plan
-from jittersim.engine.plan import GeneralProfileRule, ServiceAssignmentRule, ServiceListRule
-from jittersim.networking.browser_proxy import ProxyError, select_mark
+from jittersim.engine.plan import (
+    GeneralProfileRule,
+    ServiceAssignmentRule,
+    ServiceListRule,
+    WebsiteFilter,
+)
+from jittersim.networking.browser_proxy import ProxyError, destination_allowed, select_mark
 
 SLOW = Profile(id="slow", name="Slow", upload=Impairment(delay_ms=100))
 ALICE = IPv4Address("192.168.50.10")
@@ -66,7 +71,7 @@ class ServiceListProxyTests(unittest.TestCase):
         with self.assertRaisesRegex(ProxyError, "assigned device"):
             select_mark(plan, client_ip=STRANGER, host="example.com")
 
-    def test_a_device_in_a_random_outage_can_still_reach_listed_hosts(self) -> None:
+    def test_the_list_choice_ignores_the_devices_outage_flag(self) -> None:
         plan = device_plan(blocked_device_addresses=(ALICE,))
 
         self.assertEqual(
@@ -124,6 +129,42 @@ class ServiceListProxyTests(unittest.TestCase):
                         ),
                         (1, "general-profile"),
                     )
+
+
+class ListedDestinationTests(unittest.TestCase):
+    """A listed host skips the profile's own website rules and outage but not global rules."""
+
+    DESTINATION = "5.5.5.5"
+
+    def test_the_general_outage_and_allowlist_do_not_block_a_listed_host(self) -> None:
+        plan = compile_plan(
+            devices=(),
+            profiles={"slow": SLOW},
+            general_profile=GeneralProfileRule("slow", (IPv4Address("1.1.1.1"),), True),
+            service_list_rules=(listed("streaming", "netflix.com"),),
+        )
+
+        self.assertFalse(destination_allowed(plan, STRANGER, self.DESTINATION, AFFECTED))
+        self.assertTrue(
+            destination_allowed(plan, STRANGER, self.DESTINATION, AFFECTED, service_list=True)
+        )
+
+    def test_the_devices_website_rules_do_not_block_a_listed_host(self) -> None:
+        plan = device_plan(
+            website_filters=(
+                WebsiteFilter(ALICE, (IPv4Address("1.1.1.1"),), (IPv4Address(self.DESTINATION),)),
+            )
+        )
+
+        self.assertFalse(destination_allowed(plan, ALICE, self.DESTINATION))
+        self.assertTrue(destination_allowed(plan, ALICE, self.DESTINATION, service_list=True))
+
+    def test_global_rules_still_block_a_listed_host(self) -> None:
+        blocked = device_plan(global_blocked_addresses=(IPv4Address(self.DESTINATION),))
+        allowlisted = device_plan(global_allowed_addresses=(IPv4Address("1.1.1.1"),))
+
+        for plan in (blocked, allowlisted):
+            self.assertFalse(destination_allowed(plan, ALICE, self.DESTINATION, service_list=True))
 
 
 if __name__ == "__main__":

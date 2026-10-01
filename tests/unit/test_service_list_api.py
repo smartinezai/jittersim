@@ -13,9 +13,14 @@ from jittersim.networking.helper import HelperClientError
 
 
 class Helper:
-    def __init__(self, fail=False) -> None:
+    def __init__(self, fail=False, outdated=False) -> None:
         self.fail = fail
+        self.outdated = outdated
         self.applied_plan = None
+
+    def check_service_list_support(self):
+        if self.outdated:
+            raise HelperClientError("Update the Pi helper before applying service lists")
 
     def apply(self, *, plan):
         if self.fail:
@@ -128,6 +133,13 @@ class ServiceListApiTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(self.repository.list_service_lists(), ())
 
+    def test_a_list_may_hold_a_catalogue_service_and_one_of_its_subdomains(self) -> None:
+        status, payload = self.post(
+            body={**self.body, "services": ["linkedin"], "hostnames": ["www.linkedin.com"]}
+        )
+
+        self.assertEqual(status, 200, payload)
+
     def test_a_hostname_cannot_belong_to_two_enabled_lists(self) -> None:
         self.post()
 
@@ -171,9 +183,20 @@ class ServiceListApiTests(unittest.TestCase):
 
         status, payload = self.post()
 
-        self.assertNotEqual(status, 200)
+        self.assertEqual(status, 502)
         self.assertFalse(payload["live_applied"])
         self.assertEqual(len(self.repository.list_service_lists()), 1)
+
+    def test_an_outdated_helper_is_reported_before_anything_is_saved(self) -> None:
+        self.server.helper_client = Helper(outdated=True)
+
+        status, payload = self.post()
+
+        self.assertEqual(status, 503)
+        self.assertIn("Update the Pi helper", payload["error"])
+        self.assertEqual(self.repository.list_service_lists(), ())
+        status, _ = self.post(body={**self.body, "enabled": False})
+        self.assertEqual(status, 200)
 
     def test_without_a_helper_the_list_is_saved_for_later(self) -> None:
         self.server.helper_client = None

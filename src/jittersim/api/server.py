@@ -1416,7 +1416,7 @@ DASHBOARD_HTML = """<!doctype html>
         </label>
         <button type="button" id="service-list-add-observed">Add to hostnames</button>
       </div>
-      <p class="form-note">While a list is on, traffic to its services gets the list's profile instead of the device or general profile. Devices in Unaffected by profiles are not touched. Global access rules still apply. A hostname also matches its subdomains and can only be in one enabled list. Matching follows the DNS answers that devices receive from the Pi, so encrypted DNS, VPNs and apps that use fixed addresses are not covered. A server shared with other sites can slow those sites too. Check the names a real session uses and add any that are missing. The profile's website list and random outages are not used for service lists.</p>
+      <p class="form-note">While a list is on, traffic to its services gets the list's profile instead of the device or general profile. Devices in Unaffected by profiles are not touched. Global access rules still apply. A hostname also matches its subdomains and can only be in one enabled list. Matching follows the DNS answers that devices receive from the Pi, so encrypted DNS, VPNs and apps that use fixed addresses are not covered. Other sites on the same server address are shaped the same way. Check the names a real session uses and add any that are missing. The profile's website list and random outages are not used for service lists.</p>
       <button class="primary" type="submit">Save service list</button>
     </form>
     <div id="service-list-list" class="quota-list" aria-live="polite">Enter the admin token to view service lists.</div>
@@ -3471,6 +3471,7 @@ DASHBOARD_HTML = """<!doctype html>
     function renderServiceListObserved() {
       const select = element("service-list-observed");
       const names = observedNames;
+      const previous = select.value;
       select.replaceChildren();
       const first = document.createElement("option");
       first.value = "";
@@ -3482,6 +3483,7 @@ DASHBOARD_HTML = """<!doctype html>
         option.textContent = name;
         select.appendChild(option);
       });
+      if (names.has(previous)) select.value = previous;
     }
 
     function renderServiceLists(data) {
@@ -7021,9 +7023,15 @@ class ControlServer(HTTPServer):
                 )
                 if self.repository.get_profile(service_list.profile_id) is None:
                     raise ValidationError("profile does not exist")
+                if service_list.enabled and self.helper_client is not None:
+                    self.helper_client.check_service_list_support()
                 with self.repository.transaction():
                     self.repository.save_service_list(service_list)
                     self._validate_saved_plan()
+            except HelperClientError as error:
+                return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                    {"error": str(error)}
+                )
             except PlanError as error:
                 return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
             except ValidationError as error:

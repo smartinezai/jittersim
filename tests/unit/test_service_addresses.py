@@ -26,14 +26,14 @@ def ip(value: str) -> IPv4Address:
     return IPv4Address(value)
 
 
-def list_plan(*list_ids: str):
+def list_plan(*list_ids: str, domain_suffix: str = "example"):
     return compile_plan(
         devices=(Device("alice", "Alice", "192.168.50.10", "slow"),),
         profiles={"slow": SLOW},
         service_list_rules=tuple(
             ServiceListRule(
                 list_id=list_id,
-                domains=(f"{list_id}.example",),
+                domains=(f"{list_id}.{domain_suffix}",),
                 mark=0,
                 upload_impairment=SLOW.upload,
                 download_impairment=SLOW.download,
@@ -105,6 +105,22 @@ class ServiceAddressBookTests(unittest.TestCase):
         self.book.discard("streaming", [ip("203.0.113.1")])
 
         self.assertEqual(self.book.snapshot(["streaming"]), {"streaming": (ip("203.0.113.2"),)})
+
+    def test_forget_drops_everything_known_about_a_list(self) -> None:
+        self.book.record("streaming", [ip("203.0.113.1")])
+        self.book.record("work", [ip("203.0.113.2")])
+
+        self.book.forget("streaming")
+
+        self.assertEqual(self.book.snapshot(["streaming", "work"]), {"work": (ip("203.0.113.2"),)})
+        self.book.forget("never-seen")
+
+    def test_the_default_limits_keep_the_counter_read_small(self) -> None:
+        # nft -j lists every set element and the counter read refuses more than 512 KB.
+        from jittersim.networking.service_addresses import DEFAULT_MAX_ADDRESSES_PER_LIST
+
+        worst_case_json_bytes = 15 * DEFAULT_MAX_ADDRESSES_PER_LIST * len('"203.255.255.255", ')
+        self.assertLess(worst_case_json_bytes, 512 * 1024 * 3 // 5)
 
     def test_snapshot_only_returns_the_requested_lists(self) -> None:
         self.book.record("streaming", [ip("203.0.113.1")])
@@ -238,6 +254,28 @@ class ServiceAddressHelperTests(unittest.TestCase):
         self.assertLess(script.index("add set"), script.index("add element"))
         self.assertLess(script.index("add element"), script.index("@svc_2"))
 
+    def test_changed_hostnames_do_not_inherit_the_old_addresses(self) -> None:
+        self.apply(list_plan("streaming"))
+        self.send({"streaming": ["203.0.113.1"]})
+        self.executor.commands.clear()
+
+        self.apply(list_plan("streaming", domain_suffix="other"))
+        self.assertNotIn("203.0.113.1", self.nft_scripts()[0])
+        self.executor.commands.clear()
+        self.apply(list_plan("streaming"))
+
+        self.assertNotIn("203.0.113.1", self.nft_scripts()[0])
+
+    def test_a_list_taken_out_of_the_plan_is_forgotten(self) -> None:
+        self.apply(list_plan("streaming"))
+        self.send({"streaming": ["203.0.113.1"]})
+        self.apply(compile_plan(devices=(), profiles={}))
+        self.executor.commands.clear()
+
+        self.apply(list_plan("streaming"))
+
+        self.assertNotIn("203.0.113.1", self.nft_scripts()[0])
+
     def test_a_plan_without_the_list_does_not_replay_its_addresses(self) -> None:
         self.apply(list_plan("streaming"))
         self.send({"streaming": ["203.0.113.1"]})
@@ -358,6 +396,20 @@ class ServiceAddressClientTests(unittest.TestCase):
 
         with self.assertRaises(HelperClientError):
             client.service_addresses({"streaming": ["203.0.113.1"]})
+
+    def test_a_busy_helper_is_not_reported_as_out_of_date(self) -> None:
+        client = HelperClient(socket_path=self.socket_path)
+
+        def busy(payload, **kwargs):
+            raise HelperClientError("busy", reason="helper-busy")
+
+        client._request = busy
+
+        with self.assertRaises(HelperClientError) as caught:
+            client.check_service_list_support()
+
+        self.assertEqual(caught.exception.reason, "helper-busy")
+        self.assertNotIn("Update the Pi helper", str(caught.exception))
 
     def test_applying_a_plan_with_lists_needs_a_helper_that_supports_them(self) -> None:
         client = HelperClient(socket_path=self.socket_path)

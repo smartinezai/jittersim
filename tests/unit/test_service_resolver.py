@@ -90,6 +90,22 @@ class RefresherTests(unittest.TestCase):
         self.assertTrue(self.refresher.refresh())
         self.assertEqual(self.helper.calls[-1]["ai"], [ip("198.51.100.8")])
 
+    def test_every_hostname_a_list_can_hold_is_resolved(self) -> None:
+        from jittersim.config.models import MAX_SERVICE_LIST_DOMAINS
+
+        self.assertGreaterEqual(MAX_SEED_HOSTNAMES_PER_LIST, MAX_SERVICE_LIST_DOMAINS)
+
+    def test_a_reapplied_plan_is_sent_again_because_its_sets_started_over(self) -> None:
+        self.refresher.refresh()
+        self.assertFalse(self.refresher.refresh())
+
+        self.applied = payload(
+            ("streaming", ["netflix.com", "nflxvideo.net"]), ("ai", ["claude.ai"])
+        )
+
+        self.assertTrue(self.refresher.refresh())
+        self.assertEqual(len(self.helper.calls), 2)
+
     def test_a_changed_plan_is_resolved_straight_away(self) -> None:
         self.refresher.refresh()
         self.applied = payload(("streaming", ["netflix.com"]))
