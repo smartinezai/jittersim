@@ -2198,6 +2198,8 @@ DASHBOARD_HTML = """<!doctype html>
     let observedNames = new Set();
     // Keys of the open Traffic discovery groups. They survive the dashboard refresh.
     const openObservationGroups = new Set();
+    // The profile picked in each Traffic discovery card. It survives the dashboard refresh.
+    const observationProfileChoice = new Map();
     let randomWebsiteAnalyticsRequestVersion = 0;
     let connectedDevicesRequestInFlight = false;
     let observationRequestInFlight = false;
@@ -3357,6 +3359,14 @@ DASHBOARD_HTML = """<!doctype html>
       return address + "|" + groupKey;
     }
 
+    function chosenObservationProfile(choices, deviceKey, profiles, assignedId) {
+      const ids = (profiles || []).map((profile) => profile.id);
+      const remembered = choices.get(deviceKey);
+      if (remembered !== undefined && ids.indexOf(remembered) !== -1) return remembered;
+      if (assignedId && ids.indexOf(assignedId) !== -1) return assignedId;
+      return ids.length > 0 ? ids[0] : "";
+    }
+
     function renderObservations(data) {
       const container = element("observations");
       const count = element("observation-count");
@@ -3397,16 +3407,25 @@ DASHBOARD_HTML = """<!doctype html>
         heading.append(title, address);
         const targetProfile = document.createElement("select");
         targetProfile.setAttribute("aria-label", "Profile for discovered domains");
+        const chosenProfileId = chosenObservationProfile(
+          observationProfileChoice,
+          device.ipv4_address,
+          profiles,
+          device.assigned_profile_id
+        );
         profiles.forEach((profile) => {
           const option = document.createElement("option");
           option.value = profile.id;
           option.textContent = "Add to " + profile.name;
-          option.selected = profile.id === device.assigned_profile_id;
+          option.selected = profile.id === chosenProfileId;
           targetProfile.appendChild(option);
         });
         const profileSyncs = [];
         const syncProfileButtons = () => profileSyncs.forEach((sync) => sync());
-        targetProfile.addEventListener("change", syncProfileButtons);
+        targetProfile.addEventListener("change", () => {
+          observationProfileChoice.set(device.ipv4_address, targetProfile.value);
+          syncProfileButtons();
+        });
         const targetRow = document.createElement("div");
         targetRow.className = "observation-actions";
         targetRow.append(targetProfile);

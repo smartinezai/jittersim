@@ -555,7 +555,8 @@ def test_a_single_name_row_is_the_row_the_code_always_drew():
         buttons: findAll(item, (n) => n.tagName === "button").map((b) => b.textContent)
       }));
     """
-    single = device("192.168.50.124", with_labels([item("config.extension.grammarly.com", 5, "label:grammarly", "Grammarly")]))
+    grammarly = item("config.extension.grammarly.com", 5, "label:grammarly", "Grammarly")
+    single = device("192.168.50.124", with_labels([grammarly]))
 
     out = run_dashboard(steps, [single])
 
@@ -650,7 +651,11 @@ def test_the_header_block_button_blocks_every_name_in_one_call_and_turns_into_un
         "header": "Unblock all", "badge": "All blocked", "badgeHidden": False,
         "rows": ["Unblock"] * 7,
     }
-    assert out["last"] == {"header": "Block all", "badgeHidden": True, "rows": ["Block globally"] * 7}
+    assert out["last"] == {
+        "header": "Block all",
+        "badgeHidden": True,
+        "rows": ["Block globally"] * 7,
+    }
 
 
 @NODE
@@ -747,7 +752,11 @@ def test_the_header_profile_button_follows_the_cards_profile_select():
 
     out = run_dashboard(steps, [example_device()], profiles=[slow, FAST_PROFILE])
 
-    assert out == {"before": "All already in Slow", "after": "Add all to profile", "disabled": False}
+    assert out == {
+        "before": "All already in Slow",
+        "after": "Add all to profile",
+        "disabled": False,
+    }
 
 
 @NODE
@@ -838,3 +847,124 @@ def test_the_group_row_has_a_style_that_beats_the_plain_details_rule():
     ):
         assert selector in DASHBOARD_HTML, selector
     assert ".observation-group[open] > .observation-group-summary::before" in DASHBOARD_HTML
+
+
+# ---------------------------------------------------------------------------------------------
+# Each card keeps the profile that was picked in its select across dashboard refreshes.
+# ---------------------------------------------------------------------------------------------
+
+CHOICE_PROFILES = [{"id": "slow"}, {"id": "fast"}, {"id": "mid"}]
+
+
+def chosen(remembered, assigned, profiles=None):
+    """Call chosenObservationProfile with a map holding the remembered id for device 'd'."""
+
+    entries = [] if remembered is None else [["d", remembered]]
+    expression = "chosenObservationProfile(new Map(%s), 'd', %s, %s)" % (
+        json.dumps(entries),
+        json.dumps(CHOICE_PROFILES if profiles is None else profiles),
+        json.dumps(assigned),
+    )
+    return evaluate(expression)
+
+
+@NODE
+def test_a_remembered_profile_that_still_exists_wins_over_the_assigned_one():
+    assert chosen("mid", "slow") == "mid"
+
+
+@NODE
+def test_a_remembered_profile_that_was_deleted_falls_back_to_the_assigned_one():
+    assert chosen("gone", "fast") == "fast"
+
+
+@NODE
+def test_a_deleted_remembered_profile_and_a_missing_assigned_one_fall_back_to_the_first():
+    assert chosen("gone", "also-gone") == "slow"
+    assert chosen("gone", None) == "slow"
+
+
+@NODE
+def test_without_a_memory_the_assigned_profile_is_used():
+    assert chosen(None, "fast") == "fast"
+
+
+@NODE
+def test_an_assigned_profile_that_no_longer_exists_uses_the_first_profile():
+    assert chosen(None, "gone") == "slow"
+    assert chosen(None, None) == "slow"
+    assert chosen(None, "") == "slow"
+
+
+@NODE
+def test_no_profiles_give_an_empty_choice_whatever_was_remembered():
+    assert chosen(None, "slow", profiles=[]) == ""
+    assert chosen("slow", "slow", profiles=[]) == ""
+
+
+@NODE
+def test_the_choice_is_per_device():
+    expression = (
+        "[chosenObservationProfile(new Map([['a', 'mid']]), 'a', %s, 'slow'),"
+        " chosenObservationProfile(new Map([['a', 'mid']]), 'b', %s, 'slow')]"
+    ) % (json.dumps(CHOICE_PROFILES), json.dumps(CHOICE_PROFILES))
+
+    assert evaluate(expression) == ["mid", "slow"]
+
+
+@NODE
+def test_a_picked_profile_stays_picked_when_the_dashboard_renders_again():
+    steps = """
+      const select = (index) => byClass(cards()[index], "observation-actions")[0].children[0];
+      const start = [select(0).value, select(1).value];
+      select(0).value = "mid";
+      fire(select(0), "change");
+      render();
+      const afterRender = [select(0).value, select(1).value];
+      profiles = profiles.filter((profile) => profile.id !== "mid");
+      render();
+      const afterDelete = [select(0).value, select(1).value];
+      console.log(JSON.stringify({start, afterRender, afterDelete}));
+    """
+    profiles = [SLOW_PROFILE, FAST_PROFILE, {"id": "mid", "name": "Mid", "website_domains": []}]
+    devices = [
+        example_device("192.168.50.124"),
+        example_device("192.168.50.125"),
+    ]
+    devices[0]["assigned_profile_id"] = "fast"
+    devices[1]["assigned_profile_id"] = "slow"
+
+    out = run_dashboard(steps, devices, profiles=profiles)
+
+    assert out == {
+        "start": ["fast", "slow"],
+        "afterRender": ["mid", "slow"],
+        "afterDelete": ["fast", "slow"],
+    }
+
+
+@NODE
+def test_the_header_buttons_follow_the_remembered_profile_after_a_render():
+    steps = """
+      const select = () => byClass(cards()[0], "observation-actions")[0].children[0];
+      select().value = "fast";
+      fire(select(), "change");
+      render();
+      const parts = groupParts(cards()[0], 1);
+      console.log(JSON.stringify({
+        select: select().value, header: parts.profileButton.textContent,
+        row: parts.rows[0].children[2].textContent
+      }));
+    """
+    slow = {"id": "slow", "name": "Slow", "website_domains": [d for d, _ in IMMO_NAMES]}
+
+    out = run_dashboard(steps, [example_device()], profiles=[slow, FAST_PROFILE])
+
+    assert out == {"select": "fast", "header": "Add all to profile", "row": "Add to profile"}
+
+
+def test_the_choice_map_is_module_level_and_stored_when_the_select_changes():
+    assert re.search(r"\n    const observationProfileChoice = new Map\(\);", SCRIPT)
+    body = function_body("renderObservations")
+    assert "chosenObservationProfile(" in body
+    assert "observationProfileChoice.set(" in body
