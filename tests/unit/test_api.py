@@ -2287,6 +2287,41 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(_new_client_name("bad\nlabel", "host", "192.168.50.7"), "host")
         self.assertEqual(_new_client_name("  Sam MacBook ", None, "192.168.50.7"), "Sam MacBook")
 
+    def test_observations_survive_any_kind_of_broken_station_snapshot(self) -> None:
+        def broken_with(snapshot=None, error=None):
+            class Broken(FakeHelper):
+                def connected_device_snapshot(self):
+                    if error is not None:
+                        raise error
+                    return snapshot
+
+            return Broken()
+
+        cases = {
+            "value error": broken_with(error=ValueError("bad reply")),
+            "os error": broken_with(error=OSError("socket closed")),
+            "helper error": broken_with(error=HelperClientError("simulated failure")),
+            "no snapshot": broken_with(snapshot=None),
+            "devices is a number": broken_with(snapshot={"devices": 5}),
+            "devices is missing": broken_with(snapshot={}),
+            "station is not a dict": broken_with(snapshot={"devices": [None, 5, "text"]}),
+            "address is not text": broken_with(
+                snapshot={"devices": [{"ipv4_address": ["192.168.50.178"], "hostname": "x"}]}
+            ),
+        }
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/observations/scan", {})
+        for name, helper in cases.items():
+            with self.subTest(name):
+                self.server.helper_client = helper
+
+                status, _, body = self.server.response_for("/api/observations")
+
+                self.assertEqual(status, 200)
+                group = json.loads(body)["devices"][0]
+                self.assertEqual(group["display_name"], "Unknown device")
+                self.assertIsNone(group["hostname"])
+
 
 if __name__ == "__main__":
     unittest.main()

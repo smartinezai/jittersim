@@ -5931,18 +5931,18 @@ class ControlServer(HTTPServer):
         if self.helper_client is None:
             return {}
         try:
-            snapshot = self.helper_client.connected_device_snapshot()
-            stations = snapshot["devices"]
-        except (HelperClientError, AttributeError, KeyError, TypeError):
-            return {}
-        return {
-            station["ipv4_address"]: {
-                "mac_address": station.get("mac_address"),
-                "hostname": station.get("hostname"),
+            stations = station_snapshot(self.helper_client)["devices"]
+            return {
+                station["ipv4_address"]: {
+                    "mac_address": station.get("mac_address"),
+                    "hostname": station.get("hostname"),
+                }
+                for station in stations
+                if isinstance(station, dict) and station.get("ipv4_address")
             }
-            for station in stations
-            if isinstance(station, dict) and station.get("ipv4_address")
-        }
+        except (AttributeError, HelperClientError, KeyError, OSError, TypeError, ValueError):
+            LOGGER.warning("could not read client names from the station snapshot", exc_info=True)
+            return {}
 
     def response_for(self, path: str, query: str = "") -> Tuple[int, str, bytes]:
         """Build the response body for a supported GET path."""
