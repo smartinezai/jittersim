@@ -25,7 +25,7 @@ from jittersim.config.models import (
 )
 from jittersim.config.storage import ConfigRepository, StorageError
 from jittersim.networking.helper import HelperClientError
-from tests.helper_support import OldHelperService, OlderHelperService, captures, serving
+from tests.helper_support import OlderHelperService, OldHelperService, captures, serving
 
 
 class FakeHelper:
@@ -2114,7 +2114,9 @@ class ControlServerTests(unittest.TestCase):
                 return super().observe_dns_queries(excluded_macs)
 
         self.server.helper_client = Counting()
-        too_many = tuple("02:00:00:00:%02x:%02x" % (index // 256, index % 256) for index in range(257))
+        too_many = tuple(
+            "02:00:00:00:%02x:%02x" % (index // 256, index % 256) for index in range(257)
+        )
 
         with patch("jittersim.api.server.protected_macs", return_value=too_many):
             status, _, body = self.server.write_response_for("/api/observations/scan", {})

@@ -1,9 +1,9 @@
 import json
 import unittest
 
+from jittersim.config import exemptions
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.engine.compiler import compile_plan
-from jittersim.config import exemptions
 from jittersim.networking import applier as applier_module
 from jittersim.networking.applier import ApplyError, NetworkApplier
 from jittersim.networking.commands import CommandResult
