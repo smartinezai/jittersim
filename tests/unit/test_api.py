@@ -1642,6 +1642,80 @@ class ControlServerTests(unittest.TestCase):
             ("ads.example.com",),
         )
 
+    def test_remove_global_block_removes_one_exact_name(self) -> None:
+        from dataclasses import replace
+
+        policy = self.repository.get_website_policy()
+        self.repository.save_website_policy(
+            replace(policy, blocked_domains=("facebook.com", "example.org"))
+        )
+
+        status, _, body = self.server.write_response_for(
+            "/api/observations/remove-global-block", {"domain": "Facebook.com."}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self.repository.get_website_policy().blocked_domains, ("example.org",))
+        self.assertEqual(
+            json.loads(body)["policies"]["websites"]["blocked_domains"], ["example.org"]
+        )
+
+    def test_remove_global_block_leaves_a_subdomain_entry_alone(self) -> None:
+        from dataclasses import replace
+
+        policy = self.repository.get_website_policy()
+        self.repository.save_website_policy(
+            replace(policy, blocked_domains=("facebook.com", "www.facebook.com"))
+        )
+
+        self.server.write_response_for(
+            "/api/observations/remove-global-block", {"domain": "facebook.com"}
+        )
+
+        self.assertEqual(
+            self.repository.get_website_policy().blocked_domains, ("www.facebook.com",)
+        )
+
+    def test_remove_global_block_for_an_unlisted_name_changes_nothing(self) -> None:
+        version = self.repository.get_runtime_state().configuration_version
+
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/remove-global-block", {"domain": "never-listed.example"}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self.repository.get_website_policy().blocked_domains, ())
+        self.assertEqual(self.repository.get_runtime_state().configuration_version, version)
+
+    def test_remove_global_block_rejects_a_bad_domain(self) -> None:
+        for payload in ({}, {"domain": 5}, {"domain": "not a domain"}):
+            status, _, body = self.server.write_response_for(
+                "/api/observations/remove-global-block", payload
+            )
+            self.assertEqual(status, 400)
+            self.assertEqual(
+                json.loads(body)["error"], "could not remove domain from global block list"
+            )
+
+    def test_remove_global_block_needs_the_admin_token(self) -> None:
+        from jittersim.api.server import WRITE_PATHS
+
+        self.assertIn("/api/observations/remove-global-block", WRITE_PATHS)
+
+    def test_changing_the_global_block_list_only_saves_it(self) -> None:
+        # The dashboard words its success message from this. Enforcement waits for Apply.
+        helper = FakeHelper()
+        self.server.helper_client = helper
+
+        self.server.write_response_for(
+            "/api/observations/add-global-block", {"domain": "ads.example.com"}
+        )
+        self.server.write_response_for(
+            "/api/observations/remove-global-block", {"domain": "ads.example.com"}
+        )
+
+        self.assertIsNone(helper.applied_plan)
+
     def test_rejects_invalid_profile_writes_before_persistence(self) -> None:
         status, content_type, body = self.server.write_response_for(
             "/api/profiles",

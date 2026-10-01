@@ -144,6 +144,7 @@ WRITE_PATHS = frozenset(
         "/api/observations/scan",
         "/api/observations/add-to-profile",
         "/api/observations/add-global-block",
+        "/api/observations/remove-global-block",
         "/api/apply",
         "/api/reset",
         "/api/dashboard-access/register-self",
@@ -7107,6 +7108,9 @@ class ControlServer(HTTPServer):
         if path == "/api/observations/add-global-block":
             return self._add_observation_to_global_block(payload)
 
+        if path == "/api/observations/remove-global-block":
+            return self._remove_observation_from_global_block(payload)
+
         if path == "/api/apply":
             return self._apply_configuration()
 
@@ -7357,6 +7361,23 @@ class ControlServer(HTTPServer):
         except (KeyError, TypeError, ValueError, StorageError):
             return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
                 {"error": "could not add domain to global block list"}
+            )
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {"policies": _policies_payload(self.repository)}
+        )
+
+    def _remove_observation_from_global_block(
+        self, payload: Dict[str, Any]
+    ) -> Tuple[int, str, bytes]:
+        try:
+            domain = normalize_domain(payload["domain"])
+            policy = self.repository.get_website_policy()
+            remaining = tuple(item for item in policy.blocked_domains if item != domain)
+            if remaining != policy.blocked_domains:
+                self.repository.save_website_policy(replace(policy, blocked_domains=remaining))
+        except (KeyError, TypeError, ValueError, StorageError):
+            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                {"error": "could not remove domain from global block list"}
             )
         return HTTPStatus.OK, "application/json", _json_bytes(
             {"policies": _policies_payload(self.repository)}
