@@ -5575,6 +5575,37 @@ def _device_title(
     return name
 
 
+IMPACT_NO_HELPER_MESSAGE = "Impact needs the Pi helper."
+IMPACT_RESET_MESSAGE = "Network is reset. Apply the configuration to start impact checks."
+IMPACT_OUT_OF_DATE_MESSAGE = (
+    "The networking helper is out of date. Update it to see the impact check."
+)
+IMPACT_UNREADABLE_MESSAGE = "Impact could not be read right now."
+
+
+def _impact_queue_name(
+    queue_id: str,
+    *,
+    devices_by_id: Dict[str, Device],
+    labels_by_mac: Dict[str, Dict[str, str]],
+    list_names: Dict[str, str],
+) -> Tuple[str, str]:
+    """Name one queue of the impact check and say what kind of queue it is."""
+
+    if queue_id == GENERAL_QUEUE_ID:
+        return "General profile", "General profile"
+    for prefix, label in (("quota:", "Service quota"), ("assignment:", "Browser service profile")):
+        if queue_id.startswith(prefix):
+            return f"{label} {queue_id[len(prefix):]}", label
+    if queue_id.startswith("servicelist:"):
+        list_id = queue_id[len("servicelist:"):]
+        return f"Service list {list_names.get(list_id, list_id)}", "Service list"
+    device = devices_by_id.get(queue_id)
+    if device is not None:
+        return _device_title(device, labels_by_mac, queue_id), "Device"
+    return queue_id, "Queue"
+
+
 def _device_payload(
     device: Device, *, labels_by_mac: Dict[str, Dict[str, str]]
 ) -> Dict[str, Any]:
@@ -6561,6 +6592,8 @@ class ControlServer(HTTPServer):
                     ),
                 }
             )
+        if path == "/api/impact":
+            return HTTPStatus.OK, "application/json", _json_bytes(self._impact_status())
         if path == "/api/diagnostics":
             runtime = self.repository.get_runtime_state()
             diagnostics = {
@@ -7543,6 +7576,62 @@ class ControlServer(HTTPServer):
                 + response.get("error", "")
             )
         return status, content_type, _json_bytes(response)
+
+    def _impact_status(self) -> Dict[str, Any]:
+        """Name what each applied queue did so far and list the protected devices."""
+
+        def unavailable(message: str) -> Dict[str, Any]:
+            return {
+                "available": False,
+                "message": message,
+                "sampled_at": int(time.time()),
+                "queues": [],
+                "protected": [],
+            }
+
+        if self.helper_client is None:
+            return unavailable(IMPACT_NO_HELPER_MESSAGE)
+        if self.repository.get_runtime_state().observed_state == "reset":
+            return unavailable(IMPACT_RESET_MESSAGE)
+        read_queues = getattr(self.helper_client, "queue_stats", None)
+        if read_queues is None:
+            return unavailable(IMPACT_OUT_OF_DATE_MESSAGE)
+        try:
+            queues = read_queues()
+        except HelperClientError as error:
+            # A helper from before this check answers that it does not know the action.
+            if str(error) == "unknown action":
+                return unavailable(IMPACT_OUT_OF_DATE_MESSAGE)
+            LOGGER.warning("could not read queue statistics for the impact check")
+            return unavailable(IMPACT_UNREADABLE_MESSAGE)
+        devices_by_id = {device.id: device for device in self.repository.list_devices()}
+        labels_by_mac = self.repository.list_connected_device_labels()
+        list_names = {item.id: item.name for item in self.repository.list_service_lists()}
+        protected = self.repository.list_unaffected_devices()
+        protected_hardware = {item.mac_address for item in protected}
+        entries = []
+        for queue in queues:
+            device = devices_by_id.get(queue["device_id"])
+            # A protected device has no queue. A stale plan must never put one on screen.
+            if device is not None and device.mac_address in protected_hardware:
+                continue
+            name, kind_label = _impact_queue_name(
+                queue["device_id"],
+                devices_by_id=devices_by_id,
+                labels_by_mac=labels_by_mac,
+                list_names=list_names,
+            )
+            entries.append({**queue, "name": name, "kind_label": kind_label})
+        return {
+            "available": True,
+            "message": None,
+            "sampled_at": int(time.time()),
+            "queues": entries,
+            "protected": sorted(
+                (item.display_name or item.mac_address for item in protected),
+                key=lambda name: (name.lower(), name),
+            ),
+        }
 
     def _general_profile_status(self) -> dict:
         operation = self.scheduler.control_operation() if self.scheduler else nullcontext()
