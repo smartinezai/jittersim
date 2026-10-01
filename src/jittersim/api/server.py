@@ -6415,6 +6415,11 @@ class ControlServer(HTTPServer):
                         if address in assignments_by_address
                         else None
                     ),
+                    "assigned_profile_id": (
+                        assignments_by_address[address].profile_id
+                        if address in assignments_by_address
+                        else None
+                    ),
                     "domains": _labelled_domain_payloads(rows, blocked_names),
                 }
                 for address, rows in sorted(grouped.items())

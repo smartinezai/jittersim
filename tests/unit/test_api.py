@@ -1675,6 +1675,26 @@ class ControlServerTests(unittest.TestCase):
             json.loads(body)["policies"]["websites"]["blocked_domains"], ["example.org"]
         )
 
+    def test_remove_global_block_keeps_the_mode_and_the_allowed_list(self) -> None:
+        from jittersim.config.models import WebsitePolicy
+
+        self.repository.save_website_policy(
+            WebsitePolicy(
+                mode="allow_only",
+                allowed_domains=("ok.example",),
+                blocked_domains=("x.example", "y.example"),
+            )
+        )
+
+        self.server.write_response_for(
+            "/api/observations/remove-global-block", {"domain": "x.example"}
+        )
+
+        policy = self.repository.get_website_policy()
+        self.assertEqual(policy.mode, "allow_only")
+        self.assertEqual(policy.allowed_domains, ("ok.example",))
+        self.assertEqual(policy.blocked_domains, ("y.example",))
+
     def test_remove_global_block_leaves_a_subdomain_entry_alone(self) -> None:
         from dataclasses import replace
 
@@ -2052,6 +2072,23 @@ class ControlServerTests(unittest.TestCase):
         _, _, body = self.server.response_for("/api/observations")
 
         self.assertFalse(json.loads(body)["devices"][0]["domains"][0]["globally_blocked"])
+
+    def test_observations_name_the_profile_assigned_to_each_device(self) -> None:
+        self.repository.save_domain_observations(
+            [
+                DomainObservation("192.168.50.10", "facebook.com", 1, 100, 100),
+                DomainObservation("192.168.50.124", "facebook.com", 1, 100, 100),
+            ],
+            now=100,
+        )
+
+        _, _, body = self.server.response_for("/api/observations")
+        devices = {item["ipv4_address"]: item for item in json.loads(body)["devices"]}
+
+        self.assertEqual(devices["192.168.50.10"]["assigned_device_id"], "alice")
+        self.assertEqual(devices["192.168.50.10"]["assigned_profile_id"], "slow")
+        self.assertIsNone(devices["192.168.50.124"]["assigned_device_id"])
+        self.assertIsNone(devices["192.168.50.124"]["assigned_profile_id"])
 
     def test_the_scan_response_keeps_its_original_fields(self) -> None:
         self.server.helper_client = FakeHelper()
