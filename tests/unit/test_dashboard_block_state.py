@@ -11,7 +11,10 @@ from jittersim.api.server import DASHBOARD_HTML
 
 SCRIPT = re.search(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL).group(1)
 NODE = pytest.mark.skipif(shutil.which("node") is None, reason="node is required")
-ENFORCE = "Apply the configuration to enforce it."
+WHEN_IT_APPLIES = (
+    "It applies on its own while JitterSim is running. "
+    "After Reset or Panic choose Apply current configuration."
+)
 
 
 def served_functions():
@@ -39,13 +42,13 @@ BLOCK_ADD = {
     "label": "Block globally",
     "path": "/api/observations/add-global-block",
     "busy": "Adding facebook.com to the global block list...",
-    "done": "Added facebook.com to the global block list. " + ENFORCE,
+    "done": "Added facebook.com to the global block list. " + WHEN_IT_APPLIES,
 }
 BLOCK_REMOVE = {
     "label": "Unblock",
     "path": "/api/observations/remove-global-block",
     "busy": "Removing facebook.com from the global block list...",
-    "done": "Removed facebook.com from the global block list. " + ENFORCE,
+    "done": "Removed facebook.com from the global block list. " + WHEN_IT_APPLIES,
 }
 
 CASES = {
@@ -147,7 +150,7 @@ def test_blocking_sends_the_add_request_and_remembers_the_new_state():
     assert result["calls"] == [
         ["message", "Adding facebook.com to the global block list...", "working"],
         ["request", "/api/observations/add-global-block", "POST", {"domain": "facebook.com"}],
-        ["success", "Added facebook.com to the global block list. " + ENFORCE],
+        ["success", "Added facebook.com to the global block list. " + WHEN_IT_APPLIES],
     ]
     assert result["blocked"] is True
     assert result["busy"] is False
@@ -160,7 +163,7 @@ def test_unblocking_sends_the_remove_request_and_remembers_the_new_state():
     assert result["calls"] == [
         ["message", "Removing facebook.com from the global block list...", "working"],
         ["request", "/api/observations/remove-global-block", "POST", {"domain": "facebook.com"}],
-        ["success", "Removed facebook.com from the global block list. " + ENFORCE],
+        ["success", "Removed facebook.com from the global block list. " + WHEN_IT_APPLIES],
     ]
     assert result["blocked"] is False
     assert result["busy"] is False
@@ -178,10 +181,10 @@ def test_a_failed_change_keeps_the_state_and_shows_the_error(blocked):
     assert result["changes"] == 1
 
 
-def test_the_success_text_matches_the_save_access_rules_button():
-    # Both only save the list. Enforcing it waits for Apply.
-    assert "Access rules saved. Apply the configuration to enforce them." in SCRIPT
-    assert ENFORCE in served_functions()
+def test_the_success_text_says_when_the_change_applies():
+    # While the scheduler runs it applies a saved change on its next tick. After Reset or
+    # Panic it is paused and a saved change waits for the Apply button.
+    assert "to enforce it" not in served_functions()
 
 
 def test_each_row_shows_the_badge_and_both_buttons_from_the_state_helpers():

@@ -3209,19 +3209,21 @@ DASHBOARD_HTML = """<!doctype html>
 
     function blockButtonState(observation) {
       const domain = observation.domain;
+      const whenItApplies = "It applies on its own while JitterSim is running. " +
+        "After Reset or Panic choose Apply current configuration.";
       if (observation.globally_blocked === true) {
         return {
           label: "Unblock",
           path: "/api/observations/remove-global-block",
           busy: "Removing " + domain + " from the global block list...",
-          done: "Removed " + domain + " from the global block list. Apply the configuration to enforce it."
+          done: "Removed " + domain + " from the global block list. " + whenItApplies
         };
       }
       return {
         label: "Block globally",
         path: "/api/observations/add-global-block",
         busy: "Adding " + domain + " to the global block list...",
-        done: "Added " + domain + " to the global block list. Apply the configuration to enforce it."
+        done: "Added " + domain + " to the global block list. " + whenItApplies
       };
     }
 

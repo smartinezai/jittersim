@@ -10,7 +10,9 @@ import time
 import unittest
 from email.message import Message
 from io import BytesIO
+from ipaddress import IPv4Address
 from pathlib import Path
+from unittest.mock import patch
 
 from jittersim.api.server import DASHBOARD_HTML, ControlRequestHandler, ControlServer
 from jittersim.config.exemptions import UnaffectedDevice
@@ -23,6 +25,7 @@ from jittersim.config.models import (
     RandomWebsiteOutcome,
 )
 from jittersim.config.storage import ConfigRepository
+from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.networking.helper import HelperClientError
 
 
@@ -124,6 +127,18 @@ class FakeHelper:
                 "services": {},
             },
         }
+
+
+class PlanRecordingHelper(FakeHelper):
+    """Keep every plan that was applied rather than only the last one."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.plans = []
+
+    def apply(self, *, plan):
+        self.plans.append(plan)
+        return super().apply(plan=plan)
 
 
 class ControlServerTests(unittest.TestCase):
@@ -1702,9 +1717,73 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertIn("/api/observations/remove-global-block", WRITE_PATHS)
 
-    def test_changing_the_global_block_list_only_saves_it(self) -> None:
-        # The dashboard words its success message from this. Enforcement waits for Apply.
-        helper = FakeHelper()
+    def _scheduled_server(self):
+        helper = PlanRecordingHelper()
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=helper)
+        self.server.helper_client = helper
+        self.server.scheduler = scheduler
+        return helper, scheduler
+
+    def test_a_block_list_change_before_the_first_apply_is_not_applied_by_the_scheduler(
+        self,
+    ) -> None:
+        # The success message tells the user to apply after Reset or Panic. The scheduler is
+        # paused then and a saved change waits for the Apply button.
+        helper, scheduler = self._scheduled_server()
+
+        self.server.write_response_for(
+            "/api/observations/add-global-block", {"domain": "ads.example.com"}
+        )
+
+        self.assertFalse(scheduler.tick(repository=self.repository))
+        self.assertEqual(helper.plans, [])
+
+    def test_a_block_list_change_after_a_reset_is_not_applied_by_the_scheduler(self) -> None:
+        helper, scheduler = self._scheduled_server()
+        self.server.write_response_for("/api/apply", {})
+        self.server.write_response_for("/api/reset", {})
+        applied = len(helper.plans)
+
+        self.server.write_response_for(
+            "/api/observations/add-global-block", {"domain": "ads.example.com"}
+        )
+
+        self.assertFalse(scheduler.tick(repository=self.repository))
+        self.assertEqual(len(helper.plans), applied)
+
+    def test_an_active_scheduler_applies_a_removed_block_on_its_next_tick(self) -> None:
+        # The success message says a change applies on its own while JitterSim is running.
+        helper, scheduler = self._scheduled_server()
+        blocked = IPv4Address("203.0.113.9")
+        kept = IPv4Address("203.0.113.10")
+        lookups = {"ads.example.com": (blocked,), "other.example.com": (kept,)}
+        for domain in lookups:
+            self.server.write_response_for(
+                "/api/observations/add-global-block", {"domain": domain}
+            )
+
+        with patch(
+            "jittersim.engine.website._cached_addresses",
+            side_effect=lambda *, domain: lookups.get(domain, ()),
+        ):
+            status, _, _ = self.server.write_response_for("/api/apply", {})
+            self.assertEqual(status, 200)
+            applied = len(helper.plans)
+            self.assertCountEqual(helper.plans[-1].global_blocked_addresses, (blocked, kept))
+
+            self.server.write_response_for(
+                "/api/observations/remove-global-block", {"domain": "ads.example.com"}
+            )
+            # The endpoint only saves. It never calls the helper itself.
+            self.assertEqual(len(helper.plans), applied)
+
+            self.assertTrue(scheduler.tick(repository=self.repository))
+
+        self.assertEqual(len(helper.plans), applied + 1)
+        self.assertEqual(helper.plans[-1].global_blocked_addresses, (kept,))
+
+    def test_the_global_block_endpoints_never_call_the_helper(self) -> None:
+        helper = PlanRecordingHelper()
         self.server.helper_client = helper
 
         self.server.write_response_for(
@@ -1714,7 +1793,7 @@ class ControlServerTests(unittest.TestCase):
             "/api/observations/remove-global-block", {"domain": "ads.example.com"}
         )
 
-        self.assertIsNone(helper.applied_plan)
+        self.assertEqual(helper.plans, [])
 
     def test_rejects_invalid_profile_writes_before_persistence(self) -> None:
         status, content_type, body = self.server.write_response_for(
