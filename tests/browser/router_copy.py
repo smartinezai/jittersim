@@ -206,7 +206,24 @@ def run_width(browser, base, width, height):
     expect(page.locator("#copy-wifi-name")).to_have_attribute(
         "title", "Copy the router Wi-Fi name"
     )
-    page.locator(".router-wifi-control").screenshot(path=f"test-results/router-copy-{width}.png")
+    control = page.locator(".router-wifi-control").bounding_box()
+    copy = page.locator(".router-wifi-copy").bounding_box()
+    toggle = page.locator("#router-wifi-toggle").bounding_box()
+    # The copy buttons sit in their own row under the switch row and leave the switch where it was.
+    assert copy["y"] >= control["y"] + control["height"]
+    assert abs(copy["x"] - control["x"]) <= 1 and abs(copy["width"] - control["width"]) <= 1
+    assert toggle["x"] + toggle["width"] <= control["x"] + control["width"]
+    assert toggle["x"] > control["x"] + control["width"] / 2
+    assert toggle["y"] >= control["y"] and toggle["y"] + toggle["height"] <= control["y"] + control["height"]
+    page.screenshot(
+        path=f"test-results/router-copy-{width}.png",
+        clip={
+            "x": control["x"] - 4,
+            "y": control["y"] - 4,
+            "width": control["width"] + 8,
+            "height": copy["y"] + copy["height"] - control["y"] + 8,
+        },
+    )
 
     # The name: the password is not even asked for.
     page.locator("#copy-wifi-name").click()
