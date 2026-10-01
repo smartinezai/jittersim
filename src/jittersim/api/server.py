@@ -379,6 +379,8 @@ DASHBOARD_HTML = """<!doctype html>
     }
     .saved-device-labels h3 { margin-top: 0; }
     .saved-device-label-row { grid-template-columns: minmax(0, 1fr) auto auto; }
+    .impact-card { position: relative; }
+    .impact-status { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
     .impact-note { margin: 0 0 0.75rem; color: #a8b8ce; font-size: 0.82rem; }
     .impact-list { display: grid; gap: 0.6rem; color: #c4d5e8; font-size: 0.9rem; }
     .impact-row { padding: 0.75rem; border: 1px solid #2b435f; border-radius: 0.6rem; background: #0d1b2d; }
@@ -1750,9 +1752,10 @@ DASHBOARD_HTML = """<!doctype html>
         <div><h2 id="impact-title">Impact</h2><p>What the queues did in the last minute</p></div>
         <span id="impact-state" class="count-badge">Check token</span>
       </div>
-      <p id="impact-note" class="impact-note">Counts come from the Pi's queues. Delay and jitter are shown as configured because queue counters cannot measure them.</p>
-      <div id="impact-list" class="impact-list" aria-live="polite">Check the admin token to see the impact.</div>
+      <p id="impact-note" class="impact-note">Counts come from the Pi's queues. Delay, jitter, reorder, duplicate and corrupt are shown as configured because queue counters cannot measure them.</p>
+      <div id="impact-list" class="impact-list">Check the admin token to see the impact.</div>
       <p id="impact-protected" class="impact-protected" hidden></p>
+      <p id="impact-status" class="impact-status" role="status"></p>
     </section>
     <section class="card" data-collapse="closed">
       <div class="section-heading"><h2>Profiles</h2><p>Saved network behavior</p></div>
@@ -2939,6 +2942,7 @@ DASHBOARD_HTML = """<!doctype html>
     // end of the impact functions
 
     const IMPACT_POLL_INTERVAL_MS = 5000;
+    const IMPACT_UNREADABLE = "Impact could not be read right now.";
     const IMPACT_VERDICT_LABELS = {
       affected: "Affected in the last minute",
       idle: "No traffic in the last minute",
@@ -2951,16 +2955,34 @@ DASHBOARD_HTML = """<!doctype html>
     let impactPollTimer = null;
     let impactRequestInFlight = false;
     let impactGeneration = 0;
+    let impactLastGoodAt = null;
+    let impactRowParts = new Map();
+    let impactVerdicts = {};
+    let impactShowsRows = false;
 
     function impactVisible() {
       return document.body.dataset.section === "diagnostics" && !document.hidden;
     }
 
+    function setImpactText(node, text) {
+      if (node.textContent !== text) node.textContent = text;
+    }
+
+    // Screen readers hear one short line when something changes and nothing otherwise.
+    function announceImpact(text) {
+      element("impact-status").textContent = text;
+    }
+
     function showImpactMessage(message, state) {
-      element("impact-list").textContent = message;
-      element("impact-state").textContent = state;
+      const list = element("impact-list");
+      if (impactShowsRows || list.textContent !== message) list.textContent = message;
+      impactShowsRows = false;
+      impactRowParts = new Map();
+      impactVerdicts = {};
+      setImpactText(element("impact-state"), state);
       element("impact-note").hidden = true;
       element("impact-protected").hidden = true;
+      if (element("impact-status").textContent !== message) announceImpact(message);
     }
 
     function stopImpact(message, state) {
@@ -2970,52 +2992,112 @@ DASHBOARD_HTML = """<!doctype html>
       }
       impactGeneration += 1;
       impactHistory = {};
+      impactLastGoodAt = null;
       showImpactMessage(message, state);
     }
 
-    function impactRowElement(row) {
+    function createImpactRowParts() {
       const item = document.createElement("div");
       item.className = "impact-row";
       const head = document.createElement("div");
       head.className = "impact-head";
       const name = document.createElement("span");
       name.className = "impact-name";
-      name.textContent = row.name;
       const direction = document.createElement("span");
       direction.className = "impact-direction";
-      direction.textContent = row.direction === "upload" ? "Upload" : "Download";
       const chip = document.createElement("span");
-      chip.className = "impact-chip " + row.verdict;
-      chip.textContent = IMPACT_VERDICT_LABELS[row.verdict];
       head.append(name, direction, chip);
-      item.appendChild(head);
-      if (row.verdict !== "collecting") {
-        const lines = document.createElement("ul");
-        lines.className = "impact-lines";
-        row.lines.forEach((text) => {
-          const line = document.createElement("li");
-          line.textContent = text;
-          lines.appendChild(line);
-        });
-        item.appendChild(lines);
+      const lines = document.createElement("ul");
+      lines.className = "impact-lines";
+      item.append(head, lines);
+      return {item: item, name: name, direction: direction, chip: chip, lines: lines};
+    }
+
+    function updateImpactRow(parts, row) {
+      setImpactText(parts.name, row.name);
+      setImpactText(parts.direction, row.direction === "upload" ? "Upload" : "Download");
+      const chipClass = "impact-chip " + row.verdict;
+      if (parts.chip.className !== chipClass) parts.chip.className = chipClass;
+      setImpactText(parts.chip, IMPACT_VERDICT_LABELS[row.verdict]);
+      const lines = row.verdict === "collecting" ? [] : row.lines;
+      lines.forEach((text, index) => {
+        if (!parts.lines.children[index]) parts.lines.appendChild(document.createElement("li"));
+        setImpactText(parts.lines.children[index], text);
+      });
+      while (parts.lines.children.length > lines.length) {
+        parts.lines.children[parts.lines.children.length - 1].remove();
       }
-      return item;
+      parts.lines.hidden = lines.length === 0;
+    }
+
+    function impactAnnouncements(rows) {
+      const spoken = [];
+      rows.forEach((row) => {
+        const before = impactVerdicts[row.key];
+        if (before !== undefined && before !== row.verdict && row.verdict !== "collecting") {
+          spoken.push(row.name + " " + row.direction + ": " + IMPACT_VERDICT_LABELS[row.verdict]);
+        }
+      });
+      impactVerdicts = {};
+      rows.forEach((row) => { impactVerdicts[row.key] = row.verdict; });
+      return spoken;
+    }
+
+    function renderImpactRows(rows) {
+      const list = element("impact-list");
+      if (!impactShowsRows) {
+        list.textContent = "";
+        impactShowsRows = true;
+      }
+      const wanted = new Set(rows.map((row) => row.key));
+      impactRowParts.forEach((parts, key) => {
+        if (!wanted.has(key)) {
+          parts.item.remove();
+          impactRowParts.delete(key);
+        }
+      });
+      rows.forEach((row, index) => {
+        let parts = impactRowParts.get(row.key);
+        if (!parts) {
+          parts = createImpactRowParts();
+          impactRowParts.set(row.key, parts);
+        }
+        updateImpactRow(parts, row);
+        if (list.children[index] !== parts.item) {
+          list.insertBefore(parts.item, list.children[index] || null);
+        }
+      });
     }
 
     function renderImpact(protectedNames) {
       const rows = impactRows(impactHistory);
-      const list = element("impact-list");
       if (rows.length) {
-        list.replaceChildren(...rows.map(impactRowElement));
+        renderImpactRows(rows);
+        const spoken = impactAnnouncements(rows);
+        if (spoken.length) announceImpact(spoken.join(". "));
       } else {
-        list.textContent = "Nothing is slowed down right now. Apply a profile to a device to see its impact here.";
+        showImpactMessage(
+          "Nothing is slowed down right now. Apply a profile to a device to see its impact here.",
+          "Live");
       }
-      element("impact-state").textContent = "Live";
+      setImpactText(element("impact-state"), "Live");
       element("impact-note").hidden = false;
       const protectedLine = element("impact-protected");
       protectedLine.hidden = protectedNames.length === 0;
-      protectedLine.textContent = protectedNames.length
-        ? "Protected (not affected): " + protectedNames.join(", ") : "";
+      setImpactText(protectedLine, protectedNames.length
+        ? "Protected (not affected): " + protectedNames.join(", ") : "");
+    }
+
+    // A late answer keeps the rows for up to a minute and then they are too old to show.
+    function pauseImpact(message) {
+      const age = impactLastGoodAt === null ? Infinity : (Date.now() - impactLastGoodAt) / 1000;
+      if (age > IMPACT_WINDOW_SECONDS) {
+        impactHistory = {};
+        impactLastGoodAt = null;
+        showImpactMessage(message, "Update paused");
+        return;
+      }
+      setImpactText(element("impact-state"), "Update paused");
     }
 
     async function loadImpact() {
@@ -3025,19 +3107,25 @@ DASHBOARD_HTML = """<!doctype html>
       try {
         const data = await request("/api/impact", "GET");
         if (generation !== impactGeneration) return;
+        if (data.paused) {
+          pauseImpact(data.message || IMPACT_UNREADABLE);
+          return;
+        }
         if (!data.available) {
           impactHistory = {};
+          impactLastGoodAt = null;
           showImpactMessage(data.message || "Impact is not available.", "Unavailable");
           return;
         }
         impactHistory = recordImpactSample(impactHistory, data, data.sampled_at);
+        impactLastGoodAt = Date.now();
         renderImpact(Array.isArray(data.protected) ? data.protected : []);
       } catch (error) {
         if (generation !== impactGeneration) return;
         if (error.status === 401) {
           stopImpact("Check the admin token to see the impact.", "Check token");
         } else {
-          element("impact-state").textContent = "Update failed";
+          pauseImpact(IMPACT_UNREADABLE);
         }
       } finally {
         impactRequestInFlight = false;
