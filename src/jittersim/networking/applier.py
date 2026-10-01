@@ -7,7 +7,7 @@ from ipaddress import IPv4Address
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence
 
-from jittersim.config.exemptions import normalize_exempt_mac
+from jittersim.config.exemptions import MAX_UNAFFECTED_DEVICES, normalize_exempt_mac
 from jittersim.config.models import ValidationError
 from jittersim.engine.plan import NetworkPlan
 
@@ -25,7 +25,8 @@ from .topology import Topology
 from .wifi import WifiController
 
 
-MAX_PROTECTED_MACS = 64
+# Every protected device must be skippable so the two limits are one number.
+MAX_PROTECTED_MACS = MAX_UNAFFECTED_DEVICES
 
 
 @dataclass(frozen=True)
@@ -325,6 +326,9 @@ class NetworkApplier:
             raise ValueError("too many excluded devices")
         expression = ["udp", "port", "53", "or", "tcp", "port", "53"]
         if macs:
+            # libpcap reads and/or from left to right with equal precedence so the group
+            # changes nothing today. It keeps the meaning clear and stops a later edit
+            # from attaching the exclusions to one protocol only.
             expression = ["("] + expression + [")"]
             for mac in macs:
                 expression += ["and", "not", "ether", "host", mac]

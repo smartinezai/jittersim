@@ -58,7 +58,12 @@ from jittersim.config.models import (
     normalize_domain,
     time_quota_counter_id,
 )
-from jittersim.config.protection import protected_addresses, protected_macs
+from jittersim.config.protection import (
+    observation_is_protected,
+    protected_addresses,
+    protected_macs,
+    station_macs_by_address,
+)
 from jittersim.config.service_catalogue import SERVICE_CATALOGUE
 from jittersim.config.storage import (
     ConfigRepository,
@@ -3229,6 +3234,7 @@ DASHBOARD_HTML = """<!doctype html>
       if (observation.globally_blocked === true) {
         return {
           label: "Unblock",
+          ariaLabel: "Unblock " + domain,
           path: "/api/observations/remove-global-block",
           busy: "Removing " + domain + " from the global block list...",
           done: "Removed " + domain + " from the global block list. " + ENFORCE_NOTE
@@ -3236,6 +3242,7 @@ DASHBOARD_HTML = """<!doctype html>
       }
       return {
         label: "Block globally",
+        ariaLabel: "Block globally " + domain,
         path: "/api/observations/add-global-block",
         busy: "Adding " + domain + " to the global block list...",
         done: "Added " + domain + " to the global block list. " + ENFORCE_NOTE
@@ -3243,15 +3250,20 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     function profileButtonState(domain, profile) {
-      if (!profile) return { label: "Add to profile", disabled: true };
-      if ((profile.website_domains || []).indexOf(domain) !== -1) {
-        return { label: "Already in " + profile.name, disabled: true };
+      let label = "Add to profile";
+      let disabled = false;
+      if (!profile) {
+        disabled = true;
+      } else if ((profile.website_domains || []).indexOf(domain) !== -1) {
+        label = "Already in " + profile.name;
+        disabled = true;
       }
-      return { label: "Add to profile", disabled: false };
+      return { label: label, disabled: disabled, ariaLabel: label + " " + domain };
     }
 
-    // Saving the block list or a profile does not enforce it. Apply does.
-    const ENFORCE_NOTE = "Apply the configuration to enforce it.";
+    // What the dashboard says after a change to the block list. The scheduler applies it.
+    const ENFORCE_NOTE = "It applies on its own while JitterSim is running. " +
+      "After Reset or Panic choose Apply current configuration.";
 
     function queryCountText(count) {
       return count + (count === 1 ? " query" : " queries");
@@ -3367,6 +3379,22 @@ DASHBOARD_HTML = """<!doctype html>
       return ids.length > 0 ? ids[0] : "";
     }
 
+    function domainRowParts(observation) {
+      const label = observation.label || {};
+      const hint = domainHint(observation);
+      return {
+        labelName: label.name || "",
+        category: label.category || "",
+        kind: label.kind || "",
+        domain: observation.domain,
+        hintText: hint.text,
+        searchUrl: hint.searchable ? domainSearchUrl(observation.domain) : "",
+        searchLabel: hint.searchable
+          ? "Search the web for " + observation.domain + " (opens a new tab)"
+          : ""
+      };
+    }
+
     function renderObservations(data) {
       const container = element("observations");
       const count = element("observation-count");
@@ -3439,42 +3467,43 @@ DASHBOARD_HTML = """<!doctype html>
           item.className = "observation-domain";
           const domain = document.createElement("div");
           domain.className = "observation-domain-name";
-          if (observation.label) {
+          const parts = domainRowParts(observation);
+          if (parts.labelName) {
             const labelLine = document.createElement("div");
             labelLine.className = "observation-label";
             const labelName = document.createElement("strong");
-            labelName.textContent = observation.label.name;
+            labelName.textContent = parts.labelName;
             const category = document.createElement("span");
             category.className = "observation-category";
-            category.dataset.kind = observation.label.kind;
-            category.textContent = observation.label.category;
+            category.dataset.kind = parts.kind;
+            category.textContent = parts.category;
             labelLine.append(labelName, category);
             domain.appendChild(labelLine);
           }
           const host = document.createElement("div");
           host.className = "observation-domain-host";
           const hostName = document.createElement("span");
-          hostName.textContent = observation.domain;
+          hostName.textContent = parts.domain;
           const badge = document.createElement("span");
           badge.className = "observation-badge";
           badge.textContent = "Blocked";
           host.append(hostName, badge);
           domain.appendChild(host);
-          const hint = domainHint(observation);
           const hintLine = document.createElement("div");
           hintLine.className = "observation-hint-line";
-          if (hint.text) {
+          if (parts.hintText) {
             const hintText = document.createElement("span");
             hintText.className = "observation-hint";
-            hintText.textContent = hint.text;
+            hintText.textContent = parts.hintText;
             hintLine.appendChild(hintText);
           }
-          if (hint.searchable) {
+          if (parts.searchUrl) {
             const link = document.createElement("a");
             link.className = "observation-search-link";
-            link.href = domainSearchUrl(observation.domain);
+            link.href = parts.searchUrl;
             link.target = "_blank";
             link.rel = "noopener noreferrer";
+            link.setAttribute("aria-label", parts.searchLabel);
             link.textContent = "What is this?";
             hintLine.appendChild(link);
           }
@@ -3486,10 +3515,13 @@ DASHBOARD_HTML = """<!doctype html>
           profileButton.type = "button";
           profileButton.className = "observation-profile-button";
           const syncProfileButton = () => {
+            // A request in flight keeps the button disabled. Its finally block syncs again.
+            if (profileButton.getAttribute("aria-busy") === "true") return;
             const selectedProfile = profiles.find((profile) => profile.id === targetProfile.value);
             const state = profileButtonState(observation.domain, selectedProfile);
             profileButton.textContent = state.label;
             profileButton.title = state.label;
+            profileButton.setAttribute("aria-label", state.ariaLabel);
             profileButton.disabled = state.disabled;
           };
           profileSyncs.push(syncProfileButton);
@@ -3504,6 +3536,7 @@ DASHBOARD_HTML = """<!doctype html>
           blockButton.type = "button";
           const syncBlockButton = () => {
             blockButton.textContent = blockButtonState(observation).label;
+            blockButton.setAttribute("aria-label", blockButtonState(observation).ariaLabel);
             badge.hidden = observation.globally_blocked !== true;
           };
           syncBlockButton();
@@ -6680,10 +6713,11 @@ class ControlServer(HTTPServer):
             }
             station_devices = self._station_devices()
             blocked = protected_addresses(self.repository, station_devices)
+            protected = set(protected_macs(self.repository))
             grouped = {}
             for observation in observations:
                 address = str(observation.ipv4_address)
-                if address in blocked:
+                if observation_is_protected(observation, protected, blocked):
                     continue
                 grouped.setdefault(address, []).append(observation)
             stations = self._station_identities(station_devices)
@@ -6705,6 +6739,11 @@ class ControlServer(HTTPServer):
                     ),
                     "assigned_device_name": (
                         assignments_by_address[address].name
+                        if address in assignments_by_address
+                        else None
+                    ),
+                    "assigned_profile_id": (
+                        assignments_by_address[address].profile_id
                         if address in assignments_by_address
                         else None
                     ),
@@ -7645,9 +7684,9 @@ class ControlServer(HTTPServer):
             )
         try:
             raw_observations = self.helper_client.observe_dns_queries(macs)
-            blocked = protected_addresses(
-                self.repository, self._station_devices() if macs else ()
-            )
+            stations = self._station_devices()
+            blocked = protected_addresses(self.repository, stations)
+            macs_by_address = station_macs_by_address(stations)
             observed_at = int(time.time())
             observations = [
                 DomainObservation(
@@ -7656,9 +7695,14 @@ class ControlServer(HTTPServer):
                     query_count=observation["query_count"],
                     first_seen=observed_at,
                     last_seen=observed_at,
+                    mac_address=macs_by_address.get(str(observation["ipv4_address"])),
                 )
                 for observation in raw_observations
-                if str(observation["ipv4_address"]) not in blocked
+            ]
+            observations = [
+                observation
+                for observation in observations
+                if not observation_is_protected(observation, set(macs), blocked)
             ]
             self.repository.save_domain_observations(observations, now=observed_at)
         except (HelperClientError, KeyError, TypeError, ValueError, StorageError) as error:
@@ -7929,7 +7973,7 @@ class ControlServer(HTTPServer):
                         self.repository.delete_unaffected_device(item.mac_address)
                     else:
                         self.repository.save_unaffected_device(item)
-                        self.repository.delete_domain_observations(purge)
+                        self.repository.delete_domain_observations(purge, [item.mac_address])
                     self._validate_saved_plan()
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})

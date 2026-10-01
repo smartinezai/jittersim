@@ -11,7 +11,10 @@ from jittersim.api.server import DASHBOARD_HTML, MAX_BATCH_DOMAINS
 
 SCRIPT = re.search(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL).group(1)
 NODE = pytest.mark.skipif(shutil.which("node") is None, reason="node is required")
-ENFORCE = "Apply the configuration to enforce it."
+ENFORCE = (
+    "It applies on its own while JitterSim is running. "
+    "After Reset or Panic choose Apply current configuration."
+)
 ADD_BLOCK = "/api/observations/add-global-block"
 REMOVE_BLOCK = "/api/observations/remove-global-block"
 
@@ -396,6 +399,7 @@ class FakeElement {
   replaceChildren() { this.children = []; }
   addEventListener(type, handler) { (this.listeners[type] = this.listeners[type] || []).push(handler); }
   setAttribute(name, value) { this.attrs[name] = value; }
+  getAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attrs, name) ? this.attrs[name] : null; }
   removeAttribute(name) { delete this.attrs[name]; }
   get childNodes() { return this.children; }
 }

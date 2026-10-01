@@ -7,6 +7,7 @@ registrable domain.
 """
 
 from dataclasses import dataclass
+from ipaddress import IPv4Address
 from typing import Dict, Iterable, List, Tuple
 
 from .models import normalize_domain
@@ -27,7 +28,11 @@ _FALLBACK_CATALOGUE_CATEGORY = "Online service"
 _SECOND_LEVEL = frozenset({
     "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.nz", "co.jp",
     "co.in", "com.br", "com.mx", "co.za", "com.tr", "com.cn", "com.hk", "com.sg",
+    "co.kr", "or.kr", "com.ar", "com.tw", "com.pl", "ne.jp", "or.jp", "co.id", "co.il",
+    "com.my", "com.ph", "com.vn", "com.ua", "org.nz", "net.nz", "co.th",
 })
+# Reverse lookup names are shown whole because their labels are the address digits.
+_REVERSE_SUFFIXES = ("in-addr.arpa", "ip6.arpa")
 
 _CATALOGUE_CATEGORY = {
     "linkedin": "Social network", "microsoft_teams": "Meetings", "chatgpt": "AI assistant",
@@ -80,10 +85,10 @@ _EXTRA: Tuple[Tuple[str, str, str, str], ...] = (
     ("ttvnw.net", "Twitch", "app", "Live streaming"),
     ("jtvnw.net", "Twitch", "app", "Live streaming"),
     # Shopping and travel and money
-    ("amazon.com", "Amazon", "app", "Shopping"),
-    ("amazon.de", "Amazon", "app", "Shopping"),
-    ("media-amazon.com", "Amazon", "app", "Shopping"),
-    ("ssl-images-amazon.com", "Amazon", "app", "Shopping"),
+    ("amazon.com", "Amazon", "app", "Amazon services"),
+    ("amazon.de", "Amazon", "app", "Amazon services"),
+    ("media-amazon.com", "Amazon", "app", "Amazon services"),
+    ("ssl-images-amazon.com", "Amazon", "app", "Amazon services"),
     ("amazonaws.com", "Amazon Web Services", "cdn", "Cloud hosting"),
     ("ebay.com", "eBay", "app", "Shopping"),
     ("ebay.de", "eBay", "app", "Shopping"),
@@ -105,6 +110,15 @@ _EXTRA: Tuple[Tuple[str, str, str, str], ...] = (
     ("dropboxusercontent.com", "Dropbox", "app", "File storage"),
     # Google
     ("google.com", "Google", "system", "Google services"),
+    ("google.de", "Google", "system", "Google services"),
+    ("google.co.uk", "Google", "system", "Google services"),
+    ("google.fr", "Google", "system", "Google services"),
+    ("google.at", "Google", "system", "Google services"),
+    ("google.ch", "Google", "system", "Google services"),
+    ("google.nl", "Google", "system", "Google services"),
+    ("google.es", "Google", "system", "Google services"),
+    ("google.it", "Google", "system", "Google services"),
+    ("google.pl", "Google", "system", "Google services"),
     ("gstatic.com", "Google", "system", "Google services"),
     ("googleapis.com", "Google", "system", "Google services"),
     ("googleusercontent.com", "Google", "system", "Google services"),
@@ -114,6 +128,8 @@ _EXTRA: Tuple[Tuple[str, str, str, str], ...] = (
     ("gmail.com", "Gmail", "app", "Email"),
     ("mail.google.com", "Gmail", "app", "Email"),
     ("youtubei.googleapis.com", "YouTube", "app", "Streaming"),
+    ("storage.googleapis.com", "Google Cloud Storage", "cdn", "Cloud hosting"),
+    ("bc.googleusercontent.com", "Google Cloud", "cdn", "Cloud hosting"),
     ("google-analytics.com", "Google Analytics", "tracker", "Web analytics"),
     ("googletagmanager.com", "Google Tag Manager", "tracker", "Tag manager"),
     ("doubleclick.net", "Google Ads", "tracker", "Advertising"),
@@ -145,6 +161,9 @@ _EXTRA: Tuple[Tuple[str, str, str, str], ...] = (
     ("mozilla.net", "Mozilla", "system", "Firefox services"),
     ("firefox.com", "Mozilla", "system", "Firefox services"),
     ("ntp.org", "NTP", "system", "Time sync"),
+    # Reverse lookups
+    ("in-addr.arpa", "Reverse DNS", "system", "Reverse lookup"),
+    ("ip6.arpa", "Reverse DNS", "system", "Reverse lookup"),
     # Shared CDNs and cloud hosting
     ("akamai.net", "Akamai", "cdn", "Shared CDN"),
     ("akamai.com", "Akamai", "cdn", "Shared CDN"),
@@ -166,6 +185,17 @@ _EXTRA: Tuple[Tuple[str, str, str, str], ...] = (
     ("trafficmanager.net", "Microsoft Azure", "cdn", "Cloud hosting"),
     ("edgecastcdn.net", "Edgecast", "cdn", "Shared CDN"),
     ("jsdelivr.net", "jsDelivr", "cdn", "Shared CDN"),
+    # Tag endpoints under an app. The longer suffix wins so the app itself stays an app.
+    ("px.ads.linkedin.com", "LinkedIn Insight", "tracker", "Advertising"),
+    ("snap.licdn.com", "LinkedIn Insight", "tracker", "Advertising"),
+    ("analytics.tiktok.com", "TikTok Pixel", "tracker", "Advertising"),
+    ("analytics.twitter.com", "X Ads", "tracker", "Advertising"),
+    ("pixel.facebook.com", "Meta Pixel", "tracker", "Advertising"),
+    ("ct.pinterest.com", "Pinterest Tag", "tracker", "Advertising"),
+    ("ads.pinterest.com", "Pinterest Tag", "tracker", "Advertising"),
+    ("bat.bing.com", "Microsoft Advertising", "tracker", "Advertising"),
+    ("adservice.google.com", "Google Ads", "tracker", "Advertising"),
+    ("ads.google.com", "Google Ads", "tracker", "Advertising"),
     # Trackers and ads and measurement
     ("adnxs.com", "Xandr", "tracker", "Advertising"),
     ("criteo.com", "Criteo", "tracker", "Advertising"),
@@ -211,7 +241,6 @@ _EXTRA: Tuple[Tuple[str, str, str, str], ...] = (
     ("meethue.com", "Philips Hue", "iot", "Smart lighting"),
     ("sonos.com", "Sonos", "iot", "Smart speaker"),
     ("amazonalexa.com", "Amazon Alexa", "iot", "Voice assistant"),
-    ("alexa.com", "Amazon Alexa", "iot", "Voice assistant"),
     ("ring.com", "Ring", "iot", "Video doorbell"),
     ("nest.com", "Google Nest", "iot", "Smart home"),
     ("tplinkcloud.com", "TP-Link", "iot", "Smart home"),
@@ -298,10 +327,28 @@ class DomainLabel:
         }
 
 
-def registrable_domain(domain: str) -> str:
-    """Return the last two labels or the last three under a known second-level suffix."""
+def _is_ipv4_address(name: str) -> bool:
+    try:
+        IPv4Address(name)
+    except ValueError:
+        return False
+    return True
 
-    labels = normalize_domain(domain).split(".")
+
+def _is_reverse_name(name: str) -> bool:
+    return any(name == suffix or name.endswith("." + suffix) for suffix in _REVERSE_SUFFIXES)
+
+
+def registrable_domain(domain: str) -> str:
+    """Return the last two labels or the last three under a known second-level suffix.
+
+    A bare IPv4 address and a reverse lookup name are returned whole.
+    """
+
+    normalized = normalize_domain(domain)
+    if _is_ipv4_address(normalized) or _is_reverse_name(normalized):
+        return normalized
+    labels = normalized.split(".")
     if len(labels) <= 2:
         return ".".join(labels)
     if ".".join(labels[-2:]) in _SECOND_LEVEL:
@@ -336,7 +383,8 @@ def seen_with(observations: Iterable[Tuple[str, int]]) -> Dict[str, List[str]]:
 
     Each pair is a name and the time it was first seen. Only names labelled cdn or tracker or
     unknown get a hint. The hint lists the apps whose own names were first seen within the window
-    of this name. It is dropped when more than two apps qualify because the guess is too vague.
+    of this name. An app with the same name as this label never counts. The hint is dropped when
+    more than two apps qualify because the guess is too vague.
     """
 
     labelled = [(domain, first_seen, label_domain(domain)) for domain, first_seen in observations]
@@ -350,10 +398,12 @@ def seen_with(observations: Iterable[Tuple[str, int]]) -> Dict[str, List[str]]:
             continue
         near = []
         for name, times in app_times.items():
+            if name == label.name:
+                continue
             distance = min(abs(time - first_seen) for time in times)
             if distance <= SEEN_WITH_WINDOW_SECONDS:
                 near.append((distance, name))
-        near.sort()
+        near.sort(key=lambda item: (item[0], item[1].lower(), item[1]))
         if near and len(near) <= _SEEN_WITH_MAX_APPS:
             hints[domain] = [name for _, name in near]
     return hints
