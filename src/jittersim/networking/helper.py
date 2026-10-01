@@ -12,6 +12,7 @@ import socketserver
 import stat
 import threading
 import time
+from dataclasses import asdict
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
@@ -24,6 +25,7 @@ from jittersim.engine.plan import NetworkPlan
 from .applier import MAX_PROTECTED_MACS, ApplyError, NetworkApplier
 from .dashboard_access import ACCESS_FILE, AccessError, AccessStore, identify_peer
 from .executor import CommandExecutionError, SubprocessExecutor
+from .renderer import ROOT_HANDLE
 from .router import (
     ROUTER_CHECK_MESSAGES,
     ROUTER_IMPORT_MESSAGES,
@@ -50,6 +52,21 @@ MAX_LOG_DETAIL_CHARS = 512
 MAX_CONNECTED_CLIENTS = 256
 MAX_SERVICE_ADDRESS_LISTS = 15
 MAX_SERVICE_ADDRESSES_PER_LIST = 1024
+MAX_QUEUE_STATS_ENTRIES = 600
+QUEUE_STATS_INVALID_MESSAGE = "helper returned invalid queue statistics"
+QUEUE_STATS_COUNTERS = (
+    "packets", "bytes", "drops", "overlimits", "requeues", "backlog_bytes", "qlen"
+)
+_QUEUE_DEVICE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_:-]{0,127}$")
+_QUEUE_HANDLE_PATTERN = re.compile(r"^[0-9]{1,5}:$")
+_QUEUE_IMPAIRMENT_LIMITS = {
+    "delay_ms": 60_000,
+    "jitter_ms": 60_000,
+    "loss_percent": 100,
+    "reorder_percent": 100,
+    "duplicate_percent": 100,
+    "corrupt_percent": 100,
+}
 _SERVICE_LIST_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _MAC_ADDRESS_PATTERN = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 _STATION_HEADER_PATTERN = re.compile(
@@ -172,6 +189,8 @@ class HelperService:
             return self._handle_dns_observation(payload)
         if action == "traffic-counters":
             return self._handle_traffic_counters()
+        if action == "queue-stats":
+            return self._handle_queue_stats()
         if action in WIFI_ACTIONS:
             if not self._wifi_lock.acquire(blocking=False):
                 return {"ok": False, "error": "Another Pi Wi-Fi change is running. Try again later.",
@@ -323,6 +342,57 @@ class HelperService:
             LOGGER.exception("traffic counter inspection failed")
             return {"ok": False, "error": "traffic counter inspection failed"}
         return {"ok": True, "action": "traffic-counters", "counters": counters}
+
+    def _handle_queue_stats(self) -> Dict[str, Any]:
+        """Report what each applied queue did so far without changing or locking anything."""
+
+        plan = self._active_plan or self._published_plan()
+        if plan is None:
+            return {"ok": True, "action": "queue-stats", "queues": []}
+        try:
+            stats = self._applier.queue_stats()
+        except CommandExecutionError:
+            LOGGER.warning("queue statistics unavailable", exc_info=True)
+            return {"ok": False, "error": "queue statistics unavailable"}
+        interfaces = {
+            "upload": self._applier.uplink_interface,
+            "download": self._applier.test_interface,
+        }
+        entries = []
+        for queue in plan.queues:
+            interface = interfaces[queue.direction.value]
+            handle = f"{queue.mark + 10}:"
+            parent = f"{ROOT_HANDLE}{queue.mark + 1}"
+            match = next(
+                (
+                    item
+                    for item in stats.get(interface, ())
+                    if isinstance(item, dict)
+                    and item.get("handle") == handle
+                    and item.get("parent") == parent
+                ),
+                None,
+            )
+            if match is None:
+                continue
+            entries.append(
+                {
+                    "device_id": queue.device_id,
+                    "direction": queue.direction.value,
+                    "interface": interface,
+                    "handle": handle,
+                    "kind": match.get("kind"),
+                    "impairment": asdict(queue.impairment),
+                    "packets": match.get("packets", 0),
+                    "bytes": match.get("bytes", 0),
+                    "drops": match.get("drops", 0),
+                    "overlimits": match.get("overlimits", 0),
+                    "requeues": match.get("requeues", 0),
+                    "backlog_bytes": match.get("backlog", 0),
+                    "qlen": match.get("qlen", 0),
+                }
+            )
+        return {"ok": True, "action": "queue-stats", "queues": entries}
 
     def _handle_apply(self, payload: Any) -> Dict[str, Any]:
         try:
@@ -595,22 +665,28 @@ class HelperService:
             if wanted.get(list_id) != domains:
                 self._service_addresses.forget(list_id)
 
+    def _published_plan(self) -> Optional[NetworkPlan]:
+        """Read the published copy of the applied plan without adopting it."""
+
+        if self._active_plan_path is None:
+            return None
+        try:
+            payload = json.loads(self._active_plan_path.read_text(encoding="utf-8"))
+            return plan_from_payload(payload)
+        except (OSError, ValueError):
+            return None
+
     def _current_plan(self) -> Optional[NetworkPlan]:
         """Return the applied plan, reading the published copy after a helper restart."""
 
         if self._active_plan is not None:
             return self._active_plan
-        if self._active_plan_path is None:
+        plan = self._published_plan()
+        if plan is None:
             return None
-        try:
-            payload = json.loads(self._active_plan_path.read_text(encoding="utf-8"))
-            self._active_plan = plan_from_payload(payload)
-        except (OSError, ValueError):
-            return None
-        self._list_domains = {
-            rule.list_id: rule.domains for rule in self._active_plan.service_list_rules
-        }
-        return self._active_plan
+        self._active_plan = plan
+        self._list_domains = {rule.list_id: rule.domains for rule in plan.service_list_rules}
+        return plan
 
     def _handle_service_addresses(self, raw: Any) -> Dict[str, Any]:
         """Add learned destination addresses to the sets of the applied plan's lists."""
@@ -1029,6 +1105,47 @@ class HelperClient:
             raise HelperClientError("helper returned invalid DNS observations")
         return observations
 
+    def queue_stats(self) -> List[Dict[str, Any]]:
+        """Return what each applied queue did so far with every field checked."""
+
+        response = self._request({"action": "queue-stats"})
+        queues = response.get("queues")
+        if not isinstance(queues, list) or len(queues) > MAX_QUEUE_STATS_ENTRIES:
+            raise HelperClientError(QUEUE_STATS_INVALID_MESSAGE)
+        result = []
+        for entry in queues:
+            if not isinstance(entry, dict):
+                raise HelperClientError(QUEUE_STATS_INVALID_MESSAGE)
+            device_id = entry.get("device_id")
+            handle = entry.get("handle")
+            interface = entry.get("interface")
+            if (
+                not isinstance(device_id, str)
+                or not _QUEUE_DEVICE_ID_PATTERN.fullmatch(device_id)
+                or not isinstance(handle, str)
+                or not _QUEUE_HANDLE_PATTERN.fullmatch(handle)
+                or not isinstance(interface, str)
+                or not 1 <= len(interface) <= 32
+                or entry.get("direction") not in ("upload", "download")
+                or entry.get("kind") not in ("netem", "fq_codel")
+            ):
+                raise HelperClientError(QUEUE_STATS_INVALID_MESSAGE)
+            clean: Dict[str, Any] = {
+                "device_id": device_id,
+                "direction": entry["direction"],
+                "interface": interface,
+                "handle": handle,
+                "kind": entry["kind"],
+                "impairment": _clean_queue_impairment(entry.get("impairment")),
+            }
+            for key in QUEUE_STATS_COUNTERS:
+                value = entry.get(key)
+                if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 2**63 - 1:
+                    raise HelperClientError(QUEUE_STATS_INVALID_MESSAGE)
+                clean[key] = value
+            result.append(clean)
+        return result
+
     def traffic_counters(self) -> Dict[str, Any]:
         """Return total and per-direction traffic counters."""
 
@@ -1119,6 +1236,26 @@ class HelperClient:
                 reason = None
             raise HelperClientError(str(decoded.get("error", "helper request failed")), reason=reason)
         return decoded
+
+
+def _clean_queue_impairment(raw: Any) -> Dict[str, Any]:
+    """Keep only the checked impairment numbers the dashboard shows."""
+
+    if not isinstance(raw, dict):
+        raise HelperClientError(QUEUE_STATS_INVALID_MESSAGE)
+    clean: Dict[str, Any] = {}
+    for key, maximum in _QUEUE_IMPAIRMENT_LIMITS.items():
+        value = raw.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
+            raise HelperClientError(QUEUE_STATS_INVALID_MESSAGE)
+        clean[key] = value
+    bandwidth = raw.get("bandwidth_kbit")
+    if bandwidth is not None and (
+        isinstance(bandwidth, bool) or not isinstance(bandwidth, int) or not 1 <= bandwidth <= 1_000_000
+    ):
+        raise HelperClientError(QUEUE_STATS_INVALID_MESSAGE)
+    clean["bandwidth_kbit"] = bandwidth
+    return clean
 
 
 def run_helper(

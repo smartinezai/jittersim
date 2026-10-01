@@ -1,3 +1,4 @@
+import json
 import tempfile
 import threading
 import unittest
@@ -1149,6 +1150,288 @@ class OldHelperTests(unittest.TestCase):
 
             (capture,) = captures(executor)
             self.assertIn(self.MAC, capture.arguments)
+
+
+def lossy_plan():
+    profile = Profile(
+        id="lossy",
+        name="Lossy",
+        upload=Impairment(loss_percent=20),
+        download=Impairment(loss_percent=20),
+    )
+    return compile_plan(
+        devices=(Device("lab", "Lab", "192.168.50.10", "lossy"),),
+        profiles={"lossy": profile},
+    )
+
+
+def qdisc(handle, parent, **counters):
+    entry = {
+        "kind": "netem",
+        "handle": handle,
+        "parent": parent,
+        "bytes": 0,
+        "packets": 0,
+        "drops": 0,
+        "overlimits": 0,
+        "requeues": 0,
+        "backlog": 0,
+        "qlen": 0,
+    }
+    entry.update(counters)
+    return entry
+
+
+class QueueExecutor(FakeExecutor):
+    """Answer the queue counter command with canned stats per interface."""
+
+    def __init__(self, stats, fail=False):
+        super().__init__()
+        self.stats = stats
+        self.fail = fail
+
+    def run(self, command):
+        if command.executable == "tc" and command.arguments[:3] == ("-s", "-j", "qdisc"):
+            self.commands.append(command)
+            if self.fail:
+                raise CommandExecutionError("simulated tc failure")
+            return CommandResult(return_code=0, stdout=json.dumps(self.stats[command.arguments[-1]]))
+        return super().run(command)
+
+
+ROOT_QDISC = {"kind": "prio", "handle": "10:", "root": True, "bytes": 9, "packets": 1,
+              "drops": 0, "overlimits": 0, "requeues": 0, "backlog": 0, "qlen": 0}
+
+
+class QueueStatsHelperTests(unittest.TestCase):
+    def helper(self, stats, *, plan=lossy_plan(), fail=False, plan_path=None):
+        executor = QueueExecutor(stats, fail=fail)
+        service = HelperService(
+            NetworkApplier(
+                executor=executor,
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            ),
+            active_plan_path=plan_path,
+        )
+        if plan is not None:
+            self.assertTrue(
+                service.handle_payload({"action": "apply", "plan": plan_to_payload(plan)})["ok"]
+            )
+        executor.commands.clear()
+        return service, executor
+
+    def test_joins_each_queue_to_the_plan_the_helper_applied(self) -> None:
+        service, executor = self.helper(
+            {
+                "eth0": [ROOT_QDISC, qdisc("11:", "10:2", packets=10, drops=3, bytes=1500)],
+                "wlan0": [
+                    ROOT_QDISC,
+                    qdisc("11:", "10:2", packets=40, drops=9, bytes=6000, backlog=300, qlen=2,
+                          overlimits=4, requeues=1),
+                ],
+            }
+        )
+
+        response = service.handle_payload({"action": "queue-stats"})
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["action"], "queue-stats")
+        upload, download = response["queues"]
+        self.assertEqual(
+            (upload["device_id"], upload["direction"], upload["interface"], upload["handle"]),
+            ("lab", "upload", "eth0", "11:"),
+        )
+        self.assertEqual(
+            (download["device_id"], download["direction"], download["interface"]),
+            ("lab", "download", "wlan0"),
+        )
+        self.assertEqual(upload["kind"], "netem")
+        self.assertEqual(upload["impairment"]["loss_percent"], 20)
+        self.assertEqual(
+            {key: upload[key] for key in ("packets", "bytes", "drops", "backlog_bytes", "qlen")},
+            {"packets": 10, "bytes": 1500, "drops": 3, "backlog_bytes": 0, "qlen": 0},
+        )
+        self.assertEqual(
+            {key: download[key] for key in (
+                "packets", "bytes", "drops", "overlimits", "requeues", "backlog_bytes", "qlen")},
+            {"packets": 40, "bytes": 6000, "drops": 9, "overlimits": 4, "requeues": 1,
+             "backlog_bytes": 300, "qlen": 2},
+        )
+        self.assertEqual(
+            [command.arguments for command in executor.commands],
+            [
+                ("-s", "-j", "qdisc", "show", "dev", "eth0"),
+                ("-s", "-j", "qdisc", "show", "dev", "wlan0"),
+            ],
+        )
+
+    def test_without_an_applied_plan_it_reports_no_queues_and_reads_nothing(self) -> None:
+        service, executor = self.helper({}, plan=None)
+
+        self.assertEqual(
+            service.handle_payload({"action": "queue-stats"}),
+            {"ok": True, "action": "queue-stats", "queues": []},
+        )
+        self.assertEqual(executor.commands, [])
+
+    def test_only_queues_with_the_project_handle_and_parent_are_used(self) -> None:
+        service, _ = self.helper(
+            {
+                "eth0": [
+                    qdisc("12:", "10:2", packets=111),
+                    qdisc("11:", "10:5", packets=222),
+                    {"kind": "fq_codel", "handle": "11:", "packets": 333},
+                    qdisc("11:", "10:2", packets=7),
+                ],
+                "wlan0": [qdisc("11:", "1:2", packets=444)],
+            }
+        )
+
+        response = service.handle_payload({"action": "queue-stats"})
+
+        self.assertEqual([(q["interface"], q["packets"]) for q in response["queues"]],
+                         [("eth0", 7)])
+
+    def test_a_plan_queue_without_a_kernel_queue_is_left_out(self) -> None:
+        service, _ = self.helper({"eth0": [ROOT_QDISC], "wlan0": [qdisc("11:", "10:2", packets=5)]})
+
+        response = service.handle_payload({"action": "queue-stats"})
+
+        self.assertEqual([(q["direction"], q["packets"]) for q in response["queues"]],
+                         [("download", 5)])
+
+    def test_a_failed_read_gives_a_plain_error(self) -> None:
+        service, _ = self.helper({}, fail=True)
+
+        with self.assertLogs("jittersim.networking.helper", level="WARNING"):
+            response = service.handle_payload({"action": "queue-stats"})
+
+        self.assertEqual(response, {"ok": False, "error": "queue statistics unavailable"})
+
+    def test_a_restarted_helper_reads_the_published_plan_without_adopting_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            plan_path = Path(directory) / "active-plan.json"
+            stats = {"eth0": [qdisc("11:", "10:2", packets=1)], "wlan0": []}
+            self.helper(stats, plan_path=plan_path)
+            restarted, _ = self.helper(stats, plan=None, plan_path=plan_path)
+
+            response = restarted.handle_payload({"action": "queue-stats"})
+
+            self.assertEqual([q["device_id"] for q in response["queues"]], ["lab"])
+            self.assertIsNone(restarted._active_plan)
+
+    def test_after_a_reset_it_reports_no_queues(self) -> None:
+        service, _ = self.helper({"eth0": [qdisc("11:", "10:2", packets=1)], "wlan0": []})
+        self.assertTrue(service.handle_payload({"action": "reset"})["ok"])
+
+        self.assertEqual(service.handle_payload({"action": "queue-stats"})["queues"], [])
+
+    def test_the_client_returns_validated_entries_over_the_socket(self) -> None:
+        stats = {
+            "eth0": [qdisc("11:", "10:2", packets=10, drops=3, bytes=1500)],
+            "wlan0": [qdisc("11:", "10:2", packets=40, drops=9, bytes=6000)],
+        }
+        service, _ = self.helper(stats)
+        with tempfile.TemporaryDirectory() as directory:
+            queue_socket = Path(directory) / "q.sock"
+            server = UnixHelperServer(queue_socket, service)
+            thread = threading.Thread(target=server.serve_forever)
+            thread.start()
+            try:
+                queues = HelperClient(socket_path=queue_socket).queue_stats()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+        self.assertEqual([(q["device_id"], q["direction"], q["drops"]) for q in queues],
+                         [("lab", "upload", 3), ("lab", "download", 9)])
+        self.assertEqual(queues[0]["impairment"]["loss_percent"], 20)
+
+
+def good_queue(**changes):
+    entry = {
+        "device_id": "lab",
+        "direction": "upload",
+        "interface": "eth0",
+        "handle": "11:",
+        "kind": "netem",
+        "impairment": {
+            "delay_ms": 0, "jitter_ms": 0, "loss_percent": 20, "bandwidth_kbit": None,
+            "reorder_percent": 0, "duplicate_percent": 0, "corrupt_percent": 0,
+        },
+        "packets": 10, "bytes": 1500, "drops": 3, "overlimits": 0, "requeues": 0,
+        "backlog_bytes": 0, "qlen": 0,
+    }
+    entry.update(changes)
+    return entry
+
+
+class QueueStatsClientTests(unittest.TestCase):
+    def read(self, queues):
+        client = RecordingHelperClient({"ok": True, "action": "queue-stats", "queues": queues})
+        result = client.queue_stats()
+        self.assertEqual(client.sent, [{"action": "queue-stats"}])
+        return result
+
+    def test_accepts_good_entries_for_every_queue_kind(self) -> None:
+        entries = [
+            good_queue(),
+            good_queue(device_id="general-profile", direction="download", kind="fq_codel",
+                       impairment=dict(good_queue()["impairment"], bandwidth_kbit=2000)),
+            good_queue(device_id="quota:abc-1"),
+            good_queue(device_id="servicelist:streaming", handle="25:"),
+        ]
+
+        self.assertEqual([q["device_id"] for q in self.read(entries)],
+                         ["lab", "general-profile", "quota:abc-1", "servicelist:streaming"])
+
+    def test_keeps_only_the_numbers_the_dashboard_uses_from_the_impairment(self) -> None:
+        impairment = dict(good_queue()["impairment"], loss_randomness={"variation_percent": 5})
+
+        (entry,) = self.read([good_queue(impairment=impairment)])
+
+        self.assertNotIn("loss_randomness", entry["impairment"])
+        self.assertEqual(entry["impairment"]["loss_percent"], 20)
+
+    def test_rejects_every_malformed_entry(self) -> None:
+        bad_impairment = dict(good_queue()["impairment"])
+        del bad_impairment["delay_ms"]
+        cases = {
+            "negative counter": [good_queue(drops=-1)],
+            "bool counter": [good_queue(packets=True)],
+            "float counter": [good_queue(bytes=1.5)],
+            "huge counter": [good_queue(bytes=2**63)],
+            "string counter": [good_queue(qlen="3")],
+            "bad handle": [good_queue(handle="abc")],
+            "long handle": [good_queue(handle="123456:")],
+            "bad direction": [good_queue(direction="sideways")],
+            "bad kind": [good_queue(kind="tbf")],
+            "bad id": [good_queue(device_id="Lab Phone")],
+            "empty id": [good_queue(device_id="")],
+            "long id": [good_queue(device_id="a" * 129)],
+            "long interface": [good_queue(interface="e" * 33)],
+            "non string interface": [good_queue(interface=5)],
+            "impairment not a dict": [good_queue(impairment=[])],
+            "impairment missing key": [good_queue(impairment=bad_impairment)],
+            "impairment bad value": [good_queue(impairment=dict(
+                good_queue()["impairment"], loss_percent="20"))],
+            "impairment bool value": [good_queue(impairment=dict(
+                good_queue()["impairment"], delay_ms=True))],
+            "entry not a dict": ["lab"],
+            "too many entries": [good_queue() for _ in range(601)],
+            "not a list": {"lab": good_queue()},
+            "missing field": [{key: value for key, value in good_queue().items() if key != "qlen"}],
+        }
+        for name, queues in cases.items():
+            with self.subTest(name):
+                with self.assertRaisesRegex(
+                    HelperClientError, "^helper returned invalid queue statistics$"
+                ):
+                    self.read(queues)
+
+    def test_accepts_exactly_600_entries(self) -> None:
+        self.assertEqual(len(self.read([good_queue() for _ in range(600)])), 600)
 
 
 if __name__ == "__main__":
