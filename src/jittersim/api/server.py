@@ -371,6 +371,17 @@ DASHBOARD_HTML = """<!doctype html>
     }
     .saved-device-labels h3 { margin-top: 0; }
     .saved-device-label-row { grid-template-columns: minmax(0, 1fr) auto auto; }
+    .impact-note { margin: 0 0 0.75rem; color: #a8b8ce; font-size: 0.82rem; }
+    .impact-list { display: grid; gap: 0.6rem; }
+    .impact-row { padding: 0.75rem; border: 1px solid #2b435f; border-radius: 0.6rem; background: #0d1b2d; }
+    .impact-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.3rem 0.75rem; }
+    .impact-name { color: #edf5ff; font-weight: 700; overflow-wrap: anywhere; }
+    .impact-direction { color: #a8b8ce; font-size: 0.8rem; }
+    .impact-chip { margin-left: auto; padding: 0.1rem 0.6rem; border: 1px solid #46627f; border-radius: 999px; background: #142338; color: #c6dbf4; font-size: 0.75rem; font-weight: 700; white-space: nowrap; }
+    .impact-chip.affected { border-color: #a77b31; background: #3b2a12; color: #f5ca78; }
+    .impact-chip.idle, .impact-chip.too-few, .impact-chip.no-effect, .impact-chip.collecting { border-color: #3a4656; background: #111b29; color: #b3c1d3; }
+    .impact-lines { display: grid; gap: 0.15rem; margin: 0.45rem 0 0; padding: 0; list-style: none; color: #c4d5e8; font-size: 0.85rem; }
+    .impact-protected { margin: 0.75rem 0 0; color: #9fb0c4; font-size: 0.8rem; overflow-wrap: anywhere; }
     select {
       min-width: 0;
       max-width: 100%;
@@ -1672,6 +1683,15 @@ DASHBOARD_HTML = """<!doctype html>
     </section>
   </section><!-- /page:access -->
   <section class="page" id="page-diagnostics" data-page="diagnostics" aria-label="Diagnostics" hidden>
+    <section class="card impact-card" data-collapse="open" aria-labelledby="impact-title">
+      <div class="section-heading">
+        <div><h2 id="impact-title">Impact</h2><p>What the queues did in the last minute</p></div>
+        <span id="impact-state" class="count-badge">Check token</span>
+      </div>
+      <p id="impact-note" class="impact-note">Counts come from the Pi's queues. Delay and jitter are shown as configured because queue counters cannot measure them.</p>
+      <div id="impact-list" class="impact-list" aria-live="polite">Check the admin token to see the impact.</div>
+      <p id="impact-protected" class="impact-protected" hidden></p>
+    </section>
     <section class="card" data-collapse="closed">
       <div class="section-heading"><h2>Profiles</h2><p>Saved network behavior</p></div>
       <pre id="profiles">Enter the admin token and choose Check token to load.</pre>
@@ -1916,6 +1936,8 @@ DASHBOARD_HTML = """<!doctype html>
       element("uplink-state").textContent = state;
       element("runtime-summary").textContent = message;
       element("runtime-summary").className = "runtime-summary unknown";
+      // The panels go blank whenever the token is not trusted, so the impact card follows.
+      if (typeof syncImpact === "function") syncImpact();
     }
 
     async function loadPrivateDataPanel(panelId, load) {
@@ -2786,6 +2808,134 @@ DASHBOARD_HTML = """<!doctype html>
         .sort((a, b) => a.name.localeCompare(b.name) || a.direction.localeCompare(b.direction));
     }
     // end of the impact functions
+
+    const IMPACT_POLL_INTERVAL_MS = 5000;
+    const IMPACT_VERDICT_LABELS = {
+      affected: "Affected now",
+      idle: "Set but no traffic yet",
+      "too-few": "Too few packets to judge",
+      "no-effect": "No effect seen",
+      collecting: "Collecting…"
+    };
+    let impactHistory = {};
+    let impactPollTimer = null;
+    let impactRequestInFlight = false;
+    let impactGeneration = 0;
+
+    function impactVisible() {
+      return document.body.dataset.section === "diagnostics" && !document.hidden;
+    }
+
+    function showImpactMessage(message, state) {
+      element("impact-list").textContent = message;
+      element("impact-state").textContent = state;
+      element("impact-note").hidden = true;
+      element("impact-protected").hidden = true;
+    }
+
+    function stopImpact(message, state) {
+      if (impactPollTimer !== null) {
+        window.clearInterval(impactPollTimer);
+        impactPollTimer = null;
+      }
+      impactGeneration += 1;
+      impactHistory = {};
+      showImpactMessage(message, state);
+    }
+
+    function impactRowElement(row) {
+      const item = document.createElement("div");
+      item.className = "impact-row";
+      const head = document.createElement("div");
+      head.className = "impact-head";
+      const name = document.createElement("span");
+      name.className = "impact-name";
+      name.textContent = row.name;
+      const direction = document.createElement("span");
+      direction.className = "impact-direction";
+      direction.textContent = row.direction === "upload" ? "Upload" : "Download";
+      const chip = document.createElement("span");
+      chip.className = "impact-chip " + row.verdict;
+      chip.textContent = IMPACT_VERDICT_LABELS[row.verdict];
+      head.append(name, direction, chip);
+      item.appendChild(head);
+      if (row.verdict !== "collecting") {
+        const lines = document.createElement("ul");
+        lines.className = "impact-lines";
+        row.lines.forEach((text) => {
+          const line = document.createElement("li");
+          line.textContent = text;
+          lines.appendChild(line);
+        });
+        item.appendChild(lines);
+      }
+      return item;
+    }
+
+    function renderImpact(protectedNames) {
+      const rows = impactRows(impactHistory);
+      const list = element("impact-list");
+      if (rows.length) {
+        list.replaceChildren(...rows.map(impactRowElement));
+      } else {
+        list.textContent = "Nothing is slowed down right now. Apply a profile to a device to see its impact here.";
+      }
+      element("impact-state").textContent = "Live";
+      element("impact-note").hidden = false;
+      const protectedLine = element("impact-protected");
+      protectedLine.hidden = protectedNames.length === 0;
+      protectedLine.textContent = protectedNames.length
+        ? "Protected (not affected): " + protectedNames.join(", ") : "";
+    }
+
+    async function loadImpact() {
+      if (impactRequestInFlight || !adminTokenVerified || !impactVisible()) return;
+      impactRequestInFlight = true;
+      const generation = impactGeneration;
+      try {
+        const data = await request("/api/impact", "GET");
+        if (generation !== impactGeneration) return;
+        if (!data.available) {
+          impactHistory = {};
+          showImpactMessage(data.message || "Impact is not available.", "Unavailable");
+          return;
+        }
+        impactHistory = recordImpactSample(impactHistory, data, data.sampled_at);
+        renderImpact(Array.isArray(data.protected) ? data.protected : []);
+      } catch (error) {
+        if (generation !== impactGeneration) return;
+        if (error.status === 401) {
+          stopImpact("Check the admin token to see the impact.", "Check token");
+        } else {
+          element("impact-state").textContent = "Update failed";
+        }
+      } finally {
+        impactRequestInFlight = false;
+      }
+    }
+
+    function syncImpact() {
+      if (!adminTokenVerified) {
+        stopImpact("Check the admin token to see the impact.", "Check token");
+        return;
+      }
+      if (!helperConfigured) {
+        stopImpact("Impact needs the Pi helper.", "Unavailable");
+        return;
+      }
+      if (!impactVisible()) {
+        if (impactPollTimer !== null) {
+          window.clearInterval(impactPollTimer);
+          impactPollTimer = null;
+        }
+        return;
+      }
+      if (impactPollTimer === null) {
+        impactPollTimer = window.setInterval(loadImpact, IMPACT_POLL_INTERVAL_MS);
+        loadImpact();
+      }
+    }
+    // end of the impact card
 
     function renderRuntimeSummary(state) {
       const labels = {
@@ -4672,6 +4822,7 @@ DASHBOARD_HTML = """<!doctype html>
           if (tokenRevision !== adminTokenRevision) return;
           await startTrafficSampling();
           if (tokenRevision !== adminTokenRevision) return;
+          if (typeof syncImpact === "function") syncImpact();
         } else {
           adminTokenVerified = false;
           adminTokenRejected = true;
@@ -5054,6 +5205,7 @@ DASHBOARD_HTML = """<!doctype html>
       }
       drawTrafficChart();
     });
+    document.addEventListener("visibilitychange", syncImpact);
     window.addEventListener("resize", drawTrafficChart);
     element("toast-dismiss").addEventListener("click", dismissToast);
     element("refresh-diagnostics").addEventListener("click", async (event) => {
@@ -5582,6 +5734,7 @@ DASHBOARD_HTML = """<!doctype html>
       document.body.dataset.section = id;
       if (userInitiated) window.scrollTo(0, 0);
       if (id === "traffic" && typeof drawTrafficChart === "function") drawTrafficChart();
+      if (typeof syncImpact === "function") syncImpact();
     }
 
     function storedCardState(key) {
