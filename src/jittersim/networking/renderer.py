@@ -3,7 +3,7 @@
 from typing import List, Sequence
 
 from jittersim.config.models import Impairment
-from jittersim.engine.plan import Direction, NetworkPlan, QueueSpec
+from jittersim.engine.plan import GENERAL_QUEUE_ID, Direction, NetworkPlan, QueueSpec
 
 from .commands import Command
 from .legacy import LEGACY_ACCESS_CLEANUP, cleanup_command
@@ -13,6 +13,7 @@ PROJECT_TABLE = "jittersim"
 DOWNLOAD_TABLE = "jittersim_download"
 ROOT_HANDLE = "10:"
 DASHBOARD_REPLY_MARK = 0x80000000
+GENERAL_DOWNLOAD_MARK = 0x40000000
 
 
 def _render_set(values: Sequence[object]) -> str:
@@ -123,6 +124,38 @@ def _render_nft_script(plan: NetworkPlan, topology: Topology) -> str:
             f"add rule netdev {DOWNLOAD_TABLE} download ether daddr {macs} "
             'meta mark set 0 return comment "unaffected by profiles"'
         )
+    if plan.general_profile is not None:
+        general = plan.general_profile
+        upload_match = f'iifname "{test_interface}" oifname "{topology.uplink_interface}" '
+        if general.allowed_addresses is not None:
+            match = (
+                f"ip daddr != {_render_set(general.allowed_addresses)} "
+                if general.allowed_addresses else "meta nfproto ipv4 "
+            )
+            lines.append(
+                f'add rule inet {PROJECT_TABLE} forward {upload_match}{match}'
+                'drop comment "general profile website allowlist"'
+            )
+        lines.append(
+            f'add rule inet {PROJECT_TABLE} forward oifname "{test_interface}" '
+            f'meta mark set {GENERAL_DOWNLOAD_MARK} comment "identify forwarded test downloads"'
+        )
+        download_match = f"meta mark {{ 1, {GENERAL_DOWNLOAD_MARK} }} "
+        if general.outage_active:
+            lines.extend((
+                f'add rule inet {PROJECT_TABLE} forward {upload_match}'
+                'drop comment "general profile outage"',
+                f'add rule netdev {DOWNLOAD_TABLE} download {download_match}'
+                'drop comment "general profile outage"',
+            ))
+        lines.extend((
+            f'add rule inet {PROJECT_TABLE} forward {upload_match}meta nfproto ipv4 '
+            f'meta mark set 1 counter comment "usage-device {GENERAL_QUEUE_ID} upload"',
+            f'add rule netdev {DOWNLOAD_TABLE} download {download_match}ether type ip '
+            f'meta mark set 1 counter comment "usage-device {GENERAL_QUEUE_ID} download"',
+            f'add rule inet {PROJECT_TABLE} output oifname "{topology.uplink_interface}" '
+            f'meta mark 1 counter comment "usage-device {GENERAL_QUEUE_ID} upload"',
+        ))
     for website_filter in plan.website_filters:
         if website_filter.allowed_addresses is not None:
             if website_filter.allowed_addresses:

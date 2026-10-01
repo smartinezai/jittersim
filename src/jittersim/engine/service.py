@@ -6,6 +6,7 @@ from jittersim.config.storage import ConfigRepository
 
 from .compiler import compile_plan
 from .eligibility import eligible_clients
+from .general import compile_general_plan
 from .plan import NetworkPlan, ServiceAssignmentRule, ServiceQuotaRule
 from .website import build_website_filters, resolve_domains
 
@@ -13,6 +14,9 @@ from .website import build_website_filters, resolve_domains
 def compile_stored_plan(*, repository: ConfigRepository, connected_snapshot=None) -> NetworkPlan:
     """Compile every stored device assignment into one deterministic plan."""
 
+    general_profile = repository.get_general_profile()
+    if general_profile is not None:
+        return compile_general_plan(repository=repository, profile=general_profile)
     clients = eligible_clients(repository, connected_snapshot)
     profiles = {profile.id: profile for profile in repository.list_profiles()}
     devices = []

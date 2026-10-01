@@ -119,6 +119,18 @@ After a service restart, JitterSim restores the last applied plan or completes
 the last reset. A fresh installation with no prior action leaves the network
 unchanged.
 
+The **General profile** control applies one saved profile to every unprotected
+test Wi-Fi client, including later arrivals. Its speed limit is shared by
+affected clients only. Protected clients use separate normal queues and do
+not consume that allowance. Stopping it resumes current saved device rules.
+Panic or Reset pauses all profiles while preserving the selection.
+
+Updates start the helper, ensure the test access point is active then restart
+the browser proxy before the dashboard restores saved traffic rules. This
+keeps the new plan format available to both processes. Before rolling back to
+a version without general profiles, reset and verify normal traffic under
+the newer version so the older dashboard restores the reset state.
+
 ## Connected device details
 
 The dashboard lists Wi-Fi clients currently associated with the Pi. It joins

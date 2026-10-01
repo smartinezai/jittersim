@@ -232,6 +232,33 @@ packets or measure download bytes. Device-data mode counts IPv4 upload and
 download bytes for the selected device, so a long Netflix stream can advance a
 progression even when it creates few new DNS queries.
 
+### General profile
+
+Choose a saved profile under **General profile** then click **Apply to all**.
+It applies immediately to every unprotected device on JitterSim Wi-Fi,
+including clients without saved assignments and clients that connect later.
+There is no device selection, schedule, duration or usage quota to configure.
+
+The profile's upload and download speed limits are shared only by affected
+devices. Clients in **Unaffected by profiles** bypass those limits completely
+and do not consume that shared allowance. They also bypass the profile's delay,
+loss, website rules and random outages. Separate global access rules still
+apply to all clients.
+
+While the general profile is active it takes priority over saved device,
+group, schedule, timer, progression, browser service and quota profile rules.
+Those settings remain saved. Quota charging pauses during this mode. Timers
+and schedules keep their original times. The traffic chart shows the shared
+limit and combined affected traffic rather than an individual device limit.
+Random changes apply to the network together. Their choices are not added to
+the per-device random website history.
+
+**Stop general profile** resumes the saved device rules that are current at
+that moment. **Panic** or **Reset network** turns all profiles off while keeping
+the selection. **Apply to all** or **Apply current configuration** resumes it.
+A restart restores the last apply or reset. Protected clients remain protected
+through reconnects and IP changes.
+
 ### Connected clients and unaffected devices
 
 Open **Connected clients** after checking the admin token. This panel shows
@@ -278,9 +305,9 @@ IPv6 hosts for managed HTTPS traffic.
 Any household device can join the JitterSim Wi-Fi without a JitterSim device
 record. The DHCP service and ordinary internet forwarding run in
 NetworkManager, independently of the dashboard and network helper. A network
-plan only marks devices you add in the dashboard. Other clients use a normal
-fair queue when a profile is active. They do not inherit a selected device's
-delay, loss or bandwidth limit.
+plan normally marks devices you add in the dashboard. Other clients use a
+normal fair queue. When a general profile is active every unprotected client
+receives it instead. Protected clients keep their normal traffic path.
 
 The connected-device list shows devices currently associated with the Pi's
 Wi-Fi. It can show the IP address, signal strength and a DHCP-provided network

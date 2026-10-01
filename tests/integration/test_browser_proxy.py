@@ -11,7 +11,7 @@ from pathlib import Path
 from jittersim.config.models import Device, Impairment, MacPolicy, Profile
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import compile_plan
-from jittersim.engine.plan import ServiceAssignmentRule, WebsiteFilter
+from jittersim.engine.plan import GeneralProfileRule, ServiceAssignmentRule, WebsiteFilter
 from jittersim.networking.browser_proxy import (
     BrowserProxyServer,
     ProxyError,
@@ -27,6 +27,49 @@ class _EchoHandler(socketserver.BaseRequestHandler):
 
 
 class BrowserProxyTests(unittest.TestCase):
+    def test_general_profile_marks_both_sockets_for_unassigned_clients(self):
+        protected_mac = "02:00:00:00:00:01"
+        address = IPv4Address("192.168.50.99")
+        profile = Profile("slow", "Slow", download=Impairment(bandwidth_kbit=1000))
+        plan = compile_plan(
+            devices=(), profiles={profile.id: profile},
+            protected_mac_addresses=(protected_mac,),
+            general_profile=GeneralProfileRule(profile.id),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "active.json"
+            path.write_text(json.dumps(plan_to_payload(plan)))
+            echo = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _EchoHandler)
+            echo.daemon_threads = True
+            threading.Thread(target=echo.serve_forever, daemon=True).start()
+            marks = []
+            current_mac = ["02:00:00:00:00:02"]
+            proxy = BrowserProxyServer(
+                ("127.0.0.1", 0), active_plan_path=path, client_network="127.0.0.0/8",
+                mark_socket=lambda _socket, mark: marks.append(mark),
+                identify_client=lambda _ip: address,
+                identify_mac=lambda _ip: current_mac[0],
+                resolve_addresses=lambda _host: [
+                    (socket.AF_INET, socket.SOCK_STREAM, 0, echo.server_address)
+                ],
+            )
+            threading.Thread(target=proxy.serve_forever, daemon=True).start()
+            try:
+                for mac, expected_mark in ((current_mac[0], 1), (protected_mac, 0)):
+                    current_mac[0] = mac
+                    marks.clear()
+                    with socket.create_connection(proxy.server_address, timeout=3) as client:
+                        client.sendall(b"CONNECT example.com:443 HTTP/1.1\r\n\r\n")
+                        self.assertIn(b"200 Connection Established", client.recv(4096))
+                        client.sendall(b"general-profile-body")
+                        self.assertEqual(client.recv(4096), b"general-profile-body")
+                        self.assertEqual(marks, [expected_mark, expected_mark])
+            finally:
+                proxy.shutdown()
+                proxy.server_close()
+                echo.shutdown()
+                echo.server_close()
+
     def test_unaffected_tunnel_survives_other_profile_changes_and_rechecks_global_rules(self):
         mac = "02:00:00:00:00:01"
         address = IPv4Address("192.168.50.10")

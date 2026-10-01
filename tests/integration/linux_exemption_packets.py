@@ -10,7 +10,7 @@ from pathlib import Path
 
 from jittersim.config.models import Device, Impairment, MacPolicy, Profile
 from jittersim.engine.compiler import compile_plan
-from jittersim.engine.plan import ServiceQuotaRule, WebsiteFilter
+from jittersim.engine.plan import GENERAL_QUEUE_ID, GeneralProfileRule, ServiceQuotaRule, WebsiteFilter
 from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.executor import SubprocessExecutor
 from jittersim.networking.topology import Topology
@@ -18,6 +18,7 @@ from jittersim.networking.topology import Topology
 PROTECTED = "02:00:00:00:00:01"
 AFFECTED = "02:00:00:00:00:02"
 REMOTE = "02:00:00:00:00:03"
+OTHER_AFFECTED = "02:00:00:00:00:04"
 
 
 def run(*args):
@@ -72,13 +73,13 @@ def packet_passes(sender, receiver, packet, tag):
     return False
 
 
-def device_usage(applier):
+def device_usage(applier, device_id="affected"):
     result = {"upload": 0, "download": 0, "service-upload": 0, "service-download": 0}
     for item in json.loads(applier.traffic_counters())["nftables"]:
         rule = item.get("rule", {})
         comment = rule.get("comment", "")
         for direction in ("upload", "download"):
-            if comment == f"usage-device affected {direction}":
+            if comment == f"usage-device {device_id} {direction}":
                 key = direction
             elif comment == f"usage-service video {direction}":
                 key = "service-" + direction
@@ -252,6 +253,59 @@ def main():
             frame(PROTECTED, test_mac, "192.168.50.11", "198.18.0.2", "globally-blocked"),
             "globally-blocked",
         )
+        shared = Profile(
+            "shared", "Shared", upload=Impairment(bandwidth_kbit=1),
+            download=Impairment(bandwidth_kbit=1),
+        )
+        general = compile_plan(
+            devices=(), profiles={shared.id: shared}, protected_mac_addresses=(PROTECTED,),
+            general_profile=GeneralProfileRule(shared.id),
+        )
+        applier.apply(plan=general)
+        # New clients are covered without applying another plan.
+        for address, mac in (("192.168.50.13", AFFECTED), ("192.168.50.14", OTHER_AFFECTED)):
+            run("ip", "neigh", "replace", address, "lladdr", mac,
+                "nud", "permanent", "dev", "jittersim0")
+            tag = "shared-up-" + address + "x" * 1000
+            assert not packet_passes(
+                client, remote, frame(mac, test_mac, address, "198.18.0.2", tag), tag
+            ), "The shared upload limit did not delay an affected client"
+            tag = "shared-down-" + address + "x" * 1000
+            assert not packet_passes(
+                remote, client, frame(REMOTE, up_mac, "198.18.0.2", address, tag), tag
+            ), "The shared download limit did not delay an affected client"
+        before = device_usage(applier, GENERAL_QUEUE_ID)
+        assert before["upload"] > 0 and before["download"] > 0, before
+        for address in ("192.168.50.10", "192.168.50.11"):
+            tag = "uncapped-up-" + address + "x" * 1000
+            assert packet_passes(
+                client, remote, frame(PROTECTED, test_mac, address, "198.18.0.2", tag), tag
+            ), "A protected upload entered the shared limited queue"
+            tag = "uncapped-down-" + address + "x" * 1000
+            assert packet_passes(
+                remote, client, frame(REMOTE, up_mac, "198.18.0.2", address, tag), tag
+            ), "A protected download entered the shared limited queue"
+        assert device_usage(applier, GENERAL_QUEUE_ID) == before
+        outage = replace(general, general_profile=replace(general.general_profile, outage_active=True))
+        applier.apply(plan=outage)
+        assert not packet_passes(
+            client, remote, frame(AFFECTED, test_mac, "192.168.50.13", "198.18.0.2", "general-outage"),
+            "general-outage",
+        )
+        assert packet_passes(
+            client, remote, frame(PROTECTED, test_mac, "192.168.50.11", "198.18.0.2", "protected-outage"),
+            "protected-outage",
+        )
+        empty_allowlist = replace(general, general_profile=GeneralProfileRule(shared.id, ()))
+        applier.apply(plan=empty_allowlist)
+        assert not packet_passes(
+            client, remote, frame(AFFECTED, test_mac, "192.168.50.13", "198.18.0.2", "general-website"),
+            "general-website",
+        )
+        assert packet_passes(
+            client, remote, frame(PROTECTED, test_mac, "192.168.50.11", "198.18.0.2", "protected-website"),
+            "protected-website",
+        )
         applier.reset()
         applier.reset()
         assert packet_passes(
@@ -262,7 +316,7 @@ def main():
         )
         print(
             "Packet protection passed in both directions with IP reuse, multiple addresses "
-            "and quotas plus global access rules"
+            "and quotas plus global access rules. General shared limits bypass protected clients."
         )
     finally:
         client.close()

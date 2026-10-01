@@ -7,7 +7,9 @@ from jittersim.config.exemptions import MAX_UNAFFECTED_DEVICES, normalize_exempt
 from jittersim.config.models import Device, MacPolicy, Profile, normalize_service_hostname
 
 from .plan import (
+    GENERAL_QUEUE_ID,
     Direction,
+    GeneralProfileRule,
     MarkRule,
     NetworkPlan,
     QueueSpec,
@@ -40,6 +42,7 @@ def compile_plan(
     blocked_device_addresses: Sequence[IPv4Address] = (),
     service_quota_rules: Sequence[ServiceQuotaRule] = (),
     service_assignment_rules: Sequence[ServiceAssignmentRule] = (),
+    general_profile: Optional[GeneralProfileRule] = None,
 ) -> NetworkPlan:
     """Compile device assignments into deterministic marks and directional queues."""
 
@@ -55,6 +58,18 @@ def compile_plan(
         raise PlanError("a protected client cannot have profile rules")
     if len(devices) > MAX_DEVICES_PER_PLAN:
         raise PlanError(f"a plan cannot contain more than {MAX_DEVICES_PER_PLAN} devices")
+    if general_profile is not None:
+        if devices or service_quota_rules or service_assignment_rules or website_filters or blocked_device_addresses:
+            raise PlanError("a general profile cannot contain individual profile rules")
+        if general_profile.profile_id not in profiles:
+            raise PlanError("the general profile is missing")
+        if type(general_profile.outage_active) is not bool:
+            raise PlanError("the general profile outage state is invalid")
+        if general_profile.allowed_addresses is not None and (
+            len(general_profile.allowed_addresses) > 4096
+            or any(not isinstance(address, IPv4Address) for address in general_profile.allowed_addresses)
+        ):
+            raise PlanError("the general profile destinations are invalid")
 
     devices_by_id = {}
     addresses_by_value = {}
@@ -75,6 +90,12 @@ def compile_plan(
 
     mark_rules = []
     queues = []
+    if general_profile is not None:
+        profile = profiles[general_profile.profile_id]
+        queues.extend((
+            QueueSpec(GENERAL_QUEUE_ID, Direction.UPLOAD, 1, profile.upload),
+            QueueSpec(GENERAL_QUEUE_ID, Direction.DOWNLOAD, 1, profile.download),
+        ))
     for index, device_id in enumerate(sorted(devices_by_id), start=1):
         device = devices_by_id[device_id]
         profile = profiles[device.profile_id]
@@ -262,4 +283,5 @@ def compile_plan(
         blocked_device_addresses=tuple(sorted(set(blocked_device_addresses), key=str)),
         service_quota_rules=normalized_service_rules,
         service_assignment_rules=tuple(normalized_assignments),
+        general_profile=general_profile,
     )

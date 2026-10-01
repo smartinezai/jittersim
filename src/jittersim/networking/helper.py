@@ -124,6 +124,8 @@ class HelperService:
         action = payload.get("action")
         if action == "ping":
             return {"ok": True, "action": "ping"}
+        if action == "capabilities":
+            return {"ok": True, "general_profile": True}
         if action == "dashboard-access":
             if not self._access_lock.acquire(blocking=False):
                 return {"ok": False, "error": "Device verification is busy. Try again.",
@@ -692,7 +694,19 @@ class HelperClient:
     def apply(self, *, plan: NetworkPlan) -> Dict[str, Any]:
         """Ask the helper to apply one validated network plan."""
 
+        if plan.general_profile is not None:
+            self.check_general_profile_support()
         return self._request({"action": "apply", "plan": plan_to_payload(plan)})
+
+    def check_general_profile_support(self) -> None:
+        """Reject an older running helper before changing the saved mode."""
+
+        try:
+            capabilities = self._request({"action": "capabilities"})
+        except HelperClientError as error:
+            raise HelperClientError("Update the Pi helper before applying a general profile") from error
+        if capabilities.get("general_profile") is not True:
+            raise HelperClientError("Update the Pi helper before applying a general profile")
 
     def reset(self) -> Dict[str, Any]:
         """Ask the helper to remove project-owned network state."""

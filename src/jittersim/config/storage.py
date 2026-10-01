@@ -188,6 +188,11 @@ class ConfigRepository:
                 profile_id TEXT NOT NULL REFERENCES profiles(id),
                 mac_address TEXT
             );
+            CREATE TABLE IF NOT EXISTS general_profile_setting (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                profile_id TEXT REFERENCES profiles(id) ON DELETE RESTRICT
+            );
+            INSERT OR IGNORE INTO general_profile_setting (id, profile_id) VALUES (1, NULL);
             CREATE TABLE IF NOT EXISTS unaffected_devices (
                 mac_address TEXT PRIMARY KEY,
                 display_name TEXT NOT NULL,
@@ -477,6 +482,34 @@ class ConfigRepository:
         except sqlite3.IntegrityError as error:
             self._rollback()
             raise StorageError(f"could not save profile {profile.id}") from error
+
+    def get_general_profile(self) -> Optional[Profile]:
+        """Return the saved general profile without creating device assignments."""
+
+        row = self._connection.execute(
+            "SELECT profile_id FROM general_profile_setting WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            raise StorageError("the general profile setting is missing")
+        if row["profile_id"] is None:
+            return None
+        profile = self.get_profile(row["profile_id"])
+        if profile is None:
+            raise StorageError("the saved general profile is missing")
+        return profile
+
+    def save_general_profile(self, profile_id: Optional[str]) -> None:
+        """Save or clear one validated general profile reference."""
+
+        if profile_id is not None and (
+            not isinstance(profile_id, str) or self.get_profile(profile_id) is None
+        ):
+            raise StorageError("Choose an existing saved profile")
+        self._connection.execute(
+            "UPDATE general_profile_setting SET profile_id = ? WHERE id = 1", (profile_id,)
+        )
+        self._bump_configuration_version()
+        self._commit()
 
     def save_device(self, device: Device) -> None:
         """Insert or update one validated device assignment."""

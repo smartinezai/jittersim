@@ -22,7 +22,9 @@ from .compiler import (
     MAX_SHAPED_MARKS_PER_PLAN,
 )
 from .plan import (
+    GENERAL_QUEUE_ID,
     Direction,
+    GeneralProfileRule,
     MarkRule,
     NetworkPlan,
     QueueSpec,
@@ -81,6 +83,13 @@ def plan_to_payload(plan: NetworkPlan) -> Dict[str, Any]:
     """Convert a compiled plan into JSON-compatible values."""
 
     return {
+        "general_profile": None if plan.general_profile is None else {
+            "profile_id": plan.general_profile.profile_id,
+            "allowed_addresses": None if plan.general_profile.allowed_addresses is None else [
+                str(address) for address in plan.general_profile.allowed_addresses
+            ],
+            "outage_active": plan.general_profile.outage_active,
+        },
         "protected_mac_addresses": list(plan.protected_mac_addresses),
         "unverified_device_ids": list(plan.unverified_device_ids),
         "mark_rules": [
@@ -318,6 +327,33 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
             )
         )
 
+    general_profile = None
+    if plan_data.get("general_profile") is not None:
+        data = _as_mapping(plan_data["general_profile"], "general_profile")
+        if set(data) != {"profile_id", "allowed_addresses", "outage_active"}:
+            raise PlanCodecError("the general profile fields are invalid")
+        profile_id = data["profile_id"]
+        if not isinstance(profile_id, str) or not _SAFE_QUOTA_ID_PATTERN.fullmatch(profile_id):
+            raise PlanCodecError("the general profile ID is invalid")
+        if type(data["outage_active"]) is not bool:
+            raise PlanCodecError("the general profile outage state is invalid")
+        raw_addresses = data["allowed_addresses"]
+        addresses = None
+        if raw_addresses is not None:
+            raw_addresses = _as_list(raw_addresses, "general profile destinations")
+            if len(raw_addresses) > 4096:
+                raise PlanCodecError("too many general profile destinations")
+            if any(not isinstance(value, str) for value in raw_addresses):
+                raise PlanCodecError("general profile destinations must be IPv4 strings")
+            try:
+                addresses = tuple(IPv4Address(value) for value in raw_addresses)
+            except (TypeError, ValueError) as error:
+                raise PlanCodecError("general profile destinations are invalid") from error
+        if mark_rules or service_marks:
+            raise PlanCodecError("a general profile cannot contain individual profile rules")
+        general_profile = GeneralProfileRule(profile_id, addresses, data["outage_active"])
+        service_marks[GENERAL_QUEUE_ID] = 1
+
     if len(queue_data) != (len(mark_data) + len(service_marks)) * 2:
         raise PlanCodecError("a plan must contain two queues per device or service")
 
@@ -460,6 +496,9 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
             raise
         raise PlanCodecError("network policy is invalid") from error
 
+    if general_profile is not None and (website_filters or blocked_device_addresses):
+        raise PlanCodecError("a general profile cannot contain individual profile filters")
+
     try:
         raw_macs = _as_list(plan_data.get("protected_mac_addresses", []), "protected_mac_addresses")
         if len(raw_macs) > MAX_UNAFFECTED_DEVICES:
@@ -487,4 +526,5 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
         blocked_device_addresses=blocked_device_addresses,
         service_quota_rules=tuple(service_quota_rules),
         service_assignment_rules=tuple(service_assignment_rules),
+        general_profile=general_profile,
     )

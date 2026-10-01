@@ -74,7 +74,7 @@ def select_mark(
 
     if plan is None:
         return 0, "reset"
-    if plan.protected_mac_addresses:
+    if plan.protected_mac_addresses or plan.general_profile is not None:
         if client_mac is None:
             raise ProxyError("current Wi-Fi identity could not be verified")
         if client_mac in plan.mac_policy.denylist or (
@@ -83,6 +83,10 @@ def select_mark(
             raise ProxyError("client is blocked by global access rules")
         if client_mac in plan.protected_mac_addresses:
             return 0, "unaffected"
+    if plan.general_profile is not None:
+        if plan.general_profile.outage_active:
+            raise ProxyError("the general profile is temporarily disconnected")
+        return 1, "general-profile"
     base_rule = next((rule for rule in plan.mark_rules if rule.ipv4_address == client_ip), None)
     if base_rule is None:
         raise ProxyError("client does not have an assigned device")
@@ -116,6 +120,11 @@ def destination_allowed(
         return False
     if client_mac in plan.protected_mac_addresses:
         return True
+    if plan.general_profile is not None:
+        general = plan.general_profile
+        return not general.outage_active and (
+            general.allowed_addresses is None or destination in general.allowed_addresses
+        )
     for website_filter in plan.website_filters:
         if website_filter.device_ip != client_ip:
             continue
@@ -213,7 +222,8 @@ class _ProxyHandler(socketserver.BaseRequestHandler):
             host, first_bytes = _read_connect_request(client)
             plan, generation = _read_active_plan(self.server.active_plan_path)
             client_mac = (
-                self.server.identify_mac(peer_ip) if plan and plan.protected_mac_addresses else None
+                self.server.identify_mac(peer_ip)
+                if plan and (plan.protected_mac_addresses or plan.general_profile is not None) else None
             )
             mark, assignment_id = select_mark(
                 plan, client_ip=client_ip, host=host, client_mac=client_mac

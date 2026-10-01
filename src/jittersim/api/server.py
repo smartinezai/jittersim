@@ -59,6 +59,7 @@ from jittersim.config.storage import (
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN, PlanError
 from jittersim.engine.eligibility import eligible_clients, station_snapshot
+from jittersim.engine.plan import GENERAL_QUEUE_ID
 from jittersim.engine.progression import progression_factor
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.schedules import active_schedule
@@ -81,6 +82,8 @@ RESPONSE_SEND_TIMEOUT_SECONDS = 5.0
 WRITE_PATHS = frozenset(
     (
         "/api/profiles",
+        "/api/general-profile",
+        "/api/general-profile/stop",
         "/api/devices",
         "/api/unaffected-devices",
         "/api/unaffected-devices/delete",
@@ -771,6 +774,23 @@ DASHBOARD_HTML = """<!doctype html>
       <button id="reset-button" class="danger" type="button">Reset network</button>
     </div>
     <p id="message" class="action-message" role="status" aria-live="polite">Ready.</p>
+  </section>
+  <section class="card" aria-labelledby="general-profile-title">
+    <h2 id="general-profile-title">General profile</h2>
+    <p>Apply a saved profile to every device on JitterSim Wi-Fi except those in Unaffected by profiles. New arrivals are included.</p>
+    <div class="fields">
+      <label>Saved profile
+        <select id="general-profile-select" aria-describedby="general-profile-note" disabled>
+          <option value="">Choose a saved profile</option>
+        </select>
+      </label>
+    </div>
+    <div class="action-buttons">
+      <button id="general-profile-apply" class="primary" type="button" disabled>Apply to all</button>
+      <button id="general-profile-stop" type="button" disabled>Stop general profile</button>
+    </div>
+    <p id="general-profile-status" role="status" aria-live="polite">Check the admin token to view the general profile.</p>
+    <p id="general-profile-note" class="form-note">The speed limit is shared only by affected devices. Protected devices bypass it completely. Stopping this profile resumes saved device rules. Panic turns all profiles off.</p>
   </section>
   <section class="card connected-card">
     <div class="section-heading">
@@ -1701,7 +1721,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     const privateDataPanelIds = [
       "profiles", "devices", "plan", "state", "policies",
-      "connected-devices", "unaffected-devices", "uplink-details"
+      "connected-devices", "unaffected-devices", "uplink-details", "general-profile-status"
     ];
 
     function setDashboardUnlocked(allowed) {
@@ -2054,6 +2074,8 @@ DASHBOARD_HTML = """<!doctype html>
     });
     window.setInterval(syncRememberedCredentials, 60000);
     let profiles = [];
+    let generalProfileState = null;
+    let networkActionBusy = false;
     let groups = [];
     let savedDevices = [];
     let connectedClients = [];
@@ -2176,9 +2198,10 @@ DASHBOARD_HTML = """<!doctype html>
       select.replaceChildren();
       const allOption = document.createElement("option");
       allOption.value = "all";
-      allOption.textContent = "All assigned devices";
+      const generalActive = generalProfileState && generalProfileState.active;
+      allOption.textContent = generalActive ? "All affected devices (shared)" : "All assigned devices";
       select.appendChild(allOption);
-      devices.forEach((device) => {
+      (generalActive ? [] : devices).forEach((device) => {
         const option = document.createElement("option");
         option.value = device.id;
         option.textContent = device.name + " (" + device.ipv4_address + ")";
@@ -2324,6 +2347,16 @@ DASHBOARD_HTML = """<!doctype html>
         };
       }
       const selectedDevice = element("traffic-device").value;
+      if (data.general_profile_limits && selectedDevice === "all") {
+        element("traffic-profile-status").textContent =
+          "Shared profile limit and traffic for affected devices only. Protected traffic is excluded.";
+        return {
+          isp_upload: trafficRateMbit(ispLimits.upload_kbit),
+          isp_download: trafficRateMbit(ispLimits.download_kbit),
+          profile_upload: trafficRateMbit(data.general_profile_limits.upload_kbit),
+          profile_download: trafficRateMbit(data.general_profile_limits.download_kbit)
+        };
+      }
       const deviceLimits = selectedDevice === "all" || !data.profile_limits_available
         ? null
         : (data.profile_limits || {})[selectedDevice];
@@ -2497,11 +2530,20 @@ DASHBOARD_HTML = """<!doctype html>
       notice.textContent = helperConfigured
         ? "Hardware mode is active. Network actions can update the live test network."
         : "Configuration-only mode is active. Changes are saved but live network actions are unavailable.";
-      element("apply-button").disabled = !helperConfigured;
-      element("reset-button").disabled = !helperConfigured;
-      element("panic-button").disabled = !helperConfigured;
+      element("apply-button").disabled = networkActionBusy || !helperConfigured;
+      element("reset-button").disabled = networkActionBusy || !helperConfigured;
+      element("panic-button").disabled = networkActionBusy || !helperConfigured;
       element("scan-observations").disabled = !helperConfigured;
       element("reset-wifi-name").disabled = !helperConfigured || wifiResetPending;
+      updateGeneralProfileControls();
+    }
+
+    function updateGeneralProfileControls() {
+      const select = element("general-profile-select");
+      select.disabled = networkActionBusy || !helperConfigured || profiles.length === 0;
+      element("general-profile-apply").disabled = select.disabled || !select.value;
+      element("general-profile-stop").disabled = networkActionBusy || !helperConfigured ||
+        !generalProfileState || !generalProfileState.profile;
     }
 
     function renderRuntimeSummary(state) {
@@ -2604,6 +2646,8 @@ DASHBOARD_HTML = """<!doctype html>
         const assignmentInfo = document.createElement("p");
         assignmentInfo.className = "connected-meta";
         assignmentInfo.textContent = device.unaffected ? "Unaffected by all profiles and quotas" :
+          device.general_profile_name ? "General profile: " + device.general_profile_name +
+            " · Shared speed limit · Saved device rules paused" :
           "Base profile: " + (device.assigned_profile_id || "Unassigned") +
           (device.group_name ? " · Group: " + device.group_name + (device.group_profile_id ? " (override: " + device.group_profile_id + ")" : "") : "");
         details.append(address, metadata, deviceType, assignmentInfo);
@@ -3708,14 +3752,16 @@ DASHBOARD_HTML = """<!doctype html>
         "service-assignment-profile",
         "time-quota-profile",
         "group-profile",
-        "group-data-limit-profile"
+        "group-data-limit-profile",
+        "general-profile-select"
       ].forEach((selectId) => {
         const profileSelect = element(selectId);
+        const previousSelection = profileSelect.value;
         profileSelect.replaceChildren();
-        if (selectId === "group-profile") {
+        if (selectId === "group-profile" || selectId === "general-profile-select") {
           const option = document.createElement("option");
           option.value = "";
-          option.textContent = "Use each device profile";
+          option.textContent = selectId === "group-profile" ? "Use each device profile" : "Choose a saved profile";
           profileSelect.appendChild(option);
         }
         profiles.forEach((profile) => {
@@ -3724,7 +3770,30 @@ DASHBOARD_HTML = """<!doctype html>
           option.textContent = profile.name + " (" + profile.id + ")";
           profileSelect.appendChild(option);
         });
+        if (selectId === "general-profile-select") {
+          profileSelect.value = profiles.some((profile) => profile.id === previousSelection)
+            ? previousSelection : "";
+        }
       });
+      updateGeneralProfileControls();
+    }
+
+    async function loadGeneralProfile() {
+      const data = await request("/api/general-profile", "GET");
+      const previousId = generalProfileState && generalProfileState.profile && generalProfileState.profile.id;
+      generalProfileState = data;
+      if (data.profile && previousId !== data.profile.id) {
+        element("general-profile-select").value = data.profile.id;
+      }
+      const status = element("general-profile-status");
+      status.textContent = !data.profile
+        ? profiles.length ? "No general profile. Saved device rules apply when profiles are on." : "Create a saved profile below to use this control."
+        : data.active ? "Active: " + data.profile.name + ". Applies to every unprotected device."
+        : data.state.observed_state === "reset" ? "Paused: " + data.profile.name + ". Choose Apply to all or Apply current configuration to resume."
+        : data.state.observed_state === "error" ? "Saved: " + data.profile.name + ". Network update failed. Retry Apply to all."
+        : "Saved: " + data.profile.name + ". Apply to all to start.";
+      updateTrafficDeviceOptions(savedDevices);
+      updateGeneralProfileControls();
     }
 
     async function loadDevicesForSchedule() {
@@ -4172,6 +4241,7 @@ DASHBOARD_HTML = """<!doctype html>
         loadPrivateDataPanel("devices", () => show("/api/devices", "devices", "devices")),
         loadPrivateDataPanel("plan", () => show("/api/plan", "plan", "plan")),
         loadPrivateDataPanel("state", loadState),
+        loadPrivateDataPanel("general-profile-status", loadGeneralProfile),
         loadDevicesForSchedule(),
         loadGroups(),
         loadSchedules(),
@@ -4189,6 +4259,7 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     function setActionBusy(busy, path) {
+      networkActionBusy = busy;
       const applyButton = element("apply-button");
       const resetButton = element("reset-button");
       applyButton.disabled = busy || !helperConfigured;
@@ -4202,9 +4273,14 @@ DASHBOARD_HTML = """<!doctype html>
       panicButton.disabled = busy || !helperConfigured;
       panicButton.setAttribute("aria-busy", String(panicking));
       element("panic-state").textContent = panicking ? "Working..." : "Turn all profiles off";
+      updateGeneralProfileControls();
+      ["general-profile-apply", "general-profile-stop"].forEach((id) => {
+        element(id).setAttribute("aria-busy", String(busy && path.startsWith("/api/general-profile")));
+      });
     }
 
     async function runAction(path, successMessage, workingMessage) {
+      if (networkActionBusy) return;
       if (!helperConfigured) {
         showMessage("Network actions are unavailable in configuration-only mode.", "error");
         return;
@@ -4237,6 +4313,30 @@ DASHBOARD_HTML = """<!doctype html>
         "Turning all profiles off..."
       );
     });
+
+    async function runGeneralProfileAction(stop) {
+      if (networkActionBusy || !helperConfigured) return;
+      const profileId = element("general-profile-select").value;
+      if (!stop && !profileId) return;
+      const path = stop ? "/api/general-profile/stop" : "/api/general-profile";
+      setActionBusy(true, path);
+      showMessage(stop ? "Stopping the general profile..." : "Applying the profile to all unprotected devices...", "working");
+      try {
+        await request(path, "POST", stop ? {} : {profile_id: profileId});
+        refreshAfterSuccess(stop
+          ? "General profile stopped. Saved device rules resumed."
+          : "General profile applied. Protected devices remain unaffected.");
+      } catch (error) {
+        showMessage(error.message, "error");
+      } finally {
+        await loadPrivateDataPanel("general-profile-status", loadGeneralProfile);
+        setActionBusy(false, path);
+      }
+    }
+
+    element("general-profile-select").addEventListener("change", updateGeneralProfileControls);
+    element("general-profile-apply").addEventListener("click", () => runGeneralProfileAction(false));
+    element("general-profile-stop").addEventListener("click", () => runGeneralProfileAction(true));
 
     element("scan-observations").addEventListener("click", scanObservations);
 
@@ -4940,7 +5040,12 @@ DASHBOARD_HTML = """<!doctype html>
     element("random-website-days").addEventListener("change", loadRandomWebsiteAnalytics);
     element("random-website-refresh").addEventListener("click", loadRandomWebsiteAnalytics);
 
-    window.setInterval(() => { if (adminTokenVerified) loadConnectedDevices(); }, 5000);
+    window.setInterval(() => {
+      if (adminTokenVerified && !networkActionBusy) {
+        loadConnectedDevices();
+        loadPrivateDataPanel("general-profile-status", loadGeneralProfile);
+      }
+    }, 5000);
     window.setInterval(() => { if (adminTokenVerified) loadTimers(); }, 5000);
     window.setInterval(() => { if (adminTokenVerified) loadProgressions(); }, 5000);
     window.setInterval(() => { if (adminTokenVerified) loadQuotas(); }, 5000);
@@ -5412,6 +5517,8 @@ class ControlServer(HTTPServer):
         if path == "/api/profiles":
             profiles = [_profile_payload(profile) for profile in self.repository.list_profiles()]
             return HTTPStatus.OK, "application/json", _json_bytes({"profiles": profiles})
+        if path == "/api/general-profile":
+            return HTTPStatus.OK, "application/json", _json_bytes(self._general_profile_status())
         if path == "/api/devices":
             devices = [_device_payload(device) for device in self.repository.list_devices()]
             return HTTPStatus.OK, "application/json", _json_bytes({"devices": devices})
@@ -5600,6 +5707,7 @@ class ControlServer(HTTPServer):
             }
             labels_by_mac = self.repository.list_connected_device_labels()
             protected = {item.mac_address for item in self.repository.list_unaffected_devices()}
+            general_status = self._general_profile_status()
             groups_by_device = {
                 device_id: group
                 for group in self.repository.list_device_groups()
@@ -5619,6 +5727,8 @@ class ControlServer(HTTPServer):
                 client["group_id"] = group.id if group else None
                 client["group_name"] = group.name if group else None
                 client["group_profile_id"] = group.profile_id if group else None
+                if general_status["active"] and not client["unaffected"]:
+                    client["general_profile_name"] = general_status["profile"]["name"]
             return (
                 HTTPStatus.OK,
                 "application/json",
@@ -5783,6 +5893,10 @@ class ControlServer(HTTPServer):
                     "isp_limits": isp_limits,
                     "profile_limits_available": profile_limits is not None,
                     "profile_limits": profile_limits or {},
+                    "general_profile_limits": (
+                        (profile_limits or {}).get(GENERAL_QUEUE_ID)
+                        if self.repository.get_general_profile() is not None else None
+                    ),
                 }
             )
         if path == "/api/diagnostics":
@@ -5881,6 +5995,9 @@ class ControlServer(HTTPServer):
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {"device": _device_payload(device)}
             )
+
+        if path in ("/api/general-profile", "/api/general-profile/stop"):
+            return self._change_general_profile(payload, stop=path.endswith("/stop"))
 
         if path in ("/api/unaffected-devices", "/api/unaffected-devices/delete"):
             return self._change_unaffected_device(payload, remove=path.endswith("/delete"))
@@ -6628,6 +6745,9 @@ class ControlServer(HTTPServer):
         )
 
     def _validate_saved_plan(self) -> None:
+        if self.repository.get_general_profile() is not None:
+            compile_stored_plan(repository=self.repository)
+            return
         clients = eligible_clients(self.repository)
         eligible_ids = {device.id for device in clients.devices}
         rules = len(eligible_ids) + sum(
@@ -6681,6 +6801,60 @@ class ControlServer(HTTPServer):
                 + response.get("error", "")
             )
         return status, content_type, _json_bytes(response)
+
+    def _general_profile_status(self) -> dict:
+        operation = self.scheduler.control_operation() if self.scheduler else nullcontext()
+        with operation:
+            return self._general_profile_status_locked()
+
+    def _general_profile_status_locked(self) -> dict:
+        profile = self.repository.get_general_profile()
+        state = self.repository.get_runtime_state()
+        active = profile is not None and state.observed_state == "applied"
+        if active and self.scheduler is not None:
+            limits = self.scheduler.applied_queue_bandwidth_limits()
+            active = limits is not None and GENERAL_QUEUE_ID in limits
+        return {
+            "profile": _profile_payload(profile) if profile else None,
+            "active": active,
+            "state": _runtime_state_payload(state),
+        }
+
+    def _change_general_profile(self, payload: dict, *, stop: bool):
+        if self.helper_client is None:
+            return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                {"error": "Connect the Pi networking helper to apply a general profile"}
+            )
+        operation = self.scheduler.control_operation() if self.scheduler else nullcontext()
+        with operation:
+            try:
+                if set(payload) != (set() if stop else {"profile_id"}):
+                    raise ValueError("Choose one saved profile without device or schedule settings")
+                if not stop:
+                    if not isinstance(payload["profile_id"], str):
+                        raise ValueError("Choose an existing saved profile")
+                    self.helper_client.check_general_profile_support()
+                elif self.repository.get_general_profile() is None:
+                    return HTTPStatus.OK, "application/json", _json_bytes(
+                        {"general_profile": self._general_profile_status()}
+                    )
+                if self.scheduler:
+                    self.scheduler.sample_before_control_change(repository=self.repository)
+                with self.repository.transaction():
+                    self.repository.save_general_profile(None if stop else payload["profile_id"])
+                    self._validate_saved_plan()
+            except HelperClientError as error:
+                return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                    {"error": str(error)}
+                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
+            status, content_type, body = self._apply_configuration_locked(sample_usage=False)
+            response = json.loads(body)
+            response["general_profile"] = self._general_profile_status()
+            if status != HTTPStatus.OK:
+                response["error"] = "Selection saved but the network update failed. " + response["error"]
+            return status, content_type, _json_bytes(response)
 
     def _change_unaffected_device(self, payload: dict, *, remove: bool):
         operation = self.scheduler.control_operation() if self.scheduler else nullcontext()
@@ -6763,6 +6937,12 @@ class ControlServer(HTTPServer):
             )
 
     def _base_profile_feedback(self, device: Device) -> str:
+        general = self.repository.get_general_profile()
+        if general is not None:
+            return (
+                f"Base profile {device.profile_id} saved. General profile {general.name} "
+                "takes priority when profiles are active. Stop it to resume saved device rules."
+            )
         now = int(time.time())
         group = next(
             (item for item in self.repository.list_device_groups() if device.id in item.device_ids),

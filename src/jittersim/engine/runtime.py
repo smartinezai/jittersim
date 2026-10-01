@@ -29,7 +29,8 @@ from jittersim.networking.helper import HelperClient, HelperClientError
 from .codec import plan_to_payload
 from .compiler import PlanError, compile_plan
 from .eligibility import eligible_clients, station_snapshot
-from .plan import ServiceAssignmentRule, ServiceQuotaRule
+from .general import compile_general_plan
+from .plan import GENERAL_QUEUE_ID, NetworkPlan, ServiceAssignmentRule, ServiceQuotaRule
 from .progression import interpolate_profile, progression_factor
 from .randomizer import (
     outage_duration_seconds,
@@ -298,6 +299,9 @@ class RuntimeScheduler:
         random_website_outcomes: Optional[List[RandomWebsiteOutcome]] = None,
         connected_snapshot: Optional[dict] = None,
     ):
+        general_profile = repository.get_general_profile()
+        if general_profile is not None:
+            return self._build_general_plan(repository=repository, profile=general_profile, now=now)
         snapshot = connected_snapshot
         if snapshot is None and repository.list_unaffected_devices():
             snapshot = station_snapshot(self._helper_client)
@@ -559,6 +563,50 @@ class RuntimeScheduler:
             service_assignment_rules=service_assignment_rules,
         )
 
+    def _build_general_plan(
+        self, *, repository: ConfigRepository, profile: Profile, now: float
+    ) -> NetworkPlan:
+        key = "@general"
+        roll = self._rolls.get(key)
+        if roll is None or roll.source_configuration != profile:
+            roll = _DeviceRollState(
+                profile_id=profile.id,
+                source_configuration=profile,
+                runtime_profile=profile,
+                roll_number=0,
+                next_roll_at=now + max(1, profile.reroll_interval_seconds),
+                next_outage_check_at=now + max(
+                    1, profile.outage_interval_seconds or profile.reroll_interval_seconds
+                ),
+                outage_until=0,
+            )
+        self._rolls = {key: roll}
+        if profile.reroll_interval_seconds and now >= roll.next_roll_at:
+            generator = seeded_generator(
+                profile=profile, device_id=GENERAL_QUEUE_ID, roll_number=roll.roll_number
+            )
+            roll.runtime_profile = reroll_profile(profile=profile, generator=generator)
+            roll.roll_number += 1
+            roll.next_roll_at = now + max(
+                1, reroll_interval_seconds(profile=profile, generator=generator)
+            )
+        outage_interval = profile.outage_interval_seconds or profile.reroll_interval_seconds
+        if outage_interval and now >= roll.next_outage_check_at:
+            generator = seeded_generator(
+                profile=profile, device_id=GENERAL_QUEUE_ID, roll_number=100_000 + roll.roll_number
+            )
+            if outage_is_selected(profile=profile, generator=generator):
+                duration = outage_duration_seconds(profile=profile, generator=generator)
+                roll.outage_until = now + duration
+            roll.next_outage_check_at = now + max(
+                1, outage_interval_seconds(profile=profile, generator=generator)
+            )
+        return compile_general_plan(
+            repository=repository,
+            profile=roll.runtime_profile,
+            outage_active=roll.outage_until > now,
+        )
+
     def _build_service_quota_rules(
         self,
         *,
@@ -639,7 +687,7 @@ class RuntimeScheduler:
     def _sample_traffic_if_needed(self, *, repository: ConfigRepository, now: float) -> None:
         """Persist a bounded DNS sample when a traffic progression is active."""
 
-        if now - self._last_traffic_sample_at < 5:
+        if repository.get_general_profile() is not None or now - self._last_traffic_sample_at < 5:
             return
         progressions = repository.list_active_progressions(now=int(now))
         if not any(progression.mode == "traffic" for progression in progressions):
@@ -670,6 +718,8 @@ class RuntimeScheduler:
     def counter_device_ids(self, *, repository: ConfigRepository) -> set:
         """Use the installed rule membership when adding shared counters."""
 
+        if repository.get_general_profile() is not None:
+            return set()
         protected = {item.mac_address for item in repository.list_unaffected_devices()}
         allowed = {
             device.id for device in repository.list_devices() if device.mac_address not in protected
@@ -735,7 +785,7 @@ class RuntimeScheduler:
             device_counters = {
                 key: value
                 for key, value in counters.get("devices", {}).items()
-                if key not in excluded
+                if key in eligible_ids
             }
             excluded_services = {
                 quota.id for quota in service_quotas if quota.device_id in excluded

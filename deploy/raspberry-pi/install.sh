@@ -169,7 +169,6 @@ systemctl enable jittersim-control-firewall.service
 systemctl restart jittersim-control-firewall.service
 systemctl enable jittersim-helper.service jittersim-dashboard.service jittersim-browser-proxy.service
 systemctl restart jittersim-helper.service
-systemctl restart jittersim-dashboard.service
 if [ "$ap_active_connection" = jittersim-ap ]; then
     if [ "$ap_settings_before" != "$ap_settings_after" ]; then
         echo "AP settings were saved but the active Wi-Fi was not restarted." >&2
@@ -179,6 +178,7 @@ else
     nmcli connection up jittersim-ap
 fi
 systemctl restart jittersim-browser-proxy.service
+systemctl restart jittersim-dashboard.service
 # Remove obsolete DNS access rules even when an older database has no saved action.
 "$INSTALL_DIR/.venv/bin/python" -m jittersim.networking.legacy
 

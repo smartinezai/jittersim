@@ -70,6 +70,18 @@ class ServiceAssignmentRule:
     download_impairment: Impairment
 
 
+GENERAL_QUEUE_ID = "general-profile"
+
+
+@dataclass(frozen=True)
+class GeneralProfileRule:
+    """One shared profile for unprotected test-network traffic."""
+
+    profile_id: str
+    allowed_addresses: Optional[Tuple[IPv4Address, ...]] = None
+    outage_active: bool = False
+
+
 @dataclass(frozen=True)
 class NetworkPlan:
     """The complete device-specific plan without executable commands."""
@@ -85,3 +97,4 @@ class NetworkPlan:
     blocked_device_addresses: Tuple[IPv4Address, ...] = ()
     service_quota_rules: Tuple[ServiceQuotaRule, ...] = ()
     service_assignment_rules: Tuple[ServiceAssignmentRule, ...] = ()
+    general_profile: Optional[GeneralProfileRule] = None
