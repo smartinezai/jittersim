@@ -387,7 +387,7 @@ DASHBOARD_HTML = """<!doctype html>
     .impact-direction { color: #a8b8ce; font-size: 0.8rem; }
     .impact-chip { margin-left: auto; padding: 0.1rem 0.6rem; border: 1px solid #46627f; border-radius: 999px; background: #142338; color: #c6dbf4; font-size: 0.75rem; font-weight: 700; white-space: nowrap; }
     .impact-chip.affected { border-color: #a77b31; background: #3b2a12; color: #f5ca78; }
-    .impact-chip.idle, .impact-chip.too-few, .impact-chip.no-effect, .impact-chip.collecting { border-color: #3a4656; background: #111b29; color: #b3c1d3; }
+    .impact-chip.idle, .impact-chip.too-few, .impact-chip.clean, .impact-chip.unmeasured, .impact-chip.collecting { border-color: #3a4656; background: #111b29; color: #b3c1d3; }
     .impact-lines { display: grid; gap: 0.15rem; margin: 0.45rem 0 0; padding: 0; list-style: none; color: #c4d5e8; font-size: 0.85rem; }
     .impact-protected { margin: 0.75rem 0 0; color: #9fb0c4; font-size: 0.8rem; overflow-wrap: anywhere; }
     .saved-profile-row {
@@ -2769,7 +2769,10 @@ DASHBOARD_HTML = """<!doctype html>
     const IMPACT_WINDOW_SECONDS = 60;
     const IMPACT_MIN_PACKETS = 50;
     const IMPACT_CAP_RATIO = 0.9;
-    const IMPACT_MAX_SAMPLES = 12;
+    const IMPACT_MAX_SAMPLES = 13;
+    const IMPACT_MIN_EXPECTED_DROPS = 3;
+    const IMPACT_MIN_QUEUE_WAIT_MS = 10;
+    const IMPACT_NOT_MEASURED = " · configured, not measured";
 
     function impactSample(entry, nowSeconds) {
       return {
@@ -2782,10 +2785,14 @@ DASHBOARD_HTML = """<!doctype html>
       };
     }
 
+    // A queue is a new one when the helper applied another plan or the counters went down
+    // or the clock stepped back or the queue now belongs to another device or setting.
     function impactQueueReplaced(previous, entry, sample) {
       const last = previous.samples[previous.samples.length - 1];
-      return !last || sample.packets < last.packets || sample.drops < last.drops ||
-        sample.bytes < last.bytes || previous.latest.device_id !== entry.device_id ||
+      return !last || sample.t <= last.t || sample.packets < last.packets ||
+        sample.drops < last.drops || sample.bytes < last.bytes ||
+        previous.latest.generation !== entry.generation ||
+        previous.latest.device_id !== entry.device_id ||
         previous.latest.direction !== entry.direction ||
         JSON.stringify(previous.latest.impairment) !== JSON.stringify(entry.impairment);
     }
@@ -2813,6 +2820,43 @@ DASHBOARD_HTML = """<!doctype html>
       return kbit >= 1000 ? (Math.round(kbit / 10) / 100) + " Mbit/s" : kbit + " kbit/s";
     }
 
+    // One figure per pair of neighbouring samples so a short burst is never averaged away.
+    function impactIntervals(used) {
+      const intervals = [];
+      for (let index = 1; index < used.length; index += 1) {
+        const before = used[index - 1];
+        const after = used[index];
+        const seconds = after.t - before.t;
+        if (seconds <= 0) continue;
+        intervals.push({
+          offered: after.packets - before.packets + after.drops - before.drops,
+          kbit: (after.bytes - before.bytes) * 8 / 1000 / seconds
+        });
+      }
+      return intervals;
+    }
+
+    function impactVerdict(impairment, offered, drops, capReached) {
+      if (drops > 0 || capReached) return "affected";
+      if (offered === 0) return "idle";
+      const hasLoss = impairment.loss_percent > 0;
+      if (!hasLoss && !impairment.bandwidth_kbit) return "unmeasured";
+      if (offered < IMPACT_MIN_PACKETS ||
+          (hasLoss && offered * impairment.loss_percent / 100 < IMPACT_MIN_EXPECTED_DROPS)) {
+        return "too-few";
+      }
+      return "clean";
+    }
+
+    function impactLossLine(impairment, drops, offered, lossPercent) {
+      const head = impairment.loss_percent > 0
+        ? "Loss: set " + impairment.loss_percent + "%"
+        : impairment.bandwidth_kbit ? "Dropped (queue full at the speed cap)" : "Dropped (queue full)";
+      return head + " · actual " + lossPercent + "% (" + drops + " of " + offered +
+        " packets dropped)" + (impairment.duplicate_percent > 0
+          ? " (may read low because duplicated packets are counted)" : "");
+    }
+
     function impactRow(key, entry) {
       const latest = entry.latest;
       const impairment = latest.impairment;
@@ -2823,9 +2867,11 @@ DASHBOARD_HTML = """<!doctype html>
         configured: impairment,
         windowSeconds: 0,
         offered: 0,
+        packets: 0,
         drops: 0,
         lossPercent: 0,
         rateKbit: 0,
+        peakKbit: 0,
         capReached: false,
         queueWaitMs: null,
         verdict: "collecting",
@@ -2839,38 +2885,47 @@ DASHBOARD_HTML = """<!doctype html>
       const packets = newest.packets - first.packets;
       const drops = newest.drops - first.drops;
       const offered = packets + drops;
-      const rateKbit = Math.round((newest.bytes - first.bytes) * 8 / 1000 / seconds);
+      const intervals = impactIntervals(used);
       const limit = impairment.bandwidth_kbit;
-      const capReached = !!limit && offered > 0 && rateKbit >= IMPACT_CAP_RATIO * limit;
+      const capReached = !!limit && intervals.some((interval) =>
+        interval.offered > 0 && Math.round(interval.kbit) >= IMPACT_CAP_RATIO * limit);
       const noDelay = !impairment.delay_ms && !impairment.jitter_ms;
       row.windowSeconds = seconds;
       row.offered = offered;
+      row.packets = packets;
       row.drops = drops;
       row.lossPercent = offered ? Math.round(drops * 1000 / offered) / 10 : 0;
-      row.rateKbit = rateKbit;
+      row.rateKbit = Math.round((newest.bytes - first.bytes) * 8 / 1000 / seconds);
+      row.peakKbit = Math.round(Math.max(0, ...intervals.map((interval) => interval.kbit)));
       row.capReached = capReached;
       row.queueWaitMs = limit && noDelay && capReached
         ? Math.round(newest.backlog_bytes * 8 / limit) : null;
-      row.verdict = drops > 0 || capReached ? "affected"
-        : offered === 0 ? "idle"
-        : offered < IMPACT_MIN_PACKETS ? "too-few" : "no-effect";
+      row.verdict = impactVerdict(impairment, offered, drops, capReached);
       row.lines = [];
+      if (row.verdict === "unmeasured") {
+        row.lines.push(packets + (packets === 1 ? " packet" : " packets") + " passed in the last minute");
+      }
       if (impairment.loss_percent > 0 || drops > 0) {
-        row.lines.push("Loss: set " + impairment.loss_percent + "% · actual " + row.lossPercent +
-          "% (" + drops + " of " + offered + " packets dropped)");
+        row.lines.push(impactLossLine(impairment, drops, offered, row.lossPercent));
       }
       if (limit) {
         row.lines.push("Speed: set " + formatImpactRate(limit) + " · using " +
-          formatImpactRate(rateKbit) + (capReached ? " · cap reached" : " · below the cap"));
+          formatImpactRate(row.rateKbit) + " · peak " + formatImpactRate(row.peakKbit) +
+          (capReached ? " · cap reached" : " · below the cap"));
       }
-      if (row.queueWaitMs !== null) {
-        row.lines.push("Queue wait: about " + row.queueWaitMs + " ms");
+      if (row.queueWaitMs !== null && row.queueWaitMs >= IMPACT_MIN_QUEUE_WAIT_MS) {
+        row.lines.push("Queue wait now: about " + row.queueWaitMs + " ms");
       }
       if (impairment.delay_ms > 0 || impairment.jitter_ms > 0) {
         row.lines.push("Delay: set " + impairment.delay_ms + " ms" +
-          (impairment.jitter_ms > 0 ? " ± " + impairment.jitter_ms : "") +
-          " · configured, not measured");
+          (impairment.jitter_ms > 0 ? " ± " + impairment.jitter_ms : "") + IMPACT_NOT_MEASURED);
       }
+      [["reorder_percent", "Reorder"], ["duplicate_percent", "Duplicate"],
+       ["corrupt_percent", "Corrupt"]].forEach((item) => {
+        if (impairment[item[0]] > 0) {
+          row.lines.push(item[1] + ": set " + impairment[item[0]] + "%" + IMPACT_NOT_MEASURED);
+        }
+      });
       return row;
     }
 
@@ -2885,10 +2940,11 @@ DASHBOARD_HTML = """<!doctype html>
 
     const IMPACT_POLL_INTERVAL_MS = 5000;
     const IMPACT_VERDICT_LABELS = {
-      affected: "Affected now",
-      idle: "Set but no traffic yet",
+      affected: "Affected in the last minute",
+      idle: "No traffic in the last minute",
       "too-few": "Too few packets to judge",
-      "no-effect": "No effect seen",
+      clean: "No drops or cap hit seen",
+      unmeasured: "Effect not measured here",
       collecting: "Collecting…"
     };
     let impactHistory = {};

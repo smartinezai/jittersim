@@ -168,7 +168,7 @@ def test_the_affected_chip_uses_the_amber_pair_and_the_others_stay_muted():
     rules = impact_rules()
     assert rules[".impact-chip.affected"]["color"] == "#f5ca78"
     assert "#a77b31" in rules[".impact-chip.affected"]["border-color"]
-    for muted in (".impact-chip.idle", ".impact-chip.too-few", ".impact-chip.no-effect"):
+    for muted in (".impact-chip.idle", ".impact-chip.too-few", ".impact-chip.clean", ".impact-chip.unmeasured"):
         assert rules.get(muted, {}).get("color") != "#f5ca78", muted
 
 
@@ -252,7 +252,7 @@ def test_it_collects_first_and_then_shows_the_loss_and_the_verdict():
         """
     )
     assert result["first"] == ["Lab phoneUploadCollecting…"]
-    assert result["second"][0].startswith("Lab phoneUploadAffected now")
+    assert result["second"][0].startswith("Lab phoneUploadAffected in the last minute")
     assert "Loss: set 10% · actual 10% (9 of 90 packets dropped)" in result["second"][0]
     assert result["firstState"] == result["secondState"] == "Live"
     assert result["note"] is False
@@ -278,10 +278,10 @@ def test_each_verdict_has_a_plain_label():
         """
     )
     assert result == [
-        "Set but no traffic yet",
+        "No traffic in the last minute",
         "Too few packets to judge",
-        "No effect seen",
-        "Affected now",
+        "No drops or cap hit seen",
+        "Affected in the last minute",
     ]
 
 

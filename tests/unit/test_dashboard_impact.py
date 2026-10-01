@@ -16,7 +16,7 @@ function entry(o) {
   o = o || {};
   const base = {device_id: 'lab', direction: 'upload', interface: 'eth0', handle: '11:',
     kind: 'netem', name: 'Lab', packets: 0, bytes: 0, drops: 0, overlimits: 0, requeues: 0,
-    backlog_bytes: 0, qlen: 0};
+    backlog_bytes: 0, qlen: 0, generation: 'a1b2c3d4-1'};
   const impairment = Object.assign({delay_ms: 0, jitter_ms: 0, loss_percent: 0,
     bandwidth_kbit: null, reorder_percent: 0, duplicate_percent: 0, corrupt_percent: 0},
     o.impairment || {});
@@ -55,19 +55,52 @@ def kbit_bytes(kbit, seconds=60):
     return int(kbit * 1000 / 8 * seconds)
 
 
+def js(value):
+    return json.dumps(value)
+
+
+def two(impairment, second, first=None):
+    """One row from two samples 10 seconds apart. `second` holds the counters of the last one."""
+
+    return run(
+        f"rowsOf([[0, {{impairment: {js(impairment)}, {first or 'packets: 0'}}}],"
+        f" [10, {{impairment: {js(impairment)}, {second}}}]])"
+    )[0]
+
+
+def burst(kbits, impairment, step=5, packets=100, backlog=0):
+    """One row from samples `step` seconds apart. Each number is the speed of one interval."""
+
+    samples = [f"[0, {{impairment: {js(impairment)}, packets: 0, bytes: 0}}]"]
+    time_now = bytes_sent = packets_sent = 0
+    for kbit in kbits:
+        time_now += step
+        bytes_sent += kbit_bytes(kbit, step)
+        packets_sent += packets if kbit else 0
+        samples.append(
+            f"[{time_now}, {{impairment: {js(impairment)}, packets: {packets_sent},"
+            f" bytes: {bytes_sent}, backlog_bytes: {backlog}}}]"
+        )
+    return run("rowsOf([" + ",".join(samples) + "])")[0]
+
+
+CAP_2000 = {"bandwidth_kbit": 2000}
+
+
 @needs_node
 def test_constants_match_the_plan():
-    assert run("[IMPACT_WINDOW_SECONDS, IMPACT_MIN_PACKETS, IMPACT_CAP_RATIO, IMPACT_MAX_SAMPLES]") == [
-        60, 50, 0.9, 12,
-    ]
+    assert run(
+        "[IMPACT_WINDOW_SECONDS, IMPACT_MIN_PACKETS, IMPACT_CAP_RATIO, IMPACT_MAX_SAMPLES,"
+        " IMPACT_MIN_EXPECTED_DROPS, IMPACT_MIN_QUEUE_WAIT_MS]"
+    ) == [60, 50, 0.9, 13, 3, 10]
 
 
 @needs_node
 def test_the_specified_loss_example():
-    (row,) = run(
+    row = run(
         "rowsOf([[0, {impairment: {loss_percent: 5}}],"
         " [60, {impairment: {loss_percent: 5}, packets: 629, drops: 31}]])"
-    )
+    )[0]
     assert row["lines"] == ["Loss: set 5% · actual 4.7% (31 of 660 packets dropped)"]
     assert (row["offered"], row["drops"], row["lossPercent"]) == (660, 31, 4.7)
     assert row["verdict"] == "affected"
@@ -77,185 +110,301 @@ def test_the_specified_loss_example():
 
 @needs_node
 def test_a_whole_percent_prints_without_a_decimal_and_no_traffic_gives_zero():
-    (row,) = run(
-        "rowsOf([[0, {impairment: {loss_percent: 20}}],"
-        " [10, {impairment: {loss_percent: 20}, packets: 80, drops: 20}]])"
-    )
+    row = two({"loss_percent": 20}, "packets: 80, drops: 20")
     assert row["lines"] == ["Loss: set 20% · actual 20% (20 of 100 packets dropped)"]
-    (idle,) = run(
-        "rowsOf([[0, {impairment: {loss_percent: 20}}], [10, {impairment: {loss_percent: 20}}]])"
-    )
+    idle = two({"loss_percent": 20}, "packets: 0")
     assert idle["lossPercent"] == 0
     assert idle["verdict"] == "idle"
 
 
 @needs_node
-def test_loss_line_only_appears_when_loss_is_set_or_packets_dropped():
-    (quiet,) = run(
-        "rowsOf([[0, {impairment: {delay_ms: 50}}],"
-        " [10, {impairment: {delay_ms: 50}, packets: 100}]])"
+def test_a_queue_that_drops_without_a_loss_setting_says_why():
+    capped = two(CAP_2000, "packets: 90, drops: 10")
+    assert capped["lines"][0] == (
+        "Dropped (queue full at the speed cap) · actual 10% (10 of 100 packets dropped)"
     )
-    assert not any(line.startswith("Loss") for line in quiet["lines"])
-    (overflow,) = run(
-        "rowsOf([[0, {impairment: {bandwidth_kbit: 1000}}],"
-        " [10, {impairment: {bandwidth_kbit: 1000}, packets: 90, drops: 10}]])"
-    )
-    assert overflow["lines"][0] == "Loss: set 0% · actual 10% (10 of 100 packets dropped)"
+    assert not any(line.startswith("Loss") for line in capped["lines"])
+    delayed = two({"delay_ms": 50}, "packets: 90, drops: 10")
+    assert delayed["lines"][0] == "Dropped (queue full) · actual 10% (10 of 100 packets dropped)"
+    assert delayed["verdict"] == "affected"
+    with_loss = two({"loss_percent": 10, "bandwidth_kbit": 2000}, "packets: 90, drops: 10")
+    assert with_loss["lines"][0].startswith("Loss: set 10% · actual 10%")
+
+
+@needs_node
+def test_duplicates_qualify_the_loss_percentage():
+    note = " (may read low because duplicated packets are counted)"
+    row = two({"loss_percent": 10, "duplicate_percent": 5}, "packets: 90, drops: 10")
+    assert row["lines"][0] == "Loss: set 10% · actual 10% (10 of 100 packets dropped)" + note
+    plain = two({"loss_percent": 10}, "packets: 90, drops: 10")
+    assert note not in plain["lines"][0]
+    dropped = two({"bandwidth_kbit": 2000, "duplicate_percent": 5}, "packets: 90, drops: 10")
+    assert dropped["lines"][0].endswith(note)
 
 
 @needs_node
 @pytest.mark.parametrize(
     "bytes_sent, reached",
-    [(kbit_bytes(900), True), (kbit_bytes(901), True), (6_743_750, False), (kbit_bytes(500), False)],
+    [(kbit_bytes(1800), True), (kbit_bytes(1802), True), (kbit_bytes(1798), False)],
 )
 def test_cap_is_reached_at_ninety_percent_of_the_limit(bytes_sent, reached):
-    (row,) = run(
-        "rowsOf([[0, {impairment: {bandwidth_kbit: 1000}}],"
-        f" [60, {{impairment: {{bandwidth_kbit: 1000}}, packets: 100, bytes: {bytes_sent}}}]])"
-    )
+    row = run(
+        "rowsOf([[0, {impairment: {bandwidth_kbit: 2000}}],"
+        f" [60, {{impairment: {{bandwidth_kbit: 2000}}, packets: 100, bytes: {bytes_sent}}}]])"
+    )[0]
     assert row["capReached"] is reached
-    assert row["verdict"] == ("affected" if reached else "no-effect")
+    assert row["verdict"] == ("affected" if reached else "clean")
     assert ("cap reached" in row["lines"][0]) is reached
     assert ("below the cap" in row["lines"][0]) is not reached
 
 
 @needs_node
-def test_speed_line_formats_both_units():
-    (row,) = run(
+def test_a_burst_then_idle_still_reads_as_the_cap_reached():
+    """2000 kbit/s for 20 seconds and then nothing inside a 55 second span."""
+
+    row = burst([2000] * 4 + [0] * 7, CAP_2000)
+    assert row["windowSeconds"] == 55
+    assert row["rateKbit"] == 727
+    assert row["peakKbit"] == 2000
+    assert row["capReached"] is True
+    assert row["verdict"] == "affected"
+    assert row["lines"][0] == (
+        "Speed: set 2 Mbit/s · using 727 kbit/s · peak 2 Mbit/s · cap reached"
+    )
+
+
+@needs_node
+def test_the_average_divides_by_the_sample_span_and_not_by_a_minute():
+    row = burst([2000] * 4 + [0] * 2, CAP_2000)
+    assert row["windowSeconds"] == 30
+    assert row["rateKbit"] == 1333
+    assert row["peakKbit"] == 2000
+    assert row["lines"][0] == (
+        "Speed: set 2 Mbit/s · using 1.33 Mbit/s · peak 2 Mbit/s · cap reached"
+    )
+    short = burst([2000, 2000], CAP_2000)
+    assert (short["windowSeconds"], short["rateKbit"]) == (10, 2000)
+
+
+@needs_node
+def test_one_slow_and_busy_stretch_never_hides_a_fast_one():
+    row = burst([300, 400, 1900, 300, 200], CAP_2000)
+    assert row["peakKbit"] == 1900
+    assert row["capReached"] is True
+    steady = burst([1000, 1100, 1000, 1200], CAP_2000)
+    assert steady["capReached"] is False
+    assert steady["peakKbit"] == 1200
+    assert steady["lines"][0].endswith("peak 1.2 Mbit/s · below the cap")
+    assert steady["verdict"] == "clean"
+
+
+@needs_node
+def test_a_fast_interval_without_offered_packets_is_not_a_cap_hit():
+    row = run(
         "rowsOf([[0, {impairment: {bandwidth_kbit: 2000}}],"
-        f" [60, {{impairment: {{bandwidth_kbit: 2000}}, packets: 100, bytes: {kbit_bytes(1960)}}}]])"
+        f" [5, {{impairment: {{bandwidth_kbit: 2000}}, bytes: {kbit_bytes(2000, 5)}}}],"
+        " [10, {impairment: {bandwidth_kbit: 2000}, packets: 100,"
+        f" bytes: {kbit_bytes(2000, 5) + kbit_bytes(100, 5)}}}]])"
+    )[0]
+    assert (row["offered"], row["capReached"]) == (100, False)
+
+
+@needs_node
+def test_dropped_packets_count_as_offered_in_every_interval():
+    row = run(
+        "rowsOf([[0, {impairment: {bandwidth_kbit: 2000}}],"
+        f" [5, {{impairment: {{bandwidth_kbit: 2000}}, drops: 100, bytes: {kbit_bytes(2000, 5)}}}]])"
+    )[0]
+    assert (row["offered"], row["capReached"], row["verdict"]) == (100, True, "affected")
+
+
+@needs_node
+def test_speed_line_formats_both_units():
+    row = burst([1960] * 6, CAP_2000, step=10)
+    assert row["lines"][0] == (
+        "Speed: set 2 Mbit/s · using 1.96 Mbit/s · peak 1.96 Mbit/s · cap reached"
     )
-    assert row["lines"][0] == "Speed: set 2 Mbit/s · using 1.96 Mbit/s · cap reached"
-    assert row["lines"][1:] == ["Queue wait: about 0 ms"]
     assert row["rateKbit"] == 1960
-    (slow,) = run(
-        "rowsOf([[0, {impairment: {bandwidth_kbit: 640}}],"
-        f" [60, {{impairment: {{bandwidth_kbit: 640}}, packets: 100, bytes: {kbit_bytes(100)}}}]])"
+    slow = burst([100] * 6, {"bandwidth_kbit": 640}, step=10)
+    assert slow["lines"][0] == (
+        "Speed: set 640 kbit/s · using 100 kbit/s · peak 100 kbit/s · below the cap"
     )
-    assert slow["lines"] == ["Speed: set 640 kbit/s · using 100 kbit/s · below the cap"]
 
 
 @needs_node
 def test_a_cap_without_traffic_is_never_reached():
-    (row,) = run(
-        "rowsOf([[0, {impairment: {bandwidth_kbit: 1000}}],"
-        " [60, {impairment: {bandwidth_kbit: 1000}}]])"
-    )
+    row = two(CAP_2000, "packets: 0, bytes: 0")
     assert row["capReached"] is False
     assert row["verdict"] == "idle"
 
 
 @needs_node
-def test_a_cap_is_not_reached_by_bytes_alone_without_any_offered_packet():
-    (row,) = run(
-        "rowsOf([[0, {impairment: {bandwidth_kbit: 1000}}],"
-        f" [60, {{impairment: {{bandwidth_kbit: 1000}}, bytes: {kbit_bytes(2000)}}}]])"
-    )
-    assert (row["offered"], row["capReached"], row["verdict"]) == (0, False, "idle")
+def test_queue_wait_divides_the_backlog_by_the_cap_and_hides_below_ten_milliseconds():
+    # 80000 bytes * 8 bits / 2000 kbit/s = 320 ms
+    row = burst([2000] * 4, CAP_2000, backlog=80_000)
+    assert row["queueWaitMs"] == 320
+    assert row["lines"][1] == "Queue wait now: about 320 ms"
+    # 2500 bytes at 2000 kbit/s is exactly 10 ms and 2000 bytes is 8 ms
+    ten = burst([2000] * 4, CAP_2000, backlog=2_500)
+    assert ten["queueWaitMs"] == 10
+    assert "Queue wait now: about 10 ms" in ten["lines"]
+    small = burst([2000] * 4, CAP_2000, backlog=2_000)
+    assert small["queueWaitMs"] == 8
+    assert not any(line.startswith("Queue wait") for line in small["lines"])
+    assert not any(line.startswith("Queue wait") for line in burst([2000] * 4, CAP_2000)["lines"])
 
 
 @needs_node
-def test_queue_wait_only_for_a_cap_that_is_reached_without_delay_or_jitter():
-    def rows(impairment, bytes_sent=kbit_bytes(1000), backlog=40_000):
-        return run(
-            f"rowsOf([[0, {{impairment: {json.dumps(impairment)}}}],"
-            f" [60, {{impairment: {json.dumps(impairment)}, packets: 100,"
-            f" bytes: {bytes_sent}, backlog_bytes: {backlog}}}]])"
-        )[0]
-
-    capped = rows({"bandwidth_kbit": 1000})
-    assert capped["queueWaitMs"] == 320
-    assert "Queue wait: about 320 ms" in capped["lines"]
-    assert capped["lines"].index("Queue wait: about 320 ms") == 1
-
-    assert rows({"bandwidth_kbit": 1000, "delay_ms": 50})["queueWaitMs"] is None
-    assert rows({"bandwidth_kbit": 1000, "jitter_ms": 5})["queueWaitMs"] is None
-    below = rows({"bandwidth_kbit": 1000}, bytes_sent=kbit_bytes(300))
+def test_queue_wait_reads_the_last_sample_and_only_without_delay_or_jitter():
+    # the burst is over and the backlog has drained so the old burst shows no wait now
+    drained = run(
+        "rowsOf([[0, {impairment: {bandwidth_kbit: 2000}}],"
+        f" [5, {{impairment: {{bandwidth_kbit: 2000}}, packets: 100, bytes: {kbit_bytes(2000, 5)},"
+        " backlog_bytes: 80000}],"
+        f" [10, {{impairment: {{bandwidth_kbit: 2000}}, packets: 100, bytes: {kbit_bytes(2000, 5)},"
+        " backlog_bytes: 0}]])"
+    )[0]
+    assert drained["capReached"] is True
+    assert not any(line.startswith("Queue wait") for line in drained["lines"])
+    for extra in ({"delay_ms": 50}, {"jitter_ms": 5}):
+        row = burst([2000] * 4, dict(CAP_2000, **extra), backlog=80_000)
+        assert row["queueWaitMs"] is None
+        assert not any(line.startswith("Queue wait") for line in row["lines"])
+    below = burst([300] * 4, CAP_2000, backlog=80_000)
     assert below["queueWaitMs"] is None
-    assert not any(line.startswith("Queue wait") for line in below["lines"])
-    assert rows({"loss_percent": 10})["queueWaitMs"] is None
+    assert burst([2000] * 4, {"loss_percent": 10}, backlog=80_000)["queueWaitMs"] is None
 
 
 @needs_node
 def test_delay_line_with_and_without_jitter_is_marked_not_measured():
     def lines(impairment):
-        return run(
-            f"rowsOf([[0, {{impairment: {json.dumps(impairment)}}}],"
-            f" [10, {{impairment: {json.dumps(impairment)}, packets: 100}}]])"
-        )[0]["lines"]
+        return two(impairment, "packets: 100")["lines"]
 
-    assert lines({"delay_ms": 100, "jitter_ms": 20}) == [
+    assert lines({"delay_ms": 100, "jitter_ms": 20})[-1] == (
         "Delay: set 100 ms ± 20 · configured, not measured"
-    ]
-    assert lines({"delay_ms": 100}) == ["Delay: set 100 ms · configured, not measured"]
-    assert lines({"jitter_ms": 15}) == ["Delay: set 0 ms ± 15 · configured, not measured"]
+    )
+    assert lines({"delay_ms": 100})[-1] == "Delay: set 100 ms · configured, not measured"
+    assert lines({"jitter_ms": 15})[-1] == "Delay: set 0 ms ± 15 · configured, not measured"
     assert not any(line.startswith("Delay") for line in lines({"loss_percent": 5}))
 
 
 @needs_node
+def test_reorder_duplicate_and_corrupt_are_shown_as_configured_and_not_measured():
+    row = two(
+        {"reorder_percent": 25, "duplicate_percent": 5, "corrupt_percent": 1},
+        "packets: 100",
+    )
+    assert row["lines"] == [
+        "100 packets passed in the last minute",
+        "Reorder: set 25% · configured, not measured",
+        "Duplicate: set 5% · configured, not measured",
+        "Corrupt: set 1% · configured, not measured",
+    ]
+    only = two({"duplicate_percent": 7}, "packets: 100")
+    assert only["lines"][1:] == ["Duplicate: set 7% · configured, not measured"]
+
+
+@needs_node
 def test_lines_come_in_the_documented_order():
-    impairment = {"loss_percent": 5, "bandwidth_kbit": 1000, "delay_ms": 0}
-    (row,) = run(
-        f"rowsOf([[0, {{impairment: {json.dumps(impairment)}}}],"
-        f" [60, {{impairment: {json.dumps(impairment)}, packets: 190, drops: 10,"
+    impairment = {
+        "loss_percent": 5, "bandwidth_kbit": 1000, "delay_ms": 0, "reorder_percent": 10,
+        "duplicate_percent": 2, "corrupt_percent": 1,
+    }
+    row = run(
+        f"rowsOf([[0, {{impairment: {js(impairment)}}}],"
+        f" [60, {{impairment: {js(impairment)}, packets: 190, drops: 10,"
         f" bytes: {kbit_bytes(1000)}, backlog_bytes: 12500}}]])"
-    )
-    assert [line.split(":")[0] for line in row["lines"]] == ["Loss", "Speed", "Queue wait"]
-    impairment = {"loss_percent": 5, "bandwidth_kbit": 1000, "delay_ms": 30}
-    (row,) = run(
-        f"rowsOf([[0, {{impairment: {json.dumps(impairment)}}}],"
-        f" [60, {{impairment: {json.dumps(impairment)}, packets: 190, drops: 10,"
+    )[0]
+    assert [line.split(":")[0] for line in row["lines"]] == [
+        "Loss", "Speed", "Queue wait now", "Reorder", "Duplicate", "Corrupt",
+    ]
+    delayed = dict(impairment, delay_ms=30)
+    row = run(
+        f"rowsOf([[0, {{impairment: {js(delayed)}}}],"
+        f" [60, {{impairment: {js(delayed)}, packets: 190, drops: 10,"
         f" bytes: {kbit_bytes(1000)}}}]])"
-    )
-    assert [line.split(":")[0] for line in row["lines"]] == ["Loss", "Speed", "Delay"]
+    )[0]
+    assert [line.split(":")[0] for line in row["lines"]] == [
+        "Loss", "Speed", "Delay", "Reorder", "Duplicate", "Corrupt",
+    ]
 
 
 @needs_node
 @pytest.mark.parametrize(
-    "counters, expected",
+    "impairment, counters, expected",
     [
-        ("drops: 1, packets: 10", "affected"),
-        ("packets: 0", "idle"),
-        ("packets: 49", "too-few"),
-        ("packets: 50", "no-effect"),
-        ("packets: 500", "no-effect"),
-        ("packets: 10, drops: 39", "affected"),
-        ("packets: 20, drops: 29", "affected"),
+        # loss only
+        ({"loss_percent": 5}, "drops: 1, packets: 10", "affected"),
+        ({"loss_percent": 5}, "packets: 0", "idle"),
+        ({"loss_percent": 5}, "packets: 49", "too-few"),
+        ({"loss_percent": 5}, "packets: 59", "too-few"),
+        ({"loss_percent": 5}, "packets: 60", "clean"),
+        ({"loss_percent": 5}, "packets: 500", "clean"),
+        ({"loss_percent": 10}, "packets: 49", "too-few"),
+        ({"loss_percent": 10}, "packets: 50", "clean"),
+        ({"loss_percent": 100}, "packets: 50", "clean"),
+        ({"loss_percent": 5}, "packets: 10, drops: 39", "affected"),
+        # speed cap only
+        (CAP_2000, "packets: 49", "too-few"),
+        (CAP_2000, "packets: 50", "clean"),
+        (CAP_2000, "packets: 30, drops: 1", "affected"),
+        # nothing the kernel counters can judge
+        ({"delay_ms": 50}, "packets: 0", "idle"),
+        ({"delay_ms": 50}, "packets: 3", "unmeasured"),
+        ({"delay_ms": 50}, "packets: 500", "unmeasured"),
+        ({"reorder_percent": 20}, "packets: 500", "unmeasured"),
+        ({"duplicate_percent": 20}, "packets: 500", "unmeasured"),
+        ({"corrupt_percent": 20}, "packets: 500", "unmeasured"),
+        ({"delay_ms": 50}, "packets: 90, drops: 10", "affected"),
     ],
 )
-def test_verdicts(counters, expected):
-    (row,) = run(
-        "rowsOf([[0, {impairment: {loss_percent: 5}}],"
-        f" [10, {{impairment: {{loss_percent: 5}}, {counters}}}]])"
-    )
-    assert row["verdict"] == expected
+def test_verdicts(impairment, counters, expected):
+    assert two(impairment, counters)["verdict"] == expected
 
 
 @needs_node
-def test_forty_nine_offered_packets_is_too_few_and_fifty_is_enough():
-    (few,) = run(
-        "rowsOf([[0, {impairment: {delay_ms: 20}}],"
-        " [10, {impairment: {delay_ms: 20}, packets: 49}]])"
-    )
-    (enough,) = run(
-        "rowsOf([[0, {impairment: {delay_ms: 20}}],"
-        " [10, {impairment: {delay_ms: 20}, packets: 50}]])"
-    )
-    assert (few["offered"], few["verdict"]) == (49, "too-few")
-    assert (enough["offered"], enough["verdict"]) == (50, "no-effect")
+def test_an_unmeasured_queue_says_how_many_packets_passed():
+    row = two({"delay_ms": 50}, "packets: 500")
+    assert row["lines"][0] == "500 packets passed in the last minute"
+    one = two({"delay_ms": 50}, "packets: 1")
+    assert one["lines"][0] == "1 packet passed in the last minute"
+    idle = two({"delay_ms": 50}, "packets: 0")
+    assert not any("passed" in line for line in idle["lines"])
+    measured = two({"loss_percent": 10}, "packets: 500")
+    assert not any("passed" in line for line in measured["lines"])
 
 
 @needs_node
 def test_one_sample_or_samples_at_one_instant_are_still_collecting():
-    (single,) = run("rowsOf([[0, {impairment: {loss_percent: 5}}]])")
+    single = run("rowsOf([[0, {impairment: {loss_percent: 5}}]])")[0]
     assert single["verdict"] == "collecting"
     assert single["lines"] == ["Collecting…"]
-    (same_instant,) = run(
+    same_instant = run(
         "rowsOf([[5, {impairment: {loss_percent: 5}}],"
         " [5, {impairment: {loss_percent: 5}, packets: 10}]])"
-    )
+    )[0]
     assert same_instant["verdict"] == "collecting"
     assert same_instant["rateKbit"] == 0
+    kept = run(
+        "(() => { const h = feed([[5, {impairment: {loss_percent: 5}}],"
+        " [5, {impairment: {loss_percent: 5}, packets: 10}]]);"
+        " return h['eth0/11:'].samples.length; })()"
+    )
+    assert kept == 1
+
+
+@needs_node
+def test_a_clock_that_steps_back_restarts_instead_of_waiting():
+    result = run(
+        "(() => { const h = feed([[100, {impairment: {loss_percent: 5}, packets: 10}],"
+        " [105, {impairment: {loss_percent: 5}, packets: 20}],"
+        " [90, {impairment: {loss_percent: 5}, packets: 30}],"
+        " [95, {impairment: {loss_percent: 5}, packets: 140}]]);"
+        " return {samples: h['eth0/11:'].samples.map((s) => s.t), rows: impactRows(h)}; })()"
+    )
+    assert result["samples"] == [90, 95]
+    assert result["rows"][0]["offered"] == 110
+    assert result["rows"][0]["windowSeconds"] == 5
 
 
 @needs_node
@@ -276,12 +425,31 @@ def test_a_counter_that_goes_backwards_restarts_that_queue(counter):
 
 @needs_node
 def test_the_history_grows_again_after_a_restart():
-    (row,) = run(
+    row = run(
         "rowsOf([[0, {impairment: {loss_percent: 5}, packets: 900}],"
         " [5, {impairment: {loss_percent: 5}, packets: 3}],"
         " [10, {impairment: {loss_percent: 5}, packets: 103, drops: 5}]])"
-    )
+    )[0]
     assert (row["offered"], row["drops"], row["windowSeconds"]) == (105, 5, 5)
+
+
+@needs_node
+def test_a_new_apply_restarts_the_history_even_with_identical_settings_and_larger_counters():
+    result = run(
+        "(() => { const imp = {loss_percent: 5};"
+        " const h = feed([[0, {impairment: imp, packets: 10, bytes: 1000, generation: 'aa11-1'}],"
+        " [5, {impairment: imp, packets: 500, bytes: 90000, generation: 'aa11-2'}]]);"
+        " return {samples: h['eth0/11:'].samples.length, rows: impactRows(h)}; })()"
+    )
+    assert result["samples"] == 1
+    assert result["rows"][0]["verdict"] == "collecting"
+    kept = run(
+        "(() => { const imp = {loss_percent: 5};"
+        " const h = feed([[0, {impairment: imp, packets: 10, generation: 'aa11-2'}],"
+        " [5, {impairment: imp, packets: 500, generation: 'aa11-2'}]]);"
+        " return h['eth0/11:'].samples.length; })()"
+    )
+    assert kept == 2
 
 
 @needs_node
@@ -303,33 +471,33 @@ def test_a_queue_that_changed_hands_or_settings_restarts_even_when_counters_grow
 
 @needs_node
 def test_samples_older_than_the_window_are_ignored():
-    (row,) = run(
+    row = run(
         "rowsOf([[0, {impairment: {loss_percent: 5}, packets: 0}],"
         " [100, {impairment: {loss_percent: 5}, packets: 1000}],"
         " [130, {impairment: {loss_percent: 5}, packets: 1100, drops: 4}]])"
-    )
+    )[0]
     assert (row["offered"], row["drops"], row["windowSeconds"]) == (104, 4, 30)
-    (exact,) = run(
+    exact = run(
         "rowsOf([[0, {impairment: {loss_percent: 5}, packets: 0}],"
         " [60, {impairment: {loss_percent: 5}, packets: 100}]])"
-    )
+    )[0]
     assert (exact["offered"], exact["windowSeconds"]) == (100, 60)
-    (outside,) = run(
+    outside = run(
         "rowsOf([[0, {impairment: {loss_percent: 5}, packets: 0}],"
         " [61, {impairment: {loss_percent: 5}, packets: 100}]])"
-    )
+    )[0]
     assert outside["verdict"] == "collecting"
 
 
 @needs_node
-def test_at_most_twelve_samples_are_kept_per_queue():
-    result = run(
+def test_thirteen_samples_five_seconds_apart_cover_the_whole_minute():
+    kept = run(
         "(() => { const h = feed(Array.from({length: 20}, (_, i) =>"
-        " [i * 5, {impairment: {loss_percent: 5}, packets: i}]));"
+        " [i * 5, {impairment: {loss_percent: 5}, packets: i * 100}]));"
         " const samples = h['eth0/11:'].samples;"
-        " return [samples.length, samples[0].t, samples[11].t]; })()"
+        " return [samples.length, samples[0].t, samples[12].t, impactRows(h)[0].windowSeconds]; })()"
     )
-    assert result == [12, 40, 95]
+    assert kept == [13, 35, 95, 60]
 
 
 @needs_node
@@ -364,20 +532,20 @@ def test_keys_combine_interface_and_handle_and_samples_hold_only_counters():
 
 @needs_node
 def test_recording_does_not_change_the_history_it_was_given():
-    changed = run(
+    unchanged = run(
         "(() => { const h = feed([[0, {impairment: {loss_percent: 5}}]]);"
         " const before = JSON.stringify(h);"
         " recordImpactSample(h, {queues: [entry({impairment: {loss_percent: 5}, packets: 3})]}, 5);"
         " return before === JSON.stringify(h); })()"
     )
-    assert changed is True
+    assert unchanged is True
 
 
 @needs_node
 def test_queues_without_any_impairment_are_left_out():
     assert run("rowsOf([[0, {}], [10, {packets: 100}]])") == []
-    (row,) = run("rowsOf([[0, {impairment: {reorder_percent: 5}}], [10, {impairment: {reorder_percent: 5}, packets: 100}]])")
-    assert row["verdict"] == "no-effect"
+    row = two({"reorder_percent": 5}, "packets: 100")
+    assert row["verdict"] == "unmeasured"
     for field in (
         "delay_ms", "jitter_ms", "loss_percent", "bandwidth_kbit", "reorder_percent",
         "duplicate_percent", "corrupt_percent",
@@ -405,9 +573,7 @@ def test_rows_are_sorted_by_name_then_upload_before_download():
 
 @needs_node
 def test_rows_carry_the_configured_impairment_and_a_key():
-    (row,) = run(
-        "rowsOf([[0, {impairment: {loss_percent: 5}}], [10, {impairment: {loss_percent: 5}}]])"
-    )
+    row = two({"loss_percent": 5}, "packets: 0")
     assert row["key"] == "eth0/11:"
     assert row["configured"]["loss_percent"] == 5
 
