@@ -53,6 +53,7 @@ from jittersim.config.models import (
     normalize_domain,
     time_quota_counter_id,
 )
+from jittersim.config.protection import protected_addresses, protected_macs
 from jittersim.config.service_catalogue import SERVICE_CATALOGUE
 from jittersim.config.storage import (
     ConfigRepository,
@@ -68,7 +69,12 @@ from jittersim.engine.progression import progression_factor
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.schedules import active_schedule
 from jittersim.engine.service import compile_stored_plan
-from jittersim.networking.helper import HelperClient, HelperClientError
+from jittersim.networking.applier import MAX_PROTECTED_MACS
+from jittersim.networking.helper import (
+    HELPER_OUT_OF_DATE_MESSAGE,
+    HelperClient,
+    HelperClientError,
+)
 from jittersim.networking.router import (
     safe_router_check_message,
     safe_router_import_message,
@@ -5923,23 +5929,31 @@ class ControlServer(HTTPServer):
             raise HelperClientError("Device verification returned an invalid response.")
         return result
 
-    def _station_identities(self) -> Dict[str, Dict[str, Optional[str]]]:
-        """Map each visible client address to its MAC and announced hostname."""
+    def _station_devices(self) -> list:
+        """Return the helper's current client list or nothing when it cannot be read."""
 
         if self.helper_client is None:
-            return {}
+            return []
         try:
-            snapshot = self.helper_client.connected_device_snapshot()
-            stations = snapshot["devices"]
+            stations = self.helper_client.connected_device_snapshot()["devices"]
         except (HelperClientError, AttributeError, KeyError, TypeError):
-            return {}
+            return []
+        return [station for station in stations if isinstance(station, dict)]
+
+    def _station_identities(
+        self, stations: Optional[list] = None
+    ) -> Dict[str, Dict[str, Optional[str]]]:
+        """Map each visible client address to its MAC and announced hostname."""
+
+        if stations is None:
+            stations = self._station_devices()
         return {
             station["ipv4_address"]: {
                 "mac_address": station.get("mac_address"),
                 "hostname": station.get("hostname"),
             }
             for station in stations
-            if isinstance(station, dict) and station.get("ipv4_address")
+            if station.get("ipv4_address")
         }
 
     def response_for(self, path: str, query: str = "") -> Tuple[int, str, bytes]:
@@ -6212,11 +6226,15 @@ class ControlServer(HTTPServer):
             assignments_by_address = {
                 str(device.ipv4_address): device for device in self.repository.list_devices()
             }
+            station_devices = self._station_devices()
+            blocked = protected_addresses(self.repository, station_devices)
             grouped = {}
             for observation in observations:
                 address = str(observation.ipv4_address)
+                if address in blocked:
+                    continue
                 grouped.setdefault(address, []).append(_domain_observation_payload(observation))
-            stations = self._station_identities()
+            stations = self._station_identities(station_devices)
             labels_by_mac = self.repository.list_connected_device_labels()
             devices = [
                 {
@@ -7151,8 +7169,22 @@ class ControlServer(HTTPServer):
             return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
                 {"error": "network helper is not configured"}
             )
+        macs = protected_macs(self.repository)
+        if len(macs) > MAX_PROTECTED_MACS:
+            return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+                {
+                    "error": (
+                        "Traffic can only be scanned while at most "
+                        f"{MAX_PROTECTED_MACS} devices are protected. "
+                        "Remove some from the Unaffected list."
+                    )
+                }
+            )
         try:
-            raw_observations = self.helper_client.observe_dns_queries()
+            raw_observations = self.helper_client.observe_dns_queries(macs)
+            blocked = protected_addresses(
+                self.repository, self._station_devices() if macs else ()
+            )
             observed_at = int(time.time())
             observations = [
                 DomainObservation(
@@ -7163,13 +7195,15 @@ class ControlServer(HTTPServer):
                     last_seen=observed_at,
                 )
                 for observation in raw_observations
+                if str(observation["ipv4_address"]) not in blocked
             ]
             self.repository.save_domain_observations(observations, now=observed_at)
-        except (HelperClientError, KeyError, TypeError, ValueError, StorageError):
+        except (HelperClientError, KeyError, TypeError, ValueError, StorageError) as error:
             LOGGER.exception("could not scan DNS observations")
-            return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
-                {"error": "could not scan traffic observations"}
-            )
+            message = "could not scan traffic observations"
+            if isinstance(error, HelperClientError) and str(error) == HELPER_OUT_OF_DATE_MESSAGE:
+                message = HELPER_OUT_OF_DATE_MESSAGE
+            return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes({"error": message})
         return HTTPStatus.OK, "application/json", _json_bytes(
             {
                 "captured_observations": len(observations),
@@ -7396,6 +7430,18 @@ class ControlServer(HTTPServer):
                 item = UnaffectedDevice(
                     payload["mac_address"], payload.get("display_name", ""), int(time.time())
                 )
+                purge = set()
+                if not remove:
+                    purge = {
+                        str(station["ipv4_address"])
+                        for station in self._station_devices()
+                        if station.get("mac_address") == item.mac_address
+                        and station.get("ipv4_address")
+                    } | {
+                        str(device.ipv4_address)
+                        for device in self.repository.list_devices()
+                        if device.mac_address == item.mac_address
+                    }
                 if self.scheduler:
                     self.scheduler.sample_before_control_change(repository=self.repository)
                 with self.repository.transaction():
@@ -7403,6 +7449,7 @@ class ControlServer(HTTPServer):
                         self.repository.delete_unaffected_device(item.mac_address)
                     else:
                         self.repository.save_unaffected_device(item)
+                        self.repository.delete_domain_observations(purge)
                     self._validate_saved_plan()
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})

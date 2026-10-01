@@ -18,6 +18,7 @@ from jittersim.config.models import (
     TimeQuota,
     time_quota_counter_id,
 )
+from jittersim.config.protection import protected_addresses, protected_macs
 from jittersim.config.storage import (
     MAX_RANDOM_WEBSITE_ANALYTICS_BATCH,
     ConfigRepository,
@@ -715,7 +716,12 @@ class RuntimeScheduler:
             return
         self._last_traffic_sample_at = now
         try:
-            observations = observe_dns_queries()
+            macs = protected_macs(repository)
+            observations = observe_dns_queries(macs)
+            stations = station_snapshot(self._helper_client).get("devices", ()) if macs else ()
+            blocked = protected_addresses(
+                repository, [station for station in stations if isinstance(station, dict)]
+            )
             observed_at = int(now)
             repository.save_domain_observations(
                 tuple(
@@ -727,6 +733,7 @@ class RuntimeScheduler:
                         last_seen=observed_at,
                     )
                     for observation in observations
+                    if str(observation["ipv4_address"]) not in blocked
                 ),
                 now=observed_at,
             )

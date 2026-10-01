@@ -5,6 +5,7 @@ from datetime import datetime
 from ipaddress import IPv4Address
 from unittest.mock import patch
 
+from jittersim.config.exemptions import UnaffectedDevice
 from jittersim.config.models import (
     DataLimit,
     Device,
@@ -31,6 +32,7 @@ class RecordingHelper:
     def __init__(self) -> None:
         self.plans = []
         self.observations = []
+        self.excluded_macs_seen = []
         self.counters = {"devices": {}, "services": {}}
 
     def apply(self, *, plan):
@@ -38,6 +40,7 @@ class RecordingHelper:
         return {"commands_run": 1}
 
     def observe_dns_queries(self, excluded_macs=()):
+        self.excluded_macs_seen.append(list(excluded_macs))
         return self.observations
 
     def traffic_counters(self):
@@ -483,6 +486,88 @@ class RuntimeSchedulerTests(unittest.TestCase):
 
         scheduler.tick(repository=self.repository, now=100)
         self.assertEqual(self.helper.plans[-1].queues[1].impairment.delay_ms, 1_000)
+
+    def _traffic_progression_for_bob(self) -> None:
+        self.repository.save_profile(Profile(id="normal", name="Normal"))
+        self.repository.save_profile(
+            Profile(id="degraded", name="Degraded", download=Impairment(delay_ms=1_000))
+        )
+        self.repository.save_device(Device("bob", "Bob", "192.168.50.11", "normal"))
+        self.repository.save_progression(
+            Progression(
+                id="query-driven",
+                device_id="bob",
+                start_profile_id="normal",
+                end_profile_id="degraded",
+                started_at=100,
+                duration_seconds=1_000,
+                mode="traffic",
+                traffic_target_queries=2,
+            )
+        )
+        self.helper.observations = [
+            {"ipv4_address": "192.168.50.10", "domain": "private.example", "query_count": 3},
+            {"ipv4_address": "192.168.50.30", "domain": "live.example", "query_count": 4},
+            {"ipv4_address": "192.168.50.11", "domain": "example.com", "query_count": 2},
+        ]
+
+    def test_traffic_sampling_leaves_protected_clients_out(self) -> None:
+        protected = "02:00:00:00:00:01"
+        self._traffic_progression_for_bob()
+        self.repository.save_device(
+            Device("alice", "Alice", "192.168.50.10", "normal", mac_address=protected)
+        )
+        self.repository.save_unaffected_device(UnaffectedDevice(protected, "Alice", 1))
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+
+        scheduler.tick(repository=self.repository, now=100)
+
+        self.assertEqual(self.helper.excluded_macs_seen, [[protected]])
+        stored = {
+            str(item.ipv4_address) for item in self.repository.list_domain_observations()
+        }
+        self.assertNotIn("192.168.50.10", stored)
+        self.assertIn("192.168.50.11", stored)
+        self.assertEqual(self.repository.total_domain_queries("192.168.50.10"), 0)
+
+    def test_traffic_sampling_drops_a_protected_station_that_is_not_saved(self) -> None:
+        protected = "02:00:00:00:00:01"
+
+        class WithStation(RecordingHelper):
+            def connected_device_snapshot(self):
+                return {
+                    "devices": [
+                        {"mac_address": protected, "ipv4_address": "192.168.50.30"},
+                        {"mac_address": "02:00:00:00:00:02", "ipv4_address": "192.168.50.11"},
+                    ],
+                    "association_status_available": True,
+                }
+
+        self.helper = WithStation()
+        self._traffic_progression_for_bob()
+        self.repository.save_unaffected_device(UnaffectedDevice(protected, "Phone", 1))
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+
+        scheduler.tick(repository=self.repository, now=100)
+
+        stored = {
+            str(item.ipv4_address) for item in self.repository.list_domain_observations()
+        }
+        self.assertNotIn("192.168.50.30", stored)
+        self.assertEqual(self.repository.total_domain_queries("192.168.50.30"), 0)
+        self.assertIn("192.168.50.11", stored)
+
+    def test_traffic_sampling_without_protected_clients_passes_an_empty_list(self) -> None:
+        self._traffic_progression_for_bob()
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+
+        scheduler.tick(repository=self.repository, now=100)
+
+        self.assertEqual(self.helper.excluded_macs_seen, [[]])
+        self.assertEqual(len(self.repository.list_domain_observations()), 3)
 
     def test_byte_progression_advances_with_streaming_and_survives_counter_reset(self) -> None:
         normal = Profile(id="normal", name="Normal")

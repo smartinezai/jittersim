@@ -37,6 +37,11 @@ from .wifi import WifiError
 from .wifi_security import LEGACY_MODES, SECURITY_MODES
 
 LOGGER = logging.getLogger(__name__)
+
+HELPER_OUT_OF_DATE_MESSAGE = (
+    "The networking helper is out of date and cannot skip protected devices. "
+    "Update it before scanning traffic."
+)
 MAX_MESSAGE_BYTES = 256 * 1024
 MAX_HELPER_CONNECTIONS = 8
 WIFI_ACTIONS = ("configure-ap", "router-sync-ap", "router-preview-ap", "wifi-reset")
@@ -995,10 +1000,7 @@ class HelperClient:
             raise HelperClientError("too many excluded devices")
         response = self._request({"action": "observe-dns", "excluded_macs": macs})
         if macs and response.get("excluded_macs") != macs:
-            raise HelperClientError(
-                "The networking helper is out of date and cannot skip protected devices. "
-                "Update it before scanning traffic."
-            )
+            raise HelperClientError(HELPER_OUT_OF_DATE_MESSAGE)
         observations = response.get("observations")
         if not isinstance(observations, list) or any(
             not isinstance(observation, dict) for observation in observations

@@ -13,6 +13,7 @@ from io import BytesIO
 from pathlib import Path
 
 from jittersim.api.server import DASHBOARD_HTML, ControlRequestHandler, ControlServer
+from jittersim.config.exemptions import UnaffectedDevice
 from jittersim.config.models import (
     Device,
     DeviceGroup,
@@ -1854,6 +1855,239 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["devices"][0]["display_name"], "Unknown device")
+
+    PROTECTED_MAC = "dc:1e:d5:3e:97:4c"
+    OLD_HELPER_MESSAGE = (
+        "The networking helper is out of date and cannot skip protected devices. "
+        "Update it before scanning traffic."
+    )
+
+    def protect(self, mac=PROTECTED_MAC) -> None:
+        self.repository.save_unaffected_device(UnaffectedDevice(mac, "Protected", 1))
+
+    def test_scan_passes_the_protected_macs_to_the_helper(self) -> None:
+        seen = []
+
+        class Recording(FakeHelper):
+            def observe_dns_queries(self, excluded_macs=()):
+                seen.append(list(excluded_macs))
+                return super().observe_dns_queries(excluded_macs)
+
+        self.server.helper_client = Recording()
+        self.protect()
+        self.protect("02:00:00:00:00:01")
+
+        self.server.write_response_for("/api/observations/scan", {})
+
+        self.assertEqual(seen, [["02:00:00:00:00:01", self.PROTECTED_MAC]])
+
+    def test_scan_drops_observations_of_a_protected_station(self) -> None:
+        self.server.helper_client = FakeHelper()  # its fake ignores the exclusion
+        self.protect()
+
+        status, _, body = self.server.write_response_for("/api/observations/scan", {})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["captured_observations"], 0)
+        self.assertEqual(json.loads(body)["observations"], [])
+        self.assertEqual(self.repository.list_domain_observations(), ())
+
+    def test_scan_drops_observations_of_a_protected_saved_device_without_a_station(self) -> None:
+        class NoStations(FakeHelper):
+            def connected_device_snapshot(self):
+                raise HelperClientError("simulated failure")
+
+        self.server.helper_client = NoStations()
+        self.repository.save_device(
+            Device(
+                id="client-dc1ed53e974c",
+                name="Client",
+                ipv4_address="192.168.50.178",
+                profile_id="slow",
+                mac_address=self.PROTECTED_MAC,
+            )
+        )
+        self.protect()
+
+        status, _, body = self.server.write_response_for("/api/observations/scan", {})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["captured_observations"], 0)
+        self.assertEqual(self.repository.list_domain_observations(), ())
+
+    def test_scan_keeps_observations_of_ordinary_clients(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.protect("02:00:00:00:00:01")
+
+        status, _, body = self.server.write_response_for("/api/observations/scan", {})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["captured_observations"], 1)
+        self.assertEqual(len(self.repository.list_domain_observations()), 1)
+
+    def test_scan_fails_closed_with_an_old_helper(self) -> None:
+        message = self.OLD_HELPER_MESSAGE
+
+        class OldHelper(FakeHelper):
+            def observe_dns_queries(self, excluded_macs=()):
+                raise HelperClientError(message)
+
+        self.server.helper_client = OldHelper()
+        self.protect()
+
+        status, _, body = self.server.write_response_for("/api/observations/scan", {})
+
+        self.assertEqual(status, 502)
+        self.assertEqual(json.loads(body)["error"], message)
+        self.assertEqual(self.repository.list_domain_observations(), ())
+
+    def test_scan_keeps_the_generic_error_for_other_helper_failures(self) -> None:
+        class Failing(FakeHelper):
+            def observe_dns_queries(self, excluded_macs=()):
+                raise HelperClientError("socket path /run/secret is gone")
+
+        self.server.helper_client = Failing()
+
+        status, _, body = self.server.write_response_for("/api/observations/scan", {})
+
+        self.assertEqual(status, 502)
+        self.assertEqual(json.loads(body)["error"], "could not scan traffic observations")
+
+    def test_scan_refuses_when_more_devices_are_protected_than_the_helper_can_skip(self) -> None:
+        calls = []
+
+        class Counting(FakeHelper):
+            def observe_dns_queries(self, excluded_macs=()):
+                calls.append(list(excluded_macs))
+                return super().observe_dns_queries(excluded_macs)
+
+        self.server.helper_client = Counting()
+        for index in range(65):
+            self.protect("02:00:00:00:%02x:%02x" % (index // 256, index % 256))
+
+        status, _, body = self.server.write_response_for("/api/observations/scan", {})
+
+        self.assertEqual(status, 409)
+        self.assertIn("at most 64", json.loads(body)["error"])
+        self.assertEqual(calls, [])
+        self.assertEqual(self.repository.list_domain_observations(), ())
+
+    def test_scan_still_works_with_exactly_64_protected_devices(self) -> None:
+        seen = []
+
+        class Recording(FakeHelper):
+            def observe_dns_queries(self, excluded_macs=()):
+                seen.append(len(excluded_macs))
+                return super().observe_dns_queries(excluded_macs)
+
+        self.server.helper_client = Recording()
+        for index in range(64):
+            self.protect("02:00:00:00:%02x:%02x" % (index // 256, index % 256))
+
+        status, _, _ = self.server.write_response_for("/api/observations/scan", {})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(seen, [64])
+
+    def test_old_rows_of_a_protected_station_are_hidden(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/observations/scan", {})
+        _, _, before = self.server.response_for("/api/observations")
+        self.assertEqual(len(json.loads(before)["devices"]), 1)
+        self.protect()
+
+        _, _, body = self.server.response_for("/api/observations")
+
+        self.assertEqual(json.loads(body)["devices"], [])
+        self.assertEqual(json.loads(body)["total_domains"], 0)
+
+    def test_old_rows_of_a_protected_saved_device_are_hidden_without_the_helper(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/observations/scan", {})
+        self.server.helper_client = None
+        self.repository.save_device(
+            Device(
+                id="client-dc1ed53e974c",
+                name="Client",
+                ipv4_address="192.168.50.178",
+                profile_id="slow",
+                mac_address=self.PROTECTED_MAC,
+            )
+        )
+        self.protect()
+
+        _, _, body = self.server.response_for("/api/observations")
+
+        self.assertEqual(json.loads(body)["devices"], [])
+
+    def test_protecting_a_station_deletes_its_stored_rows(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/observations/scan", {})
+        self.assertNotEqual(self.repository.list_domain_observations(), ())
+
+        status, _, _ = self.server.write_response_for(
+            "/api/unaffected-devices",
+            {"mac_address": self.PROTECTED_MAC, "display_name": "Mine"},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self.repository.list_domain_observations(), ())
+        self.assertEqual(self.repository.total_domain_queries("192.168.50.178"), 0)
+
+    def test_protecting_a_saved_device_deletes_its_rows_even_when_it_is_offline(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/observations/scan", {})
+        self.repository.save_device(
+            Device(
+                id="client-dc1ed53e974c",
+                name="Client",
+                ipv4_address="192.168.50.178",
+                profile_id="slow",
+                mac_address=self.PROTECTED_MAC,
+            )
+        )
+        self.server.helper_client = None
+
+        status, _, _ = self.server.write_response_for(
+            "/api/unaffected-devices", {"mac_address": self.PROTECTED_MAC}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self.repository.list_domain_observations(), ())
+
+    def test_protecting_one_device_keeps_the_rows_of_the_others(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/observations/scan", {})
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.10", "example.com", 1, 10, 10)], now=10
+        )
+
+        status, _, _ = self.server.write_response_for(
+            "/api/unaffected-devices", {"mac_address": self.PROTECTED_MAC}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            [str(item.ipv4_address) for item in self.repository.list_domain_observations()],
+            ["192.168.50.10"],
+        )
+
+    def test_a_failed_protection_change_keeps_the_rows_and_the_list(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/observations/scan", {})
+
+        def refuse():
+            raise ValueError("simulated plan failure")
+
+        self.server._validate_saved_plan = refuse
+
+        status, _, _ = self.server.write_response_for(
+            "/api/unaffected-devices", {"mac_address": self.PROTECTED_MAC}
+        )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(self.repository.list_unaffected_devices(), ())
+        self.assertEqual(self.repository.total_domain_queries("192.168.50.178"), 2)
 
     def test_a_new_assignment_is_named_after_the_station_hostname(self) -> None:
         self.server.helper_client = FakeHelper()
