@@ -178,3 +178,53 @@ def test_connected_row_state(name):
     result = subprocess.run(["node", "-e", program], capture_output=True, text=True, timeout=20)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == expected
+
+
+def served_group_picker():
+    script = re.search(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL).group(1)
+    start = script.index("function updateGroupMemberOptions(")
+    return script[start : script.index("async function loadConnectedDevices(", start)]
+
+
+PICKER_HARNESS = r"""
+const select = {
+  options: [],
+  get selectedOptions() { return this.options.filter((option) => option.selected); },
+  replaceChildren() { this.options = []; },
+  appendChild(option) { this.options.push(option); }
+};
+const document = {
+  activeElement: null,
+  createElement() { return {value: "", textContent: "", selected: false}; }
+};
+const element = () => select;
+const devicePickerLabel = (device) => device.id;
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required")
+def test_the_new_group_picker_leaves_out_protected_clients():
+    live = {
+        "unaffected": False,
+        "assigned_device_id": None,
+        "association_verified": True,
+        "ipv4_address": "192.168.50.20",
+    }
+    clients = [
+        {**live, "mac_address": "aa:bb:cc:dd:ee:01"},
+        {**live, "mac_address": "aa:bb:cc:dd:ee:02", "unaffected": True},
+        {**live, "mac_address": "aa:bb:cc:dd:ee:03", "assigned_device_id": "client-3"},
+        {**live, "mac_address": "aa:bb:cc:dd:ee:04", "association_verified": False},
+        {**live, "mac_address": "aa:bb:cc:dd:ee:05", "ipv4_address": None},
+    ]
+    program = (
+        PICKER_HARNESS
+        + 'const savedDevices = [{id: "alice"}];\n'
+        + "const connectedClients = " + json.dumps(clients) + ";\n"
+        + served_group_picker()
+        + "\nupdateGroupMemberOptions();\n"
+        + "console.log(JSON.stringify(select.options.map((option) => option.value)));\n"
+    )
+    result = subprocess.run(["node", "-e", program], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == ["alice", "live:aa:bb:cc:dd:ee:01"]

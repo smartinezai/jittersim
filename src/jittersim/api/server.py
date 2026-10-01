@@ -3128,7 +3128,7 @@ DASHBOARD_HTML = """<!doctype html>
         option.selected = selected.has(option.value);
         select.appendChild(option);
       });
-      connectedClients.filter((device) => !device.assigned_device_id && device.association_verified && device.ipv4_address).forEach((device) => {
+      connectedClients.filter((device) => !device.assigned_device_id && device.association_verified && device.ipv4_address && !device.unaffected).forEach((device) => {
         const option = document.createElement("option");
         option.value = "live:" + device.mac_address;
         option.textContent = (device.display_name || device.mac_address) + " (connected · unassigned)";
