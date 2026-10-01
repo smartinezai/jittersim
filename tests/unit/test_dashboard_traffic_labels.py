@@ -83,9 +83,9 @@ def test_the_row_text_is_set_without_parsing_html():
 
 def test_the_row_keeps_the_query_count_and_both_buttons():
     body = function_body("renderObservations")
-    assert 'observation.query_count + " queries"' in body
-    assert 'profileButton.textContent = "Add to profile";' in body
-    assert 'blockButton.textContent = "Block globally";' in body
+    assert "queryCountText(observation.query_count)" in body
+    assert "profileButtonState(observation.domain, selectedProfile)" in body
+    assert "blockButtonState(observation).label" in body
 
 
 def test_the_dashboard_never_calls_the_search_site_by_itself():
@@ -219,6 +219,8 @@ class FakeNode {
   appendChild(node) { this.children.push(node); return node; }
   replaceChildren(...nodes) { this.children = nodes; }
   setAttribute(name, value) { this.attributes[name] = value; }
+  getAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null; }
+  removeAttribute(name) { delete this.attributes[name]; }
   addEventListener() {}
   get childNodes() { return this.children; }
 }
@@ -233,6 +235,7 @@ const profiles = [];
 const deviceDisplayName = () => "Test device";
 function addDomainToProfile() {}
 function addGlobalBlock() {}
+function changeGlobalBlock() {}
 function dump(node) {
   return {
     tag: node.tagName, cls: node.className, text: node.ownText, attributes: node.attributes,
@@ -282,7 +285,7 @@ def test_a_rendered_row_shows_the_label_line_and_the_raw_domain_below_it():
     label_line = one(row, "observation-label")
     assert [child["text"] for child in label_line["children"]] == ["WhatsApp", "Messaging"]
     assert one(label_line, "observation-category")["kind"] == "app"
-    assert one(row, "observation-domain-host")["text"] == "mmx-ds.cdn.whatsapp.net"
+    assert one(row, "observation-domain-host")["children"][0]["text"] == "mmx-ds.cdn.whatsapp.net"
     assert one(row, "observation-domain-count")["text"] == "3 queries"
     assert sorted(child["text"] for child in row["children"] if child["tag"] == "button") == [
         "Add to profile", "Block globally"]
@@ -294,7 +297,7 @@ def test_an_unknown_row_shows_the_registrable_domain_as_its_label():
     label_line = one(row, "observation-label")
     assert label_line["children"][0]["text"] == "somesmallsite.io"
     assert label_line["children"][1]["text"] == "Unknown site"
-    assert one(row, "observation-domain-host")["text"] == "cdn.somesmallsite.io"
+    assert one(row, "observation-domain-host")["children"][0]["text"] == "cdn.somesmallsite.io"
 
 
 @needs_node
@@ -335,7 +338,7 @@ def test_the_hint_is_rendered_in_its_own_line():
 def test_a_row_without_a_label_has_no_label_line_but_still_shows_the_domain():
     row, = rendered_rows([{"domain": "old.example.com", "query_count": 1}])
     assert find_all(row, "observation-label") == []
-    assert one(row, "observation-domain-host")["text"] == "old.example.com"
+    assert one(row, "observation-domain-host")["children"][0]["text"] == "old.example.com"
 
 
 @needs_node

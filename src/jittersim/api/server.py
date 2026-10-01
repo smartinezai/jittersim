@@ -18,7 +18,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from ipaddress import IPv4Network
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Collection, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, urlsplit
 
 from jittersim.config.device_labels import (
@@ -150,6 +150,7 @@ WRITE_PATHS = frozenset(
         "/api/observations/scan",
         "/api/observations/add-to-profile",
         "/api/observations/add-global-block",
+        "/api/observations/remove-global-block",
         "/api/apply",
         "/api/reset",
         "/api/dashboard-access/register-self",
@@ -429,13 +430,16 @@ DASHBOARD_HTML = """<!doctype html>
     .observation-domain-list { display: grid; gap: 0.35rem; margin: 0.65rem 0 0; padding: 0; list-style: none; }
     .observation-domain { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem; padding: 0.45rem 0.55rem; border-radius: 0.35rem; background: #102238; color: #c7d7eb; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
     .observation-domain-name { flex: 1 1 14rem; min-width: 0; }
-    .observation-domain button { margin-top: 0; }
+    .observation-domain button { margin-top: 0; min-width: 9.5rem; }
+    .observation-domain .observation-profile-button { max-width: 16rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .observation-label, .observation-hint-line { font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     .observation-label { display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.5rem; color: #edf5ff; font-size: 0.88rem; }
     .observation-label strong { font-weight: 650; overflow-wrap: anywhere; }
     .observation-category { padding: 0.05rem 0.45rem; border: 1px solid #46627f; border-radius: 999px; color: #c6dbf4; font-size: 0.7rem; font-weight: 500; white-space: nowrap; }
     .observation-category[data-kind="unknown"] { border-style: dashed; color: #9fb3ca; }
-    .observation-domain-host { margin-top: 0.1rem; color: #9fb3ca; font-size: 0.76rem; overflow-wrap: anywhere; }
+    .observation-domain-host { display: flex; flex-wrap: wrap; align-items: center; gap: 0.15rem 0.5rem; margin-top: 0.1rem; color: #9fb3ca; font-size: 0.76rem; }
+    .observation-domain-host span:first-child { min-width: 0; overflow-wrap: anywhere; }
+    .observation-badge { padding: 0.05rem 0.5rem; border: 1px solid #75404b; border-radius: 999px; background: #482b35; color: #ffcad0; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 0.7rem; font-weight: 600; white-space: nowrap; }
     .observation-hint-line { display: flex; flex-wrap: wrap; gap: 0.1rem 0.75rem; margin-top: 0.2rem; font-size: 0.76rem; }
     .observation-hint { color: #b9c9dc; font-style: italic; }
     .observation-search-link { color: #8cc4ff; }
@@ -3260,6 +3264,44 @@ DASHBOARD_HTML = """<!doctype html>
       };
     }
 
+    function blockButtonState(observation) {
+      const domain = observation.domain;
+      const whenItApplies = "It applies on its own while JitterSim is running. " +
+        "After Reset or Panic choose Apply current configuration.";
+      if (observation.globally_blocked === true) {
+        return {
+          label: "Unblock",
+          ariaLabel: "Unblock " + domain,
+          path: "/api/observations/remove-global-block",
+          busy: "Removing " + domain + " from the global block list...",
+          done: "Removed " + domain + " from the global block list. " + whenItApplies
+        };
+      }
+      return {
+        label: "Block globally",
+        ariaLabel: "Block globally " + domain,
+        path: "/api/observations/add-global-block",
+        busy: "Adding " + domain + " to the global block list...",
+        done: "Added " + domain + " to the global block list. " + whenItApplies
+      };
+    }
+
+    function profileButtonState(domain, profile) {
+      let label = "Add to profile";
+      let disabled = false;
+      if (!profile) {
+        disabled = true;
+      } else if ((profile.website_domains || []).indexOf(domain) !== -1) {
+        label = "Already in " + profile.name;
+        disabled = true;
+      }
+      return { label: label, disabled: disabled, ariaLabel: label + " " + domain };
+    }
+
+    function queryCountText(count) {
+      return count + (count === 1 ? " query" : " queries");
+    }
+
     function domainRowParts(observation) {
       const label = observation.label || {};
       const hint = domainHint(observation);
@@ -3323,6 +3365,9 @@ DASHBOARD_HTML = """<!doctype html>
           option.selected = profile.id === device.assigned_profile_id;
           targetProfile.appendChild(option);
         });
+        const profileSyncs = [];
+        const syncProfileButtons = () => profileSyncs.forEach((sync) => sync());
+        targetProfile.addEventListener("change", syncProfileButtons);
         const targetRow = document.createElement("div");
         targetRow.className = "observation-actions";
         targetRow.append(targetProfile);
@@ -3349,7 +3394,12 @@ DASHBOARD_HTML = """<!doctype html>
           }
           const host = document.createElement("div");
           host.className = "observation-domain-host";
-          host.textContent = parts.domain;
+          const hostName = document.createElement("span");
+          hostName.textContent = parts.domain;
+          const badge = document.createElement("span");
+          badge.className = "observation-badge";
+          badge.textContent = "Blocked";
+          host.append(hostName, badge);
           domain.appendChild(host);
           const hintLine = document.createElement("div");
           hintLine.className = "observation-hint-line";
@@ -3372,22 +3422,40 @@ DASHBOARD_HTML = """<!doctype html>
           if (hintLine.childNodes.length > 0) domain.appendChild(hintLine);
           const queryCount = document.createElement("span");
           queryCount.className = "observation-domain-count";
-          queryCount.textContent = observation.query_count + " queries";
+          queryCount.textContent = queryCountText(observation.query_count);
           const profileButton = document.createElement("button");
           profileButton.type = "button";
-          profileButton.textContent = "Add to profile";
-          profileButton.disabled = profiles.length === 0;
+          profileButton.className = "observation-profile-button";
+          const syncProfileButton = () => {
+            // A request in flight keeps the button disabled. Its finally block syncs again.
+            if (profileButton.getAttribute("aria-busy") === "true") return;
+            const selectedProfile = profiles.find((profile) => profile.id === targetProfile.value);
+            const state = profileButtonState(observation.domain, selectedProfile);
+            profileButton.textContent = state.label;
+            profileButton.title = state.label;
+            profileButton.setAttribute("aria-label", state.ariaLabel);
+            profileButton.disabled = state.disabled;
+          };
+          profileSyncs.push(syncProfileButton);
+          syncProfileButton();
           profileButton.addEventListener("click", () => addDomainToProfile(
             observation.domain,
             targetProfile.value,
-            profileButton
+            profileButton,
+            syncProfileButtons
           ));
           const blockButton = document.createElement("button");
           blockButton.type = "button";
-          blockButton.textContent = "Block globally";
-          blockButton.addEventListener("click", () => addGlobalBlock(
-            observation.domain,
-            blockButton
+          const syncBlockButton = () => {
+            blockButton.textContent = blockButtonState(observation).label;
+            blockButton.setAttribute("aria-label", blockButtonState(observation).ariaLabel);
+            badge.hidden = observation.globally_blocked !== true;
+          };
+          syncBlockButton();
+          blockButton.addEventListener("click", () => changeGlobalBlock(
+            observation,
+            blockButton,
+            syncBlockButton
           ));
           item.append(domain, queryCount, profileButton, blockButton);
           list.appendChild(item);
@@ -3397,33 +3465,39 @@ DASHBOARD_HTML = """<!doctype html>
       });
     }
 
-    async function addDomainToProfile(domain, profileId, button) {
+    async function addDomainToProfile(domain, profileId, button, onChange) {
       if (!profileId) return;
       setButtonBusy(button, true);
       showMessage("Adding " + domain + " to the profile...", "working");
       try {
-        await request("/api/observations/add-to-profile", "POST", {
+        const result = await request("/api/observations/add-to-profile", "POST", {
           domain: domain,
           profile_id: profileId
         });
+        const index = profiles.findIndex((profile) => profile.id === profileId);
+        if (index !== -1 && result.profile) profiles[index] = result.profile;
         refreshAfterSuccess("Added " + domain + " to the profile.");
       } catch (error) {
         showMessage(error.message, "error");
       } finally {
         setButtonBusy(button, false);
+        if (onChange) onChange();
       }
     }
 
-    async function addGlobalBlock(domain, button) {
+    async function changeGlobalBlock(observation, button, onChange) {
+      const state = blockButtonState(observation);
       setButtonBusy(button, true);
-      showMessage("Adding " + domain + " to the global block list...", "working");
+      showMessage(state.busy, "working");
       try {
-        await request("/api/observations/add-global-block", "POST", { domain: domain });
-        refreshAfterSuccess("Added " + domain + " to the global block list.");
+        await request(state.path, "POST", { domain: observation.domain });
+        observation.globally_blocked = observation.globally_blocked !== true;
+        refreshAfterSuccess(state.done);
       } catch (error) {
         showMessage(error.message, "error");
       } finally {
         setButtonBusy(button, false);
+        onChange();
       }
     }
 
@@ -5860,8 +5934,14 @@ def _domain_observation_payload(observation: DomainObservation) -> Dict[str, Any
     }
 
 
-def _labelled_domain_payloads(rows: Sequence[DomainObservation]) -> List[Dict[str, Any]]:
-    """Add a plain-language label and a seen-with guess to one device's observed names."""
+def _labelled_domain_payloads(
+    rows: Sequence[DomainObservation], blocked_domains: Collection[str] = ()
+) -> List[Dict[str, Any]]:
+    """Add a label and a seen-with guess and the global block state to observed names.
+
+    A name counts as blocked only when it is an exact entry of the global block list because
+    the engine resolves each listed name on its own and does not match subdomains.
+    """
 
     hints = seen_with([(row.domain, row.first_seen) for row in rows])
     return [
@@ -5869,6 +5949,7 @@ def _labelled_domain_payloads(rows: Sequence[DomainObservation]) -> List[Dict[st
             **_domain_observation_payload(row),
             "label": label_domain(row.domain).as_dict(),
             "seen_with": hints.get(row.domain, []),
+            "globally_blocked": row.domain in blocked_domains,
         }
         for row in rows
     ]
@@ -6399,6 +6480,7 @@ class ControlServer(HTTPServer):
                 grouped.setdefault(address, []).append(observation)
             stations = self._station_identities(station_devices)
             labels_by_mac = self.repository.list_connected_device_labels()
+            blocked_names = frozenset(self.repository.get_website_policy().blocked_domains)
             devices = [
                 {
                     "ipv4_address": address,
@@ -6418,7 +6500,12 @@ class ControlServer(HTTPServer):
                         if address in assignments_by_address
                         else None
                     ),
-                    "domains": _labelled_domain_payloads(rows),
+                    "assigned_profile_id": (
+                        assignments_by_address[address].profile_id
+                        if address in assignments_by_address
+                        else None
+                    ),
+                    "domains": _labelled_domain_payloads(rows, blocked_names),
                 }
                 for address, rows in sorted(grouped.items())
             ]
@@ -7174,6 +7261,9 @@ class ControlServer(HTTPServer):
         if path == "/api/observations/add-global-block":
             return self._add_observation_to_global_block(payload)
 
+        if path == "/api/observations/remove-global-block":
+            return self._remove_observation_from_global_block(payload)
+
         if path == "/api/apply":
             return self._apply_configuration()
 
@@ -7429,6 +7519,23 @@ class ControlServer(HTTPServer):
         except (KeyError, TypeError, ValueError, StorageError):
             return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
                 {"error": "could not add domain to global block list"}
+            )
+        return HTTPStatus.OK, "application/json", _json_bytes(
+            {"policies": _policies_payload(self.repository)}
+        )
+
+    def _remove_observation_from_global_block(
+        self, payload: Dict[str, Any]
+    ) -> Tuple[int, str, bytes]:
+        try:
+            domain = normalize_domain(payload["domain"])
+            policy = self.repository.get_website_policy()
+            remaining = tuple(item for item in policy.blocked_domains if item != domain)
+            if remaining != policy.blocked_domains:
+                self.repository.save_website_policy(replace(policy, blocked_domains=remaining))
+        except (KeyError, TypeError, ValueError, StorageError):
+            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                {"error": "could not remove domain from global block list"}
             )
         return HTTPStatus.OK, "application/json", _json_bytes(
             {"policies": _policies_payload(self.repository)}

@@ -10,6 +10,7 @@ import time
 import unittest
 from email.message import Message
 from io import BytesIO
+from ipaddress import IPv4Address
 from pathlib import Path
 from unittest.mock import patch
 
@@ -24,6 +25,7 @@ from jittersim.config.models import (
     RandomWebsiteOutcome,
 )
 from jittersim.config.storage import ConfigRepository, StorageError
+from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.networking.helper import HelperClientError
 from tests.helper_support import OlderHelperService, OldHelperService, captures, serving
 
@@ -126,6 +128,18 @@ class FakeHelper:
                 "services": {},
             },
         }
+
+
+class PlanRecordingHelper(FakeHelper):
+    """Keep every plan that was applied rather than only the last one."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.plans = []
+
+    def apply(self, *, plan):
+        self.plans.append(plan)
+        return super().apply(plan=plan)
 
 
 class MovingClientHelper(FakeHelper):
@@ -1663,6 +1677,164 @@ class ControlServerTests(unittest.TestCase):
             ("ads.example.com",),
         )
 
+    def test_remove_global_block_removes_one_exact_name(self) -> None:
+        from dataclasses import replace
+
+        policy = self.repository.get_website_policy()
+        self.repository.save_website_policy(
+            replace(policy, blocked_domains=("facebook.com", "example.org"))
+        )
+
+        status, _, body = self.server.write_response_for(
+            "/api/observations/remove-global-block", {"domain": "Facebook.com."}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self.repository.get_website_policy().blocked_domains, ("example.org",))
+        self.assertEqual(
+            json.loads(body)["policies"]["websites"]["blocked_domains"], ["example.org"]
+        )
+
+    def test_remove_global_block_keeps_the_mode_and_the_allowed_list(self) -> None:
+        from jittersim.config.models import WebsitePolicy
+
+        self.repository.save_website_policy(
+            WebsitePolicy(
+                mode="allow_only",
+                allowed_domains=("ok.example",),
+                blocked_domains=("x.example", "y.example"),
+            )
+        )
+
+        self.server.write_response_for(
+            "/api/observations/remove-global-block", {"domain": "x.example"}
+        )
+
+        policy = self.repository.get_website_policy()
+        self.assertEqual(policy.mode, "allow_only")
+        self.assertEqual(policy.allowed_domains, ("ok.example",))
+        self.assertEqual(policy.blocked_domains, ("y.example",))
+
+    def test_remove_global_block_leaves_a_subdomain_entry_alone(self) -> None:
+        from dataclasses import replace
+
+        policy = self.repository.get_website_policy()
+        self.repository.save_website_policy(
+            replace(policy, blocked_domains=("facebook.com", "www.facebook.com"))
+        )
+
+        self.server.write_response_for(
+            "/api/observations/remove-global-block", {"domain": "facebook.com"}
+        )
+
+        self.assertEqual(
+            self.repository.get_website_policy().blocked_domains, ("www.facebook.com",)
+        )
+
+    def test_remove_global_block_for_an_unlisted_name_changes_nothing(self) -> None:
+        version = self.repository.get_runtime_state().configuration_version
+
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/remove-global-block", {"domain": "never-listed.example"}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self.repository.get_website_policy().blocked_domains, ())
+        self.assertEqual(self.repository.get_runtime_state().configuration_version, version)
+
+    def test_remove_global_block_rejects_a_bad_domain(self) -> None:
+        for payload in ({}, {"domain": 5}, {"domain": "not a domain"}):
+            status, _, body = self.server.write_response_for(
+                "/api/observations/remove-global-block", payload
+            )
+            self.assertEqual(status, 400)
+            self.assertEqual(
+                json.loads(body)["error"], "could not remove domain from global block list"
+            )
+
+    def test_remove_global_block_needs_the_admin_token(self) -> None:
+        from jittersim.api.server import WRITE_PATHS
+
+        self.assertIn("/api/observations/remove-global-block", WRITE_PATHS)
+
+    def _scheduled_server(self):
+        helper = PlanRecordingHelper()
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=helper)
+        self.server.helper_client = helper
+        self.server.scheduler = scheduler
+        return helper, scheduler
+
+    def test_a_block_list_change_before_the_first_apply_is_not_applied_by_the_scheduler(
+        self,
+    ) -> None:
+        # The success message tells the user to apply after Reset or Panic. The scheduler is
+        # paused then and a saved change waits for the Apply button.
+        helper, scheduler = self._scheduled_server()
+
+        self.server.write_response_for(
+            "/api/observations/add-global-block", {"domain": "ads.example.com"}
+        )
+
+        self.assertFalse(scheduler.tick(repository=self.repository))
+        self.assertEqual(helper.plans, [])
+
+    def test_a_block_list_change_after_a_reset_is_not_applied_by_the_scheduler(self) -> None:
+        helper, scheduler = self._scheduled_server()
+        self.server.write_response_for("/api/apply", {})
+        self.server.write_response_for("/api/reset", {})
+        applied = len(helper.plans)
+
+        self.server.write_response_for(
+            "/api/observations/add-global-block", {"domain": "ads.example.com"}
+        )
+
+        self.assertFalse(scheduler.tick(repository=self.repository))
+        self.assertEqual(len(helper.plans), applied)
+
+    def test_an_active_scheduler_applies_a_removed_block_on_its_next_tick(self) -> None:
+        # The success message says a change applies on its own while JitterSim is running.
+        helper, scheduler = self._scheduled_server()
+        blocked = IPv4Address("203.0.113.9")
+        kept = IPv4Address("203.0.113.10")
+        lookups = {"ads.example.com": (blocked,), "other.example.com": (kept,)}
+        for domain in lookups:
+            self.server.write_response_for(
+                "/api/observations/add-global-block", {"domain": domain}
+            )
+
+        with patch(
+            "jittersim.engine.website._cached_addresses",
+            side_effect=lambda *, domain: lookups.get(domain, ()),
+        ):
+            status, _, _ = self.server.write_response_for("/api/apply", {})
+            self.assertEqual(status, 200)
+            applied = len(helper.plans)
+            self.assertCountEqual(helper.plans[-1].global_blocked_addresses, (blocked, kept))
+
+            self.server.write_response_for(
+                "/api/observations/remove-global-block", {"domain": "ads.example.com"}
+            )
+            # The endpoint only saves. It never calls the helper itself.
+            self.assertEqual(len(helper.plans), applied)
+
+            self.assertTrue(scheduler.tick(repository=self.repository))
+
+        self.assertEqual(len(helper.plans), applied + 1)
+        self.assertEqual(helper.plans[-1].global_blocked_addresses, (kept,))
+
+    def test_the_global_block_endpoints_never_call_the_helper(self) -> None:
+        helper = PlanRecordingHelper()
+        self.server.helper_client = helper
+
+        self.server.write_response_for(
+            "/api/observations/add-global-block", {"domain": "ads.example.com"}
+        )
+        self.server.write_response_for(
+            "/api/observations/remove-global-block", {"domain": "ads.example.com"}
+        )
+
+        self.assertEqual(helper.plans, [])
+
     def test_rejects_invalid_profile_writes_before_persistence(self) -> None:
         status, content_type, body = self.server.write_response_for(
             "/api/profiles",
@@ -1878,6 +2050,66 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(devices["192.168.50.125"]["domains"][0]["seen_with"], [])
 
+    def test_observations_flag_globally_blocked_names(self) -> None:
+        from dataclasses import replace
+
+        self.repository.save_domain_observations(
+            [
+                DomainObservation("192.168.50.124", "facebook.com", 2, 100, 100),
+                DomainObservation("192.168.50.124", "www.facebook.com", 1, 100, 100),
+            ],
+            now=100,
+        )
+        policy = self.repository.get_website_policy()
+        self.repository.save_website_policy(replace(policy, blocked_domains=("facebook.com",)))
+
+        _, _, body = self.server.response_for("/api/observations")
+        domains = {item["domain"]: item for item in json.loads(body)["devices"][0]["domains"]}
+
+        self.assertTrue(domains["facebook.com"]["globally_blocked"])
+        self.assertFalse(domains["www.facebook.com"]["globally_blocked"])
+
+    def test_globally_blocked_matches_after_normalization(self) -> None:
+        from dataclasses import replace
+
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.124", "Ads.Example.COM.", 1, 100, 100)], now=100
+        )
+        policy = self.repository.get_website_policy()
+        self.repository.save_website_policy(replace(policy, blocked_domains=("ADS.example.com",)))
+
+        _, _, body = self.server.response_for("/api/observations")
+        domain = json.loads(body)["devices"][0]["domains"][0]
+
+        self.assertEqual(domain["domain"], "ads.example.com")
+        self.assertTrue(domain["globally_blocked"])
+
+    def test_nothing_is_globally_blocked_without_a_block_list(self) -> None:
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.124", "facebook.com", 1, 100, 100)], now=100
+        )
+
+        _, _, body = self.server.response_for("/api/observations")
+
+        self.assertFalse(json.loads(body)["devices"][0]["domains"][0]["globally_blocked"])
+
+    def test_observations_name_the_profile_assigned_to_each_device(self) -> None:
+        self.repository.save_domain_observations(
+            [
+                DomainObservation("192.168.50.10", "facebook.com", 1, 100, 100),
+                DomainObservation("192.168.50.124", "facebook.com", 1, 100, 100),
+            ],
+            now=100,
+        )
+
+        _, _, body = self.server.response_for("/api/observations")
+        devices = {item["ipv4_address"]: item for item in json.loads(body)["devices"]}
+
+        self.assertEqual(devices["192.168.50.10"]["assigned_device_id"], "alice")
+        self.assertEqual(devices["192.168.50.10"]["assigned_profile_id"], "slow")
+        self.assertIsNone(devices["192.168.50.124"]["assigned_device_id"])
+        self.assertIsNone(devices["192.168.50.124"]["assigned_profile_id"])
+
     def test_the_scan_response_keeps_its_original_fields(self) -> None:
         self.server.helper_client = FakeHelper()
 
@@ -1886,6 +2118,7 @@ class ControlServerTests(unittest.TestCase):
         observation = json.loads(body)["observations"][0]
         self.assertNotIn("label", observation)
         self.assertNotIn("seen_with", observation)
+        self.assertNotIn("globally_blocked", observation)
 
     def test_observations_work_without_the_helper(self) -> None:
         self.server.helper_client = FakeHelper()
