@@ -146,7 +146,7 @@ DASHBOARD_HTML = """<!doctype html>
   <style>
     :root {
       color-scheme: dark;
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       background: #0b1220;
       color: #e7eef8;
     }
@@ -158,7 +158,7 @@ DASHBOARD_HTML = """<!doctype html>
     body { margin: 0; background: #0b1220; line-height: 1.5; }
     h1, h2, h3, p { margin-top: 0; }
     h1 { margin-bottom: 0.25rem; font-size: clamp(2rem, 5vw, 3.2rem); letter-spacing: -0.04em; }
-    h2 { margin-bottom: 0.75rem; font-size: 1.15rem; }
+    h2 { margin-bottom: 0.75rem; font-size: 1.25rem; }
     h3 { margin: 1.5rem 0 0.75rem; font-size: 0.9rem; color: #a8c7e8; text-transform: uppercase; letter-spacing: 0.08em; }
     code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     pre {
@@ -172,7 +172,6 @@ DASHBOARD_HTML = """<!doctype html>
       color: #c7d7eb;
       font-size: 0.82rem;
     }
-    .eyebrow { margin-bottom: 0.35rem; color: #70b7ff; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.14em; }
     .subtitle { margin-bottom: 0; color: #a8b8ce; }
     .badge {
       flex: 0 0 auto;
@@ -465,7 +464,7 @@ DASHBOARD_HTML = """<!doctype html>
     .day-field { display: grid; align-content: start; gap: 0.3rem; }
     .day-picker { display: flex; flex-wrap: wrap; gap: 0.4rem; }
     .day-toggle { min-width: 2.8rem; margin-top: 0; padding: 0.55rem 0.65rem; }
-    .day-toggle[aria-pressed="true"] { border-color: #4c9fe8; background: #2479bd; }
+    .day-toggle[aria-pressed="true"] { border-color: #4c9fe8; background: #1f6aa5; color: #fff; }
     .day-field .form-note { margin-top: 0.15rem; }
     .schedule-list { display: grid; gap: 0.5rem; margin-top: 1rem; }
     .schedule-row { display: flex; justify-content: space-between; gap: 1rem; padding: 0.6rem 0.7rem; border-radius: 0.45rem; background: #0d1b2d; color: #c7d7eb; font-size: 0.82rem; }
@@ -506,6 +505,7 @@ DASHBOARD_HTML = """<!doctype html>
       display: grid;
       gap: 0.75rem;
       grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+      align-items: start;
     }
     label { display: grid; gap: 0.3rem; color: #c7d7eb; font-size: 0.88rem; }
     input {
@@ -525,7 +525,7 @@ DASHBOARD_HTML = """<!doctype html>
       padding: 0.7rem 0.3rem; border-block: 1px solid #293e55;
     }
     .router-wifi-label { font-size: 0.85rem; font-weight: 550; }
-    .router-wifi-status { margin: 0.2rem 0 0; font-size: 0.7rem; color: #b6c8db; }
+    .router-wifi-status { margin: 0.2rem 0 0; font-size: 0.78rem; color: #b6c8db; }
     .sidebar .router-wifi-toggle {
       display: grid; place-items: center; flex: 0 0 2.8rem; min-height: 2.75rem;
       padding: 0; border: 0; background: transparent; border-radius: 0.5rem;
@@ -571,20 +571,23 @@ DASHBOARD_HTML = """<!doctype html>
       display: flex; flex-direction: column; gap: 1rem; padding: 1rem 0.85rem;
       background: var(--sidebar-bg); border-right: 1px solid var(--line);
     }
-    .sidebar-brand h1 { margin: 0 0 0.5rem; font-size: 1.5rem; }
-    .sidebar-brand .badge { display: inline-block; margin: 0; }
+    .sidebar-brand { display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.6rem; }
+    .sidebar-brand h1 { margin: 0; font-size: 1.4rem; }
+    .sidebar-brand .badge { display: inline-block; margin: 0; padding: 0.2rem 0.55rem; }
     .sidebar-nav ul { display: grid; gap: 0.2rem; margin: 0; padding: 0; list-style: none; }
     .sidebar-nav a {
       display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
-      padding: 0.5rem 0.65rem; border-radius: 0.5rem; color: var(--muted);
+      padding: 0.4rem 0.65rem; border-radius: 0.5rem; color: var(--muted);
       font-size: 0.92rem; font-weight: 550; text-decoration: none;
     }
     .sidebar-nav a:hover { background: #16263b; color: #e7eef8; }
     .sidebar-nav a[aria-current="page"] { background: #1b3a5c; color: #fff; }
     .sidebar-nav a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     .nav-chip { padding: 0.05rem 0.45rem; border-radius: 999px; background: #243b57; color: #dcecff; font-size: 0.74rem; }
-    .sidebar-footer { display: grid; gap: 0.75rem; margin-top: auto; }
-    .sidebar-operate, .sidebar-credentials, .sidebar-actions { display: grid; gap: 0.5rem; }
+    .sidebar-footer { display: grid; gap: 0.6rem; margin-top: auto; }
+    .sidebar-operate, .sidebar-actions { display: grid; gap: 0.5rem; }
+    .sidebar-credentials { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+    .sidebar-credentials button { min-height: 2.4rem; padding: 0.35rem 0.5rem; font-size: 0.8rem; }
     .sidebar button { margin: 0; min-height: 2.6rem; text-align: left; }
     .sidebar-actions button { text-align: center; }
     .sidebar span { display: block; }
@@ -593,6 +596,7 @@ DASHBOARD_HTML = """<!doctype html>
     .sidebar .panic-button { min-height: 3rem; font-weight: 600; }
     .content { min-width: 0; max-width: 84rem; padding: 1.5rem 1.75rem 4rem; }
     .page > .card:first-child { margin-top: 0; }
+    .wifi-name-card button span { display: block; }
     body:not(.dashboard-locked):not([data-section="access"]) #dashboard-access-panel { display: none; }
     .card-toggle {
       display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
@@ -718,7 +722,6 @@ DASHBOARD_HTML = """<!doctype html>
   <div class="app">
   <aside class="sidebar" aria-label="JitterSim">
     <div class="sidebar-brand">
-      <p class="eyebrow">NETWORK TEST LAB</p>
       <h1>JitterSim</h1>
       <span id="mode-badge" class="badge pending">Checking mode...</span>
     </div>
