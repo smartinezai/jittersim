@@ -81,7 +81,7 @@ bytes.
 
 ### Pi and router controls
 
-The floating **Quick actions** panel includes one **Router Wi-Fi** switch.
+The left sidebar, visible on every page, includes one **Router Wi-Fi** switch.
 It shows the router's confirmed On or Off state and the last check time.
 Enter the router admin password to start automatic checks while the page is
 visible. A change shows **Changing** until the router confirms it. An
@@ -100,7 +100,7 @@ A device asking for a WPA, WPA2 or WPA3 password needs the Wi-Fi password for
 that network. After copying router Wi-Fi this is the router's Wi-Fi password.
 It is different from the router administration password and dashboard token.
 
-Use **Reset Wi-Fi name** in the floating **Quick actions** panel or run
+Use **Reset Wi-Fi name** on the **Router and Wi-Fi** page or run
 `sudo jittersim wifi reset` on the Pi to restore `JitterSim`. Both keep the
 current password and security type. The action restarts Wi-Fi and disconnects
 test clients. Add `--yes` to confirm without an interactive prompt. The console

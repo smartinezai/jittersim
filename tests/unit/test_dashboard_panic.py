@@ -148,8 +148,8 @@ CASES = {
 }
 
 
-def test_panic_button_stays_reachable_in_the_floating_dock():
-    dock = re.search(r'<nav class="credential-dock".*?</nav>', DASHBOARD_HTML, re.DOTALL).group(0)
+def test_panic_button_stays_reachable_in_the_sidebar():
+    dock = re.search(r'<aside class="sidebar".*?</aside>', DASHBOARD_HTML, re.DOTALL).group(0)
     button = re.search(r'<button[^>]*id="panic-button"[^>]*>', dock).group(0)
     assert 'type="button"' in button
     assert "danger" in button

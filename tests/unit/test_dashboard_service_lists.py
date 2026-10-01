@@ -87,6 +87,8 @@ function element(id) {
 function showMessage(text, kind) {messages.push({text, kind})}
 function refreshAfterSuccess(message) {refreshMessages.push(message)}
 function setButtonBusy(button, busy) {button.disabled = busy}
+const revealed = [];
+function revealElement(target) {revealed.push(target.id)}
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 const CATALOGUE = [
   {key: "netflix", name: "Netflix", domains: ["netflix.com", "nflxvideo.net"]},
@@ -144,6 +146,7 @@ CASES = {
       assert.deepEqual(
         element("service-list-catalogue").querySelectorAll("input:checked").map((b) => b.value),
         ["netflix"]);
+      assert.deepEqual(revealed, ["service-list-form"]);
     """,
     "the_list_renders_names_and_actions": r"""
       serviceCatalogue = CATALOGUE;

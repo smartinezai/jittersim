@@ -11,6 +11,10 @@ from playwright.sync_api import expect, sync_playwright
 
 def check_wifi_recovery(page):
     button = page.locator("#reset-wifi-name")
+    fallback = page.get_by_role("button", name="Manual Pi access-point fallback")
+    expect(fallback).to_have_attribute("aria-expanded", "false")
+    fallback.click()
+    expect(fallback).to_have_attribute("aria-expanded", "true")
     expect(button).to_be_enabled()
     expect(button).to_be_in_viewport()
     field = page.locator("#access-point-ssid")
@@ -140,6 +144,7 @@ def run():
                 expect(page.locator("#admin-credential-state")).to_contain_text("Accepted")
                 page.locator("#remember-admin-token").check()
                 page.locator("#close-credentials").click()
+                page.locator('[data-page-link="router"]').click()
                 check_router_copy(page)
                 check_router_switch(page)
                 check_wifi_recovery(page)
@@ -148,10 +153,11 @@ def run():
                 page.screenshot(path="test-results/wifi-pi-desktop.png", animations="disabled")
                 page.set_viewport_size({"width": 1280, "height": 800})
                 expect(page.locator("#router-wifi-toggle")).to_be_in_viewport()
-                dock = page.locator(".credential-dock").bounding_box()
-                assert dock["x"] > 1000
+                sidebar = page.locator(".sidebar").bounding_box()
+                assert sidebar["x"] == 0 and sidebar["width"] < 300
                 page.screenshot(path="test-results/wifi-pi-laptop.png", animations="disabled")
                 page.set_viewport_size({"width": 390, "height": 844})
+                page.locator("#reset-wifi-name").scroll_into_view_if_needed()
                 expect(page.locator("#reset-wifi-name")).to_be_in_viewport()
                 page.screenshot(path="test-results/wifi-pi-phone.png", animations="disabled")
                 assert page.evaluate("document.documentElement.scrollWidth") <= 391
