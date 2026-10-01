@@ -2,7 +2,7 @@
 
 This directory contains the versioned deployment pieces for the Pi appliance.
 
-Install the helper and dashboard from the same release. The floating Router
+Install the helper and dashboard from the same release. The sidebar's Router
 Wi-Fi switch needs the helper's read-only status action. It refreshes while
 the dashboard is visible and uses background operations for slow router
 changes. An older helper shows unavailable status. No router password is
@@ -323,7 +323,7 @@ on the Pi through its management connection or a local terminal. Add `--yes`
 to confirm without a prompt. The command restores `JitterSim` and keeps the
 current password and security type. It restarts test Wi-Fi and needs the
 helper but works with the dashboard stopped. The dashboard has the same
-**Reset Wi-Fi name** control in its floating **Quick actions** panel.
+**Reset Wi-Fi name** control on its **Router and Wi-Fi** page.
 Administration remains unavailable from the test network.
 
 **Copy router Wi-Fi to Pi** first checks the source band and personal
