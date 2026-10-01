@@ -332,6 +332,13 @@ DASHBOARD_HTML = """<!doctype html>
     .connected-controls { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
     .connected-controls select { min-width: 0; width: 12rem; max-width: 100%; }
     .connected-controls button { margin-top: 0; white-space: nowrap; }
+    .connected-row.protected { border-color: #3a4656; background: #111b29; }
+    .connected-row.protected .connected-dot { background: #7b8797; box-shadow: 0 0 0 0.2rem #7b879722; }
+    .connected-row.protected .connected-address { color: #c3cfde; }
+    .connected-row.protected .connected-meta { color: #9fb0c4; }
+    .connected-row.protected .connected-controls select:disabled,
+    .connected-row.protected .connected-controls button:disabled { opacity: 1; color: #8493a6; border-color: #2c3847; background: #0f1824; cursor: not-allowed; }
+    .protected-badge { display: inline-block; margin-left: 0.5rem; padding: 0.05rem 0.5rem; border: 1px solid #5b6b7f; border-radius: 999px; color: #c3cfde; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.02em; }
     .connected-label-editor { margin-top: 0.4rem; color: #a8bdd4; font-size: 0.78rem; }
     .connected-label-editor summary { cursor: pointer; }
     .connected-label-form {
@@ -2842,16 +2849,9 @@ DASHBOARD_HTML = """<!doctype html>
           profileSelect.appendChild(option);
         });
         if (draft.profile !== undefined) profileSelect.value = draft.profile;
-        profileSelect.disabled = !!device.unaffected || !device.ipv4_address || !device.association_verified;
         const applyButton = document.createElement("button");
         applyButton.type = "button";
         applyButton.textContent = device.assigned_profile_id ? "Apply profile" : "Assign profile";
-        applyButton.disabled = !!device.unaffected || !profileSelect.value || !helperConfigured || profiles.length === 0 ||
-          !device.ipv4_address || !device.association_verified;
-        profileSelect.addEventListener("change", () => {
-          applyButton.disabled = !!device.unaffected || !helperConfigured || profileSelect.value === "" ||
-            !device.ipv4_address || !device.association_verified;
-        });
         applyButton.addEventListener("click", () => {
           applyProfileToDevice(device, profileSelect.value, applyButton);
         });
@@ -2874,12 +2874,32 @@ DASHBOARD_HTML = """<!doctype html>
         const groupButton = document.createElement("button");
         groupButton.type = "button";
         groupButton.textContent = "Add to group";
+        const rowContext = () => ({
+          helperConfigured,
+          profileCount: profiles.length,
+          groupCount: groups.length,
+          selectedProfile: profileSelect.value,
+          selectedGroup: groupSelect.value
+        });
+        const rowState = connectedRowState(device, rowContext());
+        row.className = rowState.rowClass;
+        if (rowState.badge) {
+          const protectedBadge = document.createElement("span");
+          protectedBadge.className = "protected-badge";
+          protectedBadge.textContent = rowState.badge;
+          address.append(" ", protectedBadge);
+        }
+        profileSelect.disabled = rowState.disableProfile;
+        applyButton.disabled = rowState.disableApply;
+        profileSelect.addEventListener("change", () => {
+          applyButton.disabled = connectedRowState(device, rowContext()).disableApply;
+        });
         const syncGroup = () => {
           const selected = groups.find((group) => group.id === groupSelect.value);
-          groupButton.disabled = !helperConfigured || !device.association_verified || !device.ipv4_address ||
-            !selected || selected.id === device.group_id || (!device.assigned_device_id && !selected.profile_id);
+          groupButton.disabled = connectedRowState(device, rowContext()).disableGroupButton ||
+            !selected || (!device.assigned_device_id && !selected.profile_id);
         };
-        groupSelect.disabled = !helperConfigured || !device.association_verified || !device.ipv4_address || !groups.length;
+        groupSelect.disabled = rowState.disableGroupSelect;
         groupSelect.addEventListener("change", syncGroup);
         syncGroup();
         groupButton.addEventListener("click", () => connectedControlAction(
@@ -2888,7 +2908,7 @@ DASHBOARD_HTML = """<!doctype html>
         ));
         const protectionButton = document.createElement("button");
         protectionButton.type = "button";
-        protectionButton.textContent = device.unaffected ? "Remove protection" : "Make unaffected";
+        protectionButton.textContent = rowState.protectionLabel;
         protectionButton.setAttribute("aria-label", protectionButton.textContent + " for " + (device.display_name || device.mac_address));
         protectionButton.addEventListener("click", () => connectedControlAction(
           device.unaffected ? "/api/unaffected-devices/delete" : "/api/unaffected-devices",
@@ -2896,6 +2916,11 @@ DASHBOARD_HTML = """<!doctype html>
           device.unaffected ? "Protection removed. Saved profiles can apply again." : "Protection saved and applied. This device is unaffected by profiles."
         ));
         controls.append(profileSelect, applyButton, groupSelect, groupButton, protectionButton);
+        if (rowState.protectedRow) {
+          [profileSelect, applyButton, groupSelect, groupButton].forEach((control) => {
+            control.setAttribute("aria-disabled", "true");
+          });
+        }
         [...labelForm.querySelectorAll("[data-draft]"), profileSelect, groupSelect].forEach((field) => {
           if (draft[field.dataset.draft] !== undefined) field.dataset.dirty = "true";
           field.addEventListener("input", () => { field.dataset.dirty = "true"; });
