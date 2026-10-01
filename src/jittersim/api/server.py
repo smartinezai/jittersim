@@ -2266,6 +2266,17 @@ DASHBOARD_HTML = """<!doctype html>
       }, { upload_bytes: 0, download_bytes: 0, upload_packets: 0, download_packets: 0 });
     }
 
+    function deviceDisplayName(device) {
+      return device.display_name || device.name || device.assigned_device_name ||
+        device.ipv4_address || "Unknown device";
+    }
+
+    function devicePickerLabel(device) {
+      return device.ipv4_address
+        ? deviceDisplayName(device) + " (" + device.ipv4_address + ")"
+        : deviceDisplayName(device);
+    }
+
     function updateTrafficDeviceOptions(devices) {
       const select = element("traffic-device");
       const selected = select.value;
@@ -2278,7 +2289,7 @@ DASHBOARD_HTML = """<!doctype html>
       (generalActive ? [] : devices).forEach((device) => {
         const option = document.createElement("option");
         option.value = device.id;
-        option.textContent = device.name + " (" + device.ipv4_address + ")";
+        option.textContent = devicePickerLabel(device);
         select.appendChild(option);
       });
       select.value = Array.from(select.options).some((option) => option.value === selected)
@@ -3063,7 +3074,7 @@ DASHBOARD_HTML = """<!doctype html>
       savedDevices.forEach((device) => {
         const option = document.createElement("option");
         option.value = device.id;
-        option.textContent = device.name + " (" + device.ipv4_address + ")";
+        option.textContent = devicePickerLabel(device);
         option.selected = selected.has(option.value);
         select.appendChild(option);
       });
@@ -3191,7 +3202,7 @@ DASHBOARD_HTML = """<!doctype html>
         const heading = document.createElement("div");
         heading.className = "observation-device-heading";
         const title = document.createElement("h3");
-        title.textContent = device.assigned_device_name || device.ipv4_address;
+        title.textContent = deviceDisplayName(device);
         const address = document.createElement("p");
         address.textContent = device.ipv4_address;
         heading.append(title, address);
@@ -4011,7 +4022,7 @@ DASHBOARD_HTML = """<!doctype html>
       data.devices.forEach((device) => {
           const option = document.createElement("option");
           option.value = device.id;
-          option.textContent = device.name + " (" + device.ipv4_address + ")";
+          option.textContent = devicePickerLabel(device);
           deviceSelect.appendChild(option);
         });
       });
