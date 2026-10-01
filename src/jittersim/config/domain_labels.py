@@ -7,6 +7,7 @@ registrable domain.
 """
 
 from dataclasses import dataclass
+from ipaddress import IPv4Address
 from typing import Dict, Iterable, List, Tuple
 
 from .models import normalize_domain
@@ -25,7 +26,11 @@ _FALLBACK_CATALOGUE_CATEGORY = "Online service"
 _SECOND_LEVEL = frozenset({
     "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.nz", "co.jp",
     "co.in", "com.br", "com.mx", "co.za", "com.tr", "com.cn", "com.hk", "com.sg",
+    "co.kr", "or.kr", "com.ar", "com.tw", "com.pl", "ne.jp", "or.jp", "co.id", "co.il",
+    "com.my", "com.ph", "com.vn", "com.ua", "org.nz", "net.nz", "co.th",
 })
+# Reverse lookup names are shown whole because their labels are the address digits.
+_REVERSE_SUFFIXES = ("in-addr.arpa", "ip6.arpa")
 
 _CATALOGUE_CATEGORY = {
     "linkedin": "Social network", "microsoft_teams": "Meetings", "chatgpt": "AI assistant",
@@ -103,6 +108,15 @@ _EXTRA: Tuple[Tuple[str, str, str, str], ...] = (
     ("dropboxusercontent.com", "Dropbox", "app", "File storage"),
     # Google
     ("google.com", "Google", "system", "Google services"),
+    ("google.de", "Google", "system", "Google services"),
+    ("google.co.uk", "Google", "system", "Google services"),
+    ("google.fr", "Google", "system", "Google services"),
+    ("google.at", "Google", "system", "Google services"),
+    ("google.ch", "Google", "system", "Google services"),
+    ("google.nl", "Google", "system", "Google services"),
+    ("google.es", "Google", "system", "Google services"),
+    ("google.it", "Google", "system", "Google services"),
+    ("google.pl", "Google", "system", "Google services"),
     ("gstatic.com", "Google", "system", "Google services"),
     ("googleapis.com", "Google", "system", "Google services"),
     ("googleusercontent.com", "Google", "system", "Google services"),
@@ -145,6 +159,9 @@ _EXTRA: Tuple[Tuple[str, str, str, str], ...] = (
     ("mozilla.net", "Mozilla", "system", "Firefox services"),
     ("firefox.com", "Mozilla", "system", "Firefox services"),
     ("ntp.org", "NTP", "system", "Time sync"),
+    # Reverse lookups
+    ("in-addr.arpa", "Reverse DNS", "system", "Reverse lookup"),
+    ("ip6.arpa", "Reverse DNS", "system", "Reverse lookup"),
     # Shared CDNs and cloud hosting
     ("akamai.net", "Akamai", "cdn", "Shared CDN"),
     ("akamai.com", "Akamai", "cdn", "Shared CDN"),
@@ -308,10 +325,28 @@ class DomainLabel:
         }
 
 
-def registrable_domain(domain: str) -> str:
-    """Return the last two labels or the last three under a known second-level suffix."""
+def _is_ipv4_address(name: str) -> bool:
+    try:
+        IPv4Address(name)
+    except ValueError:
+        return False
+    return True
 
-    labels = normalize_domain(domain).split(".")
+
+def _is_reverse_name(name: str) -> bool:
+    return any(name == suffix or name.endswith("." + suffix) for suffix in _REVERSE_SUFFIXES)
+
+
+def registrable_domain(domain: str) -> str:
+    """Return the last two labels or the last three under a known second-level suffix.
+
+    A bare IPv4 address and a reverse lookup name are returned whole.
+    """
+
+    normalized = normalize_domain(domain)
+    if _is_ipv4_address(normalized) or _is_reverse_name(normalized):
+        return normalized
+    labels = normalized.split(".")
     if len(labels) <= 2:
         return ".".join(labels)
     if ".".join(labels[-2:]) in _SECOND_LEVEL:

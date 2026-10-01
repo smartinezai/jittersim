@@ -239,3 +239,52 @@ def test_the_nearest_name_of_an_app_decides_the_distance():
 )
 def test_shared_hosting_names_are_cdn_names(domain):
     assert label_domain(domain).kind == "cdn"
+
+
+@pytest.mark.parametrize("address", ["192.168.1.1", "10.0.0.7", "8.8.8.8"])
+def test_a_bare_ipv4_address_stays_whole_and_is_unknown(address):
+    assert registrable_domain(address) == address
+    label = label_domain(address)
+    assert (label.kind, label.name, label.category, label.known) == (
+        "unknown", address, "Unknown site", False)
+
+
+def test_a_name_that_only_looks_like_an_address_still_uses_the_last_two_labels():
+    assert registrable_domain("1.2.3.example.com") == "example.com"
+    assert registrable_domain("300.1.1.1") == "1.1"
+
+
+@pytest.mark.parametrize(
+    "domain", ["4.3.2.1.in-addr.arpa", "1.0.0.127.in-addr.arpa", "b.a.9.8.7.6.5.4.ip6.arpa"]
+)
+def test_reverse_lookup_names_are_system_names_and_stay_whole(domain):
+    assert registrable_domain(domain) == domain
+    label = label_domain(domain)
+    assert (label.kind, label.name, label.category, label.known) == (
+        "system", "Reverse DNS", "Reverse lookup", True)
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "co.kr", "or.kr", "com.ar", "com.tw", "com.pl", "ne.jp", "or.jp", "co.id", "co.il",
+        "com.my", "com.ph", "com.vn", "com.ua", "org.nz", "net.nz", "co.th",
+    ],
+)
+def test_more_second_level_suffixes_keep_three_labels(suffix):
+    assert registrable_domain("www.shop.example." + suffix) == "example." + suffix
+    assert registrable_domain("example." + suffix) == "example." + suffix
+
+
+@pytest.mark.parametrize(
+    "domain",
+    [
+        "google.de", "google.co.uk", "google.fr", "google.at", "google.ch", "google.nl",
+        "google.es", "google.it", "google.pl",
+    ],
+)
+def test_google_country_domains_are_google_system_names(domain):
+    for name in (domain, "www." + domain):
+        label = label_domain(name)
+        assert (label.kind, label.name, label.category, label.known) == (
+            "system", "Google", "Google services", True)
