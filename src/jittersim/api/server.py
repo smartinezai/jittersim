@@ -2671,6 +2671,122 @@ DASHBOARD_HTML = """<!doctype html>
         !generalProfileState || !generalProfileState.profile;
     }
 
+    const IMPACT_WINDOW_SECONDS = 60;
+    const IMPACT_MIN_PACKETS = 50;
+    const IMPACT_CAP_RATIO = 0.9;
+    const IMPACT_MAX_SAMPLES = 12;
+
+    function impactSample(entry, nowSeconds) {
+      return {
+        t: nowSeconds,
+        packets: entry.packets,
+        drops: entry.drops,
+        bytes: entry.bytes,
+        overlimits: entry.overlimits,
+        backlog_bytes: entry.backlog_bytes
+      };
+    }
+
+    function impactQueueReplaced(previous, entry, sample) {
+      const last = previous.samples[previous.samples.length - 1];
+      return !last || sample.packets < last.packets || sample.drops < last.drops ||
+        sample.bytes < last.bytes || previous.latest.device_id !== entry.device_id ||
+        previous.latest.direction !== entry.direction ||
+        JSON.stringify(previous.latest.impairment) !== JSON.stringify(entry.impairment);
+    }
+
+    function recordImpactSample(history, response, nowSeconds) {
+      const next = {};
+      (response.queues || []).forEach((entry) => {
+        const key = entry.interface + "/" + entry.handle;
+        const sample = impactSample(entry, nowSeconds);
+        const previous = history[key];
+        const kept = previous && !impactQueueReplaced(previous, entry, sample)
+          ? previous.samples : [];
+        next[key] = {latest: entry, samples: kept.concat([sample]).slice(-IMPACT_MAX_SAMPLES)};
+      });
+      return next;
+    }
+
+    function impactHasNoImpairment(impairment) {
+      return !impairment.delay_ms && !impairment.jitter_ms && !impairment.loss_percent &&
+        !impairment.bandwidth_kbit && !impairment.reorder_percent &&
+        !impairment.duplicate_percent && !impairment.corrupt_percent;
+    }
+
+    function formatImpactRate(kbit) {
+      return kbit >= 1000 ? (Math.round(kbit / 10) / 100) + " Mbit/s" : kbit + " kbit/s";
+    }
+
+    function impactRow(key, entry) {
+      const latest = entry.latest;
+      const impairment = latest.impairment;
+      const row = {
+        key: key,
+        name: latest.name,
+        direction: latest.direction,
+        configured: impairment,
+        windowSeconds: 0,
+        offered: 0,
+        drops: 0,
+        lossPercent: 0,
+        rateKbit: 0,
+        capReached: false,
+        queueWaitMs: null,
+        verdict: "collecting",
+        lines: ["Collecting…"]
+      };
+      const newest = entry.samples[entry.samples.length - 1];
+      const used = entry.samples.filter((sample) => newest.t - sample.t <= IMPACT_WINDOW_SECONDS);
+      const first = used[0];
+      const seconds = newest.t - first.t;
+      if (used.length < 2 || seconds <= 0) return row;
+      const packets = newest.packets - first.packets;
+      const drops = newest.drops - first.drops;
+      const offered = packets + drops;
+      const rateKbit = Math.round((newest.bytes - first.bytes) * 8 / 1000 / seconds);
+      const limit = impairment.bandwidth_kbit;
+      const capReached = !!limit && offered > 0 && rateKbit >= IMPACT_CAP_RATIO * limit;
+      const noDelay = !impairment.delay_ms && !impairment.jitter_ms;
+      row.windowSeconds = seconds;
+      row.offered = offered;
+      row.drops = drops;
+      row.lossPercent = offered ? Math.round(drops * 1000 / offered) / 10 : 0;
+      row.rateKbit = rateKbit;
+      row.capReached = capReached;
+      row.queueWaitMs = limit && noDelay && capReached
+        ? Math.round(newest.backlog_bytes * 8 / limit) : null;
+      row.verdict = drops > 0 || capReached ? "affected"
+        : offered === 0 ? "idle"
+        : offered < IMPACT_MIN_PACKETS ? "too-few" : "no-effect";
+      row.lines = [];
+      if (impairment.loss_percent > 0 || drops > 0) {
+        row.lines.push("Loss: set " + impairment.loss_percent + "% · actual " + row.lossPercent +
+          "% (" + drops + " of " + offered + " packets dropped)");
+      }
+      if (limit) {
+        row.lines.push("Speed: set " + formatImpactRate(limit) + " · using " +
+          formatImpactRate(rateKbit) + (capReached ? " · cap reached" : " · below the cap"));
+      }
+      if (row.queueWaitMs !== null) {
+        row.lines.push("Queue wait: about " + row.queueWaitMs + " ms");
+      }
+      if (impairment.delay_ms > 0 || impairment.jitter_ms > 0) {
+        row.lines.push("Delay: set " + impairment.delay_ms + " ms" +
+          (impairment.jitter_ms > 0 ? " ± " + impairment.jitter_ms : "") +
+          " · configured, not measured");
+      }
+      return row;
+    }
+
+    function impactRows(history) {
+      return Object.keys(history)
+        .filter((key) => !impactHasNoImpairment(history[key].latest.impairment))
+        .map((key) => impactRow(key, history[key]))
+        .sort((a, b) => a.name.localeCompare(b.name) || a.direction.localeCompare(b.direction));
+    }
+    // end of the impact functions
+
     function renderRuntimeSummary(state) {
       const labels = {
         unknown: "No network action has run yet",
