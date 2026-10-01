@@ -114,6 +114,34 @@ CASES = {
         CONTEXT,
         ENABLED,
     ),
+    "protected_row_without_a_verified_association_still_looks_protected": (
+        {**PROTECTED, "association_verified": False},
+        CONTEXT,
+        {
+            "protectedRow": True,
+            "rowClass": "connected-row protected",
+            "badge": "Protected",
+            "disableProfile": True,
+            "disableApply": True,
+            "disableGroupSelect": True,
+            "disableGroupButton": True,
+            "protectionLabel": "Remove protection",
+        },
+    ),
+    "protected_row_without_an_address_still_looks_protected": (
+        {**PROTECTED, "ipv4_address": ""},
+        CONTEXT,
+        {
+            "protectedRow": True,
+            "rowClass": "connected-row protected",
+            "badge": "Protected",
+            "disableProfile": True,
+            "disableApply": True,
+            "disableGroupSelect": True,
+            "disableGroupButton": True,
+            "protectionLabel": "Remove protection",
+        },
+    ),
     "protected_row_stays_disabled_whatever_the_context_says": (
         {**PROTECTED, "group_id": "g2"},
         {**CONTEXT, "selectedProfile": "", "selectedGroup": ""},
@@ -150,4 +178,3 @@ def test_connected_row_state(name):
     result = subprocess.run(["node", "-e", program], capture_output=True, text=True, timeout=20)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == expected
-
