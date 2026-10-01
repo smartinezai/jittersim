@@ -19,6 +19,8 @@ SEEN_WITH_WINDOW_SECONDS = 10
 # A shared name is only guessed to belong to an app when at most this many apps qualify.
 _SEEN_WITH_MAX_APPS = 2
 _SEEN_WITH_KINDS = frozenset({"cdn", "tracker", "unknown"})
+# Only these label kinds group by the label. Shared infrastructure never joins an app by guesswork.
+_GROUPED_KINDS = frozenset({"app", "system", "iot"})
 _FALLBACK_CATALOGUE_CATEGORY = "Online service"
 
 # Second-level suffixes under which the registrable domain has three labels.
@@ -317,6 +319,16 @@ def label_domain(domain: str) -> DomainLabel:
             name, kind, category = entry
             return DomainLabel(kind, name, category, True)
     return DomainLabel("unknown", registrable_domain(domain), UNKNOWN_CATEGORY, False)
+
+
+def group_domain(domain: str) -> Dict[str, str]:
+    """Return the group a name belongs to for display."""
+
+    label = label_domain(domain)
+    if label.known and label.kind in _GROUPED_KINDS:
+        return {"key": "label:" + label.name.lower(), "name": label.name}
+    registrable = registrable_domain(domain)
+    return {"key": "domain:" + registrable, "name": registrable}
 
 
 def seen_with(observations: Iterable[Tuple[str, int]]) -> Dict[str, List[str]]:

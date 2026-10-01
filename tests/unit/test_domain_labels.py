@@ -4,6 +4,7 @@ from jittersim.config.domain_labels import (
     LABEL_KINDS,
     SEEN_WITH_WINDOW_SECONDS,
     TABLE_SOURCE,
+    group_domain,
     label_domain,
     registrable_domain,
     seen_with,
@@ -143,3 +144,34 @@ def test_two_apps_at_the_same_distance_sort_by_name():
 
 def test_no_observations_gives_no_hints():
     assert seen_with([]) == {}
+
+
+def test_two_netflix_domains_share_a_group():
+    a = group_domain("logs.dradis.netflix.com")
+    b = group_domain("ipv4-c179-fra002-ix.1.oca.nflxvideo.net")
+    assert a == b == {"key": "label:netflix", "name": "Netflix"}
+
+
+def test_every_immoscout_name_shares_a_group():
+    names = [
+        "content.header.immobilienscout24.de",
+        "osa.s24-media.immobilienscout24.de",
+        "sso.immobilienscout24.de",
+        "tenant-network.immobilienscout24.de",
+        "tracking.immobilienscout24.de",
+        "web.chatbot.immobilienscout24.de",
+        "api.header.immobilienscout24.de",
+    ]
+    assert {group_domain(name)["key"] for name in names} == {"label:immoscout24"}
+
+
+def test_shared_infrastructure_groups_by_registrable_domain():
+    assert group_domain("a1051.dscg4.akamai.net") == {
+        "key": "domain:akamai.net", "name": "akamai.net"}
+    assert group_domain("tags-eu.tiqcdn.com") == {
+        "key": "domain:tiqcdn.com", "name": "tiqcdn.com"}
+
+
+def test_unknown_names_group_by_registrable_domain():
+    assert group_domain("a.b.somesmallsite.co.uk") == {
+        "key": "domain:somesmallsite.co.uk", "name": "somesmallsite.co.uk"}
