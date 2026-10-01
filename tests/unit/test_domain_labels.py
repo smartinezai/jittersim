@@ -207,3 +207,35 @@ def test_alexa_com_is_not_a_smart_home_name_but_the_alexa_service_is():
     assert label_domain("alexa.com").known is False
     label = label_domain("device-metrics-us.amazonalexa.com")
     assert (label.kind, label.name) == ("iot", "Amazon Alexa")
+
+
+@pytest.mark.parametrize(
+    ("domain", "name"),
+    [
+        ("notwhatsapp.net", "notwhatsapp.net"),
+        ("evilwhatsapp.net", "evilwhatsapp.net"),
+        ("xt.me", "xt.me"),
+        ("whatsapp.net.evil.com", "evil.com"),
+    ],
+)
+def test_a_partial_label_never_matches(domain, name):
+    label = label_domain(domain)
+    assert (label.kind, label.name, label.known) == ("unknown", name, False)
+
+
+def test_the_nearest_name_of_an_app_decides_the_distance():
+    pairs = [("a.whatsapp.net", 100), ("b.whatsapp.net", 120), ("x.akamai.net", 118)]
+    assert seen_with(pairs) == {"x.akamai.net": ["WhatsApp"]}
+
+
+@pytest.mark.parametrize(
+    "domain",
+    [
+        "bucket.s3.amazonaws.com",
+        "d111111abcdef8.cloudfront.net",
+        "a1051.dscg4.akamai.net",
+        "cdn.azureedge.net",
+    ],
+)
+def test_shared_hosting_names_are_cdn_names(domain):
+    assert label_domain(domain).kind == "cdn"
