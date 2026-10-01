@@ -2671,6 +2671,83 @@ DASHBOARD_HTML = """<!doctype html>
         !generalProfileState || !generalProfileState.profile;
     }
 
+    // Works out the three sidebar lines from data the page already holds.
+    // A saved change sets the observed state to "unknown" and the running scheduler turns
+    // it back to "applied" within about a second. So "unknown" while running still means
+    // that devices are affected and a saved general profile is taking effect.
+    function sidebarStatus(input) {
+      const state = input.runtimeState || "unknown";
+      const running = input.running === true;
+      const generalState = input.generalState || null;
+      const generalProfile = generalState && generalState.profile ? generalState.profile : null;
+      const profiles = input.profiles || [];
+      const clients = input.clients || [];
+      const serviceLists = input.serviceLists || [];
+      const steady = running && (state === "applied" || state === "unknown");
+      const generalActive = !!generalProfile && (generalState.active === true ||
+        (running && state === "unknown"));
+      const generalName = generalProfile ? generalProfile.name || generalProfile.id : "";
+
+      let general = {text: "General profile: none", tone: "muted"};
+      if (generalProfile) {
+        const observed = generalState.state && generalState.state.observed_state;
+        general = generalActive
+          ? {text: "General profile: " + generalName + " · active", tone: "on"}
+          : {
+              text: "General profile: " + generalName + " · " +
+                (observed === "reset" ? "paused" : "saved, not applied"),
+              tone: "muted"
+            };
+      }
+
+      const quiet = (summary) => ({summary, items: [], more: 0});
+      let devices;
+      if (state === "reset") {
+        devices = quiet("Profiles off");
+      } else if (state === "applying" || state === "resetting") {
+        devices = quiet("Changing…");
+      } else if (state === "error") {
+        devices = quiet("Last network action failed");
+      } else if (!running) {
+        devices = quiet("Not started yet");
+      } else {
+        const nameOf = (client) => client.display_name || client.mac_address || "Unknown device";
+        const profileNameOf = (id) => {
+          const match = profiles.find((profile) => profile.id === id);
+          return match ? match.name || id : id || "";
+        };
+        const affected = generalActive
+          ? clients
+              .filter((client) => !client.unaffected && client.association_verified !== false)
+              .map((client) => ({name: nameOf(client), profile: generalName}))
+          : clients
+              .filter((client) => !client.unaffected && client.assigned_device_id)
+              .map((client) => ({
+                name: nameOf(client),
+                profile: profileNameOf(client.group_profile_id || client.assigned_profile_id)
+              }));
+        devices = {
+          summary: affected.length
+            ? affected.length + (affected.length === 1 ? " device affected" : " devices affected")
+            : "No connected device is affected",
+          items: affected.slice(0, 5),
+          more: Math.max(0, affected.length - 5)
+        };
+      }
+
+      const enabledLists = steady
+        ? serviceLists.filter((serviceList) => serviceList.enabled).map((serviceList) => serviceList.name)
+        : [];
+      return {
+        visible: !!input.adminTokenVerified,
+        general,
+        devices,
+        lists: {
+          text: enabledLists.length ? "Service lists: " + enabledLists.join(" · ") + " (every device)" : ""
+        }
+      };
+    }
+
     function renderRuntimeSummary(state) {
       const labels = {
         unknown: "No network action has run yet",
