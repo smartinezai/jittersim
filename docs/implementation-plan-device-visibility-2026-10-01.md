@@ -131,8 +131,10 @@ display. One layer is not enough so there are four.
   rows that predate the MAC). The MAC is never sent to the browser.
 - **Fail closed.** If protected devices exist the client first asks the helper for
   its `protected_dns_capture` capability and refuses to scan when the helper does
-  not advertise it or cannot answer (an older helper). The message says to restart
-  the JitterSim services or reinstall the release. No capture runs in that case.
+  not advertise it or does not know the request (an older helper). The message says
+  to restart the JitterSim services or reinstall the release. A helper that is busy
+  or cannot be reached also blocks the scan but keeps its own message. No capture
+  runs in any of these cases.
   The helper also echoes the MAC list it used and the client checks the echo as a
   second layer. It never captures protected traffic. If the saved list ever held
   more devices than the helper can skip the scan refuses with a clear message

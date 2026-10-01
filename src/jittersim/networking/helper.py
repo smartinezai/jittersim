@@ -848,9 +848,11 @@ class HelperClient:
         try:
             capabilities = self._request({"action": "capabilities"})
         except HelperClientError as error:
-            if error.reason == "helper-busy":
-                raise
-            raise HelperClientError(HELPER_OUT_OF_DATE_MESSAGE) from error
+            # Only a helper that does not know the action is out of date. A helper that is
+            # busy or cannot be reached keeps its own message and still blocks the capture.
+            if str(error) == "unknown action":
+                raise HelperClientError(HELPER_OUT_OF_DATE_MESSAGE) from error
+            raise
         if capabilities.get("protected_dns_capture") is not True:
             raise HelperClientError(HELPER_OUT_OF_DATE_MESSAGE)
 
