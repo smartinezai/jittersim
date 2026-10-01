@@ -55,9 +55,11 @@ jobs:
       - run: python -m tests.browser.wifi_recovery
       - run: python -m tests.browser.dashboard_access
       - run: python -m tests.browser.general_profile
+      - run: python -m tests.browser.saved_profiles
       - run: python -m tests.browser.dashboard_navigation
       - run: python -m tests.browser.protected_clients
       - run: python -m tests.browser.impact_check
+      - run: python -m tests.browser.router_copy
       - uses: actions/upload-artifact@v5
         if: always()
         with:
