@@ -153,14 +153,9 @@ DASHBOARD_HTML = """<!doctype html>
     * { box-sizing: border-box; }
     [hidden] { display: none !important; }
     .dashboard-locked #router-credentials,
-    .dashboard-locked .credential-dock > :not(#open-admin-credentials) { display: none; }
-    body {
-      margin: 0 auto;
-      max-width: 86rem;
-      padding: 1.5rem 13rem 4rem 1.25rem;
-      background: radial-gradient(circle at top right, #15345a 0, #0b1220 34rem);
-      line-height: 1.5;
-    }
+    .dashboard-locked .sidebar-nav, .dashboard-locked .sidebar-operate,
+    .dashboard-locked #open-router-credentials { display: none; }
+    body { margin: 0; background: #0b1220; line-height: 1.5; }
     h1, h2, h3, p { margin-top: 0; }
     h1 { margin-bottom: 0.25rem; font-size: clamp(2rem, 5vw, 3.2rem); letter-spacing: -0.04em; }
     h2 { margin-bottom: 0.75rem; font-size: 1.15rem; }
@@ -176,13 +171,6 @@ DASHBOARD_HTML = """<!doctype html>
       background: #08101c;
       color: #c7d7eb;
       font-size: 0.82rem;
-    }
-    .page-header {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 1rem;
-      margin-bottom: 1.25rem;
     }
     .eyebrow { margin-bottom: 0.35rem; color: #70b7ff; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.14em; }
     .subtitle { margin-bottom: 0; color: #a8b8ce; }
@@ -219,19 +207,6 @@ DASHBOARD_HTML = """<!doctype html>
       background: rgba(18, 31, 49, 0.9);
       box-shadow: 0 0.9rem 2rem rgba(0, 0, 0, 0.16);
     }
-    .action-bar {
-      position: sticky;
-      top: 0.75rem;
-      z-index: 10;
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 0.75rem 1rem;
-      border-color: #3c6690;
-      background: rgba(15, 31, 51, 0.96);
-      box-shadow: 0 1rem 2rem rgba(0, 0, 0, 0.3);
-      backdrop-filter: blur(0.75rem);
-    }
-    .action-copy p { margin-bottom: 0; color: #a8b8ce; }
     .runtime-summary { margin-top: 0.55rem; font-size: 0.88rem; font-weight: 700; color: #c4d5e8 !important; }
     .runtime-summary.applied, .runtime-summary.reset { color: #8de2bc !important; }
     .runtime-summary.error { color: #ff9e9e !important; }
@@ -543,30 +518,19 @@ DASHBOARD_HTML = """<!doctype html>
       color: #edf5ff;
       font: inherit;
     }
-    .credential-dock {
-      position: fixed; right: 1rem; top: 50%; transform: translateY(-50%);
-      z-index: 30; display: grid; gap: 0.5rem; width: 10.75rem;
-      max-height: calc(100dvh - 2rem); overflow-y: auto;
-      padding: 0.65rem; background: #101e30; border: 1px solid #293e55;
-      border-radius: 0.9rem; box-shadow: 0 1rem 2.5rem rgba(0, 0, 0, 0.28);
-    }
-    .credential-dock button { margin: 0; min-height: 3rem; text-align: left; }
-    .credential-dock span { display: block; }
-    .credential-dock #wifi-reset-status { margin: 0 0.25rem; font-size: 0.7rem; }
     .credential-state { margin-top: 0.15rem; color: #b6c8db; font-size: 0.75rem; font-weight: 400; }
     .credential-state.accepted { color: #8de2bc; }
-    .credential-dock .panic-button { min-height: 3rem; font-weight: 550; }
     .router-wifi-control {
       display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
       padding: 0.7rem 0.3rem; border-block: 1px solid #293e55;
     }
     .router-wifi-label { font-size: 0.85rem; font-weight: 550; }
     .router-wifi-status { margin: 0.2rem 0 0; font-size: 0.7rem; color: #b6c8db; }
-    .credential-dock .router-wifi-toggle {
+    .sidebar .router-wifi-toggle {
       display: grid; place-items: center; flex: 0 0 2.8rem; min-height: 2.75rem;
       padding: 0; border: 0; background: transparent; border-radius: 0.5rem;
     }
-    .credential-dock .router-wifi-toggle:hover:not(:disabled) { background: #233b55; }
+    .sidebar .router-wifi-toggle:hover:not(:disabled) { background: #233b55; }
     .switch-track {
       width: 2.5rem; height: 1.4rem; padding: 0.18rem; border-radius: 1rem;
       background: #40546b; transition: background 160ms ease;
@@ -600,21 +564,56 @@ DASHBOARD_HTML = """<!doctype html>
     .remember-choice { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.65rem; }
     .remember-choice input { width: auto; margin: 0; padding: 0; }
     .remember-note:empty { display: none; }
-    @media (max-width: 850px) {
-      body { padding: 1rem 1rem calc(10rem + env(safe-area-inset-bottom, 0px)); }
-      html { scroll-padding-bottom: 10rem; }
-      .credential-dock {
-        top: auto; bottom: calc(var(--credential-viewport-bottom, 0px) + 0.5rem + env(safe-area-inset-bottom, 0px));
-        left: 50%; right: auto; transform: translateX(-50%);
-        grid-template-columns: repeat(4, minmax(0, 1fr)); width: min(34rem, calc(100vw - 1rem));
-        padding: 0.5rem; gap: 0.35rem; max-height: min(12rem, 45dvh);
-      }
-      .credential-dock > button { min-height: 2.9rem; padding: 0.4rem; font-size: 0.72rem; }
-      .credential-dock > button .credential-state { font-size: 0.64rem; }
-      .credential-dock #wifi-reset-status { display: none; }
-      .router-wifi-control { grid-column: 1 / -1; grid-row: 2; border-bottom: 0; padding: 0.15rem 0.4rem 0; }
-      .router-wifi-control > div { display: flex; align-items: baseline; gap: 0.65rem; }
-      .router-wifi-status { margin: 0; }
+    :root { --sidebar-bg: #0e1a2b; --line: #263b55; --muted: #a8b8ce; --accent: #70b7ff; }
+    .app { display: grid; grid-template-columns: 15.5rem minmax(0, 1fr); min-height: 100dvh; }
+    .sidebar {
+      position: sticky; top: 0; align-self: start; height: 100dvh; overflow-y: auto;
+      display: flex; flex-direction: column; gap: 1rem; padding: 1rem 0.85rem;
+      background: var(--sidebar-bg); border-right: 1px solid var(--line);
+    }
+    .sidebar-brand h1 { margin: 0 0 0.5rem; font-size: 1.5rem; }
+    .sidebar-brand .badge { display: inline-block; margin: 0; }
+    .sidebar-nav ul { display: grid; gap: 0.2rem; margin: 0; padding: 0; list-style: none; }
+    .sidebar-nav a {
+      display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
+      padding: 0.5rem 0.65rem; border-radius: 0.5rem; color: var(--muted);
+      font-size: 0.92rem; font-weight: 550; text-decoration: none;
+    }
+    .sidebar-nav a:hover { background: #16263b; color: #e7eef8; }
+    .sidebar-nav a[aria-current="page"] { background: #1b3a5c; color: #fff; }
+    .sidebar-nav a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .nav-chip { padding: 0.05rem 0.45rem; border-radius: 999px; background: #243b57; color: #dcecff; font-size: 0.74rem; }
+    .sidebar-footer { display: grid; gap: 0.75rem; margin-top: auto; }
+    .sidebar-operate, .sidebar-credentials, .sidebar-actions { display: grid; gap: 0.5rem; }
+    .sidebar button { margin: 0; min-height: 2.6rem; text-align: left; }
+    .sidebar-actions button { text-align: center; }
+    .sidebar span { display: block; }
+    .sidebar .runtime-summary { margin: 0; font-size: 0.78rem; }
+    .sidebar .action-message { min-height: 0; padding: 0.4rem 0.55rem; font-size: 0.78rem; }
+    .sidebar .panic-button { min-height: 3rem; font-weight: 600; }
+    .content { min-width: 0; max-width: 84rem; padding: 1.5rem 1.75rem 4rem; }
+    .page > .card:first-child { margin-top: 0; }
+    body:not(.dashboard-locked):not([data-section="access"]) #dashboard-access-panel { display: none; }
+    .card-toggle {
+      display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
+      width: 100%; margin: 0; padding: 0; border: 0; background: none;
+      color: inherit; font: inherit; text-align: left;
+    }
+    .card-toggle:hover:not(:disabled) { background: none; border-color: transparent; }
+    .card-toggle::after {
+      content: ""; flex: 0 0 auto; width: 0.5rem; height: 0.5rem;
+      border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted);
+      transform: rotate(45deg); transition: transform 160ms ease;
+    }
+    .card-toggle[aria-expanded="false"]::after { transform: rotate(-45deg); }
+    .card.is-collapsed .section-heading p { display: none; }
+    .card.is-collapsed .section-heading, .card.is-collapsed > h2 { margin-bottom: 0; }
+    @media (max-width: 48rem) {
+      .app { display: block; }
+      .sidebar { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+      .sidebar-nav ul { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+      .sidebar-footer { margin-top: 0; }
+      .content { padding: 1rem 0.9rem 3rem; }
     }
     .token-check-status { min-height: 1.25rem; margin: 0.65rem 0 0; color: #91a8c1; }
     .token-check-status.success { color: #8de2bc; }
@@ -632,9 +631,6 @@ DASHBOARD_HTML = """<!doctype html>
     .analytics-table td:nth-child(n + 3) { text-align: right; font-variant-numeric: tabular-nums; }
     .analytics-domain { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
     @media (max-width: 700px) {
-      body { padding-top: 1rem; }
-      .page-header, .action-bar { display: block; }
-      .action-bar { position: static; }
       .help-icon::after { position: fixed; top: auto; bottom: 1rem; left: 1rem; width: calc(100vw - 2rem); }
       .badge { display: inline-block; margin-top: 1rem; }
       .action-buttons { flex-wrap: wrap; }
@@ -815,7 +811,7 @@ DASHBOARD_HTML = """<!doctype html>
     </p>
     <div id="connected-devices" class="connected-list" aria-live="polite">Enter the admin token and choose Check token to view connected devices.</div>
   </section>
-  <section class="card connected-card" aria-labelledby="unaffected-title">
+  <section class="card connected-card" data-collapse="closed" aria-labelledby="unaffected-title">
     <div class="section-heading">
       <div>
         <h2 id="unaffected-title">Unaffected by profiles</h2>
@@ -837,7 +833,7 @@ DASHBOARD_HTML = """<!doctype html>
   </section>
   </section><!-- /page:devices -->
   <section class="page" id="page-profiles" data-page="profiles" aria-label="profiles" hidden>
-    <section class="card">
+    <section class="card" data-collapse="open">
       <h2>Save profile</h2>
       <form id="profile-form">
         <div class="fields">
@@ -1065,7 +1061,7 @@ DASHBOARD_HTML = """<!doctype html>
     </section>
   </section><!-- /page:profiles -->
   <section class="page" id="page-schedules" data-page="schedules" aria-label="schedules" hidden>
-    <section class="card">
+    <section class="card" data-collapse="open">
       <h2>Schedule a profile</h2>
       <form id="schedule-form">
         <div class="fields">
@@ -1097,7 +1093,7 @@ DASHBOARD_HTML = """<!doctype html>
       </form>
       <div id="schedule-list" class="schedule-list" aria-live="polite">No schedules yet.</div>
     </section>
-  <section class="card timer-card">
+  <section class="card timer-card" data-collapse="closed">
     <div class="section-heading">
       <div>
         <h2>Run a profile timer</h2>
@@ -1122,7 +1118,7 @@ DASHBOARD_HTML = """<!doctype html>
     </form>
     <div id="timer-list" class="timer-list" aria-live="polite">No active timers.</div>
   </section>
-  <section class="card progression-card">
+  <section class="card progression-card" data-collapse="closed">
     <div class="section-heading">
       <div>
         <h2>Progression mode</h2>
@@ -1166,7 +1162,7 @@ DASHBOARD_HTML = """<!doctype html>
     </form>
     <div id="progression-list" class="progression-list" aria-live="polite">No active progressions.</div>
   </section>
-  <section class="card quota-card">
+  <section class="card quota-card" data-collapse="open">
     <div class="section-heading">
       <div>
         <h2>Device data limit</h2>
@@ -1211,7 +1207,7 @@ DASHBOARD_HTML = """<!doctype html>
     </form>
     <div id="data-limit-list" class="quota-list" aria-live="polite">Enter the admin token to view limits.</div>
   </section>
-  <section class="card quota-card">
+  <section class="card quota-card" data-collapse="closed">
     <div class="section-heading">
       <div>
         <h2>Shared group data limit</h2>
@@ -1256,7 +1252,7 @@ DASHBOARD_HTML = """<!doctype html>
     </form>
     <div id="group-data-limit-list" class="quota-list" aria-live="polite">Enter the admin token to view group limits.</div>
   </section>
-  <section class="card quota-card">
+  <section class="card quota-card" data-collapse="closed">
     <div class="section-heading">
       <div>
         <h2>Browser service profile</h2>
@@ -1288,7 +1284,7 @@ DASHBOARD_HTML = """<!doctype html>
     </form>
     <div id="service-assignment-list" class="quota-list" aria-live="polite">Enter the admin token to view service profiles.</div>
   </section>
-  <section class="card quota-card">
+  <section class="card quota-card" data-collapse="closed">
     <div class="section-heading">
       <div>
         <h2>Service data limit</h2>
@@ -1345,7 +1341,7 @@ DASHBOARD_HTML = """<!doctype html>
     </form>
     <div id="service-quota-list" class="quota-list" aria-live="polite">Enter the admin token to view service limits.</div>
   </section>
-  <section class="card quota-card">
+  <section class="card quota-card" data-collapse="closed">
     <div class="section-heading">
       <div>
         <h2>Service time limit</h2>
@@ -1412,7 +1408,7 @@ DASHBOARD_HTML = """<!doctype html>
     </button>
     <p id="wifi-reset-status" class="credential-state" role="status" aria-live="polite">Keep password and security</p>
   </section>
-  <section class="card uplink-card">
+  <section class="card uplink-card" data-collapse="open">
     <div class="section-heading">
       <div>
         <h2>Upstream router connection</h2>
@@ -1431,7 +1427,7 @@ DASHBOARD_HTML = """<!doctype html>
       <p id="router-action-message" class="policy-note" role="status" aria-live="polite">Keep the Pi connected to the router by Ethernet before changing the router Wi-Fi.</p>
     </div>
   </section>
-  <section class="card">
+  <section class="card" data-collapse="closed">
     <h2>Manual Pi access-point fallback</h2>
     <form id="access-point-form">
       <div class="fields">
@@ -1449,7 +1445,7 @@ DASHBOARD_HTML = """<!doctype html>
   </section>
   </section><!-- /page:router -->
   <section class="page" id="page-traffic" data-page="traffic" aria-label="traffic" hidden>
-  <section class="card traffic-card" aria-labelledby="traffic-title">
+  <section class="card traffic-card" data-collapse="open" aria-labelledby="traffic-title">
     <div class="section-heading">
       <div>
         <h2 id="traffic-title">Live traffic</h2>
@@ -1496,7 +1492,7 @@ DASHBOARD_HTML = """<!doctype html>
     <p id="traffic-profile-status" class="traffic-profile-status" role="status" aria-live="polite">Select one device to show its applied default queue limits.</p>
     <p class="traffic-note">Traffic lines count bytes at JitterSim before its queues. They do not show the speed a device receives. Dashed lines show configured limits. The ISP plan line is shared with household traffic and is not a live measurement of spare capacity. Service-specific queues may use different limits. Only assigned devices are included. Check the admin token to start; sampling pauses when this tab is hidden.</p>
   </section>
-  <section class="card observations-card">
+  <section class="card observations-card" data-collapse="closed">
     <div class="section-heading">
       <div>
         <h2>Traffic discovery</h2>
@@ -1510,7 +1506,7 @@ DASHBOARD_HTML = """<!doctype html>
     <p id="observation-note" class="observation-note">Scanning is on demand. Results are local aggregates, not exact page visits.</p>
     <div id="observations" class="observation-list" aria-live="polite">No observations yet.</div>
   </section>
-    <section class="card analytics-card">
+    <section class="card analytics-card" data-collapse="closed">
       <div class="section-heading">
         <div><h2>Random website choices</h2><p>Scheduled profile rerolls</p></div>
         <button id="random-website-refresh" type="button">Refresh</button>
@@ -1537,7 +1533,7 @@ DASHBOARD_HTML = """<!doctype html>
     </section>
   </section><!-- /page:traffic -->
   <section class="page" id="page-access" data-page="access" aria-label="access" hidden>
-    <section class="card">
+    <section class="card" data-collapse="open">
       <h2>Network access rules</h2>
       <form id="policy-form">
         <div class="policy-grid">
@@ -1583,34 +1579,34 @@ DASHBOARD_HTML = """<!doctype html>
     </section>
   </section><!-- /page:access -->
   <section class="page" id="page-diagnostics" data-page="diagnostics" aria-label="diagnostics" hidden>
-    <section class="card">
+    <section class="card" data-collapse="closed">
       <div class="section-heading"><h2>Profiles</h2><p>Saved network behavior</p></div>
       <pre id="profiles">Enter the admin token and choose Check token to load.</pre>
     </section>
-    <section class="card">
+    <section class="card" data-collapse="closed">
       <div class="section-heading"><h2>Devices</h2><p>Assigned test clients</p></div>
       <pre id="devices">Enter the admin token and choose Check token to load.</pre>
     </section>
-    <section class="card">
+    <section class="card" data-collapse="closed">
       <div class="section-heading"><h2>Compiled plan</h2><p>Current traffic rules</p></div>
       <pre id="plan">Enter the admin token and choose Check token to load.</pre>
     </section>
-    <section class="card">
+    <section class="card" data-collapse="closed">
       <div class="section-heading"><h2>Runtime state</h2><p>Last helper result</p></div>
       <pre id="state">Enter the admin token and choose Check token to load.</pre>
     </section>
-    <section class="card">
+    <section class="card" data-collapse="closed">
       <div class="section-heading"><h2>Access rules</h2><p>Saved MAC and website policy</p></div>
       <pre id="policies">Enter the admin token and choose Check token to load.</pre>
     </section>
-    <section class="card">
+    <section class="card" data-collapse="open">
       <div class="section-heading">
         <div><h2>Diagnostics</h2><p>Runtime state and available traffic counters</p></div>
         <button id="refresh-diagnostics" type="button">Refresh</button>
       </div>
       <pre id="diagnostics">Enter the admin token to inspect diagnostics.</pre>
     </section>
-    <section class="card">
+    <section class="card" data-collapse="closed">
       <div class="section-heading">
         <div><h2>Backup and action history</h2><p>Recent admin actions without request contents</p></div>
         <button id="download-backup" type="button">Download backup</button>
@@ -3472,7 +3468,7 @@ DASHBOARD_HTML = """<!doctype html>
       element("service-assignment-profile").value = assignment.profile_id;
       element("service-assignment-domains").value = assignment.domains.join("\\n");
       element("service-assignment-enabled").checked = assignment.enabled;
-      element("service-assignment-form").scrollIntoView({ behavior: "smooth", block: "center" });
+      revealElement(element("service-assignment-form"));
     }
 
     function renderTimeQuotas(data) {
@@ -3526,7 +3522,7 @@ DASHBOARD_HTML = """<!doctype html>
       ).join(", ");
       element("data-limit-enabled").checked = quota.enabled;
       syncQuotaReset("data-limit");
-      element("data-limit-form").scrollIntoView({ behavior: "smooth", block: "center" });
+      revealElement(element("data-limit-form"));
     }
 
     function editGroup(group) {
@@ -3536,7 +3532,7 @@ DASHBOARD_HTML = """<!doctype html>
       Array.from(element("group-devices").options).forEach((option) => {
         option.selected = group.device_ids.includes(option.value);
       });
-      element("group-form").scrollIntoView({ behavior: "smooth", block: "center" });
+      revealElement(element("group-form"));
     }
 
     async function deleteGroup(group, button) {
@@ -3564,7 +3560,7 @@ DASHBOARD_HTML = """<!doctype html>
       ).join(", ");
       element("group-data-limit-enabled").checked = quota.enabled;
       syncQuotaReset("group-data-limit");
-      element("group-data-limit-form").scrollIntoView({ behavior: "smooth", block: "center" });
+      revealElement(element("group-data-limit-form"));
     }
 
     function editServiceQuota(quota) {
@@ -3582,7 +3578,7 @@ DASHBOARD_HTML = """<!doctype html>
       element("service-quota-enabled").checked = quota.enabled;
       populateServiceQuotaDomains(quota.domains);
       syncQuotaReset("service-quota");
-      element("service-quota-form").scrollIntoView({ behavior: "smooth", block: "center" });
+      revealElement(element("service-quota-form"));
     }
 
     function formatQuotaDuration(seconds) {
@@ -3609,7 +3605,7 @@ DASHBOARD_HTML = """<!doctype html>
       element("time-quota-enabled").checked = quota.enabled;
       populateTimeQuotaDomains(quota.domains);
       syncQuotaReset("time-quota");
-      element("time-quota-form").scrollIntoView({ behavior: "smooth", block: "center" });
+      revealElement(element("time-quota-form"));
     }
 
     async function timeQuotaAction(quota, action, button) {
@@ -5079,6 +5075,96 @@ DASHBOARD_HTML = """<!doctype html>
       showMessage(error.message, "error");
     });
     restoreRememberedCredentials();
+  </script>
+  <script>
+    const PAGES = ["devices", "profiles", "schedules", "router", "traffic", "access", "diagnostics"];
+
+    function pageFromHash(hash) {
+      const id = String(hash || "").replace(/^#/, "");
+      return PAGES.indexOf(id) === -1 ? "devices" : id;
+    }
+
+    function cardStartsOpen(saved, fallback) {
+      if (saved === "open") return true;
+      if (saved === "closed") return false;
+      return fallback !== "closed";
+    }
+
+    function showPage(id, userInitiated) {
+      document.querySelectorAll("[data-page]").forEach((section) => {
+        section.hidden = section.dataset.page !== id;
+      });
+      document.querySelectorAll("[data-page-link]").forEach((link) => {
+        if (link.dataset.pageLink === id) link.setAttribute("aria-current", "page");
+        else link.removeAttribute("aria-current");
+      });
+      document.body.dataset.section = id;
+      if (userInitiated) window.scrollTo(0, 0);
+      if (id === "traffic" && typeof drawTrafficChart === "function") drawTrafficChart();
+    }
+
+    function storedCardState(key) {
+      try { return window.localStorage.getItem(key); } catch (error) { return null; }
+    }
+
+    function storeCardState(key, open) {
+      try { window.localStorage.setItem(key, open ? "open" : "closed"); } catch (error) { /* private window */ }
+    }
+
+    function setCardOpen(card, open, remember) {
+      const body = card.querySelector(":scope > .card-body");
+      const toggle = card.querySelector(".card-toggle");
+      if (!body || !toggle) return;
+      body.hidden = !open;
+      card.classList.toggle("is-collapsed", !open);
+      toggle.setAttribute("aria-expanded", String(open));
+      if (remember) storeCardState(card.dataset.cardKey, open);
+    }
+
+    function enhanceCollapsibleCards() {
+      document.querySelectorAll(".card[data-collapse]").forEach((card, index) => {
+        const title = card.querySelector("h2");
+        if (!title) return;
+        let heading = title;
+        while (heading.parentElement !== card) heading = heading.parentElement;
+        const body = document.createElement("div");
+        body.className = "card-body";
+        body.id = "card-body-" + index;
+        while (heading.nextSibling) body.appendChild(heading.nextSibling);
+        card.appendChild(body);
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "card-toggle";
+        toggle.setAttribute("aria-controls", body.id);
+        while (title.firstChild) toggle.appendChild(title.firstChild);
+        title.appendChild(toggle);
+        card.dataset.cardKey = "jittersim.card." + title.textContent.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
+        toggle.addEventListener("click", () => setCardOpen(card, body.hidden, true));
+        setCardOpen(card, cardStartsOpen(storedCardState(card.dataset.cardKey), card.dataset.collapse), false);
+      });
+    }
+
+    function revealElement(target) {
+      const card = target.closest(".card[data-collapse]");
+      if (card) setCardOpen(card, true, false);
+      const page = target.closest("[data-page]");
+      if (page && page.hidden) showPage(page.dataset.page, false);
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+
+    function syncDeviceChip() {
+      const chip = document.getElementById("nav-devices-count");
+      const match = /^\d+/.exec(document.getElementById("connected-count").textContent.trim());
+      chip.hidden = !match;
+      chip.textContent = match ? match[0] : "";
+    }
+
+    enhanceCollapsibleCards();
+    showPage(pageFromHash(window.location.hash), false);
+    window.addEventListener("hashchange", () => showPage(pageFromHash(window.location.hash), true));
+    new MutationObserver(syncDeviceChip).observe(
+      document.getElementById("connected-count"), { childList: true, characterData: true, subtree: true });
+    syncDeviceChip();
   </script>
 </body>
 </html>
