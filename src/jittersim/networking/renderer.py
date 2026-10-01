@@ -1,9 +1,16 @@
 """Render a network plan into inspectable Linux command operations."""
 
-from typing import List, Sequence
+from ipaddress import IPv4Address
+from typing import List, Mapping, Optional, Sequence
 
 from jittersim.config.models import Impairment
-from jittersim.engine.plan import GENERAL_QUEUE_ID, Direction, NetworkPlan, QueueSpec
+from jittersim.engine.plan import (
+    GENERAL_QUEUE_ID,
+    Direction,
+    NetworkPlan,
+    QueueSpec,
+    service_list_set_name,
+)
 
 from .commands import Command
 from .legacy import LEGACY_ACCESS_CLEANUP, cleanup_command
@@ -14,6 +21,10 @@ DOWNLOAD_TABLE = "jittersim_download"
 ROOT_HANDLE = "10:"
 DASHBOARD_REPLY_MARK = 0x80000000
 GENERAL_DOWNLOAD_MARK = 0x40000000
+# Forwarded downloads from a listed service carry this base plus the list's mark
+# until the download hook turns them back into the plain queue mark.
+SERVICE_DOWNLOAD_MARK_BASE = 0x20000000
+SERVICE_SET_SIZE = 2048
 
 
 def _render_set(values: Sequence[object]) -> str:
@@ -40,8 +51,21 @@ def _format_impairment_arguments(queue: QueueSpec) -> List[str]:
     return arguments
 
 
-def _render_nft_script(plan: NetworkPlan, topology: Topology) -> str:
+def _service_guard(plan: NetworkPlan) -> str:
+    """Match only traffic that is not headed to a service list's addresses."""
+
+    return "".join(
+        f"ip daddr != @{service_list_set_name(rule)} " for rule in plan.service_list_rules
+    )
+
+
+def _render_nft_script(
+    plan: NetworkPlan,
+    topology: Topology,
+    service_addresses: Optional[Mapping[str, Sequence[IPv4Address]]] = None,
+) -> str:
     test_interface = topology.test_interface
+    guard = _service_guard(plan)
     # Adding an existing table is harmless. Delete and recreate both in one batch.
     lines = [
         *LEGACY_ACCESS_CLEANUP.splitlines(),
@@ -65,6 +89,18 @@ def _render_nft_script(plan: NetworkPlan, topology: Topology) -> str:
             "{ type filter hook output priority -150; policy accept; }"
         ),
     ]
+    known_addresses = service_addresses or {}
+    for list_rule in plan.service_list_rules:
+        set_name = service_list_set_name(list_rule)
+        lines.append(
+            f"add set inet {PROJECT_TABLE} {set_name} "
+            f"{{ type ipv4_addr; size {SERVICE_SET_SIZE}; }}"
+        )
+        addresses = sorted(set(known_addresses.get(list_rule.list_id, ())), key=int)
+        if addresses:
+            lines.append(
+                f"add element inet {PROJECT_TABLE} {set_name} {_render_set(addresses)}"
+            )
     # Only locally generated dashboard replies get this mark. A forwarded
     # server using port 8080 must still follow the client's download profile.
     lines.extend([
@@ -133,7 +169,7 @@ def _render_nft_script(plan: NetworkPlan, topology: Topology) -> str:
                 if general.allowed_addresses else "meta nfproto ipv4 "
             )
             lines.append(
-                f'add rule inet {PROJECT_TABLE} forward {upload_match}{match}'
+                f'add rule inet {PROJECT_TABLE} forward {upload_match}{guard}{match}'
                 'drop comment "general profile website allowlist"'
             )
         lines.append(
@@ -143,11 +179,17 @@ def _render_nft_script(plan: NetworkPlan, topology: Topology) -> str:
         download_match = f"meta mark {{ 1, {GENERAL_DOWNLOAD_MARK} }} "
         if general.outage_active:
             lines.extend((
-                f'add rule inet {PROJECT_TABLE} forward {upload_match}'
+                f'add rule inet {PROJECT_TABLE} forward {upload_match}{guard}'
                 'drop comment "general profile outage"',
                 f'add rule netdev {DOWNLOAD_TABLE} download {download_match}'
                 'drop comment "general profile outage"',
             ))
+            if guard:
+                # The guard only looks at IPv4 destinations, so IPv6 needs its own drop.
+                lines.append(
+                    f'add rule inet {PROJECT_TABLE} forward {upload_match}meta nfproto ipv6 '
+                    'drop comment "general profile outage over IPv6"'
+                )
         lines.extend((
             f'add rule inet {PROJECT_TABLE} forward {upload_match}meta nfproto ipv4 '
             f'meta mark set 1 counter comment "usage-device {GENERAL_QUEUE_ID} upload"',
@@ -161,19 +203,20 @@ def _render_nft_script(plan: NetworkPlan, topology: Topology) -> str:
             if website_filter.allowed_addresses:
                 lines.append(
                     f'add rule inet {PROJECT_TABLE} forward iifname "{test_interface}" '
-                    f"ip saddr {website_filter.device_ip} ip daddr != {_render_set(website_filter.allowed_addresses)} drop "
+                    f"ip saddr {website_filter.device_ip} {guard}"
+                    f"ip daddr != {_render_set(website_filter.allowed_addresses)} drop "
                     'comment "enforce profile website allowlist"'
                 )
             else:
                 lines.append(
                     f'add rule inet {PROJECT_TABLE} forward iifname "{test_interface}" '
-                    f"ip saddr {website_filter.device_ip} drop "
+                    f"ip saddr {website_filter.device_ip} {guard}drop "
                     'comment "profile website allowlist has no resolved addresses"'
                 )
         if website_filter.blocked_addresses:
             lines.append(
                 f'add rule inet {PROJECT_TABLE} forward iifname "{test_interface}" '
-                f"ip saddr {website_filter.device_ip} "
+                f"ip saddr {website_filter.device_ip} {guard}"
                 f"ip daddr {_render_set(website_filter.blocked_addresses)} drop "
                 'comment "block progression website destinations"'
             )
@@ -185,7 +228,7 @@ def _render_nft_script(plan: NetworkPlan, topology: Topology) -> str:
         )
         lines.append(
             f'add rule inet {PROJECT_TABLE} forward iifname "{test_interface}" '
-            f"ip saddr {_render_set(plan.blocked_device_addresses)} drop "
+            f"ip saddr {_render_set(plan.blocked_device_addresses)} {guard}drop "
             'comment "temporarily disconnect randomized clients"'
         )
     for rule in plan.mark_rules:
@@ -210,6 +253,11 @@ def _render_nft_script(plan: NetworkPlan, topology: Topology) -> str:
             f'oifname "{topology.uplink_interface}" meta mark {mark} counter '
             f'comment "usage-device {device_id} upload"'
         )
+    # A service list replaces a quota's fallback profile, so leave the marker of
+    # a listed download alone until the download hook has turned it into a queue.
+    quota_download_guard = (
+        f"meta mark and {SERVICE_DOWNLOAD_MARK_BASE} == 0 " if plan.service_list_rules else ""
+    )
     for quota_rule in plan.service_quota_rules:
         destinations = _render_set(quota_rule.destination_addresses)
         lines.append(
@@ -232,9 +280,28 @@ def _render_nft_script(plan: NetworkPlan, topology: Topology) -> str:
             lines.append(
                 f"add rule netdev {DOWNLOAD_TABLE} download "
                 f"ip daddr {quota_rule.device_ip} ip saddr {destinations} "
-                f"meta mark set {quota_rule.mark} "
+                f"{quota_download_guard}meta mark set {quota_rule.mark} "
                 f"comment \"apply-service-quota {quota_rule.quota_id} download\""
             )
+    # The general profile's shared-limit chart counts all affected traffic.
+    general_download_count = (
+        f' counter comment "usage-device {GENERAL_QUEUE_ID} download"'
+        if plan.general_profile is not None
+        else ""
+    )
+    for list_rule in plan.service_list_rules:
+        set_name = service_list_set_name(list_rule)
+        download_mark = SERVICE_DOWNLOAD_MARK_BASE + list_rule.mark
+        lines.extend((
+            f'add rule inet {PROJECT_TABLE} forward iifname "{test_interface}" '
+            f"ip daddr @{set_name} meta mark set {list_rule.mark} counter "
+            f'comment "service-list {list_rule.list_id} upload"',
+            f'add rule inet {PROJECT_TABLE} forward oifname "{test_interface}" '
+            f"ip saddr @{set_name} meta mark set {download_mark} counter "
+            f'comment "service-list {list_rule.list_id} download"',
+            f"add rule netdev {DOWNLOAD_TABLE} download meta mark {download_mark} "
+            f"meta mark set {list_rule.mark}{general_download_count}",
+        ))
     return "\n".join(lines) + "\n"
 
 
@@ -373,15 +440,24 @@ def _render_tc_commands(
     return commands
 
 
-def render_command_plan(*, plan: NetworkPlan, topology: Topology) -> Sequence[Command]:
-    """Render a validated plan into commands for simulation or later execution."""
+def render_command_plan(
+    *,
+    plan: NetworkPlan,
+    topology: Topology,
+    service_addresses: Optional[Mapping[str, Sequence[IPv4Address]]] = None,
+) -> Sequence[Command]:
+    """Render a validated plan into commands for simulation or later execution.
+
+    `service_addresses` maps a service list id to the destination addresses
+    already learned for it, so a new table starts with them in the same batch.
+    """
 
     commands = [
         Command(
             executable="nft",
             arguments=("-f", "-"),
             purpose="replace project-owned traffic rules atomically",
-            stdin=_render_nft_script(plan, topology),
+            stdin=_render_nft_script(plan, topology, service_addresses),
         ),
     ]
     upload_queues = tuple(queue for queue in plan.queues if queue.direction == Direction.UPLOAD)
@@ -402,6 +478,48 @@ def render_command_plan(*, plan: NetworkPlan, topology: Topology) -> Sequence[Co
                 device_count=max(queue.mark for queue in download_queues),
             )
         )
+    return tuple(commands)
+
+
+def render_service_address_commands(
+    *,
+    plan: NetworkPlan,
+    additions: Mapping[str, Sequence[IPv4Address]],
+    removals: Mapping[str, Sequence[IPv4Address]],
+) -> Sequence[Command]:
+    """Render live changes to the address sets of the lists in an applied plan."""
+
+    set_names = {rule.list_id: service_list_set_name(rule) for rule in plan.service_list_rules}
+    commands = []
+    added = [
+        f"add element inet {PROJECT_TABLE} {set_names[list_id]} "
+        f"{_render_set(sorted(set(addresses), key=int))}"
+        for list_id, addresses in sorted(additions.items())
+        if addresses and list_id in set_names
+    ]
+    if added:
+        commands.append(
+            Command(
+                executable="nft",
+                arguments=("-f", "-"),
+                purpose="add learned service addresses",
+                stdin="\n".join(added) + "\n",
+            )
+        )
+    for list_id, addresses in sorted(removals.items()):
+        if addresses and list_id in set_names:
+            commands.append(
+                Command(
+                    executable="nft",
+                    arguments=("-f", "-"),
+                    purpose="remove stale service addresses",
+                    stdin=(
+                        f"delete element inet {PROJECT_TABLE} {set_names[list_id]} "
+                        f"{_render_set(sorted(set(addresses), key=int))}\n"
+                    ),
+                    ignore_failure=True,
+                )
+            )
     return tuple(commands)
 
 

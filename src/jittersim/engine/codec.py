@@ -18,6 +18,7 @@ from jittersim.config.models import (
 from .compiler import (
     MAX_DEVICES_PER_PLAN,
     MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN,
+    MAX_SERVICE_LIST_DOMAINS_PER_PLAN,
     MAX_SERVICE_QUOTAS_PER_PLAN,
     MAX_SHAPED_MARKS_PER_PLAN,
 )
@@ -29,6 +30,7 @@ from .plan import (
     NetworkPlan,
     QueueSpec,
     ServiceAssignmentRule,
+    ServiceListRule,
     ServiceQuotaRule,
     WebsiteFilter,
 )
@@ -153,6 +155,16 @@ def plan_to_payload(plan: NetworkPlan) -> Dict[str, Any]:
                 "download_impairment": asdict(rule.download_impairment),
             }
             for rule in plan.service_assignment_rules
+        ],
+        "service_list_rules": [
+            {
+                "list_id": rule.list_id,
+                "domains": list(rule.domains),
+                "mark": rule.mark,
+                "upload_impairment": asdict(rule.upload_impairment),
+                "download_impairment": asdict(rule.download_impairment),
+            }
+            for rule in plan.service_list_rules
         ],
     }
 
@@ -354,6 +366,64 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
         general_profile = GeneralProfileRule(profile_id, addresses, data["outage_active"])
         service_marks[GENERAL_QUEUE_ID] = 1
 
+    list_data = _as_list(plan_data.get("service_list_rules", []), "service_list_rules")
+    if (
+        len(mark_data) + len(service_marks) + len(list_data) > MAX_SHAPED_MARKS_PER_PLAN
+    ):
+        raise PlanCodecError("a plan has too many shaped traffic classes")
+    service_list_rules: List[ServiceListRule] = []
+    list_domains: List[tuple] = []
+    for index, raw_rule in enumerate(list_data):
+        rule_data = _as_mapping(raw_rule, f"service_list_rules[{index}]")
+        try:
+            list_id = rule_data["list_id"]
+            raw_domains = _as_list(rule_data["domains"], "domains")
+            mark = _as_integer(rule_data["mark"], f"service_list_rules[{index}].mark")
+            upload_impairment = _impairment_from_payload(rule_data["upload_impairment"])
+            download_impairment = _impairment_from_payload(rule_data["download_impairment"])
+            domains = tuple(normalize_service_hostname(domain) for domain in raw_domains)
+        except PlanCodecError:
+            raise
+        except (AddressValueError, KeyError, TypeError, ValueError) as error:
+            raise PlanCodecError(f"service_list_rules[{index}] is invalid") from error
+        if not isinstance(list_id, str) or not _SAFE_QUOTA_ID_PATTERN.fullmatch(list_id):
+            raise PlanCodecError(f"service_list_rules[{index}].list_id is invalid")
+        if not domains or len(domains) > 100 or len(set(domains)) != len(domains):
+            raise PlanCodecError(f"service_list_rules[{index}].domains is invalid")
+        if mark < 1 or mark > MAX_SHAPED_MARKS_PER_PLAN:
+            raise PlanCodecError(f"service_list_rules[{index}].mark is outside the safe range")
+        key = f"servicelist:{list_id}"
+        if (
+            key in service_marks
+            or mark in marks_by_device.values()
+            or mark in service_marks.values()
+        ):
+            raise PlanCodecError(f"duplicate service list mark {mark}")
+        for domain in domains:
+            if any(
+                owner != list_id
+                and (
+                    domain == prior
+                    or domain.endswith("." + prior)
+                    or prior.endswith("." + domain)
+                )
+                for prior, owner in list_domains
+            ):
+                raise PlanCodecError(f"service list hostnames overlap on {domain}")
+            list_domains.append((domain, list_id))
+        service_marks[key] = mark
+        service_list_rules.append(
+            ServiceListRule(
+                list_id=list_id,
+                domains=domains,
+                mark=mark,
+                upload_impairment=upload_impairment,
+                download_impairment=download_impairment,
+            )
+        )
+    if len(list_domains) > MAX_SERVICE_LIST_DOMAINS_PER_PLAN:
+        raise PlanCodecError("a plan has too many service list hostnames")
+
     if len(queue_data) != (len(mark_data) + len(service_marks)) * 2:
         raise PlanCodecError("a plan must contain two queues per device or service")
 
@@ -416,6 +486,14 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
             or queue_impairments[(key, Direction.DOWNLOAD)] != rule.download_impairment
         ):
             raise PlanCodecError("browser service queue impairment does not match its rule")
+
+    for rule in service_list_rules:
+        key = f"servicelist:{rule.list_id}"
+        if (
+            queue_impairments[(key, Direction.UPLOAD)] != rule.upload_impairment
+            or queue_impairments[(key, Direction.DOWNLOAD)] != rule.download_impairment
+        ):
+            raise PlanCodecError("service list queue impairment does not match its rule")
 
     try:
         mac_policy_data = _as_mapping(plan_data.get("mac_policy", {}), "mac_policy")
@@ -527,4 +605,5 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
         service_quota_rules=tuple(service_quota_rules),
         service_assignment_rules=tuple(service_assignment_rules),
         general_profile=general_profile,
+        service_list_rules=tuple(service_list_rules),
     )

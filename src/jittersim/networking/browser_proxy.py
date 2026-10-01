@@ -70,7 +70,7 @@ def select_mark(
     host: str,
     client_mac: Optional[str] = None,
 ) -> Tuple[int, str]:
-    """Choose the one hostname assignment or the device's ordinary mark."""
+    """Choose the service list or hostname assignment for this host, else the device's mark."""
 
     if plan is None:
         return 0, "reset"
@@ -83,6 +83,11 @@ def select_mark(
             raise ProxyError("client is blocked by global access rules")
         if client_mac in plan.protected_mac_addresses:
             return 0, "unaffected"
+    # A listed service replaces whatever profile behavior the client would get,
+    # including a random outage, exactly like the network rules for direct traffic.
+    for service_list in plan.service_list_rules:
+        if any(host == domain or host.endswith("." + domain) for domain in service_list.domains):
+            return service_list.mark, f"service-list:{service_list.list_id}"
     if plan.general_profile is not None:
         if plan.general_profile.outage_active:
             raise ProxyError("the general profile is temporarily disconnected")
@@ -105,8 +110,13 @@ def destination_allowed(
     client_ip: IPv4Address,
     address: str,
     client_mac: Optional[str] = None,
+    service_list: bool = False,
 ) -> bool:
-    """Preserve existing address blocks for traffic terminating on the proxy."""
+    """Preserve existing address blocks for traffic terminating on the proxy.
+
+    A service list replaces the client's own profile behavior, so a listed host
+    skips profile outages and website rules. Global rules still apply.
+    """
 
     if plan is None:
         return True
@@ -118,7 +128,7 @@ def destination_allowed(
         and destination not in plan.global_allowed_addresses
     ):
         return False
-    if client_mac in plan.protected_mac_addresses:
+    if service_list or client_mac in plan.protected_mac_addresses:
         return True
     if plan.general_profile is not None:
         general = plan.general_profile
@@ -238,7 +248,13 @@ class _ProxyHandler(socketserver.BaseRequestHandler):
                 raise ProxyError("destination has no public address")
             upstream = None
             for family, socktype, protocol, address in addresses:
-                if not destination_allowed(plan, client_ip, address[0], client_mac):
+                if not destination_allowed(
+                    plan,
+                    client_ip,
+                    address[0],
+                    client_mac,
+                    service_list=assignment_id.startswith("service-list:"),
+                ):
                     continue
                 candidate = socket.socket(family, socktype, protocol)
                 try:

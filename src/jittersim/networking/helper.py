@@ -30,6 +30,7 @@ from .router import (
     RouterError,
     TG3442DERouter,
 )
+from .service_addresses import ServiceAddressBook
 from .topology import Topology
 from .wifi import WifiError
 from .wifi_security import LEGACY_MODES, SECURITY_MODES
@@ -41,6 +42,9 @@ WIFI_ACTIONS = ("configure-ap", "router-sync-ap", "router-preview-ap", "wifi-res
 ROUTER_ACTIONS = ("router-sync-ap", "router-preview-ap", "router-wifi", "router-check", "router-status")
 MAX_LOG_DETAIL_CHARS = 512
 MAX_CONNECTED_CLIENTS = 256
+MAX_SERVICE_ADDRESS_LISTS = 15
+MAX_SERVICE_ADDRESSES_PER_LIST = 1024
+_SERVICE_LIST_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _MAC_ADDRESS_PATTERN = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 _STATION_HEADER_PATTERN = re.compile(
     r"^Station\s+(?P<mac>(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})\b"
@@ -91,9 +95,13 @@ class HelperService:
         router_factory: Optional[Callable[[str, str], TG3442DERouter]] = None,
         active_plan_path: Optional[Path] = None,
         access_store: Optional[AccessStore] = None,
+        service_address_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._applier = applier
         self._active_plan_path = active_plan_path
+        self._active_plan: Optional[NetworkPlan] = None
+        self._service_addresses = ServiceAddressBook(clock=service_address_clock)
+        self._list_domains: Dict[str, tuple] = {}
         self._network_lock = threading.Lock()
         self._wifi_lock = threading.Lock()
         self._router_lock = threading.Lock()
@@ -125,7 +133,7 @@ class HelperService:
         if action == "ping":
             return {"ok": True, "action": "ping"}
         if action == "capabilities":
-            return {"ok": True, "general_profile": True}
+            return {"ok": True, "general_profile": True, "service_lists": True}
         if action == "dashboard-access":
             if not self._access_lock.acquire(blocking=False):
                 return {"ok": False, "error": "Device verification is busy. Try again.",
@@ -143,6 +151,8 @@ class HelperService:
                         else self._handle_apply(payload.get("plan")))
             finally:
                 self._network_lock.release()
+        if action == "service-addresses":
+            return self._handle_service_addresses(payload.get("addresses"))
         if action == "clients":
             return self._handle_clients()
         if action == "uplink-info":
@@ -301,7 +311,14 @@ class HelperService:
         except PlanCodecError:
             return {"ok": False, "error": "invalid network plan"}
         try:
-            report = self._applier.apply(plan=plan)
+            self._forget_changed_lists(plan)
+            self._service_addresses.expire()
+            report = self._applier.apply(
+                plan=plan,
+                service_addresses=self._service_addresses.snapshot(
+                    [rule.list_id for rule in plan.service_list_rules]
+                ),
+            )
         except ApplyError as error:
             cause = error.cause
             reset_error = error.reset_error
@@ -312,6 +329,8 @@ class HelperService:
                 except OSError:
                     state_cleanup_failed = True
                     LOGGER.exception("could not clear the active plan after apply failure")
+            if error.cleanup_attempted:
+                self._active_plan = None
             cleanup_result = "completed" if error.cleanup_attempted else "not started"
             if reset_error is not None:
                 cleanup_result = (
@@ -343,7 +362,10 @@ class HelperService:
                     self._active_plan_path.unlink(missing_ok=True)
                 except (CommandExecutionError, OSError):
                     LOGGER.exception("network cleanup failed after plan publication error")
+                self._active_plan = None
                 return {"ok": False, "error": "network plan state could not be published"}
+        self._active_plan = plan
+        self._list_domains = {rule.list_id: rule.domains for rule in plan.service_list_rules}
         return {"ok": True, "action": "apply", "commands_run": report.commands_run}
 
     def _write_active_plan(self, plan: NetworkPlan) -> None:
@@ -536,6 +558,7 @@ class HelperService:
         return {"ok": True, "action": "router-check"}
 
     def _handle_reset(self) -> Dict[str, Any]:
+        self._active_plan = None
         try:
             commands_run = self._applier.reset()
             if self._active_plan_path is not None:
@@ -544,6 +567,94 @@ class HelperService:
             LOGGER.exception("network reset failed")
             return {"ok": False, "error": "network reset failed"}
         return {"ok": True, "action": "reset", "commands_run": commands_run}
+
+    def _forget_changed_lists(self, plan: NetworkPlan) -> None:
+        """Drop learned addresses of lists that were removed or got other hostnames."""
+
+        wanted = {rule.list_id: rule.domains for rule in plan.service_list_rules}
+        for list_id, domains in self._list_domains.items():
+            if wanted.get(list_id) != domains:
+                self._service_addresses.forget(list_id)
+
+    def _current_plan(self) -> Optional[NetworkPlan]:
+        """Return the applied plan, reading the published copy after a helper restart."""
+
+        if self._active_plan is not None:
+            return self._active_plan
+        if self._active_plan_path is None:
+            return None
+        try:
+            payload = json.loads(self._active_plan_path.read_text(encoding="utf-8"))
+            self._active_plan = plan_from_payload(payload)
+        except (OSError, ValueError):
+            return None
+        self._list_domains = {
+            rule.list_id: rule.domains for rule in self._active_plan.service_list_rules
+        }
+        return self._active_plan
+
+    def _handle_service_addresses(self, raw: Any) -> Dict[str, Any]:
+        """Add learned destination addresses to the sets of the applied plan's lists."""
+
+        error = {"ok": False, "error": "invalid service addresses"}
+        if not isinstance(raw, dict) or len(raw) > MAX_SERVICE_ADDRESS_LISTS:
+            return error
+        requested: Dict[str, List[IPv4Address]] = {}
+        for list_id, values in raw.items():
+            if (
+                not isinstance(list_id, str)
+                or not _SERVICE_LIST_ID_PATTERN.fullmatch(list_id)
+                or not isinstance(values, list)
+                or len(values) > MAX_SERVICE_ADDRESSES_PER_LIST
+                or any(not isinstance(value, str) for value in values)
+            ):
+                return error
+            try:
+                requested[list_id] = [IPv4Address(value) for value in values]
+            except ValueError:
+                return error
+        if not self._network_lock.acquire(blocking=False):
+            return {"ok": False, "error": "Pi networking is busy. Try again later.",
+                    "reason": "helper-busy"}
+        try:
+            plan = self._current_plan()
+            known = {rule.list_id for rule in plan.service_list_rules} if plan else set()
+            additions: Dict[str, Sequence[IPv4Address]] = {}
+            removals: Dict[str, List[IPv4Address]] = {}
+            for list_id, addresses in requested.items():
+                if list_id not in known:
+                    continue
+                fresh, evicted = self._service_addresses.record(
+                    list_id, [address for address in addresses if _shapeable_address(address)]
+                )
+                if fresh:
+                    additions[list_id] = fresh
+                removals.setdefault(list_id, []).extend(evicted)
+            for list_id, expired in self._service_addresses.expire().items():
+                removals.setdefault(list_id, []).extend(expired)
+            if plan is None or not known:
+                return {"ok": True, "action": "service-addresses", "added": 0}
+            removals = {
+                list_id: [a for a in addresses if a not in additions.get(list_id, ())]
+                for list_id, addresses in removals.items()
+                if list_id in known
+            }
+            try:
+                self._applier.update_service_addresses(
+                    plan=plan, additions=additions, removals=removals
+                )
+            except CommandExecutionError:
+                LOGGER.exception("service address update failed")
+                for list_id, fresh in additions.items():
+                    self._service_addresses.discard(list_id, fresh)
+                return {"ok": False, "error": "service address update failed"}
+            return {
+                "ok": True,
+                "action": "service-addresses",
+                "added": sum(len(fresh) for fresh in additions.values()),
+            }
+        finally:
+            self._network_lock.release()
 
 
 class HelperRequestHandler(socketserver.StreamRequestHandler):
@@ -696,7 +807,38 @@ class HelperClient:
 
         if plan.general_profile is not None:
             self.check_general_profile_support()
+        if plan.service_list_rules:
+            self.check_service_list_support()
         return self._request({"action": "apply", "plan": plan_to_payload(plan)})
+
+    def check_service_list_support(self) -> None:
+        """Reject an older running helper before applying service lists."""
+
+        try:
+            capabilities = self._request({"action": "capabilities"})
+        except HelperClientError as error:
+            if error.reason == "helper-busy":
+                raise
+            raise HelperClientError("Update the Pi helper before applying service lists") from error
+        if capabilities.get("service_lists") is not True:
+            raise HelperClientError("Update the Pi helper before applying service lists")
+
+    def service_addresses(self, addresses: Dict[str, Sequence[Any]]) -> int:
+        """Send learned destination addresses for lists in the applied plan."""
+
+        response = self._request(
+            {
+                "action": "service-addresses",
+                "addresses": {
+                    list_id: [str(address) for address in values]
+                    for list_id, values in addresses.items()
+                },
+            }
+        )
+        added = response.get("added")
+        if isinstance(added, bool) or not isinstance(added, int) or added < 0:
+            raise HelperClientError("helper returned an invalid service address count")
+        return added
 
     def check_general_profile_support(self) -> None:
         """Reject an older running helper before changing the saved mode."""
@@ -992,6 +1134,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         enable_hardware=arguments.enable_hardware,
     )
     return 0
+
+
+def _shapeable_address(address: IPv4Address) -> bool:
+    """Keep local, special-purpose and test-network addresses out of service sets."""
+
+    return not (
+        address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_unspecified
+        or address.is_reserved
+        or any(address in network for network in _PRIVATE_NETWORKS)
+    )
 
 
 def _valid_ipv4(value: object) -> bool:

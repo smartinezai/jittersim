@@ -3,8 +3,9 @@
 import json
 import re
 from dataclasses import dataclass
+from ipaddress import IPv4Address
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Mapping, Optional, Sequence
 
 from jittersim.config.models import ValidationError
 from jittersim.engine.plan import NetworkPlan
@@ -17,6 +18,7 @@ from .renderer import (
     ROOT_HANDLE,
     render_command_plan,
     render_reset_commands,
+    render_service_address_commands,
 )
 from .topology import Topology
 from .wifi import WifiController
@@ -62,8 +64,17 @@ class NetworkApplier:
         self._topology = topology
         self._lease_directory = lease_directory
 
-    def apply(self, *, plan: NetworkPlan) -> ApplyReport:
-        """Apply a plan and attempt a bounded reset if any command fails."""
+    def apply(
+        self,
+        *,
+        plan: NetworkPlan,
+        service_addresses: Optional[Mapping[str, Sequence[IPv4Address]]] = None,
+    ) -> ApplyReport:
+        """Apply a plan and attempt a bounded reset if any command fails.
+
+        `service_addresses` seeds each service list's set with the addresses
+        already learned for it, so the new rules never start empty.
+        """
 
         try:
             for interface in (self._topology.uplink_interface, self._topology.test_interface):
@@ -81,7 +92,9 @@ class NetworkApplier:
                 cause=error,
                 cleanup_attempted=False,
             ) from error
-        commands = render_command_plan(plan=plan, topology=self._topology)
+        commands = render_command_plan(
+            plan=plan, topology=self._topology, service_addresses=service_addresses
+        )
         for command_index, command in enumerate(commands):
             try:
                 self._run_checked(command)
@@ -100,6 +113,22 @@ class NetworkApplier:
                     cause=error,
                 ) from error
         return ApplyReport(commands_run=len(commands))
+
+    def update_service_addresses(
+        self,
+        *,
+        plan: NetworkPlan,
+        additions: Mapping[str, Sequence[IPv4Address]],
+        removals: Mapping[str, Sequence[IPv4Address]],
+    ) -> int:
+        """Change the live address sets of an applied plan without rebuilding it."""
+
+        commands = render_service_address_commands(
+            plan=plan, additions=additions, removals=removals
+        )
+        for command in commands:
+            self._run_checked(command)
+        return len(commands)
 
     def reset(self) -> int:
         """Remove only the nftables table and traffic queues owned by jittersim."""

@@ -251,6 +251,38 @@ Device traffic counters include proxy tunnels. Service byte and time quotas
 do not count those tunnels because their direct-traffic rules use destination
 addresses. Disable the browser proxy setting when finished.
 
+## Service lists
+
+A service list shapes traffic to chosen services for every affected client.
+It needs no proxy or setting on the client. Create one in the dashboard under
+**Schedules and limits** in the **Service lists** card. Use a simple profile with a visible delay for the first
+check.
+
+1. Apply the configuration. Connect a test client that is not in **Unaffected
+   by profiles** and open a listed service and then an unrelated site. Only the
+   listed service should show the profile's delay.
+2. Check the set the Pi keeps for the list. The set name is `svc_` followed by
+   the list's queue number (the first list in a plan with no devices is
+   `svc_1`):
+
+   ```sh
+   sudo nft list set inet jittersim svc_1
+   sudo nft list ruleset | grep service-list
+   ```
+
+   The set should hold addresses for the listed hostnames within a minute of
+   applying. The `service-list` rules show packet and byte counters for both
+   directions.
+3. Compare with an unaffected client. Its traffic to the same service should
+   stay normal.
+
+The Pi resolves every enabled list's hostnames about once a minute and the
+helper keeps the answers for six hours. A listed service that uses a content
+network may serve a device addresses the Pi did not resolve. Add the hostnames
+you see in the dashboard's traffic discovery. A reset removes the sets
+together with every other rule. Encrypted DNS on a client does not change what
+the Pi resolves but the client may still connect to other addresses.
+
 ## Remote control with Tailscale
 
 This is optional. [Tailscale's Personal plan](https://tailscale.com/pricing)

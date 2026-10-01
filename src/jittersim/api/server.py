@@ -43,13 +43,16 @@ from jittersim.config.models import (
     RuntimeState,
     Schedule,
     ServiceAssignment,
+    ServiceList,
     ServiceQuota,
     TimeQuota,
     Timer,
+    ValidationError,
     WebsitePolicy,
     normalize_domain,
     time_quota_counter_id,
 )
+from jittersim.config.service_catalogue import SERVICE_CATALOGUE
 from jittersim.config.storage import (
     ConfigRepository,
     DatabasePath,
@@ -104,6 +107,8 @@ WRITE_PATHS = frozenset(
         "/api/service-quotas/reset",
         "/api/service-assignments",
         "/api/service-assignments/delete",
+        "/api/service-lists",
+        "/api/service-lists/delete",
         "/api/time-quotas",
         "/api/action-history",
         "/api/diagnostics",
@@ -501,6 +506,10 @@ DASHBOARD_HTML = """<!doctype html>
     .quota-domain-picker { min-height: 8rem; }
     .quota-check { display: flex; align-items: center; gap: 0.5rem; }
     .quota-check input { width: auto; }
+    .service-catalogue { display: grid; gap: 0.5rem; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); margin: 0 0 0.75rem; padding: 0.75rem; border: 1px solid #2b435f; border-radius: 0.55rem; }
+    .service-catalogue legend { padding: 0 0.4rem; color: #c7d7eb; font-size: 0.88rem; }
+    .service-observed { display: flex; flex-wrap: wrap; align-items: end; gap: 0.5rem; }
+    .service-observed label { flex: 1 1 14rem; }
     .quota-reset-fields { display: contents; }
     .fields {
       display: grid;
@@ -1256,6 +1265,44 @@ DASHBOARD_HTML = """<!doctype html>
       <button class="primary" type="submit">Save group limit</button>
     </form>
     <div id="group-data-limit-list" class="quota-list" aria-live="polite">Enter the admin token to view group limits.</div>
+  </section>
+  <section class="card quota-card" id="service-list-card" data-collapse="closed">
+    <div class="section-heading">
+      <div>
+        <h2>Service lists</h2>
+        <p>Give chosen apps and sites their own profile on every affected device</p>
+      </div>
+      <span id="service-list-count" class="count-badge">No service lists</span>
+    </div>
+    <form id="service-list-form">
+      <div class="fields">
+        <label>List ID
+          <input id="service-list-id" required pattern="[a-z0-9][a-z0-9_\\-]{0,63}" placeholder="work-apps">
+        </label>
+        <label>List name
+          <input id="service-list-name" required placeholder="Work apps">
+        </label>
+        <label>Profile for these services
+          <select id="service-list-profile" required></select>
+        </label>
+        <label class="quota-check"><input id="service-list-enabled" type="checkbox" checked> Enabled</label>
+      </div>
+      <fieldset id="service-list-catalogue" class="service-catalogue">
+        <legend>Services</legend>
+      </fieldset>
+      <label>Extra hostnames, one per line
+        <textarea id="service-list-hostnames" rows="3" placeholder="intranet.example.com"></textarea>
+      </label>
+      <div class="service-observed">
+        <label>Names the Pi has seen
+          <select id="service-list-observed"></select>
+        </label>
+        <button type="button" id="service-list-add-observed">Add to hostnames</button>
+      </div>
+      <p class="form-note">While a list is on, traffic to its services gets the list's profile instead of the device or general profile. Devices in Unaffected by profiles are not touched. Global access rules still apply. A hostname also matches its subdomains and can only be in one enabled list. Matching follows the DNS answers that devices receive from the Pi, so encrypted DNS, VPNs and apps that use fixed addresses are not covered. Other sites on the same server address are shaped the same way. Check the names a real session uses and add any that are missing. The profile's website list and random outages are not used for service lists.</p>
+      <button class="primary" type="submit">Save service list</button>
+    </form>
+    <div id="service-list-list" class="quota-list" aria-live="polite">Enter the admin token to view service lists.</div>
   </section>
   <section class="card quota-card" data-collapse="closed">
     <div class="section-heading">
@@ -2108,6 +2155,7 @@ DASHBOARD_HTML = """<!doctype html>
     const connectedDrafts = new Map();
     const clearConnectedDrafts = new Set();
     let observedDomainsByDevice = {};
+    let observedNames = new Set();
     let randomWebsiteAnalyticsRequestVersion = 0;
     let connectedDevicesRequestInFlight = false;
     let observationRequestInFlight = false;
@@ -3112,6 +3160,7 @@ DASHBOARD_HTML = """<!doctype html>
       const container = element("observations");
       const count = element("observation-count");
       observedDomainsByDevice = {};
+      observedNames = new Set();
       container.replaceChildren();
       if (!data.available) {
         count.textContent = "Unavailable";
@@ -3131,6 +3180,7 @@ DASHBOARD_HTML = """<!doctype html>
         return;
       }
       devices.forEach((device) => {
+        (device.domains || []).forEach((observation) => observedNames.add(observation.domain));
         if (device.assigned_device_id) {
           observedDomainsByDevice[device.assigned_device_id] = (device.domains || [])
             .map((observation) => observation.domain);
@@ -3227,6 +3277,7 @@ DASHBOARD_HTML = """<!doctype html>
       } catch (error) {
         renderObservations({ available: false, devices: [], message: error.message });
       }
+      renderServiceListObserved();
     }
 
     function formatQuotaBytes(bytes) {
@@ -3415,6 +3466,113 @@ DASHBOARD_HTML = """<!doctype html>
         return;
       }
       quotas.forEach((quota) => container.appendChild(createQuotaRow({ quota, service: true })));
+    }
+
+    let serviceCatalogue = [];
+
+    function renderServiceCatalogue() {
+      const container = element("service-list-catalogue");
+      const checked = new Set(
+        Array.from(container.querySelectorAll("input:checked")).map((input) => input.value)
+      );
+      container.replaceChildren();
+      const legend = document.createElement("legend");
+      legend.textContent = "Services";
+      container.appendChild(legend);
+      serviceCatalogue.forEach((service) => {
+        const label = document.createElement("label");
+        label.className = "quota-check";
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.value = service.key;
+        input.checked = checked.has(service.key);
+        label.title = service.domains.join(", ");
+        label.append(input, document.createTextNode(" " + service.name));
+        container.appendChild(label);
+      });
+    }
+
+    function renderServiceListObserved() {
+      const select = element("service-list-observed");
+      const names = observedNames;
+      const previous = select.value;
+      select.replaceChildren();
+      const first = document.createElement("option");
+      first.value = "";
+      first.textContent = names.size ? "Choose a name" : "No names seen yet";
+      select.appendChild(first);
+      Array.from(names).sort().forEach((name) => {
+        const option = document.createElement("option");
+        option.value = name;
+        option.textContent = name;
+        select.appendChild(option);
+      });
+      if (names.has(previous)) select.value = previous;
+    }
+
+    function renderServiceLists(data) {
+      const lists = data.service_lists || [];
+      const container = element("service-list-list");
+      element("service-list-count").textContent = lists.length +
+        (lists.length === 1 ? " service list" : " service lists");
+      container.replaceChildren();
+      if (!lists.length) {
+        container.textContent = data.error || "No service lists saved.";
+        return;
+      }
+      lists.forEach((serviceList) => {
+        const row = document.createElement("div");
+        row.className = "quota-row";
+        const heading = document.createElement("div");
+        heading.className = "quota-heading";
+        const title = document.createElement("strong");
+        title.textContent = serviceList.name + " (" + serviceList.id + ")";
+        const detail = document.createElement("span");
+        detail.textContent = "All affected devices → " + serviceList.profile_name +
+          (serviceList.enabled ? "" : " · disabled");
+        heading.append(title, detail);
+        const names = serviceCatalogue
+          .filter((service) => serviceList.services.includes(service.key))
+          .map((service) => service.name)
+          .concat(serviceList.hostnames);
+        const services = document.createElement("span");
+        services.textContent = names.join(", ");
+        const actions = document.createElement("div");
+        actions.className = "quota-actions";
+        const editButton = document.createElement("button");
+        editButton.type = "button";
+        editButton.textContent = "Edit";
+        editButton.addEventListener("click", () => editServiceList(serviceList));
+        const deleteButton = document.createElement("button");
+        deleteButton.type = "button";
+        deleteButton.textContent = "Delete";
+        deleteButton.addEventListener("click", async () => {
+          setButtonBusy(deleteButton, true);
+          try {
+            await request("/api/service-lists/delete", "POST", { id: serviceList.id });
+            refreshAfterSuccess("Service list deleted.");
+          } catch (error) {
+            showMessage(error.message, "error");
+          } finally {
+            setButtonBusy(deleteButton, false);
+          }
+        });
+        actions.append(editButton, deleteButton);
+        row.append(heading, services, actions);
+        container.appendChild(row);
+      });
+    }
+
+    function editServiceList(serviceList) {
+      element("service-list-id").value = serviceList.id;
+      element("service-list-name").value = serviceList.name;
+      element("service-list-profile").value = serviceList.profile_id;
+      element("service-list-hostnames").value = serviceList.hostnames.join("\\n");
+      element("service-list-enabled").checked = serviceList.enabled;
+      element("service-list-catalogue").querySelectorAll("input").forEach((input) => {
+        input.checked = serviceList.services.includes(input.value);
+      });
+      revealElement(element("service-list-form"));
     }
 
     function renderServiceAssignments(data) {
@@ -3735,6 +3893,18 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    async function loadServiceLists() {
+      try {
+        const data = await request("/api/service-lists", "GET");
+        serviceCatalogue = data.catalogue || [];
+        renderServiceCatalogue();
+        renderServiceLists(data);
+      } catch (error) {
+        renderServiceLists({ service_lists: [], error: error.message });
+      }
+      renderServiceListObserved();
+    }
+
     async function scanObservations() {
       if (!helperConfigured || observationRequestInFlight) return;
       observationRequestInFlight = true;
@@ -3775,6 +3945,7 @@ DASHBOARD_HTML = """<!doctype html>
         "data-limit-profile",
         "service-quota-profile",
         "service-assignment-profile",
+        "service-list-profile",
         "time-quota-profile",
         "group-profile",
         "group-data-limit-profile",
@@ -4278,6 +4449,7 @@ DASHBOARD_HTML = """<!doctype html>
         loadUplink(),
         loadQuotas(),
         loadServiceAssignments(),
+        loadServiceLists(),
         loadAdminTools(),
         loadDashboardAccessList()
       ]);
@@ -4713,6 +4885,38 @@ DASHBOARD_HTML = """<!doctype html>
         refreshAfterSuccess(
           result.live_applied ? "Shared group limit saved and applied." : "Shared group limit saved.",
         );
+      } catch (error) {
+        showMessage(error.message, "error");
+      }
+    });
+
+    element("service-list-add-observed").addEventListener("click", () => {
+      const name = element("service-list-observed").value;
+      if (!name) return;
+      const field = element("service-list-hostnames");
+      const present = field.value.split(/[\\s,]+/).filter(Boolean);
+      if (!present.includes(name)) field.value = present.concat(name).join("\\n");
+    });
+
+    element("service-list-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const services = Array.from(
+          element("service-list-catalogue").querySelectorAll("input:checked")
+        ).map((input) => input.value);
+        const hostnames = element("service-list-hostnames").value.split(/[\\s,]+/).filter(Boolean);
+        if (!services.length && !hostnames.length) {
+          throw new Error("Choose at least one service or enter a hostname.");
+        }
+        const result = await request("/api/service-lists", "POST", {
+          id: element("service-list-id").value,
+          name: element("service-list-name").value,
+          profile_id: element("service-list-profile").value,
+          services: services,
+          hostnames: hostnames,
+          enabled: element("service-list-enabled").checked
+        });
+        refreshAfterSuccess(result.live_applied ? "Service list saved and applied." : "Service list saved.");
       } catch (error) {
         showMessage(error.message, "error");
       }
@@ -5340,6 +5544,29 @@ def _service_assignment_payload(
     }
 
 
+def _service_list_payload(
+    service_list: ServiceList, *, repository: ConfigRepository
+) -> Dict[str, Any]:
+    profile = repository.get_profile(service_list.profile_id)
+    return {
+        "id": service_list.id,
+        "name": service_list.name,
+        "profile_id": service_list.profile_id,
+        "profile_name": profile.name if profile is not None else service_list.profile_id,
+        "services": list(service_list.services),
+        "hostnames": list(service_list.hostnames),
+        "domains": list(service_list.domains),
+        "enabled": service_list.enabled,
+    }
+
+
+def _service_catalogue_payload() -> list:
+    return [
+        {"key": service.key, "name": service.name, "domains": list(service.domains)}
+        for service in SERVICE_CATALOGUE
+    ]
+
+
 def _time_quota_payload(
     quota: TimeQuota,
     *,
@@ -5753,6 +5980,16 @@ class ControlServer(HTTPServer):
                         _service_assignment_payload(assignment, repository=self.repository)
                         for assignment in self.repository.list_service_assignments()
                     ]
+                }
+            )
+        if path == "/api/service-lists":
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {
+                    "service_lists": [
+                        _service_list_payload(service_list, repository=self.repository)
+                        for service_list in self.repository.list_service_lists()
+                    ],
+                    "catalogue": _service_catalogue_payload(),
                 }
             )
         if path == "/api/time-quotas":
@@ -6452,6 +6689,12 @@ class ControlServer(HTTPServer):
                 )
             return self._apply_quota_change("deleted_id", assignment_id)
 
+        if path == "/api/service-lists":
+            return self._save_service_list(payload)
+
+        if path == "/api/service-lists/delete":
+            return self._delete_service_list(payload)
+
         if path == "/api/service-quotas/reset":
             try:
                 quota_id = payload["id"]
@@ -6883,6 +7126,58 @@ class ControlServer(HTTPServer):
             {"policies": _policies_payload(self.repository)}
         )
 
+    def _save_service_list(self, payload: dict):
+        operation = self.scheduler.control_operation() if self.scheduler else nullcontext()
+        with operation:
+            try:
+                service_list = ServiceList(
+                    id=payload["id"],
+                    name=payload["name"],
+                    profile_id=payload["profile_id"],
+                    services=payload.get("services", []),
+                    hostnames=payload.get("hostnames", []),
+                    enabled=payload.get("enabled", True),
+                )
+                if self.repository.get_profile(service_list.profile_id) is None:
+                    raise ValidationError("profile does not exist")
+                if service_list.enabled and self.helper_client is not None:
+                    self.helper_client.check_service_list_support()
+                with self.repository.transaction():
+                    self.repository.save_service_list(service_list)
+                    self._validate_saved_plan()
+            except HelperClientError as error:
+                return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                    {"error": str(error)}
+                )
+            except PlanError as error:
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
+            except ValidationError as error:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": str(error)}
+                )
+            except (KeyError, TypeError, ValueError, StorageError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid service list configuration"}
+                )
+            return self._apply_quota_change(
+                "service_list",
+                _service_list_payload(service_list, repository=self.repository),
+            )
+
+    def _delete_service_list(self, payload: dict):
+        operation = self.scheduler.control_operation() if self.scheduler else nullcontext()
+        with operation:
+            list_id = payload.get("id")
+            if not isinstance(list_id, str):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid service list id"}
+                )
+            if not self.repository.delete_service_list(list_id):
+                return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                    {"error": "service list does not exist"}
+                )
+            return self._apply_quota_change("deleted_id", list_id)
+
     def _validate_saved_plan(self) -> None:
         if self.repository.get_general_profile() is not None:
             compile_stored_plan(repository=self.repository)
@@ -6897,10 +7192,10 @@ class ControlServer(HTTPServer):
                 self.repository.list_service_assignments(),
             )
             for item in items
-        )
+        ) + sum(item.enabled for item in self.repository.list_service_lists())
         if rules > 15:
             raise PlanError(
-                "At most 15 affected devices and service rules can be active. Remove an assignment or keep the device unaffected."
+                "At most 15 affected devices, service rules and service lists can be active. Remove one or keep the device unaffected."
             )
         compile_stored_plan(repository=self.repository)
 

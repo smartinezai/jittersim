@@ -5,6 +5,7 @@ from jittersim.config.storage import ConfigRepository
 
 from .compiler import compile_plan
 from .plan import GeneralProfileRule, NetworkPlan
+from .service_lists import build_service_list_rules
 from .website import resolve_domains
 
 
@@ -32,4 +33,5 @@ def compile_general_plan(
             else None,
             outage_active=outage_active,
         ),
+        service_list_rules=build_service_list_rules(repository),
     )
