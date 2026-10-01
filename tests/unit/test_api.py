@@ -2130,6 +2130,30 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(self.repository.list_domain_observations(), ())
 
+    def test_a_corrupt_stored_observation_gets_the_normal_storage_error_response(self) -> None:
+        self.server.admin_token = "admin-token"
+        self.repository.save_domain_observations(
+            [DomainObservation("192.168.50.20", "amazon.com", 2, 10, 10)], now=10
+        )
+        self.repository._connection.execute(
+            "UPDATE domain_observations SET mac_address = 'garbage'"
+        )
+        handler = object.__new__(ControlRequestHandler)
+        handler.server = self.server
+        handler.client_address = ("127.0.0.1", 45000)
+        handler.path = "/api/observations"
+        handler.headers = Message()
+        handler.headers["Authorization"] = "Bearer admin-token"
+        response = {}
+        handler._send_response = lambda **values: response.update(values)
+
+        handler.do_GET()
+
+        self.assertEqual(response["status"], 500)
+        self.assertEqual(
+            json.loads(response["body"]), {"error": "stored configuration could not be read"}
+        )
+
     def test_a_scan_records_a_capital_snapshot_address_in_its_normal_form(self) -> None:
         self.scan_with(MovingClientHelper(self.UPPERCASE_PHONE, "192.168.50.99"))
 

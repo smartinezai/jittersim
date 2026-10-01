@@ -2187,16 +2187,19 @@ class ConfigRepository:
             count = counts_by_device.get(ipv4_address, 0)
             if count >= _MAX_OBSERVATIONS_PER_DEVICE:
                 continue
-            observations.append(
-                DomainObservation(
-                    ipv4_address=ipv4_address,
-                    domain=row["domain"],
-                    query_count=row["query_count"],
-                    first_seen=row["first_seen"],
-                    last_seen=row["last_seen"],
-                    mac_address=row["mac_address"],
+            try:
+                observations.append(
+                    DomainObservation(
+                        ipv4_address=ipv4_address,
+                        domain=row["domain"],
+                        query_count=row["query_count"],
+                        first_seen=row["first_seen"],
+                        last_seen=row["last_seen"],
+                        mac_address=row["mac_address"],
+                    )
                 )
-            )
+            except (KeyError, TypeError, ValueError) as error:
+                raise StorageError("stored domain observation is malformed") from error
             counts_by_device[ipv4_address] = count + 1
         return tuple(observations)
 
