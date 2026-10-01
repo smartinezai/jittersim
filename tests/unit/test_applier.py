@@ -1,8 +1,10 @@
 import json
 import unittest
 
+from jittersim.config import exemptions
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.engine.compiler import compile_plan
+from jittersim.networking import applier as applier_module
 from jittersim.networking.applier import ApplyError, NetworkApplier
 from jittersim.networking.commands import CommandResult
 from jittersim.networking.executor import CommandExecutionError, FakeExecutor
@@ -56,6 +58,81 @@ class NetworkApplierTests(unittest.TestCase):
 
         self.assertEqual(report.commands_run, len(executor.commands) - 2)
         self.assertGreater(report.commands_run, 0)
+
+    def test_dns_capture_without_exclusions_keeps_the_old_filter(self) -> None:
+        executor = FakeExecutor()
+        NetworkApplier(executor=executor, topology=self.topology).capture_dns_queries()
+
+        arguments = executor.commands[-1].arguments
+
+        self.assertEqual(arguments[-7:], ("udp", "port", "53", "or", "tcp", "port", "53"))
+        self.assertNotIn("ether", arguments)
+        self.assertNotIn("(", arguments)
+
+    def test_dns_capture_never_sees_protected_clients(self) -> None:
+        executor = FakeExecutor()
+        NetworkApplier(executor=executor, topology=self.topology).capture_dns_queries(
+            ["02:00:00:00:00:02", "02:00:00:00:00:01"]
+        )
+
+        arguments = executor.commands[-1].arguments
+        tail = arguments[arguments.index("(") :]
+
+        self.assertEqual(
+            tail,
+            (
+                "(", "udp", "port", "53", "or", "tcp", "port", "53", ")",
+                "and", "not", "ether", "host", "02:00:00:00:00:01",
+                "and", "not", "ether", "host", "02:00:00:00:00:02",
+            ),
+        )
+
+    def test_dns_capture_normalizes_and_deduplicates_excluded_addresses(self) -> None:
+        executor = FakeExecutor()
+        NetworkApplier(executor=executor, topology=self.topology).capture_dns_queries(
+            ["02-00-00-00-00-01", "02:00:00:00:00:01", "02:00:00:00:00:AA"]
+        )
+
+        arguments = executor.commands[-1].arguments
+
+        self.assertEqual(arguments.count("ether"), 2)
+        self.assertIn("02:00:00:00:00:aa", arguments)
+
+    def test_the_exclusion_limit_is_the_size_of_the_protected_list(self) -> None:
+        self.assertEqual(applier_module.MAX_PROTECTED_MACS, exemptions.MAX_UNAFFECTED_DEVICES)
+        self.assertEqual(applier_module.MAX_PROTECTED_MACS, 256)
+
+    def test_dns_capture_keeps_every_term_for_the_largest_protected_list(self) -> None:
+        macs = ["02:00:00:00:%02x:%02x" % (index // 256, index % 256) for index in range(256)]
+        executor = FakeExecutor()
+        NetworkApplier(executor=executor, topology=self.topology).capture_dns_queries(
+            list(reversed(macs))
+        )
+
+        arguments = executor.commands[-1].arguments
+        expected = ["(", "udp", "port", "53", "or", "tcp", "port", "53", ")"]
+        for mac in sorted(macs):
+            expected += ["and", "not", "ether", "host", mac]
+
+        self.assertEqual(arguments[arguments.index("(") :], tuple(expected))
+        self.assertEqual(arguments.count("ether"), 256)
+        self.assertEqual(arguments[-1], "02:00:00:00:00:ff")
+        self.assertEqual(arguments[-1], sorted(macs)[-1])
+
+    def test_dns_capture_rejects_a_bad_or_oversized_exclusion_list(self) -> None:
+        executor = FakeExecutor()
+        applier = NetworkApplier(executor=executor, topology=self.topology)
+
+        with self.assertRaises(ValueError):
+            applier.capture_dns_queries(["not-a-mac"])
+        with self.assertRaises(ValueError):
+            applier.capture_dns_queries(
+                ["02:00:00:00:%02x:%02x" % (index // 256, index % 256) for index in range(257)]
+            )
+        applier.capture_dns_queries(
+            ["02:00:00:00:%02x:%02x" % (index // 256, index % 256) for index in range(256)]
+        )
+        self.assertEqual(len(executor.commands), 1)
 
     def test_reset_runs_project_cleanup_commands(self) -> None:
         executor = RootQueueExecutor()

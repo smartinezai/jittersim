@@ -115,23 +115,51 @@ display. One layer is not enough so there are four.
 - **Capture.** `observe_dns_queries` takes the protected MAC list. The helper adds
   `not ether host <mac>` per MAC to the `tcpdump` filter so those frames (the
   client's queries and the answers to it) are never captured. The helper
-  validates every MAC and caps the list at 64. Both callers (the dashboard scan
+  validates every MAC and caps the list at 256 which is the size of the
+  Unaffected list so every protected device can be skipped. The filter groups the
+  DNS test first (`( udp port 53 or tcp port 53 ) and not ether host ...`) so the
+  MAC terms only run for DNS packets and 256 terms compile to about 2500 BPF
+  instructions against the kernel limit of 4096. Both callers (the dashboard scan
   and progression sampling) pass the saved Unaffected list.
-- **Server drop.** Before saving a scan the server drops any observation whose IP
-  belongs to a protected MAC. The IP comes from the connected-client snapshot and
-  from saved devices with that MAC. `/api/observations` also hides rows for those
-  IPs so old rows never show.
-- **Fail closed.** If protected devices exist and the helper does not accept the
-  MAC list (an older helper) the scan refuses to run and says the helper needs
-  updating. It never captures protected traffic.
+- **Server drop.** Each observation is stored with the hardware address of the
+  client that owned its IP when it was scanned (read from the connected-client
+  snapshot; an unknown or shared IP stays empty). Before saving a scan the server
+  drops any observation whose MAC is protected or whose IP belongs to a protected
+  MAC. The IP comes from the connected-client snapshot and from saved devices with
+  that MAC. `/api/observations` hides rows by the same two keys so old rows never
+  show. A row with no recorded MAC is matched by its IP alone (see Purge for the
+  rows that predate the MAC). The MAC is never sent to the browser.
+- **Fail closed.** If protected devices exist the client first asks the helper for
+  its `protected_dns_capture` capability and refuses to scan when the helper does
+  not advertise it or does not know the request (an older helper). The message says
+  to restart the JitterSim services or reinstall the release. A helper that is busy
+  or cannot be reached also blocks the scan but keeps its own message. No capture
+  runs in any of these cases.
+  The helper also echoes the MAC list it used and the client checks the echo as a
+  second layer. It never captures protected traffic. If the saved list ever held
+  more devices than the helper can skip the scan refuses with a clear message
+  instead of capturing the rest.
 - **Purge.** Making a device protected deletes its stored observations (a new
-  `delete_domain_observations` in storage keyed by IP) in the same transaction as
-  saving the protection. It also clears the totals used as progression baselines
-  for those IPs.
+  `delete_domain_observations` in storage keyed by MAC and by IP) in the same
+  transaction as saving the protection. A row goes when its recorded MAC is the
+  protected one or when its IP is one the device uses now or had assigned. This
+  also clears the totals used as progression baselines for those IPs. Rows saved
+  before the MAC was recorded have no MAC. When an existing database gains the MAC
+  column while the Unaffected list is not empty the upgrade clears every such row
+  once in the same step because a device that was protected already may have moved
+  and the rows are a cache that learns again. When the list is empty at upgrade the
+  old rows stay and can only be matched by IP so one under an address a device
+  later stops using stays until it expires.
 - **DNS watcher.** The watcher skips frames whose destination MAC is protected
   before it parses them. It reads the protected MACs from the helper on its
   existing plan check. Nothing is lost because service lists never apply to
   protected devices and other clients' lookups still teach the lists.
+- **Limits.** The watcher still receives frames for protected clients because it
+  listens on the whole test interface. It skips them in userspace so nothing is
+  parsed or stored but the skip follows the saved list with a lag of about one
+  second plus the time to apply the plan. Protection is keyed by MAC so a device
+  that rotates or randomizes its Wi-Fi address appears as a new unprotected device
+  until its new MAC is added to the Unaffected list.
 - **Interface.** Protected rows say "Traffic is not monitored". Traffic discovery
   notes that protected devices never appear. The traffic graph and the impact
   check never list them.
@@ -139,8 +167,10 @@ display. One layer is not enough so there are four.
 **Tests.**
 
 - Unit tests: the `tcpdump` argument builder (MAC validation and the cap and the
-  filter text). The scan drops protected IPs and fails closed. Observations hide
-  them. Protecting a device purges its rows.
+  full filter text for the largest list). The scan drops protected IPs and MACs and
+  fails closed before any capture with an old helper. Observations hide them.
+  Protecting a device purges its rows by MAC and by IP and a failed purge undoes the
+  protection.
 - Watcher test with synthetic frames: a frame to a protected MAC never reaches the
   parser (assert the parser is not called).
 - Real-kernel Docker test in the style of the existing `tests/integration/linux_*`
