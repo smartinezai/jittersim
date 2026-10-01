@@ -1704,6 +1704,99 @@ class ControlServerTests(unittest.TestCase):
         finally:
             token_server.server_close()
 
+    def test_devices_endpoint_adds_a_display_name(self) -> None:
+        self.repository.save_device(
+            Device(
+                id="client-dc1ed53e974c",
+                name="Client 192.168.50.178",
+                ipv4_address="192.168.50.178",
+                profile_id="slow",
+                mac_address="dc:1e:d5:3e:97:4c",
+            )
+        )
+        self.repository.save_device(
+            Device(
+                id="kitchen",
+                name="Kitchen tablet",
+                ipv4_address="192.168.50.179",
+                profile_id="slow",
+            )
+        )
+
+        _, _, body = self.server.response_for("/api/devices")
+        by_id = {item["id"]: item for item in json.loads(body)["devices"]}
+
+        self.assertEqual(by_id["client-dc1ed53e974c"]["display_name"], "Unknown device")
+        self.assertEqual(by_id["client-dc1ed53e974c"]["name"], "Client 192.168.50.178")
+        self.assertEqual(by_id["kitchen"]["display_name"], "Kitchen tablet")
+
+        self.repository.save_connected_device_label(
+            mac_address="dc:1e:d5:3e:97:4c", display_name="Sam MacBook", device_type="laptop"
+        )
+        _, _, body = self.server.response_for("/api/devices")
+        by_id = {item["id"]: item for item in json.loads(body)["devices"]}
+        self.assertEqual(by_id["client-dc1ed53e974c"]["display_name"], "Sam MacBook")
+
+    def test_device_display_name_helper(self) -> None:
+        from jittersim.api.server import _device_display_name
+
+        device = Device(
+            id="client-dc1ed53e974c",
+            name="Client 192.168.50.178",
+            ipv4_address="192.168.50.178",
+            profile_id="slow",
+            mac_address="dc:1e:d5:3e:97:4c",
+        )
+        labels = {"dc:1e:d5:3e:97:4c": {"display_name": "Sam MacBook", "device_type": "laptop"}}
+
+        self.assertEqual(_device_display_name(device, labels), "Sam MacBook")
+        self.assertEqual(_device_display_name(device, {}), "Unknown device")
+        self.assertEqual(_device_display_name(None, labels), "Unknown device")
+
+    def test_payloads_use_the_resolved_device_name(self) -> None:
+        self.repository.save_device(
+            Device(
+                id="client-dc1ed53e974c",
+                name="Client 192.168.50.178",
+                ipv4_address="192.168.50.178",
+                profile_id="slow",
+                mac_address="dc:1e:d5:3e:97:4c",
+            )
+        )
+        self.repository.save_connected_device_label(
+            mac_address="dc:1e:d5:3e:97:4c", display_name="Sam MacBook", device_type="laptop"
+        )
+        self.server.write_response_for(
+            "/api/data-limits",
+            {
+                "device_id": "client-dc1ed53e974c",
+                "profile_id": "slow",
+                "limit_bytes": 1_000,
+                "reset_mode": "manual",
+                "reset_interval_seconds": 0,
+                "reset_times": [],
+                "enabled": True,
+            },
+        )
+        self.server.write_response_for(
+            "/api/timers",
+            {
+                "id": "ten-minutes",
+                "device_id": "client-dc1ed53e974c",
+                "profile_id": "slow",
+                "duration_minutes": 10,
+            },
+        )
+
+        _, _, body = self.server.response_for("/api/data-limits")
+        self.assertEqual(json.loads(body)["data_limits"][0]["device_name"], "Sam MacBook")
+        _, _, body = self.server.response_for("/api/timers")
+        self.assertEqual(json.loads(body)["timers"][0]["device_name"], "Sam MacBook")
+
+        self.repository.delete_connected_device_label(mac_address="dc:1e:d5:3e:97:4c")
+        _, _, body = self.server.response_for("/api/data-limits")
+        self.assertEqual(json.loads(body)["data_limits"][0]["device_name"], "Unknown device")
+
 
 if __name__ == "__main__":
     unittest.main()

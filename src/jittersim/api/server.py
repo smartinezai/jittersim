@@ -28,6 +28,7 @@ from jittersim.config.device_labels import (
     normalize_device_mac,
     normalize_device_type,
 )
+from jittersim.config.device_names import UNKNOWN_DEVICE_NAME, resolve_device_name
 from jittersim.config.exemptions import UnaffectedDevice, normalize_exempt_mac
 from jittersim.config.models import (
     DataLimit,
@@ -5391,10 +5392,24 @@ def _profile_payload(profile: Profile) -> Dict[str, Any]:
     return asdict(profile)
 
 
-def _device_payload(device: Device) -> Dict[str, Any]:
+def _device_display_name(
+    device: Optional[Device], labels_by_mac: Dict[str, Dict[str, str]]
+) -> str:
+    """Resolve the name shown for a saved device."""
+
+    if device is None:
+        return UNKNOWN_DEVICE_NAME
+    label = labels_by_mac.get(device.mac_address or "", {}).get("display_name")
+    return resolve_device_name(saved_label=label, saved_name=device.name)
+
+
+def _device_payload(
+    device: Device, *, labels_by_mac: Optional[Dict[str, Dict[str, str]]] = None
+) -> Dict[str, Any]:
     return {
         "id": device.id,
         "name": device.name,
+        "display_name": _device_display_name(device, labels_by_mac or {}),
         "ipv4_address": str(device.ipv4_address),
         "profile_id": device.profile_id,
         "mac_address": device.mac_address,
@@ -5480,11 +5495,16 @@ def _data_limit_payload(
     """Build the dashboard representation of one device quota."""
 
     device = repository.get_device(data_limit.device_id)
+    labels_by_mac = repository.list_connected_device_labels()
     profile = repository.get_profile(data_limit.profile_id)
     return {
         **asdict(data_limit),
         "reset_times": list(data_limit.reset_times),
-        "device_name": device.name if device is not None else data_limit.device_id,
+        "device_name": (
+            _device_display_name(device, labels_by_mac)
+            if device is not None
+            else data_limit.device_id
+        ),
         "profile_name": profile.name if profile is not None else data_limit.profile_id,
         "remaining_bytes": max(0, data_limit.limit_bytes - data_limit.used_bytes),
         "reached": data_limit.used_bytes >= data_limit.limit_bytes,
@@ -5519,12 +5539,15 @@ def _service_quota_payload(
     """Build the dashboard representation of one service quota."""
 
     device = repository.get_device(quota.device_id)
+    labels_by_mac = repository.list_connected_device_labels()
     profile = repository.get_profile(quota.profile_id)
     return {
         **asdict(quota),
         "domains": list(quota.domains),
         "reset_times": list(quota.reset_times),
-        "device_name": device.name if device is not None else quota.device_id,
+        "device_name": (
+            _device_display_name(device, labels_by_mac) if device is not None else quota.device_id
+        ),
         "profile_name": profile.name if profile is not None else quota.profile_id,
         "remaining_bytes": max(0, quota.limit_bytes - quota.used_bytes),
         "reached": quota.used_bytes >= quota.limit_bytes,
@@ -5535,11 +5558,16 @@ def _service_assignment_payload(
     assignment: ServiceAssignment, *, repository: ConfigRepository
 ) -> Dict[str, Any]:
     device = repository.get_device(assignment.device_id)
+    labels_by_mac = repository.list_connected_device_labels()
     profile = repository.get_profile(assignment.profile_id)
     return {
         **asdict(assignment),
         "domains": list(assignment.domains),
-        "device_name": device.name if device is not None else assignment.device_id,
+        "device_name": (
+            _device_display_name(device, labels_by_mac)
+            if device is not None
+            else assignment.device_id
+        ),
         "profile_name": profile.name if profile is not None else assignment.profile_id,
     }
 
@@ -5577,13 +5605,16 @@ def _time_quota_payload(
 
     current_time = int(time.time()) if now is None else now
     device = repository.get_device(quota.device_id)
+    labels_by_mac = repository.list_connected_device_labels()
     profile = repository.get_profile(quota.profile_id)
     window_active = quota.started_at <= current_time < quota.expires_at
     return {
         **asdict(quota),
         "domains": list(quota.domains),
         "reset_times": list(quota.reset_times),
-        "device_name": device.name if device is not None else quota.device_id,
+        "device_name": (
+            _device_display_name(device, labels_by_mac) if device is not None else quota.device_id
+        ),
         "profile_name": profile.name if profile is not None else quota.profile_id,
         "remaining_seconds": max(0, quota.limit_seconds - quota.used_seconds),
         "window_remaining_seconds": (
@@ -5603,6 +5634,7 @@ def _progression_payload(
     traffic_bytes: int = 0,
 ) -> Dict[str, Any]:
     device = repository.get_device(progression.device_id)
+    labels_by_mac = repository.list_connected_device_labels()
     start_profile = repository.get_profile(progression.start_profile_id)
     end_profile = repository.get_profile(progression.end_profile_id)
     total_queries = repository.total_domain_queries(str(device.ipv4_address)) if device else 0
@@ -5614,7 +5646,11 @@ def _progression_payload(
     )
     return {
         **asdict(progression),
-        "device_name": device.name if device is not None else progression.device_id,
+        "device_name": (
+            _device_display_name(device, labels_by_mac)
+            if device is not None
+            else progression.device_id
+        ),
         "start_profile_name": (
             start_profile.name
             if start_profile is not None
@@ -5886,7 +5922,11 @@ class ControlServer(HTTPServer):
         if path == "/api/general-profile":
             return HTTPStatus.OK, "application/json", _json_bytes(self._general_profile_status())
         if path == "/api/devices":
-            devices = [_device_payload(device) for device in self.repository.list_devices()]
+            labels_by_mac = self.repository.list_connected_device_labels()
+            devices = [
+                _device_payload(device, labels_by_mac=labels_by_mac)
+                for device in self.repository.list_devices()
+            ]
             return HTTPStatus.OK, "application/json", _json_bytes({"devices": devices})
         if path == "/api/unaffected-devices":
             return HTTPStatus.OK, "application/json", _json_bytes({
@@ -5905,13 +5945,18 @@ class ControlServer(HTTPServer):
         if path == "/api/timers":
             now = int(time.time())
             timers = []
+            labels_by_mac = self.repository.list_connected_device_labels()
             for timer in self.repository.list_active_timers(now=now):
                 device = self.repository.get_device(timer.device_id)
                 profile = self.repository.get_profile(timer.profile_id)
                 timers.append(
                     {
                         **_timer_payload(timer),
-                        "device_name": device.name if device is not None else timer.device_id,
+                        "device_name": (
+                            _device_display_name(device, labels_by_mac)
+                            if device is not None
+                            else timer.device_id
+                        ),
                         "profile_name": profile.name if profile is not None else timer.profile_id,
                         "remaining_seconds": max(0, timer.expires_at - now),
                     }
