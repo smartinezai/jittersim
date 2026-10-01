@@ -574,11 +574,13 @@ DASHBOARD_HTML = """<!doctype html>
     .credential-state { margin-top: 0.15rem; color: #b6c8db; font-size: 0.75rem; font-weight: 400; }
     .credential-state.accepted { color: #8de2bc; }
     .router-wifi-control {
-      display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
+      display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem;
       padding: 0.7rem 0.3rem; border-block: 1px solid #293e55;
     }
     .router-wifi-label { font-size: 0.85rem; font-weight: 550; }
     .router-wifi-status { margin: 0.2rem 0 0; font-size: 0.78rem; color: #b6c8db; }
+    .router-wifi-copy { flex: 1 0 100%; display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+    .sidebar .router-wifi-copy button { min-height: 2.4rem; padding: 0.35rem 0.5rem; font-size: 0.8rem; text-align: center; }
     .sidebar .router-wifi-toggle {
       display: grid; place-items: center; flex: 0 0 2.8rem; min-height: 2.75rem;
       padding: 0; border: 0; background: transparent; border-radius: 0.5rem;
@@ -810,6 +812,10 @@ DASHBOARD_HTML = """<!doctype html>
             aria-checked="false" aria-labelledby="router-wifi-label" aria-describedby="router-wifi-status" data-unknown="true" disabled>
             <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
           </button>
+          <div class="router-wifi-copy">
+            <button id="copy-wifi-name" type="button">Copy Wi-Fi name</button>
+            <button id="copy-wifi-password" type="button">Copy Wi-Fi password</button>
+          </div>
         </div>
       </div>
       <div class="sidebar-credentials">
@@ -1939,6 +1945,7 @@ DASHBOARD_HTML = """<!doctype html>
     let routerPasswordRejected = false;
     let routerPasswordChecking = false;
     let routerActionPending = false;
+    let routerCopyPending = false;
     let routerWifiEnabled = null;
     let routerWifiCheckedAt = null;
     let routerWifiPolling = false;
@@ -5188,13 +5195,147 @@ DASHBOARD_HTML = """<!doctype html>
       }
     });
 
+    // Put text on the clipboard. The text may still be on its way: the browser write starts now
+    // because Safari only allows a clipboard write inside the click that asked for it.
+    async function copyText(textOrPromise, env) {
+      const scope = env || {
+        navigator: typeof navigator === "undefined" ? undefined : navigator,
+        document: typeof document === "undefined" ? undefined : document
+      };
+      const clipboard = scope.navigator && scope.navigator.clipboard;
+      const text = Promise.resolve(textOrPromise).then((value) => {
+        if (typeof value !== "string" || value === "") throw new Error("Nothing to copy");
+        return value;
+      });
+      const blob = text.then((value) => new Blob([value], {type: "text/plain"}));
+      blob.catch(() => {});
+      if (clipboard && typeof clipboard.write === "function" && typeof ClipboardItem === "function") {
+        try {
+          await clipboard.write([new ClipboardItem({"text/plain": blob})]);
+          return "clipboard-item";
+        } catch (error) {
+          // Fall through. When the text itself failed the next line throws that error.
+        }
+      }
+      const value = await text;
+      if (clipboard && typeof clipboard.writeText === "function") {
+        try {
+          await clipboard.writeText(value);
+          return "write-text";
+        } catch (error) {
+          // Fall through to the oldest method.
+        }
+      }
+      const doc = scope.document;
+      if (doc && doc.body && typeof doc.createElement === "function" && typeof doc.execCommand === "function") {
+        const area = doc.createElement("textarea");
+        const previous = doc.activeElement;
+        let copied = false;
+        area.setAttribute("readonly", "");
+        area.setAttribute("aria-hidden", "true");
+        area.style.position = "fixed";
+        area.style.left = "-9999px";
+        area.value = value;
+        doc.body.appendChild(area);
+        try {
+          area.select();
+          if (typeof area.setSelectionRange === "function") area.setSelectionRange(0, value.length);
+          copied = doc.execCommand("copy") === true;
+        } catch (error) {
+          copied = false;
+        } finally {
+          area.value = "";
+          doc.body.removeChild(area);
+          if (previous && typeof previous.focus === "function") previous.focus({preventScroll: true});
+        }
+        if (copied) return "exec-command";
+      }
+      throw new Error("Copy failed");
+    }
+
+    function routerCopyState(input) {
+      const needsPassword = !input.hasRouterPassword;
+      const noun = input.kind === "password" ? "password" : "name";
+      let disabled = true;
+      let title = "Copy the router Wi-Fi " + noun;
+      if (!input.adminTokenVerified) title = "Check the admin token first";
+      else if (!input.helperConfigured) title = "Needs the Pi helper";
+      else if (input.routerPasswordRejected) title = "Router password rejected. Enter it again.";
+      else if (input.busy) title = "Working…";
+      else {
+        disabled = false;
+        if (needsPassword) title = "Enter the router password first";
+      }
+      return {disabled: disabled, title: title, needsPassword: needsPassword};
+    }
+
+    function copyRouterWifi(kind) {
+      const wantPassword = kind === "password";
+      const button = element(wantPassword ? "copy-wifi-password" : "copy-wifi-name");
+      if (button.disabled || routerCopyPending || routerActionPending || routerPasswordChecking) return;
+      if (!requireAdminToken(button)) return;
+      const routerPassword = element("router-admin-password").value;
+      if (!routerPassword) {
+        const note = "Enter the router admin password first.";
+        element("credential-router-status").textContent = note;
+        showMessage(note, "error");
+        openCredentials("router", button);
+        return;
+      }
+      if (routerPasswordBlocked(button)) return;
+      const passwordRevision = routerPasswordRevision;
+      const label = wantPassword ? "Copy Wi-Fi password" : "Copy Wi-Fi name";
+      routerCopyPending = true;
+      setButtonBusy(button, true);
+      updateCredentialStatus();
+      // The Wi-Fi value only travels through this promise on its way to the clipboard.
+      const pending = request("/api/router/wifi-credentials", "POST", {
+        admin_password: routerPassword, include_password: wantPassword
+      }).then((response) => wantPassword ? response.result.password : response.result.ssid);
+      return copyText(pending).then(() => {
+        if (passwordRevision === routerPasswordRevision) {
+          routerPasswordVerified = true;
+          routerPasswordRejected = false;
+        }
+        if (button.copiedTimer) window.clearTimeout(button.copiedTimer);
+        button.textContent = "Copied";
+        button.copiedTimer = window.setTimeout(() => {
+          button.textContent = label;
+          button.copiedTimer = null;
+        }, 2000);
+        showMessage(wantPassword ? "Router Wi-Fi password copied." : "Router Wi-Fi name copied.", "success");
+      }, (error) => {
+        if (passwordRevision === routerPasswordRevision && isRouterLoginFailure(error)) {
+          routerPasswordVerified = false;
+          routerPasswordRejected = true;
+        }
+        const reason = error && error.message === "Copy failed" ? "The browser did not allow it." :
+          (error && error.message) || "Try again.";
+        showMessage("Could not copy. " + reason, "error");
+      }).finally(() => {
+        routerCopyPending = false;
+        setButtonBusy(button, false);
+        updateCredentialStatus();
+      });
+    }
+
     function renderRouterWifi() {
       const button = element("router-wifi-toggle");
       const status = element("router-wifi-status");
       const password = element("router-admin-password").value;
       const fresh = routerWifiCheckedAt && Date.now() / 1000 - routerWifiCheckedAt < 45;
       const known = typeof routerWifiEnabled === "boolean" && fresh && adminTokenVerified && !routerPasswordRejected;
-      const busy = routerActionPending || routerPasswordChecking || routerWifiRemoteBusy || routerWifiPolling;
+      const busy = routerActionPending || routerPasswordChecking || routerWifiRemoteBusy || routerWifiPolling ||
+        routerCopyPending;
+      [["copy-wifi-name", "name"], ["copy-wifi-password", "password"]].forEach(([id, kind]) => {
+        const copyState = routerCopyState({
+          helperConfigured: helperConfigured, adminTokenVerified: adminTokenVerified,
+          routerPasswordRejected: routerPasswordRejected, busy: busy,
+          hasRouterPassword: Boolean(password), kind: kind
+        });
+        element(id).disabled = copyState.disabled;
+        element(id).title = copyState.title;
+      });
       element("sync-router-ap").disabled = busy;
       element("check-router-password").disabled = busy;
       button.disabled = !helperConfigured || !known || busy;
@@ -5213,13 +5354,14 @@ DASHBOARD_HTML = """<!doctype html>
       if (routerWifiTimer !== null) window.clearTimeout(routerWifiTimer);
       routerWifiTimer = null;
       if (document.hidden || !adminTokenVerified || !helperConfigured || routerPasswordRejected ||
-          !element("router-admin-password").value || routerActionPending || routerPasswordChecking || routerWifiPolling) return;
+          !element("router-admin-password").value || routerActionPending || routerPasswordChecking || routerWifiPolling ||
+          routerCopyPending) return;
       routerWifiTimer = window.setTimeout(pollRouterWifi, delay);
     }
 
     async function pollRouterWifi() {
       routerWifiTimer = null;
-      if (document.hidden || !adminTokenVerified || routerPasswordRejected || routerActionPending || routerPasswordChecking || routerWifiPolling) return;
+      if (document.hidden || !adminTokenVerified || routerPasswordRejected || routerActionPending || routerPasswordChecking || routerWifiPolling || routerCopyPending) return;
       const password = element("router-admin-password").value;
       if (!password || !helperConfigured) return;
       const passwordRevision = routerPasswordRevision;
@@ -5280,7 +5422,7 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     async function routerAction(path, body, message, button) {
-      if (routerActionPending || routerPasswordChecking) return;
+      if (routerActionPending || routerPasswordChecking || routerCopyPending) return;
       if (!requireAdminToken(button)) return;
       const passwordRevision = routerPasswordRevision;
       const password = element("router-admin-password").value;
@@ -5362,7 +5504,7 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     async function checkRouterPassword() {
-      if (routerActionPending || routerPasswordChecking) return;
+      if (routerActionPending || routerPasswordChecking || routerCopyPending) return;
       const button = element("check-router-password");
       const status = element("credential-router-status");
       if (!requireAdminToken(button)) return;
@@ -5406,6 +5548,8 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     element("check-router-password").addEventListener("click", checkRouterPassword);
+    element("copy-wifi-name").addEventListener("click", () => copyRouterWifi("name"));
+    element("copy-wifi-password").addEventListener("click", () => copyRouterWifi("password"));
 
     element("sync-router-ap").addEventListener("click", (event) => {
       routerAction("/api/router/sync-ap", {}, "Checking the router Wi-Fi security...", event.currentTarget);
