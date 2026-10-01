@@ -2155,10 +2155,137 @@ class ControlServerTests(unittest.TestCase):
             )
 
         _, _, body = self.server.response_for("/api/data-limits")
-        titles = {item["device_id"]: item["device_name"] for item in json.loads(body)["data_limits"]}
+        titles = {
+            item["device_id"]: item["device_name"] for item in json.loads(body)["data_limits"]
+        }
 
         self.assertEqual(titles["client-178"], "Unknown device (192.168.50.178)")
         self.assertEqual(titles["client-179"], "Unknown device (192.168.50.179)")
+
+    def _observe_domains(self, *domains: str) -> None:
+        self.repository.save_domain_observations(
+            tuple(
+                DomainObservation(
+                    ipv4_address="192.168.50.178",
+                    domain=domain,
+                    query_count=1,
+                    first_seen=10,
+                    last_seen=10,
+                )
+                for domain in domains
+            ),
+            now=10,
+        )
+
+    def test_service_quota_payload_uses_the_resolved_device_name(self) -> None:
+        self._save_unlabelled_client()
+        self._observe_domains("netflix.com")
+        status, _, body = self.server.write_response_for(
+            "/api/service-quotas",
+            {
+                "id": "sam-video",
+                "device_id": "client-dc1ed53e974c",
+                "name": "Video service",
+                "domains": ["netflix.com"],
+                "profile_id": "slow",
+                "limit_bytes": 2_000,
+            },
+        )
+        self.assertEqual(status, 200, body)
+
+        _, _, body = self.server.response_for("/api/service-quotas")
+
+        self.assertEqual(json.loads(body)["service_quotas"][0]["device_name"], "Sam MacBook")
+
+    def test_time_quota_payload_uses_the_resolved_device_name(self) -> None:
+        self._save_unlabelled_client()
+        self._observe_domains("netflix.com")
+        status, _, body = self.server.write_response_for(
+            "/api/time-quotas",
+            {
+                "id": "sam-netflix-time",
+                "device_id": "client-dc1ed53e974c",
+                "name": "Netflix time",
+                "domains": ["netflix.com"],
+                "profile_id": "slow",
+                "limit_seconds": 3_600,
+                "window_duration_seconds": 7_200,
+            },
+        )
+        self.assertEqual(status, 200, body)
+
+        _, _, body = self.server.response_for("/api/time-quotas")
+
+        self.assertEqual(json.loads(body)["time_quotas"][0]["device_name"], "Sam MacBook")
+
+    def test_service_assignment_payload_uses_the_resolved_device_name(self) -> None:
+        self._save_unlabelled_client()
+        status, _, body = self.server.write_response_for(
+            "/api/service-assignments",
+            {
+                "id": "sam-video",
+                "device_id": "client-dc1ed53e974c",
+                "name": "Video",
+                "domains": ["youtube.com"],
+                "profile_id": "slow",
+                "enabled": True,
+            },
+        )
+        self.assertEqual(status, 200, body)
+
+        _, _, body = self.server.response_for("/api/service-assignments")
+
+        self.assertEqual(json.loads(body)["service_assignments"][0]["device_name"], "Sam MacBook")
+
+    def test_progression_payload_uses_the_resolved_device_name(self) -> None:
+        self._save_unlabelled_client()
+        status, _, body = self.server.write_response_for(
+            "/api/progressions",
+            {
+                "id": "five-hours",
+                "device_id": "client-dc1ed53e974c",
+                "start_profile_id": "slow",
+                "end_profile_id": "slow",
+                "mode": "time",
+                "duration_minutes": 300,
+            },
+        )
+        self.assertEqual(status, 200, body)
+
+        _, _, body = self.server.response_for("/api/progressions")
+
+        self.assertEqual(json.loads(body)["progressions"][0]["device_name"], "Sam MacBook")
+
+    def test_observations_find_the_label_through_the_saved_assignment_without_a_helper(
+        self,
+    ) -> None:
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/observations/scan", {})
+        self.server.helper_client = None
+        self._save_unlabelled_client()
+
+        _, _, body = self.server.response_for("/api/observations")
+
+        self.assertEqual(json.loads(body)["devices"][0]["display_name"], "Sam MacBook")
+
+    def test_new_client_name_uses_a_64_character_hostname_but_not_a_longer_one(self) -> None:
+        from jittersim.api.server import _new_client_name
+
+        self.assertEqual(_new_client_name(None, "h" * 64, "192.168.50.7"), "h" * 64)
+        self.assertEqual(
+            _new_client_name(None, "h" * 65, "192.168.50.7"), "Client 192.168.50.7"
+        )
+        self.assertEqual(_new_client_name("l" * 64, "host", "192.168.50.7"), "l" * 64)
+        self.assertEqual(_new_client_name("l" * 65, "host", "192.168.50.7"), "host")
+
+    def test_new_client_name_skips_a_name_with_control_characters(self) -> None:
+        from jittersim.api.server import _new_client_name
+
+        self.assertEqual(
+            _new_client_name(None, "bad\x07name", "192.168.50.7"), "Client 192.168.50.7"
+        )
+        self.assertEqual(_new_client_name("bad\nlabel", "host", "192.168.50.7"), "host")
+        self.assertEqual(_new_client_name("  Sam MacBook ", None, "192.168.50.7"), "Sam MacBook")
 
 
 if __name__ == "__main__":
