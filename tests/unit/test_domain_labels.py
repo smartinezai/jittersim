@@ -1,6 +1,8 @@
 import pytest
 
 from jittersim.config.domain_labels import (
+    _SECOND_LEVEL,
+    _TENANT_SUFFIXES,
     LABEL_KINDS,
     SEEN_WITH_WINDOW_SECONDS,
     TABLE_SOURCE,
@@ -351,23 +353,11 @@ def test_unknown_names_group_by_registrable_domain():
         "key": "domain:somesmallsite.co.uk", "name": "somesmallsite.co.uk"}
 
 
-# Two-part public suffixes. The registered name sits left of them so two sites never merge.
-TWO_PART_SUFFIXES = [
-    "co.kr", "or.kr", "com.ar", "com.pl", "co.at", "or.at", "com.co", "com.pe", "com.ve",
-    "co.ve", "com.ec", "com.uy", "com.pk", "com.bd", "com.ng", "com.eg", "com.sa", "co.ke",
-    "com.gh", "co.tz", "net.cn", "org.cn", "gov.cn", "edu.au", "gov.au", "ac.nz", "govt.nz",
-    "ac.jp", "go.jp", "gr.jp", "com.pt", "com.gr", "com.ro", "com.es", "com.fr", "co.hu",
-    "com.ru",
-]
-# Hosting suffixes where every tenant is a different owner so the tenant label stays.
-TENANT_SUFFIXES = [
-    "github.io", "gitlab.io", "herokuapp.com", "vercel.app", "netlify.app", "pages.dev",
-    "workers.dev", "web.app", "firebaseapp.com", "appspot.com", "azurewebsites.net",
-    "blogspot.com", "wordpress.com", "onrender.com", "fly.dev", "myshopify.com",
-    "cloudfront.net", "s3.amazonaws.com", "execute-api.amazonaws.com", "elb.amazonaws.com",
-    "compute.amazonaws.com", "trafficmanager.net", "azureedge.net", "akamaized.net",
-    "edgekey.net", "fastly.net", "b-cdn.net",
-]
+# The tests walk the real tables so a suffix that is added or dropped is pinned at once.
+# A two-part public suffix keeps the registered name left of it so two sites never merge.
+TWO_PART_SUFFIXES = sorted(_SECOND_LEVEL)
+# A hosting suffix where every tenant is a different owner so the tenant label stays.
+TENANT_SUFFIXES = sorted(_TENANT_SUFFIXES)
 
 
 @pytest.mark.parametrize("suffix", TWO_PART_SUFFIXES)
@@ -395,6 +385,117 @@ def test_a_name_that_is_only_a_suffix_is_not_grouped_with_anything(suffix):
     assert registrable_domain(suffix) == suffix
 
 
+def test_no_hosting_suffix_is_nested_in_another_one():
+    # With no nesting the longest match never has to beat a shorter one.
+    for suffix in TENANT_SUFFIXES:
+        parents = [other for other in TENANT_SUFFIXES if suffix.endswith("." + other)]
+        assert parents == [], suffix
+
+
+def test_the_cdn_edges_where_the_customer_is_not_next_to_the_suffix_are_not_tenant_hosts():
+    # The customer label is not directly left of these so a tenant rule would pick a wrong label.
+    assert "fastly.net" not in _TENANT_SUFFIXES
+    assert "edgekey.net" not in _TENANT_SUFFIXES
+    assert registrable_domain("b.global.ssl.fastly.net") == "fastly.net"
+    assert registrable_domain("www.example.com.edgekey.net") == "edgekey.net"
+    assert key_and_name("b.global.ssl.fastly.net")["key"] == "domain:fastly.net"
+    assert key_and_name("www.example.com.edgekey.net")["key"] == "domain:edgekey.net"
+    assert group_domain("b.global.ssl.fastly.net")["kind"] == "cdn"
+
+
+# Real Amazon hostnames carry a region. Each row is two names of one customer then a name of
+# another customer and the key that the first customer gets.
+AWS_CUSTOMERS = [
+    (
+        "photos-prod.s3.amazonaws.com",
+        "photos-prod.s3.eu-west-1.amazonaws.com",
+        "backups-eu.s3.amazonaws.com",
+        "domain:photos-prod.s3.amazonaws.com",
+    ),
+    (
+        "photos-prod.s3.us-west-2.amazonaws.com",
+        "photos-prod.s3-eu-west-1.amazonaws.com",
+        "backups-eu.s3.us-west-2.amazonaws.com",
+        "domain:photos-prod.s3.amazonaws.com",
+    ),
+    (
+        "photos-prod.s3.dualstack.us-east-1.amazonaws.com",
+        "photos-prod.s3-us-west-1.amazonaws.com",
+        "backups-eu.s3.dualstack.us-east-1.amazonaws.com",
+        "domain:photos-prod.s3.amazonaws.com",
+    ),
+    (
+        "abc123xyz0.execute-api.eu-west-1.amazonaws.com",
+        "abc123xyz0.execute-api.us-east-1.amazonaws.com",
+        "def456uvw1.execute-api.eu-west-1.amazonaws.com",
+        "domain:abc123xyz0.execute-api.amazonaws.com",
+    ),
+    (
+        "my-lb-1234567890.eu-west-1.elb.amazonaws.com",
+        "my-lb-1234567890.us-east-1.elb.amazonaws.com",
+        "other-lb-9876543210.eu-west-1.elb.amazonaws.com",
+        "domain:my-lb-1234567890.elb.amazonaws.com",
+    ),
+    (
+        "internal-api-lb-111222333.eu-west-1.elb.amazonaws.com",
+        "internal-api-lb-111222333.us-west-2.elb.amazonaws.com",
+        "internal-web-lb-444555666.eu-west-1.elb.amazonaws.com",
+        "domain:internal-api-lb-111222333.elb.amazonaws.com",
+    ),
+    (
+        "my-nlb-0123456789abcdef.elb.us-east-1.amazonaws.com",
+        "my-nlb-0123456789abcdef.elb.eu-west-1.amazonaws.com",
+        "other-nlb-fedcba9876543210.elb.us-east-1.amazonaws.com",
+        "domain:my-nlb-0123456789abcdef.elb.amazonaws.com",
+    ),
+    (
+        "ec2-1-2-3-4.eu-west-1.compute.amazonaws.com",
+        "ec2-1-2-3-4.compute-1.amazonaws.com",
+        "ec2-5-6-7-8.eu-west-1.compute.amazonaws.com",
+        "domain:ec2-1-2-3-4.compute.amazonaws.com",
+    ),
+    (
+        "ec2-52-10-20-30.us-west-2.compute.amazonaws.com",
+        "ec2-52-10-20-30.compute-1.amazonaws.com",
+        "ec2-52-10-20-31.us-west-2.compute.amazonaws.com",
+        "domain:ec2-52-10-20-30.compute.amazonaws.com",
+    ),
+]
+
+
+@pytest.mark.parametrize(("first", "same", "other", "key"), AWS_CUSTOMERS)
+def test_amazon_names_keep_their_customer_and_drop_the_region(first, same, other, key):
+    assert group_domain(first)["key"] == key
+    assert group_domain(same)["key"] == key
+    assert group_domain(other)["key"] != key
+    assert group_domain(first)["kind"] == "cdn"
+
+
+def test_a_dotted_bucket_name_stays_whole():
+    whole = "my.bucket.name.s3.amazonaws.com"
+    assert registrable_domain(whole) == whole
+    assert registrable_domain("my.bucket.other.s3.eu-west-1.amazonaws.com") == (
+        "my.bucket.other.s3.amazonaws.com"
+    )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "sqs.us-east-1.amazonaws.com",
+        "dynamodb.eu-west-1.amazonaws.com",
+        "s3.us-west-2.amazonaws.com",
+        "s3.amazonaws.com",
+        "elb.amazonaws.com",
+        "ec2.eu-west-1.amazonaws.com",
+        "cognito-idp.us-east-1.amazonaws.com",
+        "x.y.amazonaws.com",
+    ],
+)
+def test_other_amazon_names_keep_the_two_label_result(name):
+    assert registrable_domain(name) == "amazonaws.com"
+
+
 def test_the_korean_shops_from_the_review_are_different_groups():
     coupang = group_domain("www.coupang.co.kr")
     naver = group_domain("www.naver.co.kr")
@@ -410,15 +511,8 @@ def test_two_github_pages_and_two_heroku_apps_are_different_groups():
 
 def test_deeper_names_under_a_tenant_still_belong_to_that_tenant():
     assert registrable_domain("a.b.c.herokuapp.com") == "c.herokuapp.com"
-    assert registrable_domain("bucket.s3.amazonaws.com") == "bucket.s3.amazonaws.com"
-    assert registrable_domain("x.bucket.s3.amazonaws.com") == "bucket.s3.amazonaws.com"
     assert registrable_domain("d111abcdef8.cloudfront.net") == "d111abcdef8.cloudfront.net"
-
-
-def test_the_longest_matching_suffix_decides_for_hosting_under_amazonaws():
-    # amazonaws.com itself is not a tenant suffix so other names keep two labels.
-    assert registrable_domain("sqs.us-east-1.amazonaws.com") == "amazonaws.com"
-    assert group_domain("x.execute-api.amazonaws.com")["key"] == "domain:x.execute-api.amazonaws.com"
+    assert registrable_domain("x.d111abcdef8.cloudfront.net") == "d111abcdef8.cloudfront.net"
 
 
 def test_a_known_label_still_wins_over_the_registrable_grouping():

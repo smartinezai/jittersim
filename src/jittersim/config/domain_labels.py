@@ -6,9 +6,10 @@ teams.microsoft.com beats its parent microsoft.com. A name nobody can place is l
 registrable domain.
 """
 
+import re
 from dataclasses import dataclass
 from ipaddress import IPv4Address
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Pattern, Tuple
 
 from .models import normalize_domain
 from .service_catalogue import SERVICE_CATALOGUE
@@ -41,10 +42,24 @@ _TENANT_SUFFIXES = frozenset({
     "github.io", "gitlab.io", "herokuapp.com", "vercel.app", "netlify.app", "pages.dev",
     "workers.dev", "web.app", "firebaseapp.com", "appspot.com", "azurewebsites.net",
     "blogspot.com", "wordpress.com", "onrender.com", "fly.dev", "myshopify.com",
-    "cloudfront.net", "s3.amazonaws.com", "execute-api.amazonaws.com", "elb.amazonaws.com",
-    "compute.amazonaws.com", "trafficmanager.net", "azureedge.net", "akamaized.net",
-    "edgekey.net", "fastly.net", "b-cdn.net",
+    "cloudfront.net", "trafficmanager.net", "azureedge.net", "akamaized.net", "b-cdn.net",
 })
+# Amazon names carry a region between the customer and the service so a suffix cannot find the
+# customer. Each pattern keeps the customer label and the service and drops the region.
+_AWS_SHAPES: Tuple[Tuple[Pattern, str], ...] = (
+    # <bucket>.s3.amazonaws.com and <bucket>.s3.<region>.amazonaws.com and <bucket>.s3-<region>...
+    (re.compile(r"^(?P<customer>.+?)\.s3(?:[.-][a-z0-9-]+)*\.amazonaws\.com$"),
+     "{customer}.s3.amazonaws.com"),
+    (re.compile(r"^(?P<customer>[^.]+)\.execute-api\.[a-z0-9-]+\.amazonaws\.com$"),
+     "{customer}.execute-api.amazonaws.com"),
+    # <lb>.<region>.elb.amazonaws.com and the newer <lb>.elb.<region>.amazonaws.com
+    (re.compile(
+        r"^(?P<customer>[^.]+)\.(?:[a-z0-9-]+\.)?elb(?:\.[a-z0-9-]+)?\.amazonaws\.com$"),
+     "{customer}.elb.amazonaws.com"),
+    # ec2-1-2-3-4.<region>.compute.amazonaws.com and ec2-1-2-3-4.compute-1.amazonaws.com
+    (re.compile(r"^(?P<customer>[^.]+)\.(?:[a-z0-9-]+\.)?compute(?:-1)?\.amazonaws\.com$"),
+     "{customer}.compute.amazonaws.com"),
+)
 # Reverse lookup names are shown whole because their labels are the address digits.
 _REVERSE_SUFFIXES = ("in-addr.arpa", "ip6.arpa")
 
@@ -364,6 +379,11 @@ def registrable_domain(domain: str) -> str:
     normalized = normalize_domain(domain)
     if _is_ipv4_address(normalized) or _is_reverse_name(normalized):
         return normalized
+    if normalized.endswith(".amazonaws.com"):
+        for pattern, template in _AWS_SHAPES:
+            match = pattern.match(normalized)
+            if match:
+                return template.format(customer=match.group("customer"))
     if normalized in _TENANT_SUFFIXES:
         return normalized
     labels = normalized.split(".")
