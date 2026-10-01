@@ -62,6 +62,19 @@ class RuntimeSchedulerTests(unittest.TestCase):
             Device("alice", "Alice", "192.168.50.10", profile.id)
         )
 
+    def test_is_active_follows_activate_and_pause(self) -> None:
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        try:
+            self.assertFalse(scheduler.is_active)
+
+            scheduler.activate(applied_payload={})
+            self.assertTrue(scheduler.is_active)
+
+            scheduler.pause()
+            self.assertFalse(scheduler.is_active)
+        finally:
+            scheduler.stop()
+
     def test_pause_waits_for_an_inflight_apply(self) -> None:
         class BlockingHelper(RecordingHelper):
             def __init__(self) -> None:

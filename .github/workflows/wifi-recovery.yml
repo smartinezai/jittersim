@@ -35,6 +35,7 @@ jobs:
       - run: docker run --rm --privileged jittersim-wifi-release
       - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_network_smoke.py
       - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_exemption_packets.py
+      - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_many_queues.py
       - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_protected_not_monitored.py
       - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_service_list_packets.py
       - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_queue_stats.py
@@ -59,6 +60,7 @@ jobs:
       - run: python -m tests.browser.dashboard_navigation
       - run: python -m tests.browser.protected_clients
       - run: python -m tests.browser.impact_check
+      - run: python -m tests.browser.sidebar_status
       - run: python -m tests.browser.router_copy
       - uses: actions/upload-artifact@v5
         if: always()

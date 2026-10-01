@@ -85,6 +85,7 @@ function element(id) {
   return nodes.get(id);
 }
 function showMessage(text, kind) {messages.push({text, kind})}
+function renderSidebarStatus() {}
 function refreshAfterSuccess(message) {refreshMessages.push(message)}
 function setButtonBusy(button, busy) {button.disabled = busy}
 const revealed = [];

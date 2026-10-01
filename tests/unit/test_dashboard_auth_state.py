@@ -50,6 +50,7 @@ def test_token_checks_and_edits_release_all_private_loading_states():
       }
       function showMessage() {}
       function updateCredentialStatus() {}
+      function renderSidebarStatus() {}
       function openCredentials() {}
       function stopTrafficSampling() {samplingStops++}
       async function loadAdminTools() {if (failure) throw failure; return result}

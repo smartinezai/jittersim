@@ -112,6 +112,7 @@ function updateGeneralProfileControls() { renderSavedProfiles(); }
 function setActionBusy(busy) { networkActionBusy = busy; updateGeneralProfileControls(); }
 async function loadPrivateDataPanel() {}
 async function loadGeneralProfile() {}
+function renderSidebarStatus() {}
 function descendants(node) {
   return node.children.reduce((all, child) => all.concat([child], descendants(child)), []);
 }

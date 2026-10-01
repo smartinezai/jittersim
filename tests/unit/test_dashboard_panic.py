@@ -34,6 +34,7 @@ let helperConfigured = true;
 let profiles = [];
 let generalProfileState = null;
 let networkActionBusy = false;
+let networkActionRevision = 0;
 let wifiResetPending = false;
 let adminTokenVerified = true;
 let adminTokenRevision = 0;
@@ -57,6 +58,9 @@ function setButtonBusy(button, busy) {button.disabled = busy}
 function renderRuntimeSummary(state) {runtimeStates.push(state)}
 function refreshAfterSuccess(message) {refreshMessages.push(message)}
 function renderSavedProfiles() {}
+const refreshedPanels = [];
+async function loadPrivateDataPanel(panelId) {refreshedPanels.push(panelId)}
+async function loadState() {}
 async function fetch(path, options) {networkCalls.push({path, options}); return await network()}
 function deferred() {
   let resolve;
@@ -128,6 +132,7 @@ CASES = {
       assert.equal(messages.at(-1).text, "network helper reset failed");
       assert.equal(refreshMessages.length, 0);
       assert.equal(runtimeStates.length, 0);
+      assert.deepEqual(refreshedPanels, ["state"]);  // the page reads the state again
       for (const id of ACTION_BUTTONS) assert.equal(element(id).disabled, false, id);
     """,
     "unavailable_without_the_network_helper": r"""
