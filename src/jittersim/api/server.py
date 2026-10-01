@@ -3214,6 +3214,7 @@ DASHBOARD_HTML = """<!doctype html>
       if (observation.globally_blocked === true) {
         return {
           label: "Unblock",
+          ariaLabel: "Unblock " + domain,
           path: "/api/observations/remove-global-block",
           busy: "Removing " + domain + " from the global block list...",
           done: "Removed " + domain + " from the global block list. " + whenItApplies
@@ -3221,6 +3222,7 @@ DASHBOARD_HTML = """<!doctype html>
       }
       return {
         label: "Block globally",
+        ariaLabel: "Block globally " + domain,
         path: "/api/observations/add-global-block",
         busy: "Adding " + domain + " to the global block list...",
         done: "Added " + domain + " to the global block list. " + whenItApplies
@@ -3228,11 +3230,15 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     function profileButtonState(domain, profile) {
-      if (!profile) return { label: "Add to profile", disabled: true };
-      if ((profile.website_domains || []).indexOf(domain) !== -1) {
-        return { label: "Already in " + profile.name, disabled: true };
+      let label = "Add to profile";
+      let disabled = false;
+      if (!profile) {
+        disabled = true;
+      } else if ((profile.website_domains || []).indexOf(domain) !== -1) {
+        label = "Already in " + profile.name;
+        disabled = true;
       }
-      return { label: "Add to profile", disabled: false };
+      return { label: label, disabled: disabled, ariaLabel: label + " " + domain };
     }
 
     function queryCountText(count) {
@@ -3347,10 +3353,13 @@ DASHBOARD_HTML = """<!doctype html>
           profileButton.type = "button";
           profileButton.className = "observation-profile-button";
           const syncProfileButton = () => {
+            // A request in flight keeps the button disabled. Its finally block syncs again.
+            if (profileButton.getAttribute("aria-busy") === "true") return;
             const selectedProfile = profiles.find((profile) => profile.id === targetProfile.value);
             const state = profileButtonState(observation.domain, selectedProfile);
             profileButton.textContent = state.label;
             profileButton.title = state.label;
+            profileButton.setAttribute("aria-label", state.ariaLabel);
             profileButton.disabled = state.disabled;
           };
           profileSyncs.push(syncProfileButton);
@@ -3365,6 +3374,7 @@ DASHBOARD_HTML = """<!doctype html>
           blockButton.type = "button";
           const syncBlockButton = () => {
             blockButton.textContent = blockButtonState(observation).label;
+            blockButton.setAttribute("aria-label", blockButtonState(observation).ariaLabel);
             badge.hidden = observation.globally_blocked !== true;
           };
           syncBlockButton();
