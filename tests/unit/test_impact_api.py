@@ -1,6 +1,7 @@
 import json
 import unittest
 from email.message import Message
+from unittest import mock
 
 from jittersim.api.server import ControlRequestHandler, ControlServer
 from jittersim.config.exemptions import UnaffectedDevice
@@ -121,6 +122,31 @@ class ImpactApiTests(unittest.TestCase):
         self.assertEqual(response["queues"][1]["direction"], "download")
         self.assertEqual(response["queues"][0]["drops"], 3)
         self.assertEqual(response["protected"], ["02:00:00:00:00:08", "Dad's laptop"])
+
+    def test_the_time_is_taken_when_the_helper_answers_and_not_after_the_names(self) -> None:
+        clock = [100.0]
+        helper = ImpactHelper([queue("lab")])
+        read = helper.queue_stats
+
+        def answer_at_101():
+            clock[0] = 101.0
+            return read()
+
+        helper.queue_stats = answer_at_101
+        self.server.helper_client = helper
+        look_up = self.repository.list_devices
+
+        def slow_look_up():
+            clock[0] = 108.0
+            return look_up()
+
+        self.repository.list_devices = slow_look_up
+
+        with mock.patch("jittersim.api.server.time.time", side_effect=lambda: clock[0]):
+            response = self.impact()
+
+        self.assertEqual(response["sampled_at"], 101.0)
+        self.assertTrue(response["available"])
 
     def test_an_unnamed_device_shows_its_address_so_two_never_look_alike(self) -> None:
         self.repository.save_device(

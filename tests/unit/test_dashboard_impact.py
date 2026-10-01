@@ -270,9 +270,143 @@ def test_queue_wait_reads_the_last_sample_and_only_without_delay_or_jitter():
         row = burst([2000] * 4, dict(CAP_2000, **extra), backlog=80_000)
         assert row["queueWaitMs"] is None
         assert not any(line.startswith("Queue wait") for line in row["lines"])
-    below = burst([300] * 4, CAP_2000, backlog=80_000)
+    below = burst([300] * 4, CAP_2000)
     assert below["queueWaitMs"] is None
     assert burst([2000] * 4, {"loss_percent": 10}, backlog=80_000)["queueWaitMs"] is None
+
+
+def backlog_row(backlog, impairment=CAP_2000, rate_kbit=300):
+    """Two samples 5 seconds apart that move `rate_kbit` and hold `backlog` bytes at the last."""
+
+    return run(
+        f"rowsOf([[0, {{impairment: {js(impairment)}}}],"
+        f" [5, {{impairment: {js(impairment)}, packets: 100, bytes: {kbit_bytes(rate_kbit, 5)},"
+        f" backlog_bytes: {backlog}}}]])"
+    )[0]
+
+
+@needs_node
+def test_a_backlog_at_a_sample_proves_the_cap_even_when_no_interval_ran_at_the_cap():
+    """A 500 kB burst at a 2 Mbit/s cap on the real kernel averaged 799 kbit/s over 5 seconds."""
+
+    row = backlog_row(210_000, rate_kbit=799)
+    assert row["capReached"] is True
+    assert row["verdict"] == "affected"
+    assert row["peakKbit"] == 799
+    assert row["lines"][0] == (
+        "Speed: set 2 Mbit/s · using 799 kbit/s · peak 799 kbit/s · cap reached"
+    )
+    assert row["queueWaitMs"] == 840
+    assert row["lines"][1] == "Queue wait now: about 840 ms"
+
+
+@needs_node
+def test_a_backlog_counts_from_ten_milliseconds_of_cap_time():
+    # 2500 bytes at 2000 kbit/s is exactly 10 ms and 2000 bytes is 8 ms
+    assert backlog_row(2_500)["capReached"] is True
+    assert backlog_row(2_000)["capReached"] is False
+    assert backlog_row(2_000)["verdict"] == "clean"
+    assert backlog_row(0)["capReached"] is False
+    # the same bytes are a longer wait at a lower cap
+    assert backlog_row(2_000, {"bandwidth_kbit": 1000})["capReached"] is True
+
+
+@needs_node
+def test_a_backlog_of_an_older_sample_still_counts_for_the_minute():
+    row = run(
+        "rowsOf([[0, {impairment: {bandwidth_kbit: 2000}}],"
+        " [5, {impairment: {bandwidth_kbit: 2000}, packets: 50, bytes: 40000,"
+        " backlog_bytes: 50000}],"
+        " [10, {impairment: {bandwidth_kbit: 2000}, packets: 100, bytes: 80000}]])"
+    )[0]
+    assert row["capReached"] is True
+    # the backlog is gone now so no wait is shown
+    assert row["queueWaitMs"] == 0
+    assert not any(line.startswith("Queue wait") for line in row["lines"])
+
+
+@needs_node
+@pytest.mark.parametrize("extra", [{"delay_ms": 50}, {"jitter_ms": 5}])
+def test_a_backlog_with_a_delay_is_no_sign_of_the_cap(extra):
+    row = backlog_row(80_000, dict(CAP_2000, **extra))
+    assert row["capReached"] is False
+    assert row["verdict"] == "clean"
+
+
+@needs_node
+def test_a_backlog_without_a_cap_says_nothing():
+    row = backlog_row(80_000, {"loss_percent": 10})
+    assert row["capReached"] is False
+    assert row["queueWaitMs"] is None
+
+
+@needs_node
+def test_a_burst_that_drained_between_two_samples_is_still_missed():
+    """The stated limit: no backlog at a sample and under 90% of one interval at the cap."""
+
+    row = run(
+        "rowsOf([[0, {impairment: {bandwidth_kbit: 2000}}],"
+        f" [5, {{impairment: {{bandwidth_kbit: 2000}}, packets: 357, bytes: 499260}}]])"
+    )[0]
+    assert row["peakKbit"] == 799
+    assert row["capReached"] is False
+    assert row["verdict"] == "clean"
+
+
+@needs_node
+def test_packets_still_in_the_delay_queue_count_as_offered():
+    """Loss 20% with a 2000 ms delay on the real kernel: 216 dropped and 784 still waiting."""
+
+    row = two(
+        {"loss_percent": 20, "delay_ms": 2000}, "packets: 0, drops: 216, qlen: 784"
+    )
+    assert (row["offered"], row["packets"], row["drops"]) == (1000, 0, 216)
+    assert row["lossPercent"] == 21.6
+    assert row["lines"][0] == "Loss: set 20% · actual 21.6% (216 of 1000 packets dropped)"
+    assert row["verdict"] == "affected"
+    # once the delay is over the same packets have left and the figure does not change
+    after = run(
+        "rowsOf([[0, {impairment: {loss_percent: 20, delay_ms: 2000}}],"
+        " [5, {impairment: {loss_percent: 20, delay_ms: 2000}, packets: 0, drops: 216, qlen: 784}],"
+        " [10, {impairment: {loss_percent: 20, delay_ms: 2000}, packets: 784, drops: 216,"
+        " qlen: 0}]])"
+    )[0]
+    assert (after["offered"], after["lossPercent"]) == (1000, 21.6)
+
+
+@needs_node
+def test_a_queue_that_only_drains_offers_nothing_new_but_is_not_idle():
+    row = run(
+        "rowsOf([[0, {impairment: {loss_percent: 20, delay_ms: 2000}, qlen: 784}],"
+        " [5, {impairment: {loss_percent: 20, delay_ms: 2000}, packets: 784, qlen: 0}]])"
+    )[0]
+    assert (row["offered"], row["packets"]) == (0, 784)
+    assert row["verdict"] == "too-few"
+    nothing = run(
+        "rowsOf([[0, {impairment: {loss_percent: 20, delay_ms: 2000}}],"
+        " [5, {impairment: {loss_percent: 20, delay_ms: 2000}}]])"
+    )[0]
+    assert nothing["verdict"] == "idle"
+
+
+@needs_node
+def test_packets_that_only_wait_make_the_queue_busy_and_not_idle():
+    row = two({"loss_percent": 20, "delay_ms": 2000}, "packets: 0, qlen: 300")
+    assert (row["offered"], row["drops"]) == (300, 0)
+    assert row["verdict"] == "clean"
+    unmeasured = two({"delay_ms": 2000}, "packets: 0, qlen: 300")
+    assert unmeasured["verdict"] == "unmeasured"
+
+
+@needs_node
+def test_an_entry_without_a_queue_length_counts_as_zero():
+    row = run(
+        "(() => { const old = entry({impairment: {loss_percent: 20}, drops: 3, packets: 7});"
+        " delete old.qlen; let h = recordImpactSample({}, {queues: [entry({impairment:"
+        " {loss_percent: 20}})]}, 0); h = recordImpactSample(h, {queues: [old]}, 5);"
+        " return impactRows(h)[0]; })()"
+    )
+    assert (row["offered"], row["lossPercent"]) == (10, 30)
 
 
 @needs_node
@@ -525,7 +659,8 @@ def test_keys_combine_interface_and_handle_and_samples_hold_only_counters():
     )
     assert list(result) == ["eth0/11:"]
     assert result["eth0/11:"]["samples"] == [
-        {"t": 12.5, "packets": 7, "drops": 2, "bytes": 900, "overlimits": 1, "backlog_bytes": 40}
+        {"t": 12.5, "packets": 7, "drops": 2, "bytes": 900, "overlimits": 1, "backlog_bytes": 40,
+         "qlen": 0}
     ]
     assert result["eth0/11:"]["latest"]["device_id"] == "lab"
 

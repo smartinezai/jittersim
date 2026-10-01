@@ -2822,7 +2822,8 @@ DASHBOARD_HTML = """<!doctype html>
         drops: entry.drops,
         bytes: entry.bytes,
         overlimits: entry.overlimits,
-        backlog_bytes: entry.backlog_bytes
+        backlog_bytes: entry.backlog_bytes,
+        qlen: entry.qlen || 0
       };
     }
 
@@ -2861,7 +2862,9 @@ DASHBOARD_HTML = """<!doctype html>
       return kbit >= 1000 ? (Math.round(kbit / 10) / 100) + " Mbit/s" : kbit + " kbit/s";
     }
 
-    // One figure per pair of neighbouring samples so a short burst is never averaged away.
+    // One figure per pair of neighbouring samples so a quiet stretch never averages away a
+    // fast one. A burst that starts and ends between two samples is only seen when it filled
+    // most of one interval or still left a backlog at a sample.
     function impactIntervals(used) {
       const intervals = [];
       for (let index = 1; index < used.length; index += 1) {
@@ -2877,9 +2880,9 @@ DASHBOARD_HTML = """<!doctype html>
       return intervals;
     }
 
-    function impactVerdict(impairment, offered, drops, capReached) {
+    function impactVerdict(impairment, offered, packets, drops, capReached) {
       if (drops > 0 || capReached) return "affected";
-      if (offered === 0) return "idle";
+      if (offered === 0 && packets === 0) return "idle";
       const hasLoss = impairment.loss_percent > 0;
       if (!hasLoss && !impairment.bandwidth_kbit) return "unmeasured";
       if (offered < IMPACT_MIN_PACKETS ||
@@ -2925,12 +2928,18 @@ DASHBOARD_HTML = """<!doctype html>
       if (used.length < 2 || seconds <= 0) return row;
       const packets = newest.packets - first.packets;
       const drops = newest.drops - first.drops;
-      const offered = packets + drops;
+      // Drops are counted when a packet arrives and packets when they leave. A packet that
+      // still waits in the queue has arrived so the queue length change is added.
+      const waiting = newest.qlen - first.qlen;
+      const offered = Math.max(0, packets + drops + waiting);
       const intervals = impactIntervals(used);
       const limit = impairment.bandwidth_kbit;
-      const capReached = !!limit && intervals.some((interval) =>
-        interval.offered > 0 && Math.round(interval.kbit) >= IMPACT_CAP_RATIO * limit);
       const noDelay = !impairment.delay_ms && !impairment.jitter_ms;
+      // Without a delay a backlog of at least 10 ms of cap time can only come from the cap.
+      const backlogSeen = !!limit && noDelay && used.some((sample) =>
+        Math.round(sample.backlog_bytes * 8 / limit) >= IMPACT_MIN_QUEUE_WAIT_MS);
+      const capReached = !!limit && (backlogSeen || intervals.some((interval) =>
+        interval.offered > 0 && Math.round(interval.kbit) >= IMPACT_CAP_RATIO * limit));
       row.windowSeconds = seconds;
       row.offered = offered;
       row.packets = packets;
@@ -2941,7 +2950,7 @@ DASHBOARD_HTML = """<!doctype html>
       row.capReached = capReached;
       row.queueWaitMs = limit && noDelay && capReached
         ? Math.round(newest.backlog_bytes * 8 / limit) : null;
-      row.verdict = impactVerdict(impairment, offered, drops, capReached);
+      row.verdict = impactVerdict(impairment, offered, packets, drops, capReached);
       row.lines = [];
       if (row.verdict === "unmeasured") {
         row.lines.push(packets + (packets === 1 ? " packet" : " packets") + " passed in the last minute");
@@ -9258,6 +9267,9 @@ class ControlServer(HTTPServer):
                 return unavailable(IMPACT_OUT_OF_DATE_MESSAGE)
             LOGGER.warning("could not read queue statistics for the impact check")
             return unavailable(IMPACT_UNREADABLE_MESSAGE, paused=True)
+        # The page divides counter changes by the time between samples so the time is taken
+        # when the helper answers and not after the names are looked up.
+        sampled_at = time.time()
         devices_by_id = {device.id: device for device in self.repository.list_devices()}
         labels_by_mac = self.repository.list_connected_device_labels()
         list_names = {item.id: item.name for item in self.repository.list_service_lists()}
@@ -9280,7 +9292,7 @@ class ControlServer(HTTPServer):
             "available": True,
             "paused": False,
             "message": None,
-            "sampled_at": time.time(),
+            "sampled_at": sampled_at,
             "queues": entries,
             "protected": sorted(
                 (item.display_name or item.mac_address for item in protected),
