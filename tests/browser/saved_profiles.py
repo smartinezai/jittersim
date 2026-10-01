@@ -19,7 +19,7 @@ SLOW = {
         "delay_randomness": {"variation_percent": 20, "enabled_probability": 90},
         "corrupt_percent": 1,
     },
-    "download": {"delay_ms": 80, "bandwidth_kbit": 1500},
+    "download": {"delay_ms": 80, "bandwidth_kbit": 1500, "reorder_percent": 2},
     "random_seed": 99,
     "reroll_interval_seconds": 45,
     "reroll_interval_randomness": {"variation_percent": 7, "enabled_probability": 80},
@@ -27,18 +27,56 @@ SLOW = {
     "outage_duration_seconds": 33,
     "outage_interval_seconds": 77,
     "outage_duration_randomness": {"variation_percent": 11, "enabled_probability": 60},
-    "outage_interval_randomness": {"variation_percent": 11, "enabled_probability": 60},
+    "outage_interval_randomness": {"variation_percent": 21, "enabled_probability": 38},
     "website_mode": "allow_only",
-    "website_domains": ["a.example.com", "b.example.com"],
+    "website_domains": ["zeta.example.com", "alpha.example.com"],
     "website_randomness": {"variation_percent": 13, "enabled_probability": 40},
 }
+# A second profile with other hidden values and a name that cannot wrap on its own.
+OTHER = {
+    "id": "other",
+    "name": ("Longname" * 13)[:100],
+    "upload": {"delay_ms": 20},
+    "download": {"delay_ms": 20},
+    "reroll_interval_seconds": 30,
+    "reroll_interval_randomness": {"variation_percent": 9, "enabled_probability": 55},
+    "outage_probability": 5,
+    "outage_duration_seconds": 40,
+    "outage_interval_seconds": 60,
+    "outage_duration_randomness": {"variation_percent": 31, "enabled_probability": 45},
+    "outage_interval_randomness": {"variation_percent": 23, "enabled_probability": 35},
+    "website_mode": "allow_only",
+    "website_domains": ["zed.example.com", "beta.example.com"],
+    "website_randomness": {"variation_percent": 17, "enabled_probability": 25},
+}
+# The browser cannot hold this seed exactly so Edit must refuse it.
+BIG_SEED = {"id": "bigseed", "name": "Big seed", "random_seed": 2**53 + 1}
+SEED_MESSAGE = "random seed too large to edit here"
+HIDDEN = (
+    "reroll_interval_randomness",
+    "outage_duration_randomness",
+    "outage_interval_randomness",
+    "website_randomness",
+)
+SLOW_SUMMARY = (
+    "↑ {delay} ms ±10 · 2% loss · 5 Mbit/s · corrupt 1% · "
+    "↓ 80 ms · 1.5 Mbit/s · reorder 2% · outages 12% · allow-only 2 sites"
+)
 
 
-def saved_slow(page, base, headers):
+def saved(page, base, headers, profile_id):
     profiles = page.request.get(base + "/api/profiles", headers=headers).json()["profiles"]
-    matching = [profile for profile in profiles if profile["id"] == "slow"]
+    matching = [profile for profile in profiles if profile["id"] == profile_id]
     assert len(matching) == 1, matching
     return matching[0]
+
+
+def is_profile_save(response):
+    return response.request.method == "POST" and response.url.endswith("/api/profiles")
+
+
+def with_delay(profile, delay):
+    return dict(profile, upload=dict(profile["upload"], delay_ms=delay))
 
 
 def run():
@@ -67,13 +105,22 @@ def run():
                     assert page.request.post(
                         base + "/api/general-profile/stop", headers=headers, data={}
                     ).ok
-                    assert page.request.post(
-                        base + "/api/profiles", headers=headers, data=SLOW
-                    ).ok
-                    original = saved_slow(page, base, headers)
+                    for profile in (SLOW, OTHER, BIG_SEED):
+                        assert page.request.post(
+                            base + "/api/profiles", headers=headers, data=profile
+                        ).ok
+                    original = saved(page, base, headers, "slow")
+                    original_other = saved(page, base, headers, "other")
                     assert original["outage_duration_randomness"] == {
                         "variation_percent": 11, "enabled_probability": 60,
                     }
+                    assert original["outage_interval_randomness"] == {
+                        "variation_percent": 21, "enabled_probability": 38,
+                    }
+                    assert original["website_domains"] == ["zeta.example.com", "alpha.example.com"]
+                    for key in HIDDEN:
+                        assert original[key] != original_other[key], key
+                    assert saved(page, base, headers, "bigseed")["random_seed"] == 2**53 + 1
 
                     page.goto(base + "/#profiles")
                     page.locator("#open-admin-credentials").click()
@@ -83,12 +130,21 @@ def run():
                     page.locator("#close-credentials").click()
                     expect(page.locator("#page-profiles")).to_be_visible()
 
-                    row = page.locator('.saved-profile-row[data-profile-id="slow"]')
+                    def row_of(profile_id):
+                        return page.locator(f'.saved-profile-row[data-profile-id="{profile_id}"]')
+
+                    row = row_of("slow")
+                    other_row = row_of("other")
+                    submit = page.locator("#profile-form button[type='submit']")
                     expect(row).to_be_visible()
+                    expect(other_row).to_be_visible()
                     expect(row).to_contain_text("Slow office")
                     expect(row.locator(".saved-profile-id")).to_have_text("slow")
                     expect(row.locator(".saved-profile-summary")).to_have_text(
-                        "↑ 50 ms ±10 · 2% loss · 5 Mbit/s · ↓ 80 ms · 1.5 Mbit/s"
+                        SLOW_SUMMARY.format(delay=50)
+                    )
+                    expect(other_row.locator(".saved-profile-summary")).to_have_text(
+                        "↕ 20 ms · outages 5% · allow-only 2 sites"
                     )
                     expect(row.locator(".general-badge")).to_have_count(0)
                     edit = row.get_by_role("button", name="Edit Slow office")
@@ -98,11 +154,22 @@ def run():
                     expect(apply).to_be_enabled()
                     expect(page.locator("#new-profile")).to_be_hidden()
                     expect(page.locator("#profile-form-title")).to_have_text("Save profile")
+                    # A 100 character name without a break must wrap inside its row.
                     assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
+                    inside = other_row.evaluate(
+                        """(node) => {
+                            const box = node.getBoundingClientRect();
+                            return Array.from(node.querySelectorAll('*')).every(
+                                (child) => child.getBoundingClientRect().right <= box.right + 1);
+                        }"""
+                    )
+                    assert inside, "the long name overflows its row"
+                    page.evaluate("dismissToast()")
                     page.locator("section[aria-labelledby='saved-profiles-title']").screenshot(
                         path=f"test-results/saved-profiles-list-{width}.png"
                     )
 
+                    # Edit fills every field and locks the id.
                     edit.click()
                     expect(page.locator("#profile-form-title")).to_have_text("Edit profile")
                     expect(page.locator("#profile-id")).to_have_value("slow")
@@ -112,7 +179,7 @@ def run():
                     expect(page.locator("#download-bandwidth")).to_have_value("1500")
                     expect(page.locator("#profile-outage-probability")).to_have_value("12")
                     expect(page.locator("#profile-website-domains")).to_have_value(
-                        "a.example.com, b.example.com"
+                        "zeta.example.com, alpha.example.com"
                     )
                     expect(page.locator("#new-profile")).to_be_visible()
                     expect(page.locator("#profile-form-title")).to_be_in_viewport()
@@ -122,27 +189,17 @@ def run():
                     )
                     assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
 
+                    # Saving an edit keeps every field the form cannot show.
                     page.locator("#upload-delay").fill("75")
-                    page.locator("#profile-form button[type='submit']").click()
+                    submit.click()
                     expect(page.locator("#message")).to_contain_text("Profile saved.")
                     expect(row.locator(".saved-profile-summary")).to_have_text(
-                        "↑ 75 ms ±10 · 2% loss · 5 Mbit/s · ↓ 80 ms · 1.5 Mbit/s"
+                        SLOW_SUMMARY.format(delay=75)
                     )
-                    after = saved_slow(page, base, headers)
-                    assert after["outage_duration_randomness"] == {
-                        "variation_percent": 11, "enabled_probability": 60,
-                    }
-                    assert after["outage_interval_randomness"] == {
-                        "variation_percent": 11, "enabled_probability": 60,
-                    }
-                    assert after["website_randomness"] == {
-                        "variation_percent": 13, "enabled_probability": 40,
-                    }
-                    assert after["reroll_interval_randomness"] == {
-                        "variation_percent": 7, "enabled_probability": 80,
-                    }
-                    expected = dict(original, upload=dict(original["upload"], delay_ms=75))
-                    assert after == expected, (after, expected)
+                    after = saved(page, base, headers, "slow")
+                    for key in HIDDEN:
+                        assert after[key] == original[key], key
+                    assert after == with_delay(original, 75), (after, original)
                     expect(page.locator("#profile-form-title")).to_have_text("Edit profile")
                     expect(page.locator("#profile-id")).not_to_be_editable()
 
@@ -156,6 +213,51 @@ def run():
                     expect(page.locator("#profile-form-title")).to_have_text("Save profile")
                     expect(page.locator("#new-profile")).to_be_hidden()
 
+                    # A seed above 2^53 - 1 cannot be edited in the browser.
+                    row_of("bigseed").locator('button[data-action="edit"]').click()
+                    expect(page.locator("#message")).to_contain_text(SEED_MESSAGE)
+                    expect(page.locator("#profile-id")).to_have_value("")
+                    expect(page.locator("#profile-form-title")).to_have_text("Save profile")
+                    assert saved(page, base, headers, "bigseed")["random_seed"] == 2**53 + 1
+
+                    # Editing another profile while a save is in flight must not mix their fields.
+                    edit.click()
+                    expect(page.locator("#profile-id")).to_have_value("slow")
+                    page.locator("#upload-delay").fill("76")
+                    held = []
+                    page.route(
+                        "**/api/profiles",
+                        lambda route: held.append(route)
+                        if route.request.method == "POST"
+                        else route.continue_(),
+                    )
+                    submit.click()
+                    for _ in range(50):
+                        if held:
+                            break
+                        page.wait_for_timeout(100)
+                    assert len(held) == 1, "the save was not held"
+                    other_row.locator('button[data-action="edit"]').click()
+                    expect(page.locator("#profile-id")).to_have_value("other")
+                    with page.expect_response(is_profile_save):
+                        held[0].continue_()
+                    expect(submit).to_be_enabled()
+                    expect(page.locator("#profile-id")).to_have_value("other")
+                    expect(page.locator("#profile-form-title")).to_have_text("Edit profile")
+                    page.unroute("**/api/profiles")
+                    page.locator("#upload-delay").fill("66")
+                    with page.expect_response(is_profile_save):
+                        submit.click()
+                    expect(submit).to_be_enabled()
+                    assert saved(page, base, headers, "slow") == with_delay(original, 76)
+                    other_after = saved(page, base, headers, "other")
+                    for key in HIDDEN:
+                        assert other_after[key] == original_other[key], key
+                        assert other_after[key] != original[key], key
+                    assert other_after == with_delay(original_other, 66), other_after
+                    page.locator("#new-profile").click()
+
+                    # Apply to all and Stop from the list.
                     page.route(
                         "**/api/general-profile",
                         lambda route: route.fulfill(
@@ -174,16 +276,19 @@ def run():
                     expect(row.locator(".general-badge")).to_have_count(0)
                     page.unroute("**/api/general-profile")
 
+                    toggle = row.locator('button[data-action="general"]')
+                    toggle.focus()
                     with page.expect_request(
                         lambda sent: sent.method == "POST"
                         and sent.url.endswith("/api/general-profile")
                     ) as applied:
-                        apply.click()
+                        page.keyboard.press("Enter")
                     assert applied.value.post_data_json == {"profile_id": "slow"}
                     expect(row.locator(".general-badge")).to_have_text("General · active")
-                    stop = row.get_by_role("button", name="Stop Slow office")
-                    expect(stop).to_have_text("Stop")
-                    expect(stop).to_be_enabled()
+                    expect(toggle).to_have_text("Stop")
+                    expect(toggle).to_have_accessible_name("Stop Slow office")
+                    expect(toggle).to_be_enabled()
+                    expect(toggle).to_be_focused()
                     general = page.request.get(
                         base + "/api/general-profile", headers=headers
                     ).json()
@@ -193,18 +298,59 @@ def run():
                         path=f"test-results/saved-profiles-general-{width}.png"
                     )
 
+                    # Focus stays on the button while Stop runs and after the list redraws.
+                    stopping = []
+                    page.route(
+                        "**/api/general-profile/stop",
+                        lambda route: stopping.append(route),
+                    )
                     with page.expect_request(
                         lambda sent: sent.method == "POST"
                         and sent.url.endswith("/api/general-profile/stop")
                     ) as stopped:
-                        stop.click()
+                        page.keyboard.press("Enter")
                     assert stopped.value.post_data_json == {}
+                    expect(toggle).to_have_attribute("aria-busy", "true")
+                    expect(toggle).to_have_attribute("aria-disabled", "true")
+                    expect(toggle).to_be_focused()
+                    stopping[0].continue_()
+                    page.unroute("**/api/general-profile/stop")
                     expect(row.locator(".general-badge")).to_have_count(0)
-                    expect(apply).to_have_text("Apply to all")
+                    expect(toggle).to_have_text("Apply to all")
+                    expect(toggle).not_to_have_attribute("aria-disabled", "true")
+                    expect(toggle).to_be_focused()
                     general = page.request.get(
                         base + "/api/general-profile", headers=headers
                     ).json()
                     assert general["profile"] is None and general["active"] is False
+
+                    # Edit reloads first so a change made elsewhere is not saved back stale.
+                    changed = dict(saved(page, base, headers, "slow"), name="Renamed elsewhere")
+                    assert page.request.post(
+                        base + "/api/profiles", headers=headers, data=changed
+                    ).ok
+                    expect(row).to_contain_text("Slow office")
+                    row.locator('button[data-action="edit"]').click()
+                    expect(page.locator("#profile-name")).to_have_value("Renamed elsewhere")
+                    expect(row).to_contain_text("Renamed elsewhere")
+
+                    # Clearing the token locks the page and clears the form.
+                    page.locator("#open-admin-credentials").click()
+                    page.locator("#admin-token").fill("")
+                    for field, empty in (("profile-id", ""), ("profile-name", "")):
+                        assert page.evaluate(f"document.getElementById('{field}').value") == empty
+                    assert not page.evaluate("document.getElementById('profile-id').readOnly")
+                    assert page.evaluate("document.getElementById('new-profile').hidden")
+                    assert page.evaluate(
+                        "document.querySelector('#profile-form-title').textContent.trim()"
+                    ) == "Save profile"
+                    page.locator("#admin-token").fill("browser-test")
+                    page.locator("#check-admin-token").click()
+                    expect(page.locator("#private-dashboard")).to_be_visible()
+                    page.locator("#close-credentials").click()
+                    expect(row).to_be_visible()
+                    expect(page.locator("#profile-id")).to_have_value("")
+                    expect(page.locator("#profile-form-title")).to_have_text("Save profile")
                     assert not errors, errors
                     context.close()
                 print("Saved profiles dashboard acceptance passed at desktop and phone widths.")
