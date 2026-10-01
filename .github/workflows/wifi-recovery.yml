@@ -35,6 +35,7 @@ jobs:
       - run: docker run --rm --privileged jittersim-wifi-release
       - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_network_smoke.py
       - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_exemption_packets.py
+      - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_protected_not_monitored.py
       - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_service_list_packets.py
       - run: docker run --rm --privileged jittersim-wifi-release python -m tests.integration.linux_dns_watch
       - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_mdns_upgrade.py
