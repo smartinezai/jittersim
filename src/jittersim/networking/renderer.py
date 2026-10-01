@@ -266,6 +266,11 @@ def _render_tc_commands(
                 ignore_failure=True,
             )
         )
+    # Old sibling queues can prevent the kernel from accepting duplication.
+    # Clear them all before installing any replacement queues.
+    for queue in queues:
+        band = str(queue.mark + 1)
+        child_handle = f"{queue.mark + 10}:"
         if queue.impairment != Impairment():
             commands.append(
                 Command(

@@ -161,6 +161,46 @@ class RendererTests(unittest.TestCase):
         self.assertIn("0ms", upload_command.argv)
         self.assertIn("250ms", upload_command.argv)
 
+    def test_clears_all_previous_device_queues_before_replacements(self) -> None:
+        plan = compile_plan(
+            devices=(
+                make_device("alice", "192.168.50.10", "duplicate"),
+                make_device("bob", "192.168.50.11", "normal"),
+            ),
+            profiles={
+                "duplicate": Profile(
+                    id="duplicate",
+                    name="Duplicate",
+                    upload=Impairment(duplicate_percent=10),
+                    download=Impairment(duplicate_percent=10),
+                ),
+                "normal": Profile(id="normal", name="Normal"),
+            },
+        )
+        commands = render_command_plan(
+            plan=plan,
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+        )
+
+        for interface in ("eth0", "wlan0"):
+            queue_commands = [
+                command
+                for command in commands
+                if command.executable == "tc"
+                and command.arguments[:2] in (("qdisc", "del"), ("qdisc", "replace"))
+                and command.arguments[3] == interface
+                and "parent" in command.arguments
+                and command.arguments[command.arguments.index("parent") + 1] != "10:1"
+            ]
+            self.assertEqual(
+                [command.arguments[1] for command in queue_commands],
+                ["del", "del", "replace", "replace"],
+            )
+            self.assertEqual(
+                [command.arguments[-1] for command in queue_commands[:2]],
+                ["11:", "12:"],
+            )
+
     def test_reset_targets_only_project_owned_state(self) -> None:
         commands = render_reset_commands(
             topology=Topology(uplink_interface="eth0", test_interface="wlan0")

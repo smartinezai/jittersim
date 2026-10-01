@@ -101,6 +101,39 @@ def main() -> None:
             ):
                 raise AssertionError("ordinary service traffic did not regain a fair queue")
         applier.apply(plan=plan)
+        bob = Device("bob", "Bob", "192.168.50.11", "rate")
+        two_rate_plan = compile_plan(
+            devices=(replace(device, profile_id="rate"), bob),
+            profiles={
+                "rate": Profile(
+                    id="rate",
+                    name="Rate limit",
+                    upload=Impairment(bandwidth_kbit=2_000),
+                    download=Impairment(bandwidth_kbit=2_000),
+                ),
+            },
+        )
+        duplication_plan = compile_plan(
+            devices=(replace(device, profile_id="duplicate"), replace(bob, profile_id="normal")),
+            profiles={
+                "normal": Profile(id="normal", name="Normal"),
+                "duplicate": Profile(
+                    id="duplicate",
+                    name="Duplicate",
+                    upload=Impairment(duplicate_percent=10),
+                    download=Impairment(duplicate_percent=10),
+                ),
+            },
+        )
+        applier.apply(plan=two_rate_plan)
+        try:
+            applier.apply(plan=duplication_plan)
+            applier.apply(plan=duplication_plan)
+            applier.apply(plan=two_rate_plan)
+        except ApplyError as error:
+            raise AssertionError(
+                f"packet duplication transition failed: {error.cause.stderr}"
+            ) from error
         applier.reset()
         applier.reset()
         subprocess.run(
