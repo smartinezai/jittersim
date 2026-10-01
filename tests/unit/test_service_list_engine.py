@@ -110,7 +110,7 @@ class _Helper:
     def service_addresses(self, addresses):
         return 0
 
-    def observe_dns_queries(self):
+    def observe_dns_queries(self, excluded_macs=()):
         return []
 
     def traffic_counters(self):

@@ -225,6 +225,7 @@ class ServiceWatcher:
         self._clock = clock
         self._matcher = ServiceMatcher(())
         self._lists: Tuple = ()
+        self._protected: frozenset = frozenset()
         self._pending: Dict[str, "OrderedDict[IPv4Address, None]"] = {}
         self._sent: "OrderedDict[Tuple[str, IPv4Address], float]" = OrderedDict()
         self._last_error_logged = float("-inf")
@@ -233,6 +234,17 @@ class ServiceWatcher:
         """Follow the lists of the plan the helper applied last."""
 
         plan = self._applied_plan()
+        raw_protected = plan.get("protected_mac_addresses") if isinstance(plan, dict) else None
+        protected = set()
+        if isinstance(raw_protected, list):
+            for mac in raw_protected:
+                try:
+                    address = bytes.fromhex(mac.replace(":", ""))
+                except (AttributeError, ValueError):
+                    continue
+                if len(address) == 6:
+                    protected.add(address)
+        self._protected = frozenset(protected)
         rules = plan.get("service_list_rules") if isinstance(plan, dict) else None
         lists = []
         if isinstance(rules, list):
@@ -261,6 +273,8 @@ class ServiceWatcher:
         """Note the listed addresses in one frame the Pi sent to the test network."""
 
         if packet_type != PACKET_OUTGOING or not self._matcher:
+            return
+        if frame[:6] in self._protected:
             return
         parsed = parse_dns_frame(frame)
         if parsed is None or not parsed.addresses:

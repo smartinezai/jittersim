@@ -16,11 +16,12 @@ from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from jittersim.config.exemptions import normalize_exempt_mac
 from jittersim.config.models import ValidationError, normalize_domain
 from jittersim.engine.codec import PlanCodecError, plan_from_payload, plan_to_payload
 from jittersim.engine.plan import NetworkPlan
 
-from .applier import ApplyError, NetworkApplier
+from .applier import MAX_PROTECTED_MACS, ApplyError, NetworkApplier
 from .dashboard_access import ACCESS_FILE, AccessError, AccessStore, identify_peer
 from .executor import CommandExecutionError, SubprocessExecutor
 from .router import (
@@ -36,6 +37,11 @@ from .wifi import WifiError
 from .wifi_security import LEGACY_MODES, SECURITY_MODES
 
 LOGGER = logging.getLogger(__name__)
+
+HELPER_OUT_OF_DATE_MESSAGE = (
+    "The networking helper is out of date and cannot skip protected devices. "
+    "Restart the JitterSim services or reinstall the release."
+)
 MAX_MESSAGE_BYTES = 256 * 1024
 MAX_HELPER_CONNECTIONS = 8
 WIFI_ACTIONS = ("configure-ap", "router-sync-ap", "router-preview-ap", "wifi-reset")
@@ -133,7 +139,12 @@ class HelperService:
         if action == "ping":
             return {"ok": True, "action": "ping"}
         if action == "capabilities":
-            return {"ok": True, "general_profile": True, "service_lists": True}
+            return {
+                "ok": True,
+                "general_profile": True,
+                "service_lists": True,
+                "protected_dns_capture": True,
+            }
         if action == "dashboard-access":
             if not self._access_lock.acquire(blocking=False):
                 return {"ok": False, "error": "Device verification is busy. Try again.",
@@ -158,7 +169,7 @@ class HelperService:
         if action == "uplink-info":
             return self._handle_uplink_info()
         if action == "observe-dns":
-            return self._handle_dns_observation()
+            return self._handle_dns_observation(payload)
         if action == "traffic-counters":
             return self._handle_traffic_counters()
         if action in WIFI_ACTIONS:
@@ -284,15 +295,23 @@ class HelperService:
             return {"ok": False, "error": "upstream connection inspection failed"}
         return {"ok": True, "action": "uplink-info", "uplink": uplink}
 
-    def _handle_dns_observation(self) -> Dict[str, Any]:
+    def _handle_dns_observation(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        raw = payload.get("excluded_macs", [])
         try:
-            output = self._applier.capture_dns_queries()
+            if not isinstance(raw, list) or len(raw) > MAX_PROTECTED_MACS:
+                raise ValueError("bad list")
+            macs = sorted({normalize_exempt_mac(mac) for mac in raw})
+        except ValueError:
+            return {"ok": False, "error": "invalid excluded devices"}
+        try:
+            output = self._applier.capture_dns_queries(macs)
         except CommandExecutionError:
             LOGGER.exception("DNS observation failed")
             return {"ok": False, "error": "DNS observation failed"}
         return {
             "ok": True,
             "action": "observe-dns",
+            "excluded_macs": macs,
             "observations": _parse_dns_query_output(output, observed_at=int(time.time())),
         }
 
@@ -823,6 +842,20 @@ class HelperClient:
         if capabilities.get("service_lists") is not True:
             raise HelperClientError("Update the Pi helper before applying service lists")
 
+    def check_protected_dns_capture_support(self) -> None:
+        """Reject an older running helper before it can capture protected traffic."""
+
+        try:
+            capabilities = self._request({"action": "capabilities"})
+        except HelperClientError as error:
+            # Only a helper that does not know the action is out of date. A helper that is
+            # busy or cannot be reached keeps its own message and still blocks the capture.
+            if str(error) == "unknown action":
+                raise HelperClientError(HELPER_OUT_OF_DATE_MESSAGE) from error
+            raise
+        if capabilities.get("protected_dns_capture") is not True:
+            raise HelperClientError(HELPER_OUT_OF_DATE_MESSAGE)
+
     def service_addresses(self, addresses: Dict[str, Sequence[Any]]) -> int:
         """Send learned destination addresses for lists in the applied plan."""
 
@@ -975,10 +1008,20 @@ class HelperClient:
             "gateway": gateway,
         }
 
-    def observe_dns_queries(self) -> List[Dict[str, Any]]:
-        """Capture one bounded DNS sample from the test interface."""
+    def observe_dns_queries(self, excluded_macs: Sequence[str] = ()) -> List[Dict[str, Any]]:
+        """Capture one bounded DNS sample that leaves out the given devices."""
 
-        response = self._request({"action": "observe-dns"})
+        try:
+            macs = sorted({normalize_exempt_mac(mac) for mac in excluded_macs})
+        except ValueError as error:
+            raise HelperClientError("invalid excluded devices") from error
+        if len(macs) > MAX_PROTECTED_MACS:
+            raise HelperClientError("too many excluded devices")
+        if macs:
+            self.check_protected_dns_capture_support()
+        response = self._request({"action": "observe-dns", "excluded_macs": macs})
+        if macs and response.get("excluded_macs") != macs:
+            raise HelperClientError(HELPER_OUT_OF_DATE_MESSAGE)
         observations = response.get("observations")
         if not isinstance(observations, list) or any(
             not isinstance(observation, dict) for observation in observations

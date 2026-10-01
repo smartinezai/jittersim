@@ -11,7 +11,7 @@ import pytest
 
 from jittersim.api.server import ControlServer
 from jittersim.config.exemptions import UnaffectedDevice
-from jittersim.config.models import Profile
+from jittersim.config.models import DomainObservation, Profile
 from jittersim.config.storage import ConfigRepository, StorageError
 from jittersim.networking.helper import HelperClient, UnixHelperServer
 from tests.unit.test_api import FakeHelper
@@ -46,6 +46,116 @@ def test_original_protection_list_upgrades_and_remains_editable(tmp_path):
         assert repository.list_unaffected_devices() == (
             UnaffectedDevice("aa:bb:cc:dd:ee:02", "New", 20),
         )
+
+
+def test_observations_saved_before_hardware_addresses_were_recorded_are_kept(tmp_path):
+    path = tmp_path / "settings.db"
+    with ConfigRepository(path) as repository:
+        repository.save_profile(Profile("normal", "Keep this profile"))
+    with sqlite3.connect(path) as connection:
+        connection.execute("DROP TABLE domain_observations")
+        connection.execute(
+            "CREATE TABLE domain_observations ("
+            "ipv4_address TEXT NOT NULL, domain TEXT NOT NULL, query_count INTEGER NOT NULL, "
+            "first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, "
+            "PRIMARY KEY (ipv4_address, domain))"
+        )
+        connection.execute(
+            "INSERT INTO domain_observations VALUES ('192.168.50.20', 'amazon.com', 3, 10, 20)"
+        )
+    with ConfigRepository(path) as repository:
+        (kept,) = repository.list_domain_observations()
+        assert (str(kept.ipv4_address), kept.domain, kept.query_count) == (
+            "192.168.50.20",
+            "amazon.com",
+            3,
+        )
+        assert kept.mac_address is None
+        repository.save_domain_observations(
+            [
+                DomainObservation(
+                    "192.168.50.20", "amazon.com", 1, 30, 30, mac_address="02:00:00:00:00:01"
+                )
+            ],
+            now=30,
+        )
+    with ConfigRepository(path) as repository:
+        (kept,) = repository.list_domain_observations()
+        assert (kept.query_count, kept.mac_address) == (4, "02:00:00:00:00:01")
+        assert repository.delete_domain_observations([], ["02:00:00:00:00:01"]) == 1
+
+
+def observations_database_before_hardware_addresses(path, protected=()):
+    """Build a database as it was before observations recorded a hardware address."""
+
+    with ConfigRepository(path) as repository:
+        repository.save_profile(Profile("normal", "Keep this profile"))
+        for mac in protected:
+            repository.save_unaffected_device(UnaffectedDevice(mac, "Protected", 1))
+    with sqlite3.connect(path) as connection:
+        connection.execute("DROP TABLE domain_observations")
+        connection.execute(
+            "CREATE TABLE domain_observations ("
+            "ipv4_address TEXT NOT NULL, domain TEXT NOT NULL, query_count INTEGER NOT NULL, "
+            "first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, "
+            "PRIMARY KEY (ipv4_address, domain))"
+        )
+        connection.executemany(
+            "INSERT INTO domain_observations VALUES (?, ?, 3, 10, 20)",
+            [("192.168.50.20", "bank.example.com"), ("192.168.50.22", "news.example.com")],
+        )
+
+
+def stored_observations(path):
+    with ConfigRepository(path) as repository:
+        return sorted(
+            (str(item.ipv4_address), item.domain, item.mac_address)
+            for item in repository.list_domain_observations()
+        )
+
+
+def test_rows_without_a_hardware_address_are_cleared_once_when_a_device_is_protected(tmp_path):
+    path = tmp_path / "settings.db"
+    observations_database_before_hardware_addresses(path, protected=["02:00:00:00:00:01"])
+
+    # First open after the upgrade: a protected device may have moved since those rows.
+    assert stored_observations(path) == []
+    with ConfigRepository(path) as repository:
+        assert [item.mac_address for item in repository.list_unaffected_devices()] == [
+            "02:00:00:00:00:01"
+        ]
+        assert repository.get_profile("normal").name == "Keep this profile"
+        repository.save_domain_observations(
+            [
+                DomainObservation("192.168.50.30", "fresh.example.com", 1, 30, 30),
+                DomainObservation(
+                    "192.168.50.31", "named.example.com", 1, 30, 30, mac_address="02:00:00:00:00:02"
+                ),
+            ],
+            now=30,
+        )
+
+    # Later opens leave everything that was saved after the upgrade alone.
+    expected = [
+        ("192.168.50.30", "fresh.example.com", None),
+        ("192.168.50.31", "named.example.com", "02:00:00:00:00:02"),
+    ]
+    assert stored_observations(path) == expected
+    assert stored_observations(path) == expected
+
+
+def test_rows_without_a_hardware_address_stay_when_nobody_is_protected(tmp_path):
+    path = tmp_path / "settings.db"
+    observations_database_before_hardware_addresses(path)
+
+    assert stored_observations(path) == [
+        ("192.168.50.20", "bank.example.com", None),
+        ("192.168.50.22", "news.example.com", None),
+    ]
+    with ConfigRepository(path) as repository:
+        repository.save_unaffected_device(UnaffectedDevice("02:00:00:00:00:01", "Later", 5))
+    # Protection added after the upgrade is handled by the purge and not by the migration.
+    assert len(stored_observations(path)) == 2
 
 
 @pytest.mark.parametrize(

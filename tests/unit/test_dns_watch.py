@@ -3,11 +3,13 @@ import socket
 import struct
 import unittest
 from ipaddress import IPv4Address
+from unittest.mock import patch
 
 from jittersim.config.models import Impairment, Profile
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import compile_plan
 from jittersim.engine.plan import ServiceListRule
+from jittersim.networking import dns_watch
 from jittersim.networking.dns_watch import (
     BPF_DNS_RESPONSES,
     MAX_PENDING_PER_LIST,
@@ -50,7 +52,16 @@ def dns_message(qname, records, flags=0x8180, questions=1):
     return header + encode_name(qname) + struct.pack("!HH", 1, 1) + b"".join(records)
 
 
-def frame_for(message, *, sport=53, protocol=17, fragment=0, options=b"", ethertype=0x0800):
+def frame_for(
+    message,
+    *,
+    sport=53,
+    protocol=17,
+    fragment=0,
+    options=b"",
+    ethertype=0x0800,
+    dst_mac=b"\x02" * 6,
+):
     udp = struct.pack("!HHHH", sport, 40000, 8 + len(message), 0) + message
     ihl = 5 + len(options) // 4
     ip = struct.pack(
@@ -66,7 +77,7 @@ def frame_for(message, *, sport=53, protocol=17, fragment=0, options=b"", ethert
         socket.inet_aton("192.168.50.1"),
         socket.inet_aton("192.168.50.10"),
     )
-    return b"\x02" * 6 + b"\x04" * 6 + struct.pack("!H", ethertype) + ip + options + udp
+    return dst_mac + b"\x04" * 6 + struct.pack("!H", ethertype) + ip + options + udp
 
 
 STREAMING = ("streaming", ("netflix.com", "nflxvideo.net"))
@@ -200,11 +211,12 @@ class MatcherTests(unittest.TestCase):
             self.assertIsNone(matcher.match(name), name)
 
 
-def plan_payload(*lists):
+def plan_payload(*lists, protected=()):
     profile = Profile(id="slow", name="Slow", upload=Impairment(delay_ms=100))
     plan = compile_plan(
         devices=(),
         profiles={"slow": profile},
+        protected_mac_addresses=tuple(protected),
         service_list_rules=tuple(
             ServiceListRule(list_id, domains, 0, profile.upload, profile.download)
             for list_id, domains in lists
@@ -378,6 +390,92 @@ class WatcherTests(unittest.TestCase):
             self.watcher.refresh_lists()
             self.answer("www.netflix.com", a_record(b"\xc0\x0c", "203.0.113.5"))
             self.assertFalse(self.watcher.flush())
+
+    def parse_calls_for(self, *frames):
+        calls = []
+        original = dns_watch.parse_dns_frame
+
+        def counting(frame):
+            calls.append(frame)
+            return original(frame)
+
+        with patch.object(dns_watch, "parse_dns_frame", counting):
+            for frame in frames:
+                self.watcher.observe(frame, OUTGOING)
+        return calls
+
+    def test_answers_to_protected_clients_are_never_parsed(self) -> None:
+        protected = "02:00:00:00:00:05"
+        self.payload = plan_payload(STREAMING, WORK, protected=[protected])
+        self.watcher.refresh_lists()
+        message = dns_message("www.netflix.com", [a_record(b"\xc0\x0c", "203.0.113.5")])
+        to_protected = frame_for(message, dst_mac=bytes.fromhex("020000000005"))
+        to_other = frame_for(message)
+
+        self.assertEqual(self.parse_calls_for(to_protected), [])
+        self.assertEqual(self.watcher.pending_count("streaming"), 0)
+        self.assertFalse(self.watcher.flush())
+
+        self.assertEqual(self.parse_calls_for(to_other), [to_other])
+        self.assertEqual(self.watcher.pending_count("streaming"), 1)
+
+    def test_every_protected_client_is_skipped(self) -> None:
+        macs = ["02:00:00:00:00:05", "02:00:00:00:00:06", "AA:BB:CC:DD:EE:00"]
+        self.payload = plan_payload(STREAMING, protected=macs)
+        self.watcher.refresh_lists()
+        message = dns_message("www.netflix.com", [a_record(b"\xc0\x0c", "203.0.113.5")])
+        frames = [
+            frame_for(message, dst_mac=bytes.fromhex(mac.replace(":", ""))) for mac in macs
+        ]
+
+        self.assertEqual(self.parse_calls_for(*frames), [])
+
+    def test_the_protected_set_follows_a_changed_plan_even_when_the_lists_do_not_change(
+        self,
+    ) -> None:
+        protected = "02:00:00:00:00:05"
+        message = dns_message("www.netflix.com", [a_record(b"\xc0\x0c", "203.0.113.5")])
+        frame = frame_for(message, dst_mac=bytes.fromhex("020000000005"))
+
+        self.payload = plan_payload(STREAMING, WORK, protected=[protected])
+        self.watcher.refresh_lists()
+        self.assertEqual(self.parse_calls_for(frame), [])
+
+        self.payload = plan_payload(STREAMING, WORK)
+        self.watcher.refresh_lists()
+        self.assertEqual(self.parse_calls_for(frame), [frame])
+
+        self.payload = plan_payload(STREAMING, WORK, protected=[protected])
+        self.watcher.refresh_lists()
+        self.assertEqual(self.parse_calls_for(frame), [])
+
+    def test_a_plan_without_protected_clients_or_with_garbage_still_works(self) -> None:
+        message = dns_message("www.netflix.com", [a_record(b"\xc0\x0c", "203.0.113.5")])
+        frame = frame_for(message, dst_mac=bytes.fromhex("020000000005"))
+        stripped = plan_payload(STREAMING, WORK)
+        stripped.pop("protected_mac_addresses")
+        for protected in (
+            None,
+            "02:00:00:00:00:05",
+            [5, None, "zz:zz", "02:00:00:00:00", "", "0200000000050000"],
+        ):
+            with self.subTest(protected=protected):
+                self.payload = {**plan_payload(STREAMING, WORK), "protected_mac_addresses": protected}
+                self.watcher.refresh_lists()
+                self.assertEqual(self.parse_calls_for(frame), [frame])
+        self.payload = stripped
+        self.watcher.refresh_lists()
+        self.assertEqual(self.parse_calls_for(frame), [frame])
+
+    def test_losing_the_plan_forgets_the_protected_clients_together_with_the_lists(self) -> None:
+        self.payload = plan_payload(STREAMING, protected=["02:00:00:00:00:05"])
+        self.watcher.refresh_lists()
+        self.payload = None
+        self.watcher.refresh_lists()
+        message = dns_message("www.netflix.com", [a_record(b"\xc0\x0c", "203.0.113.5")])
+
+        self.assertEqual(self.parse_calls_for(frame_for(message)), [])  # no lists: nothing parsed
+        self.assertFalse(self.watcher.flush())
 
     def test_garbage_frames_never_stop_the_watcher(self) -> None:
         generator = random.Random(3)
