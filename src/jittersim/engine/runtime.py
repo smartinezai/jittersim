@@ -32,6 +32,7 @@ from .eligibility import eligible_clients, station_snapshot
 from .general import compile_general_plan
 from .plan import GENERAL_QUEUE_ID, NetworkPlan, ServiceAssignmentRule, ServiceQuotaRule
 from .service_lists import build_service_list_rules
+from .service_resolver import ServiceAddressRefresher
 from .progression import interpolate_profile, progression_factor
 from .randomizer import (
     outage_duration_seconds,
@@ -85,6 +86,17 @@ class RuntimeScheduler:
         self._analytics_batch_overflowed = False
         self._last_device_counters: Dict[str, int] = {}
         self._device_traffic_bytes: Dict[str, int] = {}
+        self._service_addresses = (
+            None
+            if helper_client is None
+            else ServiceAddressRefresher(
+                applied_plan=self._applied_payload, helper_client=helper_client
+            )
+        )
+
+    def _applied_payload(self):
+        with self._lock:
+            return self._current_payload
 
     def start(self) -> None:
         """Start the scheduler loop when hardware control is available."""
@@ -101,6 +113,8 @@ class RuntimeScheduler:
                 daemon=True,
             )
             self._thread.start()
+            if self._service_addresses is not None:
+                self._service_addresses.start()
 
     def stop(self) -> None:
         """Stop the loop and wait briefly for its current tick to finish."""
@@ -110,6 +124,8 @@ class RuntimeScheduler:
         if thread is not None:
             thread.join(timeout=5)
         self._thread = None
+        if self._service_addresses is not None:
+            self._service_addresses.stop()
 
     def activate(self, *, applied_payload: object) -> None:
         """Resume scheduled work after a successful manual apply."""

@@ -105,6 +105,9 @@ class _Helper:
         self.plans.append(plan)
         return {"commands_run": 1}
 
+    def service_addresses(self, addresses):
+        return 0
+
     def observe_dns_queries(self):
         return []
 

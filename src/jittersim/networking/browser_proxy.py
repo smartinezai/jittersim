@@ -70,7 +70,7 @@ def select_mark(
     host: str,
     client_mac: Optional[str] = None,
 ) -> Tuple[int, str]:
-    """Choose the one hostname assignment or the device's ordinary mark."""
+    """Choose the service list or hostname assignment for this host, else the device's mark."""
 
     if plan is None:
         return 0, "reset"
@@ -83,6 +83,11 @@ def select_mark(
             raise ProxyError("client is blocked by global access rules")
         if client_mac in plan.protected_mac_addresses:
             return 0, "unaffected"
+    # A listed service replaces whatever profile behavior the client would get,
+    # including a random outage, exactly like the network rules for direct traffic.
+    for service_list in plan.service_list_rules:
+        if any(host == domain or host.endswith("." + domain) for domain in service_list.domains):
+            return service_list.mark, f"service-list:{service_list.list_id}"
     if plan.general_profile is not None:
         if plan.general_profile.outage_active:
             raise ProxyError("the general profile is temporarily disconnected")
