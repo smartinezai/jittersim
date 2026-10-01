@@ -7,13 +7,18 @@ registrable domain.
 """
 
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 from .models import normalize_domain
 from .service_catalogue import SERVICE_CATALOGUE
 
 LABEL_KINDS = ("app", "system", "tracker", "iot", "cdn", "unknown")
 UNKNOWN_CATEGORY = "Unknown site"
+# Names that a device looks up within this many seconds of each other count as seen together.
+SEEN_WITH_WINDOW_SECONDS = 10
+# A shared name is only guessed to belong to an app when at most this many apps qualify.
+_SEEN_WITH_MAX_APPS = 2
+_SEEN_WITH_KINDS = frozenset({"cdn", "tracker", "unknown"})
 _FALLBACK_CATALOGUE_CATEGORY = "Online service"
 
 # Second-level suffixes under which the registrable domain has three labels.
@@ -312,3 +317,31 @@ def label_domain(domain: str) -> DomainLabel:
             name, kind, category = entry
             return DomainLabel(kind, name, category, True)
     return DomainLabel("unknown", registrable_domain(domain), UNKNOWN_CATEGORY, False)
+
+
+def seen_with(observations: Iterable[Tuple[str, int]]) -> Dict[str, List[str]]:
+    """Guess which apps a shared name belongs to from one device's first-seen times.
+
+    Each pair is a name and the time it was first seen. Only names labelled cdn or tracker or
+    unknown get a hint. The hint lists the apps whose own names were first seen within the window
+    of this name. It is dropped when more than two apps qualify because the guess is too vague.
+    """
+
+    labelled = [(domain, first_seen, label_domain(domain)) for domain, first_seen in observations]
+    app_times: Dict[str, List[int]] = {}
+    for _, first_seen, label in labelled:
+        if label.kind == "app":
+            app_times.setdefault(label.name, []).append(first_seen)
+    hints: Dict[str, List[str]] = {}
+    for domain, first_seen, label in labelled:
+        if label.kind not in _SEEN_WITH_KINDS:
+            continue
+        near = []
+        for name, times in app_times.items():
+            distance = min(abs(time - first_seen) for time in times)
+            if distance <= SEEN_WITH_WINDOW_SECONDS:
+                near.append((distance, name))
+        near.sort()
+        if near and len(near) <= _SEEN_WITH_MAX_APPS:
+            hints[domain] = [name for _, name in near]
+    return hints

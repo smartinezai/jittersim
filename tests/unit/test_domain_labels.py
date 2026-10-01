@@ -2,9 +2,11 @@ import pytest
 
 from jittersim.config.domain_labels import (
     LABEL_KINDS,
+    SEEN_WITH_WINDOW_SECONDS,
     TABLE_SOURCE,
     label_domain,
     registrable_domain,
+    seen_with,
 )
 from jittersim.config.models import normalize_domain
 from jittersim.config.service_catalogue import SERVICE_CATALOGUE
@@ -86,3 +88,58 @@ def test_every_catalogue_hostname_is_in_the_table_as_an_app():
 
 def test_as_dict_has_four_keys():
     assert set(label_domain("whatsapp.net").as_dict()) == {"kind", "name", "category", "known"}
+
+
+def test_a_shared_name_is_seen_with_the_app_at_the_same_time():
+    pairs = [("mmx-ds.cdn.whatsapp.net", 100), ("a1051.dscg4.akamai.net", 100)]
+    assert seen_with(pairs) == {"a1051.dscg4.akamai.net": ["WhatsApp"]}
+
+
+def test_the_window_edge():
+    inside = [("whatsapp.net", 100), ("a.akamai.net", 100 + SEEN_WITH_WINDOW_SECONDS)]
+    outside = [("whatsapp.net", 100), ("a.akamai.net", 101 + SEEN_WITH_WINDOW_SECONDS)]
+    assert seen_with(inside) == {"a.akamai.net": ["WhatsApp"]}
+    assert seen_with(outside) == {}
+
+
+def test_the_window_counts_in_both_directions():
+    pairs = [("a.akamai.net", 100), ("whatsapp.net", 100 + SEEN_WITH_WINDOW_SECONDS)]
+    assert seen_with(pairs) == {"a.akamai.net": ["WhatsApp"]}
+
+
+def test_trackers_and_unknown_names_get_a_hint_but_apps_do_not():
+    pairs = [
+        ("sso.immobilienscout24.de", 5),
+        ("tags-eu.tiqcdn.com", 5),
+        ("cdn.somesmallsite.io", 5),
+    ]
+    assert seen_with(pairs) == {
+        "tags-eu.tiqcdn.com": ["ImmoScout24"],
+        "cdn.somesmallsite.io": ["ImmoScout24"],
+    }
+
+
+def test_system_and_smart_home_names_are_neither_hinted_nor_used_as_hints():
+    pairs = [("10000.mt.eu.iot.dreame.tech", 5), ("www.apple.com", 5), ("a.akamai.net", 5)]
+    assert seen_with(pairs) == {}
+
+
+def test_too_many_apps_at_once_gives_no_hint():
+    pairs = [("whatsapp.net", 1), ("netflix.com", 1), ("spotify.com", 1), ("a.akamai.net", 1)]
+    assert seen_with(pairs) == {}
+
+
+def test_two_names_of_one_app_count_once_and_nearest_first():
+    pairs = [
+        ("a.whatsapp.net", 3), ("b.whatsapp.net", 4), ("netflix.com", 9), ("x.akamai.net", 5),
+    ]
+    assert seen_with(pairs) == {"x.akamai.net": ["WhatsApp", "Netflix"]}
+
+
+def test_two_apps_at_the_same_distance_sort_by_name():
+    pairs = [("netflix.com", 4), ("whatsapp.net", 6), ("x.akamai.net", 5)]
+    assert seen_with(pairs) == {"x.akamai.net": ["Netflix", "WhatsApp"]}
+
+
+def test_no_observations_gives_no_hints():
+    assert seen_with([]) == {}
