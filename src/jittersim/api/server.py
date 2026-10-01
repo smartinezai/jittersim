@@ -87,6 +87,7 @@ from jittersim.networking.helper import (
     HelperClientError,
 )
 from jittersim.networking.router import (
+    ROUTER_CHECK_MESSAGES,
     safe_router_check_message,
     safe_router_import_message,
     safe_router_wifi_message,
@@ -143,6 +144,7 @@ WRITE_PATHS = frozenset(
         "/api/router/check",
         "/api/router/status",
         "/api/router/operation",
+        "/api/router/wifi-credentials",
         "/api/connected-devices/apply-profile",
         "/api/connected-device-labels",
         "/api/connected-device-labels/delete",
@@ -7219,6 +7221,10 @@ class ControlServer(HTTPServer):
             if not payload["enabled"] and payload.get("confirm_disable") is not True:
                 return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
                     {"error": "turning off router Wi-Fi requires confirmation"})
+        if path == "/api/router/wifi-credentials":
+            # Never a background operation: those keep their result for minutes and this one
+            # carries the Wi-Fi password.
+            return self._router_response_for(path, payload)
         if payload.get("background") is True:
             fields = {key: payload[key] for key in (
                 "admin_password", "enabled", "confirm_disable", "expected_fingerprint", "confirm_legacy") if key in payload}
@@ -7240,6 +7246,33 @@ class ControlServer(HTTPServer):
                 return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
                     {"error": safe_router_check_message(str(error))})
             return HTTPStatus.OK, "application/json", _json_bytes({"result": result})
+        if path == "/api/router/wifi-credentials":
+            include_password = payload.get("include_password", False)
+            if type(include_password) is not bool:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "invalid router Wi-Fi request"})
+            reader = getattr(self.helper_client, "read_router_wifi_credentials", None)
+            try:
+                if not callable(reader):
+                    raise HelperClientError(
+                        "The networking helper is out of date. Restart the JitterSim services "
+                        "or reinstall the release.")
+                found = reader(admin_password=payload["admin_password"],
+                               include_password=include_password)
+                # Pass on only what this request asked for whatever the helper sent.
+                result = {"ssid": found["ssid"]}
+                if include_password:
+                    result["password"] = found["password"]
+                if not all(isinstance(value, str) for value in result.values()):
+                    raise TypeError("invalid Wi-Fi details")
+            except HelperClientError as error:
+                message = safe_router_check_message(str(error))
+            except (KeyError, TypeError):
+                message = ROUTER_CHECK_MESSAGES["failed"]
+            else:
+                return HTTPStatus.OK, "application/json", _json_bytes({"result": result})
+            LOGGER.warning("router Wi-Fi copy failed: %s", message)
+            return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes({"error": message})
         if path in ("/api/router/sync-ap", "/api/router/preview-ap"):
             if self.helper_client is None:
                 return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
