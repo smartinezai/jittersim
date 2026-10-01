@@ -18,7 +18,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from ipaddress import IPv4Network
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, urlsplit
 
 from jittersim.config.device_labels import (
@@ -33,6 +33,7 @@ from jittersim.config.device_names import (
     has_hidden_characters,
     resolve_device_name,
 )
+from jittersim.config.domain_labels import label_domain, seen_with
 from jittersim.config.exemptions import UnaffectedDevice, normalize_exempt_mac
 from jittersim.config.models import (
     DataLimit,
@@ -5726,6 +5727,20 @@ def _domain_observation_payload(observation: DomainObservation) -> Dict[str, Any
     }
 
 
+def _labelled_domain_payloads(rows: Sequence[DomainObservation]) -> List[Dict[str, Any]]:
+    """Add a plain-language label and a seen-with guess to one device's observed names."""
+
+    hints = seen_with([(row.domain, row.first_seen) for row in rows])
+    return [
+        {
+            **_domain_observation_payload(row),
+            "label": label_domain(row.domain).as_dict(),
+            "seen_with": hints.get(row.domain, []),
+        }
+        for row in rows
+    ]
+
+
 def _runtime_state_payload(state: RuntimeState) -> Dict[str, Any]:
     return {
         "configuration_version": state.configuration_version,
@@ -6247,7 +6262,7 @@ class ControlServer(HTTPServer):
                 address = str(observation.ipv4_address)
                 if address in blocked:
                     continue
-                grouped.setdefault(address, []).append(_domain_observation_payload(observation))
+                grouped.setdefault(address, []).append(observation)
             stations = self._station_identities(station_devices)
             labels_by_mac = self.repository.list_connected_device_labels()
             devices = [
@@ -6269,9 +6284,9 @@ class ControlServer(HTTPServer):
                         if address in assignments_by_address
                         else None
                     ),
-                    "domains": domains,
+                    "domains": _labelled_domain_payloads(rows),
                 }
-                for address, domains in sorted(grouped.items())
+                for address, rows in sorted(grouped.items())
             ]
             return (
                 HTTPStatus.OK,
@@ -6280,7 +6295,7 @@ class ControlServer(HTTPServer):
                     {
                         "available": self.helper_client is not None,
                         "devices": devices,
-                        "total_domains": sum(len(domains) for domains in grouped.values()),
+                        "total_domains": sum(len(rows) for rows in grouped.values()),
                         "message": (
                             None
                             if self.helper_client is not None

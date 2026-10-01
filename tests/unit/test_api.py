@@ -1823,6 +1823,49 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(json.loads(body)["devices"][0]["display_name"], "Sam MacBook")
 
+    def test_observations_carry_a_label_and_a_seen_with_hint(self) -> None:
+        self.repository.save_domain_observations(
+            [
+                DomainObservation("192.168.50.124", "mmx-ds.cdn.whatsapp.net", 5, 100, 100),
+                DomainObservation("192.168.50.124", "a1051.dscg4.akamai.net", 1, 100, 100),
+                DomainObservation("192.168.50.124", "cdn.somesmallsite.io", 1, 5000, 5000),
+            ],
+            now=100,
+        )
+
+        _, _, body = self.server.response_for("/api/observations")
+        domains = {item["domain"]: item for item in json.loads(body)["devices"][0]["domains"]}
+
+        self.assertEqual(domains["mmx-ds.cdn.whatsapp.net"]["label"]["name"], "WhatsApp")
+        self.assertEqual(domains["mmx-ds.cdn.whatsapp.net"]["seen_with"], [])
+        self.assertEqual(domains["a1051.dscg4.akamai.net"]["label"]["kind"], "cdn")
+        self.assertEqual(domains["a1051.dscg4.akamai.net"]["seen_with"], ["WhatsApp"])
+        self.assertEqual(domains["cdn.somesmallsite.io"]["label"]["known"], False)
+        self.assertEqual(domains["cdn.somesmallsite.io"]["seen_with"], [])
+
+    def test_seen_with_hints_never_cross_devices(self) -> None:
+        self.repository.save_domain_observations(
+            [
+                DomainObservation("192.168.50.124", "mmx-ds.cdn.whatsapp.net", 5, 100, 100),
+                DomainObservation("192.168.50.125", "a1051.dscg4.akamai.net", 1, 100, 100),
+            ],
+            now=100,
+        )
+
+        _, _, body = self.server.response_for("/api/observations")
+        devices = {item["ipv4_address"]: item for item in json.loads(body)["devices"]}
+
+        self.assertEqual(devices["192.168.50.125"]["domains"][0]["seen_with"], [])
+
+    def test_the_scan_response_keeps_its_original_fields(self) -> None:
+        self.server.helper_client = FakeHelper()
+
+        _, _, body = self.server.write_response_for("/api/observations/scan", {})
+
+        observation = json.loads(body)["observations"][0]
+        self.assertNotIn("label", observation)
+        self.assertNotIn("seen_with", observation)
+
     def test_observations_work_without_the_helper(self) -> None:
         self.server.helper_client = FakeHelper()
         self.server.write_response_for("/api/observations/scan", {})
