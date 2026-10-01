@@ -414,7 +414,18 @@ DASHBOARD_HTML = """<!doctype html>
     .observation-device-heading h3 { margin: 0; color: #edf5ff; text-transform: none; letter-spacing: 0; font-size: 0.95rem; }
     .observation-device-heading p { margin: 0; color: #91a8c1; font-size: 0.78rem; }
     .observation-domain-list { display: grid; gap: 0.35rem; margin: 0.65rem 0 0; padding: 0; list-style: none; }
-    .observation-domain { display: flex; justify-content: space-between; gap: 1rem; padding: 0.45rem 0.55rem; border-radius: 0.35rem; background: #102238; color: #c7d7eb; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
+    .observation-domain { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem; padding: 0.45rem 0.55rem; border-radius: 0.35rem; background: #102238; color: #c7d7eb; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
+    .observation-domain-name { flex: 1 1 14rem; min-width: 0; }
+    .observation-domain button { margin-top: 0; }
+    .observation-label, .observation-hint-line { font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .observation-label { display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.5rem; color: #edf5ff; font-size: 0.88rem; }
+    .observation-label strong { font-weight: 650; overflow-wrap: anywhere; }
+    .observation-category { padding: 0.05rem 0.45rem; border: 1px solid #46627f; border-radius: 999px; color: #c6dbf4; font-size: 0.7rem; font-weight: 500; white-space: nowrap; }
+    .observation-category[data-kind="unknown"] { border-style: dashed; color: #9fb3ca; }
+    .observation-domain-host { margin-top: 0.1rem; color: #9fb3ca; font-size: 0.76rem; overflow-wrap: anywhere; }
+    .observation-hint-line { display: flex; flex-wrap: wrap; gap: 0.1rem 0.75rem; margin-top: 0.2rem; font-size: 0.76rem; }
+    .observation-hint { color: #b9c9dc; font-style: italic; }
+    .observation-search-link { color: #8cc4ff; }
     .observation-domain-count { color: #8de2bc; white-space: nowrap; }
     .policy-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
     .policy-grid > div { min-width: 0; }
@@ -3179,6 +3190,19 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    function domainSearchUrl(domain) {
+      return "https://duckduckgo.com/?q=" + encodeURIComponent(domain);
+    }
+
+    function domainHint(observation) {
+      const label = observation.label || {};
+      const apps = observation.seen_with || [];
+      return {
+        text: apps.length ? "Seen with " + apps.join(" and ") + " (guess)" : "",
+        searchable: label.kind === "unknown" || label.kind === "cdn"
+      };
+    }
+
     function renderObservations(data) {
       const container = element("observations");
       const count = element("observation-count");
@@ -3235,8 +3259,43 @@ DASHBOARD_HTML = """<!doctype html>
         (device.domains || []).forEach((observation) => {
           const item = document.createElement("li");
           item.className = "observation-domain";
-          const domain = document.createElement("span");
-          domain.textContent = observation.domain;
+          const domain = document.createElement("div");
+          domain.className = "observation-domain-name";
+          if (observation.label) {
+            const labelLine = document.createElement("div");
+            labelLine.className = "observation-label";
+            const labelName = document.createElement("strong");
+            labelName.textContent = observation.label.name;
+            const category = document.createElement("span");
+            category.className = "observation-category";
+            category.dataset.kind = observation.label.kind;
+            category.textContent = observation.label.category;
+            labelLine.append(labelName, category);
+            domain.appendChild(labelLine);
+          }
+          const host = document.createElement("div");
+          host.className = "observation-domain-host";
+          host.textContent = observation.domain;
+          domain.appendChild(host);
+          const hint = domainHint(observation);
+          const hintLine = document.createElement("div");
+          hintLine.className = "observation-hint-line";
+          if (hint.text) {
+            const hintText = document.createElement("span");
+            hintText.className = "observation-hint";
+            hintText.textContent = hint.text;
+            hintLine.appendChild(hintText);
+          }
+          if (hint.searchable) {
+            const link = document.createElement("a");
+            link.className = "observation-search-link";
+            link.href = domainSearchUrl(observation.domain);
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            link.textContent = "What is this?";
+            hintLine.appendChild(link);
+          }
+          if (hintLine.childNodes.length > 0) domain.appendChild(hintLine);
           const queryCount = document.createElement("span");
           queryCount.className = "observation-domain-count";
           queryCount.textContent = observation.query_count + " queries";

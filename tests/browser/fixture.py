@@ -4,9 +4,11 @@ import json
 import os
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 from jittersim.api.server import ControlServer
+from jittersim.config.models import DomainObservation
 from jittersim.config.storage import ConfigRepository
 from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.commands import CommandResult
@@ -68,6 +70,31 @@ class FixtureServer(ControlServer):
         return connection, address
 
 
+def seed_observations(repository):
+    """Save a few traffic observations when JITTERSIM_BROWSER_TEST_OBSERVATIONS is 1."""
+
+    if os.environ.get("JITTERSIM_BROWSER_TEST_OBSERVATIONS") != "1":
+        return
+    now = int(time.time())
+    rows = (
+        ("192.168.50.124", "mmx-ds.cdn.whatsapp.net", 12, 0),
+        ("192.168.50.124", "a1051.dscg4.akamai.net", 3, 0),
+        ("192.168.50.124", "tags-eu.tiqcdn.com", 2, 399),
+        ("192.168.50.124", "api.header.immobilienscout24.de", 4, 400),
+        ("192.168.50.124", "cdn.somesmallsite.io", 1, 400),
+        ("192.168.50.124", "very-long-unknown-name.sub.example-sample-site.co.uk", 1, 900),
+        ("192.168.50.184", "10000.mt.eu.iot.dreame.tech", 7, 0),
+        ("192.168.50.184", "gateway.icloud.com", 5, 0),
+    )
+    repository.save_domain_observations(
+        [
+            DomainObservation(address, domain, count, now - offset, now - offset)
+            for address, domain, count, offset in rows
+        ],
+        now=now,
+    )
+
+
 def main():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -80,6 +107,7 @@ def main():
             worker.start()
             try:
                 with ConfigRepository(root / "config.db") as repository:
+                    seed_observations(repository)
                     with FixtureServer(
                         ("127.0.0.1", 0), repository, admin_token="browser-test",
                         helper_client=HelperClient(socket_path=root / "wifi.sock"),
