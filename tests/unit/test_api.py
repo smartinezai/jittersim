@@ -2322,6 +2322,25 @@ class ControlServerTests(unittest.TestCase):
                 self.assertEqual(group["display_name"], "Unknown device")
                 self.assertIsNone(group["hostname"])
 
+    def test_new_client_name_skips_hidden_control_characters(self) -> None:
+        from jittersim.api.server import _new_client_name
+
+        for character in ("\x7f", "‎", "‏", "‪", "‮", "⁦", "⁩"):
+            with self.subTest(character=repr(character)):
+                self.assertEqual(
+                    _new_client_name(None, "host" + character + "name", "192.168.50.7"),
+                    "Client 192.168.50.7",
+                )
+                self.assertEqual(
+                    _new_client_name("Sam" + character + "iPhone", "host", "192.168.50.7"), "host"
+                )
+
+    def test_new_client_name_keeps_emoji_and_accents(self) -> None:
+        from jittersim.api.server import _new_client_name
+
+        self.assertEqual(_new_client_name("Sam's 📱 phone", "host", "192.168.50.7"), "Sam's 📱 phone")
+        self.assertEqual(_new_client_name(None, "Café-tablet", "192.168.50.7"), "Café-tablet")
+
 
 if __name__ == "__main__":
     unittest.main()

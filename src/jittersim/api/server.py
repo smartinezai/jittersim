@@ -28,7 +28,11 @@ from jittersim.config.device_labels import (
     normalize_device_mac,
     normalize_device_type,
 )
-from jittersim.config.device_names import UNKNOWN_DEVICE_NAME, resolve_device_name
+from jittersim.config.device_names import (
+    UNKNOWN_DEVICE_NAME,
+    has_hidden_characters,
+    resolve_device_name,
+)
 from jittersim.config.exemptions import UnaffectedDevice, normalize_exempt_mac
 from jittersim.config.models import (
     DataLimit,
@@ -8380,8 +8384,7 @@ def _new_client_name(label: Optional[str], hostname: Optional[str], ipv4_address
 
     for candidate in (label, hostname):
         name = candidate.strip() if isinstance(candidate, str) else ""
-        has_control = any(ord(char) < 32 or ord(char) == 127 for char in name)
-        if name and len(name) <= 64 and not has_control:
+        if name and len(name) <= 64 and not has_hidden_characters(name):
             return name
     return f"Client {ipv4_address}"
 
