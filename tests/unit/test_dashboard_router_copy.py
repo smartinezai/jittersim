@@ -428,6 +428,7 @@ def test_the_name_button_asks_for_the_name_only_and_copies_it():
     assert after["nameLabel"] == "Copy Wi-Fi name"
     assert during["routerCopyPending"] is False
     assert during["routerPasswordVerified"] is True
+    assert during["messages"][-1] == ["Router Wi-Fi name copied.", "success"]
 
 
 @NEEDS_NODE
@@ -445,6 +446,10 @@ def test_the_password_button_asks_for_the_password_and_copies_it_without_showing
     assert outcome["clipboardWrites"] == [PASSWORD]
     assert outcome["passwordLabel"] == "Copied"
     assert outcome["nameLabel"] == "Copy Wi-Fi name"
+    assert outcome["messages"][-1] == [
+        "Router Wi-Fi password copied. It stays on your clipboard until you copy something else.",
+        "success",
+    ]
     # Nothing the page shows or announces may hold the copied value.
     shown = json.dumps([outcome["written"], outcome["messages"], outcome["opened"]])
     assert PASSWORD not in shown
@@ -631,15 +636,29 @@ def test_the_copied_label_is_restored_by_the_latest_click_only():
 # --- the page around the buttons -----------------------------------------------------------
 
 
-def test_the_sidebar_has_both_buttons_under_the_router_wifi_switch():
-    block = re.search(
-        r'<div class="router-wifi-control">(.*?)\n        </div>\n      </div>', HTML, re.DOTALL
-    ).group(1)
-    assert block.index('id="router-wifi-toggle"') < block.index('class="router-wifi-copy"')
-    assert 'id="copy-wifi-name" type="button">Copy Wi-Fi name</button>' in block
-    assert 'id="copy-wifi-password" type="button">Copy Wi-Fi password</button>' in block
+def test_the_sidebar_has_both_buttons_in_their_own_row_under_the_router_wifi_switch():
+    match = re.search(
+        r'<div class="router-wifi-control">(.*?)\n        </div>\n'
+        r'        <div class="router-wifi-copy">(.*?)\n        </div>\n      </div>',
+        HTML,
+        re.DOTALL,
+    )
+    assert match
+    control, copy = match.groups()
+    assert 'id="router-wifi-toggle"' in control
+    assert "copy-wifi" not in control
+    assert 'id="copy-wifi-name" type="button">Copy Wi-Fi name</button>' in copy
+    assert 'id="copy-wifi-password" type="button">Copy Wi-Fi password</button>' in copy
     assert HTML.count('id="copy-wifi-name"') == 1
     assert HTML.count('id="copy-wifi-password"') == 1
+
+
+def test_the_existing_switch_row_keeps_its_flex_behaviour():
+    rule = re.search(r"\.router-wifi-control \{(.*?)\}", HTML, re.DOTALL).group(1)
+    assert "wrap" not in rule
+    assert "display: flex" in rule
+    copy_rule = re.search(r"\.router-wifi-copy \{(.*?)\}", HTML, re.DOTALL).group(1)
+    assert "grid-template-columns: 1fr 1fr" in copy_rule
 
 
 def test_both_buttons_are_wired_to_the_copy_helper():
@@ -666,6 +685,18 @@ def test_other_router_work_waits_for_a_running_copy(name):
 
 def test_the_copy_flag_is_declared_before_the_first_render():
     assert SCRIPT.index("let routerCopyPending") < SCRIPT.index("function updateCredentialStatus(")
+
+
+def test_the_response_is_only_returned_from_the_then_callback():
+    body = function_body("copyRouterWifi")
+    match = re.search(r"const pending = request\(.*?\)\.then\((.*?)\);\n", body, re.DOTALL)
+    assert match
+    # No block and no assignment: the callback hands the value on and does nothing else.
+    assert match.group(1) == (
+        "(response) => wantPassword ? response.result.password : response.result.ssid"
+    )
+    assert re.findall(r"\bresponse\b", body) == ["response"] * 3
+    assert re.findall(r"\bpending\b", body) == ["pending", "pending"]
 
 
 def test_the_copied_value_only_travels_through_the_clipboard_call():

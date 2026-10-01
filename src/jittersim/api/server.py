@@ -621,12 +621,12 @@ DASHBOARD_HTML = """<!doctype html>
     .credential-state { margin-top: 0.15rem; color: #b6c8db; font-size: 0.75rem; font-weight: 400; }
     .credential-state.accepted { color: #8de2bc; }
     .router-wifi-control {
-      display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem;
+      display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
       padding: 0.7rem 0.3rem; border-block: 1px solid #293e55;
     }
     .router-wifi-label { font-size: 0.85rem; font-weight: 550; }
     .router-wifi-status { margin: 0.2rem 0 0; font-size: 0.78rem; color: #b6c8db; }
-    .router-wifi-copy { flex: 1 0 100%; display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+    .router-wifi-copy { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
     .sidebar .router-wifi-copy button { min-height: 2.4rem; padding: 0.35rem 0.5rem; font-size: 0.8rem; text-align: center; }
     .sidebar .router-wifi-toggle {
       display: grid; place-items: center; flex: 0 0 2.8rem; min-height: 2.75rem;
@@ -861,10 +861,10 @@ DASHBOARD_HTML = """<!doctype html>
             aria-checked="false" aria-labelledby="router-wifi-label" aria-describedby="router-wifi-status" data-unknown="true" disabled>
             <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
           </button>
-          <div class="router-wifi-copy">
-            <button id="copy-wifi-name" type="button">Copy Wi-Fi name</button>
-            <button id="copy-wifi-password" type="button">Copy Wi-Fi password</button>
-          </div>
+        </div>
+        <div class="router-wifi-copy">
+          <button id="copy-wifi-name" type="button">Copy Wi-Fi name</button>
+          <button id="copy-wifi-password" type="button">Copy Wi-Fi password</button>
         </div>
       </div>
       <div class="sidebar-credentials">
@@ -6064,7 +6064,9 @@ DASHBOARD_HTML = """<!doctype html>
           button.textContent = label;
           button.copiedTimer = null;
         }, 2000);
-        showMessage(wantPassword ? "Router Wi-Fi password copied." : "Router Wi-Fi name copied.", "success");
+        showMessage(wantPassword ?
+          "Router Wi-Fi password copied. It stays on your clipboard until you copy something else." :
+          "Router Wi-Fi name copied.", "success");
       }, (error) => {
         if (passwordRevision === routerPasswordRevision && isRouterLoginFailure(error)) {
           routerPasswordVerified = false;
