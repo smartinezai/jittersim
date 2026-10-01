@@ -409,10 +409,31 @@ class ConfigRepository:
         )
         self._add_column_if_missing("progressions", "traffic_baseline_bytes", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing("service_quotas", "weight_percent", "INTEGER NOT NULL DEFAULT 100")
-        self._add_column_if_missing("domain_observations", "mac_address", "TEXT")
+        self._commit()
+        self._migrate_domain_observations()
         self._commit()
         self._prune_random_website_analytics(now=int(time.time()))
         self._commit()
+
+    def _migrate_domain_observations(self) -> None:
+        """Add the hardware address column and drop rows that can no longer be attributed.
+
+        Rows saved before the column existed have no hardware address. A device that is
+        protected already may have moved to another address since then so those rows could
+        show its lookups under an address that no longer points to it. They are a cache
+        that learns again so they are cleared once when any device is protected. The column
+        and the clearing happen in one step so a crash cannot leave the old rows behind.
+        """
+
+        with self.transaction():
+            added = self._add_column_if_missing("domain_observations", "mac_address", "TEXT")
+            protected = self._connection.execute(
+                "SELECT 1 FROM unaffected_devices LIMIT 1"
+            ).fetchone()
+            if added and protected is not None:
+                self._connection.execute(
+                    "DELETE FROM domain_observations WHERE mac_address IS NULL"
+                )
 
     def _migrate_unaffected_devices(self) -> None:
         """Upgrade the original protection list without losing saved identities."""
@@ -453,15 +474,21 @@ class ConfigRepository:
                         (device.mac_address, row["mac_address"]),
                     )
 
-    def _add_column_if_missing(self, table_name: str, column_name: str, column_definition: str) -> None:
+    def _add_column_if_missing(
+        self, table_name: str, column_name: str, column_definition: str
+    ) -> bool:
+        """Add a column an older database lacks and tell whether it was added."""
+
         columns = {
             row["name"]
             for row in self._connection.execute(f"PRAGMA table_info({table_name})").fetchall()
         }
-        if column_name not in columns:
-            self._connection.execute(
-                f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
-            )
+        if column_name in columns:
+            return False
+        self._connection.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
+        )
+        return True
 
     def save_profile(self, profile: Profile) -> None:
         """Insert or update one validated profile."""
@@ -2160,16 +2187,19 @@ class ConfigRepository:
             count = counts_by_device.get(ipv4_address, 0)
             if count >= _MAX_OBSERVATIONS_PER_DEVICE:
                 continue
-            observations.append(
-                DomainObservation(
-                    ipv4_address=ipv4_address,
-                    domain=row["domain"],
-                    query_count=row["query_count"],
-                    first_seen=row["first_seen"],
-                    last_seen=row["last_seen"],
-                    mac_address=row["mac_address"],
+            try:
+                observations.append(
+                    DomainObservation(
+                        ipv4_address=ipv4_address,
+                        domain=row["domain"],
+                        query_count=row["query_count"],
+                        first_seen=row["first_seen"],
+                        last_seen=row["last_seen"],
+                        mac_address=row["mac_address"],
+                    )
                 )
-            )
+            except (KeyError, TypeError, ValueError) as error:
+                raise StorageError("stored domain observation is malformed") from error
             counts_by_device[ipv4_address] = count + 1
         return tuple(observations)
 
