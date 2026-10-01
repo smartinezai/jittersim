@@ -172,9 +172,12 @@ companies. The name alone cannot say which app asked for it.
   domain is the last two labels or the last three when the second-to-last label
   is in a small built-in list of second-level suffixes such as `co.uk`. No
   dependency is added.
-- `cdn` and `unknown` rows get `seen_with`: up to two identified app names whose
-  `first_seen` is within 10 seconds of this name's `first_seen` for the same
-  device. The row labels it as a guess.
+- `cdn` and `tracker` and `unknown` rows get `seen_with`: up to two identified
+  app names whose `first_seen` is within 10 seconds of this name's `first_seen`
+  for the same device. Names of one app count once and the nearest app comes
+  first. When more than two apps share the window the hint is dropped because
+  it would be too vague. System and smart-home names neither get a hint nor
+  count as the app in a hint. The row labels it as a guess.
 - Each `unknown` or `cdn` row has a "What is this?" link to a web search for the
   domain. It opens in a new tab with `rel="noopener noreferrer"` and sends
   nothing until clicked. The Pi never contacts an outside service.
