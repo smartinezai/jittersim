@@ -467,8 +467,8 @@ def test_no_profile_disables_add_all():
         "label": "Add all to profile",
         "disabled": True,
         "domains": [],
-        "ariaLabel": "Add all 7 ImmoScout24 names to a profile",
-        "title": "Add all 7 ImmoScout24 names to a profile",
+        "ariaLabel": "Add all to profile: 7 ImmoScout24 names (no profile available)",
+        "title": "Add all to profile: 7 ImmoScout24 names (no profile available)",
     }
 
     assert profile_action(immo(), None) == expected
@@ -484,8 +484,8 @@ def test_every_name_already_in_the_profile_disables_the_button_and_says_so():
         "label": "All already in Slow",
         "disabled": True,
         "domains": [],
-        "ariaLabel": "All 7 ImmoScout24 names are already in Slow",
-        "title": "All 7 ImmoScout24 names are already in Slow",
+        "ariaLabel": "All already in Slow: 7 ImmoScout24 names",
+        "title": "All already in Slow: 7 ImmoScout24 names",
     }
 
 
@@ -496,7 +496,7 @@ def test_missing_names_are_offered_and_the_ones_already_in_are_left_out():
     assert action["label"] == "Add all to profile"
     assert action["disabled"] is False
     assert action["domains"] == [d for d, _ in IMMO_NAMES if d != "sso.immobilienscout24.de"]
-    assert action["ariaLabel"] == "Add all 6 ImmoScout24 names to Slow"
+    assert action["ariaLabel"] == "Add all to profile: 6 ImmoScout24 names to Slow"
 
 
 @NODE
@@ -1213,9 +1213,12 @@ def test_the_action_buttons_are_named_by_the_group_and_the_count():
 
     out = run_dashboard(steps, [example_device()])
 
-    assert out["start"] == ["Add all 7 ImmoScout24 names to Slow", "Block all 7 ImmoScout24 names"]
+    assert out["start"] == [
+        "Add all to profile: 7 ImmoScout24 names to Slow",
+        "Block all 7 ImmoScout24 names",
+    ]
     assert out["after"] == [
-        "All 7 ImmoScout24 names are already in Slow",
+        "All already in Slow: 7 ImmoScout24 names",
         "Unblock all 7 ImmoScout24 names",
     ]
 
@@ -1440,6 +1443,50 @@ def test_the_category_line_of_a_repeated_name_has_no_name_in_it_when_categories_
 
     assert [len(lines) for lines in out] == [1, 1, 1]
     assert all(len(lines[0]) == 1 and lines[0][0].startswith("span.") for lines in out)
+
+
+@NODE
+def test_every_action_name_starts_with_the_text_the_button_shows():
+    # WCAG 2.5.3 label in name. A voice user says the visible text so the name must hold it.
+    profiles = [None, SLOW, {"id": "p", "name": "P", "website_domains": []},
+                {"id": "q", "name": "Q", "website_domains": [d for d, _ in IMMO_NAMES]}]
+    for kind in (None, "app", "system", "cdn"):
+        for flags in ((False,) * 7, (True,) * 7, (True, False) + (False,) * 5):
+            items = immo()
+            for value, flag in zip(items, flags):
+                value["globally_blocked"] = flag
+            group = json.dumps(group_of(items, kind=kind))
+            for expression in ["groupBlockAction(%s)" % group, "groupUnblockAction(%s)" % group]:
+                action = evaluate(expression)
+                if action is not None:
+                    assert action["ariaLabel"].startswith(action["label"]), action
+            for profile in profiles:
+                action = evaluate("groupProfileAction(%s, %s)" % (group, json.dumps(profile)))
+                assert action["ariaLabel"].startswith(action["label"]), action
+
+
+@NODE
+def test_every_rendered_group_button_has_a_name_that_starts_with_its_visible_text():
+    steps = """
+      const parts = groupParts(cards()[0], 0);
+      const names = () => [parts.profileButton, parts.blockButton, parts.unblockButton]
+        .filter((button) => !button.hidden)
+        .map((button) => [button.textContent, button.attrs["aria-label"]]);
+      const result = [names()];
+      await click(parts.blockButton);
+      result.push(names());
+      await click(parts.profileButton);
+      result.push(names());
+      console.log(JSON.stringify(result));
+    """
+    app_items = with_labels(kinded(immo(), "app"))
+
+    out = run_dashboard(steps, [device("192.168.50.124", app_items)])
+
+    assert len(out) == 3
+    for states in out:
+        for visible, name in states:
+            assert name.startswith(visible), (visible, name)
 
 
 def label_parts(parts, group_name, uniform):

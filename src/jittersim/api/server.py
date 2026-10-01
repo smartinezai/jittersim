@@ -3445,14 +3445,14 @@ DASHBOARD_HTML = """<!doctype html>
     function groupProfileAction(group, profile) {
       const count = group.names.length;
       if (!profile) {
-        const text = "Add all " + groupSubject(group, count) + " to a profile";
+        const text = "Add all to profile: " + groupSubject(group, count) + " (no profile available)";
         return { label: "Add all to profile", disabled: true, domains: [], ariaLabel: text, title: text };
       }
       const missing = group.names
         .map((observation) => observation.domain)
         .filter((domain) => !profileButtonState(domain, profile).disabled);
       if (missing.length === 0) {
-        const text = "All " + groupSubject(group, count) + " are already in " + profile.name;
+        const text = "All already in " + profile.name + ": " + groupSubject(group, count);
         return {
           label: "All already in " + profile.name,
           disabled: true,
@@ -3461,7 +3461,7 @@ DASHBOARD_HTML = """<!doctype html>
           title: text
         };
       }
-      const text = "Add all " + groupSubject(group, missing.length) + " to " + profile.name;
+      const text = "Add all to profile: " + groupSubject(group, missing.length) + " to " + profile.name;
       const note = groupLimitNote(missing.length);
       return {
         label: "Add all to profile",
