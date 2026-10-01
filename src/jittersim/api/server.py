@@ -686,6 +686,23 @@ DASHBOARD_HTML = """<!doctype html>
     .sidebar-nav a[aria-current="page"] { background: #1b3a5c; color: #fff; }
     .sidebar-nav a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     .nav-chip { padding: 0.05rem 0.45rem; border-radius: 999px; background: #243b57; color: #dcecff; font-size: 0.74rem; }
+    .sidebar-status {
+      display: grid; gap: 0.25rem; padding: 0.35rem 0.6rem; border: 1px solid var(--line);
+      border-radius: 0.5rem; font-size: 0.76rem; line-height: 1.3;
+    }
+    .sidebar-status p, .sidebar-status ul { margin: 0; }
+    .sidebar .status-line { color: var(--muted); overflow-wrap: anywhere; }
+    .sidebar .status-line.status-on { color: #8de2bc; }
+    .sidebar-status .status-devices { margin: 0; padding: 0; border: 0; }
+    .status-devices summary { color: #e7eef8; font-weight: 550; cursor: pointer; }
+    .status-devices ul {
+      display: grid; gap: 0.25rem; max-height: 8rem; overflow-y: auto; margin-top: 0.3rem;
+      padding: 0; list-style: none;
+    }
+    .status-devices li { font-size: 0.74rem; overflow-wrap: anywhere; }
+    .status-device-name { color: #e7eef8; }
+    .status-device-profile, .status-more { color: var(--muted); font-size: 0.72rem; }
+    .status-more { margin-top: 0.4rem; }
     .sidebar-footer { display: grid; gap: 0.6rem; margin-top: auto; }
     .sidebar-operate, .sidebar-actions { display: grid; gap: 0.5rem; }
     .sidebar-credentials { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
@@ -841,6 +858,16 @@ DASHBOARD_HTML = """<!doctype html>
         <li><a href="#diagnostics" data-page-link="diagnostics">Diagnostics</a></li>
       </ul>
     </nav>
+    <section id="sidebar-status" class="sidebar-status" aria-label="Current status" hidden>
+      <p id="status-general" class="status-line"></p>
+      <p id="status-devices-plain" class="status-line" hidden></p>
+      <details id="status-devices" class="status-devices" hidden>
+        <summary id="status-devices-summary"></summary>
+        <ul id="status-devices-list"></ul>
+        <p id="status-devices-more" class="status-more" hidden></p>
+      </details>
+      <p id="status-lists" class="status-line" hidden></p>
+    </section>
     <div class="sidebar-footer">
       <div class="sidebar-operate">
         <div class="sidebar-actions">
@@ -1982,6 +2009,7 @@ DASHBOARD_HTML = """<!doctype html>
       element("uplink-state").textContent = state;
       element("runtime-summary").textContent = message;
       element("runtime-summary").className = "runtime-summary unknown";
+      renderSidebarStatus();
     }
 
     async function loadPrivateDataPanel(panelId, load) {
@@ -2255,12 +2283,22 @@ DASHBOARD_HTML = """<!doctype html>
     window.setInterval(syncRememberedCredentials, 60000);
     let profiles = [];
     let generalProfileState = null;
+    // Each input of the sidebar block counts as loaded once it is not null.
+    // The profiles and the service lists start empty so they have a flag.
+    let lastRuntimeState = null;
+    let serviceListsState = [];
+    let serviceListsLoaded = false;
+    let profilesLoaded = false;
     let savedProfileBusy = null;
     let networkActionBusy = false;
+    // Counts the network actions started. A state answer that was asked for before an
+    // action started describes the old network so loadState drops it.
+    let networkActionRevision = 0;
     let groups = [];
     let savedDevices = [];
     let connectedClients = [];
     let lastConnectedData = null;
+    let connectedClientsAvailable = false;
     const connectedDrafts = new Map();
     const clearConnectedDrafts = new Set();
     let observedDomainsByDevice = {};
@@ -2744,7 +2782,187 @@ DASHBOARD_HTML = """<!doctype html>
       renderSavedProfiles();
     }
 
+    // Works out the sidebar lines from data the page already holds.
+    // A saved change sets the observed state to "unknown" and the running scheduler turns
+    // it back to "applied" within about a second. So "unknown" while running still means
+    // that devices are affected and a saved general profile is taking effect.
+    function sidebarStatus(input) {
+      const visible = !!input.adminTokenVerified;
+      const loaded = input.loaded || {};
+      const ready = ["runtime", "general", "clients", "profiles", "lists"]
+        .every((name) => loaded[name] === true);
+      if (!ready) {
+        return {
+          visible,
+          loading: true,
+          general: {text: "Loading…", tone: "muted"},
+          devices: {summary: "", items: [], more: 0},
+          lists: {text: ""}
+        };
+      }
+      const state = input.runtimeState || "unknown";
+      const running = input.running === true;
+      const generalState = input.generalState || null;
+      const generalProfile = generalState && generalState.profile ? generalState.profile : null;
+      const profiles = input.profiles || [];
+      const clients = input.clients || [];
+      const serviceLists = input.serviceLists || [];
+      const steady = running && (state === "applied" || state === "unknown");
+      const generalInEffect = !!generalProfile && steady &&
+        (generalState.active === true || state === "unknown");
+      const generalName = generalProfile ? generalProfile.name || generalProfile.id : "";
+
+      let general = {text: "General profile: none", tone: "muted"};
+      if (generalProfile) {
+        general = generalInEffect
+          ? {text: "General profile: " + generalName + " · active", tone: "on"}
+          : {
+              text: "General profile: " + generalName + " · " +
+                (state === "reset" ? "paused" : "saved, not applied"),
+              tone: "muted"
+            };
+      }
+
+      const quiet = (summary) => ({summary, items: [], more: 0});
+      let devices;
+      if (state === "reset") {
+        devices = quiet("Profiles off");
+      } else if (state === "applying" || state === "resetting") {
+        devices = quiet("Changing…");
+      } else if (state === "error") {
+        devices = quiet("Last network action failed");
+      } else if (!running) {
+        devices = quiet("Not started yet");
+      } else if (input.clientsAvailable !== true) {
+        devices = quiet("Connected devices unavailable");
+      } else {
+        const nameOf = (client) => client.display_name || client.mac_address || "Unknown device";
+        const profileNameOf = (id) => {
+          const match = profiles.find((profile) => profile.id === id);
+          return match ? match.name || id : id || "";
+        };
+        const affected = generalInEffect
+          ? clients
+              .filter((client) => !client.unaffected && client.association_verified !== false)
+              .map((client) => ({name: nameOf(client), profile: generalName}))
+          : clients
+              .filter((client) => !client.unaffected && client.assigned_device_id)
+              .map((client) => ({
+                name: nameOf(client),
+                profile: profileNameOf(client.group_profile_id || client.assigned_profile_id)
+              }));
+        const unassigned = !generalInEffect && clients.length > 0 &&
+          !clients.some((client) => client.assigned_device_id);
+        devices = {
+          summary: affected.length
+            ? affected.length + (affected.length === 1 ? " device affected" : " devices affected")
+            : unassigned ? "No device has its own profile" : "No connected device is affected",
+          items: affected.slice(0, 5),
+          more: Math.max(0, affected.length - 5)
+        };
+      }
+
+      const enabledLists = steady
+        ? serviceLists.filter((serviceList) => serviceList.enabled).map((serviceList) => serviceList.name)
+        : [];
+      return {
+        visible,
+        loading: false,
+        general,
+        devices,
+        lists: {
+          text: enabledLists.length
+            ? "Service lists: " + enabledLists.join(" · ") + " (every unprotected device)"
+            : ""
+        }
+      };
+    }
+
+    // Forgets everything the block was built from so that a new check of the token cannot
+    // show data from before.
+    function clearSidebarInputs() {
+      lastRuntimeState = null;
+      generalProfileState = null;
+      lastConnectedData = null;
+      connectedClients = [];
+      connectedClientsAvailable = false;
+      serviceListsState = [];
+      serviceListsLoaded = false;
+      profilesLoaded = false;
+    }
+
+    function renderSidebarStatus() {
+      const view = sidebarStatus({
+        adminTokenVerified,
+        loaded: {
+          runtime: lastRuntimeState !== null,
+          general: generalProfileState !== null,
+          clients: lastConnectedData !== null,
+          profiles: profilesLoaded,
+          lists: serviceListsLoaded
+        },
+        runtimeState: lastRuntimeState ? lastRuntimeState.observed_state : null,
+        running: !!lastRuntimeState && lastRuntimeState.running === true,
+        generalState: generalProfileState,
+        profiles,
+        clients: connectedClients,
+        clientsAvailable: lastConnectedData !== null && connectedClientsAvailable,
+        serviceLists: serviceListsState
+      });
+      element("sidebar-status").hidden = !view.visible;
+      const generalLine = element("status-general");
+      const devicesBlock = element("status-devices");
+      const devicesPlain = element("status-devices-plain");
+      const devicesSummary = element("status-devices-summary");
+      const list = element("status-devices-list");
+      const more = element("status-devices-more");
+      const listsLine = element("status-lists");
+      if (!view.visible) {
+        // Nothing private stays in the page while the dashboard is locked.
+        clearSidebarInputs();
+        generalLine.textContent = "";
+        generalLine.className = "status-line";
+        devicesBlock.hidden = true;
+        devicesPlain.hidden = true;
+        devicesPlain.textContent = "";
+        devicesSummary.textContent = "";
+        list.replaceChildren();
+        more.hidden = true;
+        more.textContent = "";
+        listsLine.hidden = true;
+        listsLine.textContent = "";
+        return;
+      }
+      generalLine.textContent = view.general.text;
+      generalLine.className = "status-line" + (view.general.tone === "on" ? " status-on" : "");
+      // Only a list of devices opens and closes. Anything else is one plain line.
+      const hasItems = view.devices.items.length > 0;
+      devicesBlock.hidden = !hasItems;
+      devicesSummary.textContent = hasItems ? view.devices.summary : "";
+      devicesPlain.hidden = hasItems || view.loading;
+      devicesPlain.textContent = hasItems || view.loading ? "" : view.devices.summary;
+      list.replaceChildren(...view.devices.items.map((item) => {
+        const row = document.createElement("li");
+        const name = document.createElement("span");
+        name.className = "status-device-name";
+        name.textContent = item.name;
+        row.appendChild(name);
+        if (item.profile) {
+          const profile = document.createElement("span");
+          profile.className = "status-device-profile";
+          profile.textContent = item.profile;
+          row.appendChild(profile);
+        }
+        return row;
+      }));
+      more.hidden = view.devices.more === 0;
+      more.textContent = view.devices.more ? "+" + view.devices.more + " more" : "";
+      listsLine.hidden = !view.lists.text;
+      listsLine.textContent = view.lists.text;
+    }
+
     function renderRuntimeSummary(state) {
+      lastRuntimeState = state;
       const labels = {
         unknown: "No network action has run yet",
         applying: "Applying configuration...",
@@ -2756,6 +2974,7 @@ DASHBOARD_HTML = """<!doctype html>
       const summary = element("runtime-summary");
       summary.textContent = labels[state.observed_state] || "Runtime state unavailable";
       summary.className = "runtime-summary " + state.observed_state;
+      renderSidebarStatus();
     }
 
     function connectedRowState(device, context) {
@@ -2800,6 +3019,9 @@ DASHBOARD_HTML = """<!doctype html>
       const devices = data.devices || [];
       connectedClients = devices;
       lastConnectedData = data;
+      connectedClientsAvailable = data.available !== false &&
+        data.association_status_available !== false;
+      renderSidebarStatus();
       const currentMacs = new Set(devices.map((device) => device.mac_address));
       for (const mac of connectedDrafts.keys()) if (!currentMacs.has(mac)) connectedDrafts.delete(mac);
       updateGroupMemberOptions();
@@ -4212,6 +4434,9 @@ DASHBOARD_HTML = """<!doctype html>
 
     function renderServiceLists(data) {
       const lists = data.service_lists || [];
+      serviceListsState = lists;
+      serviceListsLoaded = true;
+      renderSidebarStatus();
       const container = element("service-list-list");
       element("service-list-count").textContent = lists.length +
         (lists.length === 1 ? " service list" : " service lists");
@@ -4636,6 +4861,8 @@ DASHBOARD_HTML = """<!doctype html>
     async function loadProfiles() {
       const data = await request("/api/profiles", "GET");
       profiles = data.profiles;
+      profilesLoaded = true;
+      renderSidebarStatus();
       element("profiles").textContent = JSON.stringify(profiles, null, 2);
       [
         "schedule-profile",
@@ -4678,6 +4905,7 @@ DASHBOARD_HTML = """<!doctype html>
       const data = await request("/api/general-profile", "GET");
       const previousId = generalProfileState && generalProfileState.profile && generalProfileState.profile.id;
       generalProfileState = data;
+      renderSidebarStatus();
       if (data.profile && previousId !== data.profile.id) {
         element("general-profile-select").value = data.profile.id;
       }
@@ -4917,7 +5145,9 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     async function loadState() {
+      const revision = networkActionRevision;
       const data = await request("/api/state", "GET");
+      if (revision !== networkActionRevision) return;
       element("state").textContent = JSON.stringify(data.state, null, 2);
       renderRuntimeSummary(data.state);
     }
@@ -5157,6 +5387,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     function setActionBusy(busy, path) {
       networkActionBusy = busy;
+      if (busy) networkActionRevision += 1;
       const applyButton = element("apply-button");
       const resetButton = element("reset-button");
       applyButton.disabled = busy || !helperConfigured;
@@ -5190,6 +5421,8 @@ DASHBOARD_HTML = """<!doctype html>
         refreshAfterSuccess(successMessage + (data.warning ? " " + data.warning : ""));
       } catch (error) {
         showMessage(error.message, "error");
+        // A failed action can still have changed the state so the page reads it again.
+        loadPrivateDataPanel("state", loadState);
       } finally {
         setActionBusy(false, path);
       }
@@ -6334,12 +6567,14 @@ DASHBOARD_HTML = """<!doctype html>
     element("random-website-days").addEventListener("change", loadRandomWebsiteAnalytics);
     element("random-website-refresh").addEventListener("click", loadRandomWebsiteAnalytics);
 
-    window.setInterval(() => {
-      if (adminTokenVerified && !networkActionBusy) {
-        loadConnectedDevices();
-        loadPrivateDataPanel("general-profile-status", loadGeneralProfile);
-      }
-    }, 5000);
+    function pollLiveStatus() {
+      if (!adminTokenVerified || networkActionBusy) return;
+      loadConnectedDevices();
+      loadPrivateDataPanel("general-profile-status", loadGeneralProfile);
+      // Another tab or the command line can reset the network so the state is read again.
+      if (!document.hidden) loadPrivateDataPanel("state", loadState);
+    }
+    window.setInterval(pollLiveStatus, 5000);
     window.setInterval(() => { if (adminTokenVerified) loadTimers(); }, 5000);
     window.setInterval(() => { if (adminTokenVerified) loadProgressions(); }, 5000);
     window.setInterval(() => { if (adminTokenVerified) loadQuotas(); }, 5000);
@@ -7050,6 +7285,15 @@ class ControlServer(HTTPServer):
             if station.get("ipv4_address")
         }
 
+    def _runtime_state_with_running(self, state: Optional[RuntimeState] = None) -> Dict[str, Any]:
+        """Return the runtime state plus whether the scheduler keeps applying changes."""
+
+        payload = _runtime_state_payload(
+            self.repository.get_runtime_state() if state is None else state
+        )
+        payload["running"] = self.scheduler is not None and self.scheduler.is_active
+        return payload
+
     def response_for(self, path: str, query: str = "") -> Tuple[int, str, bytes]:
         """Build the response body for a supported GET path."""
 
@@ -7391,7 +7635,7 @@ class ControlServer(HTTPServer):
             return (
                 HTTPStatus.OK,
                 "application/json",
-                _json_bytes({"state": _runtime_state_payload(self.repository.get_runtime_state())}),
+                _json_bytes({"state": self._runtime_state_with_running()}),
             )
         if path == "/api/action-history":
             return (
@@ -7502,7 +7746,7 @@ class ControlServer(HTTPServer):
             runtime = self.repository.get_runtime_state()
             diagnostics = {
                 "checked_at": int(time.time()),
-                "runtime": _runtime_state_payload(runtime),
+                "runtime": self._runtime_state_with_running(runtime),
                 "helper_available": self.helper_client is not None,
                 "connected_clients": None,
                 "traffic_counters": None,
@@ -8961,7 +9205,7 @@ class ControlServer(HTTPServer):
             _json_bytes(
                 {
                     "result": result,
-                    "state": _runtime_state_payload(state),
+                    "state": self._runtime_state_with_running(state),
                     "unverified_device_ids": list(plan.unverified_device_ids),
                     "warning": (
                         "Profiles were skipped for devices whose current Wi-Fi identity could not be verified: "
@@ -9015,7 +9259,7 @@ class ControlServer(HTTPServer):
             last_error=None,
         )
         return HTTPStatus.OK, "application/json", _json_bytes(
-            {"result": result, "state": _runtime_state_payload(state)}
+            {"result": result, "state": self._runtime_state_with_running(state)}
         )
 
     def is_authorized(self, authorization_header: Optional[str]) -> bool:

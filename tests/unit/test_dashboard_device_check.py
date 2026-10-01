@@ -56,6 +56,7 @@ function setButtonBusy(button, busy) {
 }
 async function checkAdminToken() {tokenChecks++}
 function renderConnectedDevices(data) {rendered.push(data)}
+function renderSidebarStatus() {}
 async function request(path) {
   requests.push(path);
   return await responses[path]();

@@ -163,6 +163,16 @@ class RuntimeScheduler:
             finally:
                 self._rolls = previous_rolls
 
+    @property
+    def is_active(self) -> bool:
+        """Tell whether scheduled reapplication is running.
+
+        This reads one flag without taking the lock so that polling never waits
+        for an apply that is in flight.
+        """
+
+        return not self._paused
+
     def pause(self) -> None:
         """Pause scheduled reapplication after a manual network reset."""
 
