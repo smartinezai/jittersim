@@ -277,9 +277,14 @@ one by one hides what the device is doing.
   can reuse it.
 - `registrable_domain` keeps the owner's label. It knows the common two-part public
   suffixes (`co.uk` and `co.kr` and `com.ar` and so on) and a list of multi-tenant
-  hosting suffixes (`github.io` and `herokuapp.com` and `cloudfront.net` and
-  `s3.amazonaws.com` and so on) where the tenant label stays so `a.github.io` and
-  `b.github.io` are different groups. A name that is only a suffix is its own group.
+  hosting suffixes (`github.io` and `herokuapp.com` and `cloudfront.net` and so on)
+  where the tenant label stays so `a.github.io` and `b.github.io` are different groups.
+  Only a suffix with the customer label directly left of it belongs in that list so
+  `fastly.net` and `edgekey.net` are not in it. Amazon names carry a region so a few
+  patterns keep the customer and drop the region (`<bucket>.s3.<region>.amazonaws.com`
+  and `<id>.execute-api.<region>.amazonaws.com` and `<lb>.<region>.elb.amazonaws.com`
+  and `ec2-1-2-3-4.<region>.compute.amazonaws.com`). Any other Amazon name keeps two
+  labels. A name that is only a suffix is its own group.
 - The card shows one row per group per device with the group name and the number
   of names and the total queries. A group of one name is a plain row with no
   disclosure. Groups sort by total queries then by name without looking at the case.
@@ -291,19 +296,27 @@ one by one hides what the device is doing.
   `div` with an id that is unique per device and group and the `hidden` attribute while
   the group is closed.
 - Expanding a group shows its names with the per-name buttons including the
-  Block or Unblock state from piece 4. A row skips its label line when the label only
-  repeats the group name.
+  Block or Unblock state from piece 4. A row skips a label name that only repeats the
+  group name. It also skips the category when every row of the group has the same one.
+  A category that differs from the other rows stays because it tells a user which name
+  is safe to block (Windows `Connectivity check` against `Windows services`).
 - The header has group actions: **Add all to profile** (the device card's selected
   profile) and **Block all** or **Unblock all**. The label is **Unblock all** when
   every name is blocked and **Block remaining** when some are. They call the
   existing endpoints with a `domains` list. The call saves once so it is all or
   nothing and one invalid name rejects the whole call. Each action button has an
-  `aria-label` that names the group and the count such as `Block all 7 ImmoScout24
-  names` and `Add all 7 ImmoScout24 names to Fast`.
+  `aria-label` that starts with the text the button shows and then names the group and
+  the count such as `Block all 7 ImmoScout24 names` and `Add all to profile: 7
+  ImmoScout24 names to Fast` (WCAG label in name).
 - A group of system or cdn names has no **Block all** or **Block remaining**. One click
   would put connectivity checks and push and time sync into the block list and the
-  device would show no internet. The button is disabled with a note on it. **Unblock
-  all** and **Add all to profile** stay and so do the per-name buttons.
+  device would show no internet. The button is disabled and the reason is a visible
+  line under the header (`Blocking a whole group of system or content delivery names
+  could cut the device off the internet. Block single names instead.`) that the
+  disabled button names with `aria-describedby` because a disabled button is skipped by
+  Tab. When such a group is partly blocked an enabled **Unblock blocked names** button
+  removes the blocked names in one call. **Unblock all** and **Add all to profile**
+  stay and so do the per-name buttons.
 - Open groups stay open across the dashboard refresh. The open keys are kept per
   device address and group key (`<address>|<group key>`) in a module-level set that
   a click on the toggle updates. A render reads the set so a re-rendered group opens
@@ -327,14 +340,15 @@ one by one hides what the device is doing.
 
 **Tests.** `group_domain` for Netflix across two registrable domains and
 ImmoScout24 across several subdomains including `s24-media` and a `co.uk` style
-suffix and a single-name group. Every listed two-part suffix and hosting suffix keeps
-two sites apart. System and iot names group by their label and cdn and tracker names
-by their registrable domain. The endpoints with a `domains` list: the bound of 64 and
+suffix and a single-name group. Every entry of the two suffix tables keeps two sites
+apart (the tests walk the real tables and a written-out list so dropping an entry
+fails). Real Amazon hostnames keep their customer. System and iot names group by their
+label and cdn and tracker names by their registrable domain. The endpoints with a `domains` list: the bound of 64 and
 duplicates and atomicity and one invalid name and the 100 name caps. Node tests of the
 pure group functions and of the real `renderObservations` and click handlers on a small
 fake DOM: collapsed by default and counts and order and open state surviving a
-re-render and the toggle and the action buttons being siblings and their names and
-states and request bodies. The fixture seed (`JITTERSIM_BROWSER_TEST_OBSERVATIONS=1`)
+re-render and the toggle and the action buttons being siblings in Tab order and their
+names and states and request bodies and the visible note for a disabled block button. The fixture seed (`JITTERSIM_BROWSER_TEST_OBSERVATIONS=1`)
 holds the seven ImmoScout24 names and the two Netflix names for a look in a browser.
 There is no Playwright journey for this piece.
 
