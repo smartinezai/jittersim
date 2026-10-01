@@ -4,11 +4,27 @@ import re
 from typing import Optional
 
 UNKNOWN_DEVICE_NAME = "Unknown device"
-_AUTOMATIC_NAME = re.compile(r"^Client \d{1,3}(?:\.\d{1,3}){3}$")
+_AUTOMATIC_NAME = re.compile(r"^Client [0-9]{1,3}(?:\.[0-9]{1,3}){3}$")
+# Control characters (C0 and DEL) and the bidirectional controls that can make a
+# name read as something else on screen. Emoji and accents are not listed.
+_HIDDEN_CHARACTERS = re.compile("[\x00-\x1f\x7f‎‏‪-‮⁦-⁩]")
 
 
 def _text(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
+
+
+def has_hidden_characters(name: str) -> bool:
+    """Tell a name that holds a control character or a text direction control."""
+
+    return _HIDDEN_CHARACTERS.search(name) is not None
+
+
+def _usable(value: object) -> str:
+    """Return the trimmed text or an empty string when it cannot be shown as a name."""
+
+    text = _text(value)
+    return "" if has_hidden_characters(text) else text
 
 
 def is_automatic_device_name(name: object) -> bool:
@@ -26,13 +42,14 @@ def resolve_device_name(
     """Return the best display name.
 
     A name the user typed beats a hostname the device announces. The automatic
-    placeholder counts as no name at all.
+    placeholder counts as no name at all and so does a name that holds a hidden
+    control character.
     """
 
-    label = _text(saved_label)
+    label = _usable(saved_label)
     if label:
         return label
-    saved = _text(saved_name)
+    saved = _usable(saved_name)
     if saved and not is_automatic_device_name(saved):
         return saved
-    return _text(hostname) or UNKNOWN_DEVICE_NAME
+    return _usable(hostname) or UNKNOWN_DEVICE_NAME

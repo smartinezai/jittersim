@@ -28,7 +28,11 @@ from jittersim.config.device_labels import (
     normalize_device_mac,
     normalize_device_type,
 )
-from jittersim.config.device_names import UNKNOWN_DEVICE_NAME, resolve_device_name
+from jittersim.config.device_names import (
+    UNKNOWN_DEVICE_NAME,
+    has_hidden_characters,
+    resolve_device_name,
+)
 from jittersim.config.exemptions import UnaffectedDevice, normalize_exempt_mac
 from jittersim.config.models import (
     DataLimit,
@@ -3444,7 +3448,7 @@ DASHBOARD_HTML = """<!doctype html>
           : "Each device keeps its profile";
         heading.append(title, profile);
         const members = document.createElement("span");
-        members.textContent = "Devices: " + group.devices.map((device) => device.name).join(", ");
+        members.textContent = "Devices: " + group.devices.map((device) => deviceDisplayName(device)).join(", ");
         const actions = document.createElement("div");
         actions.className = "quota-actions";
         const editButton = document.createElement("button");
@@ -4255,7 +4259,7 @@ DASHBOARD_HTML = """<!doctype html>
       (data.rows || []).forEach((item) => {
         const row = document.createElement("tr");
         const device = document.createElement("td");
-        device.textContent = item.device_name + " (" + item.device_id + ")";
+        device.textContent = (item.display_name || item.device_name) + " (" + item.device_id + ")";
         const domain = document.createElement("td");
         domain.className = "analytics-domain";
         domain.textContent = item.domain;
@@ -4308,7 +4312,7 @@ DASHBOARD_HTML = """<!doctype html>
         (deviceData.devices || []).forEach((device) => {
           const option = document.createElement("option");
           option.value = device.id;
-          option.textContent = device.name + " (" + device.id + ")";
+          option.textContent = deviceDisplayName(device) + " (" + device.id + ")";
           option.selected = device.id === selectedDevice;
           deviceSelect.appendChild(option);
         });
@@ -5420,13 +5424,30 @@ def _device_display_name(
     return resolve_device_name(saved_label=label, saved_name=device.name)
 
 
+def _device_title(
+    device: Optional[Device], labels_by_mac: Dict[str, Dict[str, str]], fallback_id: str
+) -> str:
+    """Name a device in a payload that lists many of them.
+
+    An unnamed device shows its address so that two of them never look the same.
+    A device that no longer exists shows the id it was saved under.
+    """
+
+    if device is None:
+        return fallback_id
+    name = _device_display_name(device, labels_by_mac)
+    if name == UNKNOWN_DEVICE_NAME:
+        return f"{UNKNOWN_DEVICE_NAME} ({device.ipv4_address})"
+    return name
+
+
 def _device_payload(
-    device: Device, *, labels_by_mac: Optional[Dict[str, Dict[str, str]]] = None
+    device: Device, *, labels_by_mac: Dict[str, Dict[str, str]]
 ) -> Dict[str, Any]:
     return {
         "id": device.id,
         "name": device.name,
-        "display_name": _device_display_name(device, labels_by_mac or {}),
+        "display_name": _device_display_name(device, labels_by_mac),
         "ipv4_address": str(device.ipv4_address),
         "profile_id": device.profile_id,
         "mac_address": device.mac_address,
@@ -5493,12 +5514,13 @@ def _device_group_payload(
     group: DeviceGroup,
     *,
     repository: ConfigRepository,
+    labels_by_mac: Dict[str, Dict[str, str]],
 ) -> Dict[str, Any]:
     """Build the dashboard representation of one device group."""
 
     profile = repository.get_profile(group.profile_id) if group.profile_id else None
     devices = [
-        _device_payload(device)
+        _device_payload(device, labels_by_mac=labels_by_mac)
         for device_id in group.device_ids
         if (device := repository.get_device(device_id)) is not None
     ]
@@ -5533,11 +5555,7 @@ def _data_limit_payload(
     return {
         **asdict(data_limit),
         "reset_times": list(data_limit.reset_times),
-        "device_name": (
-            _device_display_name(device, labels_by_mac)
-            if device is not None
-            else data_limit.device_id
-        ),
+        "device_name": _device_title(device, labels_by_mac, data_limit.device_id),
         "profile_name": profile.name if profile is not None else data_limit.profile_id,
         "remaining_bytes": max(0, data_limit.limit_bytes - data_limit.used_bytes),
         "reached": data_limit.used_bytes >= data_limit.limit_bytes,
@@ -5578,9 +5596,7 @@ def _service_quota_payload(
         **asdict(quota),
         "domains": list(quota.domains),
         "reset_times": list(quota.reset_times),
-        "device_name": (
-            _device_display_name(device, labels_by_mac) if device is not None else quota.device_id
-        ),
+        "device_name": _device_title(device, labels_by_mac, quota.device_id),
         "profile_name": profile.name if profile is not None else quota.profile_id,
         "remaining_bytes": max(0, quota.limit_bytes - quota.used_bytes),
         "reached": quota.used_bytes >= quota.limit_bytes,
@@ -5596,11 +5612,7 @@ def _service_assignment_payload(
     return {
         **asdict(assignment),
         "domains": list(assignment.domains),
-        "device_name": (
-            _device_display_name(device, labels_by_mac)
-            if device is not None
-            else assignment.device_id
-        ),
+        "device_name": _device_title(device, labels_by_mac, assignment.device_id),
         "profile_name": profile.name if profile is not None else assignment.profile_id,
     }
 
@@ -5645,9 +5657,7 @@ def _time_quota_payload(
         **asdict(quota),
         "domains": list(quota.domains),
         "reset_times": list(quota.reset_times),
-        "device_name": (
-            _device_display_name(device, labels_by_mac) if device is not None else quota.device_id
-        ),
+        "device_name": _device_title(device, labels_by_mac, quota.device_id),
         "profile_name": profile.name if profile is not None else quota.profile_id,
         "remaining_seconds": max(0, quota.limit_seconds - quota.used_seconds),
         "window_remaining_seconds": (
@@ -5679,11 +5689,7 @@ def _progression_payload(
     )
     return {
         **asdict(progression),
-        "device_name": (
-            _device_display_name(device, labels_by_mac)
-            if device is not None
-            else progression.device_id
-        ),
+        "device_name": _device_title(device, labels_by_mac, progression.device_id),
         "start_profile_name": (
             start_profile.name
             if start_profile is not None
@@ -5935,10 +5941,11 @@ class ControlServer(HTTPServer):
         if self.helper_client is None:
             return []
         try:
-            stations = self.helper_client.connected_device_snapshot()["devices"]
-        except (HelperClientError, AttributeError, KeyError, TypeError):
+            stations = station_snapshot(self.helper_client)["devices"]
+            return [station for station in stations if isinstance(station, dict)]
+        except (AttributeError, HelperClientError, KeyError, OSError, TypeError, ValueError):
+            LOGGER.warning("could not read client names from the station snapshot", exc_info=True)
             return []
-        return [station for station in stations if isinstance(station, dict)]
 
     def _station_identities(
         self, stations: Optional[list] = None
@@ -5994,8 +6001,11 @@ class ControlServer(HTTPServer):
                 "limit": 256,
             })
         if path == "/api/groups":
+            labels_by_mac = self.repository.list_connected_device_labels()
             groups = [
-                _device_group_payload(group, repository=self.repository)
+                _device_group_payload(
+                    group, repository=self.repository, labels_by_mac=labels_by_mac
+                )
                 for group in self.repository.list_device_groups()
             ]
             return HTTPStatus.OK, "application/json", _json_bytes({"groups": groups})
@@ -6012,11 +6022,7 @@ class ControlServer(HTTPServer):
                 timers.append(
                     {
                         **_timer_payload(timer),
-                        "device_name": (
-                            _device_display_name(device, labels_by_mac)
-                            if device is not None
-                            else timer.device_id
-                        ),
+                        "device_name": _device_title(device, labels_by_mac, timer.device_id),
                         "profile_name": profile.name if profile is not None else timer.profile_id,
                         "remaining_seconds": max(0, timer.expires_at - now),
                     }
@@ -6335,6 +6341,12 @@ class ControlServer(HTTPServer):
                 days=days,
                 device_id=device_id,
             )
+            labels_by_mac = self.repository.list_connected_device_labels()
+            devices_by_id = {device.id: device for device in self.repository.list_devices()}
+            for row in report["rows"]:
+                row["display_name"] = _device_display_name(
+                    devices_by_id.get(row["device_id"]), labels_by_mac
+                )
             return HTTPStatus.OK, "application/json", _json_bytes(report)
         if path == "/api/backup":
             return HTTPStatus.OK, "application/vnd.sqlite3", self.repository.backup_bytes()
@@ -6485,8 +6497,9 @@ class ControlServer(HTTPServer):
                     {"error": "invalid device configuration"}
                 )
             self.repository.save_device(device)
+            labels_by_mac = self.repository.list_connected_device_labels()
             return HTTPStatus.OK, "application/json", _json_bytes(
-                {"device": _device_payload(device)}
+                {"device": _device_payload(device, labels_by_mac=labels_by_mac)}
             )
 
         if path in ("/api/general-profile", "/api/general-profile/stop"):
@@ -7515,7 +7528,14 @@ class ControlServer(HTTPServer):
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
             return self._saved_control_response(
-                {"group": _device_group_payload(group, repository=self.repository)}, snapshot
+                {
+                    "group": _device_group_payload(
+                        group,
+                        repository=self.repository,
+                        labels_by_mac=self.repository.list_connected_device_labels(),
+                    )
+                },
+                snapshot,
             )
 
     def _base_profile_feedback(self, device: Device) -> str:
@@ -7607,7 +7627,9 @@ class ControlServer(HTTPServer):
                 return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
             return self._saved_control_response(
                 {
-                    "device": _device_payload(device),
+                    "device": _device_payload(
+                        device, labels_by_mac=self.repository.list_connected_device_labels()
+                    ),
                     "message": self._base_profile_feedback(device),
                 },
                 snapshot,
@@ -8410,8 +8432,7 @@ def _new_client_name(label: Optional[str], hostname: Optional[str], ipv4_address
 
     for candidate in (label, hostname):
         name = candidate.strip() if isinstance(candidate, str) else ""
-        has_control = any(ord(char) < 32 or ord(char) == 127 for char in name)
-        if name and len(name) <= 64 and not has_control:
+        if name and len(name) <= 64 and not has_hidden_characters(name):
             return name
     return f"Client {ipv4_address}"
 
