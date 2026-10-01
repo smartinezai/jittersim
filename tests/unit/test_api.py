@@ -2093,6 +2093,41 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(self.shown_addresses(), [])
 
+    UPPERCASE_PHONE = "DC:1E:D5:3E:97:4C"
+
+    def test_a_scan_drops_a_protected_client_that_the_snapshot_names_in_capitals(self) -> None:
+        # The saved protection is lower case and the snapshot is not. The row is under an
+        # address that is not the one the saved device was assigned.
+        self.repository.save_device(
+            Device(
+                id="client-dc1ed53e974c",
+                name="Client",
+                ipv4_address="192.168.50.50",
+                profile_id="slow",
+                mac_address=self.UPPERCASE_PHONE,
+            )
+        )
+        self.protect(self.UPPERCASE_PHONE)
+        helper = MovingClientHelper(self.UPPERCASE_PHONE, "192.168.50.178")
+
+        self.scan_with(helper)
+
+        self.assertEqual(self.repository.list_domain_observations(), ())
+
+    def test_a_scan_records_a_capital_snapshot_address_in_its_normal_form(self) -> None:
+        self.scan_with(MovingClientHelper(self.UPPERCASE_PHONE, "192.168.50.99"))
+
+        self.assertEqual(self.stored_macs(), {("192.168.50.99", self.UPPERCASE_PHONE.lower())})
+
+    def test_rows_recorded_from_a_capital_snapshot_are_hidden_by_the_normal_form(self) -> None:
+        helper = MovingClientHelper(self.UPPERCASE_PHONE, "192.168.50.99")
+        self.scan_with(helper)
+        helper.address = "192.168.50.178"  # The rows are now under an address it left.
+        self.assertEqual(self.shown_addresses(), ["192.168.50.99"])
+        self.protect(self.UPPERCASE_PHONE.lower())
+
+        self.assertEqual(self.shown_addresses(), [])
+
     def test_scan_keeps_the_generic_error_for_other_helper_failures(self) -> None:
         class Failing(FakeHelper):
             def observe_dns_queries(self, excluded_macs=()):
