@@ -1449,6 +1449,15 @@ class ControlServerTests(unittest.TestCase):
         _, _, state_body = self.server.response_for("/api/state")
         self.assertFalse(json.loads(state_body)["state"]["running"])
 
+    def test_apply_and_reset_responses_carry_the_running_flag(self) -> None:
+        self._runtime_with_scheduler()
+
+        _, _, apply_body = self.server.write_response_for("/api/apply", {})
+        _, _, reset_body = self.server.write_response_for("/api/reset", {})
+
+        self.assertIs(json.loads(apply_body)["state"]["running"], True)
+        self.assertIs(json.loads(reset_body)["state"]["running"], False)
+
     def test_diagnostics_runtime_carries_the_running_flag(self) -> None:
         self.server.helper_client = FakeHelper()
         _, _, body = self.server.response_for("/api/diagnostics")

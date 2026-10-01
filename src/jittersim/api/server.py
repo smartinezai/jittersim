@@ -7976,7 +7976,7 @@ class ControlServer(HTTPServer):
             _json_bytes(
                 {
                     "result": result,
-                    "state": _runtime_state_payload(state),
+                    "state": self._runtime_state_with_running(state),
                     "unverified_device_ids": list(plan.unverified_device_ids),
                     "warning": (
                         "Profiles were skipped for devices whose current Wi-Fi identity could not be verified: "
@@ -8030,7 +8030,7 @@ class ControlServer(HTTPServer):
             last_error=None,
         )
         return HTTPStatus.OK, "application/json", _json_bytes(
-            {"result": result, "state": _runtime_state_payload(state)}
+            {"result": result, "state": self._runtime_state_with_running(state)}
         )
 
     def is_authorized(self, authorization_header: Optional[str]) -> bool:
