@@ -69,9 +69,9 @@ and the final branch and PR sweep. See "After these ten".
 **Design.**
 
 - New pure function `resolve_device_name` in `src/jittersim/config/device_names.py`.
-  Order: the saved label for the MAC then the hostname the station reported then
-  the saved device name unless it matches `^Client \d{1,3}(\.\d{1,3}){3}$` then
-  `Unknown device`.
+  Order: the saved label for the MAC then a saved device name that is not the
+  automatic placeholder then the hostname the station reported then Unknown
+  device. A name the user typed beats a name the device announces.
 - `/api/observations` adds `display_name` to each address group. It matches the
   IP to a MAC and hostname with `connected_device_snapshot()`. With no helper or
   a failed helper call it falls back to saved devices and labels and still
