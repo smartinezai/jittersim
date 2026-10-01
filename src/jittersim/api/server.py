@@ -36,6 +36,7 @@ from jittersim.config.device_names import (
 from jittersim.config.domain_labels import group_domain, label_domain, seen_with
 from jittersim.config.exemptions import UnaffectedDevice, normalize_exempt_mac
 from jittersim.config.models import (
+    MAX_LISTED_DOMAINS,
     DataLimit,
     Device,
     DeviceGroup,
@@ -7795,11 +7796,12 @@ class ControlServer(HTTPServer):
             profile = self.repository.get_profile(profile_id)
             if profile is None:
                 raise ValueError("profile does not exist")
-            updated = replace(
-                profile,
-                website_mode="allow_only",
-                website_domains=tuple(dict.fromkeys(profile.website_domains + names)),
-            )
+            listed = tuple(dict.fromkeys(profile.website_domains + names))
+            if len(listed) > MAX_LISTED_DOMAINS:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "A profile can list %d websites. Remove some first." % MAX_LISTED_DOMAINS}
+                )
+            updated = replace(profile, website_mode="allow_only", website_domains=listed)
             self.repository.save_profile(updated)
         except (KeyError, TypeError, ValueError, StorageError):
             return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
@@ -7815,10 +7817,15 @@ class ControlServer(HTTPServer):
         try:
             names = _domains_from_payload(payload)
             policy = self.repository.get_website_policy()
-            updated = replace(
-                policy,
-                blocked_domains=tuple(dict.fromkeys(policy.blocked_domains + names)),
-            )
+            listed = tuple(dict.fromkeys(policy.blocked_domains + names))
+            if len(listed) > MAX_LISTED_DOMAINS:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {
+                        "error": "The global block list can hold %d names. Remove some first."
+                        % MAX_LISTED_DOMAINS
+                    }
+                )
+            updated = replace(policy, blocked_domains=listed)
             self.repository.save_website_policy(updated)
         except (KeyError, TypeError, ValueError, StorageError):
             return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(

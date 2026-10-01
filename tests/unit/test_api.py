@@ -1923,6 +1923,115 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(self.repository.get_runtime_state().configuration_version, version)
 
+    def _fill_block_list(self, count: int) -> None:
+        from dataclasses import replace
+
+        policy = self.repository.get_website_policy()
+        names = tuple("listed%d.example.com" % i for i in range(count))
+        self.repository.save_website_policy(replace(policy, blocked_domains=names))
+
+    def test_a_full_block_list_says_so_and_stays_as_it_was(self) -> None:
+        self._fill_block_list(98)
+
+        status, _, body = self.server.write_response_for(
+            "/api/observations/add-global-block",
+            {"domains": ["new1.example.com", "new2.example.com", "new3.example.com"]},
+        )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(
+            json.loads(body)["error"], "The global block list can hold 100 names. Remove some first."
+        )
+        self.assertEqual(len(self.repository.get_website_policy().blocked_domains), 98)
+
+    def test_the_block_list_can_be_filled_to_exactly_the_cap(self) -> None:
+        self._fill_block_list(98)
+
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/add-global-block",
+            {"domains": ["new1.example.com", "new2.example.com"]},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(self.repository.get_website_policy().blocked_domains), 100)
+
+    def test_names_already_on_a_full_block_list_do_not_count_again(self) -> None:
+        self._fill_block_list(100)
+
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/add-global-block",
+            {"domains": ["listed0.example.com", "listed99.example.com"]},
+        )
+
+        self.assertEqual(status, 200)
+
+    def test_one_more_name_on_a_full_block_list_gets_the_same_message(self) -> None:
+        self._fill_block_list(100)
+
+        status, _, body = self.server.write_response_for(
+            "/api/observations/add-global-block", {"domain": "one-too-many.example.com"}
+        )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(
+            json.loads(body)["error"], "The global block list can hold 100 names. Remove some first."
+        )
+
+    def test_a_full_block_list_can_still_be_shortened(self) -> None:
+        self._fill_block_list(100)
+
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/remove-global-block", {"domains": ["listed0.example.com"]}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(self.repository.get_website_policy().blocked_domains), 99)
+
+    def _fill_profile(self, count: int) -> None:
+        from dataclasses import replace
+
+        profile = self.repository.get_profile("slow")
+        names = tuple("allowed%d.example.com" % i for i in range(count))
+        self.repository.save_profile(replace(profile, website_mode="allow_only", website_domains=names))
+
+    def test_a_full_profile_list_says_so_and_stays_as_it_was(self) -> None:
+        self._fill_profile(99)
+
+        status, _, body = self.server.write_response_for(
+            "/api/observations/add-to-profile",
+            {"profile_id": "slow", "domains": ["new1.example.com", "new2.example.com"]},
+        )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(
+            json.loads(body)["error"], "A profile can list 100 websites. Remove some first."
+        )
+        self.assertEqual(len(self.repository.get_profile("slow").website_domains), 99)
+
+    def test_a_profile_list_can_be_filled_to_exactly_the_cap(self) -> None:
+        self._fill_profile(99)
+
+        status, _, _ = self.server.write_response_for(
+            "/api/observations/add-to-profile",
+            {"profile_id": "slow", "domains": ["new1.example.com", "allowed0.example.com"]},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(self.repository.get_profile("slow").website_domains), 100)
+
+    def test_one_more_name_for_a_full_profile_gets_the_same_message(self) -> None:
+        self._fill_profile(100)
+
+        status, _, body = self.server.write_response_for(
+            "/api/observations/add-to-profile",
+            {"profile_id": "slow", "domain": "one-too-many.example.com"},
+        )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(
+            json.loads(body)["error"], "A profile can list 100 websites. Remove some first."
+        )
+
     def _scheduled_server(self):
         helper = PlanRecordingHelper()
         scheduler = RuntimeScheduler(database_path=":memory:", helper_client=helper)

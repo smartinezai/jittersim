@@ -591,9 +591,10 @@ const observationProfileChoice = new Map();
 const calls = [];
 let requestResult = {};
 let requestFails = false;
+let requestFailure = "the helper is busy";
 function request(path, method, body) {
   calls.push(["request", path, method, body]);
-  return requestFails ? Promise.reject(new Error("the helper is busy")) : Promise.resolve(requestResult);
+  return requestFails ? Promise.reject(new Error(requestFailure)) : Promise.resolve(requestResult);
 }
 function showMessage(text, kind) { calls.push(["message", text, kind]); }
 function refreshAfterSuccess(text) { calls.push(["success", text]); }
@@ -1197,6 +1198,27 @@ def test_a_group_of_apps_still_blocks_all_in_one_call():
 
     assert out["calls"][1][:3] == ["request", ADD_BLOCK, "POST"]
     assert out["header"] == "Unblock all"
+
+
+@NODE
+def test_the_server_text_of_a_full_list_reaches_the_message_unchanged():
+    steps = """
+      requestFails = true;
+      requestFailure = "The global block list can hold 100 names. Remove some first.";
+      const parts = groupParts(cards()[0], 1);
+      await click(parts.blockButton);
+      requestFailure = "A profile can list 100 websites. Remove some first.";
+      await click(parts.profileButton);
+      console.log(JSON.stringify({calls}));
+    """
+
+    out = run_dashboard(steps, [example_device()])
+
+    messages = [call[1:] for call in out["calls"] if call[0] == "message" and call[2] == "error"]
+    assert messages == [
+        ["The global block list can hold 100 names. Remove some first.", "error"],
+        ["A profile can list 100 websites. Remove some first.", "error"],
+    ]
 
 
 # ---------------------------------------------------------------------------------------------

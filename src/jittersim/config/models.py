@@ -109,12 +109,16 @@ def normalize_mac_address(value: str) -> str:
     return mac_address
 
 
+# A profile's website list and each global domain list hold at most this many names.
+MAX_LISTED_DOMAINS = 100
+
+
 def _normalize_domain_list(values: Tuple[str, ...], field_name: str) -> Tuple[str, ...]:
     if not isinstance(values, (list, tuple)):
         raise ValidationError(f"{field_name} must be a list")
     normalized = tuple(dict.fromkeys(normalize_domain(value) for value in values))
-    if len(normalized) > 100:
-        raise ValidationError(f"{field_name} must contain no more than 100 domains")
+    if len(normalized) > MAX_LISTED_DOMAINS:
+        raise ValidationError(f"{field_name} must contain no more than {MAX_LISTED_DOMAINS} domains")
     return normalized
 
 
