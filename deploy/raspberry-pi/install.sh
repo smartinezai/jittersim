@@ -52,7 +52,7 @@ python3 -m venv "$INSTALL_DIR/.venv"
 chown -R root:root "$INSTALL_DIR"
 chmod -R go-w "$INSTALL_DIR"
 runuser -u jittersim -- "$INSTALL_DIR/.venv/bin/python" -I -c \
-    'import jittersim.api.server, jittersim.networking.helper, jittersim.networking.browser_proxy, jittersim.dashboard_access_cli'
+    'import jittersim.api.server, jittersim.networking.helper, jittersim.networking.browser_proxy, jittersim.networking.dns_watch, jittersim.dashboard_access_cli'
 "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/deploy/raspberry-pi/bootstrap-dashboard-access.py"
 ln -sfn "$INSTALL_DIR/.venv/bin/jittersim" /usr/local/bin/jittersim
 python3 "$INSTALL_DIR/deploy/raspberry-pi/retire-services.py"
@@ -163,11 +163,14 @@ install -m 0644 -o root -g root \
 install -m 0644 -o root -g root \
     "$SOURCE_DIR/deploy/raspberry-pi/jittersim-browser-proxy.service" \
     /etc/systemd/system/jittersim-browser-proxy.service
+install -m 0644 -o root -g root \
+    "$SOURCE_DIR/deploy/raspberry-pi/jittersim-service-watch.service" \
+    /etc/systemd/system/jittersim-service-watch.service
 
 systemctl daemon-reload
 systemctl enable jittersim-control-firewall.service
 systemctl restart jittersim-control-firewall.service
-systemctl enable jittersim-helper.service jittersim-dashboard.service jittersim-browser-proxy.service
+systemctl enable jittersim-helper.service jittersim-dashboard.service jittersim-browser-proxy.service jittersim-service-watch.service
 systemctl restart jittersim-helper.service
 if [ "$ap_active_connection" = jittersim-ap ]; then
     if [ "$ap_settings_before" != "$ap_settings_after" ]; then
@@ -178,6 +181,7 @@ else
     nmcli connection up jittersim-ap
 fi
 systemctl restart jittersim-browser-proxy.service
+systemctl restart jittersim-service-watch.service
 systemctl restart jittersim-dashboard.service
 # Remove obsolete DNS access rules even when an older database has no saved action.
 "$INSTALL_DIR/.venv/bin/python" -m jittersim.networking.legacy

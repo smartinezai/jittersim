@@ -39,9 +39,9 @@ def main():
 from pathlib import Path
 import sys
 from jittersim.api import server
-from jittersim.networking import browser_proxy, helper
+from jittersim.networking import browser_proxy, dns_watch, helper
 from jittersim import dashboard_access_cli
-for module in (server, browser_proxy, helper, dashboard_access_cli):
+for module in (server, browser_proxy, dns_watch, helper, dashboard_access_cli):
     assert Path(sys.prefix) in Path(module.__file__).parents, module.__file__
 print('Fresh installed service modules import with ordinary user permissions.')
 """

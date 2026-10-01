@@ -260,21 +260,27 @@ profile is not rerolled. All affected devices share one speed limit for each
 list in the same way the general profile shares its limit. Delay, jitter and
 loss apply to each packet.
 
-Matching is by destination address. The Pi resolves the hostnames of every
-enabled list about once a minute and keeps those addresses in a set per list
-for six hours after it last saw them. A list holds up to 100 hostnames and
-remembers up to 1024 addresses. The browser proxy also checks the lists first
-by exact hostname. Browser tunnels to a listed service are not counted in the
+Matching is by destination address. A small service on the Pi reads the DNS
+answers that leave the Pi towards the test Wi-Fi. When an answer names a listed
+hostname or one of its subdomains (or an alias that leads to one) its addresses
+join the list within a moment. The Pi also resolves the hostnames of every
+enabled list about once a minute for devices that cached an answer earlier.
+Addresses stay in a list for six hours after they were last seen and a new plan
+starts with the addresses already known. A list holds up to 100 hostnames and
+remembers up to 1024 addresses. A client that sends its own fake DNS answers to
+the Pi teaches it nothing. The browser proxy also checks the lists first by
+exact hostname. Browser tunnels to a listed service are not counted in the
 device's data counters because a list belongs to no single device.
 
 A hostname also matches its subdomains and can only be in one enabled list.
 A list may hold a name and its own subdomain. Other sites on the same server
 address as a listed service get the list's profile too and skip the device's
-own outages and website rules the same way. Names resolved by the Pi can differ
-from the names a device receives from a content network so verify a real
-session and add the hostnames it actually uses. Encrypted DNS, VPNs and fixed
-server addresses are not covered. One applied plan supports at most 15 combined
-devices, service rules and service lists.
+own outages and website rules the same way. The catalogue is a starting point
+so verify a real session and add the hostnames it actually uses. The first
+connection to a service that follows the first DNS answer by a few milliseconds
+may escape the profile. Encrypted DNS on a client (such as iCloud Private Relay
+or DNS over HTTPS), VPNs and fixed server addresses are not covered. One applied
+plan supports at most 15 combined devices, service rules and service lists.
 
 ### General profile
 
