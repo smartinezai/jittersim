@@ -210,8 +210,8 @@ procedure. The older release must restore the reset state rather than apply
 saved individual profiles. A code replacement alone is not sufficient if the
 safe reset cannot be confirmed.
 
-Implementation is authorized. Publishing the branch or deploying to the Pi
-requires a separate request.
+The owner authorized implementation then testing, fixes, publication and Pi
+deployment on 1 October 2026.
 
 ## Implementation and verification
 
@@ -222,16 +222,13 @@ selection across restarts. Saved quotas skip the general-mode interval.
 The installer starts the updated helper and proxy before the dashboard
 restores traffic rules.
 
-- The complete suite passed with 527 tests on Python 3.9, Python 3.13 and the
-  local Python 3.12 environment. The required lint checks passed.
-- The clean Python 3.11 Linux image built successfully. Its full suite passed
-  during verification. Later runs encountered an intermittent existing HTTPS
-  recovery failure. The latest run had 526 passing tests with a failed recovery
-  test and its teardown error.
-- The same HTTPS handshake timeout reproduced on the unchanged branch head
-  `5ee13db861c1240f06a638f10d690ec97abd18b1` using Python 3.13. Two following
-  unchanged-head runs passed all 15 connection tests. This is a separate
-  test-stability issue and must remain visible in a future release review.
+- The initial feature suite passed with 527 tests. Repeated release checks
+  exposed an existing HTTPS recovery failure on both the changed release and
+  unchanged head `5ee13db861c1240f06a638f10d690ec97abd18b1`. The connection
+  repair below addresses that failure before publication.
+- With the connection repair, all 529 tests passed on Python 3.9, Python 3.11,
+  Python 3.13 and the local Python 3.12 environment. The Python 3.11 image was
+  built from clean source. The required lint checks passed.
 - Real Linux packet checks passed for shared upload and download limits,
   protected traffic and counters, later arrivals, outages, website access
   rules, address changes and resets.
@@ -248,5 +245,39 @@ restart behavior and update compatibility. Review removed a redundant proxy
 socket-mark operation and strengthened the proxy check to require exactly one
 mark for each side of the tunnel.
 
-No branch publication, remote CI run or Pi installation was performed.
-Physical Wi-Fi client acceptance still requires the deployment checks above.
+At this pre-publication checkpoint, branch publication, remote CI and Pi
+installation remain pending. Physical Wi-Fi client acceptance still requires
+the deployment checks above.
+
+## Follow-up connection repair before publication
+
+A controlled HTTPS test reproduced the earlier failure every time. A healthy
+handshake already accepted by the server expires while another request waits
+for its incomplete body. This is a server defect rather than only a timing
+problem in the tests.
+
+Keep the single configuration worker. Restore the remaining time available to
+waiting connections after an active request finishes. Keep their existing
+handshake and input budgets plus a fixed 30-second total lifetime. Check that
+lifetime when the worker resumes so repeated active requests cannot retain
+waiting sockets forever. The active request's own header and body deadline
+stays unchanged. Keep the sixteen-connection limit. This adds no stored data,
+endpoint or access permission.
+
+Use the controlled HTTPS regression plus a lifetime-limit check. Repeat the
+connection suite and complete release checks before the final push. Install
+the exact committed release only after CI passes. Take a private Pi recovery
+copy and restore it if installation or acceptance fails. Restore saved traffic
+settings after live general-profile acceptance.
+
+The connection test harness must also advance sockets that the server already
+accepted. A second call that waits only on the listening socket does not model
+the live server's pending-connection loop. Exercise that loop in the existing
+manual-request tests. The controlled regression must still fail when only the
+server's waiting-time repair is removed.
+
+All 17 connection tests passed in three consecutive Python 3.13 runs after
+correcting a race in the new test setup. The controlled regression fails with
+the server repair removed in memory. The lifetime check proves the waiting
+socket closes when its total lifetime expires. All three served-browser
+journeys passed again after the repair.
