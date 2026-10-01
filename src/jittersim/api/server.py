@@ -372,6 +372,29 @@ DASHBOARD_HTML = """<!doctype html>
     }
     .saved-device-labels h3 { margin-top: 0; }
     .saved-device-label-row { grid-template-columns: minmax(0, 1fr) auto auto; }
+    .saved-profile-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.75rem;
+      border: 1px solid #2b435f;
+      border-radius: 0.6rem;
+      background: #0d1b2d;
+    }
+    .saved-profile-name {
+      display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.6rem;
+      margin: 0; color: #edf5ff;
+    }
+    .saved-profile-id { color: #91a8c1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
+    .saved-profile-name strong, .saved-profile-id { min-width: 0; overflow-wrap: anywhere; }
+    .saved-profile-summary { margin: 0.15rem 0 0; color: #c6dbf4; font-size: 0.84rem; overflow-wrap: anywhere; }
+    .saved-profile-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+    .saved-profile-actions button { margin: 0; white-space: nowrap; }
+    .saved-profile-actions button[aria-disabled="true"] { cursor: not-allowed; opacity: 0.55; }
+    .saved-profile-actions button[aria-busy="true"] { cursor: progress; }
+    .general-badge { border-color: #2c9d73; background: #10372d; color: #8de2bc; }
+    #profile-id[readonly] { background: #0d1b2d; color: #91a8c1; cursor: not-allowed; }
     select {
       min-width: 0;
       max-width: 100%;
@@ -699,6 +722,8 @@ DASHBOARD_HTML = """<!doctype html>
       .policy-grid { grid-template-columns: 1fr; }
       .uplink-grid { grid-template-columns: 1fr; }
       .connected-row { grid-template-columns: auto minmax(0, 1fr) auto; }
+      .saved-profile-row { grid-template-columns: minmax(0, 1fr); }
+      .saved-profile-actions button { flex: 1; }
       .connected-controls { grid-column: 1 / -1; }
       .connected-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
       .connected-controls select { width: 100%; }
@@ -892,8 +917,12 @@ DASHBOARD_HTML = """<!doctype html>
   </section>
   </section><!-- /page:devices -->
   <section class="page" id="page-profiles" data-page="profiles" aria-label="Profiles" hidden>
+    <section class="card" data-collapse="open" aria-labelledby="saved-profiles-title">
+      <h2 id="saved-profiles-title">Saved profiles</h2>
+      <div id="saved-profiles" class="connected-list" aria-live="polite">Check the admin token to view saved profiles.</div>
+    </section>
     <section class="card" data-collapse="open">
-      <h2>Save profile</h2>
+      <h2 id="profile-form-title">Save profile</h2>
       <form id="profile-form">
         <div class="fields">
           <label><span class="field-label">Profile ID<span class="help-icon" tabindex="0" role="img" aria-label="Profile ID help" data-help="A short code that devices and schedules use to find this profile. Saving with an existing ID updates that profile and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The Name is what people read.">?</span></span>
@@ -1081,6 +1110,7 @@ DASHBOARD_HTML = """<!doctype html>
           </div>
         </details>
         <button type="submit">Save profile</button>
+        <button id="new-profile" type="button" hidden>New profile</button>
       </form>
     </section>
     <section class="card">
@@ -1838,8 +1868,11 @@ DASHBOARD_HTML = """<!doctype html>
 
     const privateDataPanelIds = [
       "profiles", "devices", "plan", "state", "policies",
-      "connected-devices", "unaffected-devices", "uplink-details", "general-profile-status"
+      "connected-devices", "unaffected-devices", "uplink-details", "general-profile-status",
+      "saved-profiles"
     ];
+    // Functions that clear private form state whenever the private panels are locked.
+    const privateDataLockHooks = [];
 
     function setDashboardUnlocked(allowed) {
       element("private-dashboard").hidden = !allowed;
@@ -1914,6 +1947,7 @@ DASHBOARD_HTML = """<!doctype html>
       privateDataPanelIds.forEach((panelId) => {
         element(panelId).textContent = message;
       });
+      privateDataLockHooks.forEach((hook) => hook());
       element("connected-count").textContent = state;
       element("connected-refresh-status").textContent =
         "Refreshes every 5 seconds once the admin token is accepted.";
@@ -2192,6 +2226,7 @@ DASHBOARD_HTML = """<!doctype html>
     window.setInterval(syncRememberedCredentials, 60000);
     let profiles = [];
     let generalProfileState = null;
+    let savedProfileBusy = null;
     let networkActionBusy = false;
     let groups = [];
     let savedDevices = [];
@@ -2673,6 +2708,7 @@ DASHBOARD_HTML = """<!doctype html>
       element("general-profile-apply").disabled = select.disabled || !select.value;
       element("general-profile-stop").disabled = networkActionBusy || !helperConfigured ||
         !generalProfileState || !generalProfileState.profile;
+      renderSavedProfiles();
     }
 
     function renderRuntimeSummary(state) {
@@ -4741,11 +4777,12 @@ DASHBOARD_HTML = """<!doctype html>
       );
     });
 
-    async function runGeneralProfileAction(stop) {
+    async function runGeneralProfileAction(stop, rowProfileId) {
       if (networkActionBusy || !helperConfigured) return;
-      const profileId = element("general-profile-select").value;
+      const profileId = rowProfileId || element("general-profile-select").value;
       if (!stop && !profileId) return;
       const path = stop ? "/api/general-profile/stop" : "/api/general-profile";
+      savedProfileBusy = rowProfileId ? { id: rowProfileId, stop: stop } : null;
       setActionBusy(true, path);
       showMessage(stop ? "Stopping the general profile..." : "Applying the profile to all unprotected devices...", "working");
       try {
@@ -4757,6 +4794,7 @@ DASHBOARD_HTML = """<!doctype html>
         showMessage(error.message, "error");
       } finally {
         await loadPrivateDataPanel("general-profile-status", loadGeneralProfile);
+        savedProfileBusy = null;
         setActionBusy(false, path);
       }
     }
@@ -4767,36 +4805,260 @@ DASHBOARD_HTML = """<!doctype html>
 
     element("scan-observations").addEventListener("click", scanObservations);
 
+    function profileSummary(profile) {
+      const upload = profileDirectionSummary(profile.upload);
+      const download = profileDirectionSummary(profile.download);
+      const parts = [upload === download ? "↕ " + upload : "↑ " + upload + " · ↓ " + download];
+      if (profile.outage_probability > 0) parts.push("outages " + profile.outage_probability + "%");
+      if (profile.website_mode === "allow_only") {
+        const sites = profile.website_domains.length;
+        parts.push("allow-only " + sites + (sites === 1 ? " site" : " sites"));
+      }
+      return parts.join(" · ");
+    }
+
+    function profileDirectionSummary(direction) {
+      const parts = [];
+      if (direction.delay_ms > 0 || direction.jitter_ms > 0) {
+        parts.push(direction.delay_ms + " ms" + (direction.jitter_ms > 0 ? " ±" + direction.jitter_ms : ""));
+      }
+      if (direction.loss_percent > 0) parts.push(direction.loss_percent + "% loss");
+      if (direction.bandwidth_kbit) {
+        parts.push(direction.bandwidth_kbit >= 1000
+          ? String(Math.round(direction.bandwidth_kbit / 10) / 100) + " Mbit/s"
+          : direction.bandwidth_kbit + " kbit/s");
+      }
+      if (direction.reorder_percent > 0) parts.push("reorder " + direction.reorder_percent + "%");
+      if (direction.duplicate_percent > 0) parts.push("duplicate " + direction.duplicate_percent + "%");
+      if (direction.corrupt_percent > 0) parts.push("corrupt " + direction.corrupt_percent + "%");
+      return parts.length ? parts.join(" · ") : "no impairment";
+    }
+
+    function fillProfileForm(profile) {
+      const set = (id, value) => {
+        element(id).value = value === null || value === undefined ? "" : String(value);
+      };
+      set("profile-id", profile.id);
+      set("profile-name", profile.name);
+      set("profile-seed", profile.random_seed);
+      set("profile-reroll", profile.reroll_interval_seconds);
+      set("profile-reroll-variation", profile.reroll_interval_randomness.variation_percent);
+      set("profile-outage-probability", profile.outage_probability);
+      set("profile-outage-duration", profile.outage_duration_seconds);
+      set("profile-outage-interval", profile.outage_interval_seconds);
+      set("profile-website-mode", profile.website_mode);
+      set("profile-website-domains", profile.website_domains.join(", "));
+      set("profile-website-enabled", profile.website_randomness.enabled_probability);
+      ["upload", "download"].forEach((prefix) => {
+        const direction = profile[prefix];
+        set(prefix + "-delay", direction.delay_ms);
+        set(prefix + "-jitter", direction.jitter_ms);
+        set(prefix + "-loss", direction.loss_percent);
+        set(prefix + "-bandwidth", direction.bandwidth_kbit);
+        set(prefix + "-reorder", direction.reorder_percent);
+        set(prefix + "-duplicate", direction.duplicate_percent);
+        set(prefix + "-corrupt", direction.corrupt_percent);
+        ["delay", "jitter", "loss", "bandwidth", "reorder", "duplicate", "corrupt"].forEach((feature) => {
+          const randomness = direction[feature + "_randomness"];
+          set(prefix + "-" + feature + "-random-variation", randomness.variation_percent);
+          set(prefix + "-" + feature + "-random-enabled", randomness.enabled_probability);
+        });
+      });
+    }
+
+    // The form has no inputs for some randomness details. A profile being edited keeps its own
+    // values for them so that saving never resets them. A new profile gets the defaults.
+    function profileFormPayload(base) {
+      const keep = (field) => base
+        ? Object.assign({}, base[field])
+        : { variation_percent: 0, enabled_probability: 100 };
+      return {
+        id: element("profile-id").value,
+        name: element("profile-name").value,
+        upload: impairment("upload"),
+        download: impairment("download"),
+        random_seed: optionalNumber("profile-seed"),
+        reroll_interval_seconds: Number(element("profile-reroll").value),
+        reroll_interval_randomness: {
+          variation_percent: Number(element("profile-reroll-variation").value),
+          enabled_probability: base ? base.reroll_interval_randomness.enabled_probability : 100
+        },
+        outage_probability: Number(element("profile-outage-probability").value),
+        outage_duration_seconds: Number(element("profile-outage-duration").value),
+        outage_interval_seconds: Number(element("profile-outage-interval").value),
+        outage_duration_randomness: keep("outage_duration_randomness"),
+        outage_interval_randomness: keep("outage_interval_randomness"),
+        website_mode: element("profile-website-mode").value,
+        website_domains: commaList("profile-website-domains"),
+        website_randomness: {
+          variation_percent: base ? base.website_randomness.variation_percent : 0,
+          enabled_probability: Number(element("profile-website-enabled").value)
+        }
+      };
+    }
+
+    let editingProfile = null;
+
+    function setProfileFormTitle(text) {
+      const title = element("profile-form-title");
+      (title.querySelector(".card-toggle") || title).textContent = text;
+    }
+
+    function startEditingProfile(profile) {
+      editingProfile = profile;
+      fillProfileForm(profile);
+      element("profile-id").readOnly = true;
+      setProfileFormTitle("Edit profile");
+      element("new-profile").hidden = false;
+      revealElement(element("profile-form-title"));
+      element("profile-name").focus({ preventScroll: true });
+    }
+
+    function resetProfileEditing() {
+      editingProfile = null;
+      element("profile-id").readOnly = false;
+      setProfileFormTitle("Save profile");
+      element("new-profile").hidden = true;
+    }
+
+    let profileEditRequest = 0;
+
+    // Edit reloads the list first so a profile changed elsewhere is never saved back stale.
+    async function editSavedProfile(profileId) {
+      const thisRequest = ++profileEditRequest;
+      try {
+        await loadProfiles();
+      } catch (error) {
+        if (thisRequest === profileEditRequest) showMessage(error.message, "error");
+        return;
+      }
+      if (thisRequest !== profileEditRequest) return;
+      const current = profiles.find((item) => item.id === profileId);
+      if (!current) {
+        renderSavedProfiles();
+        showMessage("That profile no longer exists. The list was refreshed.", "error");
+        return;
+      }
+      // The browser reads JSON numbers as doubles so a seed above 2^53 - 1 would be saved back changed.
+      if (current.random_seed !== null && current.random_seed !== undefined &&
+          !Number.isSafeInteger(current.random_seed)) {
+        showMessage(
+          "This profile has a random seed too large to edit here. Change it through the API or the CLI.",
+          "error"
+        );
+        return;
+      }
+      startEditingProfile(current);
+    }
+
+    function renderSavedProfiles() {
+      if (!adminTokenVerified) return;
+      const container = element("saved-profiles");
+      const general = generalProfileState && generalProfileState.profile;
+      const generalId = general ? general.id : null;
+      const generalActive = Boolean(general && generalProfileState.active);
+      const generalBadge = generalActive ? "General · active"
+        : generalProfileState && generalProfileState.state &&
+          generalProfileState.state.observed_state === "reset" ? "General · paused"
+        : "General · saved";
+      const noHelper = !helperConfigured;
+      const actionsBusy = networkActionBusy;
+      const signature = JSON.stringify([
+        profiles.map((profile) => [profile.id, profile.name, profileSummary(profile)]),
+        generalId, generalActive, generalBadge, noHelper, actionsBusy, savedProfileBusy
+      ]);
+      if (container.dataset.signature === signature && container.children.length) return;
+      container.dataset.signature = signature;
+      const focused = document.activeElement;
+      const focusedKey = focused && container.contains(focused) && focused.dataset.profileId
+        ? focused.dataset.profileId + "|" + focused.dataset.action : null;
+      const buttons = new Map();
+      if (!profiles.length) {
+        const empty = document.createElement("p");
+        empty.className = "device-empty";
+        empty.textContent = "No saved profiles yet. Create one below.";
+        container.replaceChildren(empty);
+        return;
+      }
+      container.replaceChildren(...profiles.map((profile) => {
+        const row = document.createElement("div");
+        row.className = "saved-profile-row";
+        row.dataset.profileId = profile.id;
+        const text = document.createElement("div");
+        const heading = document.createElement("p");
+        heading.className = "saved-profile-name";
+        const name = document.createElement("strong");
+        name.textContent = profile.name;
+        const id = document.createElement("span");
+        id.className = "saved-profile-id";
+        id.textContent = profile.id;
+        heading.append(name, id);
+        if (profile.id === generalId) {
+          const badge = document.createElement("span");
+          badge.className = "count-badge general-badge";
+          badge.textContent = generalBadge;
+          heading.append(badge);
+        }
+        const summary = document.createElement("p");
+        summary.className = "saved-profile-summary";
+        summary.textContent = profileSummary(profile);
+        text.append(heading, summary);
+        const actions = document.createElement("div");
+        actions.className = "saved-profile-actions";
+        const edit = document.createElement("button");
+        edit.type = "button";
+        edit.textContent = "Edit";
+        edit.dataset.profileId = profile.id;
+        edit.dataset.action = "edit";
+        edit.setAttribute("aria-label", "Edit " + profile.name);
+        edit.addEventListener("click", () => editSavedProfile(profile.id));
+        const stopping = profile.id === generalId && generalActive;
+        const apply = document.createElement("button");
+        apply.type = "button";
+        apply.className = stopping ? "" : "primary";
+        apply.textContent = stopping ? "Stop" : "Apply to all";
+        apply.dataset.profileId = profile.id;
+        apply.dataset.action = "general";
+        apply.setAttribute("aria-label", (stopping ? "Stop " : "Apply to all: ") + profile.name);
+        // Without the helper the button is plainly disabled. While an action runs it stays
+        // focusable (aria-disabled) so that keyboard focus survives the redraw. The action
+        // function ignores clicks in both states.
+        apply.disabled = noHelper;
+        if (actionsBusy && !noHelper) apply.setAttribute("aria-disabled", "true");
+        apply.addEventListener("click", () => runGeneralProfileAction(stopping, profile.id));
+        if (savedProfileBusy && savedProfileBusy.id === profile.id && savedProfileBusy.stop === stopping) {
+          apply.setAttribute("aria-busy", "true");
+        }
+        buttons.set(profile.id + "|edit", edit);
+        buttons.set(profile.id + "|general", apply);
+        actions.append(edit, apply);
+        row.append(text, actions);
+        return row;
+      }));
+      // A rebuild drops the focused button so put focus back on its replacement.
+      if (focusedKey && buttons.has(focusedKey)) buttons.get(focusedKey).focus();
+    }
+
     element("profile-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
-        await request("/api/profiles", "POST", {
-          id: element("profile-id").value,
-          name: element("profile-name").value,
-          upload: impairment("upload"),
-          download: impairment("download"),
-          random_seed: optionalNumber("profile-seed"),
-          reroll_interval_seconds: Number(element("profile-reroll").value),
-          reroll_interval_randomness: {
-            variation_percent: Number(element("profile-reroll-variation").value),
-            enabled_probability: 100
-          },
-          outage_probability: Number(element("profile-outage-probability").value),
-          outage_duration_seconds: Number(element("profile-outage-duration").value),
-          outage_interval_seconds: Number(element("profile-outage-interval").value),
-          outage_duration_randomness: { variation_percent: 0, enabled_probability: 100 },
-          outage_interval_randomness: { variation_percent: 0, enabled_probability: 100 },
-          website_mode: element("profile-website-mode").value,
-          website_domains: commaList("profile-website-domains"),
-          website_randomness: {
-            variation_percent: 0,
-            enabled_probability: Number(element("profile-website-enabled").value)
-          }
-        });
+        const body = profileFormPayload(editingProfile);
+        await request("/api/profiles", "POST", body);
         refreshAfterSuccess("Profile saved.");
       } catch (error) {
         showMessage(error.message, "error");
       }
+    });
+
+    element("new-profile").addEventListener("click", () => {
+      element("profile-form").reset();
+      resetProfileEditing();
+      element("profile-id").focus();
+    });
+
+    privateDataLockHooks.push(() => {
+      element("profile-form").reset();
+      resetProfileEditing();
     });
 
     element("device-form").addEventListener("submit", async (event) => {
