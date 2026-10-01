@@ -26,7 +26,7 @@ from jittersim.engine.plan import NetworkPlan
 from .applier import MAX_PROTECTED_MACS, ApplyError, NetworkApplier
 from .dashboard_access import ACCESS_FILE, AccessError, AccessStore, identify_peer
 from .executor import CommandExecutionError, SubprocessExecutor
-from .renderer import ROOT_HANDLE
+from .renderer import queue_handle, queue_parent
 from .router import (
     ROUTER_CHECK_MESSAGES,
     ROUTER_IMPORT_MESSAGES,
@@ -388,8 +388,8 @@ class HelperService:
         entries = []
         for queue in plan.queues:
             interface = interfaces[queue.direction.value]
-            handle = f"{queue.mark + 10}:"
-            parent = f"{ROOT_HANDLE}{queue.mark + 1}"
+            handle = queue_handle(queue.mark)
+            parent = queue_parent(queue.mark)
             match = next(
                 (
                     item

@@ -10,7 +10,7 @@ from unittest import mock
 
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.engine.codec import plan_to_payload
-from jittersim.engine.compiler import compile_plan
+from jittersim.engine.compiler import MAX_SHAPED_MARKS_PER_PLAN, compile_plan
 from jittersim.engine.plan import (
     GeneralProfileRule,
     ServiceAssignmentRule,
@@ -1691,80 +1691,111 @@ class QueueStatsHelperTests(unittest.TestCase):
         self.assertEqual(before, "aaaa0001-1")
         self.assertEqual(after, "bbbb0002-1")
 
-    def test_every_queue_kind_joins_at_marks_above_one(self) -> None:
-        """Join a plan whose marks run from 1 to 6 against the queues the renderer installs."""
+    def assert_every_queue_joins(self, plan) -> None:
+        """Feed the queues the renderer installs back as kernel stats and join every plan queue."""
 
+        topology = Topology(uplink_interface="eth0", test_interface="wlan0")
+        installed = re.compile(
+            r"(?:apply \w+ impairment for|preserve fair queuing for) device (\S+) on (\S+)$"
+        )
+        expected = {}
+        kernel = {"eth0": [ROOT_QDISC], "wlan0": [ROOT_QDISC]}
+        counter = 100
+        for command in render_command_plan(plan=plan, topology=topology):
+            if command.executable != "tc" or command.arguments[:2] != ("qdisc", "replace"):
+                continue
+            if "parent" not in command.arguments:
+                continue
+            arguments = command.arguments
+            interface = arguments[arguments.index("dev") + 1]
+            parent = arguments[arguments.index("parent") + 1]
+            handle = arguments[arguments.index("handle") + 1]
+            kind = arguments[arguments.index("handle") + 2]
+            counter += 1
+            entry = qdisc(handle, parent, packets=counter, drops=counter // 10)
+            entry["kind"] = kind
+            kernel[interface].append(entry)
+            found = installed.search(command.purpose)
+            if found:
+                expected[(found.group(1), interface)] = (handle, kind, counter)
+        self.assertEqual(len(expected), len(plan.queues))
+        service, _ = self.helper(kernel, plan=plan)
+
+        response = service.handle_payload({"action": "queue-stats"})
+
+        self.assertTrue(response["ok"])
+        joined = {(item["device_id"], item["interface"]): item for item in response["queues"]}
+        self.assertEqual(set(joined), set(expected))
+        for key, (handle, kind, counter) in expected.items():
+            self.assertEqual(
+                (joined[key]["handle"], joined[key]["kind"], joined[key]["packets"]),
+                (handle, kind, counter),
+                key,
+            )
+
+    def plan_with_every_queue_kind(self, device_count):
         impairment = Impairment(loss_percent=7)
         profile = Profile("p", "P", upload=impairment, download=impairment)
         plain = Profile("plain", "Plain")
-        devices = (
-            Device("d0", "D0", "192.168.50.10", "p", "02:00:00:00:00:01"),
-            Device("d1", "D1", "192.168.50.11", "plain", "02:00:00:00:00:02"),
-            Device("d2", "D2", "192.168.50.12", "p", "02:00:00:00:00:03"),
+        devices = tuple(
+            Device(
+                f"d{index:02d}", f"D{index:02d}", f"192.168.50.{10 + index}",
+                "plain" if index == 1 else "p", f"02:00:00:00:00:{index + 1:02x}",
+            )
+            for index in range(device_count)
         )
-        plans = (
-            compile_plan(
-                devices=devices,
-                profiles={"p": profile, "plain": plain},
-                service_quota_rules=(
-                    ServiceQuotaRule(
-                        "q1", "d2", devices[2].ipv4_address, (IPv4Address("198.18.0.2"),),
-                        0, impairment, impairment, True,
-                    ),
+        return compile_plan(
+            devices=devices,
+            profiles={"p": profile, "plain": plain},
+            service_quota_rules=(
+                ServiceQuotaRule(
+                    "q1", "d00", devices[0].ipv4_address, (IPv4Address("198.18.0.2"),),
+                    0, impairment, impairment, True,
                 ),
-                service_assignment_rules=(
-                    ServiceAssignmentRule(
-                        "a1", "d0", devices[0].ipv4_address, ("example.com",),
-                        0, impairment, impairment,
-                    ),
-                ),
-                service_list_rules=(ServiceListRule("s1", ("x.example",), 0, impairment, impairment),),
             ),
-            compile_plan(
-                devices=(),
-                profiles={"p": profile},
-                general_profile=GeneralProfileRule("p"),
-                service_list_rules=(ServiceListRule("s1", ("x.example",), 0, impairment, impairment),),
+            service_assignment_rules=(
+                ServiceAssignmentRule(
+                    "a1", "d00", devices[0].ipv4_address, ("example.com",),
+                    0, impairment, impairment,
+                ),
+            ),
+            service_list_rules=(ServiceListRule("s1", ("x.example",), 0, impairment, impairment),),
+        )
+
+    def test_every_queue_kind_joins_at_marks_above_one(self) -> None:
+        general = compile_plan(
+            devices=(),
+            profiles={"p": Profile("p", "P", upload=Impairment(loss_percent=7))},
+            general_profile=GeneralProfileRule("p"),
+            service_list_rules=(
+                ServiceListRule("s1", ("x.example",), 0, Impairment(loss_percent=7), Impairment()),
             ),
         )
-        topology = Topology(uplink_interface="eth0", test_interface="wlan0")
-        installed = re.compile(r"(?:apply \w+ impairment for|preserve fair queuing for) device (\S+) on (\S+)$")
-        for plan in plans:
-            self.assertGreaterEqual(max(queue.mark for queue in plan.queues), 2)
-            expected = {}
-            kernel = {"eth0": [ROOT_QDISC], "wlan0": [ROOT_QDISC]}
-            counter = 100
-            for command in render_command_plan(plan=plan, topology=topology):
-                if command.executable != "tc" or command.arguments[:2] != ("qdisc", "replace"):
-                    continue
-                if "parent" not in command.arguments:
-                    continue
-                arguments = command.arguments
-                interface = arguments[arguments.index("dev") + 1]
-                parent = arguments[arguments.index("parent") + 1]
-                handle = arguments[arguments.index("handle") + 1]
-                kind = arguments[arguments.index("handle") + 2]
-                counter += 1
-                entry = qdisc(handle, parent, packets=counter, drops=counter // 10)
-                entry["kind"] = kind
-                kernel[interface].append(entry)
-                found = installed.search(command.purpose)
-                if found:
-                    expected[(found.group(1), interface)] = (handle, kind, counter)
-            self.assertEqual(len(expected), len(plan.queues))
-            service, _ = self.helper(kernel, plan=plan)
+        for plan in (self.plan_with_every_queue_kind(3), general):
+            with self.subTest(marks=sorted({queue.mark for queue in plan.queues})):
+                self.assertGreaterEqual(max(queue.mark for queue in plan.queues), 2)
+                self.assert_every_queue_joins(plan)
 
-            response = service.handle_payload({"action": "queue-stats"})
-
-            self.assertTrue(response["ok"])
-            joined = {(item["device_id"], item["interface"]): item for item in response["queues"]}
-            self.assertEqual(set(joined), set(expected))
-            for key, (handle, kind, counter) in expected.items():
-                self.assertEqual(
-                    (joined[key]["handle"], joined[key]["kind"], joined[key]["packets"]),
-                    (handle, kind, counter),
-                    key,
-                )
+    def test_every_queue_joins_at_every_mark_up_to_the_limit_including_hex_bands(self) -> None:
+        plan = self.plan_with_every_queue_kind(MAX_SHAPED_MARKS_PER_PLAN - 3)
+        marks = sorted({queue.mark for queue in plan.queues})
+        self.assertEqual(marks, list(range(1, MAX_SHAPED_MARKS_PER_PLAN + 1)))
+        self.assertEqual(
+            {queue.device_id for queue in plan.queues if queue.mark in (9, 15)},
+            {"d08", "servicelist:s1"},
+        )
+        parents = {
+            arguments[arguments.index("parent") + 1]
+            for command in render_command_plan(
+                plan=plan, topology=Topology(uplink_interface="eth0", test_interface="wlan0")
+            )
+            if command.executable == "tc" and command.arguments[:2] == ("qdisc", "replace")
+            for arguments in (command.arguments,)
+            if "parent" in arguments
+        }
+        self.assertIn("10:a", parents)
+        self.assertIn("10:10", parents)
+        self.assert_every_queue_joins(plan)
 
     def test_after_a_reset_it_reports_no_queues(self) -> None:
         service, _ = self.helper({"eth0": [qdisc("11:", "10:2", packets=1)], "wlan0": []})

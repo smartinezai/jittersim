@@ -2,7 +2,9 @@
 
 Run it only in a disposable container with NET_ADMIN and NET_RAW capabilities. A profile with
 20% loss in both directions is applied. Thousands of frames cross the queues and the kernel
-counters that the dashboard reads must show about one fifth of them dropped.
+counters that the dashboard reads must show about one fifth of them dropped. A plan with the
+most shaped marks is then joined against the real `tc -j` output. tc prints a class minor
+number in hexadecimal so the queues of marks 9 and above sit under `10:a` and `10:10`.
 """
 
 import json
@@ -14,10 +16,11 @@ from pathlib import Path
 
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.engine.codec import plan_to_payload
-from jittersim.engine.compiler import compile_plan
+from jittersim.engine.compiler import MAX_SHAPED_MARKS_PER_PLAN, compile_plan
 from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.executor import SubprocessExecutor
 from jittersim.networking.helper import HelperClient, HelperService
+from jittersim.networking.renderer import queue_handle, queue_parent
 from jittersim.networking.topology import Topology
 
 CLIENT_MAC = "02:00:00:00:00:02"
@@ -116,6 +119,61 @@ def check_one_direction(name, before, after, expected_kind="netem"):
     return packets, drops, share
 
 
+def many_queue_plan():
+    """One device per shaped mark with its own delay in each direction."""
+
+    profiles = {}
+    devices = []
+    for mark in range(1, MAX_SHAPED_MARKS_PER_PLAN + 1):
+        profiles[f"p{mark:02d}"] = Profile(
+            f"p{mark:02d}",
+            f"Profile {mark:02d}",
+            upload=Impairment(delay_ms=100 + mark),
+            download=Impairment(delay_ms=200 + mark),
+        )
+        devices.append(
+            Device(f"d{mark:02d}", f"Device {mark:02d}", f"192.168.50.{10 + mark}", f"p{mark:02d}")
+        )
+    return compile_plan(devices=tuple(devices), profiles=profiles)
+
+
+def check_many_queues(service, applier):
+    """Join a plan with every shaped mark and check each entry against its own kernel queue."""
+
+    applier.reset()
+    plan = many_queue_plan()
+    response = service.handle_payload({"action": "apply", "plan": plan_to_payload(plan)})
+    assert response["ok"], response
+    response = service.handle_payload({"action": "queue-stats"})
+    assert response["ok"], response
+    joined = {(item["device_id"], item["direction"]): item for item in response["queues"]}
+    expected = {(queue.device_id, queue.direction.value) for queue in plan.queues}
+    assert set(joined) == expected, ("queues missing from the join", expected - set(joined))
+    raw = applier.queue_stats()
+    for (device_id, direction), item in joined.items():
+        mark = int(device_id[1:])
+        delay = (100 if direction == "upload" else 200) + mark
+        kernel = [
+            entry for entry in raw[item["interface"]] if entry.get("handle") == queue_handle(mark)
+        ]
+        assert len(kernel) == 1, (device_id, direction, kernel)
+        assert kernel[0]["parent"] == queue_parent(mark), (device_id, direction, kernel[0])
+        assert round(kernel[0]["options"]["delay"]["delay"] * 1000) == delay, kernel[0]
+        assert item["impairment"]["delay_ms"] == delay, item
+        assert item["packets"] == kernel[0]["packets"], (item, kernel[0])
+    # Spelled out because a decimal parent for these marks names classes that do not exist.
+    parents = {
+        item["handle"]: [
+            entry["parent"] for entry in raw[item["interface"]] if entry.get("handle") == item["handle"]
+        ]
+        for item in joined.values()
+    }
+    assert parents["19:"] == ["10:a"], parents["19:"]
+    assert parents["25:"] == ["10:10"], parents["25:"]
+    assert len(joined) == 2 * MAX_SHAPED_MARKS_PER_PLAN
+    return len(joined)
+
+
 def main():
     if not Path("/.dockerenv").exists():
         isolated = Path("/proc/self/ns/net").stat().st_ino != Path("/proc/1/ns/net").stat().st_ino
@@ -192,6 +250,7 @@ def main():
         validated = DirectClient(service).queue_stats()
         assert {(item["device_id"], item["direction"]) for item in validated} == set(joined)
 
+        joined_count = check_many_queues(service, applier)
         print(
             "upload dropped %d of %d (%.1f%%) and download dropped %d of %d (%.1f%%)"
             % (
@@ -199,6 +258,8 @@ def main():
                 download[1], download[0] + download[1], download[2] * 100,
             )
         )
+        print("%d queues joined with the real tc output up to mark %d"
+              % (joined_count, MAX_SHAPED_MARKS_PER_PLAN))
         print("OK queue counters match the configured loss")
     finally:
         client.close()
