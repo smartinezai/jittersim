@@ -149,6 +149,21 @@ def test_groups_with_the_same_total_sort_by_name_ignoring_case():
 
 
 @NODE
+def test_a_lowercase_name_sorts_before_an_uppercase_one_that_comes_later_in_the_alphabet():
+    # A sort that looks at the character codes would put Beta before alpha.
+    domains = [
+        item("b.example.com", 5, "domain:b", "Beta"),
+        item("a.example.com", 5, "domain:a", "alpha"),
+        item("c.example.com", 5, "domain:c", "Charlie"),
+        item("d.example.com", 5, "domain:d", "bravo"),
+    ]
+
+    groups = evaluate("groupObservations(" + json.dumps(domains) + ")")
+
+    assert [g["name"] for g in groups] == ["alpha", "Beta", "bravo", "Charlie"]
+
+
+@NODE
 def test_a_bigger_total_beats_a_smaller_name():
     domains = [item("a.example.com", 1, "domain:a", "a"), item("z.example.com", 2, "domain:z", "z")]
 
