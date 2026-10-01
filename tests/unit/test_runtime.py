@@ -26,6 +26,7 @@ from jittersim.config.storage import ConfigRepository
 from jittersim.engine.randomizer import reroll_profile, seeded_generator
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.networking.helper import HelperClientError
+from tests.helper_support import OldHelperService, captures, serving
 
 
 class RecordingHelper:
@@ -558,6 +559,18 @@ class RuntimeSchedulerTests(unittest.TestCase):
         self.assertNotIn("192.168.50.30", stored)
         self.assertEqual(self.repository.total_domain_queries("192.168.50.30"), 0)
         self.assertIn("192.168.50.11", stored)
+
+    def test_traffic_sampling_never_captures_through_an_old_helper(self) -> None:
+        protected = "02:00:00:00:00:01"
+        self._traffic_progression_for_bob()
+        self.repository.save_unaffected_device(UnaffectedDevice(protected, "Phone", 1))
+        with serving(OldHelperService) as (client, executor):
+            scheduler = RuntimeScheduler(database_path=":memory:", helper_client=client)
+
+            scheduler._sample_traffic_if_needed(repository=self.repository, now=100)
+
+            self.assertEqual(captures(executor), [])
+        self.assertEqual(self.repository.list_domain_observations(), ())
 
     def test_traffic_sampling_without_protected_clients_passes_an_empty_list(self) -> None:
         self._traffic_progression_for_bob()

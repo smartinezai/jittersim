@@ -24,6 +24,7 @@ from jittersim.config.models import (
 )
 from jittersim.config.storage import ConfigRepository
 from jittersim.networking.helper import HelperClientError
+from tests.helper_support import OldHelperService, OlderHelperService, captures, serving
 
 
 class FakeHelper:
@@ -1861,7 +1862,7 @@ class ControlServerTests(unittest.TestCase):
     PROTECTED_MAC = "dc:1e:d5:3e:97:4c"
     OLD_HELPER_MESSAGE = (
         "The networking helper is out of date and cannot skip protected devices. "
-        "Update it before scanning traffic."
+        "Restart the JitterSim services or reinstall the release."
     )
 
     def protect(self, mac=PROTECTED_MAC) -> None:
@@ -1942,6 +1943,22 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 502)
         self.assertEqual(json.loads(body)["error"], message)
         self.assertEqual(self.repository.list_domain_observations(), ())
+
+    def test_scan_never_captures_through_a_helper_that_cannot_skip_protected_devices(self) -> None:
+        for service_class in (OldHelperService, OlderHelperService):
+            with self.subTest(service=service_class.__name__):
+                with serving(service_class) as (client, executor):
+                    self.server.helper_client = client
+                    self.protect()
+
+                    status, _, body = self.server.write_response_for(
+                        "/api/observations/scan", {}
+                    )
+
+                    self.assertEqual(status, 502)
+                    self.assertEqual(json.loads(body)["error"], self.OLD_HELPER_MESSAGE)
+                    self.assertEqual(captures(executor), [])
+                    self.assertEqual(self.repository.list_domain_observations(), ())
 
     def test_scan_keeps_the_generic_error_for_other_helper_failures(self) -> None:
         class Failing(FakeHelper):
