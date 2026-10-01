@@ -765,6 +765,24 @@ class HelperServiceTests(unittest.TestCase):
 
         self.assertEqual(response["excluded_macs"], [])
 
+    def test_dns_observation_accepts_and_echoes_the_largest_protected_list(self) -> None:
+        executor = OutputExecutor("")
+        service = HelperService(
+            NetworkApplier(
+                executor=executor,
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            )
+        )
+        macs = ["02:00:00:00:%02x:%02x" % (index // 256, index % 256) for index in range(256)]
+
+        response = service.handle_payload(
+            {"action": "observe-dns", "excluded_macs": list(reversed(macs))}
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["excluded_macs"], macs)
+        self.assertEqual(executor.commands[0].arguments.count("ether"), 256)
+
     def test_dns_observation_rejects_invalid_or_too_many_excluded_addresses(self) -> None:
         executor = OutputExecutor("")
         service = HelperService(
@@ -773,9 +791,9 @@ class HelperServiceTests(unittest.TestCase):
                 topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
             )
         )
-        too_many = ["02:00:00:00:%02x:%02x" % (index // 256, index % 256) for index in range(65)]
+        too_many = ["02:00:00:00:%02x:%02x" % (index // 256, index % 256) for index in range(257)]
         for bad in (["not-a-mac"], too_many, "02:00:00:00:00:01", [5], ["00:00:00:00:00:00"]):
-            with self.subTest(bad=bad if len(bad) < 5 else "65 addresses"):
+            with self.subTest(bad=bad if len(bad) < 5 else "257 addresses"):
                 response = service.handle_payload({"action": "observe-dns", "excluded_macs": bad})
                 self.assertEqual(response, {"ok": False, "error": "invalid excluded devices"})
 
@@ -964,7 +982,7 @@ class ObserveDnsClientTests(unittest.TestCase):
             client.observe_dns_queries(["not-a-mac"])
         with self.assertRaises(HelperClientError):
             client.observe_dns_queries(
-                ["02:00:00:00:%02x:%02x" % (index // 256, index % 256) for index in range(65)]
+                ["02:00:00:00:%02x:%02x" % (index // 256, index % 256) for index in range(257)]
             )
         self.assertEqual(client.sent, [])
 

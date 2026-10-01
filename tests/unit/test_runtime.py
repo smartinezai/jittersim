@@ -624,6 +624,56 @@ class RuntimeSchedulerTests(unittest.TestCase):
             self.assertEqual(captures(executor), [])
         self.assertEqual(self.repository.list_domain_observations(), ())
 
+    def test_a_refusing_helper_is_reported_once_and_without_a_traceback(self) -> None:
+        class Refusing(RecordingHelper):
+            def __init__(self) -> None:
+                super().__init__()
+                self.message = "The networking helper is out of date."
+
+            def observe_dns_queries(self, excluded_macs=()):
+                raise HelperClientError(self.message)
+
+        self.helper = Refusing()
+        self._traffic_progression_for_bob()
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+
+        with self.assertLogs("jittersim.engine.runtime", level="WARNING") as logs:
+            for now in (100, 106, 112, 118):
+                scheduler._sample_traffic_if_needed(repository=self.repository, now=now)
+            self.helper.message = "The networking helper is busy."
+            for now in (124, 130):
+                scheduler._sample_traffic_if_needed(repository=self.repository, now=now)
+
+        self.assertEqual(len(logs.records), 2)
+        self.assertIn("out of date", logs.records[0].getMessage())
+        self.assertIn("busy", logs.records[1].getMessage())
+        self.assertFalse(any(record.exc_info for record in logs.records))
+
+    def test_a_refusal_is_reported_again_after_a_successful_sample(self) -> None:
+        class Flaky(RecordingHelper):
+            def __init__(self) -> None:
+                super().__init__()
+                self.fail = True
+
+            def observe_dns_queries(self, excluded_macs=()):
+                if self.fail:
+                    raise HelperClientError("The networking helper is busy.")
+                return []
+
+        self.helper = Flaky()
+        self._traffic_progression_for_bob()
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+
+        with self.assertLogs("jittersim.engine.runtime", level="WARNING") as logs:
+            scheduler._sample_traffic_if_needed(repository=self.repository, now=100)
+            scheduler._sample_traffic_if_needed(repository=self.repository, now=106)
+            self.helper.fail = False
+            scheduler._sample_traffic_if_needed(repository=self.repository, now=112)
+            self.helper.fail = True
+            scheduler._sample_traffic_if_needed(repository=self.repository, now=118)
+
+        self.assertEqual(len(logs.records), 2)
+
     def test_traffic_sampling_without_protected_clients_passes_an_empty_list(self) -> None:
         self._traffic_progression_for_bob()
         scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)

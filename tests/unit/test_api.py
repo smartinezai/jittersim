@@ -11,6 +11,7 @@ import unittest
 from email.message import Message
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import patch
 
 from jittersim.api.server import DASHBOARD_HTML, ControlRequestHandler, ControlServer
 from jittersim.config.exemptions import UnaffectedDevice
@@ -2113,32 +2114,34 @@ class ControlServerTests(unittest.TestCase):
                 return super().observe_dns_queries(excluded_macs)
 
         self.server.helper_client = Counting()
-        for index in range(65):
-            self.protect("02:00:00:00:%02x:%02x" % (index // 256, index % 256))
+        too_many = tuple("02:00:00:00:%02x:%02x" % (index // 256, index % 256) for index in range(257))
 
-        status, _, body = self.server.write_response_for("/api/observations/scan", {})
+        with patch("jittersim.api.server.protected_macs", return_value=too_many):
+            status, _, body = self.server.write_response_for("/api/observations/scan", {})
 
         self.assertEqual(status, 409)
-        self.assertIn("at most 64", json.loads(body)["error"])
+        self.assertIn("at most 256", json.loads(body)["error"])
         self.assertEqual(calls, [])
         self.assertEqual(self.repository.list_domain_observations(), ())
 
-    def test_scan_still_works_with_exactly_64_protected_devices(self) -> None:
+    def test_scan_still_works_with_the_largest_protected_list(self) -> None:
         seen = []
 
         class Recording(FakeHelper):
             def observe_dns_queries(self, excluded_macs=()):
-                seen.append(len(excluded_macs))
+                seen.append(list(excluded_macs))
                 return super().observe_dns_queries(excluded_macs)
 
         self.server.helper_client = Recording()
-        for index in range(64):
+        for index in range(256):
             self.protect("02:00:00:00:%02x:%02x" % (index // 256, index % 256))
 
         status, _, _ = self.server.write_response_for("/api/observations/scan", {})
 
         self.assertEqual(status, 200)
-        self.assertEqual(seen, [64])
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(len(seen[0]), 256)
+        self.assertEqual(seen[0], sorted(seen[0]))
 
     def test_old_rows_of_a_protected_station_are_hidden(self) -> None:
         self.server.helper_client = FakeHelper()

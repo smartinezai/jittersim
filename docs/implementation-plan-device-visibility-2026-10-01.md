@@ -115,7 +115,11 @@ display. One layer is not enough so there are four.
 - **Capture.** `observe_dns_queries` takes the protected MAC list. The helper adds
   `not ether host <mac>` per MAC to the `tcpdump` filter so those frames (the
   client's queries and the answers to it) are never captured. The helper
-  validates every MAC and caps the list at 64. Both callers (the dashboard scan
+  validates every MAC and caps the list at 256 which is the size of the
+  Unaffected list so every protected device can be skipped. The filter groups the
+  DNS test first (`( udp port 53 or tcp port 53 ) and not ether host ...`) so the
+  MAC terms only run for DNS packets and 256 terms compile to about 2500 BPF
+  instructions against the kernel limit of 4096. Both callers (the dashboard scan
   and progression sampling) pass the saved Unaffected list.
 - **Server drop.** Each observation is stored with the hardware address of the
   client that owned its IP when it was scanned (read from the connected-client
@@ -126,9 +130,9 @@ display. One layer is not enough so there are four.
   show. The MAC is never sent to the browser.
 - **Fail closed.** If protected devices exist and the helper does not accept the
   MAC list (an older helper) the scan refuses to run and says the helper needs
-  updating. It never captures protected traffic. The Unaffected list holds up to
-  256 devices but the helper filter takes at most 64 so a scan refuses with a
-  clear message while more than 64 devices are protected.
+  updating. It never captures protected traffic. If the saved list ever held more
+  devices than the helper can skip the scan refuses with a clear message instead
+  of capturing the rest.
 - **Purge.** Making a device protected deletes its stored observations (a new
   `delete_domain_observations` in storage keyed by MAC and by IP) in the same
   transaction as saving the protection. A row goes when its recorded MAC is the

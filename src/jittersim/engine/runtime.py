@@ -87,6 +87,7 @@ class RuntimeScheduler:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_traffic_sample_at = 0.0
+        self._last_traffic_sample_error: Optional[str] = None
         self._last_quota_sample_at = 0.0
         self._last_analytics_cleanup_at = 0.0
         self._analytics_batch_overflowed = False
@@ -750,8 +751,17 @@ class RuntimeScheduler:
                 ),
                 now=observed_at,
             )
-        except (KeyError, TypeError, ValueError, StorageError, HelperClientError):
-            LOGGER.warning("traffic progression sample failed", exc_info=True)
+            self._last_traffic_sample_error = None
+        except (KeyError, TypeError, ValueError, StorageError, HelperClientError) as error:
+            # The sampler retries every few seconds so say it once for each new reason.
+            reason = "%s: %s" % (type(error).__name__, error)
+            if reason != self._last_traffic_sample_error:
+                self._last_traffic_sample_error = reason
+                LOGGER.warning(
+                    "traffic progression sample failed: %s",
+                    error,
+                    exc_info=not isinstance(error, HelperClientError),
+                )
 
     def counter_device_ids(self, *, repository: ConfigRepository) -> set:
         """Use the installed rule membership when adding shared counters."""
