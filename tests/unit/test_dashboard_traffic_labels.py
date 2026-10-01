@@ -82,9 +82,9 @@ def test_the_row_text_is_set_without_parsing_html():
 
 def test_the_row_keeps_the_query_count_and_both_buttons():
     body = function_body("renderObservations")
-    assert 'observation.query_count + " queries"' in body
-    assert 'profileButton.textContent = "Add to profile";' in body
-    assert 'blockButton.textContent = "Block globally";' in body
+    assert "queryCountText(observation.query_count)" in body
+    assert "profileButtonState(observation.domain, selectedProfile)" in body
+    assert "blockButtonState(observation).label" in body
 
 
 def test_the_dashboard_never_calls_the_search_site_by_itself():
