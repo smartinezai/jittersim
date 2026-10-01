@@ -231,6 +231,8 @@ const nodesById = {
 const element = (id) => nodesById[id];
 let observedDomainsByDevice = {};
 let observedNames = new Set();
+const openObservationGroups = new Set();
+const observationProfileChoice = new Map();
 const profiles = [];
 const deviceDisplayName = () => "Test device";
 function addDomainToProfile() {}
@@ -273,6 +275,10 @@ def find_all(node, class_name):
     return found
 
 
+def host_of(row):
+    return one(row, "observation-domain-host")["children"][0]["text"]
+
+
 def one(node, class_name):
     matches = find_all(node, class_name)
     assert len(matches) == 1, (class_name, len(matches))
@@ -309,9 +315,17 @@ def test_the_search_link_is_rendered_only_for_unknown_and_cdn_rows():
         observed("cdn.somesmallsite.io"),
         observed("10000.mt.eu.iot.dreame.tech"),
     ])
-    links = [find_all(row, "observation-search-link") for row in rows]
-    assert [len(found) for found in links] == [0, 1, 0, 1, 0]
-    for found, domain in ((links[1], "a1051.dscg4.akamai.net"), (links[3], "cdn.somesmallsite.io")):
+    # Traffic groups sort by total queries and then by name so look the rows up by their name.
+    links = {host_of(row): find_all(row, "observation-search-link") for row in rows}
+    assert {domain: len(found) for domain, found in links.items()} == {
+        "mmx-ds.cdn.whatsapp.net": 0,
+        "a1051.dscg4.akamai.net": 1,
+        "tags-eu.tiqcdn.com": 0,
+        "cdn.somesmallsite.io": 1,
+        "10000.mt.eu.iot.dreame.tech": 0,
+    }
+    for domain in ("a1051.dscg4.akamai.net", "cdn.somesmallsite.io"):
+        found = links[domain]
         link, = found
         assert link["tag"] == "a"
         assert link["text"] == "What is this?"
@@ -329,9 +343,12 @@ def test_the_hint_is_rendered_in_its_own_line():
         observed("a1051.dscg4.akamai.net", ["WhatsApp"]),
         observed("mmx-ds.cdn.whatsapp.net"),
     ])
-    assert one(rows[0], "observation-hint")["text"] == "Seen with WhatsApp (guess)"
-    assert find_all(rows[1], "observation-hint") == []
-    assert find_all(rows[1], "observation-hint-line") == []
+    by_host = {host_of(row): row for row in rows}
+    shared = by_host["a1051.dscg4.akamai.net"]
+    own = by_host["mmx-ds.cdn.whatsapp.net"]
+    assert one(shared, "observation-hint")["text"] == "Seen with WhatsApp (guess)"
+    assert find_all(own, "observation-hint") == []
+    assert find_all(own, "observation-hint-line") == []
 
 
 @needs_node

@@ -261,6 +261,8 @@ function element(id) { return elements[id]; }
 let profiles = [];
 let observedDomainsByDevice = {};
 let observedNames = new Set();
+const openObservationGroups = new Set();
+const observationProfileChoice = new Map();
 const calls = [];
 const pending = [];
 function request(path, method, body) {

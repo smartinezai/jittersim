@@ -33,9 +33,10 @@ from jittersim.config.device_names import (
     has_hidden_characters,
     resolve_device_name,
 )
-from jittersim.config.domain_labels import label_domain, seen_with
+from jittersim.config.domain_labels import group_domain, label_domain, seen_with
 from jittersim.config.exemptions import UnaffectedDevice, normalize_exempt_mac
 from jittersim.config.models import (
+    MAX_LISTED_DOMAINS,
     DataLimit,
     Device,
     DeviceGroup,
@@ -96,6 +97,8 @@ from jittersim.api.router_operations import RouterOperations
 
 LOGGER = logging.getLogger(__name__)
 MAX_JSON_BODY_BYTES = 64 * 1024
+# One block or profile call may carry this many names.
+MAX_BATCH_DOMAINS = 64
 TLS_HANDSHAKE_TIMEOUT_SECONDS = 5.0
 REQUEST_INPUT_TIMEOUT_SECONDS = 10.0
 MAX_PENDING_CONNECTION_LIFETIME_SECONDS = 30.0
@@ -467,6 +470,21 @@ DASHBOARD_HTML = """<!doctype html>
     .observation-hint { color: #b9c9dc; font-style: italic; }
     .observation-search-link { color: #8cc4ff; }
     .observation-domain-count { color: #8de2bc; white-space: nowrap; }
+    .observation-group-item { list-style: none; }
+    .observation-group { border-radius: 0.35rem; background: #102238; color: #c7d7eb; }
+    .observation-group-header { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem; padding: 0.45rem 0.55rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
+    .observation-group-header button { margin-top: 0; min-width: 9.5rem; }
+    .observation-group-header .observation-group-toggle { display: flex; flex: 1 1 18rem; align-items: center; gap: 0.5rem 1rem; min-width: 0; padding: 0.1rem 0; border: 0; border-radius: 0.35rem; background: none; color: inherit; font: inherit; font-weight: 400; text-align: left; }
+    .observation-group-header .observation-group-toggle:hover:not(:disabled) { background: none; }
+    .observation-group-chevron { flex: none; width: 0.45rem; height: 0.45rem; margin: 0 0.15rem 0 0.1rem; border-right: 2px solid #8cc4ff; border-bottom: 2px solid #8cc4ff; transform: rotate(-45deg); }
+    .observation-group-toggle[aria-expanded="true"] .observation-group-chevron { transform: rotate(45deg); }
+    .observation-group-title { flex: 1 1 10rem; min-width: 0; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .observation-group-name { display: block; color: #edf5ff; font-size: 0.88rem; font-weight: 650; overflow-wrap: anywhere; }
+    .observation-group-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0.15rem 0.5rem; margin-top: 0.1rem; color: #9fb3ca; font-size: 0.76rem; font-weight: 400; }
+    .observation-group-note { margin: 0; padding: 0 0.55rem 0.5rem 1.6rem; color: #f5ca78; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 0.78rem; }
+    .observation-group-note[hidden], .observation-group-header button[hidden] { display: none; }
+    .observation-group-body { margin: 0 0.55rem 0.55rem 1.1rem; padding-left: 0.6rem; border-left: 2px solid #2b435f; }
+    .observation-group-body[hidden] { display: none; }
     .policy-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
     .policy-grid > div { min-width: 0; }
     .policy-note, .form-note { margin: 0.7rem 0 0; color: #91a8c1; font-size: 0.82rem; }
@@ -2236,6 +2254,10 @@ DASHBOARD_HTML = """<!doctype html>
     const clearConnectedDrafts = new Set();
     let observedDomainsByDevice = {};
     let observedNames = new Set();
+    // Keys of the open Traffic discovery groups. They survive the dashboard refresh.
+    const openObservationGroups = new Set();
+    // The profile picked in each Traffic discovery card. It survives the dashboard refresh.
+    const observationProfileChoice = new Map();
     let randomWebsiteAnalyticsRequestVersion = 0;
     let connectedDevicesRequestInFlight = false;
     let observationRequestInFlight = false;
@@ -3302,15 +3324,13 @@ DASHBOARD_HTML = """<!doctype html>
 
     function blockButtonState(observation) {
       const domain = observation.domain;
-      const whenItApplies = "It applies on its own while JitterSim is running. " +
-        "After Reset or Panic choose Apply current configuration.";
       if (observation.globally_blocked === true) {
         return {
           label: "Unblock",
           ariaLabel: "Unblock " + domain,
           path: "/api/observations/remove-global-block",
           busy: "Removing " + domain + " from the global block list...",
-          done: "Removed " + domain + " from the global block list. " + whenItApplies
+          done: "Removed " + domain + " from the global block list. " + ENFORCE_NOTE
         };
       }
       return {
@@ -3318,7 +3338,7 @@ DASHBOARD_HTML = """<!doctype html>
         ariaLabel: "Block globally " + domain,
         path: "/api/observations/add-global-block",
         busy: "Adding " + domain + " to the global block list...",
-        done: "Added " + domain + " to the global block list. " + whenItApplies
+        done: "Added " + domain + " to the global block list. " + ENFORCE_NOTE
       };
     }
 
@@ -3334,8 +3354,204 @@ DASHBOARD_HTML = """<!doctype html>
       return { label: label, disabled: disabled, ariaLabel: label + " " + domain };
     }
 
+    // What the dashboard says after a change to the block list. The scheduler applies it.
+    const ENFORCE_NOTE = "It applies on its own while JitterSim is running. " +
+      "After Reset or Panic choose Apply current configuration.";
+
     function queryCountText(count) {
       return count + (count === 1 ? " query" : " queries");
+    }
+
+    // A group action sends its names in one call and the server accepts this many.
+    const GROUP_ACTION_MAX_NAMES = 64;
+
+    // Blocking every name of a group of these kinds could cut a device off the internet.
+    const RISKY_BLOCK_NOTE = "Blocking a whole group of system or content delivery names could cut " +
+      "the device off the internet. Block single names instead.";
+
+    function isRiskyGroupKind(kind) {
+      return kind === "system" || kind === "cdn";
+    }
+
+    function groupObservations(domains) {
+      const groups = new Map();
+      (domains || []).forEach((observation) => {
+        const group = observation.group || { key: "domain:" + observation.domain, name: observation.domain };
+        if (!groups.has(group.key)) {
+          groups.set(group.key, {
+            key: group.key, name: group.name, kind: group.kind || "", names: [], totalQueries: 0, single: true
+          });
+        }
+        const entry = groups.get(group.key);
+        if (!isRiskyGroupKind(entry.kind) && isRiskyGroupKind(group.kind)) entry.kind = group.kind;
+        entry.names.push(observation);
+        entry.totalQueries += Number(observation.query_count) || 0;
+        entry.single = entry.names.length === 1;
+      });
+      return Array.from(groups.values()).sort((a, b) => {
+        if (a.totalQueries !== b.totalQueries) return b.totalQueries - a.totalQueries;
+        const first = a.name.toLowerCase();
+        const second = b.name.toLowerCase();
+        return first < second ? -1 : first > second ? 1 : 0;
+      });
+    }
+
+    function groupBlockAction(group) {
+      const blocked = group.names.filter((observation) => observation.globally_blocked === true);
+      const open = group.names.filter((observation) => observation.globally_blocked !== true);
+      const domains = (list) => list.map((observation) => observation.domain);
+      const unblocking = blocked.length > 0 && open.length === 0;
+      const action = unblocking
+        ? {
+            label: "Unblock all",
+            path: blockButtonState({ globally_blocked: true }).path,
+            domains: domains(blocked)
+          }
+        : {
+            label: blocked.length > 0 ? "Block remaining" : "Block all",
+            path: blockButtonState({ globally_blocked: false }).path,
+            domains: domains(open)
+          };
+      action.ariaLabel = action.label + " " + groupSubject(group, action.domains.length);
+      const risky = isRiskyGroupKind(group.kind);
+      const limitNote = groupLimitNote(action.domains.length);
+      const reason = (risky && !unblocking) ? RISKY_BLOCK_NOTE : limitNote;
+      action.disabled = reason !== "";
+      action.title = reason || action.ariaLabel;
+      // The visible line under the header. It stays for a risky group and explains the button.
+      action.note = risky ? RISKY_BLOCK_NOTE : limitNote;
+      return action;
+    }
+
+    // The way back for a risky group that is only partly blocked. Block remaining is off there.
+    function groupUnblockAction(group) {
+      if (!isRiskyGroupKind(group.kind)) return null;
+      const blocked = group.names
+        .filter((observation) => observation.globally_blocked === true)
+        .map((observation) => observation.domain);
+      if (blocked.length === 0 || blocked.length === group.names.length) return null;
+      const text = "Unblock blocked names: " + groupSubject(group, blocked.length);
+      const note = groupLimitNote(blocked.length);
+      return {
+        label: "Unblock blocked names",
+        path: blockButtonState({ globally_blocked: true }).path,
+        domains: blocked,
+        disabled: note !== "",
+        ariaLabel: text,
+        title: note || text
+      };
+    }
+
+    function groupProfileAction(group, profile) {
+      const count = group.names.length;
+      if (!profile) {
+        const text = "Add all to profile: " + groupSubject(group, count) + " (no profile available)";
+        return { label: "Add all to profile", disabled: true, domains: [], ariaLabel: text, title: text };
+      }
+      const missing = group.names
+        .map((observation) => observation.domain)
+        .filter((domain) => !profileButtonState(domain, profile).disabled);
+      if (missing.length === 0) {
+        const text = "All already in " + profile.name + ": " + groupSubject(group, count);
+        return {
+          label: "All already in " + profile.name,
+          disabled: true,
+          domains: [],
+          ariaLabel: text,
+          title: text
+        };
+      }
+      const text = "Add all to profile: " + groupSubject(group, missing.length) + " to " + profile.name;
+      const note = groupLimitNote(missing.length);
+      return {
+        label: "Add all to profile",
+        disabled: note !== "",
+        domains: missing,
+        ariaLabel: text,
+        title: note || text
+      };
+    }
+
+    // True when every row of the group has the same category so the group header says it all.
+    function groupCategoriesUniform(group) {
+      const category = (observation) => (observation.label && observation.label.category) || "";
+      return group.names.every((observation) => category(observation) === category(group.names[0]));
+    }
+
+    // What a row shows in its label line. A row in a group skips a name that only repeats the
+    // group name and skips the category when the whole group has the same one.
+    function rowLabelParts(parts, groupName, categoriesUniform) {
+      const repeated = Boolean(groupName) && parts.labelName === groupName;
+      return {
+        showName: Boolean(parts.labelName) && !repeated,
+        showCategory: Boolean(parts.category) && !(repeated && categoriesUniform)
+      };
+    }
+
+    function groupNamesText(count) {
+      return count + (count === 1 ? " name" : " names");
+    }
+
+    function groupSubject(group, count) {
+      return count + " " + group.name + (count === 1 ? " name" : " names");
+    }
+
+    function isUnblockAction(action) {
+      return action.path === blockButtonState({ globally_blocked: true }).path;
+    }
+
+    function groupBlockMessages(group, action) {
+      const subject = groupSubject(group, action.domains.length);
+      if (isUnblockAction(action)) {
+        return {
+          busy: "Removing " + subject + " from the global block list...",
+          done: "Removed " + subject + " from the global block list. " + ENFORCE_NOTE
+        };
+      }
+      return {
+        busy: "Adding " + subject + " to the global block list...",
+        done: "Added " + subject + " to the global block list. " + ENFORCE_NOTE
+      };
+    }
+
+    function groupProfileMessages(group, action) {
+      const subject = groupSubject(group, action.domains.length);
+      return {
+        busy: "Adding " + subject + " to the profile...",
+        done: "Added " + subject + " to the profile."
+      };
+    }
+
+    function groupBlockedText(group) {
+      const blocked = group.names.filter((observation) => observation.globally_blocked === true).length;
+      if (blocked === 0) return "";
+      return blocked === group.names.length ? "All blocked" : blocked + " blocked";
+    }
+
+    function groupLimitNote(count) {
+      if (count <= GROUP_ACTION_MAX_NAMES) return "";
+      return "This group needs " + count + " names changed and one step takes at most " +
+        GROUP_ACTION_MAX_NAMES + ". Use the buttons on the names instead.";
+    }
+
+    function observationGroupOpenKey(address, groupKey) {
+      return address + "|" + groupKey;
+    }
+
+    // An id that is unique for one device and group and holds no spaces so aria-controls works.
+    function observationGroupDomId(address, groupKey) {
+      const encoded = Array.from(observationGroupOpenKey(address, groupKey)).map((character) =>
+        /[A-Za-z0-9-]/.test(character) ? character : "_" + character.codePointAt(0).toString(16) + "_"
+      );
+      return "observation-group-" + encoded.join("");
+    }
+
+    function chosenObservationProfile(choices, deviceKey, profiles, assignedId) {
+      const ids = (profiles || []).map((profile) => profile.id);
+      const remembered = choices.get(deviceKey);
+      if (remembered !== undefined && ids.indexOf(remembered) !== -1) return remembered;
+      if (assignedId && ids.indexOf(assignedId) !== -1) return assignedId;
+      return ids.length > 0 ? ids[0] : "";
     }
 
     function domainRowParts(observation) {
@@ -3394,38 +3610,60 @@ DASHBOARD_HTML = """<!doctype html>
         heading.append(title, address);
         const targetProfile = document.createElement("select");
         targetProfile.setAttribute("aria-label", "Profile for discovered domains");
+        const chosenProfileId = chosenObservationProfile(
+          observationProfileChoice,
+          device.ipv4_address,
+          profiles,
+          device.assigned_profile_id
+        );
         profiles.forEach((profile) => {
           const option = document.createElement("option");
           option.value = profile.id;
           option.textContent = "Add to " + profile.name;
-          option.selected = profile.id === device.assigned_profile_id;
+          option.selected = profile.id === chosenProfileId;
           targetProfile.appendChild(option);
         });
         const profileSyncs = [];
         const syncProfileButtons = () => profileSyncs.forEach((sync) => sync());
-        targetProfile.addEventListener("change", syncProfileButtons);
+        targetProfile.addEventListener("change", () => {
+          observationProfileChoice.set(device.ipv4_address, targetProfile.value);
+          syncProfileButtons();
+        });
         const targetRow = document.createElement("div");
         targetRow.className = "observation-actions";
         targetRow.append(targetProfile);
         card.append(heading, targetRow);
         const list = document.createElement("ul");
         list.className = "observation-domain-list";
-        (device.domains || []).forEach((observation) => {
+        // One name. A row of a group also gets its block button in blockSyncs so the group can
+        // refresh it and calls afterBlockChange when its own block state changes. A row in a
+        // group skips what its label line only repeats from the group header.
+        const buildRow = (observation, blockSyncs, afterBlockChange, inGroup) => {
           const item = document.createElement("li");
           item.className = "observation-domain";
           const domain = document.createElement("div");
           domain.className = "observation-domain-name";
           const parts = domainRowParts(observation);
-          if (parts.labelName) {
+          const labelShown = rowLabelParts(
+            parts,
+            inGroup ? inGroup.name : "",
+            inGroup ? inGroup.categoriesUniform : false
+          );
+          if (labelShown.showName || labelShown.showCategory) {
             const labelLine = document.createElement("div");
             labelLine.className = "observation-label";
-            const labelName = document.createElement("strong");
-            labelName.textContent = parts.labelName;
-            const category = document.createElement("span");
-            category.className = "observation-category";
-            category.dataset.kind = parts.kind;
-            category.textContent = parts.category;
-            labelLine.append(labelName, category);
+            if (labelShown.showName) {
+              const labelName = document.createElement("strong");
+              labelName.textContent = parts.labelName;
+              labelLine.appendChild(labelName);
+            }
+            if (labelShown.showCategory) {
+              const category = document.createElement("span");
+              category.className = "observation-category";
+              category.dataset.kind = parts.kind;
+              category.textContent = parts.category;
+              labelLine.appendChild(category);
+            }
             domain.appendChild(labelLine);
           }
           const host = document.createElement("div");
@@ -3488,13 +3726,155 @@ DASHBOARD_HTML = """<!doctype html>
             badge.hidden = observation.globally_blocked !== true;
           };
           syncBlockButton();
+          blockSyncs.push(syncBlockButton);
+          const onBlockChange = () => {
+            syncBlockButton();
+            if (afterBlockChange) afterBlockChange();
+          };
           blockButton.addEventListener("click", () => changeGlobalBlock(
             observation,
             blockButton,
-            syncBlockButton
+            onBlockChange
           ));
           item.append(domain, queryCount, profileButton, blockButton);
-          list.appendChild(item);
+          return item;
+        };
+        // Two or more names of one app. Closed by default. The header holds a toggle button and
+        // the action buttons side by side. The action buttons act on every name of the group.
+        const buildGroup = (group) => {
+          const item = document.createElement("li");
+          item.className = "observation-group-item";
+          const wrapper = document.createElement("div");
+          wrapper.className = "observation-group";
+          const openKey = observationGroupOpenKey(device.ipv4_address, group.key);
+          const header = document.createElement("div");
+          header.className = "observation-group-header";
+          const body = document.createElement("div");
+          body.className = "observation-group-body";
+          body.id = observationGroupDomId(device.ipv4_address, group.key);
+          const toggle = document.createElement("button");
+          toggle.type = "button";
+          toggle.className = "observation-group-toggle";
+          toggle.setAttribute("aria-controls", body.id);
+          const setOpen = (open) => {
+            toggle.setAttribute("aria-expanded", open ? "true" : "false");
+            body.hidden = !open;
+            if (open) openObservationGroups.add(openKey);
+            else openObservationGroups.delete(openKey);
+          };
+          setOpen(openObservationGroups.has(openKey));
+          toggle.addEventListener("click", () => setOpen(body.hidden));
+          const chevron = document.createElement("span");
+          chevron.className = "observation-group-chevron";
+          chevron.setAttribute("aria-hidden", "true");
+          const title = document.createElement("span");
+          title.className = "observation-group-title";
+          const groupName = document.createElement("strong");
+          groupName.className = "observation-group-name";
+          groupName.textContent = group.name;
+          const meta = document.createElement("span");
+          meta.className = "observation-group-meta";
+          const nameCount = document.createElement("span");
+          nameCount.className = "observation-group-count";
+          nameCount.textContent = groupNamesText(group.names.length);
+          const groupBadge = document.createElement("span");
+          groupBadge.className = "observation-badge";
+          meta.append(nameCount, groupBadge);
+          title.append(groupName, meta);
+          const totalQueries = document.createElement("span");
+          totalQueries.className = "observation-domain-count";
+          totalQueries.textContent = queryCountText(group.totalQueries);
+          toggle.append(chevron, title, totalQueries);
+          const groupProfileButton = document.createElement("button");
+          groupProfileButton.type = "button";
+          groupProfileButton.className = "observation-group-profile-button";
+          const groupBlockButton = document.createElement("button");
+          groupBlockButton.type = "button";
+          groupBlockButton.className = "observation-group-block-button";
+          const groupUndoButton = document.createElement("button");
+          groupUndoButton.type = "button";
+          groupUndoButton.className = "observation-group-unblock-button";
+          groupUndoButton.hidden = true;
+          const groupNote = document.createElement("p");
+          groupNote.className = "observation-group-note";
+          groupNote.id = body.id + "-note";
+          groupNote.hidden = true;
+          const syncGroupProfile = () => {
+            // A request in flight keeps the button disabled. Its finally block syncs again.
+            if (groupProfileButton.getAttribute("aria-busy") === "true") return;
+            const selectedProfile = profiles.find((profile) => profile.id === targetProfile.value);
+            const action = groupProfileAction(group, selectedProfile);
+            groupProfileButton.textContent = action.label;
+            groupProfileButton.title = action.title;
+            groupProfileButton.setAttribute("aria-label", action.ariaLabel);
+            groupProfileButton.disabled = action.disabled;
+          };
+          const syncGroupBlock = () => {
+            const blockedText = groupBlockedText(group);
+            groupBadge.textContent = blockedText;
+            groupBadge.hidden = blockedText === "";
+            const action = groupBlockAction(group);
+            groupNote.textContent = action.note;
+            groupNote.hidden = action.note === "";
+            if (groupBlockButton.getAttribute("aria-busy") !== "true") {
+              groupBlockButton.textContent = action.label;
+              groupBlockButton.title = action.title;
+              groupBlockButton.setAttribute("aria-label", action.ariaLabel);
+              groupBlockButton.disabled = action.disabled;
+              if (action.disabled && action.note) {
+                groupBlockButton.setAttribute("aria-describedby", groupNote.id);
+              } else {
+                groupBlockButton.removeAttribute("aria-describedby");
+              }
+            }
+            const undo = groupUnblockAction(group);
+            groupUndoButton.hidden = undo === null;
+            if (undo !== null && groupUndoButton.getAttribute("aria-busy") !== "true") {
+              groupUndoButton.textContent = undo.label;
+              groupUndoButton.title = undo.title;
+              groupUndoButton.setAttribute("aria-label", undo.ariaLabel);
+              groupUndoButton.disabled = undo.disabled;
+            }
+          };
+          const rowSyncs = [];
+          const syncRowsAndHeader = () => {
+            rowSyncs.forEach((sync) => sync());
+            syncGroupBlock();
+          };
+          profileSyncs.push(syncGroupProfile);
+          syncGroupProfile();
+          syncGroupBlock();
+          groupProfileButton.addEventListener("click", () => addGroupToProfile(
+            group,
+            profiles.find((profile) => profile.id === targetProfile.value),
+            groupProfileButton,
+            syncProfileButtons
+          ));
+          groupBlockButton.addEventListener("click", () => changeGroupBlock(
+            group,
+            groupBlockButton,
+            syncRowsAndHeader
+          ));
+          groupUndoButton.addEventListener("click", () => changeGroupBlock(
+            group,
+            groupUndoButton,
+            syncRowsAndHeader,
+            groupUnblockAction
+          ));
+          header.append(toggle, groupProfileButton, groupBlockButton, groupUndoButton);
+          const rows = document.createElement("ul");
+          rows.className = "observation-domain-list";
+          const inGroup = { name: group.name, categoriesUniform: groupCategoriesUniform(group) };
+          group.names.forEach((observation) => {
+            rows.appendChild(buildRow(observation, rowSyncs, syncGroupBlock, inGroup));
+          });
+          body.appendChild(rows);
+          wrapper.append(header, groupNote, body);
+          item.appendChild(wrapper);
+          return item;
+        };
+        groupObservations(device.domains).forEach((group) => {
+          list.appendChild(group.single ? buildRow(group.names[0], [], null) : buildGroup(group));
         });
         card.append(list);
         container.appendChild(card);
@@ -3534,6 +3914,49 @@ DASHBOARD_HTML = """<!doctype html>
       } finally {
         setButtonBusy(button, false);
         onChange();
+      }
+    }
+
+    async function changeGroupBlock(group, button, onChange, pickAction) {
+      const action = (pickAction || groupBlockAction)(group);
+      if (!action || action.disabled || action.domains.length === 0) return;
+      const messages = groupBlockMessages(group, action);
+      setButtonBusy(button, true);
+      showMessage(messages.busy, "working");
+      try {
+        await request(action.path, "POST", { domains: action.domains });
+        const blocked = !isUnblockAction(action);
+        group.names.forEach((observation) => {
+          if (action.domains.indexOf(observation.domain) !== -1) observation.globally_blocked = blocked;
+        });
+        refreshAfterSuccess(messages.done);
+      } catch (error) {
+        showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
+        onChange();
+      }
+    }
+
+    async function addGroupToProfile(group, profile, button, onChange) {
+      const action = groupProfileAction(group, profile);
+      if (action.disabled) return;
+      const messages = groupProfileMessages(group, action);
+      setButtonBusy(button, true);
+      showMessage(messages.busy, "working");
+      try {
+        const result = await request("/api/observations/add-to-profile", "POST", {
+          domains: action.domains,
+          profile_id: profile.id
+        });
+        const index = profiles.findIndex((item) => item.id === profile.id);
+        if (index !== -1 && result.profile) profiles[index] = result.profile;
+        refreshAfterSuccess(messages.done);
+      } catch (error) {
+        showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
+        if (onChange) onChange();
       }
     }
 
@@ -6187,6 +6610,20 @@ def _policies_payload(repository: ConfigRepository) -> Dict[str, Any]:
     }
 
 
+def _domains_from_payload(payload: Dict[str, Any]) -> Tuple[str, ...]:
+    """Return the unique normalized names of a call that sends domain or domains but not both.
+
+    Every name is checked before the caller saves anything so one bad name rejects the call.
+    """
+
+    if not isinstance(payload, dict) or ("domain" in payload) == ("domains" in payload):
+        raise ValueError("send either domain or domains")
+    raw = [payload["domain"]] if "domain" in payload else payload["domains"]
+    if not isinstance(raw, list) or not 1 <= len(raw) <= MAX_BATCH_DOMAINS:
+        raise ValueError("send between 1 and %d names" % MAX_BATCH_DOMAINS)
+    return tuple(dict.fromkeys(normalize_domain(item) for item in raw))
+
+
 def _domain_observation_payload(observation: DomainObservation) -> Dict[str, Any]:
     return {
         "domain": observation.domain,
@@ -6199,7 +6636,7 @@ def _domain_observation_payload(observation: DomainObservation) -> Dict[str, Any
 def _labelled_domain_payloads(
     rows: Sequence[DomainObservation], blocked_domains: Collection[str] = ()
 ) -> List[Dict[str, Any]]:
-    """Add a label and a seen-with guess and the global block state to observed names.
+    """Add a label and a group and a seen-with guess and the global block state to observed names.
 
     A name counts as blocked only when it is an exact entry of the global block list because
     the engine resolves each listed name on its own and does not match subdomains.
@@ -6210,6 +6647,7 @@ def _labelled_domain_payloads(
         {
             **_domain_observation_payload(row),
             "label": label_domain(row.domain).as_dict(),
+            "group": group_domain(row.domain),
             "seen_with": hints.get(row.domain, []),
             "globally_blocked": row.domain in blocked_domains,
         }
@@ -7749,15 +8187,16 @@ class ControlServer(HTTPServer):
     ) -> Tuple[int, str, bytes]:
         try:
             profile_id = payload["profile_id"]
-            domain = normalize_domain(payload["domain"])
+            names = _domains_from_payload(payload)
             profile = self.repository.get_profile(profile_id)
             if profile is None:
                 raise ValueError("profile does not exist")
-            updated = replace(
-                profile,
-                website_mode="allow_only",
-                website_domains=tuple(dict.fromkeys(profile.website_domains + (domain,))),
-            )
+            listed = tuple(dict.fromkeys(profile.website_domains + names))
+            if len(listed) > MAX_LISTED_DOMAINS:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {"error": "A profile can list %d websites. Remove some first." % MAX_LISTED_DOMAINS}
+                )
+            updated = replace(profile, website_mode="allow_only", website_domains=listed)
             self.repository.save_profile(updated)
         except (KeyError, TypeError, ValueError, StorageError):
             return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
@@ -7771,12 +8210,17 @@ class ControlServer(HTTPServer):
         self, payload: Dict[str, Any]
     ) -> Tuple[int, str, bytes]:
         try:
-            domain = normalize_domain(payload["domain"])
+            names = _domains_from_payload(payload)
             policy = self.repository.get_website_policy()
-            updated = replace(
-                policy,
-                blocked_domains=tuple(dict.fromkeys(policy.blocked_domains + (domain,))),
-            )
+            listed = tuple(dict.fromkeys(policy.blocked_domains + names))
+            if len(listed) > MAX_LISTED_DOMAINS:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                    {
+                        "error": "The global block list can hold %d names. Remove some first."
+                        % MAX_LISTED_DOMAINS
+                    }
+                )
+            updated = replace(policy, blocked_domains=listed)
             self.repository.save_website_policy(updated)
         except (KeyError, TypeError, ValueError, StorageError):
             return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
@@ -7790,9 +8234,9 @@ class ControlServer(HTTPServer):
         self, payload: Dict[str, Any]
     ) -> Tuple[int, str, bytes]:
         try:
-            domain = normalize_domain(payload["domain"])
+            names = _domains_from_payload(payload)
             policy = self.repository.get_website_policy()
-            remaining = tuple(item for item in policy.blocked_domains if item != domain)
+            remaining = tuple(item for item in policy.blocked_domains if item not in names)
             if remaining != policy.blocked_domains:
                 self.repository.save_website_policy(replace(policy, blocked_domains=remaining))
         except (KeyError, TypeError, ValueError, StorageError):
