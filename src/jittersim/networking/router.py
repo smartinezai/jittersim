@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -13,6 +14,8 @@ import requests
 from Crypto.Cipher import AES
 
 from .wifi_security import router_security
+
+LOGGER = logging.getLogger(__name__)
 
 ROUTER_IMPORT_MESSAGES = {
     "security": "The router's Wi-Fi security type is missing or unsupported. No Pi Wi-Fi change was made.",
@@ -41,7 +44,7 @@ ROUTER_IMPORT_MESSAGES = {
 
 
 ROUTER_WIFI_MESSAGES = {
-    "failed": "Router Wi-Fi change failed. Check the router over Ethernet before retrying.",
+    "failed": "Router Wi-Fi change failed. Check the router status before retrying.",
     "login": "Router login failed. Check the router admin password and try again.",
     "unreachable": "Could not contact the router. Check the Pi's wired connection and try again.",
     "unsupported": (
@@ -55,7 +58,7 @@ ROUTER_WIFI_MESSAGES = {
     ),
     "uncertain": (
         "The router may have changed Wi-Fi, but JitterSim could not confirm both radios. "
-        "Check the router over Ethernet before retrying."
+        "Wait for a fresh router status before retrying."
     ),
 }
 
@@ -463,6 +466,11 @@ class TG3442DERouter:
         cipher.update(b"wifidata")
         ciphertext, tag = cipher.encrypt_and_digest(json.dumps(payload).encode("utf-8"))
         refreshed = False
+        started = time.monotonic()
+        step = "write"
+        attempts = 0
+        last_reason = "mismatch"
+        radio_flags = (None, None, None)
         try:
             try:
                 self._request(
@@ -480,24 +488,48 @@ class TG3442DERouter:
                 if error.reason != "unreachable":
                     raise
             for attempt in range(self._CONFIRMATION_ATTEMPTS):
+                step = "confirm"
+                attempts = attempt + 1
                 updated = None
                 try:
-                    updated = self._read_verified_wifi_data()
-                except RouterError as error:
-                    if error.reason == "login" and not refreshed:
+                    try:
+                        updated = self._read_verified_wifi_data()
+                    except RouterError as error:
+                        if error.reason != "login" or refreshed:
+                            raise
                         refreshed = True
                         self.session.cookies.clear()
                         self.session.headers.pop("csrfNonce", None)
                         self.login(preserve_deadline=True)
                         updated = self._read_verified_wifi_data()
-                    elif error.reason != "unreachable":
+                except _EndpointUnavailable:
+                    last_reason = "unavailable"
+                except RouterError as error:
+                    last_reason = error.reason
+                    if error.reason != "unreachable":
                         raise
-                if updated is not None and _wifi_state_matches(updated, payload):
-                    return RouterWifiSettings(ssid="", password="", enabled=enabled)
+                if updated is not None:
+                    radio_flags = tuple(
+                        _radio_state(updated.get(name))
+                        for name in ("EnableWiFiFunction", "Enable", "Enable5G")
+                    )
+                    if _wifi_state_matches(updated, payload):
+                        return RouterWifiSettings(ssid="", password="", enabled=enabled)
+                    last_reason = "mismatch"
                 if attempt + 1 < self._CONFIRMATION_ATTEMPTS:
                     time.sleep(min(self._CONFIRMATION_DELAY_SECONDS, self._remaining_timeout()))
-        except RouterError:
+        except RouterError as error:
+            LOGGER.warning(
+                "router Wi-Fi confirmation failed: step=%s reason=%s enabled=%s "
+                "attempts=%s elapsed=%.1f radios=%s",
+                step, error.reason, enabled, attempts, time.monotonic() - started, radio_flags,
+            )
             raise RouterError("router change could not be confirmed", reason="uncertain") from None
+        LOGGER.warning(
+            "router Wi-Fi confirmation failed: step=%s reason=%s enabled=%s "
+            "attempts=%s elapsed=%.1f radios=%s",
+            step, last_reason, enabled, attempts, time.monotonic() - started, radio_flags,
+        )
         raise RouterError("router radios did not confirm the requested state", reason="uncertain")
 
     def _wifi_write_payload(self, current: Dict[str, Any], *, enabled: bool) -> Dict[str, Any]:

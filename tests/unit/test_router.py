@@ -76,6 +76,9 @@ class FirmwareServer(ThreadingHTTPServer):
         self.master_page_value = None
         self.conflicting_master_page = False
         self.omit_master_page = False
+        self.unavailable_reads_after_write = 0
+        self.restart_reads_remaining = 0
+        self.restart_page_status = 404
 
     def seal(self, value, auth_data):
         cipher = AES.new(self.key, AES.MODE_CCM, nonce=self.iv, mac_len=16)
@@ -125,6 +128,11 @@ class FirmwareHandler(BaseHTTPRequestHandler):
         elif parsed.path == "/php/wifi_general_data.php":
             if not self.authenticated():
                 self.respond("not authenticated", status=401)
+                return
+            if self.server.restart_reads_remaining:
+                self.server.restart_reads_remaining -= 1
+                self.respond("restarting router-test-password wifi-test-password",
+                             status=self.server.restart_page_status)
                 return
             if self.server.api_status != 200:
                 self.respond("endpoint unavailable", status=self.server.api_status)
@@ -202,6 +210,7 @@ class FirmwareHandler(BaseHTTPRequestHandler):
                     self.respond("invalid security mode", status=400)
                     return
             self.server.writes.append(payload)
+            self.server.restart_reads_remaining = self.server.unavailable_reads_after_write
             if not payload["SplitSSIDEnable"] and (
                 payload["Enable"] != 1 or payload["Enable5G"] != 1
             ):
@@ -402,6 +411,63 @@ class RouterProtocolTests(unittest.TestCase):
             count += 1
             if count == 2:
                 raise RouterError("expired session", reason="login")
+            return original()
+
+        with patch.object(self.router, "_read_verified_wifi_data", side_effect=read):
+            self.assertFalse(self.router.set_wifi_enabled(enabled=False).enabled)
+        self.assertEqual(self.router._deadline, deadline)
+        self.assertEqual(len(self.firmware.writes), 1)
+        self.assertEqual(self.firmware.calls.count(("POST", "/php/ajaxSet_Password.php")), 2)
+
+    def test_temporary_missing_confirmation_page_recovers_without_rewriting(self):
+        self.firmware.omit_wifi_master = True
+        self.firmware.effective_band_reads = True
+        before = dict(self.firmware.settings)
+        for status in (404, 200):
+            with self.subTest(status=status):
+                self.firmware.restart_page_status = status
+                for enabled in (False, True):
+                    self.firmware.unavailable_reads_after_write = 2
+                    self.router.login()
+                    self.assertIs(self.router.set_wifi_enabled(enabled=enabled).enabled, enabled)
+                    self.router.close()
+                    self.router.password = self.firmware.password
+        self.assertEqual(len(self.firmware.writes), 4)
+        self.assertEqual(self.firmware.settings, before)
+        self.assertFalse(any("wifi2g" in path for _, path in self.firmware.calls))
+
+    def test_persistent_missing_confirmation_page_is_bounded_and_logs_no_secrets(self):
+        self.firmware.unavailable_reads_after_write = 100
+        self.router.login()
+        with self.assertLogs("jittersim.networking.router", level="WARNING") as logs:
+            with self.assertRaises(RouterError) as caught:
+                self.router.set_wifi_enabled(enabled=False)
+        self.assertEqual(caught.exception.reason, "uncertain")
+        self.assertEqual(len(self.firmware.writes), 1)
+        self.assertEqual(
+            self.firmware.calls.count(("GET", "/php/wifi_general_data.php")),
+            1 + self.router._CONFIRMATION_ATTEMPTS,
+        )
+        logged = " ".join(logs.output)
+        self.assertIn("step=confirm", logged)
+        self.assertIn("reason=unavailable", logged)
+        self.assertNotIn(self.firmware.password, logged)
+        self.assertNotIn(self.firmware.settings["Passphrase"], logged)
+        self.assertNotIn(self.firmware.nonce, logged)
+
+    def test_restart_during_authentication_refresh_retries_reads_with_original_deadline(self):
+        self.router.login()
+        original = self.router._read_verified_wifi_data
+        deadline = self.router._deadline
+        count = 0
+
+        def read():
+            nonlocal count
+            count += 1
+            if count == 2:
+                raise RouterError("expired session", reason="login")
+            if count == 3:
+                raise RouterError("router restarting", reason="unreachable")
             return original()
 
         with patch.object(self.router, "_read_verified_wifi_data", side_effect=read):
