@@ -10,6 +10,7 @@ from pathlib import Path
 from jittersim.api.server import ControlServer
 from jittersim.config.models import DomainObservation
 from jittersim.config.storage import ConfigRepository
+from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.commands import CommandResult
 from jittersim.networking.dashboard_access import AccessStore
@@ -121,12 +122,23 @@ def main():
             try:
                 with ConfigRepository(root / "config.db") as repository:
                     seed_observations(repository)
-                    with FixtureServer(
-                        ("127.0.0.1", 0), repository, admin_token="browser-test",
-                        helper_client=HelperClient(socket_path=root / "wifi.sock"),
-                    ) as server:
-                        print(server.server_address[1], flush=True)
-                        server.serve_forever()
+                    helper_client = HelperClient(socket_path=root / "wifi.sock")
+                    scheduler = None
+                    if os.environ.get("JITTERSIM_BROWSER_TEST_SCHEDULER") == "1":
+                        # Like a real install: an Apply keeps the scheduler running.
+                        scheduler = RuntimeScheduler(
+                            database_path=root / "config.db", helper_client=helper_client
+                        )
+                    try:
+                        with FixtureServer(
+                            ("127.0.0.1", 0), repository, admin_token="browser-test",
+                            helper_client=helper_client, scheduler=scheduler,
+                        ) as server:
+                            print(server.server_address[1], flush=True)
+                            server.serve_forever()
+                    finally:
+                        if scheduler is not None:
+                            scheduler.stop()
             finally:
                 helper.shutdown()
                 worker.join(timeout=3)
