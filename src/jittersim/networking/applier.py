@@ -326,6 +326,9 @@ class NetworkApplier:
             raise ValueError("too many excluded devices")
         expression = ["udp", "port", "53", "or", "tcp", "port", "53"]
         if macs:
+            # libpcap reads and/or from left to right with equal precedence so the group
+            # changes nothing today. It keeps the meaning clear and stops a later edit
+            # from attaching the exclusions to one protocol only.
             expression = ["("] + expression + [")"]
             for mac in macs:
                 expression += ["and", "not", "ether", "host", mac]

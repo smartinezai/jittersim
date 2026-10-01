@@ -23,7 +23,7 @@ from jittersim.config.models import (
     Profile,
     RandomWebsiteOutcome,
 )
-from jittersim.config.storage import ConfigRepository
+from jittersim.config.storage import ConfigRepository, StorageError
 from jittersim.networking.helper import HelperClientError
 from tests.helper_support import OldHelperService, OlderHelperService, captures, serving
 
@@ -2225,6 +2225,25 @@ class ControlServerTests(unittest.TestCase):
             [str(item.ipv4_address) for item in self.repository.list_domain_observations()],
             ["192.168.50.10"],
         )
+
+    def test_a_failed_purge_rolls_the_protection_back(self) -> None:
+        # The purge and the protection are one change. If the rows cannot be deleted the
+        # device must not look protected while its old rows are still stored.
+        self.server.helper_client = FakeHelper()
+        self.server.write_response_for("/api/observations/scan", {})
+
+        def refuse(addresses, macs=()):
+            raise StorageError("could not delete domain observations")
+
+        self.repository.delete_domain_observations = refuse
+
+        status, _, _ = self.server.write_response_for(
+            "/api/unaffected-devices", {"mac_address": self.PROTECTED_MAC}
+        )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(self.repository.list_unaffected_devices(), ())
+        self.assertEqual(self.repository.total_domain_queries("192.168.50.178"), 2)
 
     def test_a_failed_protection_change_keeps_the_rows_and_the_list(self) -> None:
         self.server.helper_client = FakeHelper()
