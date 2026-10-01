@@ -31,6 +31,28 @@ class DeploymentFirewallTests(unittest.TestCase):
         self.assertIn("subjectAltName=DNS:jittersim.local,IP:$dashboard_ip", installer)
         self.assertIn('openssl x509 -in "$CONFIG_DIR/dashboard.crt" -noout -text', installer)
 
+    def test_dns_watcher_runs_unprivileged_with_only_packet_capture(self) -> None:
+        service = (
+            REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "jittersim-service-watch.service"
+        ).read_text()
+        installer = (REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "install.sh").read_text()
+
+        self.assertIn("User=jittersim", service)
+        self.assertIn("AmbientCapabilities=CAP_NET_RAW", service)
+        self.assertIn("CapabilityBoundingSet=CAP_NET_RAW", service)
+        self.assertIn("NoNewPrivileges=true", service)
+        self.assertIn("RestrictAddressFamilies=AF_PACKET AF_UNIX", service)
+        self.assertIn("--interface ${JITTERSIM_TEST_INTERFACE}", service)
+        self.assertIn("After=NetworkManager.service jittersim-helper.service", service)
+        self.assertIn("jittersim-service-watch.service", installer)
+        self.assertIn("systemctl restart jittersim-service-watch.service", installer)
+        self.assertIn("jittersim.networking.dns_watch", installer)
+
+    def test_the_watcher_is_installed_as_a_command(self) -> None:
+        project = (REPOSITORY_ROOT / "pyproject.toml").read_text()
+
+        self.assertIn('jittersim-service-watch = "jittersim.networking.dns_watch:main"', project)
+
 
 if __name__ == "__main__":
     unittest.main()

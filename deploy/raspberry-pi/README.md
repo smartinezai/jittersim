@@ -276,12 +276,23 @@ check.
 3. Compare with an unaffected client. Its traffic to the same service should
    stay normal.
 
-The Pi resolves every enabled list's hostnames about once a minute and the
-helper keeps the answers for six hours. A listed service that uses a content
-network may serve a device addresses the Pi did not resolve. Add the hostnames
-you see in the dashboard's traffic discovery. A reset removes the sets
-together with every other rule. Encrypted DNS on a client does not change what
-the Pi resolves but the client may still connect to other addresses.
+The `jittersim-service-watch` service reads the DNS answers that leave the Pi
+towards the test Wi-Fi and passes listed addresses to the helper. It runs as
+the `jittersim` user with only the packet capture capability. The Pi also
+resolves every enabled list's hostnames about once a minute and the helper
+keeps each address for six hours after it was last seen. Check the watcher
+with:
+
+```sh
+sudo systemctl status jittersim-service-watch.service
+sudo journalctl -u jittersim-service-watch.service -n 50 --no-pager
+```
+
+A listed service that uses many hostnames may need more names than the
+catalogue holds. Add the hostnames you see in the dashboard's traffic
+discovery. A reset removes the sets together with every other rule. Encrypted
+DNS on a client hides its lookups from the watcher so the client may reach
+addresses the Pi never saw.
 
 ## Remote control with Tailscale
 

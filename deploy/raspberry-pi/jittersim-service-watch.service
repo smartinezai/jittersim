@@ -1,0 +1,25 @@
+[Unit]
+Description=JitterSim service list DNS watcher
+Requires=jittersim-helper.service jittersim-control-firewall.service
+After=NetworkManager.service jittersim-helper.service jittersim-control-firewall.service
+
+[Service]
+Type=simple
+User=jittersim
+Group=jittersim
+EnvironmentFile=/etc/jittersim/runtime.env
+ExecStart=/opt/jittersim/.venv/bin/jittersim-service-watch --interface ${JITTERSIM_TEST_INTERFACE} --plan /run/jittersim/active-plan.json
+Restart=on-failure
+RestartSec=2s
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_PACKET AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
