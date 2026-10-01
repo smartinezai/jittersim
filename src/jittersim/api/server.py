@@ -28,6 +28,11 @@ from jittersim.config.device_labels import (
     normalize_device_mac,
     normalize_device_type,
 )
+from jittersim.config.device_names import (
+    UNKNOWN_DEVICE_NAME,
+    has_hidden_characters,
+    resolve_device_name,
+)
 from jittersim.config.exemptions import UnaffectedDevice, normalize_exempt_mac
 from jittersim.config.models import (
     DataLimit,
@@ -2265,6 +2270,17 @@ DASHBOARD_HTML = """<!doctype html>
       }, { upload_bytes: 0, download_bytes: 0, upload_packets: 0, download_packets: 0 });
     }
 
+    function deviceDisplayName(device) {
+      return device.display_name || device.name || device.assigned_device_name ||
+        device.ipv4_address || "Unknown device";
+    }
+
+    function devicePickerLabel(device) {
+      return device.ipv4_address
+        ? deviceDisplayName(device) + " (" + device.ipv4_address + ")"
+        : deviceDisplayName(device);
+    }
+
     function updateTrafficDeviceOptions(devices) {
       const select = element("traffic-device");
       const selected = select.value;
@@ -2277,7 +2293,7 @@ DASHBOARD_HTML = """<!doctype html>
       (generalActive ? [] : devices).forEach((device) => {
         const option = document.createElement("option");
         option.value = device.id;
-        option.textContent = device.name + " (" + device.ipv4_address + ")";
+        option.textContent = devicePickerLabel(device);
         select.appendChild(option);
       });
       select.value = Array.from(select.options).some((option) => option.value === selected)
@@ -3062,7 +3078,7 @@ DASHBOARD_HTML = """<!doctype html>
       savedDevices.forEach((device) => {
         const option = document.createElement("option");
         option.value = device.id;
-        option.textContent = device.name + " (" + device.ipv4_address + ")";
+        option.textContent = devicePickerLabel(device);
         option.selected = selected.has(option.value);
         select.appendChild(option);
       });
@@ -3190,7 +3206,7 @@ DASHBOARD_HTML = """<!doctype html>
         const heading = document.createElement("div");
         heading.className = "observation-device-heading";
         const title = document.createElement("h3");
-        title.textContent = device.assigned_device_name || device.ipv4_address;
+        title.textContent = deviceDisplayName(device);
         const address = document.createElement("p");
         address.textContent = device.ipv4_address;
         heading.append(title, address);
@@ -3426,7 +3442,7 @@ DASHBOARD_HTML = """<!doctype html>
           : "Each device keeps its profile";
         heading.append(title, profile);
         const members = document.createElement("span");
-        members.textContent = "Devices: " + group.devices.map((device) => device.name).join(", ");
+        members.textContent = "Devices: " + group.devices.map((device) => deviceDisplayName(device)).join(", ");
         const actions = document.createElement("div");
         actions.className = "quota-actions";
         const editButton = document.createElement("button");
@@ -4010,7 +4026,7 @@ DASHBOARD_HTML = """<!doctype html>
       data.devices.forEach((device) => {
           const option = document.createElement("option");
           option.value = device.id;
-          option.textContent = device.name + " (" + device.ipv4_address + ")";
+          option.textContent = devicePickerLabel(device);
           deviceSelect.appendChild(option);
         });
       });
@@ -4237,7 +4253,7 @@ DASHBOARD_HTML = """<!doctype html>
       (data.rows || []).forEach((item) => {
         const row = document.createElement("tr");
         const device = document.createElement("td");
-        device.textContent = item.device_name + " (" + item.device_id + ")";
+        device.textContent = (item.display_name || item.device_name) + " (" + item.device_id + ")";
         const domain = document.createElement("td");
         domain.className = "analytics-domain";
         domain.textContent = item.domain;
@@ -4290,7 +4306,7 @@ DASHBOARD_HTML = """<!doctype html>
         (deviceData.devices || []).forEach((device) => {
           const option = document.createElement("option");
           option.value = device.id;
-          option.textContent = device.name + " (" + device.id + ")";
+          option.textContent = deviceDisplayName(device) + " (" + device.id + ")";
           option.selected = device.id === selectedDevice;
           deviceSelect.appendChild(option);
         });
@@ -5391,14 +5407,61 @@ def _profile_payload(profile: Profile) -> Dict[str, Any]:
     return asdict(profile)
 
 
-def _device_payload(device: Device) -> Dict[str, Any]:
+def _device_display_name(
+    device: Optional[Device], labels_by_mac: Dict[str, Dict[str, str]]
+) -> str:
+    """Resolve the name shown for a saved device."""
+
+    if device is None:
+        return UNKNOWN_DEVICE_NAME
+    label = labels_by_mac.get(device.mac_address or "", {}).get("display_name")
+    return resolve_device_name(saved_label=label, saved_name=device.name)
+
+
+def _device_title(
+    device: Optional[Device], labels_by_mac: Dict[str, Dict[str, str]], fallback_id: str
+) -> str:
+    """Name a device in a payload that lists many of them.
+
+    An unnamed device shows its address so that two of them never look the same.
+    A device that no longer exists shows the id it was saved under.
+    """
+
+    if device is None:
+        return fallback_id
+    name = _device_display_name(device, labels_by_mac)
+    if name == UNKNOWN_DEVICE_NAME:
+        return f"{UNKNOWN_DEVICE_NAME} ({device.ipv4_address})"
+    return name
+
+
+def _device_payload(
+    device: Device, *, labels_by_mac: Dict[str, Dict[str, str]]
+) -> Dict[str, Any]:
     return {
         "id": device.id,
         "name": device.name,
+        "display_name": _device_display_name(device, labels_by_mac),
         "ipv4_address": str(device.ipv4_address),
         "profile_id": device.profile_id,
         "mac_address": device.mac_address,
     }
+
+
+def _observation_display_name(
+    station: Dict[str, Optional[str]],
+    saved: Optional[Device],
+    labels_by_mac: Dict[str, Dict[str, str]],
+) -> str:
+    """Resolve the name shown for one client in Traffic discovery."""
+
+    mac_address = station.get("mac_address") or (saved.mac_address if saved else None)
+    label = labels_by_mac.get(mac_address or "", {}).get("display_name")
+    return resolve_device_name(
+        saved_label=label,
+        saved_name=saved.name if saved else None,
+        hostname=station.get("hostname"),
+    )
 
 
 def _connected_device_payload(
@@ -5445,12 +5508,13 @@ def _device_group_payload(
     group: DeviceGroup,
     *,
     repository: ConfigRepository,
+    labels_by_mac: Dict[str, Dict[str, str]],
 ) -> Dict[str, Any]:
     """Build the dashboard representation of one device group."""
 
     profile = repository.get_profile(group.profile_id) if group.profile_id else None
     devices = [
-        _device_payload(device)
+        _device_payload(device, labels_by_mac=labels_by_mac)
         for device_id in group.device_ids
         if (device := repository.get_device(device_id)) is not None
     ]
@@ -5480,11 +5544,12 @@ def _data_limit_payload(
     """Build the dashboard representation of one device quota."""
 
     device = repository.get_device(data_limit.device_id)
+    labels_by_mac = repository.list_connected_device_labels()
     profile = repository.get_profile(data_limit.profile_id)
     return {
         **asdict(data_limit),
         "reset_times": list(data_limit.reset_times),
-        "device_name": device.name if device is not None else data_limit.device_id,
+        "device_name": _device_title(device, labels_by_mac, data_limit.device_id),
         "profile_name": profile.name if profile is not None else data_limit.profile_id,
         "remaining_bytes": max(0, data_limit.limit_bytes - data_limit.used_bytes),
         "reached": data_limit.used_bytes >= data_limit.limit_bytes,
@@ -5519,12 +5584,13 @@ def _service_quota_payload(
     """Build the dashboard representation of one service quota."""
 
     device = repository.get_device(quota.device_id)
+    labels_by_mac = repository.list_connected_device_labels()
     profile = repository.get_profile(quota.profile_id)
     return {
         **asdict(quota),
         "domains": list(quota.domains),
         "reset_times": list(quota.reset_times),
-        "device_name": device.name if device is not None else quota.device_id,
+        "device_name": _device_title(device, labels_by_mac, quota.device_id),
         "profile_name": profile.name if profile is not None else quota.profile_id,
         "remaining_bytes": max(0, quota.limit_bytes - quota.used_bytes),
         "reached": quota.used_bytes >= quota.limit_bytes,
@@ -5535,11 +5601,12 @@ def _service_assignment_payload(
     assignment: ServiceAssignment, *, repository: ConfigRepository
 ) -> Dict[str, Any]:
     device = repository.get_device(assignment.device_id)
+    labels_by_mac = repository.list_connected_device_labels()
     profile = repository.get_profile(assignment.profile_id)
     return {
         **asdict(assignment),
         "domains": list(assignment.domains),
-        "device_name": device.name if device is not None else assignment.device_id,
+        "device_name": _device_title(device, labels_by_mac, assignment.device_id),
         "profile_name": profile.name if profile is not None else assignment.profile_id,
     }
 
@@ -5577,13 +5644,14 @@ def _time_quota_payload(
 
     current_time = int(time.time()) if now is None else now
     device = repository.get_device(quota.device_id)
+    labels_by_mac = repository.list_connected_device_labels()
     profile = repository.get_profile(quota.profile_id)
     window_active = quota.started_at <= current_time < quota.expires_at
     return {
         **asdict(quota),
         "domains": list(quota.domains),
         "reset_times": list(quota.reset_times),
-        "device_name": device.name if device is not None else quota.device_id,
+        "device_name": _device_title(device, labels_by_mac, quota.device_id),
         "profile_name": profile.name if profile is not None else quota.profile_id,
         "remaining_seconds": max(0, quota.limit_seconds - quota.used_seconds),
         "window_remaining_seconds": (
@@ -5603,6 +5671,7 @@ def _progression_payload(
     traffic_bytes: int = 0,
 ) -> Dict[str, Any]:
     device = repository.get_device(progression.device_id)
+    labels_by_mac = repository.list_connected_device_labels()
     start_profile = repository.get_profile(progression.start_profile_id)
     end_profile = repository.get_profile(progression.end_profile_id)
     total_queries = repository.total_domain_queries(str(device.ipv4_address)) if device else 0
@@ -5614,7 +5683,7 @@ def _progression_payload(
     )
     return {
         **asdict(progression),
-        "device_name": device.name if device is not None else progression.device_id,
+        "device_name": _device_title(device, labels_by_mac, progression.device_id),
         "start_profile_name": (
             start_profile.name
             if start_profile is not None
@@ -5860,6 +5929,25 @@ class ControlServer(HTTPServer):
             raise HelperClientError("Device verification returned an invalid response.")
         return result
 
+    def _station_identities(self) -> Dict[str, Dict[str, Optional[str]]]:
+        """Map each visible client address to its MAC and announced hostname."""
+
+        if self.helper_client is None:
+            return {}
+        try:
+            stations = station_snapshot(self.helper_client)["devices"]
+            return {
+                station["ipv4_address"]: {
+                    "mac_address": station.get("mac_address"),
+                    "hostname": station.get("hostname"),
+                }
+                for station in stations
+                if isinstance(station, dict) and station.get("ipv4_address")
+            }
+        except (AttributeError, HelperClientError, KeyError, OSError, TypeError, ValueError):
+            LOGGER.warning("could not read client names from the station snapshot", exc_info=True)
+            return {}
+
     def response_for(self, path: str, query: str = "") -> Tuple[int, str, bytes]:
         """Build the response body for a supported GET path."""
 
@@ -5886,7 +5974,11 @@ class ControlServer(HTTPServer):
         if path == "/api/general-profile":
             return HTTPStatus.OK, "application/json", _json_bytes(self._general_profile_status())
         if path == "/api/devices":
-            devices = [_device_payload(device) for device in self.repository.list_devices()]
+            labels_by_mac = self.repository.list_connected_device_labels()
+            devices = [
+                _device_payload(device, labels_by_mac=labels_by_mac)
+                for device in self.repository.list_devices()
+            ]
             return HTTPStatus.OK, "application/json", _json_bytes({"devices": devices})
         if path == "/api/unaffected-devices":
             return HTTPStatus.OK, "application/json", _json_bytes({
@@ -5894,8 +5986,11 @@ class ControlServer(HTTPServer):
                 "limit": 256,
             })
         if path == "/api/groups":
+            labels_by_mac = self.repository.list_connected_device_labels()
             groups = [
-                _device_group_payload(group, repository=self.repository)
+                _device_group_payload(
+                    group, repository=self.repository, labels_by_mac=labels_by_mac
+                )
                 for group in self.repository.list_device_groups()
             ]
             return HTTPStatus.OK, "application/json", _json_bytes({"groups": groups})
@@ -5905,13 +6000,14 @@ class ControlServer(HTTPServer):
         if path == "/api/timers":
             now = int(time.time())
             timers = []
+            labels_by_mac = self.repository.list_connected_device_labels()
             for timer in self.repository.list_active_timers(now=now):
                 device = self.repository.get_device(timer.device_id)
                 profile = self.repository.get_profile(timer.profile_id)
                 timers.append(
                     {
                         **_timer_payload(timer),
-                        "device_name": device.name if device is not None else timer.device_id,
+                        "device_name": _device_title(device, labels_by_mac, timer.device_id),
                         "profile_name": profile.name if profile is not None else timer.profile_id,
                         "remaining_seconds": max(0, timer.expires_at - now),
                     }
@@ -6125,9 +6221,17 @@ class ControlServer(HTTPServer):
             for observation in observations:
                 address = str(observation.ipv4_address)
                 grouped.setdefault(address, []).append(_domain_observation_payload(observation))
+            stations = self._station_identities()
+            labels_by_mac = self.repository.list_connected_device_labels()
             devices = [
                 {
                     "ipv4_address": address,
+                    "display_name": _observation_display_name(
+                        stations.get(address, {}),
+                        assignments_by_address.get(address),
+                        labels_by_mac,
+                    ),
+                    "hostname": stations.get(address, {}).get("hostname"),
                     "assigned_device_id": (
                         assignments_by_address[address].id
                         if address in assignments_by_address
@@ -6218,6 +6322,12 @@ class ControlServer(HTTPServer):
                 days=days,
                 device_id=device_id,
             )
+            labels_by_mac = self.repository.list_connected_device_labels()
+            devices_by_id = {device.id: device for device in self.repository.list_devices()}
+            for row in report["rows"]:
+                row["display_name"] = _device_display_name(
+                    devices_by_id.get(row["device_id"]), labels_by_mac
+                )
             return HTTPStatus.OK, "application/json", _json_bytes(report)
         if path == "/api/backup":
             return HTTPStatus.OK, "application/vnd.sqlite3", self.repository.backup_bytes()
@@ -6368,8 +6478,9 @@ class ControlServer(HTTPServer):
                     {"error": "invalid device configuration"}
                 )
             self.repository.save_device(device)
+            labels_by_mac = self.repository.list_connected_device_labels()
             return HTTPStatus.OK, "application/json", _json_bytes(
-                {"device": _device_payload(device)}
+                {"device": _device_payload(device, labels_by_mac=labels_by_mac)}
             )
 
         if path in ("/api/general-profile", "/api/general-profile/stop"):
@@ -7345,7 +7456,9 @@ class ControlServer(HTTPServer):
                                 "Choose a group profile before adding an unassigned client"
                             )
                         device = _connected_device_from_payload(
-                            {**client, "profile_id": base_profile}, self.repository
+                            {**client, "profile_id": base_profile},
+                            self.repository,
+                            hostname=_snapshot_hostname(snapshot, client["mac_address"]),
                         )
                         self._verify_selected_client(device, snapshot)
                         self.repository.save_device(device)
@@ -7367,7 +7480,14 @@ class ControlServer(HTTPServer):
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
             return self._saved_control_response(
-                {"group": _device_group_payload(group, repository=self.repository)}, snapshot
+                {
+                    "group": _device_group_payload(
+                        group,
+                        repository=self.repository,
+                        labels_by_mac=self.repository.list_connected_device_labels(),
+                    )
+                },
+                snapshot,
             )
 
     def _base_profile_feedback(self, device: Device) -> str:
@@ -7437,14 +7557,18 @@ class ControlServer(HTTPServer):
         operation = self.scheduler.control_operation() if self.scheduler else nullcontext()
         with operation:
             try:
-                device = _connected_device_from_payload(payload, self.repository)
+                snapshot = station_snapshot(self.helper_client)
+                device = _connected_device_from_payload(
+                    payload,
+                    self.repository,
+                    hostname=_snapshot_hostname(snapshot, payload.get("mac_address")),
+                )
                 if device.mac_address in {
                     item.mac_address for item in self.repository.list_unaffected_devices()
                 }:
                     raise ValueError(
                         "This device is unaffected by profiles. Remove its protection before applying a profile."
                     )
-                snapshot = station_snapshot(self.helper_client)
                 self._verify_selected_client(device, snapshot)
                 if self.scheduler:
                     self.scheduler.sample_before_control_change(repository=self.repository)
@@ -7455,7 +7579,9 @@ class ControlServer(HTTPServer):
                 return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
             return self._saved_control_response(
                 {
-                    "device": _device_payload(device),
+                    "device": _device_payload(
+                        device, labels_by_mac=self.repository.list_connected_device_labels()
+                    ),
                     "message": self._base_profile_feedback(device),
                 },
                 snapshot,
@@ -8234,8 +8360,43 @@ def _policies_from_payload(payload: Dict[str, Any]) -> Tuple[MacPolicy, WebsiteP
     )
 
 
-def _connected_device_from_payload(payload: Dict[str, Any], repository: ConfigRepository) -> Device:
-    """Build an assignment for a visible client while preserving existing names and IDs."""
+def _snapshot_hostname(snapshot: Optional[Dict[str, Any]], mac_address: Any) -> Optional[str]:
+    """Find the hostname a station announced in a connected-client snapshot."""
+
+    try:
+        wanted = normalize_exempt_mac(mac_address)
+    except ValueError:
+        return None
+    stations = snapshot.get("devices") if isinstance(snapshot, dict) else None
+    for station in stations if isinstance(stations, list) else ():
+        if isinstance(station, dict) and station.get("mac_address") == wanted:
+            hostname = station.get("hostname")
+            return hostname if isinstance(hostname, str) else None
+    return None
+
+
+def _new_client_name(label: Optional[str], hostname: Optional[str], ipv4_address: Any) -> str:
+    """Name a client saved for the first time.
+
+    Use the saved label then the announced hostname. A candidate that is not a
+    usable name is skipped and the automatic placeholder is the last resort.
+    """
+
+    for candidate in (label, hostname):
+        name = candidate.strip() if isinstance(candidate, str) else ""
+        if name and len(name) <= 64 and not has_hidden_characters(name):
+            return name
+    return f"Client {ipv4_address}"
+
+
+def _connected_device_from_payload(
+    payload: Dict[str, Any], repository: ConfigRepository, *, hostname: Optional[str] = None
+) -> Device:
+    """Build an assignment for a visible client while preserving existing names and IDs.
+
+    A client saved for the first time takes its saved label or else the hostname
+    it announced. An existing assignment keeps its name.
+    """
 
     ipv4_address = payload["ipv4_address"]
     profile_id = payload["profile_id"]
@@ -8261,9 +8422,14 @@ def _connected_device_from_payload(payload: Dict[str, Any], repository: ConfigRe
     generated_id = "client-" + mac_address.replace(":", "")
     if existing is None and repository.get_device(generated_id) is not None:
         raise ValueError("The detected client ID conflicts with another saved assignment")
+    label = repository.list_connected_device_labels().get(mac_address, {}).get("display_name")
     return Device(
         id=existing.id if existing else generated_id,
-        name=existing.name if existing else f"Client {address_only.ipv4_address}",
+        name=(
+            existing.name
+            if existing
+            else _new_client_name(label, hostname, address_only.ipv4_address)
+        ),
         ipv4_address=address_only.ipv4_address,
         profile_id=profile_id,
         mac_address=mac_address,
