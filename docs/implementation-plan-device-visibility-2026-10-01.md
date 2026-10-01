@@ -259,30 +259,57 @@ one by one hides what the device is doing.
 
 **Design.**
 
-- New `group_domain(domain)` in `domain_labels.py` returns `{key, name}`. A known
-  app or system service groups by its label so `nflxvideo.net` and `netflix.com`
-  both land in Netflix. Anything else groups by its registrable domain so every
-  `*.immobilienscout24.de` name lands in `immobilienscout24.de`. `/api/observations`
-  adds `group` per domain. Grouping lives on the server so the CLI can reuse it.
+- New `group_domain(domain)` in `domain_labels.py` returns `{key, name, kind}`. A name
+  with a known label of kind app or system or iot groups by its label so `nflxvideo.net`
+  and `netflix.com` both land in Netflix and every `*.immobilienscout24.de` name lands
+  in `ImmoScout24`. A name with any other label (cdn or tracker or unknown) groups by
+  its registrable domain (key `domain:<registrable>`) so two sites behind one CDN never
+  merge into an app by guesswork. `kind` is the label kind of the name. A group takes
+  the kind of its names and a system or cdn name wins when kinds differ.
+  `/api/observations` adds `group` per domain. Grouping lives on the server so the CLI
+  can reuse it.
+- `registrable_domain` keeps the owner's label. It knows the common two-part public
+  suffixes (`co.uk` and `co.kr` and `com.ar` and so on) and a list of multi-tenant
+  hosting suffixes (`github.io` and `herokuapp.com` and `cloudfront.net` and
+  `s3.amazonaws.com` and so on) where the tenant label stays so `a.github.io` and
+  `b.github.io` are different groups. A name that is only a suffix is its own group.
 - The card shows one row per group per device with the group name and the number
-  of names and the total queries and a chevron (`<details>`). A group of one name
-  is a plain row with no chevron. Groups sort by total queries then by name.
+  of names and the total queries. A group of one name is a plain row with no
+  disclosure. Groups sort by total queries then by name without looking at the case.
+- The group header is a row of three sibling buttons. The first is the disclosure
+  toggle (`<button type="button">` with `aria-expanded` and `aria-controls`). It holds
+  the chevron and the group name and the number of names and the total queries and the
+  blocked count. The other two are the group actions. It is not a `<details>` element
+  because buttons inside a `<summary>` are nested interactive content. The body is a
+  `div` with an id that is unique per device and group and the `hidden` attribute while
+  the group is closed.
 - Expanding a group shows its names with the per-name buttons including the
-  Block or Unblock state from piece 4.
+  Block or Unblock state from piece 4. A row skips its label line when the label only
+  repeats the group name.
 - The header has group actions: **Add all to profile** (the device card's selected
   profile) and **Block all** or **Unblock all**. The label is **Unblock all** when
   every name is blocked and **Block remaining** when some are. They call the
-  existing endpoints with a `domains` list of up to 64 names. The call saves once
-  so it is all or nothing and one invalid name rejects the whole call.
+  existing endpoints with a `domains` list. The call saves once so it is all or
+  nothing and one invalid name rejects the whole call. Each action button has an
+  `aria-label` that names the group and the count such as `Block all 7 ImmoScout24
+  names` and `Add all 7 ImmoScout24 names to Fast`.
+- A group of system or cdn names has no **Block all** or **Block remaining**. One click
+  would put connectivity checks and push and time sync into the block list and the
+  device would show no internet. The button is disabled with a note on it. **Unblock
+  all** and **Add all to profile** stay and so do the per-name buttons.
 - Open groups stay open across the dashboard refresh. The open keys are kept per
   device address and group key (`<address>|<group key>`) in a module-level set that
-  the `<details>` `toggle` event updates. A render reads the set so a re-rendered
-  group opens again.
+  a click on the toggle updates. A render reads the set so a re-rendered group opens
+  again.
 - The header also says how many of its names are blocked (`All blocked` or `2 blocked`)
   because a collapsed group hides the per-name Blocked badges.
-- A call takes at most 64 names. When a group needs more than 64 names changed the
-  header buttons are disabled with a note on the button. The per-name buttons still
-  work. The calls are not split into chunks because that would break all or nothing.
+- A call takes at most 64 names. That is only a safety limit because storage returns
+  at most 50 names per device so a group never gets near it. When a group would need
+  more the header buttons are disabled with a note on the button.
+- A list holds at most 100 names (the global block list and a profile's websites). A
+  call that would go over is refused whole with `The global block list can hold 100
+  names. Remove some first.` or `A profile can list 100 websites. Remove some first.`
+  and the dashboard shows that text. Names that are already listed do not count again.
 - Each card keeps the profile picked in its select across refreshes (a pre-existing
   defect that reset the select on every re-render). The remembered choice falls back
   to the assigned profile and then the first profile when its profile is deleted.
@@ -293,14 +320,16 @@ one by one hides what the device is doing.
 
 **Tests.** `group_domain` for Netflix across two registrable domains and
 ImmoScout24 across several subdomains including `s24-media` and a `co.uk` style
-suffix and a single-name group. The endpoints with a `domains` list: the bound of
-64 and duplicates and atomicity and one invalid name. Node tests of the pure group
-functions and of the real `renderObservations` and click handlers on a small fake
-DOM: collapsed by default and counts and order and open state surviving a
-re-render and the header buttons' states and request bodies. The fixture seed
-(`JITTERSIM_BROWSER_TEST_OBSERVATIONS=1`) holds the seven ImmoScout24 names and the
-two Netflix names for a look in a browser. There is no Playwright journey for this
-piece.
+suffix and a single-name group. Every listed two-part suffix and hosting suffix keeps
+two sites apart. System and iot names group by their label and cdn and tracker names
+by their registrable domain. The endpoints with a `domains` list: the bound of 64 and
+duplicates and atomicity and one invalid name and the 100 name caps. Node tests of the
+pure group functions and of the real `renderObservations` and click handlers on a small
+fake DOM: collapsed by default and counts and order and open state surviving a
+re-render and the toggle and the action buttons being siblings and their names and
+states and request bodies. The fixture seed (`JITTERSIM_BROWSER_TEST_OBSERVATIONS=1`)
+holds the seven ImmoScout24 names and the two Netflix names for a look in a browser.
+There is no Playwright journey for this piece.
 
 ## 6. Protected clients look protected
 
