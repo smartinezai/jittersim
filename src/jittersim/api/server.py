@@ -18,7 +18,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from ipaddress import IPv4Network
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, urlsplit
 
 from jittersim.config.device_labels import (
@@ -33,6 +33,7 @@ from jittersim.config.device_names import (
     has_hidden_characters,
     resolve_device_name,
 )
+from jittersim.config.domain_labels import label_domain, seen_with
 from jittersim.config.exemptions import UnaffectedDevice, normalize_exempt_mac
 from jittersim.config.models import (
     DataLimit,
@@ -344,6 +345,13 @@ DASHBOARD_HTML = """<!doctype html>
     .connected-controls { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
     .connected-controls select { min-width: 0; width: 12rem; max-width: 100%; }
     .connected-controls button { margin-top: 0; white-space: nowrap; }
+    .connected-row.protected { border-color: #3a4656; background: #111b29; }
+    .connected-row.protected .connected-dot { background: #7b8797; box-shadow: 0 0 0 0.2rem #7b879722; }
+    .connected-row.protected .connected-address { color: #c3cfde; }
+    .connected-row.protected .connected-meta { color: #9fb0c4; }
+    .connected-row.protected .connected-controls select:disabled,
+    .connected-row.protected .connected-controls button:disabled { opacity: 1; color: #8493a6; border-color: #2c3847; background: #0f1824; cursor: not-allowed; }
+    .protected-badge { display: inline-block; margin-left: 0.5rem; padding: 0.05rem 0.5rem; border: 1px solid #5b6b7f; border-radius: 999px; color: #c3cfde; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.02em; }
     .connected-label-editor { margin-top: 0.4rem; color: #a8bdd4; font-size: 0.78rem; }
     .connected-label-editor summary { cursor: pointer; }
     .connected-label-form {
@@ -442,7 +450,18 @@ DASHBOARD_HTML = """<!doctype html>
     .observation-device-heading h3 { margin: 0; color: #edf5ff; text-transform: none; letter-spacing: 0; font-size: 0.95rem; }
     .observation-device-heading p { margin: 0; color: #91a8c1; font-size: 0.78rem; }
     .observation-domain-list { display: grid; gap: 0.35rem; margin: 0.65rem 0 0; padding: 0; list-style: none; }
-    .observation-domain { display: flex; justify-content: space-between; gap: 1rem; padding: 0.45rem 0.55rem; border-radius: 0.35rem; background: #102238; color: #c7d7eb; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
+    .observation-domain { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem; padding: 0.45rem 0.55rem; border-radius: 0.35rem; background: #102238; color: #c7d7eb; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
+    .observation-domain-name { flex: 1 1 14rem; min-width: 0; }
+    .observation-domain button { margin-top: 0; }
+    .observation-label, .observation-hint-line { font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .observation-label { display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.5rem; color: #edf5ff; font-size: 0.88rem; }
+    .observation-label strong { font-weight: 650; overflow-wrap: anywhere; }
+    .observation-category { padding: 0.05rem 0.45rem; border: 1px solid #46627f; border-radius: 999px; color: #c6dbf4; font-size: 0.7rem; font-weight: 500; white-space: nowrap; }
+    .observation-category[data-kind="unknown"] { border-style: dashed; color: #9fb3ca; }
+    .observation-domain-host { margin-top: 0.1rem; color: #9fb3ca; font-size: 0.76rem; overflow-wrap: anywhere; }
+    .observation-hint-line { display: flex; flex-wrap: wrap; gap: 0.1rem 0.75rem; margin-top: 0.2rem; font-size: 0.76rem; }
+    .observation-hint { color: #b9c9dc; font-style: italic; }
+    .observation-search-link { color: #8cc4ff; }
     .observation-domain-count { color: #8de2bc; white-space: nowrap; }
     .policy-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
     .policy-grid > div { min-width: 0; }
@@ -490,6 +509,11 @@ DASHBOARD_HTML = """<!doctype html>
       display: block;
       opacity: 1;
       visibility: visible;
+    }
+    @media (min-width: 701px) {
+      /* In a form grid the label is as wide as its column so the tooltip takes that width.
+         The grid has as many columns as fit and a fixed width could run past the card edge. */
+      .fields > label > .field-label .help-icon::after { right: 0; width: auto; }
     }
     .randomness-fields {
       display: grid;
@@ -897,36 +921,36 @@ DASHBOARD_HTML = """<!doctype html>
       <h2 id="profile-form-title">Save profile</h2>
       <form id="profile-form">
         <div class="fields">
-          <label>Profile ID
+          <label><span class="field-label">Profile ID<span class="help-icon" tabindex="0" role="img" aria-label="Profile ID help" data-help="A short code that devices and schedules use to find this profile. Saving with an existing ID updates that profile and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The Name is what people read.">?</span></span>
             <input id="profile-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}">
           </label>
-          <label>Name <input id="profile-name" required></label>
+          <label><span class="field-label">Name<span class="help-icon" tabindex="0" role="img" aria-label="Profile name help" data-help="The name people read in lists and menus. Use any words you like. The Profile ID is the short code behind it.">?</span></span> <input id="profile-name" required></label>
         </div>
         <h3>Upload</h3>
         <div class="fields">
-          <label>Delay (ms) <input id="upload-delay" type="number" min="0" value="0" required></label>
-          <label>Jitter (ms)
+          <label><span class="field-label">Delay (ms)<span class="help-icon" tabindex="0" role="img" aria-label="Upload delay help" data-help="Extra waiting time added to every packet. 1000 ms is one second. Upload is traffic leaving the device and download is traffic arriving at it.">?</span></span> <input id="upload-delay" type="number" min="0" value="0" required></label>
+          <label><span class="field-label">Jitter (ms)<span class="help-icon" tabindex="0" role="img" aria-label="Upload jitter help" data-help="How much each packet's delay can vary. With a 100 ms delay and 20 ms jitter each packet waits somewhere between 80 and 120 ms. High jitter makes calls and games feel choppy.">?</span></span>
             <input id="upload-jitter" type="number" min="0" value="0" required>
           </label>
-          <label>Loss (%)
+          <label><span class="field-label">Loss (%)<span class="help-icon" tabindex="0" role="img" aria-label="Upload loss help" data-help="The chance that a packet is lost on the way. 5% means about 1 packet in 20 never arrives. Many apps notice and send it again which slows them down.">?</span></span>
             <input id="upload-loss" type="number" min="0" max="100" value="0" required>
           </label>
-          <label>Bandwidth (kbit/s, optional)
+          <label><span class="field-label">Bandwidth (kbit/s, optional)<span class="help-icon" tabindex="0" role="img" aria-label="Upload bandwidth help" data-help="The top speed in kilobits per second. 1000 kbit/s is about 1 Mbit/s. Leave it empty for no limit.">?</span></span>
             <input id="upload-bandwidth" type="number" min="1">
           </label>
         </div>
         <h3>Download</h3>
         <div class="fields">
-          <label>Delay (ms)
+          <label><span class="field-label">Delay (ms)<span class="help-icon" tabindex="0" role="img" aria-label="Download delay help" data-help="Extra waiting time added to every packet. 1000 ms is one second. Upload is traffic leaving the device and download is traffic arriving at it.">?</span></span>
             <input id="download-delay" type="number" min="0" value="0" required>
           </label>
-          <label>Jitter (ms)
+          <label><span class="field-label">Jitter (ms)<span class="help-icon" tabindex="0" role="img" aria-label="Download jitter help" data-help="How much each packet's delay can vary. With a 100 ms delay and 20 ms jitter each packet waits somewhere between 80 and 120 ms. High jitter makes calls and games feel choppy.">?</span></span>
             <input id="download-jitter" type="number" min="0" value="0" required>
           </label>
-          <label>Loss (%)
+          <label><span class="field-label">Loss (%)<span class="help-icon" tabindex="0" role="img" aria-label="Download loss help" data-help="The chance that a packet is lost on the way. 5% means about 1 packet in 20 never arrives. Many apps notice and send it again which slows them down.">?</span></span>
             <input id="download-loss" type="number" min="0" max="100" value="0" required>
           </label>
-          <label>Bandwidth (kbit/s, optional)
+          <label><span class="field-label">Bandwidth (kbit/s, optional)<span class="help-icon" tabindex="0" role="img" aria-label="Download bandwidth help" data-help="The top speed in kilobits per second. 1000 kbit/s is about 1 Mbit/s. Leave it empty for no limit.">?</span></span>
             <input id="download-bandwidth" type="number" min="1">
           </label>
         </div>
@@ -949,16 +973,16 @@ DASHBOARD_HTML = """<!doctype html>
             <label><span class="field-label">Outage check interval (seconds)<span class="help-icon" tabindex="0" role="img" aria-label="Outage interval help" data-help="How often JitterSim checks whether to start a new outage. Set this to 0 to use the reroll interval.">?</span></span>
               <input id="profile-outage-interval" type="number" min="0" value="0">
             </label>
-            <label>Random seed (optional)
+            <label><span class="field-label">Random seed (optional)<span class="help-icon" tabindex="0" role="img" aria-label="Random seed help" data-help="Makes the random changes repeat exactly. The same seed gives a device the same values in the same order every time. Leaving it empty is the same as 0. Pick another number for a different pattern.">?</span></span>
               <input id="profile-seed" type="number" min="0">
             </label>
-            <label>Website mode
+            <label><span class="field-label">Website mode<span class="help-icon" tabindex="0" role="img" aria-label="Website mode help" data-help="Unrestricted puts no site limit on this profile. Allow only listed domains limits the device to the sites named in Profile domains.">?</span></span>
               <select id="profile-website-mode">
                 <option value="unrestricted">Unrestricted</option>
                 <option value="allow_only">Allow only listed domains</option>
               </select>
             </label>
-            <label>Profile domains (comma separated)
+            <label><span class="field-label">Profile domains (comma separated)<span class="help-icon" tabindex="0" role="img" aria-label="Profile domains help" data-help="Only used when Website mode is Allow only listed domains. Separate names with commas. Each name is looked up exactly as typed so list www.example.com as well as example.com if you need both. An empty list lets the device reach no sites.">?</span></span>
               <input id="profile-website-domains" placeholder="linkedin.com, chat.openai.com">
             </label>
             <label><span class="field-label">Website entry chance (%)<span class="help-icon" tabindex="0" role="img" aria-label="Website chance help" data-help="At each profile reroll, this chance controls whether each listed profile domain stays allowed for the next interval.">?</span></span>
@@ -968,9 +992,9 @@ DASHBOARD_HTML = """<!doctype html>
           <h3>Upload variation</h3>
           <p class="form-note">Each card controls one feature. Value variation changes the base value. Enabled chance decides whether the feature is used after a reroll.</p>
           <div class="fields">
-            <label>Reorder (%) <input id="upload-reorder" type="number" min="0" max="100" value="0"></label>
-            <label>Duplicate (%) <input id="upload-duplicate" type="number" min="0" max="100" value="0"></label>
-            <label>Corrupt (%) <input id="upload-corrupt" type="number" min="0" max="100" value="0"></label>
+            <label><span class="field-label">Reorder (%)<span class="help-icon" tabindex="0" role="img" aria-label="Upload reorder help" data-help="The chance that a packet skips the delay and arrives ahead of packets sent before it. It does nothing unless the Delay in the same direction is above 0. Jitter alone is not enough.">?</span></span> <input id="upload-reorder" type="number" min="0" max="100" value="0"></label>
+            <label><span class="field-label">Duplicate (%)<span class="help-icon" tabindex="0" role="img" aria-label="Upload duplicate help" data-help="The chance that a packet is delivered twice. Real networks do this occasionally and some apps handle it badly.">?</span></span> <input id="upload-duplicate" type="number" min="0" max="100" value="0"></label>
+            <label><span class="field-label">Corrupt (%)<span class="help-icon" tabindex="0" role="img" aria-label="Upload corrupt help" data-help="The chance that a packet arrives with one damaged bit. Most devices spot the damage and throw the packet away so it behaves much like loss.">?</span></span> <input id="upload-corrupt" type="number" min="0" max="100" value="0"></label>
           </div>
           <div class="randomness-fields">
             <div class="randomness-field">
@@ -1025,9 +1049,9 @@ DASHBOARD_HTML = """<!doctype html>
           </div>
           <h3>Download variation</h3>
           <div class="fields">
-            <label>Reorder (%) <input id="download-reorder" type="number" min="0" max="100" value="0"></label>
-            <label>Duplicate (%) <input id="download-duplicate" type="number" min="0" max="100" value="0"></label>
-            <label>Corrupt (%) <input id="download-corrupt" type="number" min="0" max="100" value="0"></label>
+            <label><span class="field-label">Reorder (%)<span class="help-icon" tabindex="0" role="img" aria-label="Download reorder help" data-help="The chance that a packet skips the delay and arrives ahead of packets sent before it. It does nothing unless the Delay in the same direction is above 0. Jitter alone is not enough.">?</span></span> <input id="download-reorder" type="number" min="0" max="100" value="0"></label>
+            <label><span class="field-label">Duplicate (%)<span class="help-icon" tabindex="0" role="img" aria-label="Download duplicate help" data-help="The chance that a packet is delivered twice. Real networks do this occasionally and some apps handle it badly.">?</span></span> <input id="download-duplicate" type="number" min="0" max="100" value="0"></label>
+            <label><span class="field-label">Corrupt (%)<span class="help-icon" tabindex="0" role="img" aria-label="Download corrupt help" data-help="The chance that a packet arrives with one damaged bit. Most devices spot the damage and throw the packet away so it behaves much like loss.">?</span></span> <input id="download-corrupt" type="number" min="0" max="100" value="0"></label>
           </div>
           <div class="randomness-fields">
             <div class="randomness-field">
@@ -1089,12 +1113,12 @@ DASHBOARD_HTML = """<!doctype html>
       <h2>Assign a device</h2>
       <form id="device-form">
         <div class="fields">
-          <label>Device ID <input id="device-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}"></label>
+          <label><span class="field-label">Device ID<span class="help-icon" tabindex="0" role="img" aria-label="Device ID help" data-help="A short code that identifies this device. Saving with an existing ID updates that device and a new ID adds a new one. Use only lowercase letters and digits and hyphens and underscores. The Name is what people read. Each device needs its own IP address.">?</span></span> <input id="device-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}"></label>
           <label>Name <input id="device-name" required></label>
           <label>Reserved IPv4 address
             <input id="device-ip" required placeholder="192.168.50.10">
           </label>
-          <label>Profile ID <input id="device-profile" required></label>
+          <label><span class="field-label">Profile ID<span class="help-icon" tabindex="0" role="img" aria-label="Device profile ID help" data-help="The ID of a profile you already saved. It is the code you typed as Profile ID when saving that profile. Profile menus show it in parentheses after the name.">?</span></span> <input id="device-profile" required></label>
           <label>MAC address (optional)
             <input id="device-mac" placeholder="aa:bb:cc:dd:ee:ff">
           </label>
@@ -1107,7 +1131,7 @@ DASHBOARD_HTML = """<!doctype html>
       <p class="form-note">Select saved devices or connected clients. Choose a profile override when adding an unassigned client. A device can belong to one group.</p>
       <form id="group-form">
         <div class="fields">
-          <label>Group ID <input id="group-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="family"></label>
+          <label><span class="field-label">Group ID<span class="help-icon" tabindex="0" role="img" aria-label="Group ID help" data-help="A short code that identifies this group. Saving with an existing ID updates that group and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The Group name is what people read.">?</span></span> <input id="group-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="family"></label>
           <label>Group name <input id="group-name" required placeholder="Family devices"></label>
           <label>Profile override
             <select id="group-profile"><option value="">Use each device profile</option></select>
@@ -1126,7 +1150,7 @@ DASHBOARD_HTML = """<!doctype html>
       <h2>Schedule a profile</h2>
       <form id="schedule-form">
         <div class="fields">
-          <label>Schedule ID <input id="schedule-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}"></label>
+          <label><span class="field-label">Schedule ID<span class="help-icon" tabindex="0" role="img" aria-label="Schedule ID help" data-help="A short code that names this schedule in the list below. Saving with an existing ID updates that schedule and a new ID adds another one. Use only lowercase letters and digits and hyphens and underscores.">?</span></span> <input id="schedule-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}"></label>
           <label>Device
             <select id="schedule-device" required></select>
           </label>
@@ -1323,7 +1347,7 @@ DASHBOARD_HTML = """<!doctype html>
     </div>
     <form id="service-list-form">
       <div class="fields">
-        <label>List ID
+        <label><span class="field-label">List ID<span class="help-icon" tabindex="0" role="img" aria-label="List ID help" data-help="A short code that identifies this service list. Saving with an existing ID updates that list and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The List name is what people read.">?</span></span>
           <input id="service-list-id" required pattern="[a-z0-9][a-z0-9_\\-]{0,63}" placeholder="work-apps">
         </label>
         <label>List name
@@ -1361,7 +1385,7 @@ DASHBOARD_HTML = """<!doctype html>
     </div>
     <form id="service-assignment-form">
       <div class="fields">
-        <label>Service ID
+        <label><span class="field-label">Service ID<span class="help-icon" tabindex="0" role="img" aria-label="Browser service profile ID help" data-help="A short code that identifies this browser service profile. Saving with an existing ID updates it and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The Service name is what people read.">?</span></span>
           <input id="service-assignment-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="alice-video">
         </label>
         <label>Service name
@@ -1393,7 +1417,7 @@ DASHBOARD_HTML = """<!doctype html>
     </div>
     <form id="service-quota-form">
       <div class="fields">
-        <label>Service ID
+        <label><span class="field-label">Service ID<span class="help-icon" tabindex="0" role="img" aria-label="Service data limit ID help" data-help="A short code that identifies this service data limit. Saving with an existing ID updates it and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The Service name is what people read.">?</span></span>
           <input id="service-quota-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="alice-netflix">
         </label>
         <label>Service name
@@ -1450,7 +1474,7 @@ DASHBOARD_HTML = """<!doctype html>
     </div>
     <form id="time-quota-form">
       <div class="fields">
-        <label>Service ID
+        <label><span class="field-label">Service ID<span class="help-icon" tabindex="0" role="img" aria-label="Service time limit ID help" data-help="A short code that identifies this service time limit. Saving with an existing ID updates it and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The Service name is what people read.">?</span></span>
           <input id="time-quota-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="alice-netflix-time">
         </label>
         <label>Service name
@@ -2697,6 +2721,27 @@ DASHBOARD_HTML = """<!doctype html>
       summary.className = "runtime-summary " + state.observed_state;
     }
 
+    function connectedRowState(device, context) {
+      const protectedRow = !!device.unaffected;
+      const disableProfile = protectedRow || !device.ipv4_address || !device.association_verified;
+      const disableApply = protectedRow || !context.selectedProfile || !context.helperConfigured ||
+        context.profileCount === 0 || !device.ipv4_address || !device.association_verified;
+      const disableGroupSelect = protectedRow || !context.helperConfigured ||
+        !device.association_verified || !device.ipv4_address || context.groupCount === 0;
+      const disableGroupButton = disableGroupSelect || !context.selectedGroup ||
+        context.selectedGroup === device.group_id;
+      return {
+        protectedRow,
+        rowClass: "connected-row" + (protectedRow ? " protected" : ""),
+        badge: protectedRow ? "Protected" : "",
+        disableProfile,
+        disableApply,
+        disableGroupSelect,
+        disableGroupButton,
+        protectionLabel: protectedRow ? "Remove protection" : "Make unaffected"
+      };
+    }
+
     function renderConnectedDevices(data) {
       const container = element("connected-devices");
       const count = element("connected-count");
@@ -2869,16 +2914,9 @@ DASHBOARD_HTML = """<!doctype html>
           profileSelect.appendChild(option);
         });
         if (draft.profile !== undefined) profileSelect.value = draft.profile;
-        profileSelect.disabled = !!device.unaffected || !device.ipv4_address || !device.association_verified;
         const applyButton = document.createElement("button");
         applyButton.type = "button";
         applyButton.textContent = device.assigned_profile_id ? "Apply profile" : "Assign profile";
-        applyButton.disabled = !!device.unaffected || !profileSelect.value || !helperConfigured || profiles.length === 0 ||
-          !device.ipv4_address || !device.association_verified;
-        profileSelect.addEventListener("change", () => {
-          applyButton.disabled = !!device.unaffected || !helperConfigured || profileSelect.value === "" ||
-            !device.ipv4_address || !device.association_verified;
-        });
         applyButton.addEventListener("click", () => {
           applyProfileToDevice(device, profileSelect.value, applyButton);
         });
@@ -2901,12 +2939,32 @@ DASHBOARD_HTML = """<!doctype html>
         const groupButton = document.createElement("button");
         groupButton.type = "button";
         groupButton.textContent = "Add to group";
+        const rowContext = () => ({
+          helperConfigured,
+          profileCount: profiles.length,
+          groupCount: groups.length,
+          selectedProfile: profileSelect.value,
+          selectedGroup: groupSelect.value
+        });
+        const rowState = connectedRowState(device, rowContext());
+        row.className = rowState.rowClass;
+        if (rowState.badge) {
+          const protectedBadge = document.createElement("span");
+          protectedBadge.className = "protected-badge";
+          protectedBadge.textContent = rowState.badge;
+          address.append(" ", protectedBadge);
+        }
+        profileSelect.disabled = rowState.disableProfile;
+        applyButton.disabled = rowState.disableApply;
+        profileSelect.addEventListener("change", () => {
+          applyButton.disabled = connectedRowState(device, rowContext()).disableApply;
+        });
         const syncGroup = () => {
           const selected = groups.find((group) => group.id === groupSelect.value);
-          groupButton.disabled = !helperConfigured || !device.association_verified || !device.ipv4_address ||
-            !selected || selected.id === device.group_id || (!device.assigned_device_id && !selected.profile_id);
+          groupButton.disabled = connectedRowState(device, rowContext()).disableGroupButton ||
+            !selected || (!device.assigned_device_id && !selected.profile_id);
         };
-        groupSelect.disabled = !helperConfigured || !device.association_verified || !device.ipv4_address || !groups.length;
+        groupSelect.disabled = rowState.disableGroupSelect;
         groupSelect.addEventListener("change", syncGroup);
         syncGroup();
         groupButton.addEventListener("click", () => connectedControlAction(
@@ -2915,7 +2973,7 @@ DASHBOARD_HTML = """<!doctype html>
         ));
         const protectionButton = document.createElement("button");
         protectionButton.type = "button";
-        protectionButton.textContent = device.unaffected ? "Remove protection" : "Make unaffected";
+        protectionButton.textContent = rowState.protectionLabel;
         protectionButton.setAttribute("aria-label", protectionButton.textContent + " for " + (device.display_name || device.mac_address));
         protectionButton.addEventListener("click", () => connectedControlAction(
           device.unaffected ? "/api/unaffected-devices/delete" : "/api/unaffected-devices",
@@ -2923,6 +2981,11 @@ DASHBOARD_HTML = """<!doctype html>
           device.unaffected ? "Protection removed. Saved profiles can apply again." : "Protection saved and applied. This device is unaffected by profiles."
         ));
         controls.append(profileSelect, applyButton, groupSelect, groupButton, protectionButton);
+        if (rowState.protectedRow) {
+          [profileSelect, applyButton, groupSelect, groupButton].forEach((control) => {
+            control.setAttribute("aria-disabled", "true");
+          });
+        }
         [...labelForm.querySelectorAll("[data-draft]"), profileSelect, groupSelect].forEach((field) => {
           if (draft[field.dataset.draft] !== undefined) field.dataset.dirty = "true";
           field.addEventListener("input", () => { field.dataset.dirty = "true"; });
@@ -3130,7 +3193,7 @@ DASHBOARD_HTML = """<!doctype html>
         option.selected = selected.has(option.value);
         select.appendChild(option);
       });
-      connectedClients.filter((device) => !device.assigned_device_id && device.association_verified && device.ipv4_address).forEach((device) => {
+      connectedClients.filter((device) => !device.assigned_device_id && device.association_verified && device.ipv4_address && !device.unaffected).forEach((device) => {
         const option = document.createElement("option");
         option.value = "live:" + device.mac_address;
         option.textContent = (device.display_name || device.mac_address) + " (connected · unassigned)";
@@ -3220,6 +3283,35 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    function domainSearchUrl(domain) {
+      return "https://duckduckgo.com/?q=" + encodeURIComponent(domain);
+    }
+
+    function domainHint(observation) {
+      const label = observation.label || {};
+      const apps = observation.seen_with || [];
+      return {
+        text: apps.length ? "Seen with " + apps.join(" and ") + " (guess)" : "",
+        searchable: label.kind === "unknown" || label.kind === "cdn"
+      };
+    }
+
+    function domainRowParts(observation) {
+      const label = observation.label || {};
+      const hint = domainHint(observation);
+      return {
+        labelName: label.name || "",
+        category: label.category || "",
+        kind: label.kind || "",
+        domain: observation.domain,
+        hintText: hint.text,
+        searchUrl: hint.searchable ? domainSearchUrl(observation.domain) : "",
+        searchLabel: hint.searchable
+          ? "Search the web for " + observation.domain + " (opens a new tab)"
+          : ""
+      };
+    }
+
     function renderObservations(data) {
       const container = element("observations");
       const count = element("observation-count");
@@ -3276,8 +3368,44 @@ DASHBOARD_HTML = """<!doctype html>
         (device.domains || []).forEach((observation) => {
           const item = document.createElement("li");
           item.className = "observation-domain";
-          const domain = document.createElement("span");
-          domain.textContent = observation.domain;
+          const domain = document.createElement("div");
+          domain.className = "observation-domain-name";
+          const parts = domainRowParts(observation);
+          if (parts.labelName) {
+            const labelLine = document.createElement("div");
+            labelLine.className = "observation-label";
+            const labelName = document.createElement("strong");
+            labelName.textContent = parts.labelName;
+            const category = document.createElement("span");
+            category.className = "observation-category";
+            category.dataset.kind = parts.kind;
+            category.textContent = parts.category;
+            labelLine.append(labelName, category);
+            domain.appendChild(labelLine);
+          }
+          const host = document.createElement("div");
+          host.className = "observation-domain-host";
+          host.textContent = parts.domain;
+          domain.appendChild(host);
+          const hintLine = document.createElement("div");
+          hintLine.className = "observation-hint-line";
+          if (parts.hintText) {
+            const hintText = document.createElement("span");
+            hintText.className = "observation-hint";
+            hintText.textContent = parts.hintText;
+            hintLine.appendChild(hintText);
+          }
+          if (parts.searchUrl) {
+            const link = document.createElement("a");
+            link.className = "observation-search-link";
+            link.href = parts.searchUrl;
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            link.setAttribute("aria-label", parts.searchLabel);
+            link.textContent = "What is this?";
+            hintLine.appendChild(link);
+          }
+          if (hintLine.childNodes.length > 0) domain.appendChild(hintLine);
           const queryCount = document.createElement("span");
           queryCount.className = "observation-domain-count";
           queryCount.textContent = observation.query_count + " queries";
@@ -5994,6 +6122,20 @@ def _domain_observation_payload(observation: DomainObservation) -> Dict[str, Any
     }
 
 
+def _labelled_domain_payloads(rows: Sequence[DomainObservation]) -> List[Dict[str, Any]]:
+    """Add a plain-language label and a seen-with guess to one device's observed names."""
+
+    hints = seen_with([(row.domain, row.first_seen) for row in rows])
+    return [
+        {
+            **_domain_observation_payload(row),
+            "label": label_domain(row.domain).as_dict(),
+            "seen_with": hints.get(row.domain, []),
+        }
+        for row in rows
+    ]
+
+
 def _runtime_state_payload(state: RuntimeState) -> Dict[str, Any]:
     return {
         "configuration_version": state.configuration_version,
@@ -6516,7 +6658,7 @@ class ControlServer(HTTPServer):
                 address = str(observation.ipv4_address)
                 if observation_is_protected(observation, protected, blocked):
                     continue
-                grouped.setdefault(address, []).append(_domain_observation_payload(observation))
+                grouped.setdefault(address, []).append(observation)
             stations = self._station_identities(station_devices)
             labels_by_mac = self.repository.list_connected_device_labels()
             devices = [
@@ -6538,9 +6680,9 @@ class ControlServer(HTTPServer):
                         if address in assignments_by_address
                         else None
                     ),
-                    "domains": domains,
+                    "domains": _labelled_domain_payloads(rows),
                 }
-                for address, domains in sorted(grouped.items())
+                for address, rows in sorted(grouped.items())
             ]
             return (
                 HTTPStatus.OK,
@@ -6549,7 +6691,7 @@ class ControlServer(HTTPServer):
                     {
                         "available": self.helper_client is not None,
                         "devices": devices,
-                        "total_domains": sum(len(domains) for domains in grouped.values()),
+                        "total_domains": sum(len(rows) for rows in grouped.values()),
                         "message": (
                             None
                             if self.helper_client is not None
@@ -7777,8 +7919,15 @@ class ControlServer(HTTPServer):
                     self.scheduler.sample_before_control_change(repository=self.repository)
                 with self.repository.transaction():
                     profile_id = group.profile_id if existing else payload.get("profile_id") or None
+                    protected_macs = {
+                        item.mac_address for item in self.repository.list_unaffected_devices()
+                    }
                     for client in connected:
                         mac = normalize_exempt_mac(client["mac_address"])
+                        if mac in protected_macs:
+                            raise ValueError(
+                                "This device is unaffected by profiles. Remove its protection before adding it to a group."
+                            )
                         saved = self.repository.get_device_by_mac_address(mac)
                         base_profile = saved.profile_id if saved else profile_id
                         if base_profile is None:
