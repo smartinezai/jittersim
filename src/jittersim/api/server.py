@@ -3216,14 +3216,14 @@ DASHBOARD_HTML = """<!doctype html>
           label: "Unblock",
           path: "/api/observations/remove-global-block",
           busy: "Removing " + domain + " from the global block list...",
-          done: "Removed " + domain + " from the global block list. Apply the configuration to enforce it."
+          done: "Removed " + domain + " from the global block list. " + ENFORCE_NOTE
         };
       }
       return {
         label: "Block globally",
         path: "/api/observations/add-global-block",
         busy: "Adding " + domain + " to the global block list...",
-        done: "Added " + domain + " to the global block list. Apply the configuration to enforce it."
+        done: "Added " + domain + " to the global block list. " + ENFORCE_NOTE
       };
     }
 
@@ -3235,8 +3235,109 @@ DASHBOARD_HTML = """<!doctype html>
       return { label: "Add to profile", disabled: false };
     }
 
+    // Saving the block list or a profile does not enforce it. Apply does.
+    const ENFORCE_NOTE = "Apply the configuration to enforce it.";
+
     function queryCountText(count) {
       return count + (count === 1 ? " query" : " queries");
+    }
+
+    // A group action sends its names in one call and the server accepts this many.
+    const GROUP_ACTION_MAX_NAMES = 64;
+
+    function groupObservations(domains) {
+      const groups = new Map();
+      (domains || []).forEach((observation) => {
+        const group = observation.group || { key: "domain:" + observation.domain, name: observation.domain };
+        if (!groups.has(group.key)) {
+          groups.set(group.key, { key: group.key, name: group.name, names: [], totalQueries: 0, single: true });
+        }
+        const entry = groups.get(group.key);
+        entry.names.push(observation);
+        entry.totalQueries += Number(observation.query_count) || 0;
+        entry.single = entry.names.length === 1;
+      });
+      return Array.from(groups.values()).sort((a, b) => {
+        if (a.totalQueries !== b.totalQueries) return b.totalQueries - a.totalQueries;
+        const first = a.name.toLowerCase();
+        const second = b.name.toLowerCase();
+        return first < second ? -1 : first > second ? 1 : 0;
+      });
+    }
+
+    function groupBlockAction(group) {
+      const blocked = group.names.filter((observation) => observation.globally_blocked === true);
+      const open = group.names.filter((observation) => observation.globally_blocked !== true);
+      const domains = (list) => list.map((observation) => observation.domain);
+      if (blocked.length > 0 && open.length === 0) {
+        return {
+          label: "Unblock all",
+          path: blockButtonState({ globally_blocked: true }).path,
+          domains: domains(blocked)
+        };
+      }
+      return {
+        label: blocked.length > 0 ? "Block remaining" : "Block all",
+        path: blockButtonState({ globally_blocked: false }).path,
+        domains: domains(open)
+      };
+    }
+
+    function groupProfileAction(group, profile) {
+      if (!profile) return { label: "Add all to profile", disabled: true, domains: [] };
+      const missing = group.names
+        .map((observation) => observation.domain)
+        .filter((domain) => !profileButtonState(domain, profile).disabled);
+      if (missing.length === 0) {
+        return { label: "All already in " + profile.name, disabled: true, domains: [] };
+      }
+      return { label: "Add all to profile", disabled: false, domains: missing };
+    }
+
+    function groupNamesText(count) {
+      return count + (count === 1 ? " name" : " names");
+    }
+
+    function groupSubject(group, count) {
+      return count + " " + group.name + (count === 1 ? " name" : " names");
+    }
+
+    function groupBlockMessages(group, action) {
+      const subject = groupSubject(group, action.domains.length);
+      if (action.path === blockButtonState({ globally_blocked: true }).path) {
+        return {
+          busy: "Removing " + subject + " from the global block list...",
+          done: "Removed " + subject + " from the global block list. " + ENFORCE_NOTE
+        };
+      }
+      return {
+        busy: "Adding " + subject + " to the global block list...",
+        done: "Added " + subject + " to the global block list. " + ENFORCE_NOTE
+      };
+    }
+
+    function groupProfileMessages(group, action) {
+      const subject = groupSubject(group, action.domains.length);
+      return {
+        busy: "Adding " + subject + " to the profile...",
+        done: "Added " + subject + " to the profile."
+      };
+    }
+
+    function groupBlockedText(group) {
+      const blocked = group.names.filter((observation) => observation.globally_blocked === true).length;
+      if (blocked === 0) return "";
+      return blocked === group.names.length ? "All blocked" : blocked + " blocked";
+    }
+
+    function groupLimitNote(count) {
+      if (count <= GROUP_ACTION_MAX_NAMES) return "";
+      return "This group needs " + count + " names changed and one step takes at most " +
+        GROUP_ACTION_MAX_NAMES + ". Use the buttons on the names instead.";
+    }
+
+    function observationGroupOpenKey(address, groupKey) {
+      return address + "|" + groupKey;
     }
 
     function renderObservations(data) {
