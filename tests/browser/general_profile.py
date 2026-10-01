@@ -9,6 +9,16 @@ from pathlib import Path
 from playwright.sync_api import expect, sync_playwright
 
 
+def wait_for_automatic_token_check(page):
+    """Wait until the remembered token check has finished its refresh.
+
+    That check ends with a status message. If a later action message is shown
+    before it ends the late message overwrites the one a test is waiting for.
+    """
+
+    expect(page.locator("#message")).to_contain_text("Token accepted. Diagnostics loaded.")
+
+
 def run():
     process = subprocess.Popen(
         [sys.executable, "-m", "tests.browser.fixture"], stdout=subprocess.PIPE, text=True
@@ -56,6 +66,7 @@ def run():
                     page.locator("#remember-admin-token").check()
                     page.locator("#close-credentials").click()
                     page.reload()
+                    wait_for_automatic_token_check(page)
                     expect(page.locator("#general-profile-select")).to_be_enabled()
                     page.locator("#general-profile-select").select_option("slow")
                     page.locator("#general-profile-apply").click()
@@ -71,6 +82,7 @@ def run():
                         == []
                     )
                     page.reload()
+                    wait_for_automatic_token_check(page)
                     expect(page.locator("#general-profile-status")).to_contain_text("Active:")
                     page.locator("section[aria-labelledby='general-profile-title']").screenshot(
                         path=f"test-results/general-profile-{width}.png"
@@ -79,6 +91,7 @@ def run():
                     page.locator("#panic-button").click()
                     expect(page.locator("#general-profile-status")).to_contain_text("Paused:")
                     page.reload()
+                    wait_for_automatic_token_check(page)
                     expect(page.locator("#general-profile-status")).to_contain_text("Paused:")
                     page.locator("#general-profile-apply").click()
                     expect(page.locator("#general-profile-status")).to_contain_text("Active:")

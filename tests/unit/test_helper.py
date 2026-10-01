@@ -949,6 +949,24 @@ class ObserveDnsClientTests(unittest.TestCase):
                 self.assertEqual(str(caught.exception), HELPER_OUT_OF_DATE_MESSAGE)
                 self.assertEqual([item["action"] for item in client.sent], ["capabilities"])
 
+    def test_a_helper_that_cannot_be_reached_is_not_reported_as_out_of_date(self) -> None:
+        for message in (
+            "could not contact the networking helper",
+            "helper returned an invalid response",
+            "helper returned invalid JSON",
+        ):
+            with self.subTest(message=message):
+                client = RecordingHelperClient(
+                    {"ok": True, "observations": [], "excluded_macs": self.MACS},
+                    capabilities=HelperClientError(message),
+                )
+
+                with self.assertRaises(HelperClientError) as caught:
+                    client.observe_dns_queries(self.MACS)
+
+                self.assertEqual(str(caught.exception), message)
+                self.assertEqual([item["action"] for item in client.sent], ["capabilities"])
+
     def test_a_busy_helper_is_not_reported_as_out_of_date(self) -> None:
         client = RecordingHelperClient(
             {"ok": True, "observations": []},
@@ -1109,6 +1127,15 @@ class OldHelperTests(unittest.TestCase):
 
                     self.assertEqual(str(caught.exception), HELPER_OUT_OF_DATE_MESSAGE)
                     self.assertEqual(captures(executor), [])
+
+    def test_a_missing_helper_socket_gives_the_real_cause_and_no_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            client = HelperClient(socket_path=Path(directory) / "missing.sock")
+
+            with self.assertRaises(HelperClientError) as caught:
+                client.observe_dns_queries([self.MAC])
+
+        self.assertEqual(str(caught.exception), "could not contact the networking helper")
 
     def test_an_old_helper_still_serves_a_scan_when_nothing_is_protected(self) -> None:
         with serving(OldHelperService) as (client, executor):

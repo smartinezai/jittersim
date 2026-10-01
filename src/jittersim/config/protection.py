@@ -1,6 +1,6 @@
 """Which clients are protected and so must never be monitored."""
 
-from typing import Any, Dict, Iterable, Mapping, Set, Tuple
+from typing import Any, Dict, Iterable, Mapping, Optional, Set, Tuple
 
 from .exemptions import normalize_exempt_mac
 
@@ -9,6 +9,15 @@ def protected_macs(repository: Any) -> Tuple[str, ...]:
     """Return the hardware addresses in the Unaffected list in a stable order."""
 
     return tuple(sorted(item.mac_address for item in repository.list_unaffected_devices()))
+
+
+def station_mac(station: Mapping[str, Any]) -> Optional[str]:
+    """Return the hardware address of a station in its normal form or nothing."""
+
+    try:
+        return normalize_exempt_mac(station.get("mac_address"))
+    except ValueError:
+        return None
 
 
 def protected_addresses(repository: Any, stations: Iterable[Mapping[str, Any]]) -> Set[str]:
@@ -24,7 +33,7 @@ def protected_addresses(repository: Any, stations: Iterable[Mapping[str, Any]]) 
     addresses = {
         str(station["ipv4_address"])
         for station in stations
-        if station.get("mac_address") in macs and station.get("ipv4_address")
+        if station_mac(station) in macs and station.get("ipv4_address")
     }
     for device in repository.list_devices():
         if device.mac_address in macs:
@@ -44,9 +53,8 @@ def station_macs_by_address(stations: Iterable[Mapping[str, Any]]) -> Dict[str, 
         address = station.get("ipv4_address")
         if not address:
             continue
-        try:
-            mac = normalize_exempt_mac(station.get("mac_address"))
-        except ValueError:
+        mac = station_mac(station)
+        if mac is None:
             continue
         owners.setdefault(str(address), set()).add(mac)
     return {address: next(iter(macs)) for address, macs in owners.items() if len(macs) == 1}
