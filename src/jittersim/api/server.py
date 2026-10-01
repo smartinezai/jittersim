@@ -2649,6 +2649,27 @@ DASHBOARD_HTML = """<!doctype html>
       summary.className = "runtime-summary " + state.observed_state;
     }
 
+    function connectedRowState(device, context) {
+      const protectedRow = !!device.unaffected;
+      const disableProfile = protectedRow || !device.ipv4_address || !device.association_verified;
+      const disableApply = protectedRow || !context.selectedProfile || !context.helperConfigured ||
+        context.profileCount === 0 || !device.ipv4_address || !device.association_verified;
+      const disableGroupSelect = protectedRow || !context.helperConfigured ||
+        !device.association_verified || !device.ipv4_address || context.groupCount === 0;
+      const disableGroupButton = disableGroupSelect || !context.selectedGroup ||
+        context.selectedGroup === device.group_id;
+      return {
+        protectedRow,
+        rowClass: "connected-row" + (protectedRow ? " protected" : ""),
+        badge: protectedRow ? "Protected" : "",
+        disableProfile,
+        disableApply,
+        disableGroupSelect,
+        disableGroupButton,
+        protectionLabel: protectedRow ? "Remove protection" : "Make unaffected"
+      };
+    }
+
     function renderConnectedDevices(data) {
       const container = element("connected-devices");
       const count = element("connected-count");
