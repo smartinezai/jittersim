@@ -7,7 +7,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Union
+from typing import Dict, Iterable, Optional, Sequence, Union
 
 from .device_labels import (
     MAX_SAVED_CONNECTED_DEVICE_LABELS,
@@ -368,6 +368,7 @@ class ConfigRepository:
                 query_count INTEGER NOT NULL,
                 first_seen INTEGER NOT NULL,
                 last_seen INTEGER NOT NULL,
+                mac_address TEXT,
                 PRIMARY KEY (ipv4_address, domain)
             );
             CREATE INDEX IF NOT EXISTS domain_observations_last_seen_idx
@@ -409,8 +410,30 @@ class ConfigRepository:
         self._add_column_if_missing("progressions", "traffic_baseline_bytes", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing("service_quotas", "weight_percent", "INTEGER NOT NULL DEFAULT 100")
         self._commit()
+        self._migrate_domain_observations()
+        self._commit()
         self._prune_random_website_analytics(now=int(time.time()))
         self._commit()
+
+    def _migrate_domain_observations(self) -> None:
+        """Add the hardware address column and drop rows that can no longer be attributed.
+
+        Rows saved before the column existed have no hardware address. A device that is
+        protected already may have moved to another address since then so those rows could
+        show its lookups under an address that no longer points to it. They are a cache
+        that learns again so they are cleared once when any device is protected. The column
+        and the clearing happen in one step so a crash cannot leave the old rows behind.
+        """
+
+        with self.transaction():
+            added = self._add_column_if_missing("domain_observations", "mac_address", "TEXT")
+            protected = self._connection.execute(
+                "SELECT 1 FROM unaffected_devices LIMIT 1"
+            ).fetchone()
+            if added and protected is not None:
+                self._connection.execute(
+                    "DELETE FROM domain_observations WHERE mac_address IS NULL"
+                )
 
     def _migrate_unaffected_devices(self) -> None:
         """Upgrade the original protection list without losing saved identities."""
@@ -451,15 +474,21 @@ class ConfigRepository:
                         (device.mac_address, row["mac_address"]),
                     )
 
-    def _add_column_if_missing(self, table_name: str, column_name: str, column_definition: str) -> None:
+    def _add_column_if_missing(
+        self, table_name: str, column_name: str, column_definition: str
+    ) -> bool:
+        """Add a column an older database lacks and tell whether it was added."""
+
         columns = {
             row["name"]
             for row in self._connection.execute(f"PRAGMA table_info({table_name})").fetchall()
         }
-        if column_name not in columns:
-            self._connection.execute(
-                f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
-            )
+        if column_name in columns:
+            return False
+        self._connection.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
+        )
+        return True
 
     def save_profile(self, profile: Profile) -> None:
         """Insert or update one validated profile."""
@@ -2080,9 +2109,12 @@ class ConfigRepository:
                 self._connection.execute(
                     """
                     INSERT INTO domain_observations (
-                        ipv4_address, domain, query_count, first_seen, last_seen
-                    ) VALUES (?, ?, ?, ?, ?)
+                        ipv4_address, domain, query_count, first_seen, last_seen, mac_address
+                    ) VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(ipv4_address, domain) DO UPDATE SET
+                        mac_address = COALESCE(
+                            excluded.mac_address, domain_observations.mac_address
+                        ),
                         query_count = MIN(
                             domain_observations.query_count + excluded.query_count,
                             ?
@@ -2100,6 +2132,7 @@ class ConfigRepository:
                         observation.query_count,
                         observation.first_seen,
                         observation.last_seen,
+                        observation.mac_address,
                         1_000_000_000,
                     ),
                 )
@@ -2109,12 +2142,40 @@ class ConfigRepository:
             self._rollback()
             raise StorageError("could not save domain observations") from error
 
+    def delete_domain_observations(
+        self, ipv4_addresses: Iterable[str], mac_addresses: Iterable[str] = ()
+    ) -> int:
+        """Remove every stored DNS aggregate for the given client addresses or devices.
+
+        A row goes when its address is listed or when its recorded hardware address is
+        listed. Rows saved before hardware addresses were recorded match by address only.
+        """
+
+        addresses = sorted({str(address) for address in ipv4_addresses})
+        macs = sorted({normalize_exempt_mac(mac) for mac in mac_addresses})
+        if not addresses and not macs:
+            return 0
+        try:
+            cursor = self._connection.execute(
+                "DELETE FROM domain_observations WHERE ipv4_address IN ("
+                + ",".join("?" for _ in addresses)
+                + ") OR mac_address IN ("
+                + ",".join("?" for _ in macs)
+                + ")",
+                addresses + macs,
+            )
+            self._commit()
+        except (sqlite3.IntegrityError, sqlite3.OperationalError) as error:
+            self._rollback()
+            raise StorageError("could not delete domain observations") from error
+        return cursor.rowcount
+
     def list_domain_observations(self) -> tuple:
         """Return recent domain aggregates ordered by device and query count."""
 
         rows = self._connection.execute(
             """
-            SELECT ipv4_address, domain, query_count, first_seen, last_seen
+            SELECT ipv4_address, domain, query_count, first_seen, last_seen, mac_address
             FROM domain_observations
             ORDER BY ipv4_address, query_count DESC, domain
             """
@@ -2126,15 +2187,19 @@ class ConfigRepository:
             count = counts_by_device.get(ipv4_address, 0)
             if count >= _MAX_OBSERVATIONS_PER_DEVICE:
                 continue
-            observations.append(
-                DomainObservation(
-                    ipv4_address=ipv4_address,
-                    domain=row["domain"],
-                    query_count=row["query_count"],
-                    first_seen=row["first_seen"],
-                    last_seen=row["last_seen"],
+            try:
+                observations.append(
+                    DomainObservation(
+                        ipv4_address=ipv4_address,
+                        domain=row["domain"],
+                        query_count=row["query_count"],
+                        first_seen=row["first_seen"],
+                        last_seen=row["last_seen"],
+                        mac_address=row["mac_address"],
+                    )
                 )
-            )
+            except (KeyError, TypeError, ValueError) as error:
+                raise StorageError("stored domain observation is malformed") from error
             counts_by_device[ipv4_address] = count + 1
         return tuple(observations)
 
