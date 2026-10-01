@@ -152,24 +152,19 @@ DASHBOARD_HTML = """<!doctype html>
   <style>
     :root {
       color-scheme: dark;
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       background: #0b1220;
       color: #e7eef8;
     }
     * { box-sizing: border-box; }
     [hidden] { display: none !important; }
     .dashboard-locked #router-credentials,
-    .dashboard-locked .credential-dock > :not(#open-admin-credentials) { display: none; }
-    body {
-      margin: 0 auto;
-      max-width: 86rem;
-      padding: 1.5rem 13rem 4rem 1.25rem;
-      background: radial-gradient(circle at top right, #15345a 0, #0b1220 34rem);
-      line-height: 1.5;
-    }
+    .dashboard-locked .sidebar-nav, .dashboard-locked .sidebar-operate,
+    .dashboard-locked #open-router-credentials { display: none; }
+    body { margin: 0; background: #0b1220; line-height: 1.5; }
     h1, h2, h3, p { margin-top: 0; }
     h1 { margin-bottom: 0.25rem; font-size: clamp(2rem, 5vw, 3.2rem); letter-spacing: -0.04em; }
-    h2 { margin-bottom: 0.75rem; font-size: 1.15rem; }
+    h2 { margin-bottom: 0.75rem; font-size: 1.25rem; }
     h3 { margin: 1.5rem 0 0.75rem; font-size: 0.9rem; color: #a8c7e8; text-transform: uppercase; letter-spacing: 0.08em; }
     code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     pre {
@@ -183,14 +178,6 @@ DASHBOARD_HTML = """<!doctype html>
       color: #c7d7eb;
       font-size: 0.82rem;
     }
-    .page-header {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 1rem;
-      margin-bottom: 1.25rem;
-    }
-    .eyebrow { margin-bottom: 0.35rem; color: #70b7ff; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.14em; }
     .subtitle { margin-bottom: 0; color: #a8b8ce; }
     .badge {
       flex: 0 0 auto;
@@ -225,19 +212,6 @@ DASHBOARD_HTML = """<!doctype html>
       background: rgba(18, 31, 49, 0.9);
       box-shadow: 0 0.9rem 2rem rgba(0, 0, 0, 0.16);
     }
-    .action-bar {
-      position: sticky;
-      top: 0.75rem;
-      z-index: 10;
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 0.75rem 1rem;
-      border-color: #3c6690;
-      background: rgba(15, 31, 51, 0.96);
-      box-shadow: 0 1rem 2rem rgba(0, 0, 0, 0.3);
-      backdrop-filter: blur(0.75rem);
-    }
-    .action-copy p { margin-bottom: 0; color: #a8b8ce; }
     .runtime-summary { margin-top: 0.55rem; font-size: 0.88rem; font-weight: 700; color: #c4d5e8 !important; }
     .runtime-summary.applied, .runtime-summary.reset { color: #8de2bc !important; }
     .runtime-summary.error { color: #ff9e9e !important; }
@@ -496,7 +470,7 @@ DASHBOARD_HTML = """<!doctype html>
     .day-field { display: grid; align-content: start; gap: 0.3rem; }
     .day-picker { display: flex; flex-wrap: wrap; gap: 0.4rem; }
     .day-toggle { min-width: 2.8rem; margin-top: 0; padding: 0.55rem 0.65rem; }
-    .day-toggle[aria-pressed="true"] { border-color: #4c9fe8; background: #2479bd; }
+    .day-toggle[aria-pressed="true"] { border-color: #4c9fe8; background: #1f6aa5; color: #fff; }
     .day-field .form-note { margin-top: 0.15rem; }
     .schedule-list { display: grid; gap: 0.5rem; margin-top: 1rem; }
     .schedule-row { display: flex; justify-content: space-between; gap: 1rem; padding: 0.6rem 0.7rem; border-radius: 0.45rem; background: #0d1b2d; color: #c7d7eb; font-size: 0.82rem; }
@@ -541,6 +515,7 @@ DASHBOARD_HTML = """<!doctype html>
       display: grid;
       gap: 0.75rem;
       grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+      align-items: start;
     }
     label { display: grid; gap: 0.3rem; color: #c7d7eb; font-size: 0.88rem; }
     input {
@@ -553,30 +528,19 @@ DASHBOARD_HTML = """<!doctype html>
       color: #edf5ff;
       font: inherit;
     }
-    .credential-dock {
-      position: fixed; right: 1rem; top: 50%; transform: translateY(-50%);
-      z-index: 30; display: grid; gap: 0.5rem; width: 10.75rem;
-      max-height: calc(100dvh - 2rem); overflow-y: auto;
-      padding: 0.65rem; background: #101e30; border: 1px solid #293e55;
-      border-radius: 0.9rem; box-shadow: 0 1rem 2.5rem rgba(0, 0, 0, 0.28);
-    }
-    .credential-dock button { margin: 0; min-height: 3rem; text-align: left; }
-    .credential-dock span { display: block; }
-    .credential-dock #wifi-reset-status { margin: 0 0.25rem; font-size: 0.7rem; }
     .credential-state { margin-top: 0.15rem; color: #b6c8db; font-size: 0.75rem; font-weight: 400; }
     .credential-state.accepted { color: #8de2bc; }
-    .credential-dock .panic-button { min-height: 3rem; font-weight: 550; }
     .router-wifi-control {
       display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
       padding: 0.7rem 0.3rem; border-block: 1px solid #293e55;
     }
     .router-wifi-label { font-size: 0.85rem; font-weight: 550; }
-    .router-wifi-status { margin: 0.2rem 0 0; font-size: 0.7rem; color: #b6c8db; }
-    .credential-dock .router-wifi-toggle {
+    .router-wifi-status { margin: 0.2rem 0 0; font-size: 0.78rem; color: #b6c8db; }
+    .sidebar .router-wifi-toggle {
       display: grid; place-items: center; flex: 0 0 2.8rem; min-height: 2.75rem;
       padding: 0; border: 0; background: transparent; border-radius: 0.5rem;
     }
-    .credential-dock .router-wifi-toggle:hover:not(:disabled) { background: #233b55; }
+    .sidebar .router-wifi-toggle:hover:not(:disabled) { background: #233b55; }
     .switch-track {
       width: 2.5rem; height: 1.4rem; padding: 0.18rem; border-radius: 1rem;
       background: #40546b; transition: background 160ms ease;
@@ -610,21 +574,61 @@ DASHBOARD_HTML = """<!doctype html>
     .remember-choice { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.65rem; }
     .remember-choice input { width: auto; margin: 0; padding: 0; }
     .remember-note:empty { display: none; }
-    @media (max-width: 850px) {
-      body { padding: 1rem 1rem calc(10rem + env(safe-area-inset-bottom, 0px)); }
-      html { scroll-padding-bottom: 10rem; }
-      .credential-dock {
-        top: auto; bottom: calc(var(--credential-viewport-bottom, 0px) + 0.5rem + env(safe-area-inset-bottom, 0px));
-        left: 50%; right: auto; transform: translateX(-50%);
-        grid-template-columns: repeat(4, minmax(0, 1fr)); width: min(34rem, calc(100vw - 1rem));
-        padding: 0.5rem; gap: 0.35rem; max-height: min(12rem, 45dvh);
-      }
-      .credential-dock > button { min-height: 2.9rem; padding: 0.4rem; font-size: 0.72rem; }
-      .credential-dock > button .credential-state { font-size: 0.64rem; }
-      .credential-dock #wifi-reset-status { display: none; }
-      .router-wifi-control { grid-column: 1 / -1; grid-row: 2; border-bottom: 0; padding: 0.15rem 0.4rem 0; }
-      .router-wifi-control > div { display: flex; align-items: baseline; gap: 0.65rem; }
-      .router-wifi-status { margin: 0; }
+    :root { --sidebar-bg: #0e1a2b; --line: #263b55; --muted: #a8b8ce; --accent: #70b7ff; }
+    .app { display: grid; grid-template-columns: 15.5rem minmax(0, 1fr); min-height: 100dvh; }
+    .sidebar {
+      position: sticky; top: 0; align-self: start; height: 100dvh; overflow-y: auto;
+      display: flex; flex-direction: column; gap: 1rem; padding: 1rem 0.85rem;
+      background: var(--sidebar-bg); border-right: 1px solid var(--line);
+    }
+    .sidebar-brand { display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.6rem; }
+    .sidebar-brand h1 { margin: 0; font-size: 1.4rem; }
+    .sidebar-brand .badge { display: inline-block; margin: 0; padding: 0.2rem 0.55rem; }
+    .sidebar-nav ul { display: grid; gap: 0.2rem; margin: 0; padding: 0; list-style: none; }
+    .sidebar-nav a {
+      display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
+      padding: 0.4rem 0.65rem; border-radius: 0.5rem; color: var(--muted);
+      font-size: 0.92rem; font-weight: 550; text-decoration: none;
+    }
+    .sidebar-nav a:hover { background: #16263b; color: #e7eef8; }
+    .sidebar-nav a[aria-current="page"] { background: #1b3a5c; color: #fff; }
+    .sidebar-nav a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .nav-chip { padding: 0.05rem 0.45rem; border-radius: 999px; background: #243b57; color: #dcecff; font-size: 0.74rem; }
+    .sidebar-footer { display: grid; gap: 0.6rem; margin-top: auto; }
+    .sidebar-operate, .sidebar-actions { display: grid; gap: 0.5rem; }
+    .sidebar-credentials { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+    .dashboard-locked .sidebar-credentials { grid-template-columns: 1fr; }
+    .sidebar-credentials button { min-height: 2.4rem; padding: 0.35rem 0.5rem; font-size: 0.8rem; }
+    .sidebar button { margin: 0; min-height: 2.6rem; text-align: left; }
+    .sidebar-actions button { text-align: center; }
+    .sidebar span { display: block; }
+    .sidebar .runtime-summary { margin: 0; font-size: 0.78rem; }
+    .sidebar .action-message { min-height: 0; padding: 0.4rem 0.55rem; font-size: 0.78rem; }
+    .sidebar .panic-button { min-height: 3rem; font-weight: 600; }
+    .content { min-width: 0; max-width: 84rem; padding: 1.5rem 1.75rem 4rem; }
+    .page > .card:first-child { margin-top: 0; }
+    .wifi-name-card button span { display: block; }
+    body:not(.dashboard-locked):not([data-section="access"]) #dashboard-access-panel { display: none; }
+    .card-toggle {
+      display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
+      width: 100%; margin: 0; padding: 0; border: 0; background: none;
+      color: inherit; font: inherit; text-align: left;
+    }
+    .card-toggle:hover:not(:disabled) { background: none; border-color: transparent; }
+    .card-toggle::after {
+      content: ""; flex: 0 0 auto; width: 0.5rem; height: 0.5rem;
+      border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted);
+      transform: rotate(45deg); transition: transform 160ms ease;
+    }
+    .card-toggle[aria-expanded="false"]::after { transform: rotate(-45deg); }
+    .card.is-collapsed .section-heading p { display: none; }
+    .card.is-collapsed .section-heading, .card.is-collapsed > h2 { margin-bottom: 0; }
+    @media (max-width: 48rem) {
+      .app { display: block; }
+      .sidebar { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+      .sidebar-nav ul { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+      .sidebar-footer { margin-top: 0; }
+      .content { padding: 1rem 0.9rem 3rem; }
     }
     .token-check-status { min-height: 1.25rem; margin: 0.65rem 0 0; color: #91a8c1; }
     .token-check-status.success { color: #8de2bc; }
@@ -642,9 +646,6 @@ DASHBOARD_HTML = """<!doctype html>
     .analytics-table td:nth-child(n + 3) { text-align: right; font-variant-numeric: tabular-nums; }
     .analytics-domain { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
     @media (max-width: 700px) {
-      body { padding-top: 1rem; }
-      .page-header, .action-bar { display: block; }
-      .action-bar { position: static; }
       .help-icon::after { position: fixed; top: auto; bottom: 1rem; left: 1rem; width: calc(100vw - 2rem); }
       .badge { display: inline-block; margin-top: 1rem; }
       .action-buttons { flex-wrap: wrap; }
@@ -685,31 +686,6 @@ DASHBOARD_HTML = """<!doctype html>
     <span id="toast-message"></span>
     <button id="toast-dismiss" type="button" aria-label="Dismiss message">Dismiss</button>
   </div>
-  <nav class="credential-dock" aria-label="Quick actions">
-    <button id="open-admin-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
-      <span>Admin token</span><span id="admin-credential-state" class="credential-state">Needed</span>
-    </button>
-    <button id="open-router-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
-      <span>Router password</span><span id="router-credential-state" class="credential-state">Not entered</span>
-    </button>
-    <div class="router-wifi-control">
-      <div><span id="router-wifi-label" class="router-wifi-label">Router Wi-Fi</span>
-        <p id="router-wifi-status" class="router-wifi-status" role="status" aria-live="polite">Enter router password</p>
-      </div>
-      <button id="router-wifi-toggle" class="router-wifi-toggle" type="button" role="switch"
-        aria-checked="false" aria-labelledby="router-wifi-label" aria-describedby="router-wifi-status" data-unknown="true" disabled>
-        <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
-      </button>
-    </div>
-    <button id="panic-button" class="danger panic-button" type="button"
-      title="Remove all traffic shaping now. Choose Apply current configuration to resume.">
-      <span>Panic</span><span id="panic-state" class="credential-state">Turn all profiles off</span>
-    </button>
-    <button id="reset-wifi-name" type="button" disabled aria-describedby="wifi-reset-status">
-      <span>Reset Wi-Fi name</span><span class="credential-state">Restore JitterSim</span>
-    </button>
-    <p id="wifi-reset-status" class="credential-state" role="status" aria-live="polite">Keep password and security</p>
-  </nav>
   <section id="credentials-panel" class="credentials-panel" aria-labelledby="credentials-title" hidden>
     <div class="credential-heading">
       <h2 id="credentials-title">Credentials</h2>
@@ -754,6 +730,56 @@ DASHBOARD_HTML = """<!doctype html>
     </p>
     </div>
   </section>
+  <div class="app">
+  <aside class="sidebar" aria-label="JitterSim">
+    <div class="sidebar-brand">
+      <h1>JitterSim</h1>
+      <span id="mode-badge" class="badge pending">Checking mode...</span>
+    </div>
+    <nav class="sidebar-nav" aria-label="Sections">
+      <ul>
+        <li><a href="#devices" data-page-link="devices">Devices <span id="nav-devices-count" class="nav-chip" hidden></span></a></li>
+        <li><a href="#profiles" data-page-link="profiles">Profiles</a></li>
+        <li><a href="#schedules" data-page-link="schedules">Schedules and limits</a></li>
+        <li><a href="#router" data-page-link="router">Router and Wi-Fi</a></li>
+        <li><a href="#traffic" data-page-link="traffic">Traffic</a></li>
+        <li><a href="#access" data-page-link="access">Access and rules</a></li>
+        <li><a href="#diagnostics" data-page-link="diagnostics">Diagnostics</a></li>
+      </ul>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="sidebar-operate">
+        <div class="sidebar-actions">
+          <button id="apply-button" class="primary" type="button">Apply current configuration</button>
+          <button id="reset-button" class="danger" type="button">Reset network</button>
+        </div>
+        <p id="runtime-summary" class="runtime-summary unknown">Check the admin token to view the network state.</p>
+        <p id="message" class="action-message" role="status" aria-live="polite">Ready.</p>
+        <button id="panic-button" class="danger panic-button" type="button"
+          title="Remove all traffic shaping now. Choose Apply current configuration to resume.">
+          <span>Panic</span><span id="panic-state" class="credential-state">Turn all profiles off</span>
+        </button>
+        <div class="router-wifi-control">
+          <div><span id="router-wifi-label" class="router-wifi-label">Router Wi-Fi</span>
+            <p id="router-wifi-status" class="router-wifi-status" role="status" aria-live="polite">Enter router password</p>
+          </div>
+          <button id="router-wifi-toggle" class="router-wifi-toggle" type="button" role="switch"
+            aria-checked="false" aria-labelledby="router-wifi-label" aria-describedby="router-wifi-status" data-unknown="true" disabled>
+            <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+          </button>
+        </div>
+      </div>
+      <div class="sidebar-credentials">
+        <button id="open-admin-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
+          <span>Admin token</span><span id="admin-credential-state" class="credential-state">Needed</span>
+        </button>
+        <button id="open-router-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
+          <span>Router password</span><span id="router-credential-state" class="credential-state">Not entered</span>
+        </button>
+      </div>
+    </div>
+  </aside>
+  <main class="content" id="content">
   <section class="card" id="dashboard-access-panel" aria-labelledby="dashboard-access-title">
     <h2 id="dashboard-access-title">Dashboard access</h2>
     <p id="dashboard-access-status" role="status">Open Admin token and choose Check token to sign in.</p>
@@ -764,27 +790,8 @@ DASHBOARD_HTML = """<!doctype html>
     <div id="dashboard-access-list" hidden></div>
   </section>
   <div id="private-dashboard" hidden>
-  <header class="page-header">
-    <div>
-      <p class="eyebrow">NETWORK TEST LAB</p>
-      <h1>JitterSim</h1>
-      <p class="subtitle">Shape the test network then observe the result from a connected device.</p>
-    </div>
-    <span id="mode-badge" class="badge pending">Checking mode...</span>
-  </header>
   <p id="mode-notice" class="notice" role="status">Checking control mode...</p>
-  <section class="card action-bar" aria-label="Network actions">
-    <div class="action-copy">
-      <h2>Network controls</h2>
-      <p>Apply the saved configuration or return the test network to its normal state.</p>
-      <p id="runtime-summary" class="runtime-summary unknown">Check the admin token to view the network state.</p>
-    </div>
-    <div class="action-buttons">
-      <button id="apply-button" class="primary" type="button">Apply current configuration</button>
-      <button id="reset-button" class="danger" type="button">Reset network</button>
-    </div>
-    <p id="message" class="action-message" role="status" aria-live="polite">Ready.</p>
-  </section>
+  <section class="page" id="page-devices" data-page="devices" aria-label="Devices">
   <section class="card" aria-labelledby="general-profile-title">
     <h2 id="general-profile-title">General profile</h2>
     <p>Apply a saved profile to every device on JitterSim Wi-Fi except those in Unaffected by profiles. New arrivals are included.</p>
@@ -818,7 +825,7 @@ DASHBOARD_HTML = """<!doctype html>
     </p>
     <div id="connected-devices" class="connected-list" aria-live="polite">Enter the admin token and choose Check token to view connected devices.</div>
   </section>
-  <section class="card connected-card" aria-labelledby="unaffected-title">
+  <section class="card connected-card" data-collapse="closed" aria-labelledby="unaffected-title">
     <div class="section-heading">
       <div>
         <h2 id="unaffected-title">Unaffected by profiles</h2>
@@ -838,88 +845,9 @@ DASHBOARD_HTML = """<!doctype html>
     </details>
     <p class="form-note">Use “Make unaffected” beside a connected device to add it without typing an address. If a device changes its private Wi-Fi MAC, add its new address.</p>
   </section>
-  <section class="card traffic-card" aria-labelledby="traffic-title">
-    <div class="section-heading">
-      <div>
-        <h2 id="traffic-title">Live traffic</h2>
-        <p>Recent traffic rates for assigned test devices</p>
-      </div>
-      <span id="traffic-window" class="count-badge">Last 60 seconds</span>
-    </div>
-    <div class="traffic-controls">
-      <label>Device
-        <select id="traffic-device">
-          <option value="all">All assigned devices</option>
-        </select>
-      </label>
-      <p id="traffic-status" class="traffic-status" role="status" aria-live="polite">Check the admin token to start live traffic sampling.</p>
-    </div>
-    <form id="traffic-rate-form" class="traffic-rate-form">
-      <label>ISP download maximum (Mbit/s)
-        <input id="traffic-isp-download" type="number" min="0.1" max="1000" step="0.1" value="100.0">
-      </label>
-      <label>ISP upload maximum (Mbit/s)
-        <input id="traffic-isp-upload" type="number" min="0.1" max="1000" step="0.1" placeholder="Unknown">
-      </label>
-      <button class="primary" type="submit">Save speed references</button>
-      <p id="traffic-rate-status" class="traffic-rate-help" role="status" aria-live="polite"></p>
-      <p class="traffic-rate-help">These reference lines do not limit traffic. The ISP plan maximum is shared with other home devices.</p>
-    </form>
-    <div class="traffic-metrics">
-      <div class="traffic-metric"><span>Upload rate</span><strong id="traffic-upload-rate">—</strong></div>
-      <div class="traffic-metric"><span>Download rate</span><strong id="traffic-download-rate">—</strong></div>
-      <div class="traffic-metric"><span>Upload packet rate</span><strong id="traffic-upload-packets">—</strong></div>
-      <div class="traffic-metric"><span>Download packet rate</span><strong id="traffic-download-packets">—</strong></div>
-    </div>
-    <div class="traffic-chart-wrap">
-      <canvas id="traffic-chart" width="900" height="320" role="img" aria-label="Live upload and download rates at JitterSim with configured ISP and device queue limits over the last 60 seconds">Live traffic chart. Check the admin token to begin sampling.</canvas>
-      <div class="traffic-legend" aria-label="Graph legend">
-        <span><i class="traffic-key"></i>Upload rate at Pi</span>
-        <span><i class="traffic-key download"></i>Download rate at Pi</span>
-        <span><i class="traffic-key isp-upload"></i>ISP upload plan</span>
-        <span><i class="traffic-key isp-download"></i>ISP download plan</span>
-        <span id="traffic-profile-upload-legend"><i class="traffic-key profile-upload"></i>Default queue upload limit</span>
-        <span id="traffic-profile-download-legend"><i class="traffic-key profile-download"></i>Default queue download limit</span>
-      </div>
-    </div>
-    <p id="traffic-profile-status" class="traffic-profile-status" role="status" aria-live="polite">Select one device to show its applied default queue limits.</p>
-    <p class="traffic-note">Traffic lines count bytes at JitterSim before its queues. They do not show the speed a device receives. Dashed lines show configured limits. The ISP plan line is shared with household traffic and is not a live measurement of spare capacity. Service-specific queues may use different limits. Only assigned devices are included. Check the admin token to start; sampling pauses when this tab is hidden.</p>
-  </section>
-  <section class="card uplink-card">
-    <div class="section-heading">
-      <div>
-        <h2>Upstream router connection</h2>
-        <p>What the Pi can see through Ethernet</p>
-      </div>
-      <span id="uplink-state" class="count-badge">Check token</span>
-    </div>
-    <div id="uplink-details" class="uplink-grid" aria-live="polite">Enter the admin token and choose Check token to view the router connection.</div>
-    <p id="uplink-note" class="policy-note">The router controls use the TG3442DE local web interface. The router admin password is used for one request and is not saved.</p>
-    <a id="router-settings-link" class="button-link" href="http://192.168.0.1" target="_blank" rel="noreferrer">Open router Wi-Fi settings</a>
-    <div class="router-controls">
-      <button id="open-router-credentials-inline" type="button" aria-controls="credentials-panel" aria-expanded="false">Enter router password</button>
-      <div class="action-buttons">
-        <button id="sync-router-ap" class="primary" type="button">Copy router Wi-Fi to Pi</button>
-      </div>
-      <p id="router-action-message" class="policy-note" role="status" aria-live="polite">Keep the Pi connected to the router by Ethernet before changing the router Wi-Fi.</p>
-    </div>
-  </section>
-  <section class="card observations-card">
-    <div class="section-heading">
-      <div>
-        <h2>Traffic discovery</h2>
-        <p>Review DNS names observed from devices on the test network</p>
-      </div>
-      <div class="observation-actions">
-        <span id="observation-count" class="count-badge">No scan yet</span>
-        <button id="scan-observations" class="primary" type="button">Scan now</button>
-      </div>
-    </div>
-    <p id="observation-note" class="observation-note">Scanning is on demand. Results are local aggregates, not exact page visits.</p>
-    <div id="observations" class="observation-list" aria-live="polite">No observations yet.</div>
-  </section>
-  <div class="content-grid">
-    <section class="card">
+  </section><!-- /page:devices -->
+  <section class="page" id="page-profiles" data-page="profiles" aria-label="Profiles" hidden>
+    <section class="card" data-collapse="open">
       <h2>Save profile</h2>
       <form id="profile-form">
         <div class="fields">
@@ -1145,53 +1073,9 @@ DASHBOARD_HTML = """<!doctype html>
       </form>
       <div id="group-list" class="quota-list" aria-live="polite">No groups saved.</div>
     </section>
-  </div>
-  <div class="content-grid">
-    <section class="card">
-      <h2>Network access rules</h2>
-      <form id="policy-form">
-        <div class="policy-grid">
-          <div>
-            <h3>MAC filtering</h3>
-            <div class="fields">
-              <label>Mode
-                <select id="mac-mode">
-                  <option value="disabled">Disabled</option>
-                  <option value="allowlist">Allow only these MAC addresses</option>
-                  <option value="denylist">Block these MAC addresses</option>
-                </select>
-              </label>
-              <label>Allowlist (comma separated)
-                <textarea id="mac-allowlist" placeholder="aa:bb:cc:dd:ee:ff"></textarea>
-              </label>
-              <label>Denylist (comma separated)
-                <textarea id="mac-denylist" placeholder="11:22:33:44:55:66"></textarea>
-              </label>
-            </div>
-          </div>
-          <div>
-            <h3>Website filtering</h3>
-            <div class="fields">
-              <label>Global mode
-                <select id="website-mode">
-                  <option value="unrestricted">Unrestricted</option>
-                  <option value="allow_only">Allow only these domains</option>
-                </select>
-              </label>
-              <label>Global allowed domains (comma separated)
-                <textarea id="website-allowlist" placeholder="example.com"></textarea>
-              </label>
-              <label>Global blocked domains (comma separated)
-                <textarea id="website-blocklist" placeholder="ads.example.com"></textarea>
-              </label>
-            </div>
-          </div>
-        </div>
-        <p class="policy-note">Website rules use resolved IPv4 destinations and are best effort. VPNs, encrypted DNS and direct IP connections can bypass them.</p>
-        <button id="save-policies" type="submit">Save access rules</button>
-      </form>
-    </section>
-    <section class="card">
+  </section><!-- /page:profiles -->
+  <section class="page" id="page-schedules" data-page="schedules" aria-label="Schedules and limits" hidden>
+    <section class="card" data-collapse="open">
       <h2>Schedule a profile</h2>
       <form id="schedule-form">
         <div class="fields">
@@ -1223,8 +1107,7 @@ DASHBOARD_HTML = """<!doctype html>
       </form>
       <div id="schedule-list" class="schedule-list" aria-live="polite">No schedules yet.</div>
     </section>
-  </div>
-  <section class="card timer-card">
+  <section class="card timer-card" data-collapse="closed">
     <div class="section-heading">
       <div>
         <h2>Run a profile timer</h2>
@@ -1249,7 +1132,7 @@ DASHBOARD_HTML = """<!doctype html>
     </form>
     <div id="timer-list" class="timer-list" aria-live="polite">No active timers.</div>
   </section>
-  <section class="card progression-card">
+  <section class="card progression-card" data-collapse="closed">
     <div class="section-heading">
       <div>
         <h2>Progression mode</h2>
@@ -1293,7 +1176,7 @@ DASHBOARD_HTML = """<!doctype html>
     </form>
     <div id="progression-list" class="progression-list" aria-live="polite">No active progressions.</div>
   </section>
-  <section class="card quota-card">
+  <section class="card quota-card" data-collapse="open">
     <div class="section-heading">
       <div>
         <h2>Device data limit</h2>
@@ -1338,7 +1221,7 @@ DASHBOARD_HTML = """<!doctype html>
     </form>
     <div id="data-limit-list" class="quota-list" aria-live="polite">Enter the admin token to view limits.</div>
   </section>
-  <section class="card quota-card">
+  <section class="card quota-card" data-collapse="closed">
     <div class="section-heading">
       <div>
         <h2>Shared group data limit</h2>
@@ -1383,7 +1266,7 @@ DASHBOARD_HTML = """<!doctype html>
     </form>
     <div id="group-data-limit-list" class="quota-list" aria-live="polite">Enter the admin token to view group limits.</div>
   </section>
-  <section class="card quota-card" id="service-list-card">
+  <section class="card quota-card" id="service-list-card" data-collapse="closed">
     <div class="section-heading">
       <div>
         <h2>Service lists</h2>
@@ -1421,7 +1304,7 @@ DASHBOARD_HTML = """<!doctype html>
     </form>
     <div id="service-list-list" class="quota-list" aria-live="polite">Enter the admin token to view service lists.</div>
   </section>
-  <section class="card quota-card">
+  <section class="card quota-card" data-collapse="closed">
     <div class="section-heading">
       <div>
         <h2>Browser service profile</h2>
@@ -1453,7 +1336,7 @@ DASHBOARD_HTML = """<!doctype html>
     </form>
     <div id="service-assignment-list" class="quota-list" aria-live="polite">Enter the admin token to view service profiles.</div>
   </section>
-  <section class="card quota-card">
+  <section class="card quota-card" data-collapse="closed">
     <div class="section-heading">
       <div>
         <h2>Service data limit</h2>
@@ -1510,7 +1393,7 @@ DASHBOARD_HTML = """<!doctype html>
     </form>
     <div id="service-quota-list" class="quota-list" aria-live="polite">Enter the admin token to view service limits.</div>
   </section>
-  <section class="card quota-card">
+  <section class="card quota-card" data-collapse="closed">
     <div class="section-heading">
       <div>
         <h2>Service time limit</h2>
@@ -1567,7 +1450,36 @@ DASHBOARD_HTML = """<!doctype html>
     </form>
     <div id="time-quota-list" class="quota-list" aria-live="polite">Enter the admin token to view time limits.</div>
   </section>
-  <section class="card">
+  </section><!-- /page:schedules -->
+  <section class="page" id="page-router" data-page="router" aria-label="Router and Wi-Fi" hidden>
+    <section class="card wifi-name-card">
+    <h2>Wi-Fi name</h2>
+    <p>Restore the Pi's test network name to JitterSim. It keeps the password and security type. Test devices disconnect while Wi-Fi restarts. Use management access.</p>
+    <button id="reset-wifi-name" type="button" disabled aria-describedby="wifi-reset-status">
+      <span>Reset Wi-Fi name</span><span class="credential-state">Restore JitterSim</span>
+    </button>
+    <p id="wifi-reset-status" class="credential-state" role="status" aria-live="polite">Keep password and security</p>
+  </section>
+  <section class="card uplink-card" data-collapse="open">
+    <div class="section-heading">
+      <div>
+        <h2>Upstream router connection</h2>
+        <p>What the Pi can see through Ethernet</p>
+      </div>
+      <span id="uplink-state" class="count-badge">Check token</span>
+    </div>
+    <div id="uplink-details" class="uplink-grid" aria-live="polite">Enter the admin token and choose Check token to view the router connection.</div>
+    <p id="uplink-note" class="policy-note">The router controls use the TG3442DE local web interface. The router admin password is used for one request and is not saved.</p>
+    <a id="router-settings-link" class="button-link" href="http://192.168.0.1" target="_blank" rel="noreferrer">Open router Wi-Fi settings</a>
+    <div class="router-controls">
+      <button id="open-router-credentials-inline" type="button" aria-controls="credentials-panel" aria-expanded="false">Enter router password</button>
+      <div class="action-buttons">
+        <button id="sync-router-ap" class="primary" type="button">Copy router Wi-Fi to Pi</button>
+      </div>
+      <p id="router-action-message" class="policy-note" role="status" aria-live="polite">Keep the Pi connected to the router by Ethernet before changing the router Wi-Fi.</p>
+    </div>
+  </section>
+  <section class="card" data-collapse="closed">
     <h2>Manual Pi access-point fallback</h2>
     <form id="access-point-form">
       <div class="fields">
@@ -1581,30 +1493,72 @@ DASHBOARD_HTML = """<!doctype html>
       <p class="policy-note">These values configure the Pi with WPA3. To keep the router's security type use Copy router Wi-Fi to Pi. To join the copied network use the router's Wi-Fi password. The password is not saved in the dashboard database.</p>
       <button type="submit">Use these values on the Pi</button>
     </form>
-    <p class="policy-note">Reset Wi-Fi name is in Quick actions. It keeps the password and security type. Test devices disconnect while Wi-Fi restarts. Use management access.</p>
+    <p class="policy-note">To restore the JitterSim name without changing the password, use Reset Wi-Fi name above.</p>
   </section>
-  <div class="data-grid">
-    <section class="card">
-      <div class="section-heading"><h2>Profiles</h2><p>Saved network behavior</p></div>
-      <pre id="profiles">Enter the admin token and choose Check token to load.</pre>
-    </section>
-    <section class="card">
-      <div class="section-heading"><h2>Devices</h2><p>Assigned test clients</p></div>
-      <pre id="devices">Enter the admin token and choose Check token to load.</pre>
-    </section>
-    <section class="card">
-      <div class="section-heading"><h2>Compiled plan</h2><p>Current traffic rules</p></div>
-      <pre id="plan">Enter the admin token and choose Check token to load.</pre>
-    </section>
-    <section class="card">
-      <div class="section-heading"><h2>Runtime state</h2><p>Last helper result</p></div>
-      <pre id="state">Enter the admin token and choose Check token to load.</pre>
-    </section>
-    <section class="card">
-      <div class="section-heading"><h2>Access rules</h2><p>Saved MAC and website policy</p></div>
-      <pre id="policies">Enter the admin token and choose Check token to load.</pre>
-    </section>
-    <section class="card analytics-card">
+  </section><!-- /page:router -->
+  <section class="page" id="page-traffic" data-page="traffic" aria-label="Traffic" hidden>
+  <section class="card traffic-card" data-collapse="open" aria-labelledby="traffic-title">
+    <div class="section-heading">
+      <div>
+        <h2 id="traffic-title">Live traffic</h2>
+        <p>Recent traffic rates for assigned test devices</p>
+      </div>
+      <span id="traffic-window" class="count-badge">Last 60 seconds</span>
+    </div>
+    <div class="traffic-controls">
+      <label>Device
+        <select id="traffic-device">
+          <option value="all">All assigned devices</option>
+        </select>
+      </label>
+      <p id="traffic-status" class="traffic-status" role="status" aria-live="polite">Check the admin token to start live traffic sampling.</p>
+    </div>
+    <form id="traffic-rate-form" class="traffic-rate-form">
+      <label>ISP download maximum (Mbit/s)
+        <input id="traffic-isp-download" type="number" min="0.1" max="1000" step="0.1" value="100.0">
+      </label>
+      <label>ISP upload maximum (Mbit/s)
+        <input id="traffic-isp-upload" type="number" min="0.1" max="1000" step="0.1" placeholder="Unknown">
+      </label>
+      <button class="primary" type="submit">Save speed references</button>
+      <p id="traffic-rate-status" class="traffic-rate-help" role="status" aria-live="polite"></p>
+      <p class="traffic-rate-help">These reference lines do not limit traffic. The ISP plan maximum is shared with other home devices.</p>
+    </form>
+    <div class="traffic-metrics">
+      <div class="traffic-metric"><span>Upload rate</span><strong id="traffic-upload-rate">—</strong></div>
+      <div class="traffic-metric"><span>Download rate</span><strong id="traffic-download-rate">—</strong></div>
+      <div class="traffic-metric"><span>Upload packet rate</span><strong id="traffic-upload-packets">—</strong></div>
+      <div class="traffic-metric"><span>Download packet rate</span><strong id="traffic-download-packets">—</strong></div>
+    </div>
+    <div class="traffic-chart-wrap">
+      <canvas id="traffic-chart" width="900" height="320" role="img" aria-label="Live upload and download rates at JitterSim with configured ISP and device queue limits over the last 60 seconds">Live traffic chart. Check the admin token to begin sampling.</canvas>
+      <div class="traffic-legend" aria-label="Graph legend">
+        <span><i class="traffic-key"></i>Upload rate at Pi</span>
+        <span><i class="traffic-key download"></i>Download rate at Pi</span>
+        <span><i class="traffic-key isp-upload"></i>ISP upload plan</span>
+        <span><i class="traffic-key isp-download"></i>ISP download plan</span>
+        <span id="traffic-profile-upload-legend"><i class="traffic-key profile-upload"></i>Default queue upload limit</span>
+        <span id="traffic-profile-download-legend"><i class="traffic-key profile-download"></i>Default queue download limit</span>
+      </div>
+    </div>
+    <p id="traffic-profile-status" class="traffic-profile-status" role="status" aria-live="polite">Select one device to show its applied default queue limits.</p>
+    <p class="traffic-note">Traffic lines count bytes at JitterSim before its queues. They do not show the speed a device receives. Dashed lines show configured limits. The ISP plan line is shared with household traffic and is not a live measurement of spare capacity. Service-specific queues may use different limits. Only assigned devices are included. Check the admin token to start; sampling pauses when this tab is hidden.</p>
+  </section>
+  <section class="card observations-card" data-collapse="closed">
+    <div class="section-heading">
+      <div>
+        <h2>Traffic discovery</h2>
+        <p>Review DNS names observed from devices on the test network</p>
+      </div>
+      <div class="observation-actions">
+        <span id="observation-count" class="count-badge">No scan yet</span>
+        <button id="scan-observations" class="primary" type="button">Scan now</button>
+      </div>
+    </div>
+    <p id="observation-note" class="observation-note">Scanning is on demand. Results are local aggregates, not exact page visits.</p>
+    <div id="observations" class="observation-list" aria-live="polite">No observations yet.</div>
+  </section>
+    <section class="card analytics-card" data-collapse="closed">
       <div class="section-heading">
         <div><h2>Random website choices</h2><p>Scheduled profile rerolls</p></div>
         <button id="random-website-refresh" type="button">Refresh</button>
@@ -1629,21 +1583,91 @@ DASHBOARD_HTML = """<!doctype html>
         </table>
       </div>
     </section>
-    <section class="card">
+  </section><!-- /page:traffic -->
+  <section class="page" id="page-access" data-page="access" aria-label="Access and rules" hidden>
+    <section class="card" data-collapse="open">
+      <h2>Network access rules</h2>
+      <form id="policy-form">
+        <div class="policy-grid">
+          <div>
+            <h3>MAC filtering</h3>
+            <div class="fields">
+              <label>Mode
+                <select id="mac-mode">
+                  <option value="disabled">Disabled</option>
+                  <option value="allowlist">Allow only these MAC addresses</option>
+                  <option value="denylist">Block these MAC addresses</option>
+                </select>
+              </label>
+              <label>Allowlist (comma separated)
+                <textarea id="mac-allowlist" placeholder="aa:bb:cc:dd:ee:ff"></textarea>
+              </label>
+              <label>Denylist (comma separated)
+                <textarea id="mac-denylist" placeholder="11:22:33:44:55:66"></textarea>
+              </label>
+            </div>
+          </div>
+          <div>
+            <h3>Website filtering</h3>
+            <div class="fields">
+              <label>Global mode
+                <select id="website-mode">
+                  <option value="unrestricted">Unrestricted</option>
+                  <option value="allow_only">Allow only these domains</option>
+                </select>
+              </label>
+              <label>Global allowed domains (comma separated)
+                <textarea id="website-allowlist" placeholder="example.com"></textarea>
+              </label>
+              <label>Global blocked domains (comma separated)
+                <textarea id="website-blocklist" placeholder="ads.example.com"></textarea>
+              </label>
+            </div>
+          </div>
+        </div>
+        <p class="policy-note">Website rules use resolved IPv4 destinations and are best effort. VPNs, encrypted DNS and direct IP connections can bypass them.</p>
+        <button id="save-policies" type="submit">Save access rules</button>
+      </form>
+    </section>
+  </section><!-- /page:access -->
+  <section class="page" id="page-diagnostics" data-page="diagnostics" aria-label="Diagnostics" hidden>
+    <section class="card" data-collapse="closed">
+      <div class="section-heading"><h2>Profiles</h2><p>Saved network behavior</p></div>
+      <pre id="profiles">Enter the admin token and choose Check token to load.</pre>
+    </section>
+    <section class="card" data-collapse="closed">
+      <div class="section-heading"><h2>Devices</h2><p>Assigned test clients</p></div>
+      <pre id="devices">Enter the admin token and choose Check token to load.</pre>
+    </section>
+    <section class="card" data-collapse="closed">
+      <div class="section-heading"><h2>Compiled plan</h2><p>Current traffic rules</p></div>
+      <pre id="plan">Enter the admin token and choose Check token to load.</pre>
+    </section>
+    <section class="card" data-collapse="closed">
+      <div class="section-heading"><h2>Runtime state</h2><p>Last helper result</p></div>
+      <pre id="state">Enter the admin token and choose Check token to load.</pre>
+    </section>
+    <section class="card" data-collapse="closed">
+      <div class="section-heading"><h2>Access rules</h2><p>Saved MAC and website policy</p></div>
+      <pre id="policies">Enter the admin token and choose Check token to load.</pre>
+    </section>
+    <section class="card" data-collapse="open">
       <div class="section-heading">
         <div><h2>Diagnostics</h2><p>Runtime state and available traffic counters</p></div>
         <button id="refresh-diagnostics" type="button">Refresh</button>
       </div>
       <pre id="diagnostics">Enter the admin token to inspect diagnostics.</pre>
     </section>
-    <section class="card">
+    <section class="card" data-collapse="closed">
       <div class="section-heading">
         <div><h2>Backup and action history</h2><p>Recent admin actions without request contents</p></div>
         <button id="download-backup" type="button">Download backup</button>
       </div>
       <pre id="action-history">Enter the admin token to view recent actions.</pre>
     </section>
+  </section><!-- /page:diagnostics -->
   </div>
+  </main>
   </div>
   <script>
     const element = (id) => document.getElementById(id);
@@ -3548,7 +3572,7 @@ DASHBOARD_HTML = """<!doctype html>
       element("service-list-catalogue").querySelectorAll("input").forEach((input) => {
         input.checked = serviceList.services.includes(input.value);
       });
-      element("service-list-form").scrollIntoView({ behavior: "smooth", block: "center" });
+      revealElement(element("service-list-form"));
     }
 
     function renderServiceAssignments(data) {
@@ -3607,7 +3631,7 @@ DASHBOARD_HTML = """<!doctype html>
       element("service-assignment-profile").value = assignment.profile_id;
       element("service-assignment-domains").value = assignment.domains.join("\\n");
       element("service-assignment-enabled").checked = assignment.enabled;
-      element("service-assignment-form").scrollIntoView({ behavior: "smooth", block: "center" });
+      revealElement(element("service-assignment-form"));
     }
 
     function renderTimeQuotas(data) {
@@ -3661,7 +3685,7 @@ DASHBOARD_HTML = """<!doctype html>
       ).join(", ");
       element("data-limit-enabled").checked = quota.enabled;
       syncQuotaReset("data-limit");
-      element("data-limit-form").scrollIntoView({ behavior: "smooth", block: "center" });
+      revealElement(element("data-limit-form"));
     }
 
     function editGroup(group) {
@@ -3671,7 +3695,7 @@ DASHBOARD_HTML = """<!doctype html>
       Array.from(element("group-devices").options).forEach((option) => {
         option.selected = group.device_ids.includes(option.value);
       });
-      element("group-form").scrollIntoView({ behavior: "smooth", block: "center" });
+      revealElement(element("group-form"));
     }
 
     async function deleteGroup(group, button) {
@@ -3699,7 +3723,7 @@ DASHBOARD_HTML = """<!doctype html>
       ).join(", ");
       element("group-data-limit-enabled").checked = quota.enabled;
       syncQuotaReset("group-data-limit");
-      element("group-data-limit-form").scrollIntoView({ behavior: "smooth", block: "center" });
+      revealElement(element("group-data-limit-form"));
     }
 
     function editServiceQuota(quota) {
@@ -3717,7 +3741,7 @@ DASHBOARD_HTML = """<!doctype html>
       element("service-quota-enabled").checked = quota.enabled;
       populateServiceQuotaDomains(quota.domains);
       syncQuotaReset("service-quota");
-      element("service-quota-form").scrollIntoView({ behavior: "smooth", block: "center" });
+      revealElement(element("service-quota-form"));
     }
 
     function formatQuotaDuration(seconds) {
@@ -3744,7 +3768,7 @@ DASHBOARD_HTML = """<!doctype html>
       element("time-quota-enabled").checked = quota.enabled;
       populateTimeQuotaDomains(quota.domains);
       syncQuotaReset("time-quota");
-      element("time-quota-form").scrollIntoView({ behavior: "smooth", block: "center" });
+      revealElement(element("time-quota-form"));
     }
 
     async function timeQuotaAction(quota, action, button) {
@@ -5260,6 +5284,99 @@ DASHBOARD_HTML = """<!doctype html>
       showMessage(error.message, "error");
     });
     restoreRememberedCredentials();
+  </script>
+  <script>
+    const PAGES = ["devices", "profiles", "schedules", "router", "traffic", "access", "diagnostics"];
+
+    function pageFromHash(hash) {
+      const id = String(hash || "").replace(/^#/, "");
+      return PAGES.indexOf(id) === -1 ? "devices" : id;
+    }
+
+    function cardStartsOpen(saved, fallback) {
+      if (saved === "open") return true;
+      if (saved === "closed") return false;
+      return fallback !== "closed";
+    }
+
+    function showPage(id, userInitiated) {
+      document.querySelectorAll("[data-page]").forEach((section) => {
+        section.hidden = section.dataset.page !== id;
+      });
+      document.querySelectorAll("[data-page-link]").forEach((link) => {
+        if (link.dataset.pageLink === id) link.setAttribute("aria-current", "page");
+        else link.removeAttribute("aria-current");
+      });
+      document.body.dataset.section = id;
+      if (userInitiated) window.scrollTo(0, 0);
+      if (id === "traffic" && typeof drawTrafficChart === "function") drawTrafficChart();
+    }
+
+    function storedCardState(key) {
+      try { return window.localStorage.getItem(key); } catch (error) { return null; }
+    }
+
+    function storeCardState(key, open) {
+      try { window.localStorage.setItem(key, open ? "open" : "closed"); } catch (error) { /* private window */ }
+    }
+
+    function setCardOpen(card, open, remember) {
+      const body = card.querySelector(":scope > .card-body");
+      const toggle = card.querySelector(".card-toggle");
+      if (!body || !toggle) return;
+      body.hidden = !open;
+      card.classList.toggle("is-collapsed", !open);
+      toggle.setAttribute("aria-expanded", String(open));
+      if (remember) storeCardState(card.dataset.cardKey, open);
+    }
+
+    function enhanceCollapsibleCards() {
+      document.querySelectorAll(".card[data-collapse]").forEach((card, index) => {
+        const title = card.querySelector("h2");
+        if (!title) return;
+        let heading = title;
+        while (heading.parentElement !== card) heading = heading.parentElement;
+        const body = document.createElement("div");
+        body.className = "card-body";
+        body.id = "card-body-" + index;
+        while (heading.nextSibling) body.appendChild(heading.nextSibling);
+        card.appendChild(body);
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "card-toggle";
+        toggle.setAttribute("aria-controls", body.id);
+        while (title.firstChild) toggle.appendChild(title.firstChild);
+        title.appendChild(toggle);
+        card.dataset.cardKey = "jittersim.card." + title.textContent.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
+        toggle.addEventListener("click", () => setCardOpen(card, body.hidden, true));
+        setCardOpen(card, cardStartsOpen(storedCardState(card.dataset.cardKey), card.dataset.collapse), false);
+      });
+    }
+
+    function revealElement(target) {
+      const card = target.closest(".card[data-collapse]");
+      if (card) setCardOpen(card, true, false);
+      const page = target.closest("[data-page]");
+      if (page && page.hidden) {
+        showPage(page.dataset.page, false);
+        window.history.replaceState(null, "", "#" + page.dataset.page);
+      }
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+
+    function syncDeviceChip() {
+      const chip = document.getElementById("nav-devices-count");
+      const match = /^\d+/.exec(document.getElementById("connected-count").textContent.trim());
+      chip.hidden = !match;
+      chip.textContent = match ? match[0] : "";
+    }
+
+    enhanceCollapsibleCards();
+    showPage(pageFromHash(window.location.hash), false);
+    window.addEventListener("hashchange", () => showPage(pageFromHash(window.location.hash), true));
+    new MutationObserver(syncDeviceChip).observe(
+      document.getElementById("connected-count"), { childList: true, characterData: true, subtree: true });
+    syncDeviceChip();
   </script>
 </body>
 </html>

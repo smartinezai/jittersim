@@ -65,6 +65,7 @@ def run():
                     expect(page.locator("#dashboard-access-list")).to_contain_text("Browser Mac")
                     page.screenshot(path=f"test-results/dashboard-access-{width}.png")
                     assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
+                    page.locator('[data-page-link="access"]').click()
                     page.once("dialog", lambda dialog: dialog.accept())
                     page.locator("#dashboard-access-list button").click()
                     expect(page.locator("#private-dashboard")).to_be_hidden()
