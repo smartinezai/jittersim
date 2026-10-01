@@ -635,6 +635,21 @@ DASHBOARD_HTML = """<!doctype html>
     .sidebar-nav a[aria-current="page"] { background: #1b3a5c; color: #fff; }
     .sidebar-nav a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     .nav-chip { padding: 0.05rem 0.45rem; border-radius: 999px; background: #243b57; color: #dcecff; font-size: 0.74rem; }
+    .sidebar-status {
+      display: grid; gap: 0.4rem; padding: 0.6rem 0.65rem; border: 1px solid var(--line);
+      border-radius: 0.5rem; font-size: 0.8rem; line-height: 1.35;
+    }
+    .sidebar-status p, .sidebar-status ul { margin: 0; }
+    .sidebar .status-line { color: var(--muted); overflow-wrap: anywhere; }
+    .sidebar .status-line.status-on { color: #8de2bc; }
+    .status-devices summary { color: #e7eef8; font-weight: 550; cursor: pointer; }
+    .status-devices.is-empty summary { color: var(--muted); font-weight: 400; cursor: default; list-style: none; }
+    .status-devices.is-empty summary::-webkit-details-marker { display: none; }
+    .status-devices ul { display: grid; gap: 0.3rem; margin-top: 0.4rem; padding: 0; list-style: none; }
+    .status-devices li { font-size: 0.76rem; overflow-wrap: anywhere; }
+    .status-device-name { color: #e7eef8; }
+    .status-device-profile, .status-more { color: var(--muted); font-size: 0.74rem; }
+    .status-more { margin-top: 0.3rem; }
     .sidebar-footer { display: grid; gap: 0.6rem; margin-top: auto; }
     .sidebar-operate, .sidebar-actions { display: grid; gap: 0.5rem; }
     .sidebar-credentials { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
@@ -788,6 +803,15 @@ DASHBOARD_HTML = """<!doctype html>
         <li><a href="#diagnostics" data-page-link="diagnostics">Diagnostics</a></li>
       </ul>
     </nav>
+    <section id="sidebar-status" class="sidebar-status" aria-label="Current status" hidden>
+      <p id="status-general" class="status-line"></p>
+      <details id="status-devices" class="status-devices">
+        <summary id="status-devices-summary"></summary>
+        <ul id="status-devices-list"></ul>
+        <p id="status-devices-more" class="status-more" hidden></p>
+      </details>
+      <p id="status-lists" class="status-line" hidden></p>
+    </section>
     <div class="sidebar-footer">
       <div class="sidebar-operate">
         <div class="sidebar-actions">
@@ -1916,6 +1940,7 @@ DASHBOARD_HTML = """<!doctype html>
       element("uplink-state").textContent = state;
       element("runtime-summary").textContent = message;
       element("runtime-summary").className = "runtime-summary unknown";
+      renderSidebarStatus();
     }
 
     async function loadPrivateDataPanel(panelId, load) {
@@ -2188,6 +2213,8 @@ DASHBOARD_HTML = """<!doctype html>
     window.setInterval(syncRememberedCredentials, 60000);
     let profiles = [];
     let generalProfileState = null;
+    let lastRuntimeState = null;
+    let serviceListsState = [];
     let networkActionBusy = false;
     let groups = [];
     let savedDevices = [];
@@ -2748,7 +2775,58 @@ DASHBOARD_HTML = """<!doctype html>
       };
     }
 
+    function renderSidebarStatus() {
+      const block = element("sidebar-status");
+      const view = sidebarStatus({
+        adminTokenVerified,
+        runtimeState: lastRuntimeState ? lastRuntimeState.observed_state : null,
+        running: !!lastRuntimeState && lastRuntimeState.running === true,
+        generalState: generalProfileState,
+        profiles,
+        clients: connectedClients,
+        serviceLists: serviceListsState
+      });
+      block.hidden = !view.visible;
+      const generalLine = element("status-general");
+      const devicesBlock = element("status-devices");
+      const list = element("status-devices-list");
+      const more = element("status-devices-more");
+      const listsLine = element("status-lists");
+      if (!view.visible) {
+        // Nothing private stays in the page while the dashboard is locked.
+        generalLine.textContent = "";
+        element("status-devices-summary").textContent = "";
+        list.replaceChildren();
+        more.textContent = "";
+        listsLine.textContent = "";
+        return;
+      }
+      generalLine.textContent = view.general.text;
+      generalLine.className = "status-line" + (view.general.tone === "on" ? " status-on" : "");
+      element("status-devices-summary").textContent = view.devices.summary;
+      devicesBlock.classList.toggle("is-empty", view.devices.items.length === 0);
+      list.replaceChildren(...view.devices.items.map((item) => {
+        const row = document.createElement("li");
+        const name = document.createElement("span");
+        name.className = "status-device-name";
+        name.textContent = item.name;
+        row.appendChild(name);
+        if (item.profile) {
+          const profile = document.createElement("span");
+          profile.className = "status-device-profile";
+          profile.textContent = item.profile;
+          row.appendChild(profile);
+        }
+        return row;
+      }));
+      more.hidden = view.devices.more === 0;
+      more.textContent = view.devices.more ? "+" + view.devices.more + " more" : "";
+      listsLine.hidden = !view.lists.text;
+      listsLine.textContent = view.lists.text;
+    }
+
     function renderRuntimeSummary(state) {
+      lastRuntimeState = state;
       const labels = {
         unknown: "No network action has run yet",
         applying: "Applying configuration...",
@@ -2760,6 +2838,7 @@ DASHBOARD_HTML = """<!doctype html>
       const summary = element("runtime-summary");
       summary.textContent = labels[state.observed_state] || "Runtime state unavailable";
       summary.className = "runtime-summary " + state.observed_state;
+      renderSidebarStatus();
     }
 
     function connectedRowState(device, context) {
@@ -2804,6 +2883,7 @@ DASHBOARD_HTML = """<!doctype html>
       const devices = data.devices || [];
       connectedClients = devices;
       lastConnectedData = data;
+      renderSidebarStatus();
       const currentMacs = new Set(devices.map((device) => device.mac_address));
       for (const mac of connectedDrafts.keys()) if (!currentMacs.has(mac)) connectedDrafts.delete(mac);
       updateGroupMemberOptions();
@@ -3745,6 +3825,8 @@ DASHBOARD_HTML = """<!doctype html>
 
     function renderServiceLists(data) {
       const lists = data.service_lists || [];
+      serviceListsState = lists;
+      renderSidebarStatus();
       const container = element("service-list-list");
       element("service-list-count").textContent = lists.length +
         (lists.length === 1 ? " service list" : " service lists");
@@ -4169,6 +4251,7 @@ DASHBOARD_HTML = """<!doctype html>
     async function loadProfiles() {
       const data = await request("/api/profiles", "GET");
       profiles = data.profiles;
+      renderSidebarStatus();
       element("profiles").textContent = JSON.stringify(profiles, null, 2);
       [
         "schedule-profile",
@@ -4211,6 +4294,7 @@ DASHBOARD_HTML = """<!doctype html>
       const data = await request("/api/general-profile", "GET");
       const previousId = generalProfileState && generalProfileState.profile && generalProfileState.profile.id;
       generalProfileState = data;
+      renderSidebarStatus();
       if (data.profile && previousId !== data.profile.id) {
         element("general-profile-select").value = data.profile.id;
       }
@@ -4627,6 +4711,7 @@ DASHBOARD_HTML = """<!doctype html>
         if (tokenRevision !== adminTokenRevision) return;
         if (result.ok) {
           adminTokenVerified = true;
+          renderSidebarStatus();
           await refresh();
           if (tokenRevision !== adminTokenRevision) return;
           await loadTrafficSettings();
@@ -5513,6 +5598,7 @@ DASHBOARD_HTML = """<!doctype html>
     window.setInterval(() => { if (adminTokenVerified) loadQuotas(); }, 5000);
     window.setInterval(() => { if (adminTokenVerified) loadObservations(); }, 15000);
 
+    renderSidebarStatus();
     loadHealth().catch((error) => {
       showMessage(error.message, "error");
     });

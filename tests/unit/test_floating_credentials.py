@@ -76,6 +76,7 @@ function element(id) {
 function setButtonBusy(button, busy) {button.disabled = busy}
 function showMessage(text, kind) {messages.push({text, kind})}
 function stopTrafficSampling() {}
+function renderSidebarStatus() {}
 async function loadAdminTools() {return await toolResult}
 async function loadDashboardAccess() {return {allowed: true}}
 function setDashboardUnlocked() {}
