@@ -37,6 +37,109 @@ def enter_router_password(page):
     page.locator("#close-credentials").click()
 
 
+SCAN_JS = """
+(() => {
+  const secret = __SECRET__;
+  const hits = [];
+  const seen = new Set();
+  let budget = 400000;
+  let scanned = 0;
+  const scan = (value, path, depth) => {
+    if (budget-- <= 0 || value === null || value === undefined) return;
+    if (typeof value === "string") {
+      scanned += 1;
+      if (value.includes(secret)) hits.push(path);
+      return;
+    }
+    if (typeof value === "function") {
+      try { if (Function.prototype.toString.call(value).includes(secret)) hits.push(path + "()"); }
+      catch (error) { /* a native function has no source to read */ }
+      return;
+    }
+    if (typeof value !== "object" || depth > 5 || seen.has(value)) return;
+    seen.add(value);
+    if (value instanceof Node || ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return;
+    if (value instanceof Map || value instanceof Set) {
+      value.forEach((entry, key) => { scan(key, path + ".key", depth + 1); scan(entry, path + ".value", depth + 1); });
+      return;
+    }
+    let keys;
+    try { keys = Reflect.ownKeys(value); } catch (error) { return; }
+    for (const key of keys) {
+      let entry;
+      try { entry = value[key]; } catch (error) { continue; }
+      scan(entry, path + "." + String(key), depth + 1);
+    }
+  };
+  for (const name of Object.getOwnPropertyNames(window)) {
+    let entry;
+    try { entry = window[name]; } catch (error) { continue; }
+    scan(entry, "window." + name, 0);
+  }
+  const lexical = __LEXICAL__;
+  for (const [name, entry] of lexical) scan(entry, "let " + name, 0);
+  // Every text node and attribute and field value in the page, hidden or not.
+  if (document.documentElement.textContent.includes(secret)) hits.push("document text");
+  for (const node of document.querySelectorAll("*")) {
+    for (const attribute of node.attributes) {
+      if (attribute.value.includes(secret)) hits.push("attribute " + attribute.name + " of " + node.tagName);
+    }
+    if (typeof node.value === "string" && node.value.includes(secret)) hits.push("value of " + node.tagName);
+  }
+  for (const store of [localStorage, sessionStorage]) {
+    for (let index = 0; index < store.length; index += 1) {
+      const key = store.key(index);
+      if (key.includes(secret) || store.getItem(key).includes(secret)) hits.push("storage " + key);
+    }
+  }
+  if (document.cookie.includes(secret)) hits.push("cookie");
+  return {hits: hits, scanned: scanned, lexical: lexical.length};
+})()
+"""
+
+
+def scan_for_secret(page, secret):
+    """Look for a value in window properties and top-level let bindings and the whole DOM."""
+
+    session = page.context.new_cdp_session(page)
+    try:
+        names = session.send("Runtime.globalLexicalScopeNames")["names"]
+        reads = ",".join(
+            "(() => { try { return [%s, %s]; } catch (error) { return [%s, undefined]; } })()"
+            % (json.dumps(name), name, json.dumps(name))
+            for name in names
+        )
+        expression = SCAN_JS.replace("__SECRET__", json.dumps(secret)).replace(
+            "__LEXICAL__", "[" + reads + "]"
+        )
+        outcome = session.send(
+            "Runtime.evaluate", {"expression": expression, "returnByValue": True}
+        )
+        assert "exceptionDetails" not in outcome, outcome
+        return outcome["result"]["value"]
+    finally:
+        session.detach()
+
+
+def prove_the_scan_can_find_a_value(context, base):
+    """A scan that finds nothing means little unless it finds a planted value."""
+
+    page = context.new_page()
+    page.goto(base + "/")
+    probe = "planted-value-for-the-scan"
+    page.evaluate("(probe) => { window.planted = {deep: {value: probe}}; }", probe)
+    session = context.new_cdp_session(page)
+    session.send(
+        "Runtime.evaluate",
+        {"expression": "let plantedLexical = {inner: '%s'}; 0" % probe, "replMode": True},
+    )
+    session.detach()
+    found = scan_for_secret(page, probe)
+    page.close()
+    assert any(hit.endswith("planted.deep.value") for hit in found["hits"]), found
+    assert "let plantedLexical.inner" in found["hits"], found
+
+
 def clipboard_text(page):
     return page.evaluate("navigator.clipboard.readText()")
 
@@ -115,6 +218,9 @@ def run_width(browser, base, width, height):
     page.locator("#copy-wifi-password").click()
     expect(page.locator("#copy-wifi-password")).to_have_text("Copied")
     assert clipboard_text(page) == WIFI_PASSWORD
+    expect(page.locator("#message")).to_contain_text(
+        "Router Wi-Fi password copied. It stays on your clipboard until you copy something else."
+    )
     expect(page.locator("#copy-wifi-password")).to_have_text("Copy Wi-Fi password")
 
     asked = credential_requests(requests)
@@ -157,6 +263,12 @@ def run_width(browser, base, width, height):
     )
     assert WIFI_PASSWORD not in stored
     assert page.evaluate("document.querySelectorAll('textarea[readonly]').length") == 0
+    assert all(WIFI_PASSWORD not in item["url"] for item in requests)
+    assert all(WIFI_PASSWORD not in cookie["value"] for cookie in context.cookies())
+    prove_the_scan_can_find_a_value(context, base)
+    found = scan_for_secret(page, WIFI_PASSWORD)
+    assert found["hits"] == [], found["hits"]
+    assert found["scanned"] > 30 and found["lexical"] > 20, found
     history = page.request.get(
         "/api/action-history", headers={"Authorization": "Bearer " + ADMIN_TOKEN}
     ).text()
