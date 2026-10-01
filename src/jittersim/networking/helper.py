@@ -42,6 +42,7 @@ HELPER_OUT_OF_DATE_MESSAGE = (
     "The networking helper is out of date and cannot skip protected devices. "
     "Restart the JitterSim services or reinstall the release."
 )
+WIFI_DETAILS_MISSING_MESSAGE = "The router did not return a Wi-Fi name or password."
 MAX_MESSAGE_BYTES = 256 * 1024
 MAX_HELPER_CONNECTIONS = 8
 WIFI_ACTIONS = ("configure-ap", "router-sync-ap", "router-preview-ap", "wifi-reset")
@@ -578,8 +579,8 @@ class HelperService:
             if not gateway:
                 raise RouterError("router gateway is unavailable", reason="unreachable")
             router = self._router_factory(gateway, password)
-            # A click should not hold the router session for the router's full two minutes.
-            router.limit_operation(30.0)
+            # The dashboard waits on this answer so keep it as short as router-status.
+            router.limit_operation(15.0)
             router.login(preserve_deadline=True)
             settings = router.read_wifi_settings()
             response = {"ok": True, "action": "router-wifi-credentials", "ssid": settings.ssid}
@@ -996,11 +997,11 @@ class HelperClient:
         response = self._request(
             {"action": "router-wifi-credentials", "admin_password": admin_password,
              "include_password": include_password},
-            timeout_seconds=60.0,
+            timeout_seconds=25.0,
         )
         ssid = response.get("ssid")
         if not isinstance(ssid, str) or not 1 <= len(ssid.encode("utf-8")) <= 32:
-            raise HelperClientError("The router did not return a Wi-Fi name.")
+            raise HelperClientError(WIFI_DETAILS_MISSING_MESSAGE)
         result = {"ssid": ssid}
         if include_password:
             password = response.get("password")
@@ -1009,7 +1010,7 @@ class HelperClient:
                 or not 8 <= len(password) <= 63
                 or any(ord(char) < 32 for char in password)
             ):
-                raise HelperClientError("The router did not return a usable Wi-Fi password.")
+                raise HelperClientError(WIFI_DETAILS_MISSING_MESSAGE)
             result["password"] = password
         return result
 

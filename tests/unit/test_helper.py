@@ -16,6 +16,7 @@ from tests.helper_support import OldHelperService, OlderHelperService, captures,
 from tests.wifi_support import WifiExecutor
 from jittersim.networking.helper import (
     HELPER_OUT_OF_DATE_MESSAGE,
+    WIFI_DETAILS_MISSING_MESSAGE,
     HelperClient,
     HelperClientError,
     HelperError,
@@ -547,6 +548,10 @@ class HelperServiceTests(unittest.TestCase):
              "include_password": "yes"},
             {"action": "router-wifi-credentials", "admin_password": "router-secret",
              "include_password": 1},
+            {"action": "router-wifi-credentials", "admin_password": "router-secret",
+             "include_password": "true"},
+            {"action": "router-wifi-credentials", "admin_password": "router-secret",
+             "include_password": "false"},
         ):
             with self.subTest(payload=payload):
                 self.assertEqual(
@@ -629,7 +634,7 @@ class HelperServiceTests(unittest.TestCase):
             self.assertNotIn("router-wifi-password", message)
             self.assertNotIn("router-secret", message)
 
-    def test_wifi_credentials_bound_how_long_the_router_can_take(self) -> None:
+    def test_wifi_credentials_ask_the_router_for_a_fifteen_second_limit(self) -> None:
         class TimedRouter(FakeRouter):
             def login(self, **kwargs):
                 self.login_kwargs = kwargs
@@ -641,7 +646,7 @@ class HelperServiceTests(unittest.TestCase):
              "include_password": False}
         )
 
-        self.assertLessEqual(routers[0].limit, 45)
+        self.assertEqual(routers[0].limit, 15.0)
         self.assertEqual(routers[0].login_kwargs, {"preserve_deadline": True})
 
     def test_wifi_credentials_are_refused_while_another_router_operation_runs(self) -> None:
@@ -1224,13 +1229,27 @@ class RouterWifiCredentialsClientTests(unittest.TestCase):
         self.assertEqual(result, {"ssid": "Vodafone-Test"})
         self.assertFalse(client.sent[0]["include_password"])
 
+    def test_gives_the_router_no_more_than_twenty_five_seconds(self) -> None:
+        timeouts = []
+
+        class TimedClient(RecordingHelperClient):
+            def _request(self, payload, *, timeout_seconds=None):
+                timeouts.append(timeout_seconds)
+                return super()._request(payload, timeout_seconds=timeout_seconds)
+
+        TimedClient(dict(self.GOOD)).read_router_wifi_credentials(
+            admin_password="router-secret", include_password=True)
+
+        self.assertEqual(timeouts, [25.0])
+
     def test_rejects_a_name_that_is_not_usable(self) -> None:
         for ssid in (None, 7, "", "x" * 33, "\u00e4" * 17, ["Vodafone-Test"]):
             with self.subTest(ssid=ssid):
                 client = RecordingHelperClient({**self.GOOD, "ssid": ssid})
-                with self.assertRaises(HelperClientError):
+                with self.assertRaises(HelperClientError) as caught:
                     client.read_router_wifi_credentials(
                         admin_password="router-secret", include_password=False)
+                self.assertEqual(str(caught.exception), WIFI_DETAILS_MISSING_MESSAGE)
 
     def test_rejects_a_password_that_is_not_usable_without_repeating_it(self) -> None:
         for password in (None, 12345678, "short", "x" * 64, "has\ncontrol-char", ["router-wifi-pass"]):
@@ -1239,14 +1258,16 @@ class RouterWifiCredentialsClientTests(unittest.TestCase):
                 with self.assertRaises(HelperClientError) as caught:
                     client.read_router_wifi_credentials(
                         admin_password="router-secret", include_password=True)
+                self.assertEqual(str(caught.exception), WIFI_DETAILS_MISSING_MESSAGE)
                 self.assertNotIn(str(password), str(caught.exception))
                 self.assertNotIn("router-secret", str(caught.exception))
 
     def test_a_missing_password_is_an_error_only_when_it_was_asked_for(self) -> None:
         without_password = {key: value for key, value in self.GOOD.items() if key != "password"}
         client = RecordingHelperClient(without_password)
-        with self.assertRaises(HelperClientError):
+        with self.assertRaises(HelperClientError) as caught:
             client.read_router_wifi_credentials(admin_password="router-secret", include_password=True)
+        self.assertEqual(str(caught.exception), WIFI_DETAILS_MISSING_MESSAGE)
         self.assertEqual(
             client.read_router_wifi_credentials(
                 admin_password="router-secret", include_password=False),
