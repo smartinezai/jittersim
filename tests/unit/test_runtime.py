@@ -26,6 +26,7 @@ from jittersim.config.storage import ConfigRepository
 from jittersim.engine.randomizer import reroll_profile, seeded_generator
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.networking.helper import HelperClientError
+from tests.helper_support import OldHelperService, captures, serving
 
 
 class RecordingHelper:
@@ -558,6 +559,120 @@ class RuntimeSchedulerTests(unittest.TestCase):
         self.assertNotIn("192.168.50.30", stored)
         self.assertEqual(self.repository.total_domain_queries("192.168.50.30"), 0)
         self.assertIn("192.168.50.11", stored)
+
+    def test_traffic_sampling_records_the_hardware_address_of_each_client(self) -> None:
+        class WithStations(RecordingHelper):
+            def connected_device_snapshot(self):
+                return {
+                    "devices": [
+                        {"mac_address": "02:00:00:00:00:02", "ipv4_address": "192.168.50.11"},
+                        {"mac_address": "02:00:00:00:00:03", "ipv4_address": "192.168.50.30"},
+                    ],
+                    "association_status_available": True,
+                }
+
+        self.helper = WithStations()
+        self._traffic_progression_for_bob()
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+
+        scheduler.tick(repository=self.repository, now=100)
+
+        stored = {
+            str(item.ipv4_address): item.mac_address
+            for item in self.repository.list_domain_observations()
+        }
+        self.assertEqual(
+            stored,
+            {
+                "192.168.50.10": None,
+                "192.168.50.11": "02:00:00:00:00:02",
+                "192.168.50.30": "02:00:00:00:00:03",
+            },
+        )
+
+    def test_traffic_sampling_drops_rows_of_a_protected_client_at_any_address(self) -> None:
+        class WithStation(RecordingHelper):
+            def connected_device_snapshot(self):
+                return {
+                    "devices": [
+                        {"mac_address": "02:00:00:00:00:01", "ipv4_address": "192.168.50.30"},
+                    ],
+                    "association_status_available": True,
+                }
+
+        self.helper = WithStation()
+        self._traffic_progression_for_bob()
+        self.repository.save_unaffected_device(UnaffectedDevice("02:00:00:00:00:01", "Phone", 1))
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        scheduler.activate(applied_payload={})
+
+        scheduler.tick(repository=self.repository, now=100)
+
+        stored = {str(item.ipv4_address) for item in self.repository.list_domain_observations()}
+        self.assertEqual(stored, {"192.168.50.10", "192.168.50.11"})
+
+    def test_traffic_sampling_never_captures_through_an_old_helper(self) -> None:
+        protected = "02:00:00:00:00:01"
+        self._traffic_progression_for_bob()
+        self.repository.save_unaffected_device(UnaffectedDevice(protected, "Phone", 1))
+        with serving(OldHelperService) as (client, executor):
+            scheduler = RuntimeScheduler(database_path=":memory:", helper_client=client)
+
+            scheduler._sample_traffic_if_needed(repository=self.repository, now=100)
+
+            self.assertEqual(captures(executor), [])
+        self.assertEqual(self.repository.list_domain_observations(), ())
+
+    def test_a_refusing_helper_is_reported_once_and_without_a_traceback(self) -> None:
+        class Refusing(RecordingHelper):
+            def __init__(self) -> None:
+                super().__init__()
+                self.message = "The networking helper is out of date."
+
+            def observe_dns_queries(self, excluded_macs=()):
+                raise HelperClientError(self.message)
+
+        self.helper = Refusing()
+        self._traffic_progression_for_bob()
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+
+        with self.assertLogs("jittersim.engine.runtime", level="WARNING") as logs:
+            for now in (100, 106, 112, 118):
+                scheduler._sample_traffic_if_needed(repository=self.repository, now=now)
+            self.helper.message = "The networking helper is busy."
+            for now in (124, 130):
+                scheduler._sample_traffic_if_needed(repository=self.repository, now=now)
+
+        self.assertEqual(len(logs.records), 2)
+        self.assertIn("out of date", logs.records[0].getMessage())
+        self.assertIn("busy", logs.records[1].getMessage())
+        self.assertFalse(any(record.exc_info for record in logs.records))
+
+    def test_a_refusal_is_reported_again_after_a_successful_sample(self) -> None:
+        class Flaky(RecordingHelper):
+            def __init__(self) -> None:
+                super().__init__()
+                self.fail = True
+
+            def observe_dns_queries(self, excluded_macs=()):
+                if self.fail:
+                    raise HelperClientError("The networking helper is busy.")
+                return []
+
+        self.helper = Flaky()
+        self._traffic_progression_for_bob()
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+
+        with self.assertLogs("jittersim.engine.runtime", level="WARNING") as logs:
+            scheduler._sample_traffic_if_needed(repository=self.repository, now=100)
+            scheduler._sample_traffic_if_needed(repository=self.repository, now=106)
+            self.helper.fail = False
+            scheduler._sample_traffic_if_needed(repository=self.repository, now=112)
+            self.helper.fail = True
+            scheduler._sample_traffic_if_needed(repository=self.repository, now=118)
+
+        self.assertEqual(len(logs.records), 2)
 
     def test_traffic_sampling_without_protected_clients_passes_an_empty_list(self) -> None:
         self._traffic_progression_for_bob()

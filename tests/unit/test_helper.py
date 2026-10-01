@@ -10,8 +10,10 @@ from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.browser_proxy import load_active_plan
 from jittersim.networking.commands import CommandResult
 from jittersim.networking.executor import CommandExecutionError, FakeExecutor
+from tests.helper_support import OldHelperService, OlderHelperService, captures, serving
 from tests.wifi_support import WifiExecutor
 from jittersim.networking.helper import (
+    HELPER_OUT_OF_DATE_MESSAGE,
     HelperClient,
     HelperClientError,
     HelperError,
@@ -713,6 +715,20 @@ class HelperServiceTests(unittest.TestCase):
         self.assertEqual(executor.commands[0].timeout_seconds, 5.0)
         self.assertTrue(executor.commands[0].timeout_is_success)
 
+    def test_the_helper_advertises_protected_dns_capture(self) -> None:
+        service = HelperService(
+            NetworkApplier(
+                executor=FakeExecutor(),
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            )
+        )
+
+        capabilities = service.handle_payload({"action": "capabilities"})
+
+        self.assertIs(capabilities["protected_dns_capture"], True)
+        self.assertIs(capabilities["general_profile"], True)
+        self.assertIs(capabilities["service_lists"], True)
+
     def test_dns_observation_echoes_the_sorted_excluded_addresses(self) -> None:
         executor = OutputExecutor("")
         service = HelperService(
@@ -749,6 +765,24 @@ class HelperServiceTests(unittest.TestCase):
 
         self.assertEqual(response["excluded_macs"], [])
 
+    def test_dns_observation_accepts_and_echoes_the_largest_protected_list(self) -> None:
+        executor = OutputExecutor("")
+        service = HelperService(
+            NetworkApplier(
+                executor=executor,
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            )
+        )
+        macs = ["02:00:00:00:%02x:%02x" % (index // 256, index % 256) for index in range(256)]
+
+        response = service.handle_payload(
+            {"action": "observe-dns", "excluded_macs": list(reversed(macs))}
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["excluded_macs"], macs)
+        self.assertEqual(executor.commands[0].arguments.count("ether"), 256)
+
     def test_dns_observation_rejects_invalid_or_too_many_excluded_addresses(self) -> None:
         executor = OutputExecutor("")
         service = HelperService(
@@ -757,9 +791,9 @@ class HelperServiceTests(unittest.TestCase):
                 topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
             )
         )
-        too_many = ["02:00:00:00:%02x:%02x" % (index // 256, index % 256) for index in range(65)]
+        too_many = ["02:00:00:00:%02x:%02x" % (index // 256, index % 256) for index in range(257)]
         for bad in (["not-a-mac"], too_many, "02:00:00:00:00:01", [5], ["00:00:00:00:00:00"]):
-            with self.subTest(bad=bad if len(bad) < 5 else "65 addresses"):
+            with self.subTest(bad=bad if len(bad) < 5 else "257 addresses"):
                 response = service.handle_payload({"action": "observe-dns", "excluded_macs": bad})
                 self.assertEqual(response, {"ok": False, "error": "invalid excluded devices"})
 
@@ -836,15 +870,22 @@ class HelperServiceTests(unittest.TestCase):
 
 
 class RecordingHelperClient(HelperClient):
-    """A client that answers from a canned response instead of a socket."""
+    """A client that answers from canned responses instead of a socket."""
 
-    def __init__(self, response):
+    def __init__(self, response, capabilities=None):
         super().__init__(socket_path=Path("unused.sock"))
         self.response = response
+        self.capabilities = (
+            {"ok": True, "protected_dns_capture": True} if capabilities is None else capabilities
+        )
         self.sent = []
 
     def _request(self, payload, *, timeout_seconds=None):
         self.sent.append(payload)
+        if payload["action"] == "capabilities":
+            if isinstance(self.capabilities, Exception):
+                raise self.capabilities
+            return self.capabilities
         return self.response
 
 
@@ -858,7 +899,8 @@ class ObserveDnsClientTests(unittest.TestCase):
 
         self.assertEqual(observations, [])
         self.assertEqual(
-            client.sent, [{"action": "observe-dns", "excluded_macs": self.MACS}]
+            client.sent,
+            [{"action": "capabilities"}, {"action": "observe-dns", "excluded_macs": self.MACS}],
         )
 
     def test_an_old_helper_that_does_not_echo_the_list_fails_closed(self) -> None:
@@ -881,6 +923,58 @@ class ObserveDnsClientTests(unittest.TestCase):
         self.assertEqual(client.observe_dns_queries(), [])
         self.assertEqual(client.sent, [{"action": "observe-dns", "excluded_macs": []}])
 
+    def test_checks_the_capability_before_asking_for_a_capture(self) -> None:
+        client = RecordingHelperClient({"ok": True, "observations": [], "excluded_macs": self.MACS})
+
+        client.observe_dns_queries(self.MACS)
+
+        self.assertEqual([item["action"] for item in client.sent], ["capabilities", "observe-dns"])
+
+    def test_a_helper_without_the_capability_is_never_asked_to_capture(self) -> None:
+        for capabilities in (
+            {"ok": True, "general_profile": True, "service_lists": True},
+            {"ok": True, "protected_dns_capture": False},
+            {"ok": True, "protected_dns_capture": "yes"},
+            HelperClientError("unknown action"),
+        ):
+            with self.subTest(capabilities=capabilities):
+                client = RecordingHelperClient(
+                    {"ok": True, "observations": [], "excluded_macs": self.MACS},
+                    capabilities=capabilities,
+                )
+
+                with self.assertRaises(HelperClientError) as caught:
+                    client.observe_dns_queries(self.MACS)
+
+                self.assertEqual(str(caught.exception), HELPER_OUT_OF_DATE_MESSAGE)
+                self.assertEqual([item["action"] for item in client.sent], ["capabilities"])
+
+    def test_a_busy_helper_is_not_reported_as_out_of_date(self) -> None:
+        client = RecordingHelperClient(
+            {"ok": True, "observations": []},
+            capabilities=HelperClientError("busy", reason="helper-busy"),
+        )
+
+        with self.assertRaises(HelperClientError) as caught:
+            client.observe_dns_queries(self.MACS)
+
+        self.assertEqual(caught.exception.reason, "helper-busy")
+        self.assertNotEqual(str(caught.exception), HELPER_OUT_OF_DATE_MESSAGE)
+        self.assertEqual([item["action"] for item in client.sent], ["capabilities"])
+
+    def test_the_out_of_date_message_says_how_to_fix_it(self) -> None:
+        self.assertEqual(
+            HELPER_OUT_OF_DATE_MESSAGE,
+            "The networking helper is out of date and cannot skip protected devices. "
+            "Restart the JitterSim services or reinstall the release.",
+        )
+
+    def test_the_echo_check_still_applies_when_the_capability_is_advertised(self) -> None:
+        client = RecordingHelperClient({"ok": True, "observations": []})
+
+        with self.assertRaisesRegex(HelperClientError, "out of date"):
+            client.observe_dns_queries(self.MACS)
+
     def test_rejects_a_bad_or_oversized_list_before_contacting_the_helper(self) -> None:
         client = RecordingHelperClient({"ok": True, "observations": [], "excluded_macs": []})
 
@@ -888,7 +982,7 @@ class ObserveDnsClientTests(unittest.TestCase):
             client.observe_dns_queries(["not-a-mac"])
         with self.assertRaises(HelperClientError):
             client.observe_dns_queries(
-                ["02:00:00:00:%02x:%02x" % (index // 256, index % 256) for index in range(65)]
+                ["02:00:00:00:%02x:%02x" % (index // 256, index % 256) for index in range(257)]
             )
         self.assertEqual(client.sent, [])
 
@@ -1001,6 +1095,33 @@ class UnixHelperServerTests(unittest.TestCase):
                 socket_path=self.socket_path,
                 topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
             )
+
+
+class OldHelperTests(unittest.TestCase):
+    MAC = "02:00:00:00:00:01"
+
+    def test_an_old_helper_never_captures_when_devices_are_protected(self) -> None:
+        for service_class in (OldHelperService, OlderHelperService):
+            with self.subTest(service=service_class.__name__):
+                with serving(service_class) as (client, executor):
+                    with self.assertRaises(HelperClientError) as caught:
+                        client.observe_dns_queries([self.MAC])
+
+                    self.assertEqual(str(caught.exception), HELPER_OUT_OF_DATE_MESSAGE)
+                    self.assertEqual(captures(executor), [])
+
+    def test_an_old_helper_still_serves_a_scan_when_nothing_is_protected(self) -> None:
+        with serving(OldHelperService) as (client, executor):
+            self.assertEqual(client.observe_dns_queries(), [])
+
+            self.assertEqual(len(captures(executor)), 1)
+
+    def test_a_current_helper_captures_with_the_exclusions(self) -> None:
+        with serving(HelperService) as (client, executor):
+            self.assertEqual(client.observe_dns_queries([self.MAC]), [])
+
+            (capture,) = captures(executor)
+            self.assertIn(self.MAC, capture.arguments)
 
 
 if __name__ == "__main__":

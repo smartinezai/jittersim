@@ -18,7 +18,12 @@ from jittersim.config.models import (
     TimeQuota,
     time_quota_counter_id,
 )
-from jittersim.config.protection import protected_addresses, protected_macs
+from jittersim.config.protection import (
+    observation_is_protected,
+    protected_addresses,
+    protected_macs,
+    station_macs_by_address,
+)
 from jittersim.config.storage import (
     MAX_RANDOM_WEBSITE_ANALYTICS_BATCH,
     ConfigRepository,
@@ -82,6 +87,7 @@ class RuntimeScheduler:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_traffic_sample_at = 0.0
+        self._last_traffic_sample_error: Optional[str] = None
         self._last_quota_sample_at = 0.0
         self._last_analytics_cleanup_at = 0.0
         self._analytics_batch_overflowed = False
@@ -718,27 +724,44 @@ class RuntimeScheduler:
         try:
             macs = protected_macs(repository)
             observations = observe_dns_queries(macs)
-            stations = station_snapshot(self._helper_client).get("devices", ()) if macs else ()
-            blocked = protected_addresses(
-                repository, [station for station in stations if isinstance(station, dict)]
-            )
+            stations = [
+                station
+                for station in station_snapshot(self._helper_client).get("devices", ())
+                if isinstance(station, dict)
+            ]
+            blocked = protected_addresses(repository, stations)
+            macs_by_address = station_macs_by_address(stations)
             observed_at = int(now)
+            sampled = tuple(
+                DomainObservation(
+                    ipv4_address=observation["ipv4_address"],
+                    domain=observation["domain"],
+                    query_count=observation["query_count"],
+                    first_seen=observed_at,
+                    last_seen=observed_at,
+                    mac_address=macs_by_address.get(str(observation["ipv4_address"])),
+                )
+                for observation in observations
+            )
             repository.save_domain_observations(
                 tuple(
-                    DomainObservation(
-                        ipv4_address=observation["ipv4_address"],
-                        domain=observation["domain"],
-                        query_count=observation["query_count"],
-                        first_seen=observed_at,
-                        last_seen=observed_at,
-                    )
-                    for observation in observations
-                    if str(observation["ipv4_address"]) not in blocked
+                    observation
+                    for observation in sampled
+                    if not observation_is_protected(observation, set(macs), blocked)
                 ),
                 now=observed_at,
             )
-        except (KeyError, TypeError, ValueError, StorageError, HelperClientError):
-            LOGGER.warning("traffic progression sample failed", exc_info=True)
+            self._last_traffic_sample_error = None
+        except (KeyError, TypeError, ValueError, StorageError, HelperClientError) as error:
+            # The sampler retries every few seconds so say it once for each new reason.
+            reason = "%s: %s" % (type(error).__name__, error)
+            if reason != self._last_traffic_sample_error:
+                self._last_traffic_sample_error = reason
+                LOGGER.warning(
+                    "traffic progression sample failed: %s",
+                    error,
+                    exc_info=not isinstance(error, HelperClientError),
+                )
 
     def counter_device_ids(self, *, repository: ConfigRepository) -> set:
         """Use the installed rule membership when adding shared counters."""

@@ -58,7 +58,12 @@ from jittersim.config.models import (
     normalize_domain,
     time_quota_counter_id,
 )
-from jittersim.config.protection import protected_addresses, protected_macs
+from jittersim.config.protection import (
+    observation_is_protected,
+    protected_addresses,
+    protected_macs,
+    station_macs_by_address,
+)
 from jittersim.config.service_catalogue import SERVICE_CATALOGUE
 from jittersim.config.storage import (
     ConfigRepository,
@@ -6333,10 +6338,11 @@ class ControlServer(HTTPServer):
             }
             station_devices = self._station_devices()
             blocked = protected_addresses(self.repository, station_devices)
+            protected = set(protected_macs(self.repository))
             grouped = {}
             for observation in observations:
                 address = str(observation.ipv4_address)
-                if address in blocked:
+                if observation_is_protected(observation, protected, blocked):
                     continue
                 grouped.setdefault(address, []).append(observation)
             stations = self._station_identities(station_devices)
@@ -7294,9 +7300,9 @@ class ControlServer(HTTPServer):
             )
         try:
             raw_observations = self.helper_client.observe_dns_queries(macs)
-            blocked = protected_addresses(
-                self.repository, self._station_devices() if macs else ()
-            )
+            stations = self._station_devices()
+            blocked = protected_addresses(self.repository, stations)
+            macs_by_address = station_macs_by_address(stations)
             observed_at = int(time.time())
             observations = [
                 DomainObservation(
@@ -7305,9 +7311,14 @@ class ControlServer(HTTPServer):
                     query_count=observation["query_count"],
                     first_seen=observed_at,
                     last_seen=observed_at,
+                    mac_address=macs_by_address.get(str(observation["ipv4_address"])),
                 )
                 for observation in raw_observations
-                if str(observation["ipv4_address"]) not in blocked
+            ]
+            observations = [
+                observation
+                for observation in observations
+                if not observation_is_protected(observation, set(macs), blocked)
             ]
             self.repository.save_domain_observations(observations, now=observed_at)
         except (HelperClientError, KeyError, TypeError, ValueError, StorageError) as error:
@@ -7561,7 +7572,7 @@ class ControlServer(HTTPServer):
                         self.repository.delete_unaffected_device(item.mac_address)
                     else:
                         self.repository.save_unaffected_device(item)
-                        self.repository.delete_domain_observations(purge)
+                        self.repository.delete_domain_observations(purge, [item.mac_address])
                     self._validate_saved_plan()
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
