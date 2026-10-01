@@ -161,6 +161,30 @@ class RendererTests(unittest.TestCase):
         self.assertIn("0ms", upload_command.argv)
         self.assertIn("250ms", upload_command.argv)
 
+    def test_reorder_is_only_rendered_together_with_a_delay(self) -> None:
+        # tc refuses "netem reorder" without a delay and the failed apply resets the network.
+        profile = Profile(
+            id="reorder",
+            name="Reorder",
+            upload=Impairment(reorder_percent=10),
+            download=Impairment(delay_ms=100, reorder_percent=10),
+        )
+        plan = compile_plan(
+            devices=(make_device("alice", "192.168.50.10", "reorder"),),
+            profiles={"reorder": profile},
+        )
+
+        commands = render_command_plan(
+            plan=plan,
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+        )
+
+        upload = next(c for c in commands if "upload impairment for device alice" in c.purpose)
+        download = next(c for c in commands if "download impairment for device alice" in c.purpose)
+        self.assertNotIn("reorder", upload.argv)
+        self.assertIn("reorder", download.argv)
+        self.assertIn("10%", download.argv)
+
     def test_clears_all_previous_device_queues_before_replacements(self) -> None:
         plan = compile_plan(
             devices=(
