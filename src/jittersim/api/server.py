@@ -238,6 +238,11 @@ DASHBOARD_HTML = """<!doctype html>
     .runtime-summary.applied, .runtime-summary.reset { color: #8de2bc !important; }
     .runtime-summary.error { color: #ff9e9e !important; }
     .runtime-summary.applying, .runtime-summary.resetting { color: #f5ca78 !important; }
+    .runtime-summary.tone-ok { color: #8de2bc !important; }
+    .runtime-summary.tone-working { color: #f5ca78 !important; }
+    .runtime-summary.tone-pending { color: #9fd0ff !important; }
+    .runtime-summary.tone-error { color: #ff9e9e !important; }
+    .runtime-summary.tone-muted { color: #c4d5e8 !important; }
     .action-buttons { display: flex; align-items: center; gap: 0.6rem; }
     button {
       margin-top: 1rem;
@@ -703,6 +708,9 @@ DASHBOARD_HTML = """<!doctype html>
     .sidebar-credentials button { min-height: 2.4rem; padding: 0.35rem 0.5rem; font-size: 0.8rem; }
     .sidebar button { margin: 0; min-height: 2.6rem; text-align: left; }
     .sidebar-actions button { text-align: center; }
+    .sidebar-action-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 0.45rem; }
+    .sidebar .sidebar-action-row .help-icon { display: inline-grid; flex: none; }
+    .sidebar .apply-summary { margin: -0.15rem 0 0; color: var(--muted); font-size: 0.76rem; line-height: 1.35; overflow-wrap: anywhere; }
     .sidebar span { display: block; }
     .sidebar .runtime-summary { margin: 0; font-size: 0.78rem; }
     .sidebar .action-message { min-height: 0; padding: 0.4rem 0.55rem; font-size: 0.78rem; }
@@ -747,6 +755,10 @@ DASHBOARD_HTML = """<!doctype html>
     .analytics-table td { color: #d7e4f2; font-size: 0.84rem; }
     .analytics-table td:nth-child(n + 3) { text-align: right; font-variant-numeric: tabular-nums; }
     .analytics-domain { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+    @media (min-width: 701px) {
+      /* The sidebar scrolls and would cut off a wider tip so it opens upward at the row width. */
+      .sidebar .sidebar-action-row .help-icon::after { top: auto; bottom: calc(100% + 0.4rem); left: 0; right: 0; width: auto; }
+    }
     @media (max-width: 700px) {
       .help-icon::after { position: fixed; top: auto; bottom: 1rem; left: 1rem; width: calc(100vw - 2rem); }
       .badge { display: inline-block; margin-top: 1rem; }
@@ -863,13 +875,20 @@ DASHBOARD_HTML = """<!doctype html>
     <div class="sidebar-footer">
       <div class="sidebar-operate">
         <div class="sidebar-actions">
-          <button id="apply-button" class="primary" type="button">Apply current configuration</button>
-          <button id="reset-button" class="danger" type="button">Reset network</button>
+          <div class="sidebar-action-row">
+            <button id="apply-button" class="primary" type="button">Start with saved settings</button>
+            <span class="help-icon" tabindex="0" role="img" aria-label="Start with saved settings help" data-help="Starts JitterSim with everything you saved: device and group profiles and schedules and limits and service lists and access rules. While it runs saved changes apply on their own within a few seconds. Reset or Panic stops it. Protected devices stay untouched.">?</span>
+          </div>
+          <p id="apply-summary" class="apply-summary" aria-live="polite" hidden></p>
+          <div class="sidebar-action-row">
+            <button id="reset-button" class="danger" type="button">Reset network</button>
+            <span class="help-icon" tabindex="0" role="img" aria-label="Reset network help" data-help="Stops JitterSim and removes every rule from the Pi so all devices run normally. Your saved settings are kept. Choose Start with saved settings to run them again.">?</span>
+          </div>
         </div>
         <p id="runtime-summary" class="runtime-summary unknown">Check the admin token to view the network state.</p>
         <p id="message" class="action-message" role="status" aria-live="polite">Ready.</p>
         <button id="panic-button" class="danger panic-button" type="button"
-          title="Remove all traffic shaping now. Choose Apply current configuration to resume.">
+          title="Remove all traffic shaping now. Choose Start with saved settings to run again.">
           <span>Panic</span><span id="panic-state" class="credential-state">Turn all profiles off</span>
         </button>
         <div class="router-wifi-control">
@@ -2273,6 +2292,8 @@ DASHBOARD_HTML = """<!doctype html>
     let lastRuntimeState = null;
     let serviceListsState = [];
     let savedProfileBusy = null;
+    let unaffectedMacs = [];
+    let applyBusy = false;
     let networkActionBusy = false;
     let groups = [];
     let savedDevices = [];
@@ -2579,7 +2600,7 @@ DASHBOARD_HTML = """<!doctype html>
       element("traffic-profile-status").textContent = selectedDevice === "all"
         ? "Select one device to see its applied default queue limit. Service-specific limits are not shown."
         : !data.profile_limits_available
-          ? "No applied plan is available. Apply the configuration to see current default queue limits."
+          ? "No plan is running yet. Choose Start with saved settings to see current default queue limits."
           : !profileAvailable
             ? "The selected device has no applied default queue limits available."
             : deviceLimits.upload_kbit === null && deviceLimits.download_kbit === null
@@ -2607,7 +2628,7 @@ DASHBOARD_HTML = """<!doctype html>
         const totals = selectedTrafficTotals(data.devices || {});
         if (!totals) {
           resetTrafficHistory();
-          element("traffic-status").textContent = "No counters yet. Assign a profile and apply the configuration.";
+          element("traffic-status").textContent = "No counters yet. Assign a profile and choose Start with saved settings.";
           return;
         }
         const sampledAt = performance.now();
@@ -2850,6 +2871,8 @@ DASHBOARD_HTML = """<!doctype html>
         serviceLists: serviceListsState
       });
       block.hidden = !view.visible;
+      renderApplySummary();
+      renderApplyButton();
       const generalLine = element("status-general");
       const devicesBlock = element("status-devices");
       const list = element("status-devices-list");
@@ -2888,19 +2911,115 @@ DASHBOARD_HTML = """<!doctype html>
       listsLine.textContent = view.lists.text;
     }
 
+    // Says in plain words what the Apply button runs. The input counts what is saved.
+    function applySummary(input) {
+      const count = (number, one, many) => number + " " + (number === 1 ? one : many);
+      const protectedCount = input.protected || 0;
+      const protectedText = protectedCount === 1
+        ? "1 protected device stays untouched"
+        : protectedCount + " protected devices stay untouched";
+      if (input.generalProfileName) {
+        const text = 'Applies the general profile "' + input.generalProfileName +
+          '" to every device that is not protected';
+        return protectedCount > 0 ? text + " · " + protectedText : text;
+      }
+      const parts = [];
+      if (input.devices > 0) parts.push(count(input.devices, "device", "devices") + " with a profile");
+      if (input.groups > 0) parts.push(count(input.groups, "group", "groups"));
+      if (input.serviceLists > 0) {
+        parts.push(count(input.serviceLists, "service list", "service lists"));
+      }
+      if (protectedCount > 0) parts.push(protectedText);
+      return parts.length ? parts.join(" · ") : "Nothing saved to apply yet";
+    }
+
+    // Says whether JitterSim is running on the Pi. A saved change sets the state to "unknown"
+    // and the running scheduler turns it back to "applied" within about a second. So
+    // "unknown" means "not started" only while the scheduler is not running.
+    function runtimeStatusText(state, running) {
+      if (state === "applying") return {text: "Applying…", tone: "working"};
+      if (state === "resetting") return {text: "Resetting…", tone: "working"};
+      if (running === true) {
+        if (state === "applied") {
+          return {
+            text: "Running. Your saved settings are applied. New changes apply on their own.",
+            tone: "ok"
+          };
+        }
+        if (state === "unknown") return {text: "Applying your latest change…", tone: "working"};
+        if (state === "error") return {text: "The last apply failed. Check the Pi.", tone: "error"};
+      } else {
+        if (state === "reset") {
+          return {text: "Off. No traffic shaping is running.", tone: "muted"};
+        }
+        if (state === "unknown") {
+          return {text: "Not started. Choose Start with saved settings.", tone: "pending"};
+        }
+        if (state === "error") {
+          return {text: "The last start failed. Check the Pi and try again.", tone: "error"};
+        }
+        if (state === "applied") {
+          return {text: "Applied. Waiting for the scheduler.", tone: "muted"};
+        }
+      }
+      return {text: "State unknown.", tone: "muted"};
+    }
+
+    function applyButtonLabel(state, running) {
+      return running === true && (state === "applied" || state === "unknown" || state === "error")
+        ? "Re-apply saved settings"
+        : "Start with saved settings";
+    }
+
+    function currentApplyLabel() {
+      const known = adminTokenVerified && !!lastRuntimeState;
+      return applyButtonLabel(
+        known ? lastRuntimeState.observed_state : null,
+        known && lastRuntimeState.running === true
+      );
+    }
+
+    function renderApplyButton() {
+      if (applyBusy) return;
+      element("apply-button").textContent = currentApplyLabel();
+    }
+
+    // Counts what the next apply sends from the data the page already holds. The server
+    // leaves out a protected device and a group that has no other member.
+    function renderApplySummary() {
+      const line = element("apply-summary");
+      if (!adminTokenVerified) {
+        line.textContent = "";
+        line.hidden = true;
+        return;
+      }
+      const running = !!lastRuntimeState && lastRuntimeState.running === true;
+      const generalProfile = generalProfileState && generalProfileState.profile
+        ? generalProfileState.profile : null;
+      const protectedMacs = new Set(unaffectedMacs);
+      const affected = savedDevices.filter(
+        (device) => !device.mac_address || !protectedMacs.has(device.mac_address)
+      );
+      const affectedIds = new Set(affected.map((device) => device.id));
+      const text = applySummary({
+        devices: affected.length,
+        groups: groups.filter(
+          (group) => (group.device_ids || []).some((id) => affectedIds.has(id))
+        ).length,
+        serviceLists: serviceListsState.filter((serviceList) => serviceList.enabled).length,
+        protected: unaffectedMacs.length,
+        generalProfileName: generalProfile ? generalProfile.name || generalProfile.id : ""
+      });
+      line.textContent = (running ? "Running: " : "Will run: ") + text;
+      line.hidden = false;
+    }
+
     function renderRuntimeSummary(state) {
       lastRuntimeState = state;
-      const labels = {
-        unknown: "No network action has run yet",
-        applying: "Applying configuration...",
-        resetting: "Resetting network...",
-        applied: "Configuration applied successfully",
-        reset: "Network reset successfully",
-        error: "The last network action failed"
-      };
+      const status = runtimeStatusText(state.observed_state, state.running === true);
       const summary = element("runtime-summary");
-      summary.textContent = labels[state.observed_state] || "Runtime state unavailable";
-      summary.className = "runtime-summary " + state.observed_state;
+      summary.textContent = status.text;
+      summary.className = "runtime-summary " + state.observed_state + " tone-" + status.tone;
       renderSidebarStatus();
     }
 
@@ -3337,6 +3456,8 @@ DASHBOARD_HTML = """<!doctype html>
       const container = element("unaffected-devices");
       try {
         const data = await request("/api/unaffected-devices", "GET");
+        unaffectedMacs = data.devices.map((device) => device.mac_address);
+        renderApplySummary();
         container.replaceChildren();
         if (!data.devices.length) {
           container.textContent = "No devices are protected. Choose Make unaffected beside a connected client.";
@@ -3514,7 +3635,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     // What the dashboard says after a change to the block list. The scheduler applies it.
     const ENFORCE_NOTE = "It applies on its own while JitterSim is running. " +
-      "After Reset or Panic choose Apply current configuration.";
+      "After Reset or Panic choose Start with saved settings.";
 
     function queryCountText(count) {
       return count + (count === 1 ? " query" : " queries");
@@ -4253,6 +4374,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     function renderGroups(data) {
       groups = data.groups || [];
+      renderApplySummary();
       const container = element("group-list");
       container.replaceChildren();
       if (!groups.length) {
@@ -4836,7 +4958,7 @@ DASHBOARD_HTML = """<!doctype html>
       status.textContent = !data.profile
         ? profiles.length ? "No general profile. Saved device rules apply when profiles are on." : "Create a saved profile below to use this control."
         : data.active ? "Active: " + data.profile.name + ". Applies to every unprotected device."
-        : data.state.observed_state === "reset" ? "Paused: " + data.profile.name + ". Choose Apply to all or Apply current configuration to resume."
+        : data.state.observed_state === "reset" ? "Paused: " + data.profile.name + ". Choose Apply to all or Start with saved settings to resume."
         : data.state.observed_state === "error" ? "Saved: " + data.profile.name + ". Network update failed. Retry Apply to all."
         : "Saved: " + data.profile.name + ". Apply to all to start.";
       updateTrafficDeviceOptions(savedDevices);
@@ -4846,6 +4968,7 @@ DASHBOARD_HTML = """<!doctype html>
     async function loadDevicesForSchedule() {
       const data = await request("/api/devices", "GET");
       savedDevices = data.devices;
+      renderApplySummary();
       updateGroupMemberOptions();
       [
         "schedule-device",
@@ -5313,9 +5436,10 @@ DASHBOARD_HTML = """<!doctype html>
       const resetButton = element("reset-button");
       applyButton.disabled = busy || !helperConfigured;
       resetButton.disabled = busy || !helperConfigured;
-      applyButton.setAttribute("aria-busy", String(busy && path === "/api/apply"));
+      applyBusy = busy && path === "/api/apply";
+      applyButton.setAttribute("aria-busy", String(applyBusy));
       resetButton.setAttribute("aria-busy", String(busy && path === "/api/reset"));
-      applyButton.textContent = busy && path === "/api/apply" ? "Applying..." : "Apply current configuration";
+      applyButton.textContent = applyBusy ? "Applying…" : currentApplyLabel();
       resetButton.textContent = busy && path === "/api/reset" ? "Resetting..." : "Reset network";
       const panicButton = element("panic-button");
       const panicking = busy && path === "/api/reset";
@@ -5328,18 +5452,22 @@ DASHBOARD_HTML = """<!doctype html>
       });
     }
 
+    // The message is a text or a function of the response and whether JitterSim was running.
     async function runAction(path, successMessage, workingMessage) {
       if (networkActionBusy) return;
       if (!helperConfigured) {
         showMessage("Network actions are unavailable in configuration-only mode.", "error");
         return;
       }
+      const wasRunning = !!lastRuntimeState && lastRuntimeState.running === true;
       setActionBusy(true, path);
       showMessage(workingMessage, "working");
       try {
         const data = await request(path, "POST", {});
         if (data.state) renderRuntimeSummary(data.state);
-        refreshAfterSuccess(successMessage + (data.warning ? " " + data.warning : ""));
+        const done = typeof successMessage === "function"
+          ? successMessage(data, wasRunning) : successMessage;
+        refreshAfterSuccess(done + (data.warning ? " " + data.warning : ""));
       } catch (error) {
         showMessage(error.message, "error");
       } finally {
@@ -5347,8 +5475,22 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    function appliedMessage(data, wasRunning) {
+      const applied = data.applied;
+      if (!applied) {
+        return wasRunning ? "Re-applied your saved settings." : "Started with your saved settings.";
+      }
+      return (wasRunning ? "Re-applied: " : "Started: ") + applySummary({
+        devices: applied.devices,
+        groups: applied.groups,
+        serviceLists: applied.service_lists,
+        protected: applied.protected,
+        generalProfileName: applied.general_profile
+      });
+    }
+
     element("apply-button").addEventListener("click", () => {
-      runAction("/api/apply", "Configuration applied successfully.", "Applying configuration...");
+      runAction("/api/apply", appliedMessage, "Applying your saved settings…");
     });
 
     element("reset-button").addEventListener("click", () => {
@@ -5358,7 +5500,7 @@ DASHBOARD_HTML = """<!doctype html>
     element("panic-button").addEventListener("click", () => {
       runAction(
         "/api/reset",
-        "All profiles are off. Choose Apply current configuration to resume.",
+        "All profiles are off. Choose Start with saved settings to resume.",
         "Turning all profiles off..."
       );
     });
@@ -5713,7 +5855,7 @@ DASHBOARD_HTML = """<!doctype html>
             blocked_domains: commaList("website-blocklist")
           }
         });
-        refreshAfterSuccess("Access rules saved. Apply the configuration to enforce them.");
+        refreshAfterSuccess("Access rules saved. They apply on their own while JitterSim is running.");
       } catch (error) {
         showMessage(error.message, "error");
       }
@@ -5736,7 +5878,7 @@ DASHBOARD_HTML = """<!doctype html>
           end_minute: timeToMinute("schedule-end"),
           enabled: true
         });
-        refreshAfterSuccess("Schedule saved. Apply the configuration to start it.");
+        refreshAfterSuccess("Schedule saved. It applies on its own while JitterSim is running.");
       } catch (error) {
         showMessage(error.message, "error");
       }
@@ -5753,7 +5895,7 @@ DASHBOARD_HTML = """<!doctype html>
         refreshAfterSuccess(
           result.live_applied
             ? "Timer started and the profile is active now."
-            : "Timer saved. Apply the configuration in hardware mode to start it.",
+            : "Timer saved. Choose Start with saved settings in hardware mode to start it.",
         );
       } catch (error) {
         showMessage(error.message, "error");
@@ -5784,7 +5926,7 @@ DASHBOARD_HTML = """<!doctype html>
         refreshAfterSuccess(
           result.live_applied
             ? "Progression started and is active now."
-            : "Progression saved. Apply the configuration in hardware mode to start it.",
+            : "Progression saved. Choose Start with saved settings in hardware mode to start it.",
         );
       } catch (error) {
         showMessage(error.message, "error");
@@ -7501,7 +7643,7 @@ class ControlServer(HTTPServer):
                         "message": (
                             "Live traffic needs hardware mode."
                             if self.helper_client is None
-                            else "Network is reset. Apply the configuration to start traffic measurements."
+                            else "Network is reset. Choose Start with saved settings to start traffic measurements."
                         ),
                         "devices": {},
                         "isp_limits": isp_limits,
@@ -7550,7 +7692,7 @@ class ControlServer(HTTPServer):
                 "connected_clients": None,
                 "traffic_counters": None,
                 "traffic_counters_message": (
-                    "Network is reset. Apply the configuration to start traffic measurements."
+                    "Network is reset. Choose Start with saved settings to start traffic measurements."
                     if runtime.observed_state == "reset"
                     else None
                 ),
@@ -7692,7 +7834,7 @@ class ControlServer(HTTPServer):
                     {
                         "timer": _timer_payload(timer),
                         "live_applied": False,
-                        "message": "timer saved; apply the configuration in hardware mode to start it",
+                        "message": "timer saved; choose Start with saved settings in hardware mode to start it",
                     }
                 )
             status, content_type, body = self._apply_configuration()
@@ -7747,7 +7889,7 @@ class ControlServer(HTTPServer):
                             now=int(time.time()),
                         ),
                         "live_applied": False,
-                        "message": "progression saved; apply the configuration in hardware mode to start it",
+                        "message": "progression saved; choose Start with saved settings in hardware mode to start it",
                     }
                 )
             status, content_type, body = self._apply_configuration()
@@ -8878,7 +9020,7 @@ class ControlServer(HTTPServer):
                     {
                         key: value,
                         "live_applied": False,
-                        "message": "settings saved; apply the configuration in hardware mode to start them",
+                        "message": "settings saved; choose Start with saved settings in hardware mode to start them",
                     }
                 ),
             )

@@ -1331,7 +1331,8 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("Shared group data limit", DASHBOARD_HTML)
         self.assertIn("/api/groups", DASHBOARD_HTML)
         self.assertIn("/api/group-data-limits", DASHBOARD_HTML)
-        self.assertIn("Apply current configuration", DASHBOARD_HTML)
+        self.assertIn("Start with saved settings", DASHBOARD_HTML)
+        self.assertNotIn("Apply current configuration", DASHBOARD_HTML)
         self.assertIn("Reset network", DASHBOARD_HTML)
         self.assertIn('id="check-admin-token"', DASHBOARD_HTML)
         self.assertIn("Check token", DASHBOARD_HTML)
@@ -2175,8 +2176,8 @@ class ControlServerTests(unittest.TestCase):
     def test_a_block_list_change_before_the_first_apply_is_not_applied_by_the_scheduler(
         self,
     ) -> None:
-        # The success message tells the user to apply after Reset or Panic. The scheduler is
-        # paused then and a saved change waits for the Apply button.
+        # The success message tells the user to start again after Reset or Panic. The scheduler
+        # is paused then and a saved change waits for the Start with saved settings button.
         helper, scheduler = self._scheduled_server()
 
         self.server.write_response_for(

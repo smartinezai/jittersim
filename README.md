@@ -282,6 +282,16 @@ may escape the profile. Encrypted DNS on a client (such as iCloud Private Relay
 or DNS over HTTPS), VPNs and fixed server addresses are not covered. One applied
 plan supports at most 15 combined devices, service rules and service lists.
 
+### Starting and stopping
+
+**Start with saved settings** starts JitterSim with everything you saved: device
+and group profiles and schedules and limits and service lists and access rules.
+While JitterSim runs the dashboard says so and the button reads **Re-apply saved
+settings**. Changes you save apply on their own within a few seconds so you do
+not press the button again. **Reset network** and **Panic** stop JitterSim and
+remove every rule from the Pi. Your saved settings are kept. Choose **Start with
+saved settings** to run them again. Protected devices are never touched.
+
 ### General profile
 
 Choose a saved profile under **General profile** then click **Apply to all**.
@@ -306,7 +316,7 @@ the per-device random website history.
 
 **Stop general profile** resumes the saved device rules that are current at
 that moment. **Panic** or **Reset network** turns all profiles off while keeping
-the selection. **Apply to all** or **Apply current configuration** resumes it.
+the selection. **Apply to all** or **Start with saved settings** resumes it.
 A restart restores the last apply or reset. Protected clients remain protected
 through reconnects and IP changes.
 
@@ -336,8 +346,9 @@ offline device** for a device that is not connected. If its private Wi-Fi MAC
 changes, add the new address. When protection is configured, unverifiable
 clients have their profile rules skipped and the dashboard reports a warning.
 If applying a change fails, the dashboard reports that settings were saved
-but network protection is not confirmed. Retry **Apply current configuration**
-after fixing the helper error.
+but network protection is not confirmed. Retry **Start with saved settings**
+after fixing the helper error. The button reads **Re-apply saved settings** while
+JitterSim runs.
 
 ## Network layout
 

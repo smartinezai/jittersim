@@ -321,6 +321,10 @@ let generalProfileState = {profile: {id: "slow", name: "Shared slow"}, active: t
 let profiles = [];
 let connectedClients = [];
 let serviceListsState = [];
+let savedDevices = [];
+let groups = [];
+let unaffectedMacs = [];
+let applyBusy = false;
 const listed = () => element("status-devices-list").children.map(
   (row) => row.children.map((part) => part.textContent));
 """
