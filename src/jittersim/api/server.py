@@ -5414,6 +5414,23 @@ def _device_display_name(
     return resolve_device_name(saved_label=label, saved_name=device.name)
 
 
+def _device_title(
+    device: Optional[Device], labels_by_mac: Dict[str, Dict[str, str]], fallback_id: str
+) -> str:
+    """Name a device in a payload that lists many of them.
+
+    An unnamed device shows its address so that two of them never look the same.
+    A device that no longer exists shows the id it was saved under.
+    """
+
+    if device is None:
+        return fallback_id
+    name = _device_display_name(device, labels_by_mac)
+    if name == UNKNOWN_DEVICE_NAME:
+        return f"{UNKNOWN_DEVICE_NAME} ({device.ipv4_address})"
+    return name
+
+
 def _device_payload(
     device: Device, *, labels_by_mac: Dict[str, Dict[str, str]]
 ) -> Dict[str, Any]:
@@ -5528,11 +5545,7 @@ def _data_limit_payload(
     return {
         **asdict(data_limit),
         "reset_times": list(data_limit.reset_times),
-        "device_name": (
-            _device_display_name(device, labels_by_mac)
-            if device is not None
-            else data_limit.device_id
-        ),
+        "device_name": _device_title(device, labels_by_mac, data_limit.device_id),
         "profile_name": profile.name if profile is not None else data_limit.profile_id,
         "remaining_bytes": max(0, data_limit.limit_bytes - data_limit.used_bytes),
         "reached": data_limit.used_bytes >= data_limit.limit_bytes,
@@ -5573,9 +5586,7 @@ def _service_quota_payload(
         **asdict(quota),
         "domains": list(quota.domains),
         "reset_times": list(quota.reset_times),
-        "device_name": (
-            _device_display_name(device, labels_by_mac) if device is not None else quota.device_id
-        ),
+        "device_name": _device_title(device, labels_by_mac, quota.device_id),
         "profile_name": profile.name if profile is not None else quota.profile_id,
         "remaining_bytes": max(0, quota.limit_bytes - quota.used_bytes),
         "reached": quota.used_bytes >= quota.limit_bytes,
@@ -5591,11 +5602,7 @@ def _service_assignment_payload(
     return {
         **asdict(assignment),
         "domains": list(assignment.domains),
-        "device_name": (
-            _device_display_name(device, labels_by_mac)
-            if device is not None
-            else assignment.device_id
-        ),
+        "device_name": _device_title(device, labels_by_mac, assignment.device_id),
         "profile_name": profile.name if profile is not None else assignment.profile_id,
     }
 
@@ -5640,9 +5647,7 @@ def _time_quota_payload(
         **asdict(quota),
         "domains": list(quota.domains),
         "reset_times": list(quota.reset_times),
-        "device_name": (
-            _device_display_name(device, labels_by_mac) if device is not None else quota.device_id
-        ),
+        "device_name": _device_title(device, labels_by_mac, quota.device_id),
         "profile_name": profile.name if profile is not None else quota.profile_id,
         "remaining_seconds": max(0, quota.limit_seconds - quota.used_seconds),
         "window_remaining_seconds": (
@@ -5674,11 +5679,7 @@ def _progression_payload(
     )
     return {
         **asdict(progression),
-        "device_name": (
-            _device_display_name(device, labels_by_mac)
-            if device is not None
-            else progression.device_id
-        ),
+        "device_name": _device_title(device, labels_by_mac, progression.device_id),
         "start_profile_name": (
             start_profile.name
             if start_profile is not None
@@ -6002,11 +6003,7 @@ class ControlServer(HTTPServer):
                 timers.append(
                     {
                         **_timer_payload(timer),
-                        "device_name": (
-                            _device_display_name(device, labels_by_mac)
-                            if device is not None
-                            else timer.device_id
-                        ),
+                        "device_name": _device_title(device, labels_by_mac, timer.device_id),
                         "profile_name": profile.name if profile is not None else timer.profile_id,
                         "remaining_seconds": max(0, timer.expires_at - now),
                     }

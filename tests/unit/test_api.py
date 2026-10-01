@@ -1796,7 +1796,9 @@ class ControlServerTests(unittest.TestCase):
 
         self.repository.delete_connected_device_label(mac_address="dc:1e:d5:3e:97:4c")
         _, _, body = self.server.response_for("/api/data-limits")
-        self.assertEqual(json.loads(body)["data_limits"][0]["device_name"], "Unknown device")
+        self.assertEqual(
+            json.loads(body)["data_limits"][0]["device_name"], "Unknown device (192.168.50.178)"
+        )
 
     def test_observations_name_a_client_by_its_hostname(self) -> None:
         self.server.helper_client = FakeHelper()
@@ -2105,6 +2107,58 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(rows["labelled.example"]["device_name"], "Client 192.168.50.178")
         self.assertEqual(rows["plain.example"]["display_name"], "Unknown device")
         self.assertEqual(rows["named.example"]["display_name"], "Alice's laptop")
+
+    def test_device_title_helper(self) -> None:
+        from jittersim.api.server import _device_title
+
+        placeholder = Device(
+            id="client-dc1ed53e974c",
+            name="Client 192.168.50.178",
+            ipv4_address="192.168.50.178",
+            profile_id="slow",
+            mac_address="dc:1e:d5:3e:97:4c",
+        )
+        named = Device(
+            id="kitchen", name="Kitchen tablet", ipv4_address="192.168.50.179", profile_id="slow"
+        )
+        labels = {"dc:1e:d5:3e:97:4c": {"display_name": "Sam MacBook", "device_type": "laptop"}}
+
+        self.assertEqual(_device_title(placeholder, labels, "gone"), "Sam MacBook")
+        self.assertEqual(
+            _device_title(placeholder, {}, "gone"), "Unknown device (192.168.50.178)"
+        )
+        self.assertEqual(_device_title(named, {}, "gone"), "Kitchen tablet")
+        self.assertEqual(_device_title(None, labels, "gone"), "gone")
+
+    def test_unlabelled_placeholder_devices_keep_distinct_titles(self) -> None:
+        for suffix in ("178", "179"):
+            self.repository.save_device(
+                Device(
+                    id="client-" + suffix,
+                    name="Client 192.168.50." + suffix,
+                    ipv4_address="192.168.50." + suffix,
+                    profile_id="slow",
+                    mac_address="dc:1e:d5:3e:97:" + ("4c" if suffix == "178" else "4d"),
+                )
+            )
+            self.server.write_response_for(
+                "/api/data-limits",
+                {
+                    "device_id": "client-" + suffix,
+                    "profile_id": "slow",
+                    "limit_bytes": 1_000,
+                    "reset_mode": "manual",
+                    "reset_interval_seconds": 0,
+                    "reset_times": [],
+                    "enabled": True,
+                },
+            )
+
+        _, _, body = self.server.response_for("/api/data-limits")
+        titles = {item["device_id"]: item["device_name"] for item in json.loads(body)["data_limits"]}
+
+        self.assertEqual(titles["client-178"], "Unknown device (192.168.50.178)")
+        self.assertEqual(titles["client-179"], "Unknown device (192.168.50.179)")
 
 
 if __name__ == "__main__":
