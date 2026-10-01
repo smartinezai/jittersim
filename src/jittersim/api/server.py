@@ -6,11 +6,13 @@ import io
 import json
 import logging
 import os
+import select
 import socket
 import ssl
+import threading
 import time
 from contextlib import nullcontext
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -74,6 +76,7 @@ LOGGER = logging.getLogger(__name__)
 MAX_JSON_BODY_BYTES = 64 * 1024
 TLS_HANDSHAKE_TIMEOUT_SECONDS = 5.0
 REQUEST_INPUT_TIMEOUT_SECONDS = 10.0
+MAX_PENDING_DASHBOARD_CONNECTIONS = 16
 RESPONSE_SEND_TIMEOUT_SECONDS = 5.0
 WRITE_PATHS = frozenset(
     (
@@ -5215,11 +5218,13 @@ def _json_bytes(payload: Dict[str, Any]) -> bytes:
 class _DeadlineReader(io.RawIOBase):
     """Bound all input reads to one deadline, including a slow byte stream."""
 
-    def __init__(self, source: io.RawIOBase, connection: socket.socket, deadline: float) -> None:
+    def __init__(self, source: io.RawIOBase, connection: socket.socket, deadline: float,
+                 prefix: bytes = b"") -> None:
         super().__init__()
         self._source = source
         self._connection = connection
         self._deadline = deadline
+        self._prefix = prefix
 
     def readable(self) -> bool:
         return True
@@ -5229,6 +5234,11 @@ class _DeadlineReader(io.RawIOBase):
         if remaining <= 0:
             raise TimeoutError("dashboard request input timed out")
         self._connection.settimeout(remaining)
+        if self._prefix:
+            count = min(len(buffer), len(self._prefix))
+            buffer[:count] = self._prefix[:count]
+            self._prefix = self._prefix[count:]
+            return count
         return self._source.readinto(buffer)
 
     def close(self) -> None:
@@ -5236,6 +5246,14 @@ class _DeadlineReader(io.RawIOBase):
             self._source.close()
         finally:
             super().close()
+
+
+@dataclass
+class _PendingConnection:
+    address: Any
+    deadline: float
+    handshake: bool
+    want_write: bool = False
 
 
 class ControlServer(HTTPServer):
@@ -5274,18 +5292,89 @@ class ControlServer(HTTPServer):
         )
         self.secure_transport = tls_context is not None
         self._tls_context = tls_context
+        self._pending_connections: Dict[socket.socket, _PendingConnection] = {}
+        self._request_inputs: Dict[socket.socket, Tuple[bytes, float]] = {}
+        self._stop_connections = threading.Event()
         super().__init__(server_address, ControlRequestHandler)
 
     def get_request(self) -> Tuple[socket.socket, Any]:
-        connection, address = super().get_request()
-        try:
-            connection.settimeout(TLS_HANDSHAKE_TIMEOUT_SECONDS)
-            if self._tls_context is not None:
-                connection = self._tls_context.wrap_socket(connection, server_side=True)
-            return connection, address
-        except OSError:
-            connection.close()
-            raise
+        """Advance waiting connections without serial waits for idle clients."""
+        attempted = bool(self._pending_connections)
+        while not self._stop_connections.is_set():
+            now = time.monotonic()
+            for connection, pending in tuple(self._pending_connections.items()):
+                if now >= pending.deadline:
+                    self._close_pending(connection)
+            if attempted and not self._pending_connections:
+                raise TimeoutError("dashboard connections expired")
+            readers = [self.socket] + [connection for connection, pending
+                                      in self._pending_connections.items() if not pending.want_write]
+            writers = [connection for connection, pending
+                       in self._pending_connections.items() if pending.want_write]
+            readable, writable, _ = select.select(readers, writers, [], 0.05)
+            if self.socket in readable:
+                connection, address = self.socket.accept()
+                attempted = True
+                if len(self._pending_connections) >= MAX_PENDING_DASHBOARD_CONNECTIONS:
+                    connection.close()
+                else:
+                    try:
+                        connection.setblocking(False)
+                        if self._tls_context is not None:
+                            connection = self._tls_context.wrap_socket(
+                                connection, server_side=True, do_handshake_on_connect=False)
+                        self._pending_connections[connection] = _PendingConnection(
+                            address=address,
+                            deadline=time.monotonic() + (TLS_HANDSHAKE_TIMEOUT_SECONDS
+                                if self._tls_context is not None else REQUEST_INPUT_TIMEOUT_SECONDS),
+                            handshake=self._tls_context is not None,
+                        )
+                    except OSError:
+                        connection.close()
+            for connection in readable + writable:
+                if connection is self.socket:
+                    continue
+                pending = self._pending_connections[connection]
+                try:
+                    if pending.handshake:
+                        connection.do_handshake()
+                        pending.handshake = False
+                        pending.deadline = time.monotonic() + REQUEST_INPUT_TIMEOUT_SECONDS
+                    prefix = connection.recv(1)
+                    if not prefix:
+                        self._close_pending(connection)
+                        continue
+                    remaining = pending.deadline - time.monotonic()
+                    if remaining <= 0:
+                        self._close_pending(connection)
+                        continue
+                    connection.settimeout(remaining)
+                    del self._pending_connections[connection]
+                    self._request_inputs[connection] = prefix, pending.deadline
+                    return connection, pending.address
+                except ssl.SSLWantWriteError:
+                    pending.want_write = True
+                except (ssl.SSLWantReadError, BlockingIOError):
+                    pending.want_write = False
+                except OSError:
+                    self._close_pending(connection)
+        raise OSError("dashboard is stopping")
+
+    def _close_pending(self, connection: socket.socket) -> None:
+        self._pending_connections.pop(connection, None)
+        connection.close()
+
+    def service_actions(self) -> None:
+        if self._pending_connections and not self._stop_connections.is_set():
+            self._handle_request_noblock()
+
+    def shutdown(self) -> None:
+        self._stop_connections.set()
+        super().shutdown()
+
+    def shutdown_request(self, request: socket.socket) -> None:
+        self._request_inputs.pop(request, None)
+        super().shutdown_request(request)
 
     def dashboard_access(self, peer: str, operation: str = "status", **values: Any) -> Dict[str, Any]:
         """Authorize the socket peer through the helper instead of request headers."""
@@ -6308,6 +6397,10 @@ class ControlServer(HTTPServer):
         return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
 
     def server_close(self) -> None:
+        self._stop_connections.set()
+        for connection in tuple(self._pending_connections):
+            self._close_pending(connection)
+        self._request_inputs.clear()
         self.router_operations.close()
         super().server_close()
 
@@ -7006,8 +7099,9 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
 
     def setup(self) -> None:
         super().setup()
-        deadline = time.monotonic() + REQUEST_INPUT_TIMEOUT_SECONDS
-        self.rfile = io.BufferedReader(_DeadlineReader(self.rfile, self.connection, deadline))
+        prefix, deadline = self.server._request_inputs.pop(
+            self.connection, (b"", time.monotonic() + REQUEST_INPUT_TIMEOUT_SECONDS))
+        self.rfile = io.BufferedReader(_DeadlineReader(self.rfile, self.connection, deadline, prefix))
 
     def handle(self) -> None:
         try:

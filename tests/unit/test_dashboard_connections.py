@@ -143,7 +143,9 @@ class DashboardConnectionTests(unittest.TestCase):
         self._start_client(healthy)
         started = time.monotonic()
         self.server.handle_request()
-        self.server.handle_request()
+        self.threads[1].join(timeout=0.1)
+        if not response:
+            self.server.handle_request()
         elapsed = time.monotonic() - started
         self.threads[1].join(timeout=2)
         self.assertLess(elapsed, 1.0, "unfinished client blocked the next request")
@@ -156,6 +158,108 @@ class DashboardConnectionTests(unittest.TestCase):
     def test_incomplete_tls_handshake_releases_the_server(self) -> None:
         self._assert_next_client_recovers("handshake")
 
+    def test_several_idle_handshakes_do_not_delay_a_healthy_connection(self) -> None:
+        clients = [socket.create_connection(self.server.server_address, timeout=2)
+                   for _ in range(3)]
+        response = []
+
+        def healthy() -> None:
+            with self._connect() as client:
+                client.sendall(b"GET /api/health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+                response.append(self._response(client))
+
+        self._start_client(healthy)
+        try:
+            with patch.object(api, "TLS_HANDSHAKE_TIMEOUT_SECONDS", 1.0):
+                started = time.monotonic()
+                self.server.handle_request()
+                elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 0.5, "idle handshakes delayed the healthy connection")
+            self.threads[-1].join(timeout=2)
+            self.assertTrue(response[0].startswith(b"HTTP/1.0 200 OK"))
+        finally:
+            for client in clients:
+                client.close()
+
+    def test_unused_encrypted_connection_does_not_delay_a_healthy_connection(self) -> None:
+        ready = threading.Event()
+        release = threading.Event()
+        response = []
+
+        def idle() -> None:
+            with self._connect():
+                ready.set()
+                self.assertTrue(release.wait(timeout=2))
+
+        def healthy() -> None:
+            self.assertTrue(ready.wait(timeout=2))
+            with self._connect() as client:
+                client.sendall(b"GET /api/health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+                response.append(self._response(client))
+
+        self._start_client(idle)
+        self._start_client(healthy)
+        try:
+            with patch.object(api, "REQUEST_INPUT_TIMEOUT_SECONDS", 1.0):
+                started = time.monotonic()
+                self.server.handle_request()
+                elapsed = time.monotonic() - started
+            self.threads[-1].join(timeout=2)
+            self.assertLess(elapsed, 0.5)
+            self.assertTrue(response[0].startswith(b"HTTP/1.0 200 OK"))
+        finally:
+            release.set()
+
+    def test_connection_capacity_rejects_excess_and_recovers(self) -> None:
+        clients = [socket.create_connection(self.server.server_address, timeout=2)
+                   for _ in range(3)]
+        rejected = []
+
+        def excess() -> None:
+            started = time.monotonic()
+            try:
+                with self._connect():
+                    self.fail("excess connection was accepted")
+            except OSError:
+                rejected.append(time.monotonic() - started)
+
+        self._start_client(excess)
+        try:
+            with patch.object(api, "MAX_PENDING_DASHBOARD_CONNECTIONS", 3):
+                self.server.handle_request()
+            self.threads[-1].join(timeout=2)
+            self.assertLess(rejected[0], 0.5)
+            self.assertEqual(len(self.server._pending_connections), 0)
+        finally:
+            for client in clients:
+                client.close()
+        response = []
+
+        def healthy() -> None:
+            with self._connect() as client:
+                client.sendall(b"GET /api/health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+                response.append(self._response(client))
+
+        self._start_client(healthy)
+        self.server.handle_request()
+        self.threads[-1].join(timeout=2)
+        self.assertTrue(response[0].startswith(b"HTTP/1.0 200 OK"))
+
+    def test_shutdown_releases_idle_connections_promptly(self) -> None:
+        worker = threading.Thread(target=self.server.serve_forever)
+        worker.start()
+        client = socket.create_connection(self.server.server_address, timeout=2)
+        try:
+            started = time.monotonic()
+            self.server.shutdown()
+            worker.join(timeout=1)
+            self.assertFalse(worker.is_alive())
+            self.assertLess(time.monotonic() - started, 1)
+            self.server.server_close()
+            self.assertEqual(len(self.server._pending_connections), 0)
+        finally:
+            client.close()
+
     def test_incomplete_headers_release_the_server(self) -> None:
         self._assert_next_client_recovers("headers")
 
@@ -167,6 +271,29 @@ class DashboardConnectionTests(unittest.TestCase):
 
     def test_body_bytes_cannot_extend_the_input_deadline(self) -> None:
         self._assert_next_client_recovers("body", drip=True)
+
+    def test_waiting_for_first_byte_uses_the_same_input_deadline(self) -> None:
+        payload = json.dumps({"admin_password": "isolated-password", "enabled": True}).encode()
+
+        def delayed_request() -> None:
+            with self._connect() as client:
+                time.sleep(0.2)
+                client.sendall(
+                    b"POST /api/router/wifi HTTP/1.0\r\nHost: 127.0.0.1\r\n"
+                    b"Authorization: Bearer test-admin\r\nContent-Length: "
+                    + str(len(payload)).encode() + b"\r\n\r\n"
+                )
+                time.sleep(0.2)
+                try:
+                    client.sendall(payload)
+                except OSError:
+                    pass
+
+        self._start_client(delayed_request)
+        self.server.handle_request()
+        self.threads[-1].join(timeout=2)
+        self.assertEqual(self.helper_calls, [])
+        self.assertEqual(self.repository.list_recent_actions(), ())
 
     def test_headers_and_body_share_one_input_deadline(self) -> None:
         ready = threading.Event()
