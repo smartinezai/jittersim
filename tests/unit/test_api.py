@@ -15,6 +15,7 @@ from pathlib import Path
 from jittersim.api.server import DASHBOARD_HTML, ControlRequestHandler, ControlServer
 from jittersim.config.models import (
     Device,
+    DeviceGroup,
     DomainObservation,
     Impairment,
     Profile,
@@ -1853,6 +1854,145 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["devices"][0]["display_name"], "Unknown device")
+
+    def test_a_new_assignment_is_named_after_the_station_hostname(self) -> None:
+        self.server.helper_client = FakeHelper()
+
+        status, _, body = self.server.write_response_for(
+            "/api/connected-devices/apply-profile",
+            {
+                "ipv4_address": "192.168.50.178",
+                "mac_address": "dc:1e:d5:3e:97:4c",
+                "profile_id": "slow",
+            },
+        )
+
+        self.assertEqual(status, 200, body)
+        saved = self.repository.get_device_by_ipv4_address("192.168.50.178")
+        self.assertEqual(saved.name, "MacBook-Pro")
+
+    def test_a_new_assignment_prefers_the_saved_label(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.repository.save_connected_device_label(
+            mac_address="dc:1e:d5:3e:97:4c", display_name="Sam MacBook", device_type="laptop"
+        )
+
+        self.server.write_response_for(
+            "/api/connected-devices/apply-profile",
+            {
+                "ipv4_address": "192.168.50.178",
+                "mac_address": "dc:1e:d5:3e:97:4c",
+                "profile_id": "slow",
+            },
+        )
+
+        saved = self.repository.get_device_by_ipv4_address("192.168.50.178")
+        self.assertEqual(saved.name, "Sam MacBook")
+
+    def test_without_a_hostname_the_old_placeholder_remains(self) -> None:
+        class Anonymous(FakeHelper):
+            def connected_devices(self):
+                device = super().connected_devices()[0]
+                device["hostname"] = None
+                return [device]
+
+        self.server.helper_client = Anonymous()
+
+        self.server.write_response_for(
+            "/api/connected-devices/apply-profile",
+            {
+                "ipv4_address": "192.168.50.178",
+                "mac_address": "dc:1e:d5:3e:97:4c",
+                "profile_id": "slow",
+            },
+        )
+
+        saved = self.repository.get_device_by_ipv4_address("192.168.50.178")
+        self.assertEqual(saved.name, "Client 192.168.50.178")
+
+    def test_an_existing_device_keeps_its_name(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.repository.save_device(
+            Device(
+                id="client-dc1ed53e974c",
+                name="Alice phone",
+                ipv4_address="192.168.50.178",
+                profile_id="slow",
+                mac_address="dc:1e:d5:3e:97:4c",
+            )
+        )
+
+        self.server.write_response_for(
+            "/api/connected-devices/apply-profile",
+            {
+                "ipv4_address": "192.168.50.178",
+                "mac_address": "dc:1e:d5:3e:97:4c",
+                "profile_id": "slow",
+            },
+        )
+
+        saved = self.repository.get_device_by_ipv4_address("192.168.50.178")
+        self.assertEqual(saved.name, "Alice phone")
+
+    def test_a_hostname_that_is_not_a_usable_name_falls_back_to_the_placeholder(self) -> None:
+        class OddHostname(FakeHelper):
+            def connected_devices(self):
+                device = super().connected_devices()[0]
+                device["hostname"] = "x" * 101
+                return [device]
+
+        self.server.helper_client = OddHostname()
+
+        status, _, body = self.server.write_response_for(
+            "/api/connected-devices/apply-profile",
+            {
+                "ipv4_address": "192.168.50.178",
+                "mac_address": "dc:1e:d5:3e:97:4c",
+                "profile_id": "slow",
+            },
+        )
+
+        self.assertEqual(status, 200, body)
+        saved = self.repository.get_device_by_ipv4_address("192.168.50.178")
+        self.assertEqual(saved.name, "Client 192.168.50.178")
+
+    def test_a_client_added_to_a_group_is_named_after_the_station_hostname(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.repository.save_device_group(DeviceGroup("family", "Family", ("alice",), "slow"))
+
+        status, _, body = self.server.write_response_for(
+            "/api/connected-devices/group",
+            {
+                "group_id": "family",
+                "ipv4_address": "192.168.50.178",
+                "mac_address": "dc:1e:d5:3e:97:4c",
+            },
+        )
+
+        self.assertEqual(status, 200, body)
+        saved = self.repository.get_device_by_ipv4_address("192.168.50.178")
+        self.assertEqual(saved.name, "MacBook-Pro")
+        self.assertIn(saved.id, self.repository.get_device_group("family").device_ids)
+
+    def test_clients_picked_for_a_new_group_are_named_after_the_station_hostname(self) -> None:
+        self.server.helper_client = FakeHelper()
+
+        status, _, body = self.server.write_response_for(
+            "/api/groups",
+            {
+                "id": "family",
+                "name": "Family",
+                "profile_id": "slow",
+                "device_ids": [],
+                "connected_clients": [
+                    {"ipv4_address": "192.168.50.178", "mac_address": "dc:1e:d5:3e:97:4c"}
+                ],
+            },
+        )
+
+        self.assertEqual(status, 200, body)
+        saved = self.repository.get_device_by_ipv4_address("192.168.50.178")
+        self.assertEqual(saved.name, "MacBook-Pro")
 
 
 if __name__ == "__main__":

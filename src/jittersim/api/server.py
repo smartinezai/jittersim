@@ -7433,7 +7433,9 @@ class ControlServer(HTTPServer):
                                 "Choose a group profile before adding an unassigned client"
                             )
                         device = _connected_device_from_payload(
-                            {**client, "profile_id": base_profile}, self.repository
+                            {**client, "profile_id": base_profile},
+                            self.repository,
+                            hostname=_snapshot_hostname(snapshot, client["mac_address"]),
                         )
                         self._verify_selected_client(device, snapshot)
                         self.repository.save_device(device)
@@ -7525,14 +7527,18 @@ class ControlServer(HTTPServer):
         operation = self.scheduler.control_operation() if self.scheduler else nullcontext()
         with operation:
             try:
-                device = _connected_device_from_payload(payload, self.repository)
+                snapshot = station_snapshot(self.helper_client)
+                device = _connected_device_from_payload(
+                    payload,
+                    self.repository,
+                    hostname=_snapshot_hostname(snapshot, payload.get("mac_address")),
+                )
                 if device.mac_address in {
                     item.mac_address for item in self.repository.list_unaffected_devices()
                 }:
                     raise ValueError(
                         "This device is unaffected by profiles. Remove its protection before applying a profile."
                     )
-                snapshot = station_snapshot(self.helper_client)
                 self._verify_selected_client(device, snapshot)
                 if self.scheduler:
                     self.scheduler.sample_before_control_change(repository=self.repository)
@@ -8322,8 +8328,44 @@ def _policies_from_payload(payload: Dict[str, Any]) -> Tuple[MacPolicy, WebsiteP
     )
 
 
-def _connected_device_from_payload(payload: Dict[str, Any], repository: ConfigRepository) -> Device:
-    """Build an assignment for a visible client while preserving existing names and IDs."""
+def _snapshot_hostname(snapshot: Optional[Dict[str, Any]], mac_address: Any) -> Optional[str]:
+    """Find the hostname a station announced in a connected-client snapshot."""
+
+    try:
+        wanted = normalize_exempt_mac(mac_address)
+    except ValueError:
+        return None
+    stations = snapshot.get("devices") if isinstance(snapshot, dict) else None
+    for station in stations if isinstance(stations, list) else ():
+        if isinstance(station, dict) and station.get("mac_address") == wanted:
+            hostname = station.get("hostname")
+            return hostname if isinstance(hostname, str) else None
+    return None
+
+
+def _new_client_name(label: Optional[str], hostname: Optional[str], ipv4_address: Any) -> str:
+    """Name a client saved for the first time.
+
+    Use the saved label then the announced hostname. A candidate that is not a
+    usable name is skipped and the automatic placeholder is the last resort.
+    """
+
+    for candidate in (label, hostname):
+        name = candidate.strip() if isinstance(candidate, str) else ""
+        has_control = any(ord(char) < 32 or ord(char) == 127 for char in name)
+        if name and len(name) <= 64 and not has_control:
+            return name
+    return f"Client {ipv4_address}"
+
+
+def _connected_device_from_payload(
+    payload: Dict[str, Any], repository: ConfigRepository, *, hostname: Optional[str] = None
+) -> Device:
+    """Build an assignment for a visible client while preserving existing names and IDs.
+
+    A client saved for the first time takes its saved label or else the hostname
+    it announced. An existing assignment keeps its name.
+    """
 
     ipv4_address = payload["ipv4_address"]
     profile_id = payload["profile_id"]
@@ -8349,9 +8391,14 @@ def _connected_device_from_payload(payload: Dict[str, Any], repository: ConfigRe
     generated_id = "client-" + mac_address.replace(":", "")
     if existing is None and repository.get_device(generated_id) is not None:
         raise ValueError("The detected client ID conflicts with another saved assignment")
+    label = repository.list_connected_device_labels().get(mac_address, {}).get("display_name")
     return Device(
         id=existing.id if existing else generated_id,
-        name=existing.name if existing else f"Client {address_only.ipv4_address}",
+        name=(
+            existing.name
+            if existing
+            else _new_client_name(label, hostname, address_only.ipv4_address)
+        ),
         ipv4_address=address_only.ipv4_address,
         profile_id=profile_id,
         mac_address=mac_address,
