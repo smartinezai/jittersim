@@ -1,4 +1,6 @@
 import threading
+import time
+from unittest.mock import patch
 import unittest
 from ipaddress import IPv4Address
 
@@ -159,6 +161,48 @@ class RefresherTests(unittest.TestCase):
 
         self.helper.error = None
         self.assertTrue(self.refresher.refresh())
+
+    def test_repeated_slow_rounds_share_a_fixed_worker_limit(self) -> None:
+        release = threading.Event()
+        guard = threading.Lock()
+        running = [0]
+        peak = [0]
+        seen = []
+
+        def blocked(domain):
+            with guard:
+                running[0] += 1
+                peak[0] = max(peak[0], running[0])
+                seen.append(domain)
+            try:
+                release.wait(timeout=10)
+                return [ip("203.0.113.1")]
+            finally:
+                with guard:
+                    running[0] -= 1
+
+        refresher = ServiceAddressRefresher(
+            applied_plan=lambda: self.applied,
+            helper_client=self.helper,
+            resolver=blocked,
+        )
+        try:
+            with patch("jittersim.engine.service_resolver.RESOLVE_WAIT_SECONDS", 0.05):
+                for round_number in range(5):
+                    names = [f"round{round_number}-host{number}.example" for number in range(8)]
+                    self.applied = payload(("slow", names))
+                    self.assertFalse(refresher.refresh())
+            self.assertLessEqual(peak[0], 8)
+            self.assertLessEqual(len(seen), 8)
+        finally:
+            release.set()
+            deadline = time.monotonic() + 5
+            while running[0] and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(running[0], 0)
+        self.applied = payload(("recovered", ["ready.example"]))
+        self.assertTrue(refresher.refresh())
+        self.assertEqual(self.helper.calls[-1], {"recovered": [ip("203.0.113.1")]})
 
     def test_the_background_loop_refreshes_and_stops_cleanly(self) -> None:
         sent = threading.Event()

@@ -234,6 +234,31 @@ class WebsiteLookupDeadlineTests(LookupDeadlineTestCase):
             finally:
                 self._release_lookups(lookups, names)
 
+    def test_queue_is_bounded_and_recovers_after_late_answers(self) -> None:
+        names = tuple(f"host{number}.example" for number in range(1, 97))
+        lookups = SlowLookups(slow=names)
+        with patch("jittersim.engine.website.socket.getaddrinfo", side_effect=lookups):
+            try:
+                with patch.object(website, "RESOLVE_WAIT_SECONDS", 0.02):
+                    for offset in range(0, len(names), 8):
+                        resolve_domains(domains=names[offset : offset + 8])
+                with website._resolution_cache_lock:
+                    pending = len(website._pending)
+                self.assertLessEqual(pending, 32)
+                self.assertLessEqual(lookups.most_running, 8)
+            finally:
+                self._release_lookups(lookups, names)
+            self.assertEqual(resolve_domains(domains=("example.com",)), (IPv4Address("203.0.113.10"),))
+
+    def test_large_fast_batches_finish_within_the_original_deadline(self) -> None:
+        names = tuple(f"host{number}.example" for number in range(1, 97))
+        lookups = SlowLookups(slow=(), delay=0.001)
+        with patch.object(website, "RESOLVE_WAIT_SECONDS", 3.0):
+            found = resolve_domains(domains=names, resolver=lookups)
+        self.assertEqual(len(found), len(names))
+        self.assertEqual(set(lookups.calls), set(names))
+        self.assertLessEqual(lookups.most_running, 8)
+
     def test_concurrent_calls_share_one_worker_limit(self) -> None:
         names = tuple(f"host{number}.example" for number in range(1, 41))
         lookups = SlowLookups(slow=names)

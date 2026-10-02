@@ -10,8 +10,8 @@ import logging
 import socket
 import threading
 import time
-from collections import OrderedDict
-from concurrent.futures import Future, ThreadPoolExecutor
+from collections import OrderedDict, deque
+from concurrent.futures import FIRST_COMPLETED, Future
 from concurrent.futures import wait as wait_for_futures
 from contextlib import contextmanager
 from ipaddress import AddressValueError, IPv4Address
@@ -19,6 +19,7 @@ from typing import Callable, Dict, Iterable, Iterator, List, Mapping, Optional, 
 
 from jittersim.config.models import Device, WebsitePolicy
 
+from .lookup_pool import BoundedLookupPool
 from .plan import WebsiteFilter
 
 LOGGER = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ _MAX_CACHED_DOMAINS = 512
 # All the lookups of one plan wait this long together.
 RESOLVE_WAIT_SECONDS = 10.0
 RESOLVER_THREADS = 8
+_lookup_pool = BoundedLookupPool(workers=RESOLVER_THREADS, name="website-dns")
 # A name that missed the deadline is not waited for again for this long. Its lookup
 # carries on in the background and fills the cache when it ends.
 _TIMEOUT_MEMORY_SECONDS = 30.0
@@ -147,7 +149,7 @@ def _cached_addresses(*, domain: str) -> tuple:
             continue
     result_addresses = tuple(sorted(addresses, key=str))
     with _resolution_cache_lock:
-        _resolution_cache[domain] = (now + _RESOLUTION_CACHE_SECONDS, result_addresses)
+        _resolution_cache[domain] = (time.monotonic() + _RESOLUTION_CACHE_SECONDS, result_addresses)
         _resolution_cache.move_to_end(domain)
         while len(_resolution_cache) > _MAX_CACHED_DOMAINS:
             _resolution_cache.popitem(last=False)
@@ -211,21 +213,20 @@ def _lookup_with(resolver: AddressResolver, domain: str) -> tuple:
     return tuple(addresses)
 
 
-def _start_lookup(
-    pool: ThreadPoolExecutor, domain: str, resolver: Optional[AddressResolver]
-) -> Future:
-    """Start the lookup of one name, or join the system lookup that is still running."""
+def _start_lookup(domain: str, resolver: Optional[AddressResolver]) -> Optional[Future]:
+    """Start bounded work or join a system lookup that is still running."""
 
     if resolver is not None:
-        return pool.submit(_lookup_with, resolver, domain)
+        return _lookup_pool.submit(_lookup_with, resolver, domain)
     with _resolution_cache_lock:
         running = _pending.get(domain)
         if running is not None:
             return running
-        future = pool.submit(_system_lookup, domain)
+        future = _lookup_pool.submit(_system_lookup, domain)
+        if future is None:
+            return None
         _pending[domain] = future
-    # Outside the lock because a finished future calls this at once. It also runs when
-    # a queued lookup is cancelled, so a name never stays marked as running.
+    # Outside the lock because a finished future calls this at once.
     future.add_done_callback(lambda done, name=domain: _forget_pending(name, done))
     return future
 
@@ -235,52 +236,75 @@ def resolve_domains(
     domains: Iterable[str],
     resolver: Optional[AddressResolver] = None,
 ) -> tuple:
-    """Resolve a bounded set of domain names to unique IPv4 addresses.
+    """Resolve names within the plan deadline and process-wide worker limits."""
 
-    The lookups share the deadline of the current `lookup_session`, or get a fresh
-    one of their own. A name that does not answer in time adds nothing and is
-    listed in the session as timed out.
-    """
-
-    names = tuple(dict.fromkeys(domains))
+    names = deque(dict.fromkeys(domains))
     if not names:
         return ()
     session = getattr(_session_state, "session", None) or LookupSession(RESOLVE_WAIT_SECONDS)
     addresses = set()
-    started: Dict[str, Future] = {}
-    pool: Optional[ThreadPoolExecutor] = None
+    waiting: Dict[str, Future] = {}
+
+    def missed(name: str) -> None:
+        session.note_timeout(name)
+        if resolver is None:
+            _remember_timeout(name)
+
     try:
-        for name in names:
-            if resolver is None:
-                cached = _fresh_addresses(name)
-                if cached is not None:
-                    addresses.update(cached)
-                    continue
-                if _recently_timed_out(name):
+        while names or waiting:
+            while names and len(waiting) < RESOLVER_THREADS:
+                name = names.popleft()
+                if resolver is None:
+                    cached = _fresh_addresses(name)
+                    if cached is not None:
+                        addresses.update(cached)
+                        continue
+                    if _recently_timed_out(name):
+                        session.note_timeout(name)
+                        continue
+                if name in session.timed_out or session.remaining() <= 0:
                     session.note_timeout(name)
                     continue
-            if name in session.timed_out or session.remaining() <= 0:
-                session.note_timeout(name)
+                future = _start_lookup(name, resolver)
+                if future is None:
+                    if waiting:
+                        names.appendleft(name)
+                        break
+                    missed(name)
+                    continue
+                waiting[name] = future
+            if not waiting:
                 continue
-            if pool is None:
-                pool = ThreadPoolExecutor(max_workers=RESOLVER_THREADS)
-            started[name] = _start_lookup(pool, name, resolver)
-        if started:
-            done, _ = wait_for_futures(started.values(), timeout=session.remaining())
-            for name, future in started.items():
-                if future in done and not future.cancelled():
-                    try:
-                        addresses.update(future.result())
-                    except Exception:  # one unresolvable name must not hide the others
-                        LOGGER.debug("could not resolve %s", name, exc_info=True)
-                else:
-                    session.note_timeout(name)
-                    if resolver is None:
-                        _remember_timeout(name)
+            done, _ = wait_for_futures(
+                waiting.values(), timeout=session.remaining(), return_when=FIRST_COMPLETED
+            )
+            if not done:
+                break
+            for name, future in tuple(waiting.items()):
+                if future not in done:
+                    continue
+                del waiting[name]
+                if future.cancelled():
+                    missed(name)
+                    continue
+                try:
+                    addresses.update(future.result())
+                except Exception:  # one unresolvable name must not hide the others
+                    LOGGER.debug("could not resolve %s", name, exc_info=True)
+        for name in names:
+            cached = _fresh_addresses(name) if resolver is None else None
+            if cached is not None:
+                addresses.update(cached)
+            else:
+                session.note_timeout(name)
+        for name in waiting:
+            missed(name)
     finally:
-        if pool is not None:
-            # A lookup stuck in the system resolver must not hold up the plan.
-            pool.shutdown(wait=False, cancel_futures=True)
+        if resolver is not None:
+            for future in waiting.values():
+                future.cancel()
+        # System work stays bounded and can supply a late cache answer or be joined
+        # by another caller. A timed-out caller never shuts down the shared pool.
     return tuple(sorted(addresses, key=str))
 
 

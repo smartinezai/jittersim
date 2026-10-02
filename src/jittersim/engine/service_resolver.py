@@ -9,13 +9,15 @@ looked a name up yet.
 import logging
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from collections import deque
+from concurrent.futures import FIRST_COMPLETED, Future
 from concurrent.futures import wait as wait_for_futures
 from ipaddress import IPv4Address
 from typing import Callable, Dict, List, Optional, Sequence
 
 from jittersim.networking.helper import HelperClientError
 
+from .lookup_pool import BoundedLookupPool
 from .website import resolve_domains
 
 LOGGER = logging.getLogger(__name__)
@@ -23,6 +25,8 @@ MAX_SEED_HOSTNAMES_PER_LIST = 100  # as many as a list can hold
 RESEND_SECONDS = 30 * 60
 RESOLVE_WAIT_SECONDS = 10.0
 RESOLVER_THREADS = 8
+# Separate from website workers because the default resolver calls that layer.
+_lookup_pool = BoundedLookupPool(workers=RESOLVER_THREADS, name="service-dns")
 
 
 def _resolve_one(domain: str) -> Sequence[IPv4Address]:
@@ -125,20 +129,38 @@ class ServiceAddressRefresher:
         return True
 
     def _resolve(self, lists: Dict[str, List[str]]) -> Dict[str, List[IPv4Address]]:
-        names = sorted({domain for domains in lists.values() for domain in domains})
+        names = deque(sorted({domain for domains in lists.values() for domain in domains}))
         results: Dict[str, Sequence[IPv4Address]] = {}
-        pool = ThreadPoolExecutor(max_workers=RESOLVER_THREADS)
+        deadline = time.monotonic() + RESOLVE_WAIT_SECONDS
+        waiting: Dict[Future, str] = {}
         try:
-            futures = {pool.submit(self._resolver, name): name for name in names}
-            done, _ = wait_for_futures(futures, timeout=RESOLVE_WAIT_SECONDS)
-            for future in done:
-                try:
-                    results[futures[future]] = future.result()
-                except Exception:  # one unresolvable name must not hide the others
-                    LOGGER.debug("could not resolve %s", futures[future], exc_info=True)
+            while (names or waiting) and time.monotonic() < deadline:
+                while names and len(waiting) < RESOLVER_THREADS:
+                    name = names.popleft()
+                    future = _lookup_pool.submit(self._resolver, name)
+                    if future is None:
+                        names.appendleft(name)
+                        break
+                    waiting[future] = name
+                if not waiting:
+                    break
+                done, _ = wait_for_futures(
+                    waiting, timeout=max(0.0, deadline - time.monotonic()),
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done:
+                    break
+                for future in done:
+                    name = waiting.pop(future)
+                    if future.cancelled():
+                        continue
+                    try:
+                        results[name] = future.result()
+                    except Exception:  # one unresolvable name must not hide the others
+                        LOGGER.debug("could not resolve %s", name, exc_info=True)
         finally:
-            # A lookup stuck in the system resolver must not hold up the next round.
-            pool.shutdown(wait=False, cancel_futures=True)
+            for future in waiting:
+                future.cancel()
         answers = {}
         for list_id, domains in lists.items():
             addresses = sorted(

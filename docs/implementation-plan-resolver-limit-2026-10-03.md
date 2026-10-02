@@ -6,16 +6,16 @@ PR 51 limits each individual call to eight DNS threads. A timed-out call leaves 
 
 Keep one shared pool of eight website lookup workers for the lifetime of the process. Bound submitted work across all callers. Keep the existing ten-second plan deadline, late-result cache, same-name joining and warning text. Preserve ordinary batches larger than eight by admitting more names as earlier work finishes. No database or installer changes are needed.
 
-This is a focused correction to the existing hardening PR. Review the summary and the review notes before production implementation. Merge only after the exact combined source passes its checks. GitHub currently refuses to start jobs because of billing. That failure provides no test evidence.
+This is a focused correction to the existing hardening PR. Samantha approved the reviewed summary on 3 October before production implementation. Merge only after the exact combined source passes its checks. GitHub currently refuses to start jobs because of billing. That failure provides no test evidence.
 
 ## Scope and decisions
 
-- Source: `src/jittersim/engine/website.py` and focused tests in `tests/unit/test_website.py`.
-- One process-wide executor with eight workers. Allow at most 32 unfinished tasks across the process including the eight running tasks. Queue admission must be checked under the same lock as lookup ownership.
+- Source: `src/jittersim/engine/website.py`, `service_resolver.py`, one small shared pool helper and focused tests for both paths.
+- Separate process-wide website and service executors with eight workers each. Allow at most 32 submitted tasks in each pool including the eight running tasks. Queue admission must be checked under the same lock as lookup ownership.
 - System lookups for the same name join the existing future. Injected resolvers used in tests must use the same capacity limits without sharing their answers across resolver identities.
 - A call may admit at most eight of its own unfinished lookups at once. Refill that window as answers arrive while the original deadline still has time.
 - If other callers occupy all available capacity, return best-effort results with the existing unresolved-name warning. Do not create another executor or wait outside the original deadline.
-- Cancel this call's queued work when its deadline ends. A running system lookup may finish later and fill the existing bounded cache. Cancellation and callbacks must not deadlock the cache lock.
+- Cancel queued injected-resolver and service work after a call times out. Keep bounded system lookups available for another caller joining the same name and for late cache results. No call waits past its original deadline. Cancellation and callbacks must run outside state locks. A cancelled queue item retains its reserved capacity until an executor worker consumes it. A separate caller future allows cancellation without losing physical queue ownership.
 - Keep the cache limit of 512 entries and the timeout memory limit of 1024 names. Start the sixty-second cache lifetime when the lookup completes. Preserve the shared deadline across all website filters in one plan.
 - Do not alter service matching, network rules or HTTP APIs in this correction.
 
@@ -32,7 +32,7 @@ This is a focused correction to the existing hardening PR. Review the summary an
 3. Run the focused website and service-refresher suites plus runtime, plan and warning checks. Run the full Python suite and lint on the final source.
 4. Bring the current integration branch forward in a separate review branch without changing another owner's worktree. Review conflicts and run the checks again if the source changes.
 5. Publish one finished correction PR against PR 51. Do not force push. Attach the PR to the current chat. Wait for actual green CI before merging.
-6. Keep deployment with the update owner. After the correction reaches the combined release, normal Apply and status acceptance are required on the Pi.
+6. Keep final deployment with this coordinating chat and use the update owner’s reviewed release path. After the correction reaches the combined release, normal Apply and status acceptance are required on the Pi.
 
 ## Deployment and recovery
 
@@ -45,8 +45,21 @@ There is no new setting or stored-data format. The released package includes the
 - Never call cancellation or add an already-completed future callback while holding the cache lock. Both can immediately invoke cleanup.
 - A cache write must use the completion time for its expiry. A lookup that was slow for more than sixty seconds should still provide a fresh answer on completion.
 - Tests must release all blocked calls before removing their socket mock. A test that leaves background work running can contaminate later tests.
-- The service refresher has its own per-round pool for custom resolvers. Audit its callers separately rather than claim this patch establishes a limit for every DNS-related thread in the application.
+- The main review also reproduced service-refresher worker growth. Replace its per-round pool with its own process-wide pool of eight workers and at most 32 unfinished tasks. Use separate website and service pools to avoid nested work waiting on its own workers. Do not claim the two pools together have only eight threads.
 
-## Open question
+## Approval and remaining gates
 
-Human feedback on this focused repair plan is pending. The regression and source review can proceed while that feedback is pending. Production code waits for the required review checkpoint.
+Samantha approved the repair and coordinated release on 3 October. Implementation may proceed. Exact-source CI and release recovery checks remain required before merge or deployment.
+
+## Final local source checks
+
+The final repair passed 149 focused checks and the full Python suite with
+2,851 passes and 36 Linux-only skips on the Mac. Ruff and whitespace checks
+passed. Independent source review found no remaining blocker. Its repeated
+cancellation reproduction retained eight running tasks and 24 queue items
+with all 32 reserved slots accounted for. The same reproduction retained
+320 queue items before physical queue ownership was fixed. Both drained
+after the blocked workers were released.
+
+Exact combined verification, published CI and real installation remain
+separate gates. Verification results include the checked source hashes.

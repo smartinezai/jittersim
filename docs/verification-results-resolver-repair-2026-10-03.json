@@ -1,0 +1,58 @@
+{
+  "date": "2026-10-03",
+  "base_pr": "https://github.com/smartinezai/jittersim/pull/51",
+  "base_head": "8bc2ca7c52a80ec2d49e6de381fa74f0673b2421",
+  "human_plan_feedback": "Approved on 3 October before production implementation",
+  "source_sha256": {
+    "src/jittersim/engine/lookup_pool.py": "8ebd990644bc658da435d1fea284138cec4b967e77e66dadc65944b78ef945f0",
+    "src/jittersim/engine/website.py": "f200363e90543decbe429499688f610eb48ef852da24b837bc374f4612f5b028",
+    "src/jittersim/engine/service_resolver.py": "ac9fae3feb7778713bec8649d7a8e0c5e4b602286596019499bb27904b4ec84c",
+    "tests/unit/test_lookup_pool.py": "d5834756eb8123df46f90920aa64009a4e38df7a9c45559902ef260b30c5c526",
+    "tests/unit/test_website.py": "20e4a7147607744778f7ae6eff0701a5c50d80c4e1806dabd6e3e7a0cc107d8c",
+    "tests/unit/test_service_resolver.py": "332d53fb011673cc6f80e2ce781d908065796ddc7ad7499eaffe92f0a8cea060"
+  },
+  "limits": {
+    "website_workers": 8,
+    "service_workers": 8,
+    "submitted_tasks_per_pool": 32,
+    "caller_window": 8,
+    "plan_deadline_seconds": 10,
+    "cache_seconds_from_completion": 60
+  },
+  "cancelled_queue_ownership": "Executor tasks retain admission capacity until consumed even if their separate caller futures are cancelled",
+  "regression_evidence": {
+    "old_successive_website_active": 40,
+    "old_concurrent_website_active": 40,
+    "old_service_active": 40,
+    "old_system_pending_names": 96,
+    "old_cancelled_queue_items_after_40_rounds": 320,
+    "fixed_cancelled_queue_items": 24,
+    "fixed_running_items": 8,
+    "fixed_reserved_items": 32
+  },
+  "verification": {
+    "focused_passed": 149,
+    "full_passed": 2851,
+    "linux_only_skipped": 36,
+    "full_seconds": 104.19,
+    "full_exit_code": 0,
+    "full_log": "/private/tmp/jittersim-resolver-final-full-2026-10-03.log",
+    "lint": "passed E9,F63,F7,F82,F811",
+    "whitespace": "passed",
+    "independent_final_review": "No remaining source blocker. Separate cancellation reproduction and 37 focused checks passed"
+  },
+  "remaining_gates": [
+    "Verify final source combined with current integration",
+    "Publish one finished correction",
+    "Actual exact-head green CI",
+    "Merged release identity and independent management recovery before deployment"
+  ],
+  "published_ci": "Not yet run on this final source. Recent GitHub jobs fail before steps because of billing",
+  "live_pi_changed": false,
+  "recovery_check": {
+    "mac_default_gateway": "192.168.50.1",
+    "pi_lan_route": "192.168.50.1 on en0",
+    "known_host_ssh_to_pi_lan": "Timed out after five seconds",
+    "installed_identity": "unconfirmed"
+  }
+}
