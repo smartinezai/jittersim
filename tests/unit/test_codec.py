@@ -168,7 +168,7 @@ class PlanCodecTests(unittest.TestCase):
         payload = plan_to_payload(self.plan)
         payload["mark_rules"][0]["ipv4_address"] = "8.8.8.8"
 
-        with self.assertRaisesRegex(PlanCodecError, "mark_rules\[0\] is invalid"):
+        with self.assertRaisesRegex(PlanCodecError, r"mark_rules\[0\] is invalid"):
             plan_from_payload(payload)
 
     def test_rejects_a_queue_with_the_wrong_mark(self) -> None:
