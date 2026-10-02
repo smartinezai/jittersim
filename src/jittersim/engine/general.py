@@ -27,12 +27,19 @@ def compile_general_plan(
 
     with lookup_session():
         return _compile_general_plan(
-            repository=repository, profile=profile, outage_active=outage_active
+            repository=repository,
+            profile=profile,
+            outage_active=outage_active,
+            service_list_rules=service_list_rules,
         )
 
 
 def _compile_general_plan(
-    *, repository: ConfigRepository, profile: Profile, outage_active: bool
+    *,
+    repository: ConfigRepository,
+    profile: Profile,
+    outage_active: bool,
+    service_list_rules: Optional[Sequence[ServiceListRule]],
 ) -> NetworkPlan:
     website_policy = repository.get_website_policy()
     return compile_plan(
