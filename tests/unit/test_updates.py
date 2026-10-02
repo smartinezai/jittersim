@@ -119,7 +119,7 @@ class UpdateTests(unittest.TestCase):
 
     def stage(self):
         path, digest = self.archive()
-        stage_release(path, digest, "v1", root=self.root)
+        stage_release(path, digest, "0.2.0", root=self.root)
 
     def apply(self, run, health, query=None):
         return apply_update(
@@ -150,7 +150,7 @@ class UpdateTests(unittest.TestCase):
     def install(self, fail=lambda command: False, query=None):
         """Install the staged release and return every command it ran."""
         self.stage()
-        request_update("v1", root=self.root, code=self.code, run=lambda *args: None)
+        request_update("0.2.0", root=self.root, code=self.code, run=lambda *args: None)
         commands, run = self.recorder(fail)
         self.apply(run, lambda: True, query)
         return commands
@@ -165,7 +165,7 @@ class UpdateTests(unittest.TestCase):
     def test_rejects_wrong_checksum_traversal_and_links_before_extraction(self):
         path, _ = self.archive()
         with self.assertRaises(UpdateError):
-            stage_release(path, "0" * 64, "v1", root=self.root)
+            stage_release(path, "0" * 64, "0.2.0", root=self.root)
         for name, kind in (
             ("../escaped", tarfile.REGTYPE),
             ("src/link", tarfile.SYMTYPE),
@@ -177,7 +177,7 @@ class UpdateTests(unittest.TestCase):
             entry.linkname = "/etc/passwd"
             path, digest = self.archive(entry)
             with self.assertRaises(UpdateError):
-                stage_release(path, digest, "v1", root=self.root)
+                stage_release(path, digest, "0.2.0", root=self.root)
         self.assertFalse((self.base / "escaped").exists())
         self.assertFalse((self.root / "staged").exists())
 
@@ -185,13 +185,13 @@ class UpdateTests(unittest.TestCase):
         self.stage()
         with self.assertRaises(UpdateError):
             request_update("../../bad", root=self.root, code=self.code, run=lambda *args: None)
-        request_update("v1", root=self.root, code=self.code, run=lambda *args: None)
+        request_update("0.2.0", root=self.root, code=self.code, run=lambda *args: None)
         with self.assertRaises(UpdateError):
-            request_update("v1", root=self.root, code=self.code, run=lambda *args: None)
+            request_update("0.2.0", root=self.root, code=self.code, run=lambda *args: None)
 
     def test_failed_install_restores_code_database_services_and_permissions(self):
         self.stage()
-        request_update("v1", root=self.root, code=self.code, run=lambda *args: None)
+        request_update("0.2.0", root=self.root, code=self.code, run=lambda *args: None)
 
         def fail_package(command, timeout):
             if "pip" in command:
@@ -212,7 +212,7 @@ class UpdateTests(unittest.TestCase):
         backup = self.root / "backup"
         backup.mkdir()
         atomic_json(backup / "complete.json", {"created_at": 1})
-        request_update("v1", root=self.root, code=self.code, run=lambda *args: None)
+        request_update("0.2.0", root=self.root, code=self.code, run=lambda *args: None)
         with patch("jittersim.updates.shutil.disk_usage") as disk:
             disk.return_value.free = 0
             with self.assertRaises(UpdateError):
@@ -225,7 +225,7 @@ class UpdateTests(unittest.TestCase):
         policy.write_text('{"options":{"enabled":true}}')
         policy.chmod(0o640)
         self.stage()
-        request_update('v1', root=self.root, code=self.code, run=lambda *args: None)
+        request_update("0.2.0", root=self.root, code=self.code, run=lambda *args: None)
         def fail(command, timeout):
             if 'pip' in command:
                 policy.write_text('damaged')
@@ -237,7 +237,7 @@ class UpdateTests(unittest.TestCase):
 
     def test_downgrade_cannot_silently_remove_active_access_controls(self):
         self.stage()
-        request_update('v1', root=self.root, code=self.code, run=lambda *args: None)
+        request_update("0.2.0", root=self.root, code=self.code, run=lambda *args: None)
         self.apply(lambda *args: None, lambda: True)
         self.access.mkdir()
         (self.access / 'policy.json').write_text('{"options":{"enabled":true}}')
@@ -251,9 +251,9 @@ class UpdateTests(unittest.TestCase):
 
     def test_successful_install_can_be_rolled_back(self):
         self.stage()
-        request_update("v1", root=self.root, code=self.code, run=lambda *args: None)
+        request_update("0.2.0", root=self.root, code=self.code, run=lambda *args: None)
         self.apply(lambda *args: None, lambda: True)
-        self.assertEqual(update_status(root=self.root, code=self.code)["installed"], "v1")
+        self.assertEqual(update_status(root=self.root, code=self.code)["installed"], "0.2.0")
         self.assertEqual(self.manager.read_text(), "new recovery manager")
         request_update("", rollback=True, root=self.root, code=self.code, run=lambda *args: None)
         self.apply(lambda *args: None, lambda: True)
@@ -263,7 +263,7 @@ class UpdateTests(unittest.TestCase):
 
     def test_failed_health_check_restores_the_previous_installation(self):
         self.stage()
-        request_update("v1", root=self.root, code=self.code, run=lambda *args: None)
+        request_update("0.2.0", root=self.root, code=self.code, run=lambda *args: None)
         with patch("jittersim.updates.time.sleep"):
             with self.assertRaisesRegex(UpdateError, "health check"):
                 self.apply(lambda *args: None, lambda: not (self.code / "src").exists())
@@ -272,7 +272,7 @@ class UpdateTests(unittest.TestCase):
 
     def test_interrupted_installation_recovers_before_trying_another_install(self):
         self.stage()
-        request_update("v1", root=self.root, code=self.code, run=lambda *args: None)
+        request_update("0.2.0", root=self.root, code=self.code, run=lambda *args: None)
 
         def interrupted(command, timeout):
             if "pip" in command:
@@ -287,7 +287,7 @@ class UpdateTests(unittest.TestCase):
 
     def test_failed_recovery_keeps_the_request_for_another_attempt(self):
         self.stage()
-        request_update("v1", root=self.root, code=self.code, run=lambda *args: None)
+        request_update("0.2.0", root=self.root, code=self.code, run=lambda *args: None)
         self.apply(lambda *args: None, lambda: True)
         request_update("", rollback=True, root=self.root, code=self.code, run=lambda *args: None)
         with patch("jittersim.updates.time.sleep"), self.assertRaises(UpdateError):
@@ -445,7 +445,7 @@ class UpdateTests(unittest.TestCase):
             with self.subTest(script=script):
                 self.fresh()
                 self.stage()
-                request_update("v1", root=self.root, code=self.code, run=lambda *args: None)
+                request_update("0.2.0", root=self.root, code=self.code, run=lambda *args: None)
                 commands, run = self.recorder(lambda command: command[1].endswith(script))
                 with self.assertRaises(UpdateError):
                     self.apply(run, lambda: True)
@@ -488,7 +488,7 @@ class UpdateTests(unittest.TestCase):
             'JITTERSIM_UPLINK=eth7\nJITTERSIM_TEST_INTERFACE="wlan7; drop"\n'
         )
         self.stage()
-        request_update("v1", root=self.root, code=self.code, run=lambda *args: None)
+        request_update("0.2.0", root=self.root, code=self.code, run=lambda *args: None)
         commands, run = self.recorder()
         with self.assertRaisesRegex(UpdateError, "interface"):
             self.apply(run, lambda: True)
@@ -578,7 +578,7 @@ class UpdateTests(unittest.TestCase):
                 publisher.parent.mkdir(parents=True)
                 publisher.write_text("old publisher")
                 self.stage()
-                request_update("v1", root=self.root, code=self.code, run=lambda *args: None)
+                request_update("0.2.0", root=self.root, code=self.code, run=lambda *args: None)
                 commands, run = self.recorder(fail)
                 with self.assertRaises(UpdateError):
                     self.apply(run, lambda: True)
@@ -633,7 +633,7 @@ class UpdateTests(unittest.TestCase):
 
     def test_failure_before_backup_starts_the_watcher_again(self):
         self.stage()
-        request_update("v1", root=self.root, code=self.code, run=lambda *args: None)
+        request_update("0.2.0", root=self.root, code=self.code, run=lambda *args: None)
         commands, run = self.recorder()
         with patch("jittersim.updates.shutil.disk_usage") as disk:
             disk.return_value.free = 0

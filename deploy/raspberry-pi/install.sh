@@ -295,6 +295,7 @@ else
     echo "Warning: local dashboard name setup failed. Use the Pi's Ethernet address." >&2
 fi
 
+echo "Installed JitterSim $("$INSTALL_DIR/.venv/bin/python" -c 'import jittersim; print(jittersim.__version__)')" >&2
 echo "JitterSim installed. Read the generated credentials locally from:" >&2
 echo "  $CONFIG_DIR/control.env" >&2
 echo "  $CONFIG_DIR/ap.env" >&2

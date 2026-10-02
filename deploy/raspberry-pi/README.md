@@ -662,13 +662,26 @@ After that, Setup can check the installed version, install an approved staged
 release and restore the previous installation. The Pi stores no GitHub
 credentials. An administrator transfers the release over the existing SSH path.
 
-Build a bundle from a reviewed tag or commit on the development machine:
+Releases have semantic version numbers: MAJOR.MINOR.PATCH. A new feature raises
+MINOR and a fix raises PATCH. A change that needs a reinstall with the installer
+or breaks saved settings raises MAJOR. Put the number in `pyproject.toml` and in
+`src/jittersim/__init__.py` then mark the reviewed commit with
+`git tag vMAJOR.MINOR.PATCH`. A test fails when the tag and the files disagree.
+
+Build a bundle from the tag on the development machine:
 
 ```sh
-./deploy/raspberry-pi/build-release.sh RELEASE_REF /tmp/jittersim-release.tar.gz
+./deploy/raspberry-pi/build-release.sh vMAJOR.MINOR.PATCH /tmp
 ```
 
-Save the printed SHA-256 checksum with the release record. Transfer that exact
+The bundle is named `jittersim-MAJOR.MINOR.PATCH.tar.gz` and the script prints
+the version it built. A commit without a tag builds a test build named
+`NUMBER.dev+COMMIT` that never looks like a release. A second argument that ends
+in `.tar.gz` names the file yourself.
+
+Save the printed SHA-256 checksum with the release record. Stage the version the script printed.
+The update refuses to install an older number over a newer one. Use Restore previous
+installation to go back on purpose. Transfer that exact
 bundle to the Pi using the existing SSH account then stage it as root:
 
 ```sh
