@@ -37,7 +37,10 @@ python tests/browser/homepage_bounce_reference.py
 The journey loads the actual Manifest V3 extension in a separate temporary
 Chromium profile. It checks the extension worker and served fixture navigation.
 Startup, lookups, browser actions and cleanup have deadlines. The fixture
-listens only on loopback and caps concurrent request handlers at four.
+listens only on loopback and caps browser request handlers at four. A separate
+loopback listener allows one test-runner control request at a time so stalled
+browser requests cannot block the runner’s observations. The control secret
+never enters the extension. Each listener refuses the other listener’s routes.
 
 Live policy routes, verified Wi-Fi identity, profile storage and verified HTTPS
 pairing remain unimplemented. A simulated loopback identity is not physical

@@ -26,8 +26,9 @@ def fixture():
         server.close()
 
 
-def post(fixture, path, payload, authorization=""):
-    connection = http.client.HTTPConnection("127.0.0.1", fixture.server.server_port, timeout=2)
+def post(fixture, path, payload, authorization="", *, harness=False):
+    server = fixture.control_server if harness else fixture.server
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
     try:
         connection.request("POST", path, json.dumps(payload), {
             "Content-Type": "application/json", "Authorization": authorization,
@@ -55,7 +56,7 @@ def test_pairing_replay_and_replacement(fixture):
     old_credential = pair(fixture)
     assert post(fixture, "/reference/pair", {"code": code})[0] == 400
     status, replacement = post(fixture, "/__reference/control", {"event": "pairing-code"},
-                               "Harness " + fixture.harness_key)
+                               "Harness " + fixture.harness_key, harness=True)
     assert status == 200
     new_credential = pair(fixture, replacement["code"])
     assert policy(fixture, old_credential)[0] == 401
@@ -76,7 +77,11 @@ def test_elapsed_pairing_and_session_deadlines(fixture):
 
 def test_browser_credential_cannot_control_the_harness(fixture):
     credential = pair(fixture)
-    assert post(fixture, "/__reference/control", {"event": "restart"}, credential)[0] == 400
+    assert post(fixture, "/__reference/control", {"event": "restart"},
+                credential, harness=True)[0] == 400
+    assert post(fixture, "/__reference/control", {"read_counts": True},
+                "Harness " + fixture.harness_key)[0] == 404
+    assert post(fixture, "/reference/pair", {"code": fixture.code}, harness=True)[0] == 404
     assert policy(fixture, credential)[0] == 200
 
 
@@ -102,6 +107,10 @@ def test_four_stalled_handlers_refuse_more_work_then_recover(fixture):
         while fixture.server.slots._value and time.monotonic() < deadline:
             time.sleep(0.01)
         assert fixture.server.slots._value == 0
+        status, result = post(fixture, "/__reference/control", {"read_counts": True},
+                              "Harness " + fixture.harness_key, harness=True)
+        assert status == 200
+        assert result == {"counts": {}}
         with socket.create_connection(address, timeout=1) as refused:
             refused.sendall(b"GET / HTTP/1.0\r\n\r\n")
             try:

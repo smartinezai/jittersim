@@ -48,3 +48,13 @@ Use isolated GitHub runners for clean builds and packet checks. Do not stop
 the fourteen unrelated containers on the local Docker VM. Normal HTTPS trust,
 actual peer identity and physical phones remain unverified until exercised
 against the final installed live implementation.
+
+## CI failure repairs
+
+The clean Pi image must contain the fixture source loaded by its HTTP tests.
+Keep browser admission capped at four and give the test runner a separate
+loopback control listener capped at one. Reproduce runner rejection with four
+stalled browser requests before the repair. Verify route separation and recovery.
+The DNS journey must wait for the dashboard to finish reading the saved version
+before clicking Apply. A successful save response alone does not prove that
+the displayed access state has caught up.

@@ -32,6 +32,7 @@ def run():
         environment = {
             **os.environ,
             "HOMEPAGE_REFERENCE_ORIGIN": fixture.origin,
+            "HOMEPAGE_REFERENCE_CONTROL_ORIGIN": fixture.control_origin,
             "HOMEPAGE_REFERENCE_EXTENSION": str(extension),
             "HOMEPAGE_REFERENCE_PROFILE": str(directory / "browser-profile"),
             "HOMEPAGE_REFERENCE_HARNESS": fixture.harness_key,

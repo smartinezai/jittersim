@@ -29,8 +29,12 @@ class Fixture:
         self.counts = Counter()
         self.server = BoundedServer(("127.0.0.1", 0), Handler)
         self.server.fixture = self
+        self.control_server = BoundedServer(("127.0.0.1", 0), Handler, slots=1)
+        self.control_server.fixture = self
         self.origin = f"http://127.0.0.1:{self.server.server_port}"
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.control_origin = f"http://127.0.0.1:{self.control_server.server_port}"
+        self.threads = [threading.Thread(target=server.serve_forever, daemon=True)
+                        for server in (self.server, self.control_server)]
 
     @staticmethod
     def defaults():
@@ -39,14 +43,17 @@ class Fixture:
                 "pair_delay": 0}
 
     def start(self):
-        self.thread.start()
+        for thread in self.threads:
+            thread.start()
 
     def close(self):
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join(timeout=3)
-        if self.thread.is_alive():
-            raise RuntimeError("Reference fixture did not stop")
+        for server in (self.server, self.control_server):
+            server.shutdown()
+            server.server_close()
+        for thread in self.threads:
+            thread.join(timeout=3)
+            if thread.is_alive():
+                raise RuntimeError("Reference fixture did not stop")
 
     def control(self, payload):
         with self.lock:
@@ -159,8 +166,8 @@ class BoundedServer(ThreadingHTTPServer):
     daemon_threads = True
     block_on_close = False
 
-    def __init__(self, *args):
-        self.slots = threading.BoundedSemaphore(4)
+    def __init__(self, *args, slots=4):
+        self.slots = threading.BoundedSemaphore(slots)
         super().__init__(*args)
 
     def process_request(self, request, client_address):
@@ -203,6 +210,9 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def do_GET(self):
+        if self.server is self.server.fixture.control_server:
+            self.respond(404, {"error": "No reference route"})
+            return
         titles = {"/": "Reference home", "/pages/article": "Reference article",
                   "/pages/notes": "Reference notes"}
         if self.path not in titles:
@@ -224,6 +234,10 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length))
             if not isinstance(payload, dict):
                 raise ValueError("Invalid request")
+            is_control = self.server is fixture.control_server
+            if is_control != (self.path == "/__reference/control"):
+                self.respond(404, {"error": "No reference route"})
+                return
             if self.path == "/__reference/control":
                 expected = "Harness " + fixture.harness_key
                 if not hmac.compare_digest(self.headers.get("Authorization", ""), expected):

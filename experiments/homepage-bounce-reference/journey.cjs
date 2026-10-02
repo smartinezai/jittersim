@@ -8,6 +8,8 @@ const { expect } = require(playwrightModule + "/test");
 
 async function run() {
   const origin = process.env.HOMEPAGE_REFERENCE_ORIGIN;
+  const controlOrigin = process.env.HOMEPAGE_REFERENCE_CONTROL_ORIGIN;
+  assert.equal(new URL(controlOrigin).hostname, "127.0.0.1");
   const extension = process.env.HOMEPAGE_REFERENCE_EXTENSION;
   const profile = process.env.HOMEPAGE_REFERENCE_PROFILE;
   assert.equal(new URL(origin).hostname, "127.0.0.1");
@@ -35,7 +37,7 @@ async function run() {
     await expect(ui.getByRole("heading", { name: "Homepage bounce reference" })).toBeVisible();
     await expect(ui.locator("#status")).toHaveText("Off by default.");
     const control = async body => {
-      const response = await fetch(origin + "/__reference/control", {
+      const response = await fetch(controlOrigin + "/__reference/control", {
         method: "POST", headers: {
           "Content-Type": "application/json",
           "Authorization": "Harness " + process.env.HOMEPAGE_REFERENCE_HARNESS
