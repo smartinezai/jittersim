@@ -33,7 +33,7 @@ def served_functions():
             'element("refresh-diagnostics").addEventListener',
             'element("download-backup").addEventListener',
         )
-        + block("async function copyText(", 'element("sync-router-ap").addEventListener')
+        + block("function renderRouterWifi(", 'element("sync-router-ap").addEventListener')
     )
 
 
@@ -241,7 +241,9 @@ CASES = {
       assert.equal(element("credentials-panel").hidden, false);
     """,
     "router_replacements_and_failure": r"""
+      helperConfigured = true;
       enter("admin-token", "fixture token");
+      adminTokenVerified = true;
       enter("router-admin-password", "fixture password");
       const pending = deferred();
       network = () => pending.promise;
@@ -331,7 +333,9 @@ CASES = {
       assert.equal(element("check-router-password").disabled, false);
     """,
     "router_check_runs_alone_and_ignores_stale_results": r"""
+      helperConfigured = true;
       enter("admin-token", "fixture token");
+      adminTokenVerified = true;
       enter("router-admin-password", "fixture password");
       const pending = deferred();
       network = () => pending.promise;

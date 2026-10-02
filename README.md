@@ -193,16 +193,13 @@ visible. A change shows **Changing** until the router confirms it. An
 unavailable status disables the switch instead of guessing. Keep the Pi
 connected by Ethernet when changing router Wi-Fi.
 
-Under the switch **Copy Wi-Fi name** and **Copy Wi-Fi password** put the
-router's own Wi-Fi name or password on the clipboard. The Pi reads them from
-the router with the router admin password and sends them to the page only when
-you press the button. The name button never requests the password. JitterSim
-does not store the password or log it or keep it in the page. The clipboard
-keeps whatever it holds until something else replaces it so paste it where you
-need it then copy something else. A wrong router password disables both
-buttons until the password changes so repeated guesses cannot lock the router
-login. Without a router password the buttons open the **Router password**
-panel. Use them on a computer that you trust.
+Under the switch **Copy router Wi-Fi to Pi** applies the router's Wi-Fi name,
+password and security together to the Pi's test network. Its progress and
+result appear beside the button on every page. Without a router password the
+button opens the **Router password** panel. A rejected password disables the
+button until the password changes. Test clients disconnect while the Pi Wi-Fi
+restarts so keep a separate management connection. The copy action keeps the
+Wi-Fi password out of the page and clipboard.
 
 The sidebar also shows a short status block once the admin token is accepted.
 **General profile** says which saved profile is the general profile and whether
