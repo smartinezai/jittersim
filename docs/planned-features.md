@@ -54,7 +54,7 @@ Please check `git branch -r` and the open pull requests before starting an item.
 
 ### 8. Forced test network window
 
-- **Status:** planned. The owner decided where the router login lives and what happens when the router does not answer.
+- **Status:** in progress. Built as a stack of draft pull requests: the engine and storage (#61) then the helper steps and the root-only login (#62) then the service and API (#63) then the dashboard card (#69). Still open: a trial on the real Pi with a short window. The owner decided where the router login lives and what happens when the router does not answer.
 - **Why:** the owner wants a weekend where the only Wi-Fi at home is the Pi. A schedule such as Friday to Sunday or Saturday 15:00 to Sunday 05:00 switches the router's Wi-Fi off and makes the Pi's test Wi-Fi look like it. Every device has to join the Pi. When the window ends the Pi goes back to its own name and the router's Wi-Fi comes back on.
 - **How it would work:**
   - A new schedule kind with a start and an end. A window may cross midnight and may span several days.
@@ -80,7 +80,7 @@ Please check `git branch -r` and the open pull requests before starting an item.
 
 ### 9. Semantic version numbers for releases
 
-- **Status:** planned. The owner chose semantic versions and the installer printing the number.
+- **Status:** in progress (#60). The owner chose semantic versions and the installer printing the number. Still open: the owner tags `v0.2.0` on the commit that is ready.
 - **Why:** a release is named after a commit today (for example `a0dc551`). That says nothing about order or size of change. The package version is `0.1.0` in `pyproject.toml` and in `src/jittersim/__init__.py` and never changes.
 - **How it would work:**
   - Releases are numbered `MAJOR.MINOR.PATCH`. A new feature raises MINOR. A fix raises PATCH. A change that needs a reinstall with the installer or breaks saved settings raises MAJOR.
