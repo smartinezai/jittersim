@@ -112,8 +112,8 @@ The sidebar also shows a short status block once the admin token is accepted.
 it is active or paused or only saved. **Devices** says how many connected
 devices are affected right now and opens a list with the profile each one
 gets. Protected devices are never listed. **Service lists** names the enabled
-lists. The block says `Profiles off` after Reset or Panic and `Not started
-yet` before the first Apply.
+lists. The block says `Profiles off` after Reset or Panic and `Not running`
+before the first start.
 
 **Copy router Wi-Fi to Pi** checks the router's security before copying its
 name and password. The confirmation shows the source band and security type.
@@ -411,7 +411,7 @@ disabled. **Remove protection** and the name and type editor stay active.
 
 ### Traffic discovery
 
-**Traffic discovery** is on the **Diagnostics** page. Press the scan button and
+**Traffic discovery** is on the **Traffic** page. Press the scan button and
 it summarises the DNS names that devices on the test Wi-Fi looked up. A row
 shows what a name is for then the technical name in monospace below it. The
 labels are app or system or tracker or smart-home or content delivery network.
