@@ -16,7 +16,7 @@ The installed dashboard wheel uses integration base
 with Chromium 153.0.8010.12 were used on macOS. The manifests distinguish the
 installed package from checkout source and record the actual served HTML hash.
 
-- Existing unit suite: 2,833 passed.
+- Complete unit suite on checkpoint `91dc652`: 2,872 passed in 85.2 seconds.
 - Final focused report, failure and container checks: 61 passed with warnings
   treated as errors.
 - Existing browser journeys: passed against the installed wheel.
@@ -71,6 +71,12 @@ checkout and all 40 completed states. The screenshot run took 94.2 seconds
 and the accessibility run took 74.0 seconds. Both matrices also passed on
 clean checkpoint `76e6366ad073b8f9a075a541277c21a8972677ae`. Its screenshot
 run took 94.6 seconds and its accessibility run took 65.7 seconds.
+The final container portability checkpoint
+`91dc652079526bc116aaa4d62fc6c84f6b988d94` also passed both complete macOS
+matrices with clean Git identity. Screenshots took 94.2 seconds and
+accessibility took 67.2 seconds. All 40 PNG dimensions matched their requested
+viewport. Every statistics and accessibility file was present. Both matrices
+again recorded zero browser errors, policy errors or external requests.
 The container handoff then identified that the browser image has no Git
 checkout. Explicit supplied source metadata and a bounded container command
 were added to support that path. The command uses only tracked files from
@@ -85,6 +91,20 @@ An initial cached attempt stopped before importing tests because Colima could
 not see host temporary bind paths. No baseline was accepted. The owned
 containers were cleaned up. The cached path now copies tracked inputs into
 the container and copies reports back after execution.
+The corrected path reached Linux runtime verification on `91dc652` before
+the release coordinator reassigned Docker to the combined release. The
+owned container was deliberately stopped. Partial artifacts were copied
+back with an incomplete report and container absence was checked afterward.
+This interruption is not an accepted Linux baseline.
+That partial run verified 63 installed app files against the new wheel on
+Linux aarch64 with Python 3.13.15, Playwright 1.63.0, Chromium 153.0.8010.12,
+requests 2.34.2 and pycryptodome 3.23.0. The Docker host is Colima on Ubuntu
+24.04.4 LTS. The cached image ID is
+`sha256:c84c35705a9b65f48fcbc676f6653514bab9086e746c09035c8dbc695a60ab16`.
+The installed dashboard source hash is
+`40b6ea966445f898606d35fe5c48585ee5d88550e3ea5ae431d973fca2ecbbf3`.
+The complete 40-state screenshot and 40-state accessibility Linux matrices
+remain pending the returned Docker slot.
 The final combined release needs another baseline after chart, router-copy,
 polling and sign-in work is integrated by their current owners.
 
