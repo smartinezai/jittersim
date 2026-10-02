@@ -1,0 +1,148 @@
+{
+  "date": "2026-10-03",
+  "checked_source_commit": "934863b46c464250508ae64b1ff872e87caa5fb9",
+  "checked_source_tree": "ac9867bad17080fe9c0dc520edede9948e11a94e",
+  "documentation_only_followup_commit": "180f6c022030a19de0192bab13473deabce1dbb6",
+  "included_heads": {
+    "integration": "cf2a6fe44ec245061839a44b09a57e0b28782a6a",
+    "network_and_access": "a0fcf169847708b7eaa4b5e2a8b3ee4c6231895f",
+    "dns": "0d011446d4a92da5279b5c7552e75b6b8d7140f6",
+    "router_pr_76": "cb5d6abac672da10d407acf4d6797a31be293c8e",
+    "graph_pr_77": "99364e2e7030198b49905e895d25b21c3be7f16b"
+  },
+  "verification": {
+    "wheel": "/private/tmp/jittersim-coordinated-wheel-i5gc1gwm/jittersim-0.1.0-py3-none-any.whl",
+    "wheel_sha256": "112c9cb259d93c1c05ef7b2c8c7b4f157b3f01b1cfc9b64e5a76662474ea6d5a",
+    "matching_packaged_source_files": 64,
+    "installed_python_passed": 3005,
+    "linux_only_skipped": 39,
+    "installed_python_seconds": 133.24,
+    "installed_python_exit_code": 0,
+    "installed_python_log": "/private/tmp/jittersim-coordinated-installed-tests-2026-10-03.log",
+    "workflow_browser_journeys": [
+      {
+        "module": "tests.browser.journeys",
+        "status": "pass",
+        "seconds": 30.65,
+        "log": "/private/tmp/tests-browser-journeys-coordinated.log"
+      },
+      {
+        "module": "tests.browser.homepage_bounce_reference",
+        "status": "pass",
+        "seconds": 9.19,
+        "log": "/private/tmp/tests-browser-homepage_bounce_reference-coordinated.log"
+      },
+      {
+        "module": "tests.browser.wifi_recovery",
+        "status": "pass",
+        "seconds": 13.68,
+        "log": "/private/tmp/tests-browser-wifi_recovery-coordinated.log"
+      },
+      {
+        "module": "tests.browser.dashboard_access",
+        "status": "pass",
+        "seconds": 3.02,
+        "log": "/private/tmp/tests-browser-dashboard_access-coordinated.log"
+      },
+      {
+        "module": "tests.browser.general_profile",
+        "status": "pass",
+        "seconds": 4.07,
+        "log": "/private/tmp/tests-browser-general_profile-coordinated.log"
+      },
+      {
+        "module": "tests.browser.saved_profiles",
+        "status": "pass",
+        "seconds": 4.26,
+        "log": "/private/tmp/tests-browser-saved_profiles-coordinated.log"
+      },
+      {
+        "module": "tests.browser.dashboard_navigation",
+        "status": "pass",
+        "seconds": 4.89,
+        "log": "/private/tmp/tests-browser-dashboard_navigation-coordinated.log"
+      },
+      {
+        "module": "tests.browser.protected_clients",
+        "status": "pass",
+        "seconds": 3.86,
+        "log": "/private/tmp/tests-browser-protected_clients-coordinated.log"
+      },
+      {
+        "module": "tests.browser.impact_check",
+        "status": "pass",
+        "seconds": 82.7,
+        "log": "/private/tmp/tests-browser-impact_check-coordinated.log"
+      },
+      {
+        "module": "tests.browser.sidebar_status",
+        "status": "pass",
+        "seconds": 27.08,
+        "log": "/private/tmp/tests-browser-sidebar_status-coordinated.log"
+      },
+      {
+        "module": "tests.browser.apply_clarity",
+        "status": "pass",
+        "seconds": 47.71,
+        "log": "/private/tmp/tests-browser-apply_clarity-coordinated.log"
+      },
+      {
+        "module": "tests.browser.router_copy",
+        "status": "pass",
+        "seconds": 17.97,
+        "log": "/private/tmp/tests-browser-router_copy-coordinated.log"
+      },
+      {
+        "module": "tests.browser.traffic_chart",
+        "status": "pass",
+        "seconds": 30.68,
+        "log": "/private/tmp/tests-browser-traffic_chart-coordinated.log"
+      },
+      {
+        "module": "tests.browser.device_names",
+        "status": "pass",
+        "seconds": 3.87,
+        "log": "/private/tmp/tests-browser-device_names-coordinated.log"
+      },
+      {
+        "module": "tests.browser.phone_layout",
+        "status": "pass",
+        "seconds": 15.2,
+        "log": "/private/tmp/tests-browser-phone_layout-coordinated.log"
+      },
+      {
+        "module": "tests.browser.help_icons",
+        "status": "pass",
+        "seconds": 31.38,
+        "log": "/private/tmp/tests-browser-help_icons-coordinated.log"
+      },
+      {
+        "module": "tests.browser.token_remember",
+        "status": "pass",
+        "seconds": 3.09,
+        "log": "/private/tmp/tests-browser-token_remember-coordinated.log"
+      },
+      {
+        "module": "tests.browser.dns_failure",
+        "status": "pass",
+        "seconds": 13.2,
+        "log": "/private/tmp/tests-browser-dns_failure-coordinated.log"
+      }
+    ],
+    "lint": "passed E9,F63,F7,F82,F811",
+    "whitespace": "passed",
+    "fixture_only": true
+  },
+  "release_ready": false,
+  "remaining_blockers": [
+    "Repeated full Linux failures reproduced the helper response and operation-lock race. Fourth networking repair is assigned and must be reviewed and verified.",
+    "CI refuses to start because of account billing or spending limits. Exact combined-head green checks are required.",
+    "Update and polling plan feedback remains pending. Current candidate omits those branches.",
+    "Signing rollback can restore a revoked key and replace the current update token. The old green signing PR is blocked.",
+    "CLI name resolution exceeds its request deadline. The old green CLI PR is blocked.",
+    "GUI baseline container metadata correction and clean container verification are pending.",
+    "Independent management recovery and installed Pi source identity are unconfirmed."
+  ],
+  "remote_merged": false,
+  "live_pi_changed": false
+}
