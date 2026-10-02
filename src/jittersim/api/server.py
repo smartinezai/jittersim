@@ -10591,6 +10591,7 @@ class ControlServer(HTTPServer):
         if (tls_certfile is None) != (tls_keyfile is None):
             raise ValueError("TLS certificate and key must be provided together")
         tls_context = None
+        wifi_context = None
         if tls_certfile is not None and tls_keyfile is not None:
             tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             tls_context.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -10601,18 +10602,7 @@ class ControlServer(HTTPServer):
                 wifi_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
                 wifi_context.minimum_version = ssl.TLSVersion.TLSv1_2
                 wifi_context.load_cert_chain(str(tls_wifi_certfile), str(tls_keyfile))
-                wifi_network = ipaddress.ip_network(tls_wifi_network)
-
-                def choose_certificate(connection, server_name, original_context):
-                    try:
-                        local = ipaddress.ip_address(connection.getsockname()[0])
-                    except (OSError, ValueError, IndexError):
-                        return None
-                    if local in wifi_network:
-                        connection.context = wifi_context
-                    return None
-
-                tls_context.sni_callback = choose_certificate
+        wifi_network = ipaddress.ip_network(tls_wifi_network)
         bind_host = server_address[0]
         if tls_context is None and bind_host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValueError("TLS is required when the dashboard listens beyond this device")
@@ -10628,6 +10618,8 @@ class ControlServer(HTTPServer):
         )
         self.secure_transport = tls_context is not None
         self._tls_context = tls_context
+        self._tls_wifi_context = wifi_context
+        self._tls_wifi_network = wifi_network
         self._pending_connections: Dict[socket.socket, _PendingConnection] = {}
         self._request_inputs: Dict[socket.socket, Tuple[bytes, float]] = {}
         self._stop_connections = threading.Event()
@@ -10681,6 +10673,22 @@ class ControlServer(HTTPServer):
                     self._close_pending(connection)
         raise OSError("dashboard is stopping")
 
+    def tls_context_for(self, local_address: str, peer_address: str) -> Optional[ssl.SSLContext]:
+        """The certificate set for one connection.
+
+        A client on the test Wi-Fi gets the neutral certificate, whichever of the
+        Pi's addresses it reached (the firewall lets it reach the dashboard port
+        on the Ethernet address too), so it never reads the other names.
+        """
+        if self._tls_wifi_context is not None:
+            for text in (peer_address, local_address):
+                try:
+                    if ipaddress.ip_address(str(text).split("%")[0]) in self._tls_wifi_network:
+                        return self._tls_wifi_context
+                except ValueError:
+                    continue
+        return self._tls_context
+
     def _accept_connection(self) -> None:
         connection, address = self.socket.accept()
         if len(self._pending_connections) >= MAX_PENDING_DASHBOARD_CONNECTIONS:
@@ -10689,7 +10697,8 @@ class ControlServer(HTTPServer):
         try:
             connection.setblocking(False)
             if self._tls_context is not None:
-                connection = self._tls_context.wrap_socket(
+                context = self.tls_context_for(connection.getsockname()[0], address[0])
+                connection = context.wrap_socket(
                     connection, server_side=True, do_handshake_on_connect=False)
             now = time.monotonic()
             self._pending_connections[connection] = _PendingConnection(

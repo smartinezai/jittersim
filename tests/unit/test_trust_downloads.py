@@ -158,6 +158,34 @@ class NeutralCertificateTests(unittest.TestCase):
                     full = (config / "dashboard.crt").read_text().strip()
                     self.assertEqual(pem.strip(), wifi if expected == "wifi" else full)
 
+    def test_a_test_wifi_client_gets_the_neutral_certificate_whichever_address_it_reaches(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory)
+            localca.prepare(config, host_name="pi-lab.local", neutral_name="pi.home.arpa",
+                            ethernet_ip="192.168.1.20")
+            repository = ConfigRepository(":memory:")
+            self.addCleanup(repository.close)
+            server = ControlServer(
+                ("127.0.0.1", 0), repository, admin_token=TOKEN,
+                tls_certfile=config / "dashboard.crt", tls_keyfile=config / "dashboard.key",
+                tls_wifi_certfile=config / "dashboard-wifi.crt")
+            self.addCleanup(server.server_close)
+            full, neutral = server._tls_context, server._tls_wifi_context
+            self.assertIsNotNone(neutral)
+            cases = (
+                # (address the client reached, client address, expected)
+                ("192.168.50.1", "192.168.50.7", neutral),
+                # The firewall lets the test Wi-Fi reach the dashboard port on the Ethernet address too.
+                ("192.168.1.20", "192.168.50.7", neutral),
+                ("192.168.1.20", "192.168.1.5", full),
+                ("127.0.0.1", "127.0.0.1", full),
+            )
+            for local, peer, expected in cases:
+                with self.subTest(local=local, peer=peer):
+                    self.assertIs(server.tls_context_for(local, peer), expected)
+            self.assertIs(server.tls_context_for("not-an-address", "192.168.1.5"), full)
+            self.assertIs(server.tls_context_for("192.168.1.20", "not-an-address"), full)
+
 
 if __name__ == "__main__":
     unittest.main()
