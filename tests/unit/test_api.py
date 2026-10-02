@@ -1227,9 +1227,12 @@ class ControlServerTests(unittest.TestCase):
 
     def test_the_traffic_menu_offers_everyone_else_while_it_has_a_profile(self) -> None:
         result = self._run_dashboard_functions(
-            ["updateTrafficDeviceOptions", "everyoneElseAssigned", "everyoneElseInLiveTraffic"],
+            ["updateTrafficDeviceOptions", "everyoneElseAssigned", "everyoneElseInLiveTraffic",
+             "resetTrafficView"],
             "const EVERYONE_ELSE_TRAFFIC = '__everyone_else__';\n"
             "let generalProfileState = null;\n"
+            "let latestTrafficReferences = {profile_upload:10,profile_download:5};\n"
+            "let trafficProfileScope = 'everyone';\n"
             "function devicePickerLabel(device) { return device.name; }\n"
             "let everyoneElse = {profile_id: 'slow'};\n"
             "let savedSchedules = [];\n"
@@ -1253,13 +1256,16 @@ class ControlServerTests(unittest.TestCase):
             "savedSchedules = [{everyone_else: true, enabled: true}];\n"
             "updateTrafficDeviceOptions(devices);\n"
             "console.log(JSON.stringify({offered: offered, kept: kept, after: after,\n"
-            "  scheduled: select.options.map((option) => option.value)}));\n",
+            "  scheduled: select.options.map((option) => option.value),\n"
+            "  limits: latestTrafficReferences, scope: trafficProfileScope}));\n",
         )
 
         self.assertEqual(result["offered"], ["@all", "alice", "__everyone_else__"])
         self.assertEqual(result["kept"], ["__everyone_else__", 0])
         # Without a profile the choice goes, and the graph starts again for "all".
         self.assertEqual(result["after"], [["@all", "alice"], "@all", 1])
+        self.assertEqual(result["limits"], {"profile_upload": None, "profile_download": None})
+        self.assertIsNone(result["scope"])
         # An everyone-else schedule brings the choice back.
         self.assertEqual(result["scheduled"], ["@all", "alice", "__everyone_else__"])
 
@@ -2958,12 +2964,17 @@ class ControlServerTests(unittest.TestCase):
         harness = (
             "const TRAFFIC_WINDOW_MS = 60000;\n"
             "const trafficSamples = [];\n"
+            + re.search(r"const TRAFFIC_SERIES = \[.*?\n    \];", script, re.S).group(0)
+            + "\nconst trafficProfileScope = 'device';\n"
+            "const trafficInspection = {pointer:null,legend:null,pinned:null};\n"
+            "const TRAFFIC_INSPECTION_HELP = 'Inspect a line';\n"
+            "const document = {querySelectorAll: () => []};\n"
             # An ISP plan of 100 Mbit/s sets the scale to 100 Mbit/s.
             "const latestTrafficReferences = {isp_download: 100};\n"
             "const drawn = [];\n"
             "const context = {\n"
             "  setTransform() {}, clearRect() {}, beginPath() {}, moveTo() {},\n"
-            "  lineTo() {}, stroke() {}, setLineDash() {},\n"
+            "  lineTo() {}, stroke() {}, setLineDash() {}, arc() {}, fill() {},\n"
             "  measureText(text) { return {width: 7 * text.length}; },\n"
             "  fillText(text, x) { drawn.push({text, x, align: this.textAlign}); },\n"
             "};\n"
@@ -2971,12 +2982,15 @@ class ControlServerTests(unittest.TestCase):
             "  'traffic-chart': {getBoundingClientRect: () => ({width: 600, height: 320}),\n"
             "                    getContext: () => context},\n"
             "  'traffic-device': {value: 'all'},\n"
-            "  'traffic-profile-upload-legend': {},\n"
-            "  'traffic-profile-download-legend': {},\n"
+            "  'traffic-chart-detail': {},\n"
             "};\n"
             "const element = (id) => elements[id];\n"
             "const window = {devicePixelRatio: 1};\n"
             + function("formatTrafficRate")
+            + function("trafficSeriesName")
+            + function("trafficSeriesGeometry")
+            + function("trafficSegmentDistance")
+            + function("trafficLineHits")
             + function("drawTrafficChart")
             + "drawTrafficChart();\n"
             "const clipped = drawn.filter(({text, x, align}) => {\n"
@@ -4427,7 +4441,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn('id="traffic-isp-download"', DASHBOARD_HTML)
         self.assertIn('id="traffic-isp-upload"', DASHBOARD_HTML)
         self.assertIn('request("/api/traffic-settings", "POST"', DASHBOARD_HTML)
-        self.assertIn("Default queue download limit", DASHBOARD_HTML)
+        self.assertIn("Device download limit", DASHBOARD_HTML)
         self.assertIn("Edit name and type", DASHBOARD_HTML)
         self.assertIn("/api/connected-device-labels", DASHBOARD_HTML)
         self.assertIn("Saved labels for devices not listed above", DASHBOARD_HTML)
