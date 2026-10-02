@@ -41,3 +41,16 @@ No migration, backfill, new dependency or special setup is needed. The ordinary 
 ## Verification record
 
 Independent plan review approved the shared bounded pool design and required explicit cancellation handling, close/submission race coverage and callbacks outside the tracking lock. These requirements are included above. Record deterministic before/after limits, recovery and closure results, affected tests, independent source review and the focused source commit before handoff.
+
+
+Completed source repair: `894d40ec346c20e7c2b933dc158a6c47e51f0fe8`.
+
+- Both baseline socket checks failed before repair. Repeated requests retained eight running plus 40 queued lookups. Three server recreations multiplied stalled workers to 24.
+- Seven new socket regressions passed after repair. They cover physical queue bounds, shared worker bounds, recovery without running cancelled queued work, queued cancellation, closure racing with submission, completion after closure and immediate completion callbacks.
+- The combined affected run passed 128 tests. Full required Ruff and whitespace checks passed.
+- Independent source review found no blocker in admission, physical cancellation capacity, callback lock ordering, closure races or preserved address/access/marking/generation checks.
+- Final combined source passed 3,071 tests with 39 expected skips on both Mac and Linux. Fresh installed-wheel general-profile, protected-client and complete browser journeys passed.
+- The service-list packet check passed with IPv4, IPv6, rerolls, outages and protected clients.
+- Image `jittersim-pr50-proxy-final` has identifier `4069c3e0469d3b21d8d4963c81fc75151e7bb93b7c4112a1086e858961788aef`. All 251 relevant tracked source, test and deployment files matched the final source. Old source/test/deployment folders were removed inside the build before copying the final tree and reinstalling its wheel.
+
+The Docker slot was released after the checks. The release coordinator owns final combined checks and publication. PR72 remains open with failed CI checks. GitHub's recorded annotation says the jobs did not start due to failed account payments or a spending limit. No remote publication or device action occurred here.
