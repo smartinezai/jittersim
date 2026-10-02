@@ -6,8 +6,8 @@ The Phase 0 test baseline captures all 40 dashboard states with screenshots,
 source statistics and local accessibility reports. Production files are
 unchanged. The first release gate is real green CI on the final combined
 source. GitHub currently refuses to start jobs because of account billing or
-spending limits. The shared Docker slot is available for the cached Linux
-browser check. A fresh image build remains pending registry availability.
+spending limits. Both 40-state matrices passed in the inspected cached Linux
+browser environment. A fresh image build remains pending registry availability.
 
 ## Local evidence
 
@@ -85,8 +85,7 @@ context, image tag and container. A second path supports an inspected cached
 browser image when the registry is unavailable. It installs a fresh portable
 wheel offline in an owned container and checks every app file hash plus the
 import locations of the app and current tests. The report distinguishes this
-cached runtime check from a fresh image build. Actual cached Linux execution
-is the next verification step.
+cached runtime check from a fresh image build.
 An initial cached attempt stopped before importing tests because Colima could
 not see host temporary bind paths. No baseline was accepted. The owned
 containers were cleaned up. The cached path now copies tracked inputs into
@@ -103,8 +102,21 @@ requests 2.34.2 and pycryptodome 3.23.0. The Docker host is Colima on Ubuntu
 `sha256:c84c35705a9b65f48fcbc676f6653514bab9086e746c09035c8dbc695a60ab16`.
 The installed dashboard source hash is
 `40b6ea966445f898606d35fe5c48585ee5d88550e3ea5ae431d973fca2ecbbf3`.
-The complete 40-state screenshot and 40-state accessibility Linux matrices
-remain pending the returned Docker slot.
+The complete Linux matrices then passed on clean checkpoint
+`f696f9f63043cbbb509e05a9c0de7e7ccc81a853` after the Docker slot returned.
+Code, tests and workflow files at that checkpoint match the passed macOS
+checkpoint exactly. The screenshot matrix completed all 40 states in 66.0
+seconds and accessibility completed all 40 scans in 47.0 seconds. All PNG
+dimensions and output files were checked. Both matrices recorded zero browser
+errors, policy errors or external requests. The same 50 existing violation
+nodes were preserved as observations.
+The 380,221-byte wheel hash for this complete Linux run is
+`80a49d925fcab521ac2b758aa628e905c95eb4c2ea50024c03ae7274003169ba`.
+The runtime again verified all 63 installed app files. Those file hashes also
+matched the clean host source. Both manifests identify supplied source
+metadata and the installed wheel. Cleanup removed only the owned container.
+A subsequent inspect confirmed its absence and the cached image's unchanged
+immutable ID. The reports remain explicitly labeled `cached-runtime`.
 The final combined release needs another baseline after chart, router-copy,
 polling and sign-in work is integrated by their current owners.
 
@@ -114,7 +126,9 @@ as contrast ratios. Current reports retain rule links and affected selectors
 while removing text and credential attributes.
 
 Do not merge or deploy until executed CI passes on the exact combined source
-and clean Linux verification is available. Existing stopped-before-start CI
+and its Linux verification is available. The cached result does not prove
+fresh dependency resolution or replace the remaining fresh image build.
+Existing stopped-before-start CI
 jobs do not count as test failures in the code or as passing evidence. The
 release coordinator owns final integration, merge and deployment.
 
