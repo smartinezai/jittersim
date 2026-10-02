@@ -95,6 +95,7 @@ from jittersim.config.transfer import (
     settings_to_payload,
 )
 from jittersim.config.workflows import WorkflowStore
+from jittersim.engine.access import build_access_plan
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import (
     MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN,
@@ -12411,6 +12412,9 @@ class ControlServer(HTTPServer):
             self.repository.save_website_policy(updated)
         except (KeyError, TypeError, ValueError, StorageError) as error:
             return _bad_request("could not add domain to global block list", error)
+        failed = self._apply_household_block_list()
+        if failed is not None:
+            return failed
         return HTTPStatus.OK, "application/json", _json_bytes(
             {"policies": _policies_payload(self.repository)}
         )
@@ -12428,9 +12432,43 @@ class ControlServer(HTTPServer):
             return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
                 {"error": "could not remove domain from global block list"}
             )
+        failed = self._apply_household_block_list()
+        if failed is not None:
+            return failed
         return HTTPStatus.OK, "application/json", _json_bytes(
             {"policies": _policies_payload(self.repository)}
         )
+
+    def _apply_household_block_list(self) -> Optional[Tuple[int, str, bytes]]:
+        """Bring the filtered resolver in line with a changed global block list.
+
+        Block globally and Unblock act at once like main's device quick action. Main's
+        resolver otherwise kept refusing an unblocked name and the names under it until
+        someone chose Apply access rules. While household access rules are off the
+        resolver does not filter so nothing needs to change. The scheduler still blocks
+        the addresses of each listed name within a second while JitterSim runs.
+        """
+
+        settings = self.repository.access_settings()
+        if (
+            not settings.access_options.enabled
+            or self.helper_client is None
+            or not hasattr(self.helper_client, "apply_access")
+        ):
+            return None
+        try:
+            self.helper_client.apply_access(build_access_plan(settings))
+        except (HelperClientError, ValidationError):
+            LOGGER.warning("the global block list did not reach the filtered resolver")
+            return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                {
+                    "error": (
+                        "Saved but the household access rules could not be updated. "
+                        "Choose Apply access rules on the Access and rules page."
+                    )
+                }
+            )
+        return None
 
     def _save_service_list(self, payload: dict):
         operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
