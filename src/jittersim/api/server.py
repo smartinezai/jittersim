@@ -781,7 +781,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     .active-profile select { width: 100%; padding: 0.35rem 0.45rem; font-size: 0.85rem; }
     .sidebar .active-profile button { min-height: 2.4rem; padding-block: 0.4rem; text-align: center; }
     .active-profile-note { margin: 0; color: var(--muted); font-size: 0.74rem; line-height: 1.3; overflow-wrap: anywhere; }
-    .active-profile-note a { color: #8cc4ff; }
+    .active-profile-link { color: #8cc4ff; font-size: 0.74rem; line-height: 1.3; }
     .sidebar span { display: block; }
     .sidebar .runtime-summary { margin: 0; font-size: 0.78rem; }
     .sidebar .action-message { min-height: 0; padding: 0.4rem 0.55rem; font-size: 0.78rem; }
@@ -849,11 +849,12 @@ DASHBOARD_HTML = r"""<!doctype html>
       .sidebar .sidebar-actions #apply-button { min-height: 4.1rem; min-height: calc(2lh + 1.24rem + 2px); }
     }
     /* With the Active profile control the column is taller than a laptop window. Then the page
-       list gives up room first and scrolls inside itself (five links stay in view) so that Panic
+       list gives up room first and scrolls inside itself (four and a half links stay in view so
+       the cut one shows that it scrolls) so that Panic
        and the router switch and both copy buttons stay where they were. On a taller window
        nothing scrolls. */
     @media (min-width: 48.01rem) {
-      .sidebar-nav { min-height: 7.5rem; overflow-y: auto; }
+      .sidebar-nav { min-height: 7rem; overflow-y: auto; }
       .sidebar-nav a:focus-visible { outline-offset: -2px; }
       .sidebar-nav[data-more-after] {
         -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 1.25rem), transparent);
@@ -1095,6 +1096,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           </div>
           <button id="active-profile-button" class="primary" type="button" disabled>Apply to all devices</button>
           <p id="active-profile-note" class="active-profile-note">Check the admin token first.</p>
+          <a id="active-profile-link" class="active-profile-link" hidden>Create one on the Profiles page</a>
         </div>
         <div class="sidebar-actions">
           <div class="sidebar-action-row">
@@ -2587,6 +2589,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       element("router-action-message").setAttribute("aria-live", "off");
       const field = element(kind === "router" ? "router-admin-password" : "admin-token");
       field.focus({preventScroll: true});
+      // A short window shows the Check button below the field too when both fit.
+      element(kind === "router" ? "check-router-password" : "check-admin-token")
+        .scrollIntoView({block: "nearest", inline: "nearest"});
       field.scrollIntoView({block: "nearest", inline: "nearest"});
     }
 
@@ -6795,18 +6800,14 @@ DASHBOARD_HTML = r"""<!doctype html>
         savedProfileBusy.stop === view.button.stop;
       button.setAttribute("aria-busy", String(Boolean(running)));
       const note = element("active-profile-note");
-      const noteKey = view.note + (view.profilesLink ? "|link" : "");
-      if (note.dataset.key === noteKey) return;
-      note.dataset.key = noteKey;
-      note.textContent = view.note;
-      if (view.profilesLink) {
-        const link = document.createElement("a");
-        link.href = "#profiles";
-        link.textContent = "Create one on the Profiles page";
-        link.addEventListener("click", (event) => followTabLink(event, "profiles"));
-        note.append(" ", link);
-      }
+      if (note.textContent !== view.note) note.textContent = view.note;
+      // The link is its own line under the note so that the two never overlap.
+      element("active-profile-link").hidden = !view.profilesLink;
     }
+
+    // Set here and not in the markup so that the sidebar links stay the nine page links.
+    element("active-profile-link").href = "#profiles";
+    element("active-profile-link").addEventListener("click", (event) => followTabLink(event, "profiles"));
 
     element("active-profile-select").addEventListener("change", (event) => {
       activeProfilePick = event.target.value;

@@ -222,7 +222,7 @@ def test_scrolling_honours_reduced_motion():
 def test_the_desktop_page_list_gives_room_to_the_footer_on_a_short_window():
     desktop = re.findall(r"@media \(min-width: 48\.01rem\) \{(.*?)\n    \}", CSS, re.DOTALL)
     rules = declarations("".join(desktop))
-    assert rules[".sidebar-nav"] == {"min-height": "7.5rem", "overflow-y": "auto"}
+    assert rules[".sidebar-nav"] == {"min-height": "7rem", "overflow-y": "auto"}
     # The focus ring stays inside the list that clips it.
     assert rules[".sidebar-nav a:focus-visible"]["outline-offset"] == "-2px"
 

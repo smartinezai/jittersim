@@ -118,13 +118,14 @@ function control() {
   const select = element("active-profile-select");
   const button = element("active-profile-button");
   const note = element("active-profile-note");
-  const links = note.children.filter((child) => typeof child !== "string");
+  const link = element("active-profile-link");
+  const links = link.hidden ? [] : [link];
   return {
     options: select.children.map((option) => [option.value, option.textContent]),
     value: select.value, select_disabled: select.disabled, button: button.textContent,
     primary: button.className === "primary", disabled: button.disabled,
     aria_disabled: button.getAttribute("aria-disabled"), busy: button.getAttribute("aria-busy"),
-    note: note.textContent, links: links.map((link) => [link.textContent, link.href])
+    note: note.textContent, links: links.map((shown) => shown.href)
   };
 }
 function choose(value) {
@@ -290,16 +291,25 @@ def test_no_saved_profiles_points_to_the_profiles_page():
     result = run_node(
         f"generalProfileState = {state()};",
         "renderActiveProfileControl(); renderActiveProfileControl();\n"
-        "const note = element('active-profile-note');\n"
-        "const link = note.children.find((child) => typeof child !== 'string');\n"
-        "link.listeners.click({button: 0});\n"
-        "console.log(JSON.stringify({control: control(), tabs}));",
+        "element('active-profile-link').listeners.click({button: 0});\n"
+        "const shown = control();\n"
+        f"profiles = {json.dumps([SLOW])}; renderActiveProfileControl();\n"
+        "console.log(JSON.stringify({control: shown, after: control().links, tabs}));",
     )
     assert result["control"]["options"] == [["", "None selected"]]
     assert result["control"]["select_disabled"] is True and result["control"]["disabled"] is True
-    assert result["control"]["note"] == "No saved profiles yet. Create one on the Profiles page"
-    assert result["control"]["links"] == [["Create one on the Profiles page", "#profiles"]]
+    assert result["control"]["note"] == "No saved profiles yet."
+    # The link is its own line under the note and goes away once a profile is saved.
+    assert result["control"]["links"] == ["#profiles"]
+    assert result["after"] == []
     assert result["tabs"] == ["profiles"]
+
+
+def test_the_profiles_link_is_its_own_line_under_the_note():
+    sidebar = re.search(r'<aside class="sidebar".*?</aside>', HTML, re.DOTALL).group(0)
+    assert re.search(
+        r'<p id="active-profile-note"[^>]*>[^<]*</p>\s*<a id="active-profile-link"[^>]*hidden>', sidebar
+    )
 
 
 @NEEDS_NODE

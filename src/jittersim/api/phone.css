@@ -150,6 +150,16 @@
   .button-link { display: inline-flex; align-items: center; min-height: 2.75rem; }
   .remember-choice { min-height: 2.75rem; }
   .remember-choice input { width: 1.25rem; height: 1.25rem; }
+  .content select { min-width: 2.75rem; }
+  /* A choice and its button share a line only when the choice keeps a usable width. */
+  .connected-controls { display: flex; flex-wrap: wrap; }
+  .connected-controls select { flex: 1 1 9rem; width: auto; min-width: min(9rem, 100%); }
+  .connected-controls button { flex: 1 0 auto; }
+  .connected-controls button:last-child { flex-basis: 100%; }
+  .sidebar .active-profile-link { display: flex; align-items: center; min-height: 2.75rem; }
+  /* A short window keeps the token field and its Check button in the panel together. */
+  .credentials-panel h3 { margin-top: 0.8rem; }
+  .credential-note { margin-top: 0.4rem; }
 
   /* Messages and tips keep clear of the bar. */
   .toast {
