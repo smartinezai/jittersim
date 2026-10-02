@@ -529,6 +529,12 @@ buttons. A group opened stays open when the page refreshes.
 - **Block globally** on a name that is already blocked turns into **Unblock**
   and shows a **Blocked** badge. **Add to profile** reads **Already in** and the
   profile name when the name is in the selected profile's website list.
+- While household access rules are on a blocked name also blocks every name
+  under it: the Pi's filtered DNS refuses `www.example.com` once `example.com`
+  is blocked. The badge and **Unblock** belong to the exact name that was
+  blocked. **Unblock** removes it and the names under it resolve again. With
+  household access rules off only the addresses of each listed name are blocked
+  while JitterSim runs.
 - **Add all to profile** adds every name of a group to the profile chosen on the
   device card. **Block all** blocks every name. It reads **Block remaining**
   when some are blocked and **Unblock all** when all are. One call changes the

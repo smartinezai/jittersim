@@ -158,6 +158,32 @@ class AccessDatapathTests(unittest.TestCase):
         NetworkApplier(executor=self.executor, topology=TOPOLOGY).reset()
         self.assertIn("status: NXDOMAIN", self.query("video.example.com"))
 
+    def test_the_global_block_list_covers_subdomains_and_unblock_brings_both_back(self):
+        # Block globally on the Traffic page writes this list. The Pi line's engine
+        # matched exact names. The filtered resolver also refuses every name below.
+        plan = AccessPlan(
+            websites=WebsitePolicy(blocked_domains=("video.example.com", "news.example.com")),
+            clients=(AccessClient("child", CLIENT_ADDRESS, CLIENT_MAC, ()),),
+        )
+        self.manager.apply(plan)
+        for namespace in (CLIENT, OTHER_CLIENT):
+            for name in ("video.example.com", "cdn.video.example.com", "news.example.com"):
+                self.assertIn("status: NXDOMAIN", self.query(name, namespace))
+            self.assertIn("203.0.113.7", self.query("notvideo.example.com", namespace))
+        # Unblock removes one exact entry. The name and the names below it resolve again.
+        self.manager.apply(
+            replace(plan, websites=WebsitePolicy(blocked_domains=("news.example.com",)))
+        )
+        for namespace in (CLIENT, OTHER_CLIENT):
+            for name in ("video.example.com", "cdn.video.example.com"):
+                self.assertIn("203.0.113.7", self.query(name, namespace))
+            self.assertIn("status: NXDOMAIN", self.query("news.example.com", namespace))
+        # Unblocking the last entry leaves no DNS rule. Plain DNS answers everything.
+        self.manager.apply(replace(plan, websites=WebsitePolicy()))
+        for namespace in (CLIENT, OTHER_CLIENT):
+            for name in ("video.example.com", "cdn.video.example.com", "news.example.com"):
+                self.assertIn("203.0.113.7", self.query(name, namespace, resolver="192.168.50.1"))
+
     def test_dns_failure_percentage_rejects_only_test_wifi_requests(self):
         self.manager.apply(
             replace(self.plan, options=AccessOptions(dns_failure_percent=0))

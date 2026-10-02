@@ -2020,7 +2020,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         <button id="scan-observations" class="primary" type="button">Scan now</button>
       </div>
     </div>
-    <p id="observation-note" class="observation-note">Scanning is on demand. Results are local aggregates, not exact page visits. Protected devices are never monitored and never appear here.</p>
+    <p id="observation-note" class="observation-note">Scanning is on demand. Results are local aggregates, not exact page visits. Protected devices are never monitored and never appear here. Block globally also blocks every name under a name (example.com also blocks www.example.com) while household access rules are on. Blocked and Unblock show on the exact name that was blocked.</p>
     <div id="observations" class="observation-list" aria-live="polite">No observations yet.</div>
   </section>
     <section class="card analytics-card" data-collapse="closed">
@@ -10354,8 +10354,10 @@ def _labelled_domain_payloads(
 ) -> List[Dict[str, Any]]:
     """Add a label and a group and a seen-with guess and the global block state to observed names.
 
-    A name counts as blocked only when it is an exact entry of the global block list because
-    the engine resolves each listed name on its own and does not match subdomains.
+    A name counts as blocked only when it is an exact entry of the global block list: that is
+    the entry Unblock removes. While household access rules are on the Pi's filtered resolver
+    also refuses every name under a listed name. Without them the engine blocks only the
+    addresses of each listed name while JitterSim runs.
     """
 
     hints = seen_with([(row.domain, row.first_seen) for row in rows])
