@@ -37,6 +37,7 @@ from jittersim.config.device_names import (
     UNKNOWN_DEVICE_NAME,
     has_hidden_characters,
     resolve_device_name,
+    saved_device_title,
 )
 from jittersim.config.domain_labels import group_domain, label_domain, seen_with
 from jittersim.config.exemptions import UnaffectedDevice, normalize_exempt_mac
@@ -2943,6 +2944,15 @@ DASHBOARD_HTML = r"""<!doctype html>
         device.ipv4_address || "Unknown device";
     }
 
+    // The name in a line of text such as a list row or a question. An unnamed device keeps its
+    // address there so that two of them never look the same.
+    function deviceTitle(device) {
+      const name = deviceDisplayName(device);
+      return name === "Unknown device" && device.ipv4_address
+        ? name + " (" + device.ipv4_address + ")"
+        : name;
+    }
+
     function devicePickerLabel(device) {
       return device.ipv4_address
         ? deviceDisplayName(device) + " (" + device.ipv4_address + ")"
@@ -4485,7 +4495,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
       setActionBusy(true, "/api/apply");
       setButtonBusy(button, true);
-      showMessage("Applying " + profileId + " to " + device.ipv4_address + "...", "working");
+      showMessage("Applying " + profileName(profileId) + " to " + (device.display_name || device.ipv4_address) + "...", "working");
       try {
         const result = await request("/api/connected-devices/apply-profile", "POST", {
           ipv4_address: device.ipv4_address,
@@ -7990,7 +8000,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     function deviceName(deviceId) {
       const device = devices.find((candidate) => candidate.id === deviceId);
-      return device ? device.name : deviceId;
+      return device ? deviceTitle(device) : deviceId;
     }
 
     function scheduleTargetFields(value) {
@@ -8149,7 +8159,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     function renderDeviceTable() {
       const rows = devices.map((device) => ({
         cells: [
-          [device.name, device.id],
+          [deviceDisplayName(device), device.id],
           [device.ipv4_address, device.mac_address || "No MAC address"],
           appliedProfileCell(profileName(device.profile_id),
             Object.prototype.hasOwnProperty.call(deviceConditions.devices, device.id)
@@ -8335,7 +8345,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       element("device-ip").value = device.ipv4_address;
       element("device-profile").value = device.profile_id;
       element("device-mac").value = device.mac_address || "";
-      startEditing("device", device.name);
+      startEditing("device", deviceTitle(device));
     }
 
     async function deleteItem(path, body, successMessage, button) {
@@ -8357,7 +8367,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function deleteDevice(device, button) {
-      const question = "Delete " + device.name + "? Its schedules, timers, progressions, " +
+      const question = "Delete " + deviceTitle(device) + "? Its schedules, timers, progressions, " +
         "limits and browser service profiles are deleted too, and so is a group it is the " +
         "only member of.";
       if (!window.confirm(question)) return;
@@ -9296,7 +9306,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         item.append(time, message);
         (event.device_ids || []).forEach(id => {
           const device = devices.find(candidate => candidate.id === id);
-          if (device) item.append(actionButton("Open " + device.name, () => openDevice(id)));
+          if (device) item.append(actionButton("Open " + deviceTitle(device), () => openDevice(id)));
         });
         list.appendChild(item);
       });
@@ -9938,10 +9948,11 @@ def _device_title(
 
     if device is None:
         return fallback_id
-    name = _device_display_name(device, labels_by_mac)
-    if name == UNKNOWN_DEVICE_NAME:
-        return f"{UNKNOWN_DEVICE_NAME} ({device.ipv4_address})"
-    return name
+    return saved_device_title(
+        saved_label=labels_by_mac.get(device.mac_address or "", {}).get("display_name"),
+        saved_name=device.name,
+        ipv4_address=device.ipv4_address,
+    )
 
 
 IMPACT_NO_HELPER_MESSAGE = "Impact needs the Pi helper."
@@ -10097,8 +10108,11 @@ def _scenario_run_payload(
     """Describe one running scenario, its current step and the time left."""
 
     if run.device_id is not None:
-        device = repository.get_device(run.device_id)
-        target_name = device.name if device is not None else run.device_id
+        target_name = _device_title(
+            repository.get_device(run.device_id),
+            repository.list_connected_device_labels(),
+            run.device_id,
+        )
     elif run.group_id is not None:
         group = repository.get_device_group(run.group_id)
         target_name = "Group " + (group.name if group is not None else run.group_id)

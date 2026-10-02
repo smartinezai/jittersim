@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from jittersim.measure import _is_measurement, comparison_table
 
+from .device_names import resolve_device_name
 from .storage import StorageError
 from .transfer import settings_to_payload
 
@@ -27,6 +28,25 @@ def encoded(value, limit=MAX_SNAPSHOT_BYTES):
 
 def settings_snapshot(repository):
     return settings_to_payload(repository.saved_settings(), exported_at=0)
+
+
+def target_title(repository, target):
+    """Name the target of a test session the way the dashboard's target menu does."""
+
+    if target == "everyone-else":
+        return "Everyone else"
+    kind, _, identifier = str(target).partition(":")
+    if kind == "group":
+        group = repository.get_device_group(identifier)
+        return f"Group {group.name}" if group is not None else f"Deleted group ({identifier})"
+    if kind == "device":
+        device = repository.get_device(identifier)
+        if device is None:
+            return f"Deleted device ({identifier})"
+        label = repository.list_connected_device_labels().get(device.mac_address or "", {})
+        name = resolve_device_name(saved_label=label.get("display_name"), saved_name=device.name)
+        return f"{name} ({device.ipv4_address})"
+    return str(target)
 
 
 def short_text(value, label, limit, *, empty=False):
@@ -158,7 +178,7 @@ class WorkflowStore:
 
     def sessions(self):
         return [
-            dict(row)
+            {**dict(row), "target_name": target_title(self.repository, row["target"])}
             for row in self.db.execute(
                 "SELECT id, name, target, started_at, ended_at FROM test_sessions "
                 "ORDER BY started_at DESC, rowid DESC LIMIT ?",
@@ -171,6 +191,7 @@ class WorkflowStore:
         if row is None:
             raise ValueError("test session no longer exists")
         result = dict(row)
+        result["target_name"] = target_title(self.repository, result["target"])
         result["settings"] = json.loads(result.pop("settings_json"))
         result["captures"] = json.loads(result.pop("captures_json"))
         result["measurements"] = json.loads(result.pop("measurements_json"))
@@ -238,7 +259,7 @@ def session_report(session):
     lines = [
         "# " + line(session["name"]),
         "",
-        "Target: " + line(session["target"]),
+        "Target: " + line(session.get("target_name") or session["target"]),
         "Started: " + moment(session["started_at"]),
         "Finished: " + moment(session["ended_at"]),
         "",

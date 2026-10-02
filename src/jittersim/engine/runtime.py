@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
+from jittersim.config.device_names import saved_device_title
 from jittersim.config.models import (
     DataLimit,
     Device,
@@ -65,6 +66,29 @@ from .service_resolver import ServiceAddressRefresher
 from .website import build_website_filters, resolve_domains
 
 LOGGER = logging.getLogger(__name__)
+
+
+def device_titles(repository: ConfigRepository, devices: Sequence[Device]) -> Dict[str, str]:
+    """Name saved devices in the activity log the way the dashboard names them.
+
+    A device saved from the connected list is called "Client <ip>" until someone
+    names it, so its saved label comes first. A name is only wording: when the
+    labels cannot be read the saved names are used.
+    """
+
+    try:
+        labels = repository.list_connected_device_labels()
+    except StorageError:
+        LOGGER.warning("could not read device labels for the activity log", exc_info=True)
+        labels = {}
+    return {
+        device.id: saved_device_title(
+            saved_label=labels.get(device.mac_address or "", {}).get("display_name"),
+            saved_name=device.name,
+            ipv4_address=device.ipv4_address,
+        )
+        for device in devices
+    }
 
 
 def plan_address_moves(
@@ -568,6 +592,7 @@ class RuntimeScheduler:
         }
         devices = {device.id: device for device in repository.list_devices()}
         moves, blocked = plan_address_moves(tuple(devices.values()), seen)
+        titles = device_titles(repository, tuple(devices.values())) if moves or blocked else {}
         for device_id, (address, holder) in blocked.items():
             if self._blocked_moves.get(device_id) != (address, holder):
                 LOGGER.warning(
@@ -577,12 +602,12 @@ class RuntimeScheduler:
                     holder,
                 )
                 device = devices[device_id]
-                keeper = devices[holder].name if holder in devices else holder
+                keeper = titles.get(holder, holder)
                 self._record(
                     repository,
                     [(
                         "address",
-                        f"{device.name} now uses {address}, which {keeper} keeps, "
+                        f"{titles[device_id]} now uses {address}, which {keeper} keeps, "
                         f"so it stays at {device.ipv4_address}",
                     )],
                     now,
@@ -606,7 +631,7 @@ class RuntimeScheduler:
                 repository,
                 [(
                     "address",
-                    f"{devices[device_id].name} moved from {old_address} to {new_address}",
+                    f"{titles[device_id]} moved from {old_address} to {new_address}",
                 )],
                 now,
                 device_ids=[(device_id,)],
@@ -709,6 +734,7 @@ class RuntimeScheduler:
             data_limit.group_id: data_limit
             for data_limit in repository.list_group_data_limits()
         }
+        titles = device_titles(repository, clients.devices)
 
         for device in clients.devices:
             group = groups_by_device.get(device.id)
@@ -851,7 +877,7 @@ class RuntimeScheduler:
                     group_id=group.id if group is not None else None,
                 )
             states[device.id] = TargetState(
-                name=device.name,
+                name=titles[device.id],
                 next_change_at=next_change,
                 source=Source(kind, identity, label, step, profile_name, group_name),
                 outage=roll.outage_until > now,

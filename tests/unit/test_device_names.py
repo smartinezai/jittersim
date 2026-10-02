@@ -4,6 +4,7 @@ from jittersim.config.device_names import (
     UNKNOWN_DEVICE_NAME,
     is_automatic_device_name,
     resolve_device_name,
+    saved_device_title,
 )
 
 
@@ -89,3 +90,21 @@ def test_emoji_and_accents_in_a_name_still_work(label):
     assert resolve_device_name(saved_label=label, hostname="iPhone-12") == label
     assert resolve_device_name(saved_name=label, hostname="iPhone-12") == label
     assert resolve_device_name(hostname=label) == label
+
+
+def test_a_saved_device_title_uses_the_label_then_the_typed_name():
+    assert saved_device_title(
+        saved_label="Sam laptop", saved_name="Client 192.168.50.10", ipv4_address="192.168.50.10"
+    ) == "Sam laptop"
+    assert saved_device_title(
+        saved_label=None, saved_name="Kitchen tablet", ipv4_address="192.168.50.10"
+    ) == "Kitchen tablet"
+
+
+def test_an_unnamed_saved_device_title_keeps_its_address_so_two_never_look_the_same():
+    assert saved_device_title(
+        saved_label="", saved_name="Client 192.168.50.10", ipv4_address="192.168.50.10"
+    ) == "Unknown device (192.168.50.10)"
+    assert saved_device_title(saved_label=None, saved_name="", ipv4_address="") == (
+        UNKNOWN_DEVICE_NAME
+    )
