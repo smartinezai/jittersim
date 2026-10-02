@@ -146,7 +146,7 @@ WIDE_PAGE = os.environ.get("JITTERSIM_BROWSER_TEST_WIDE_FONTS") == "1"
 # tall window and for the reach of every control on the others.
 TALL_WINDOW = (1920, 1000)
 REACH_SIZES = ((1280, 700), (1280, 721), (1280, 760), (1280, 800), (390, 844))
-REACH_TARGETS = ("#panic-button", "#router-wifi-toggle", "#copy-wifi-name", "#copy-wifi-password")
+REACH_TARGETS = ("#panic-button", "#router-wifi-toggle", "#sync-router-ap")
 LONG_MESSAGE = (
     "Started: 12 devices with a profile · 3 groups · 2 service lists · 4 protected devices stay"
     " untouched. Profiles were skipped for devices whose current Wi-Fi identity could not be"
