@@ -1,4 +1,5 @@
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 import unittest
 from ipaddress import IPv4Address
@@ -208,6 +209,59 @@ class WebsiteLookupDeadlineTests(LookupDeadlineTestCase):
 
         self.assertEqual(len(addresses), 12)
         self.assertLessEqual(lookups.most_running, 3)
+
+    @staticmethod
+    def _release_lookups(lookups, names) -> None:
+        lookups.release.set()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            with website._resolution_cache_lock:
+                pending = any(name in website._pending for name in names)
+            if not pending and not lookups.running:
+                return
+            time.sleep(0.01)
+        raise AssertionError("blocked lookups did not finish during test cleanup")
+
+    def test_successive_timeouts_share_one_worker_limit(self) -> None:
+        names = tuple(f"host{number}.example" for number in range(1, 41))
+        lookups = SlowLookups(slow=names)
+        with patch("jittersim.engine.website.socket.getaddrinfo", side_effect=lookups):
+            try:
+                with patch.object(website, "RESOLVE_WAIT_SECONDS", 0.05):
+                    for offset in range(0, len(names), 8):
+                        resolve_domains(domains=names[offset : offset + 8])
+                self.assertLessEqual(lookups.most_running, 8)
+            finally:
+                self._release_lookups(lookups, names)
+
+    def test_concurrent_calls_share_one_worker_limit(self) -> None:
+        names = tuple(f"host{number}.example" for number in range(1, 41))
+        lookups = SlowLookups(slow=names)
+        with patch("jittersim.engine.website.socket.getaddrinfo", side_effect=lookups):
+            try:
+                with patch.object(website, "RESOLVE_WAIT_SECONDS", 0.1):
+                    with ThreadPoolExecutor(max_workers=5) as callers:
+                        calls = [
+                            callers.submit(resolve_domains, domains=names[offset : offset + 8])
+                            for offset in range(0, len(names), 8)
+                        ]
+                        for call in calls:
+                            self.assertEqual(call.result(timeout=3), ())
+                self.assertLessEqual(lookups.most_running, 8)
+            finally:
+                self._release_lookups(lookups, names)
+
+    def test_late_answer_remains_fresh_from_its_completion(self) -> None:
+        clock = [1.0]
+
+        def getaddrinfo(domain, _port, _family, _kind):
+            clock[0] += 120.0
+            return ((None, None, None, None, (address_of(domain), 0)),)
+
+        with patch.object(website.time, "monotonic", side_effect=lambda: clock[0]):
+            with patch.object(website.socket, "getaddrinfo", side_effect=getaddrinfo):
+                addresses = website._cached_addresses(domain="slow.example")
+            self.assertEqual(website._fresh_addresses("slow.example"), addresses)
 
     def test_a_session_inside_a_session_joins_the_outer_one(self) -> None:
         with website.lookup_session() as outer:
