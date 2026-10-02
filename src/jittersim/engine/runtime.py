@@ -180,6 +180,8 @@ class RuntimeScheduler:
         self._rolls: Dict[str, _DeviceRollState] = {}
         self._current_payload = None
         self._paused = True
+        # Counts Panic requests so an apply that was running meanwhile can tell.
+        self._halt_count = 0
         self._lock = threading.RLock()
         # Held while a plan is built and applied, so pause() and manual applies
         # never interleave with a scheduled apply.
@@ -340,6 +342,41 @@ class RuntimeScheduler:
             self._group_members.clear()
             self._blocked_moves.clear()
             self._applied_states = None
+
+    def halt(self) -> None:
+        """Stop scheduled reapplication at once, without waiting for an apply in flight.
+
+        Panic uses this so it never queues behind a slow apply. An apply that was
+        running checks `halt_count` before it records its result.
+        """
+
+        with self._lock:
+            self._paused = True
+            self._halt_count += 1
+            self._current_payload = None
+
+    def finish_halt(self) -> None:
+        """Clear the roll state of a halt when no apply is in flight.
+
+        An apply that is in flight backs out on its own and clears it then.
+        """
+
+        if self._apply_lock.acquire(blocking=False):
+            try:
+                self.pause()
+            finally:
+                self._apply_lock.release()
+
+    @property
+    def halt_count(self) -> int:
+        with self._lock:
+            return self._halt_count
+
+    def applied_snapshot(self):
+        """Return the applied plan and its source descriptions without the apply lock."""
+
+        with self._lock:
+            return self.applied_plan(), self.applied_target_states()
 
     def sample_usage(self, *, repository: ConfigRepository) -> None:
         """Record quota and device traffic before the helper counters restart."""

@@ -11,6 +11,7 @@ import os
 import re
 import select
 import socket
+import socketserver
 import ssl
 import threading
 import time
@@ -140,6 +141,8 @@ TLS_HANDSHAKE_TIMEOUT_SECONDS = 5.0
 REQUEST_INPUT_TIMEOUT_SECONDS = 10.0
 MAX_PENDING_CONNECTION_LIFETIME_SECONDS = 30.0
 MAX_PENDING_DASHBOARD_CONNECTIONS = 16
+# Requests handled at the same time. A request over the limit gets a clear 503.
+MAX_DASHBOARD_WORKERS = 16
 RESPONSE_SEND_TIMEOUT_SECONDS = 5.0
 # A settings export with many profiles is larger than ordinary requests.
 MAX_IMPORT_BODY_BYTES = 1024 * 1024
@@ -220,6 +223,8 @@ ACTION_PATHS = frozenset(
      "/api/access-point/reset-name")
 )
 PUBLIC_READ_PATHS = frozenset(("/", "/api/health"))
+# Panic runs ahead of other writes: it never waits for the write lock of an apply in flight.
+PRIORITY_WRITE_PATHS = frozenset(("/api/normal-access",))
 
 
 # Raw string: JavaScript escapes such as "\n" must reach the browser unchanged.
@@ -10537,12 +10542,18 @@ class _PendingConnection:
     want_write: bool = False
 
 
-class ControlServer(HTTPServer):
-    """Serve configuration and plan data from one repository."""
+class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
+    """Serve configuration and plan data from one repository.
+
+    Each request runs on its own daemon thread so one slow request (an apply or a
+    scan or a router call) cannot hold up Panic or the health check. The accept
+    loop still advances every TLS handshake without blocking, and at most
+    `MAX_DASHBOARD_WORKERS` requests run at once.
+    """
 
     allow_reuse_address = True
-    # The server handles one connection at a time, so bound how long an idle or
-    # slow client (such as a browser preconnect) can hold it.
+    daemon_threads = True
+    block_on_close = False
     request_timeout_seconds = 5.0
     # After a reboot the dashboard can start before the helper's socket exists.
     helper_startup_wait_seconds = 30.0
@@ -10583,7 +10594,58 @@ class ControlServer(HTTPServer):
         self._pending_connections: Dict[socket.socket, _PendingConnection] = {}
         self._request_inputs: Dict[socket.socket, Tuple[bytes, float]] = {}
         self._stop_connections = threading.Event()
+        self._workers_lock = threading.Lock()
+        self._active_workers = 0
         super().__init__(server_address, ControlRequestHandler)
+
+    @property
+    def active_workers(self) -> int:
+        """Return how many requests are being handled right now."""
+
+        with self._workers_lock:
+            return self._active_workers
+
+    def process_request(self, request: socket.socket, client_address: Any) -> None:
+        with self._workers_lock:
+            accepted = self._active_workers < MAX_DASHBOARD_WORKERS
+            if accepted:
+                self._active_workers += 1
+        if not accepted:
+            self._refuse_request(request)
+            return
+        try:
+            threading.Thread(
+                target=self._serve_request, args=(request, client_address),
+                name="jittersim-request", daemon=True,
+            ).start()
+        except BaseException:
+            with self._workers_lock:
+                self._active_workers -= 1
+            self.shutdown_request(request)
+            raise
+
+    def _serve_request(self, request: socket.socket, client_address: Any) -> None:
+        try:
+            self.process_request_thread(request, client_address)
+        finally:
+            with self._workers_lock:
+                self._active_workers -= 1
+
+    def _refuse_request(self, request: socket.socket) -> None:
+        """Tell a client over the limit to retry instead of leaving it hanging."""
+
+        try:
+            request.settimeout(0.2)
+            request.sendall(
+                b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\n"
+                b"Content-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            # Read what the client already sent so closing does not reset the reply.
+            request.settimeout(0.05)
+            request.recv(65536)
+        except (OSError, ssl.SSLError):
+            pass
+        self.shutdown_request(request)
 
     def get_request(self) -> Tuple[socket.socket, Any]:
         """Advance waiting connections without serial waits for idle clients."""
@@ -10653,20 +10715,6 @@ class ControlServer(HTTPServer):
             )
         except OSError:
             connection.close()
-
-    def finish_request(self, request: socket.socket, client_address: Any) -> None:
-        started = time.monotonic()
-        try:
-            super().finish_request(request, client_address)
-        finally:
-            # Waiting clients keep their remaining time while one request runs.
-            finished = time.monotonic()
-            elapsed = max(0.0, finished - started)
-            for connection, pending in tuple(self._pending_connections.items()):
-                if finished >= pending.expires_at:
-                    self._close_pending(connection)
-                else:
-                    pending.deadline = min(pending.expires_at, pending.deadline + elapsed)
 
     def _close_pending(self, connection: socket.socket) -> None:
         self._pending_connections.pop(connection, None)
@@ -11160,10 +11208,13 @@ class ControlServer(HTTPServer):
             )
             return HTTPStatus.OK, "application/json", _json_bytes({"plan": plan_to_payload(plan)})
         if path == "/api/conditions":
-            operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
-            with operation:
-                plan = self.scheduler.applied_plan() if self.scheduler is not None else None
-                sources = self.scheduler.applied_target_states() if self.scheduler is not None else None
+            # Read the applied plan without the apply lock, so this read never waits for an apply.
+            if self.scheduler is None:
+                plan, sources = None, None
+            elif hasattr(self.scheduler, "applied_snapshot"):
+                plan, sources = self.scheduler.applied_snapshot()
+            else:
+                plan, sources = self.scheduler.applied_plan(), self.scheduler.applied_target_states()
             applied = plan is not None
 
             def described_condition(state, target_id):
@@ -11395,7 +11446,12 @@ class ControlServer(HTTPServer):
         return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
 
     def write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
-        operation = self.scheduler.exclusive() if self.scheduler is not None and path not in ACTION_PATHS else nullcontext()
+        # Panic skips the write lock so it never queues behind an apply in flight.
+        operation = (
+            self.scheduler.exclusive()
+            if self.scheduler is not None and path not in ACTION_PATHS and path not in PRIORITY_WRITE_PATHS
+            else nullcontext()
+        )
         with operation:
             before = self.repository.get_runtime_state().configuration_version
             try:
@@ -12775,9 +12831,8 @@ class ControlServer(HTTPServer):
         }
 
     def _general_profile_status(self) -> dict:
-        operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
-        with operation:
-            return self._general_profile_status_locked()
+        # A read: it must not wait behind an apply that holds the write lock.
+        return self._general_profile_status_locked()
 
     def _general_profile_status_locked(self) -> dict:
         profile = self.repository.get_general_profile()
@@ -13318,6 +13373,7 @@ class ControlServer(HTTPServer):
                 "application/json",
                 _json_bytes({"error": "network helper is not configured"}),
             )
+        halts_at_start = getattr(self.scheduler, "halt_count", 0)
         try:
             prepared = (
                 self.scheduler.prepare_plan(
@@ -13352,6 +13408,8 @@ class ControlServer(HTTPServer):
         if self.scheduler is not None and sample_usage:
             # Applying recreates the helper counters, so record their traffic first.
             self.scheduler.sample_usage(repository=self.repository)
+        if self._panic_since(halts_at_start):
+            return self._stopped_by_panic(undo=False)
         try:
             if explicit_apply:
                 result = self.helper_client.apply(plan=plan, explicit_apply=True)
@@ -13382,6 +13440,8 @@ class ControlServer(HTTPServer):
                     }
                 ),
             )
+        if self._panic_since(halts_at_start):
+            return self._stopped_by_panic(undo=True)
         self.repository.rebase_quota_counters(now=int(time.time()))
         state = self.repository.update_runtime_state(
             observed_state="applied",
@@ -13409,6 +13469,29 @@ class ControlServer(HTTPServer):
                 }
             ),
         )
+
+    def _panic_since(self, halts_at_start: int) -> bool:
+        return getattr(self.scheduler, "halt_count", 0) != halts_at_start
+
+    def _stopped_by_panic(self, *, undo: bool) -> Tuple[int, str, bytes]:
+        """Back out of an apply that Panic overtook, so Panic stays the last word."""
+
+        if undo and self.helper_client is not None:
+            # The helper already applied this plan after Panic released the network.
+            try:
+                restore = getattr(self.helper_client, "normal_access", self.helper_client.reset)
+                restore()
+            except HelperClientError:
+                LOGGER.error("could not undo an apply that Panic overtook")
+        if self.scheduler is not None:
+            self.scheduler.pause()
+        state = self.repository.update_runtime_state(
+            observed_state="reset", last_action="reset", last_result="success", last_error=None,
+        )
+        return HTTPStatus.CONFLICT, "application/json", _json_bytes({
+            "error": "Panic stopped this apply. Choose Start with saved settings when it is safe.",
+            "state": self._runtime_state_with_running(state),
+        })
 
     def _reset_network(self) -> Tuple[int, str, bytes]:
         operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()

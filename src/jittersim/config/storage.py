@@ -1,8 +1,11 @@
 """SQLite persistence for validated jittersim configuration."""
 
+import functools
+import inspect
 import json
 import sqlite3
 import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -152,11 +155,18 @@ def _deserialize_profile_settings(value: str) -> dict:
 
 
 class ConfigRepository:
-    """Store profiles and device assignments in a local SQLite database."""
+    """Store profiles and device assignments in a local SQLite database.
+
+    The dashboard serves requests on several threads that share one repository,
+    so the connection may be used from any thread and every method holds one
+    re-entrant lock. A call that needs several statements to stay together uses
+    `transaction()`, which keeps the lock for the whole block.
+    """
 
     def __init__(self, database_path: DatabasePath) -> None:
+        self._lock = threading.RLock()
         self._transaction_depth = 0
-        self._connection = sqlite3.connect(str(database_path))
+        self._connection = sqlite3.connect(str(database_path), check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
         self._initialize_schema()
@@ -184,26 +194,27 @@ class ConfigRepository:
     def transaction(self):
         """Commit related configuration writes together or restore all of them."""
 
-        depth = self._transaction_depth
-        savepoint = f"configuration_{depth}"
-        self._connection.execute("BEGIN IMMEDIATE" if depth == 0 else f"SAVEPOINT {savepoint}")
-        self._transaction_depth += 1
-        try:
-            yield
-        except BaseException:
-            self._transaction_depth -= 1
-            if depth == 0:
-                self._connection.rollback()
+        with self._lock:
+            depth = self._transaction_depth
+            savepoint = f"configuration_{depth}"
+            self._connection.execute("BEGIN IMMEDIATE" if depth == 0 else f"SAVEPOINT {savepoint}")
+            self._transaction_depth += 1
+            try:
+                yield
+            except BaseException:
+                self._transaction_depth -= 1
+                if depth == 0:
+                    self._connection.rollback()
+                else:
+                    self._connection.execute(f"ROLLBACK TO {savepoint}")
+                    self._connection.execute(f"RELEASE {savepoint}")
+                raise
             else:
-                self._connection.execute(f"ROLLBACK TO {savepoint}")
-                self._connection.execute(f"RELEASE {savepoint}")
-            raise
-        else:
-            self._transaction_depth -= 1
-            if depth == 0:
-                self._connection.commit()
-            else:
-                self._connection.execute(f"RELEASE {savepoint}")
+                self._transaction_depth -= 1
+                if depth == 0:
+                    self._connection.commit()
+                else:
+                    self._connection.execute(f"RELEASE {savepoint}")
 
     def _initialize_schema(self) -> None:
         # An existing settings table without access options comes from the Pi line.
@@ -3619,3 +3630,18 @@ class ConfigRepository:
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
             raise StorageError("stored time quota is malformed") from error
+
+
+def _serialized(method):
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
+# Every plain method runs under the repository lock. `transaction` holds the lock itself.
+for _name, _member in tuple(vars(ConfigRepository).items()):
+    if inspect.isfunction(_member) and _name not in ("__init__", "transaction"):
+        setattr(ConfigRepository, _name, _serialized(_member))

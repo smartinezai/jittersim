@@ -82,7 +82,8 @@ def normal_access(server):
             {"error": "A current networking helper is required to restore normal access."}, 503
         )
     if server.scheduler is not None:
-        server.scheduler.pause()
+        # Panic never waits for an apply in flight: that apply sees the halt and backs out.
+        getattr(server.scheduler, "halt", server.scheduler.pause)()
     persisted = True
     try:
         settings = repository.access_settings()
@@ -105,6 +106,8 @@ def normal_access(server):
         error = (
             "Normal access was not fully restored. Automation is paused. Retry the panic button."
         )
+    if hasattr(server.scheduler, "finish_halt"):
+        server.scheduler.finish_halt()
     state = None
     try:
         state = repository.update_runtime_state(
