@@ -397,7 +397,11 @@ def healthy(*, config=CONFIG_ROOT, run=run_command, port=8080):
             if line.startswith("JITTERSIM_ADMIN_TOKEN=")
         )
         hostname = socket.gethostname().split(".")[0] + ".local"
-        context = ssl.create_default_context(cafile=str(config / "dashboard.crt"))
+        # The dashboard certificate is issued by the local authority. An older
+        # self-signed one is its own authority.
+        authority = config / "ca" / "ca.crt"
+        context = ssl.create_default_context(
+            cafile=str(authority if authority.exists() else config / "dashboard.crt"))
         connection = http.client.HTTPSConnection(hostname, port, timeout=3, context=context)
         try:
             connection.sock = context.wrap_socket(
@@ -514,6 +518,14 @@ def apply_update(
                     targets.append((name, units / name[6:]))
                 else:
                     raise UpdateError("the recovery copy names an unknown file")
+            # Devices that already trust a new authority must not be asked again,
+            # so a rollback keeps the one it finds when the recovery copy has none.
+            kept_authority = None
+            if (config / "ca").is_dir() and not (backup / "config" / "ca").exists():
+                kept_authority = root / "authority-kept"
+                if kept_authority.exists():
+                    shutil.rmtree(kept_authority)
+                shutil.copytree(config / "ca", kept_authority, symlinks=True)
             for name, destination in (("code", code), ("config", config), ("data", data)):
                 if destination.exists():
                     shutil.rmtree(destination)
@@ -522,6 +534,9 @@ def apply_update(
                     uid, gid = ownership[name]
                     for entry in [destination, *destination.rglob("*")]:
                         os.chown(entry, uid, gid, follow_symlinks=False)
+            if kept_authority is not None:
+                shutil.copytree(kept_authority, config / "ca", symlinks=True)
+                shutil.rmtree(kept_authority)
             for name, destination in targets:
                 saved = backup / name
                 if saved.is_symlink():
@@ -667,6 +682,12 @@ def apply_update(
             python = str(code / ".venv/bin/python")
             run(["runuser", "-u", "jittersim", "--", python, "-I", "-c", IMPORT_CHECK], 120)
             run([python, str(code / BOOTSTRAP)], 60)
+            # Like install.sh: keep the dashboard name setting and the local
+            # certificate authority, and renew the dashboard certificates.
+            run([python, "-m", "jittersim.localname", "install",
+                 "--config-dir", str(config), "--group", "jittersim"], 60)
+            run([python, "-m", "jittersim.localca", "ensure",
+                 "--config-dir", str(config), "--group", "jittersim"], 120)
             link_command(str(code / ".venv/bin/jittersim"), command)
             render_firewall(
                 staged / FIREWALL_TEMPLATE, config / FIREWALL_RULES, uplink, test_interface

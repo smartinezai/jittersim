@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import shutil
 import json
 import os
 import re
@@ -207,6 +208,41 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual((self.config / "control.env").stat().st_mode & 0o777, 0o600)
         self.assertEqual(update_status(root=self.root, code=self.code)["phase"], "rolled-back")
 
+    def test_rollback_keeps_a_certificate_authority_the_failed_update_created(self):
+        self.stage()
+        request_update("v1", root=self.root, code=self.code, run=lambda *args: None)
+
+        def fail_package(command, timeout):
+            if "pip" in command:
+                (self.config / "ca").mkdir()
+                (self.config / "ca" / "ca.key").write_text("authority key")
+                (self.config / "ca" / "ca.crt").write_text("authority certificate")
+                (self.config / "ca" / "ca.key").chmod(0o600)
+                raise UpdateError("package install failed")
+
+        with self.assertRaises(UpdateError):
+            self.apply(fail_package, lambda: True)
+        # Devices that already trust the authority must not be asked again.
+        self.assertEqual((self.config / "ca" / "ca.crt").read_text(), "authority certificate")
+        self.assertEqual((self.config / "ca" / "ca.key").read_text(), "authority key")
+        self.assertEqual((self.config / "ca" / "ca.key").stat().st_mode & 0o777, 0o600)
+        self.assertEqual((self.config / "control.env").read_text(), "private credentials")
+
+    def test_rollback_keeps_the_authority_that_the_recovery_copy_holds(self):
+        (self.config / "ca").mkdir()
+        (self.config / "ca" / "ca.crt").write_text("original authority")
+        self.stage()
+        request_update("v1", root=self.root, code=self.code, run=lambda *args: None)
+
+        def fail_package(command, timeout):
+            if "pip" in command:
+                (self.config / "ca" / "ca.crt").write_text("replaced authority")
+                raise UpdateError("package install failed")
+
+        with self.assertRaises(UpdateError):
+            self.apply(fail_package, lambda: True)
+        self.assertEqual((self.config / "ca" / "ca.crt").read_text(), "original authority")
+
     def test_failure_before_backup_does_not_restore_an_older_backup(self):
         self.stage()
         backup = self.root / "backup"
@@ -385,6 +421,13 @@ class UpdateTests(unittest.TestCase):
                 elif line.startswith("ln "):
                     self.assertEqual(words[1], "-sf")
                     self.assertEqual(os.readlink(self.command), words[2])
+                elif words[1:2] == ["-m"] and words[2].startswith("jittersim.local"):
+                    # The dashboard update runs the same name and certificate
+                    # steps with the helpers' own defaults.
+                    self.assertIn(
+                        [str(self.code / ".venv/bin/python"), "-m", words[2], words[3]],
+                        [command[:4] for command in commands],
+                    )
                 elif Path(words[0]).name == "pip":
                     self.assertIn(
                         [str(self.code / ".venv/bin/python"), "-m", "pip", "install",
@@ -640,6 +683,34 @@ class UpdateTests(unittest.TestCase):
             "systemctl start jittersim-helper.service jittersim-dashboard.service "
             "jittersim-browser-proxy.service " + WATCHER,
         )
+
+    def test_health_trusts_a_dashboard_certificate_issued_by_the_local_authority(self):
+        from jittersim import localca
+        from jittersim.api.server import ControlServer
+        from jittersim.config.storage import ConfigRepository
+        from tests.unit.test_api import FakeHelper
+
+        if shutil.which("openssl") is None:
+            self.skipTest("OpenSSL is required for the HTTPS health check")
+        localca.prepare(self.config, host_name="pi.local", neutral_name="pi.home.arpa",
+                        ethernet_ip="192.168.1.20")
+        (self.config / "control.env").write_text("JITTERSIM_ADMIN_TOKEN=release-health-test\n")
+        with ConfigRepository(self.base / "health.db") as repository:
+            with ControlServer(
+                ("127.0.0.1", 0), repository, admin_token="release-health-test",
+                helper_client=FakeHelper(),
+                tls_certfile=self.config / "dashboard.crt",
+                tls_keyfile=self.config / "dashboard.key",
+            ) as server:
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    with patch("jittersim.updates.socket.gethostname", return_value="pi"):
+                        self.assertTrue(healthy(
+                            config=self.config, port=server.server_port, run=lambda *args: None))
+                finally:
+                    server.shutdown()
+                    thread.join(timeout=5)
 
     def test_health_uses_the_installer_certificate_name_and_checks_every_service(self):
         from jittersim.api.server import ControlServer

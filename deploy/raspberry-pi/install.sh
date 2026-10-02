@@ -154,33 +154,26 @@ dashboard_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (p = 1; p <= NF; 
 if [ -z "$dashboard_ip" ]; then
     dashboard_ip=127.0.0.1
 fi
-# The certificate is named after the Pi and also covers the jittersim.local
-# name that the Avahi publisher announces on the management network and the
-# test Wi-Fi gateway address that browsers on the test Wi-Fi use.
+# The dashboard certificate comes from a small local certificate authority that is
+# created once and kept across upgrades and rollbacks (the recovery copy holds the
+# whole configuration folder). Devices that trust the authority open the dashboard
+# without a warning. The certificate names the Pi, the jittersim.local name, the
+# Ethernet address, the test Wi-Fi gateway and the neutral test Wi-Fi name. A second
+# certificate for test Wi-Fi clients names only the neutral name and the gateway.
+# The same two commands run in the dashboard update. The first keeps the name
+# setting and the resolver record. The second keeps the authority and renews the
+# certificates. Only root reads the authority key.
+dns_name_state=$("$INSTALL_DIR/.venv/bin/python" -m jittersim.localname install \
+    --config-dir "$CONFIG_DIR" --group jittersim)
+local_name=$(printf '%s\n' "$dns_name_state" | sed -n 1p)
+dns_name_changed=no
+if [ "$(printf '%s\n' "$dns_name_state" | sed -n 2p)" = changed ]; then
+    dns_name_changed=yes
+fi
 dashboard_host="$(hostname -s).local"
-dashboard_cert_matches=false
-if [ -s "$CONFIG_DIR/dashboard.crt" ] && [ -s "$CONFIG_DIR/dashboard.key" ]; then
-    dashboard_cert_text=$(openssl x509 -in "$CONFIG_DIR/dashboard.crt" -noout -text 2>/dev/null || true)
-    if printf '%s\n' "$dashboard_cert_text" | grep -Fq "IP Address:$dashboard_ip" \
-        && printf '%s\n' "$dashboard_cert_text" | grep -Fq "DNS:$dashboard_host" \
-        && printf '%s\n' "$dashboard_cert_text" | grep -Fq "DNS:jittersim.local" \
-        && printf '%s\n' "$dashboard_cert_text" | grep -Fq "IP Address:192.168.50.1"; then
-        dashboard_cert_matches=true
-    fi
-fi
-if [ "$dashboard_cert_matches" = false ]; then
-    umask 077
-    openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 825 \
-        -keyout "$CONFIG_DIR/dashboard.key" \
-        -out "$CONFIG_DIR/dashboard.crt" \
-        -subj "/CN=$dashboard_host" \
-        -addext "subjectAltName=DNS:$dashboard_host,DNS:jittersim.local,IP:$dashboard_ip,IP:192.168.50.1" \
-        -addext "extendedKeyUsage=serverAuth"
-fi
-chown root:jittersim "$CONFIG_DIR/dashboard.key"
-chmod 0640 "$CONFIG_DIR/dashboard.key"
-chown root:root "$CONFIG_DIR/dashboard.crt"
-chmod 0644 "$CONFIG_DIR/dashboard.crt"
+"$INSTALL_DIR/.venv/bin/python" -m jittersim.localca ensure \
+    --config-dir "$CONFIG_DIR" --host-name "$dashboard_host" \
+    --neutral-name "$local_name" --ethernet-ip "$dashboard_ip" --group jittersim >&2
 
 sed \
     -e "s/@UPLINK_INTERFACE@/$JITTERSIM_UPLINK/g" \
@@ -253,7 +246,7 @@ systemctl restart jittersim-control-firewall.service
 systemctl enable jittersim-helper.service jittersim-dashboard.service jittersim-browser-proxy.service jittersim-service-watch.service
 systemctl restart jittersim-helper.service
 if [ "$ap_active_connection" = jittersim-ap ]; then
-    if [ "$ap_settings_before" != "$ap_settings_after" ]; then
+    if [ "$ap_settings_before" != "$ap_settings_after" ] || [ "$dns_name_changed" = yes ]; then
         echo "AP settings were saved but the active Wi-Fi was not restarted." >&2
         echo "To use them now, run: sudo nmcli connection up jittersim-ap" >&2
         echo "Test Wi-Fi devices reconnect after a few seconds. A reboot also works." >&2
@@ -295,5 +288,7 @@ fi
 echo "JitterSim installed. Read the generated credentials locally from:" >&2
 echo "  $CONFIG_DIR/control.env" >&2
 echo "  $CONFIG_DIR/ap.env" >&2
-echo "Dashboard certificate fingerprint (verify before trusting):" >&2
-openssl x509 -in "$CONFIG_DIR/dashboard.crt" -noout -fingerprint -sha256 >&2
+echo "Easy address on the test Wi-Fi: https://$local_name:8080" >&2
+echo "Certificate authority fingerprint (verify before trusting):" >&2
+openssl x509 -in "$CONFIG_DIR/ca/ca.crt" -noout -fingerprint -sha256 >&2
+echo "After signing in, the dashboard offers this certificate to trust on a Mac or iPhone." >&2
