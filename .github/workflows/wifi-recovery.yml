@@ -44,7 +44,8 @@ jobs:
 
   browser:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # The phone layout journey checks three phone sizes twice (normal and wide fonts).
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -63,6 +64,8 @@ jobs:
       - run: python -m tests.browser.apply_clarity
       - run: python -m tests.browser.router_copy
       - run: python -m tests.browser.device_names
+      - run: python -m tests.browser.phone_layout
+      - run: python -m tests.browser.help_icons
       - run: python -m tests.browser.token_remember
       - run: python -m tests.browser.dns_failure
       - uses: actions/upload-artifact@v5

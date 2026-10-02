@@ -123,6 +123,9 @@ Goal: control the emulator from a Mac without a screen or keyboard attached to t
   signed-in browsers signed in for 7 days.
 - [x] Split the dashboard into tabs, fit it on a phone and guide a first setup.
 - [x] Offer the connected devices in forms instead of typed addresses.
+- [x] Give the dashboard a phone layout: a short header, Panic and the router Wi-Fi switch
+  pinned to the bottom of the screen and the other sidebar controls in a sheet.
+- [x] Name the active general profile above Start and let the owner pick one there.
 
 Suggested commits:
 

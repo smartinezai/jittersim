@@ -227,11 +227,11 @@ CASES = {
       adminTokenVerified = true;
       const pending = deferred();
       network = () => pending.promise;
-      const loading = show("/api/profiles", "profiles", "profiles");
+      const loading = show("/api/profiles", "profiles-json", "profiles");
       enter("admin-token", "replacement token");
       pending.resolve({ok:true, json:async () => ({profiles:["stale private profile"]})});
       await assert.rejects(loading, /Token changed/);
-      assert.ok(!element("profiles").textContent.includes("stale private profile"));
+      assert.ok(!element("profiles-json").textContent.includes("stale private profile"));
       const count = networkCalls.length;
       await assert.rejects(request("/api/groups", "GET"), /Check token/);
       assert.equal(networkCalls.length, count);

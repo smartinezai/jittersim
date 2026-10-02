@@ -8,6 +8,8 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.phone import sidebar_control
+
 
 def wait_for_automatic_token_check(page):
     """Wait until the remembered token check has finished its refresh.
@@ -66,7 +68,7 @@ def run():
                             "download": {"bandwidth_kbit": 2000},
                         },
                     ).ok
-                    page.locator("#open-admin-credentials").click()
+                    sidebar_control(page, "#open-admin-credentials").click()
                     page.locator("#remember-admin-token").check()
                     # A reload before the token is stored would forget it.
                     expect(page.locator("#remember-admin-token-note")).to_contain_text(

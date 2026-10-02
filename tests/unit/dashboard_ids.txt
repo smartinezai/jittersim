@@ -259,8 +259,8 @@ time-quota-list
 access-point-form
 access-point-ssid
 access-point-password
-profiles
-devices
+profiles-json
+devices-json
 plan
 state
 policies
@@ -270,6 +270,6 @@ random-website-days
 random-website-status
 random-website-rows
 refresh-diagnostics
-diagnostics
+diagnostics-json
 download-backup
 action-history

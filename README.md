@@ -186,7 +186,8 @@ bytes.
 ### Pi and router controls
 
 The left sidebar, visible on every page, includes one **Router Wi-Fi** switch.
-It shows the router's confirmed On or Off state and the last check time.
+On a phone the switch sits in the bar at the bottom of the screen next to
+**Panic**. It shows the router's confirmed On or Off state and the last check time.
 Enter the router admin password to start automatic checks while the page is
 visible. A change shows **Changing** until the router confirms it. An
 unavailable status disables the switch instead of guessing. Keep the Pi
@@ -422,6 +423,25 @@ The line under the button counts what is saved. The message after a start counts
 what JitterSim really started. Access rules also run after a start so a start
 with no profiles saved says that they apply. Without the Pi helper the dashboard
 says that it needs the helper to run.
+
+**Active profile** above the button names the general profile that is active
+right now. When none is active choose a saved profile in the list. Nothing
+changes until you press **Apply to all devices**. While that profile is active
+the button reads **Stop**. It works like **Apply to all** and **Stop** on the
+Profiles page and protected devices stay untouched.
+
+### On a phone
+
+Up to a width of 768 pixels the dashboard uses a phone layout. The top of the
+page shows the name, the mode, every page in one row that scrolls sideways and
+one line of status. Tap the status line to open the full status block. A page
+link shows the start of that page. **Panic** and the **Router Wi-Fi** switch
+stay in a bar at the bottom of the screen on every page. **Controls** in that
+bar opens a sheet with **Active profile**, **Start with saved settings**,
+**Reset network**, the status and message lines, the two copy buttons and the
+**Admin token** and **Router password** buttons. Tap outside the sheet or press
+Escape to close it. Buttons, fields and the page links are at least 44 pixels
+tall.
 
 ### General profile
 
@@ -706,6 +726,15 @@ The installer preserves your saved Wi-Fi name and password. Use it when
 upgrading an older release so it can add new system services. A code-only
 update does not install those services.
 
+An upgrade from a release that did not record the hardware address of each
+device clears the DNS names listed under Traffic once when any device is
+protected. Those names cannot be tied to a device and a protected device may
+have moved to another address since they were saved. The installer prints a
+notice with the number of names before it happens. The Traffic page then says
+when the list was cleared until the first new name arrives and `jittersim
+traffic` says the same. The list fills again as devices browse. Names are kept
+for 30 days from their last sighting. Nothing else is lost.
+
 The test network requires WPA3 with AES and protected Wi-Fi management messages.
 Upgrades save the stronger security settings and report when an active network
 needs a planned restart. Manual
@@ -753,7 +782,8 @@ network namespaces. Run them in a privileged Linux container with:
 tests/kernel/run-in-docker.sh
 ```
 
-The browser checks exercise the dashboard on desktop and phone-sized screens.
+The browser checks exercise the dashboard on desktop and phone-sized screens
+(390, 360 and 320 pixels wide, also with wider fonts).
 GitHub Actions runs the Python, Linux and browser checks for each pull
 request.
 

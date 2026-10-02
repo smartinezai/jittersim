@@ -66,6 +66,9 @@ def check_nothing_floats(page):
     assert pinned == ["sidebar"], pinned
     page.locator('[data-page-link="schedules"]').click()
     page.locator("#page-schedules").evaluate("(node) => node.scrollIntoView({block: 'end'})")
+    # On a short window the page list scrolls inside itself, so the wheel turns over the lower
+    # part of the sidebar where a person reaches for the footer.
+    page.mouse.move(100, page.viewport_size["height"] - 60)
     page.mouse.wheel(0, 3000)
     for control in ("#panic-button", "#apply-button", "#router-wifi-toggle"):
         expect(page.locator(control)).to_be_in_viewport()
@@ -104,11 +107,21 @@ def check_reveal(page):
 
 
 def check_narrow(page):
-    page.set_viewport_size({"width": 390, "height": 844})
-    assert page.evaluate("document.documentElement.scrollWidth") <= 391
-    expect(page.locator("#panic-button")).to_be_visible()
-    for name in PAGES:
-        expect(page.locator(f'[data-page-link="{name}"]')).to_be_visible()
+    # A phone keeps every page link in one row and Panic and the router switch in the bar at
+    # the bottom of the window, also at the end of the longest page. A page link shows the page.
+    for width, height in ((320, 568), (360, 640), (390, 844)):
+        page.set_viewport_size({"width": width, "height": height})
+        assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
+        for name in PAGES:
+            expect(page.locator(f'[data-page-link="{name}"]')).to_be_visible()
+        page.locator('[data-page-link="schedules"]').click()
+        expect(page.locator("#page-schedules")).to_be_focused()
+        expect(page.locator("#page-schedules")).to_be_in_viewport()
+        page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
+        for control in ("#panic-button", "#router-wifi-toggle"):
+            expect(page.locator(control)).to_be_in_viewport(ratio=1)
+        page.locator('[data-page-link="devices"]').click()
+        expect(page.locator("#page-devices")).to_be_in_viewport()
 
 
 def run():

@@ -8,6 +8,8 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.phone import sidebar_control
+
 
 def run():
     environment = {**os.environ, "JITTERSIM_BROWSER_TEST_WIFI_PEER": "1"}
@@ -57,7 +59,7 @@ def run():
                     expect(page.locator("#private-dashboard")).to_be_visible()
                     expect(page.locator("#dashboard-access-list")).to_contain_text("Browser Mac")
                     expect(page.locator("#admin-credential-state")).to_contain_text("Accepted")
-                    page.locator("#open-admin-credentials").click()
+                    sidebar_control(page, "#open-admin-credentials").click()
                     page.locator("#remember-admin-token").check()
                     page.locator("#close-credentials").click()
                     page.reload()

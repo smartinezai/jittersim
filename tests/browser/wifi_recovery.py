@@ -8,6 +8,8 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.phone import sidebar_control
+
 
 def check_wifi_recovery(page):
     button = page.locator("#reset-wifi-name")
@@ -168,7 +170,8 @@ def run():
                 page.screenshot(path="test-results/wifi-pi-phone.png", animations="disabled")
                 assert page.evaluate("document.documentElement.scrollWidth") <= 391
                 page.set_viewport_size({"width": 390, "height": 360})
-                page.locator("#open-admin-credentials").click()
+                # On a phone the credential buttons are in the Controls sheet.
+                sidebar_control(page, "#open-admin-credentials").click()
                 page.locator("#admin-token").fill("browser-test")
                 expect(page.locator("#check-admin-token")).to_be_in_viewport()
                 page.locator("#check-admin-token").click()

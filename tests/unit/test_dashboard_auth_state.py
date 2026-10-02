@@ -67,9 +67,9 @@ def test_token_checks_and_edits_release_all_private_loading_states():
     checks = r"""
       function assertLocked() {
         assert.equal(adminTokenVerified, false);
-        const message = element("profiles").textContent;
+        const message = element("profiles-json").textContent;
         assert.ok(message.length > 0);
-        for (const id of ["devices", "plan", "state", "policies",
+        for (const id of ["devices-json", "plan", "state", "policies",
                           "connected-devices", "unaffected-devices", "uplink-details"])
           assert.equal(element(id).textContent, message, id);
         assert.equal(element("runtime-summary").textContent, message);

@@ -26,8 +26,25 @@ select:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px sol
 #site-rule-form { display: grid; gap: .8rem; }
 #site-rule-list { margin-top: 1.5rem; }
 #site-rule-domains { min-height: 7rem; }
-.help-icon { display: inline-grid; width: 1.8rem; height: 1.8rem; min-height: 1.8rem; flex: 0 0 auto; padding: 0; margin: 0; border-radius: 50%; background: #142338; color: #b9d8f4; cursor: pointer; }
-label > .help-icon { justify-self: start; }
+/* A help icon is a small round mark on the label line. The .content button rule gives every page
+   button a 2.75rem minimum height and the more specific selectors here win over it. The touch target
+   is the invisible ::before and it adds nothing to the layout. */
+.help-icon, .content .help-icon, .sidebar .help-icon {
+  position: relative; display: inline-grid; place-items: center; box-sizing: border-box; flex: 0 0 auto;
+  width: 1.25rem; height: 1.25rem; min-width: 0; min-height: 0; margin: 0; padding: 0;
+  border: 1px solid #4f6c8c; border-radius: 50%; background: #142338; color: #b9d8f4;
+  font-size: 0.75rem; font-weight: 700; line-height: 1; text-align: center; cursor: help;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.help-icon::before {
+  content: ""; position: absolute; top: 50%; left: 50%; width: 2rem; height: 2rem;
+  transform: translate(-50%, -50%); border-radius: 50%;
+}
+.help-icon:hover, .help-icon[aria-expanded="true"] { background: #1f3a58; border-color: #8fc4f5; color: #fff; }
+.help-icon:focus-visible { outline: 2px solid #70b7ff; outline-offset: 2px; border-color: #70b7ff; color: #fff; }
+.field-label .help-icon { align-self: center; }
+.randomness-title .help-icon { vertical-align: middle; margin-left: 0.25rem; }
+.sidebar .sidebar-action-row .help-icon { margin: 0 0.4rem; }
 .help-icon.field-help::after, .help-icon.field-help:hover::after, .help-icon.field-help:focus-visible::after { display: none; content: none; }
 .field-tooltip { position: fixed; z-index: 120; max-width: min(24rem, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: auto; padding: .9rem 1rem; border: 1px solid #547392; border-radius: var(--radius); background: #08101c; color: #dcecff; font-size: .9rem; line-height: 1.55; box-shadow: 0 .5rem 1.5rem #0008; }
 #profile-form > .fields { margin-bottom: 1.5rem; }
@@ -42,8 +59,11 @@ label > .help-icon { justify-self: start; }
 @media (max-width: 600px) {
   .access-rule-row { align-items: flex-start; flex-direction: column; gap: .5rem; }
   .access-actions button { flex: 1 1 auto; }
-  .help-icon { width: 2.75rem; height: 2.75rem; min-height: 2.75rem; }
   .panic-button { grid-column: 1 / -1; }
-  .field-label { flex-wrap: wrap; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+/* Phones and touch screens: the invisible target grows to 44px. The sidebar icon has room for it in its margin. */
+@media (max-width: 48rem), (pointer: coarse) {
+  .help-icon::before { width: 2.75rem; height: 2.75rem; }
+  .sidebar .sidebar-action-row .help-icon { margin: 0 0.75rem; }
+}

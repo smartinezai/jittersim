@@ -373,6 +373,10 @@ class UpdateTests(unittest.TestCase):
                         # It refuses to run while the update service runs and no
                         # unit waits to be retired. A test below keeps that true.
                         continue
+                    if script == "upgrade-notice.py":
+                        # It prints a notice for the person who runs the installer. An update
+                        # from the dashboard has no terminal and the Traffic page says it.
+                        continue
                     if script == "replace-source.py":
                         # The update replaces the same folders itself.
                         self.assertFalse((self.code / "build").exists())

@@ -8,6 +8,8 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.phone import is_phone, open_status, sidebar_control
+
 MAC_ADDRESS = "02:00:00:00:00:01"
 CLIENT_NAME = "Fixture laptop"
 PROFILE_NAME = "Shared slow network"
@@ -36,12 +38,21 @@ def devices_line(page):
     return page.locator("#status-devices-plain, #status-devices-summary").locator("visible=true")
 
 
+def show_status(page):
+    """On a phone the full status block opens from the one line strip in the header."""
+
+    if is_phone(page):
+        expect(page.locator("#status-strip")).to_be_visible()
+        open_status(page)
+
+
 def wait_for_automatic_token_check(page):
     # The check ends after many requests to a dashboard that answers one at a time.
     # A slow shared CI machine needs more than 5 seconds (like apply_clarity).
     expect(page.locator("#message")).to_contain_text(
         "Token accepted. Diagnostics loaded.", timeout=20000
     )
+    show_status(page)
 
 
 def check_width(browser, width, height):
@@ -98,7 +109,8 @@ def check_width(browser, width, height):
         # nothing to open when there is no list of devices
         expect(page.locator("#status-devices")).to_be_hidden()
         # the collapsed block stays small so that the footer buttons keep their place
-        assert status.bounding_box()["height"] <= 52, status.bounding_box()
+        if not is_phone(page):
+            assert status.bounding_box()["height"] <= 52, status.bounding_box()
 
         # the general profile reaches the one connected client
         expect(page.locator("#general-profile-select")).to_be_enabled()
@@ -196,7 +208,7 @@ def check_width(browser, width, height):
         expect(devices_line(page)).to_have_text("Profiles off")
 
         # clearing the token takes the block and the names out of the page
-        page.locator("#open-admin-credentials").click()
+        sidebar_control(page, "#open-admin-credentials").click()
         page.locator("#clear-admin-token").click()
         expect(status).to_be_hidden()
         expect(page.locator("#status-general")).to_have_text("")
