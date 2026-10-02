@@ -25,7 +25,7 @@ HOST = "jittersim@192.168.0.17"
 MANAGER = "/usr/local/lib/jittersim-update.py"
 SHELLS = [shell for shell in ("/bin/sh", "/bin/bash", shutil.which("dash")) if shell and
           Path(shell).exists()]
-CONNECTION = ["-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o",
+CONNECTION = ["-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=15", "-o",
               "ServerAliveCountMax=3", "-o", "IdentitiesOnly=yes"]
 BATCH_OPTIONS = ["-o", "BatchMode=yes", *CONNECTION]
 TERMINAL_OPTIONS = ["-t", *CONNECTION]
@@ -95,6 +95,22 @@ sys.exit(int(os.environ.get("FAKE_TERMINAL_EXIT", "0")))
 '''
 
 
+# ifconfig and route as the Mac prints them. They log nothing: the tests count ssh and scp calls.
+# The default is a Mac on the home network.
+NETWORK_FAKE = r'''#!/bin/sh
+case "$(basename "$0")" in
+    ifconfig)
+        printf 'lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384\n\tinet 127.0.0.1 netmask 0xff000000\n'
+        printf 'en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n'
+        printf '\tinet %s netmask 0xffffff00 broadcast 255.255.255.255\n' "${FAKE_ADDRESS:-192.168.0.23}"
+        ;;
+    route)
+        printf '   route to: default\n destination: default\n     gateway: %s\n  interface: en0\n' "${FAKE_GATEWAY:-192.168.0.1}"
+        ;;
+esac
+'''
+
+
 @pytest.fixture
 def fakes(tmp_path):
     return make_fakes(tmp_path)
@@ -106,6 +122,10 @@ def make_fakes(tmp_path):
     for name in ("ssh", "scp", "sleep"):
         path = bin_directory / name
         path.write_text(FAKE)
+        path.chmod(0o755)
+    for name in ("ifconfig", "route"):
+        path = bin_directory / name
+        path.write_text(NETWORK_FAKE)
         path.chmod(0o755)
     key = tmp_path / "keys dir" / "it's_ed25519"
     key.parent.mkdir()
@@ -185,10 +205,10 @@ def test_dry_run_prints_every_command_and_runs_none(fakes):
     assert list(fakes["copies"].iterdir()) == []
     printed = [line for line in result.stdout.splitlines() if line.startswith("+ ")]
     assert printed[0].startswith("+ sh deploy/raspberry-pi/build-release.sh ")
-    assert printed[1].startswith("+ ssh -o BatchMode=yes -o ConnectTimeout=10")
+    assert printed[1].startswith("+ ssh -o BatchMode=yes -o ConnectTimeout=8")
     assert shlex.split(printed[1][2:])[-1] == PROBE
-    assert printed[2].startswith("+ scp -o BatchMode=yes -o ConnectTimeout=10")
-    assert printed[3].startswith("+ ssh -t -o ConnectTimeout=10 -o ServerAliveInterval=15")
+    assert printed[2].startswith("+ scp -o BatchMode=yes -o ConnectTimeout=8")
+    assert printed[3].startswith("+ ssh -t -o ConnectTimeout=8 -o ServerAliveInterval=15")
     assert " stage " in printed[3] and "&& sudo jittersim update install --yes" in printed[3]
     assert "sudo systemctl start jittersim-update.service" in printed[3]
     assert printed[4].endswith(" 'jittersim update check'")
@@ -671,3 +691,63 @@ needs_a_checkout = pytest.mark.skipif(
 for _name, _test in list(globals().items()):
     if _name.startswith("test_") and _name not in WITHOUT_GIT:
         globals()[_name] = needs_a_checkout(_test)
+
+
+# The Mac on the Pi's test Wi-Fi
+
+
+TEST_WIFI_WORDS = "SSH from the test Wi-Fi is blocked on purpose; join the home network or use Ethernet"
+
+
+@pytest.mark.parametrize("environment", [
+    {"FAKE_ADDRESS": "192.168.50.23"},
+    {"FAKE_GATEWAY": "192.168.50.1"},
+], ids=["address", "gateway"])
+@pytest.mark.parametrize("arguments", [[], ["--install"], ["--dry-run"]])
+def test_a_mac_on_the_test_wifi_stops_before_anything_is_built_or_sent(fakes, arguments,
+                                                                      environment):
+    result, calls = deploy(fakes, *arguments, **environment)
+    assert result.returncode != 0
+    assert TEST_WIFI_WORDS in result.stderr
+    # The exact command to retry once the Mac is on the home network.
+    retry = result.stderr.rstrip().splitlines()[-1].strip()
+    assert retry.startswith("deploy/raspberry-pi/deploy-from-mac.sh --key ")
+    assert retry.endswith("".join(f" {a}" for a in arguments))
+    assert calls == []
+    assert "Commit:" not in result.stdout
+    assert list(fakes["tmp"].iterdir()) == []
+
+
+def test_a_pi_address_on_the_test_wifi_stops_before_ssh(fakes):
+    result, calls = deploy(fakes, "--host", "jittersim@192.168.50.1")
+    assert result.returncode != 0
+    assert TEST_WIFI_WORDS in result.stderr
+    assert "--host jittersim@192.168.50.1" in result.stderr
+    assert calls == []
+
+
+def test_the_retry_command_quotes_odd_arguments(fakes):
+    result, _ = deploy(fakes, "--ref", "my branch", FAKE_ADDRESS="192.168.50.9")
+    assert "--ref 'my branch'" in result.stderr
+
+
+def test_a_similar_address_is_not_the_test_wifi(fakes):
+    for address in ("192.168.5.23", "10.192.168.50", "192.168.150.4"):
+        result, calls = deploy(fakes, "--dry-run", FAKE_ADDRESS=address, FAKE_GATEWAY="192.168.5.1")
+        assert result.returncode == 0, (address, result.stderr)
+        assert TEST_WIFI_WORDS not in result.stderr
+
+
+def test_the_network_check_can_be_skipped_on_purpose(fakes):
+    result, calls = deploy(fakes, "--skip-network-check", "--dry-run",
+                           FAKE_ADDRESS="192.168.50.23")
+    assert result.returncode == 0, result.stderr
+    assert TEST_WIFI_WORDS not in result.stderr
+
+
+def test_every_connection_has_a_short_timeout_and_a_plain_message(fakes):
+    result, calls = deploy(fakes, FAKE_PROBE_EXIT="255")
+    assert result.returncode != 0
+    assert NETWORK_HINT in result.stderr
+    assert calls and all("ConnectTimeout=8" in call["argv"] for call in calls
+                         if call["tool"] == "ssh")
