@@ -253,6 +253,21 @@ def test_the_fetch_unit_is_a_root_one_shot_that_needs_a_request():
     assert "[Install]" not in text
 
 
+def test_the_fetch_unit_that_holds_the_token_is_locked_down():
+    text = (ROOT / "deploy/raspberry-pi/jittersim-update-fetch.service").read_text()
+    lines = set(text.splitlines())
+    # It talks to GitHub and to systemd. It needs no other kind of socket.
+    assert "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK" in lines
+    for line in ("ProtectSystem=full", "ProtectHome=true", "PrivateTmp=true", "PrivateDevices=true",
+                 "ProtectKernelTunables=true", "ProtectKernelModules=true",
+                 "ProtectKernelLogs=true", "ProtectControlGroups=true", "RestrictNamespaces=true",
+                 "RestrictSUIDSGID=true", "LockPersonality=true", "UMask=0077",
+                 "SystemCallArchitectures=native"):
+        assert line in lines, line
+    # A stuck download is ended by systemd shortly after the five minute limit of the manager.
+    assert "TimeoutStartSec=6min" in lines
+
+
 def test_the_installer_and_the_recovery_list_know_the_fetch_unit():
     installer = (ROOT / "deploy/raspberry-pi/install.sh").read_text()
     assert "jittersim-update-fetch.service" in installer

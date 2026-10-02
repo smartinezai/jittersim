@@ -1287,6 +1287,11 @@ def _outcome(result, message, **more):
 
 
 def _check_online(root, code, config, source):
+    # Only one check runs at a time (online_lock), so every online- folder is left over from
+    # a check that systemd ended.
+    for left in root.glob("online-*"):
+        if left.is_dir() and not left.is_symlink():
+            shutil.rmtree(left, ignore_errors=True)
     token = read_token(config)
     deadline = time.monotonic() + source.total
     body = _download(source, source.url("releases/latest"), token, "application/vnd.github+json",

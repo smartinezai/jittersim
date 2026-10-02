@@ -219,6 +219,18 @@ def test_the_asset_url_is_built_from_the_id_and_not_taken_from_the_answer(online
     assert all("evil" not in item["host"] for item in online.github.requests)
 
 
+def test_a_download_folder_left_by_a_killed_check_is_removed_by_the_next_one(online):
+    # systemd ends a stuck check and nothing then cleans up its half-downloaded archive.
+    left = online.pi.root / "online-killed"
+    left.mkdir()
+    (left / ARCHIVE_NAME).write_bytes(b"x" * 1000)
+    other = online.pi.root / "staged-not-mine"
+    other.mkdir()
+    online.check()
+    assert not left.exists()
+    assert other.exists()
+
+
 def test_a_second_check_of_the_same_release_downloads_nothing(online):
     online.check()
     count = len(online.github.requests)
