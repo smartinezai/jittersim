@@ -511,7 +511,7 @@ def check_width(browser, width, height):
         # the help text beside each button opens on hover and on keyboard focus
         apply_icon = page.locator("#apply-button + .help-icon")
         reset_icon = page.locator("#reset-button + .help-icon")
-        expect(apply_icon).to_have_attribute("aria-label", "Start or re-apply saved settings help")
+        expect(apply_icon).to_have_attribute("aria-label", "Start help")
         assert not tip_of(page, apply_icon)["shown"]
         apply_icon.hover()
         tip = tip_of(page, apply_icon)

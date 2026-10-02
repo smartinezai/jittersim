@@ -1123,7 +1123,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         <div class="sidebar-actions">
           <div class="sidebar-action-row">
             <button id="apply-button" class="primary" type="button">Start</button>
-            <span class="help-icon" tabindex="0" role="img" aria-label="Start or re-apply saved settings help" data-help="Starts everything you saved: device and group profiles and schedules and limits and service lists and access rules. Then saved changes apply on their own within a few seconds. Reset or Panic stops the profiles. Protected devices stay untouched.">?</span>
+            <span class="help-icon" tabindex="0" role="img" aria-label="Start help" data-help="Starts everything you saved: device and group profiles and schedules and limits and service lists and access rules. Then saved changes apply on their own within a few seconds. Reset or Panic stops the profiles. Protected devices stay untouched.">?</span>
           </div>
           <p id="apply-summary" class="apply-summary" aria-live="polite" hidden></p>
           <div class="sidebar-action-row">
@@ -1798,7 +1798,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         </label>
         <button type="button" id="service-list-add-observed">Add to hostnames</button>
       </div>
-      <p class="form-note">While a list is on, traffic to its services gets the list's profile instead of the device or general profile. Protected devices are not touched. Global access rules still apply. A hostname also matches its subdomains and can only be in one enabled list. Matching follows the DNS answers that devices receive from the Pi, so encrypted DNS, VPNs and apps that use fixed addresses are not covered. Other sites on the same server address are shaped the same way. Check the names a real session uses and add any that are missing. The profile's website list and random outages are not used for service lists.</p>
+      <p class="form-note">While a list is on, traffic to its services gets the list's profile instead of the device profile or the profile for Everyone. Protected devices are not touched. Global access rules still apply. A hostname also matches its subdomains and can only be in one enabled list. Matching follows the DNS answers that devices receive from the Pi, so encrypted DNS, VPNs and apps that use fixed addresses are not covered. Other sites on the same server address are shaped the same way. Check the names a real session uses and add any that are missing. The profile's website list and random outages are not used for service lists.</p>
       <button class="primary" type="submit">Save service list</button>
     </form>
     <div id="service-list-list" class="quota-list" aria-live="polite">Enter the admin token to view service lists.</div>
@@ -2415,9 +2415,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     // Nothing here may name the product: this text shows before anyone has signed in. The setup
     // notes hold the exact command.
     adminTokenHelp.textContent =
-      "The token is stored on the Pi. The setup notes show the ssh command that prints it for " +
-      window.location.hostname + ".\n" +
-      "Copy the output into this field. Keep the token private.";
+      "The token is stored on the Pi. The setup notes show how to read it there.\n" +
+      "Copy it into this field. Keep the token private.";
 
     // The product name, the command name and the default Wi-Fi name come from a private route
     // after the token is accepted. Until then the page stays neutral.
@@ -2763,10 +2762,12 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
     }
 
-    function rememberedUntil(expires) {
-      return new Date(expires).toLocaleString(
-        "en-GB", { weekday: "short", hour: "2-digit", minute: "2-digit" }
-      );
+    // Longer than a day needs the date too: a weekday alone could mean this week or next month.
+    function rememberedUntil(expires, long) {
+      const options = long
+        ? { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }
+        : { weekday: "short", hour: "2-digit", minute: "2-digit" };
+      return new Date(expires).toLocaleString("en-GB", options);
     }
 
     // renew names the credential a person has just checked again. If it was accepted its
@@ -2813,7 +2814,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           note = "Forgot the saved " + config.noun + " after " + expiredNotice[kind] + ".";
         } else if (!note && box.checked) {
           note = saved && saved.value === value
-            ? "Remembered until " + rememberedUntil(saved.expires) + "."
+            ? "Remembered until " + rememberedUntil(saved.expires, savedHours(saved) > 24) + "."
             : "Will be remembered for " + REMEMBER_CHOICES[rememberHours(kind)] + " once accepted.";
         }
         element(config.note).textContent = note;
@@ -2863,6 +2864,13 @@ DASHBOARD_HTML = r"""<!doctype html>
         // The choice is used for this visit only.
       }
       expiredNotice.admin = false;
+      // A shorter time cuts what is saved at once, even if the token is not checked again.
+      // A longer one only counts once the token has been accepted.
+      const saved = savedCredential("admin");
+      if (
+        saved && saved.value === ownedRemembered.admin &&
+        saved.expires > Date.now() + rememberHours("admin") * REMEMBER_HOUR_MS
+      ) saveCredential("admin", saved.value);
       syncRememberedCredentials("admin");
     });
 
@@ -6644,6 +6652,8 @@ DASHBOARD_HTML = r"""<!doctype html>
           status.textContent = access.can_register ? "Token accepted. Choose Allow this device."
             : "Token accepted but device verification is pending. Wait a few seconds and check again.";
           status.className = "token-check-status success";
+          // The status line is not read out. The toast says it and replaces the working message.
+          showMessage(status.textContent, "info");
           return;
         }
         const result = await loadAdminTools();
@@ -12927,7 +12937,7 @@ class ControlServer(HTTPServer):
     def _change_general_profile(self, payload: dict, *, stop: bool):
         if self.helper_client is None:
             return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
-                {"error": "Connect the Pi networking helper to apply a general profile"}
+                {"error": "Connect the Pi networking helper to apply a profile for everyone"}
             )
         operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
         with operation:

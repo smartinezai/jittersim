@@ -70,6 +70,8 @@ def run():
                     page.locator("#admin-token").fill("browser-test")
                     page.locator("#check-admin-token").click()
                     expect(page.locator("#token-check-status")).to_contain_text("Allow this device")
+                    # The status line is silent, so the toast says it and the working message is gone.
+                    expect(page.locator("#toast-message")).to_have_text("Token accepted. Choose Allow this device.")
                     expect(page.locator("#allow-dashboard-device")).to_be_enabled()
                     expect(page.locator("#private-dashboard")).to_be_hidden()
                     assert not any(url.endswith("/api/devices") for url in requested)

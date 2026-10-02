@@ -735,8 +735,7 @@ def test_the_apply_and_reset_buttons_each_have_a_help_icon():
         dock,
     )
     by_label = dict(helps)
-    # One label for both states because the button reads Start or Re-apply.
-    apply_help = by_label["Start or re-apply saved settings help"]
+    apply_help = by_label["Start help"]
     reset_help = by_label["Reset network help"]
     assert len(apply_help) <= 280
     for fact in (

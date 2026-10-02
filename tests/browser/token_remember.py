@@ -5,6 +5,7 @@ The page runs on a fake clock so the journey can move a day on in a moment.
 
 import json
 import os
+import re
 import selectors
 import subprocess
 import sys
@@ -110,6 +111,8 @@ def run_width(browser, base, width, height):
     assert page.evaluate("(key) => window.localStorage.getItem(key)", CHOICE_KEY) == "168"
     box.check()
     expect(note).to_contain_text("Remembered until")
+    # A week away needs the date. A weekday alone could mean this week or next month.
+    expect(note).to_contain_text(re.compile(r"Remembered until \w{3},? \d{1,2} \w{3}"))
     week = saved_entry(page)
     assert week["value"] == TOKEN and week["hours"] == 168, week
     assert 7 * DAY_MS - 2 * MINUTE_MS < week["expires"] - page.evaluate("Date.now()") <= 7 * DAY_MS, week

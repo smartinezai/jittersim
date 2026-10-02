@@ -410,7 +410,7 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
         ):
             raise PlanCodecError("everyone_else.unaffected_macs is invalid")
         if general_profile is not None:
-            raise PlanCodecError("a general profile already covers everyone else")
+            raise PlanCodecError("a profile set for Everyone already covers everyone else")
         if (
             mark <= len(mark_data) + len(service_quota_rules) + len(service_assignment_rules)
             or mark > MAX_SHAPED_MARKS_PER_PLAN

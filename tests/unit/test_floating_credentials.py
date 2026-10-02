@@ -113,8 +113,8 @@ function rememberNote(kind) {
   return element(kind === "admin" ? "remember-admin-token-note" : "remember-router-password-note")
     .textContent;
 }
-function untilNote(expires) {
-  return "Remembered until " + rememberedUntil(expires) + ".";
+function untilNote(expires, long) {
+  return "Remembered until " + rememberedUntil(expires, long) + ".";
 }
 function savedEntry(key) {
   return JSON.parse(storage.get(key));
@@ -675,7 +675,7 @@ CASES = {
       storage.set(ADMIN_KEY, JSON.stringify({value: "saved token", expires: ends, hours: 720}));
       await restoreRememberedCredentials();
       assert.equal(element("remember-admin-duration").value, "720");
-      assert.equal(rememberNote("admin"), untilNote(ends));
+      assert.equal(rememberNote("admin"), untilNote(ends, true));
       clock = ends;
       syncRememberedCredentials();
       assert.equal(storage.has(ADMIN_KEY), false);
@@ -683,6 +683,49 @@ CASES = {
       // A choice that is not on the list falls back to 24 hours.
       element("remember-admin-duration").value = "9999";
       tick("remember-admin-token", true);
+      assert.deepEqual(savedEntry(ADMIN_KEY), {value: "saved token", expires: clock + DAY});
+    """,
+    "a_token_that_still_needs_this_device_to_be_allowed_is_announced_and_replaces_the_working_message": r"""
+      loadDashboardAccess = async () => ({allowed: false, can_register: true});
+      enter("admin-token", "fixture token");
+      await clickCheckToken();
+      // The status line is not a live region any more, so the toast is the only announcement.
+      assert.deepEqual(messages.at(-1), {text: "Token accepted. Choose Allow this device.", kind: "info"});
+      assert.notEqual(messages.at(-1).kind, "working");
+      loadDashboardAccess = async () => ({allowed: false, can_register: false});
+      await clickCheckToken();
+      assert.match(messages.at(-1).text, /^Token accepted but device verification is pending/);
+      assert.equal(messages.at(-1).kind, "info");
+    """,
+    "a_token_remembered_for_longer_than_a_day_names_the_day_it_ends": r"""
+      const ends = clock + 3 * DAY;
+      storage.set(ADMIN_KEY, JSON.stringify({value: "saved token", expires: ends, hours: 168}));
+      await restoreRememberedCredentials();
+      const day = new Date(ends).toLocaleString("en-GB", {day: "numeric", month: "short"});
+      assert.ok(rememberNote("admin").includes(day), rememberNote("admin") + " should name " + day);
+      // A token kept for 24 hours still shows only the weekday and the time.
+      storage.set(ADMIN_KEY, JSON.stringify({value: "saved token", expires: clock + 4 * HOUR}));
+      await restoreRememberedCredentials();
+      assert.ok(!rememberNote("admin").includes(day), rememberNote("admin"));
+      assert.equal(rememberNote("admin"), untilNote(clock + 4 * HOUR));
+    """,
+    "a_shorter_choice_cuts_a_saved_token_at_once_even_before_it_is_checked_again": r"""
+      storage.set(ADMIN_KEY, JSON.stringify({value: "saved token", expires: clock + 20 * DAY, hours: 720}));
+      await restoreRememberedCredentials();
+      assert.equal(element("remember-admin-duration").value, "720");
+      // The person is typing another token, so the saved one is not checked again.
+      enter("admin-token", "another token");
+      element("remember-admin-duration").value = "168";
+      element("remember-admin-duration").dispatchEvent(new Event("change"));
+      assert.deepEqual(
+        savedEntry(ADMIN_KEY), {value: "saved token", expires: clock + 7 * DAY, hours: 168});
+      // Choosing a longer time never extends a token that was not checked again.
+      element("remember-admin-duration").value = "720";
+      element("remember-admin-duration").dispatchEvent(new Event("change"));
+      assert.deepEqual(
+        savedEntry(ADMIN_KEY), {value: "saved token", expires: clock + 7 * DAY, hours: 168});
+      element("remember-admin-duration").value = "24";
+      element("remember-admin-duration").dispatchEvent(new Event("change"));
       assert.deepEqual(savedEntry(ADMIN_KEY), {value: "saved token", expires: clock + DAY});
     """,
     "the_check_on_load_and_other_buttons_keep_the_end_time": r"""

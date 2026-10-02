@@ -5,6 +5,10 @@ import re
 import pytest
 
 from jittersim.api.server import DASHBOARD_HTML, _connected_device_payload
+from jittersim.config.exemptions import UnaffectedDevice
+from jittersim.config.models import Device, Impairment, Profile
+from jittersim.config.storage import ConfigRepository
+from jittersim.engine.eligibility import device_protection_states
 
 # Words the glossary retired. Each idea has one name now: Protected, Start, Stop, Everyone.
 RETIRED = (
@@ -97,3 +101,39 @@ def test_the_hints_point_at_the_profiles_page():
     assert "Create a group below" not in DASHBOARD_HTML
     assert "Create a saved profile below" not in DASHBOARD_HTML
     assert '"Create a group on the Profiles page"' in DASHBOARD_HTML
+
+
+def test_no_label_a_screen_reader_reads_still_says_re_apply():
+    # The help icon beside Start is read out loud, so its label follows the same word.
+    assert "re-apply" not in DASHBOARD_HTML.lower()
+    assert 'aria-label="Start help"' in DASHBOARD_HTML
+
+
+def test_a_service_list_note_names_the_profile_set_for_everyone_not_a_general_profile():
+    note = re.search(r'<p class="form-note">While a list is on[^<]*</p>', DASHBOARD_HTML).group(0)
+    assert "general profile" not in note
+    assert "profile for Everyone" in note
+
+
+def test_the_notes_about_a_paused_saved_device_say_protected_and_not_unaffected(tmp_path):
+    repository = ConfigRepository(tmp_path / "settings.db")
+    try:
+        repository.save_profile(Profile(id="slow", name="Slow", upload=Impairment(delay_ms=100)))
+        repository.save_device(Device("laptop", "Laptop", "192.168.50.20", "slow", "aa:bb:cc:dd:ee:01"))
+        repository.save_device(Device("tablet", "Tablet", "192.168.50.21", "slow"))
+        repository.save_unaffected_device(UnaffectedDevice("aa:bb:cc:dd:ee:01", "Laptop", 1))
+        states = device_protection_states(
+            repository, {"association_status_available": True, "devices": []})
+    finally:
+        repository.close()
+    notes = [state["effective_note"] for state in states.values() if state["effective_note"]]
+    assert len(notes) == 2, states
+    assert not [note for note in notes if "naffected" in note], notes
+    assert any("Protected list" in note for note in notes), notes
+
+
+def test_the_token_hint_does_not_promise_a_command_the_setup_notes_do_not_have():
+    # The setup notes show how to read the token on the Pi. They have no ssh command for a Mac.
+    hint = re.search(r'adminTokenHelp\.textContent =(.*?);\n', DASHBOARD_HTML, re.DOTALL).group(1)
+    assert "ssh" not in hint.lower()
+    assert "setup notes" in hint and "stored on the Pi" in hint
