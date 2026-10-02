@@ -103,7 +103,11 @@ from jittersim.engine.compiler import (
     PlanError,
 )
 from jittersim.engine.conditions import device_conditions, everyone_else_condition
-from jittersim.engine.eligibility import eligible_clients, station_snapshot
+from jittersim.engine.eligibility import (
+    device_protection_states,
+    eligible_clients,
+    station_snapshot,
+)
 from jittersim.engine.plan import EVERYONE_ELSE_QUEUE_ID, GENERAL_QUEUE_ID, NetworkPlan
 from jittersim.engine.progression import progression_factor
 from jittersim.engine.runtime import RuntimeScheduler
@@ -947,6 +951,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       vertical-align: top;
     }
     .data-table td strong { color: #edf5ff; }
+    .data-table tr.protected td, .data-table tr.paused td { color: #8493a6; background: #111b29; }
+    .data-table tr.protected td strong, .data-table tr.paused td strong { color: #c3cfde; }
+    .data-table tr.protected td small, .data-table tr.paused td small { color: #8493a6; }
     .data-table td small { display: block; color: #91a8c1; font-size: 0.76rem; }
     .row-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.4rem; }
     .row-actions button { margin-top: 0; padding: 0.35rem 0.6rem; }
@@ -3809,7 +3816,9 @@ DASHBOARD_HTML = r"""<!doctype html>
               .filter((client) => !client.unaffected && client.association_verified !== false)
               .map((client) => ({name: nameOf(client), profile: generalName}))
           : clients
-              .filter((client) => !client.unaffected && client.assigned_device_id)
+              .filter((client) => !client.unaffected && client.assigned_device_id &&
+                client.assigned_effective_state !== "unverified" &&
+                client.assigned_effective_state !== "protected")
               .map((client) => ({
                 name: nameOf(client),
                 profile: profileNameOf(client.group_profile_id || client.assigned_profile_id)
@@ -4051,7 +4060,9 @@ DASHBOARD_HTML = r"""<!doctype html>
         const generalProfile = generalProfileState.profile ? generalProfileState.profile : null;
         const protectedMacs = new Set(unaffectedMacs);
         const affected = savedDevices.filter(
-          (device) => !device.mac_address || !protectedMacs.has(device.mac_address)
+          (device) => device.effective_state !== "protected" &&
+            device.effective_state !== "unverified" &&
+            (!device.mac_address || !protectedMacs.has(device.mac_address))
         );
         const affectedIds = new Set(affected.map((device) => device.id));
         text = savedLine({
@@ -7982,8 +7993,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       const head = document.createElement("thead");
       head.appendChild(headRow);
       const body = document.createElement("tbody");
-      rows.forEach(({ cells, actions }) => {
+      rows.forEach(({ cells, actions, rowClass }) => {
         const row = document.createElement("tr");
+        if (rowClass) row.className = rowClass;
         cells.forEach((value) => row.appendChild(tableCell(value)));
         const actionCell = document.createElement("td");
         const actionGroup = document.createElement("div");
@@ -8166,19 +8178,72 @@ DASHBOARD_HTML = r"""<!doctype html>
       };
     }
 
+    // A saved profile that is paused because the device is protected or cannot be
+    // checked against the Unaffected list is never shown as applied or degraded.
+    function deviceIsPaused(device) {
+      return !!device && (device.effective_state === "protected" || device.effective_state === "unverified");
+    }
+
+    function deviceProfileCell(device) {
+      if (deviceIsPaused(device)) return [profileName(device.profile_id), "Saved profile · paused"];
+      return appliedProfileCell(profileName(device.profile_id),
+        Object.prototype.hasOwnProperty.call(deviceConditions.devices, device.id)
+          ? deviceConditions.devices[device.id] : null);
+    }
+
+    function deviceStateCell(device) {
+      if (device.effective_state === "protected") {
+        return ["Protected: profile paused", "Unaffected by profiles · Traffic is not monitored"];
+      }
+      if (device.effective_state === "unverified") {
+        return ["Profile paused", device.effective_note ||
+          "This saved device has no MAC address so JitterSim cannot check it against the Unaffected list."];
+      }
+      return deviceConditionCell(device.id);
+    }
+
+    function deviceRowClass(device) {
+      return device.effective_state === "protected" ? "protected"
+        : device.effective_state === "unverified" ? "paused" : "";
+    }
+
+    async function saveObservedMac(device, button) {
+      const match = device.protected_match;
+      if (!match) return;
+      setButtonBusy(button, true);
+      try {
+        await request("/api/devices", "POST", {
+          id: device.id, name: device.name, ipv4_address: device.ipv4_address,
+          profile_id: device.profile_id, mac_address: match.mac_address,
+          expected: {
+            id: device.id, name: device.name, ipv4_address: device.ipv4_address,
+            profile_id: device.profile_id, mac_address: device.mac_address
+          }
+        });
+        refreshAfterSuccess("Saved the MAC address. " + (match.name || "This device") + " is now protected.");
+      } catch (error) {
+        showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
+      }
+    }
+
     function renderDeviceTable() {
       const rows = devices.map((device) => ({
+        rowClass: deviceRowClass(device),
         cells: [
           [deviceDisplayName(device), device.id],
           [device.ipv4_address, device.mac_address || "No MAC address"],
-          appliedProfileCell(profileName(device.profile_id),
-            Object.prototype.hasOwnProperty.call(deviceConditions.devices, device.id)
-              ? deviceConditions.devices[device.id] : null),
-          deviceConditionCell(device.id)
+          deviceProfileCell(device),
+          deviceStateCell(device)
         ],
         actions: [
           ["Open controls", () => openDevice(device.id)],
           ["Edit", () => fillDeviceForm(device)],
+          ...(device.protected_match
+            ? [["Save MAC " + device.protected_match.mac_address,
+                (button) => saveObservedMac(device, button)]]
+            : []),
           ["Delete", (button) => deleteDevice(device, button)]
         ]
       }));
@@ -9997,9 +10062,16 @@ def _impact_queue_name(
 
 
 def _device_payload(
-    device: Device, *, labels_by_mac: Dict[str, Dict[str, str]]
+    device: Device,
+    *,
+    labels_by_mac: Dict[str, Dict[str, str]],
+    state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    state = state or {}
     return {
+        "effective_state": state.get("effective_state", "active"),
+        "effective_note": state.get("effective_note"),
+        "protected_match": state.get("protected_match"),
         "id": device.id,
         "name": device.name,
         "display_name": _device_display_name(device, labels_by_mac),
@@ -10726,8 +10798,9 @@ class ControlServer(HTTPServer):
             return HTTPStatus.OK, "application/json", _json_bytes(self._general_profile_status())
         if path == "/api/devices":
             labels_by_mac = self.repository.list_connected_device_labels()
+            states = self._device_protection_states()
             devices = [
-                _device_payload(device, labels_by_mac=labels_by_mac)
+                _device_payload(device, labels_by_mac=labels_by_mac, state=states.get(device.id))
                 for device in self.repository.list_devices()
             ]
             return HTTPStatus.OK, "application/json", _json_bytes({"devices": devices})
@@ -10978,9 +11051,15 @@ class ControlServer(HTTPServer):
                 )
                 for device in devices
             ]
+            states = device_protection_states(
+                self.repository, snapshot if protected else None
+            )
             for client in devices:
                 group = groups_by_device.get(client["assigned_device_id"])
                 client["unaffected"] = client["mac_address"] in protected
+                client["assigned_effective_state"] = states.get(
+                    client["assigned_device_id"], {}
+                ).get("effective_state")
                 client["group_id"] = group.id if group else None
                 client["group_name"] = group.name if group else None
                 client["group_profile_id"] = group.profile_id if group else None
@@ -11092,7 +11171,9 @@ class ControlServer(HTTPServer):
             if plan is None:
                 # Nothing runs on the network, so describe the saved settings.
                 # The scheduler's runtime plan would advance its rerolls.
-                plan = compile_stored_plan(repository=self.repository)
+                plan = compile_stored_plan(
+                    repository=self.repository, connected_snapshot=self._protection_snapshot()
+                )
             everyone_else = everyone_else_condition(plan)
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {
@@ -11529,8 +11610,9 @@ class ControlServer(HTTPServer):
             except DeviceConflictError as error:
                 return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
             labels_by_mac = self.repository.list_connected_device_labels()
+            state = self._device_protection_states().get(device.id)
             return HTTPStatus.OK, "application/json", _json_bytes(
-                {"device": _device_payload(device, labels_by_mac=labels_by_mac)}
+                {"device": _device_payload(device, labels_by_mac=labels_by_mac, state=state)}
             )
 
         if path in ("/api/general-profile", "/api/general-profile/stop"):
@@ -12602,6 +12684,18 @@ class ControlServer(HTTPServer):
             )
         return status, content_type, _json_bytes(response)
 
+    def _device_protection_states(self) -> Dict[str, Dict[str, Any]]:
+        """Whether each saved profile applies, using the same check as the plan."""
+
+        return device_protection_states(self.repository, self._protection_snapshot())
+
+    def _protection_snapshot(self) -> Optional[dict]:
+        """The live clients when a protected client makes identity matter."""
+
+        if self.helper_client is None or not self.repository.list_unaffected_devices():
+            return None
+        return station_snapshot(self.helper_client)
+
     def _impact_status(self) -> Dict[str, Any]:
         """Name what each applied queue did so far and list the protected devices."""
 
@@ -12643,7 +12737,10 @@ class ControlServer(HTTPServer):
         for queue in queues:
             device = devices_by_id.get(queue["device_id"])
             # A protected device has no queue. A stale plan must never put one on screen.
-            if device is not None and device.mac_address in protected_hardware:
+            # A device without a MAC address is paused while any client is protected.
+            if device is not None and protected_hardware and (
+                device.mac_address is None or device.mac_address in protected_hardware
+            ):
                 continue
             name, kind_label = _impact_queue_name(
                 queue["device_id"],
