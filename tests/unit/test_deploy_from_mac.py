@@ -316,8 +316,10 @@ def test_an_unreachable_pi_stops_before_copying_and_says_which_network(fakes, ex
     assert list(fakes["copies"].iterdir()) == []
 
 
-@pytest.mark.parametrize("hang, words", [("probe", "Checking the Pi did not finish within 60"),
-                                         ("scp", "Copying the archive did not finish within 600")])
+@pytest.mark.parametrize("hang, words", [
+    ("probe", "Checking the Pi did not finish within 60 seconds."),
+    ("scp", "Copying the archive did not finish within 600 seconds."),
+])
 def test_a_call_that_hangs_is_stopped_at_its_deadline(fakes, hang, words):
     started = time.monotonic()
     result, _ = deploy(fakes, FAKE_HANG=hang, FAKE_SLEEP_SCALE="0.002")
@@ -562,11 +564,19 @@ def test_a_missing_key_or_an_option_like_key_is_refused(fakes, tmp_path):
     assert result.returncode == 2 and calls == []
 
 
-@pytest.mark.parametrize("ref", ["-x", "--output=/tmp/x", "no-such-ref-anywhere", ""])
-def test_unsafe_or_unknown_refs_are_refused(fakes, ref):
+@pytest.mark.parametrize("ref", ["-x", "--output=/tmp/x", ""])
+def test_unsafe_refs_are_refused(fakes, ref):
     result, calls = deploy(fakes, "--ref", ref)
     assert result.returncode == 2
     assert calls == []
+    assert "refusing ref" in result.stderr
+
+
+def test_an_unknown_ref_is_refused(fakes):
+    result, calls = deploy(fakes, "--ref", "no-such-ref-anywhere")
+    assert result.returncode == 2
+    assert calls == []
+    assert "unknown ref" in result.stderr
 
 
 @pytest.mark.parametrize("arguments", [("--password", "secret"), ("--host",), ("extra",)])
@@ -604,3 +614,28 @@ def test_the_script_never_handles_a_password_or_trusts_new_host_keys():
                       "python3 -m jittersim", "accept-new", "UserKnownHostsFile"):
         assert forbidden not in source
     assert os.access(SCRIPT, os.X_OK)
+
+
+def _in_a_checkout():
+    if shutil.which("git") is None:
+        return False
+    return subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--is-inside-work-tree"],
+                          capture_output=True).returncode == 0
+
+
+# These refuse their input before the script calls git so they also run where the tests run
+# from a copy without git (the Pi release image). Every other test needs git and a checkout.
+WITHOUT_GIT = {
+    "test_unsafe_hosts_are_refused_before_anything_runs",
+    "test_letters_outside_ascii_are_refused_in_a_utf8_locale",
+    "test_a_missing_key_or_an_option_like_key_is_refused",
+    "test_unsafe_refs_are_refused",
+    "test_unknown_options_are_usage_errors",
+    "test_help_names_the_defaults_where_it_runs_and_the_network",
+    "test_the_script_never_handles_a_password_or_trusts_new_host_keys",
+}
+needs_a_checkout = pytest.mark.skipif(
+    not _in_a_checkout(), reason="the deploy script builds from a git checkout")
+for _name, _test in list(globals().items()):
+    if _name.startswith("test_") and _name not in WITHOUT_GIT:
+        globals()[_name] = needs_a_checkout(_test)

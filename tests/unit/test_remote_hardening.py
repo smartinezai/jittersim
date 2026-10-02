@@ -347,8 +347,8 @@ def test_each_verify_code_gets_its_sentence(code, message):
 def test_only_the_given_certificate_is_trusted_and_old_tls_is_refused(tmp_path):
     certificate, _ = make_certificate(tmp_path)
     dashboard = DashboardClient(Connection("https://127.0.0.1:1", certificate), None)
-    assert dashboard.context.cert_store_stats()["x509"] + dashboard.context.cert_store_stats()[
-        "x509_ca"] == 1
+    # "x509" counts every certificate (OpenSSL counts the CA ones again under "x509_ca").
+    assert dashboard.context.cert_store_stats()["x509"] == 1
     assert dashboard.context.minimum_version == ssl.TLSVersion.TLSv1_2
     assert dashboard.context.verify_mode == ssl.CERT_REQUIRED
     assert dashboard.context.check_hostname is True
