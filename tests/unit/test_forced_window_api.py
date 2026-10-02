@@ -142,6 +142,47 @@ class ServiceTests(unittest.TestCase):
         self.assertTrue(wait_until(lambda: self.client.calls[-2:] == ["pi-reset", "router-on"]))
         self.assertTrue(wait_until(lambda: service.status()["phase"] == "idle"))
 
+    def test_a_window_after_panic_starts_normally(self) -> None:
+        service = self.service()
+        service.tick()
+        service.request_end()
+        self.assertTrue(wait_until(lambda: service.status()["phase"] == "idle"))
+        self.assertTrue(wait_until(lambda: not service._end_requested.is_set()))
+        self.client.calls.clear()
+
+        self.now = saturday(16) + 7 * 24 * 3600  # the next Saturday
+        service.tick()
+
+        self.assertEqual(self.client.calls[-2:], ["copy", "router-off"])
+        self.assertTrue(service.status()["router_wifi_off"])
+
+    def test_panic_returns_at_once_while_a_helper_step_is_running(self) -> None:
+        release = threading.Event()
+        entered = threading.Event()
+        original = self.client.window_copy
+
+        def slow_copy():
+            entered.set()
+            release.wait(10)
+            return original()
+
+        self.client.window_copy = slow_copy
+        service = self.service()
+        ticking = threading.Thread(target=service.tick)
+        ticking.start()
+        self.assertTrue(entered.wait(5))
+
+        started = time.monotonic()
+        service.request_end()
+        self.assertLess(time.monotonic() - started, 1.0, "Panic must not wait for the helper step")
+
+        release.set()
+        ticking.join(10)
+        # the window never switched the router off and everything is back
+        self.assertTrue(wait_until(lambda: service.status()["phase"] == "idle"))
+        self.assertNotIn("router-off", self.client.calls)
+        self.assertEqual(self.client.calls[-2:], ["pi-reset", "router-on"])
+
     def test_the_loop_ticks_and_stops(self) -> None:
         service = self.service()
         service.start()
