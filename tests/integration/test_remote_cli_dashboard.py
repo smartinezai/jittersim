@@ -118,6 +118,8 @@ def test_every_remote_command_against_the_live_dashboard(dashboard, capsys):
     assert code == 0
     assert "JitterSim is not running. Choose Start with saved settings." in out
     assert "General profile: none" in out
+    # The fixture's helper answers the release status like a Pi without a release label.
+    assert out.splitlines()[1] == "Release on the Pi: Unversioned installation"
 
     setup = DashboardClient(Connection(url, certificate), TOKEN)
     setup.post("/api/profiles", {

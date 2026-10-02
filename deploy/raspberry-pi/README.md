@@ -750,7 +750,8 @@ The defaults are `--host jittersim@192.168.0.17` and
    Compare it with `git rev-parse --short RELEASE_REF`.
 
 The release is named after the short commit. The Pi records it in
-`/opt/jittersim/.jittersim-release.json`.
+`/opt/jittersim/.jittersim-release.json`. Setup shows it and so does
+`jittersim status` on the Mac.
 
 A Pi without the update service (a release from before staged updates) needs
 the full installer once. `--use-installer` copies the archive, checks its

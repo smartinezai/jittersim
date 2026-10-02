@@ -36,6 +36,7 @@ def test_status_lists_every_affected_device_with_the_general_profile(dashboard, 
     assert "Protected laptop" not in out
     assert "1 protected device stays untouched" in out
     assert "Service lists: Games (every unprotected device)" in out
+    assert out.splitlines()[1] == "Release on the Pi: abc1234"
     assert all(item["authorization"] == "Bearer " + TEST_TOKEN for item in dashboard.requests)
 
 
@@ -84,6 +85,7 @@ def test_status_json_shape(dashboard, capsys):
         "affected_devices": [{"name": "Phone", "profile": "Slow connection"}],
         "service_lists": [],
         "protected_connected_devices": 0,
+        "release": {"installed": "abc1234", "staged": None},
     }
 
 
@@ -119,3 +121,30 @@ def test_local_status_stays_the_pi_command_without_a_saved_connection(tmp_path, 
     assert code == 0
     assert "Database: not readable" in output.out
     assert "jittersim connect" in output.err
+
+
+@pytest.mark.parametrize(
+    "release, line",
+    [
+        ({"installed": "abc1234", "available": "def5678", "phase": "ready"},
+         "Release on the Pi: abc1234. Staged and ready to install: def5678"),
+        ({"installed": "abc1234", "available": "abc1234", "phase": "ready"},
+         "Release on the Pi: abc1234"),
+        ({"phase": "unavailable", "message": "Release controls require the Pi network helper."},
+         "Release on the Pi: unknown (Release controls require the Pi network helper.)"),
+        (None, "Release on the Pi: unknown (The dashboard does not report its release.)"),
+    ],
+)
+def test_status_names_the_release_the_pi_runs(dashboard, capsys, release, line):
+    serve_status(dashboard, release=release)
+    code, out, _, _ = run(dashboard, capsys, "status")
+    assert code == 0
+    assert out.splitlines()[1] == line
+    assert ("GET", "/api/updates") in dashboard.paths()
+
+
+def test_status_json_names_a_staged_release(dashboard, capsys):
+    serve_status(dashboard, release={"installed": "abc1234", "available": "def5678"})
+    code, out, _, _ = run(dashboard, capsys, "status", "--json")
+    assert code == 0
+    assert json.loads(out)["release"] == {"installed": "abc1234", "staged": "def5678"}

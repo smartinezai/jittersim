@@ -133,7 +133,7 @@ path or query are refused.
 
 | Command (on the Mac) | What it does |
 | --- | --- |
-| `jittersim status` | Whether JitterSim is running, the general profile and each affected connected device with its profile. Protected devices are never listed. |
+| `jittersim status` | The release the Pi runs (and a staged one), whether JitterSim is running, the general profile and each affected connected device with its profile. Protected devices are never listed. |
 | `jittersim profiles list` | The saved profiles with a one-line summary. The general profile is marked. |
 | `jittersim profiles apply-all PROFILE_ID` | Makes that profile the general profile for every connected device. Protected devices stay untouched. |
 | `jittersim profiles stop-all` | Stops the general profile. Saved device rules resume. |

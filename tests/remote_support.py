@@ -169,9 +169,16 @@ PROFILES = [
 ]
 
 
+RELEASE = {"installed": "abc1234", "available": None, "phase": "idle",
+           "message": "No approved release has been staged on this Pi.",
+           "rollback_available": False}
+
+
 def serve_status(dashboard, *, general=None, active=False, observed="applied", running=True,
-                 clients=(), lists=(), available=True):
+                 clients=(), lists=(), available=True, release=RELEASE):
     dashboard.answer("GET", "/api/health", {"status": "ok", "helper_configured": True})
+    if release is not None:
+        dashboard.answer("GET", "/api/updates", release)
     dashboard.answer("GET", "/api/state", state(observed, running))
     dashboard.answer("GET", "/api/general-profile", {
         "profile": general, "active": active, "state": state(observed)["state"]})

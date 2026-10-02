@@ -221,9 +221,9 @@ def remote_status_wanted(argv: Sequence[str], environ: Optional[Mapping[str, str
 def _status_parser() -> argparse.ArgumentParser:
     return _parser(
         "jittersim status",
-        "Show whether JitterSim is running, the general profile and the connected devices that "
-        "are affected right now with the profile each one gets. Protected devices are never "
-        "listed. On the Pi without a saved connection 'sudo jittersim status' shows the local "
+        "Show the release the Pi runs, whether JitterSim is running, the general profile and "
+        "the connected devices that are affected right now with the profile each one gets. "
+        "Protected devices are never listed. On the Pi without a saved connection 'sudo jittersim status' shows the local "
         "helper status instead.",
     )
 
@@ -239,6 +239,35 @@ def _general_status(view_text: str, general: Optional[Dict[str, Any]]) -> Option
     }
 
 
+def _release(client: DashboardClient) -> Dict[str, Any]:
+    """The release label the Pi runs and a staged one, as Setup shows them."""
+
+    try:
+        data = client.get("/api/updates")
+    except RemoteError:
+        # An older dashboard has no release controls. The rest of the status still counts.
+        return {"installed": None, "staged": None,
+                "message": "The dashboard does not report its release."}
+    installed = data.get("installed")
+    if not isinstance(installed, str) or not installed:
+        message = data.get("message")
+        return {"installed": None, "staged": None,
+                "message": message if isinstance(message, str) and message else None}
+    staged = data.get("available")
+    return {"installed": installed,
+            "staged": staged if isinstance(staged, str) and staged != installed else None,
+            "message": None}
+
+
+def _release_text(release: Dict[str, Any]) -> str:
+    if release["installed"] is None:
+        return "Release on the Pi: unknown" + (
+            f" ({release['message']})" if release["message"] else "")
+    text = f"Release on the Pi: {release['installed']}"
+    return text + (f". Staged and ready to install: {release['staged']}"
+                   if release["staged"] else "")
+
+
 @register("status", _status_parser)
 def _status(arguments: argparse.Namespace) -> int:
     client = _client(arguments)
@@ -248,6 +277,7 @@ def _status(arguments: argparse.Namespace) -> int:
     connected = client.get("/api/connected-devices")
     profiles = _require(client.get("/api/profiles").get("profiles"), list)
     lists = _require(client.get("/api/service-lists").get("service_lists"), list)
+    release = _release(client)
     clients = _require(connected.get("devices") or [], list)
     observed = state.get("observed_state")
     running = state.get("running") is True
@@ -293,9 +323,11 @@ def _status(arguments: argparse.Namespace) -> int:
             "affected_devices": view["devices"]["items"],
             "service_lists": enabled_lists,
             "protected_connected_devices": protected,
+            "release": {"installed": release["installed"], "staged": release["staged"]},
         })
         return 0
     _out(f"Dashboard: {client.url}")
+    _out(_release_text(release))
     _out(summary["text"])
     if state.get("last_action"):
         result = f" ({state['last_result']})" if state.get("last_result") else ""
