@@ -102,7 +102,9 @@ def check_window(page, base, width, height):
     # Removing the login leaves the Pi without one.
     page.locator("#forced-window-login-remove").click()
     expect(page.locator("#forced-window-login-status")).to_contain_text("No router login is saved")
-    expect(page.locator("#forced-window-login-remove")).to_be_disabled()
+    # right away and not at the next poll: the button must not turn itself back on
+    page.wait_for_timeout(300)
+    assert page.locator("#forced-window-login-remove").is_disabled()
 
 
 def check_panic(page, base):

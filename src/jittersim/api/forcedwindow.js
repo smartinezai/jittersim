@@ -114,6 +114,8 @@ function installForcedWindows() {
   const remove = actionButton('Remove login', async () => {
     await request('/api/forced-windows/login/clear', 'POST', {});
     await loadForcedWindows();
+    // The button turns itself back on when this handler ends. Draw the card again after that.
+    setTimeout(() => renderForcedWindows(forcedWindowData), 0);
   });
   remove.id = 'forced-window-login-remove';
   element('forced-window-login-actions').append(save, remove);

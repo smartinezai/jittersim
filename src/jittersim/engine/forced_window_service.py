@@ -15,6 +15,7 @@ FIRST_PLAUSIBLE_TIME = 1_767_225_600  # 2026-01-01
 NO_LOGIN = "No router login is saved on the Pi. Save it on the Schedules page."
 CLOCK_NOT_SET = "The Pi's clock is not set yet."
 HELPER_UNREACHABLE = "The networking helper does not answer."
+NO_ETHERNET = "The Pi has no Ethernet connection to the router. Connect it before a window can start."
 
 
 class ForcedWindowService:
@@ -46,6 +47,9 @@ class ForcedWindowService:
         try:
             if not self._client.window_login_status().get("saved"):
                 return NO_LOGIN
+            # The router's Wi-Fi goes off. The Pi must keep its own way to the router and the dashboard.
+            if not self._client.uplink_info().get("gateway"):
+                return NO_ETHERNET
         except self._error_type:
             return HELPER_UNREACHABLE
         return None

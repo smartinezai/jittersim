@@ -112,6 +112,12 @@ def write_forced_window_api(server, path, payload):
             return response({"error": "Forced windows are not running."}, 503)
         service.request_end()
         return response({"ending": True})
+    if path == "/api/forced-windows/login/clear" and service is not None:
+        if service.status()["phase"] != IDLE:
+            # The saved login is what switches the router's Wi-Fi back on.
+            return response(
+                {"error": "A window is running. End it first so the router's Wi-Fi can come back on."}, 409
+            )
     try:
         if path == "/api/forced-windows/login":
             password = payload.get("admin_password")

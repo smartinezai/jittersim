@@ -70,3 +70,16 @@ def test_the_card_never_shows_or_stores_the_router_password():
     assert "localStorage" not in SOURCE and "sessionStorage" not in SOURCE
     assert re.search(r"element\('forced-window-password'\)\.value = ''", SOURCE)
     assert 'type="password"' in SOURCE and 'autocomplete="off"' in SOURCE
+
+
+def test_the_readme_explains_forced_windows():
+    readme = " ".join((Path(__file__).resolve().parents[2] / "README.md").read_text().split())
+    for phrase in (
+        "Forced test network window",
+        "only the root helper can read",
+        "An end time of 00:00 ends at midnight at the start of that day",
+        "Panic and Reset stop it too",
+        "The saved login cannot be removed while a window runs",
+        "no Ethernet connection to the router",
+    ):
+        assert phrase in readme, phrase

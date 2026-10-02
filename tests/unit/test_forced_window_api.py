@@ -15,6 +15,7 @@ from jittersim.config.storage import ConfigRepository
 from jittersim.engine.forced_window_service import (
     CLOCK_NOT_SET,
     HELPER_UNREACHABLE,
+    NO_ETHERNET,
     NO_LOGIN,
     ForcedWindowService,
 )
@@ -42,7 +43,11 @@ class FakeClient:
         self.calls = []
         self.saved = True
         self.unreachable = False
+        self.gateway = "192.168.0.1"
         self.fail = set()
+
+    def uplink_info(self):
+        return {"interface": "eth0", "connection_name": "wired", "gateway": self.gateway}
 
     def _do(self, name):
         self.calls.append(name)
@@ -111,11 +116,12 @@ class ServiceTests(unittest.TestCase):
             (CLOCK_NOT_SET, lambda: setattr(self, "now", 1000.0)),
             (NO_LOGIN, lambda: setattr(self.client, "saved", False)),
             (HELPER_UNREACHABLE, lambda: setattr(self.client, "unreachable", True)),
+            (NO_ETHERNET, lambda: setattr(self.client, "gateway", None)),
         )
         for reason, make in cases:
             with self.subTest(reason=reason):
                 self.now = saturday(16)
-                self.client.saved, self.client.unreachable = True, False
+                self.client.saved, self.client.unreachable, self.client.gateway = True, False, "192.168.0.1"
                 self.repository.save_forced_window_state(WindowState())
                 self.client.calls.clear()
                 make()
@@ -160,6 +166,7 @@ class SpyService:
         self.ended = 0
         self.fail = fail
         self.router_wifi_off = True
+        self.phase = "active"
 
     def request_end(self):
         self.ended += 1
@@ -167,7 +174,7 @@ class SpyService:
             raise RuntimeError("boom")
 
     def status(self):
-        return {"phase": "active", "window_id": "night", "ends_at": datetime(2026, 10, 4, 5).timestamp(),
+        return {"phase": self.phase, "window_id": "night", "ends_at": datetime(2026, 10, 4, 5).timestamp(),
                 "error": None, "problem": None, "attempts": 0, "router_wifi_off": self.router_wifi_off}
 
 
@@ -232,9 +239,20 @@ class ApiTests(unittest.TestCase):
         self.assertIn(("save", "router-secret"), self.client.calls)
         self.assertNotIn("router-secret", json.dumps(self.get()))
         self.assertEqual(self.get()["login_saved"], True)
+        self.service.phase = "idle"
         self.assertEqual(self.post("/api/forced-windows/login/clear", {}), (200, {"login_saved": False}))
         for bad in ({}, {"admin_password": ""}, {"admin_password": 5}):
             self.assertEqual(self.post("/api/forced-windows/login", bad)[0], 400)
+
+    def test_the_saved_login_cannot_be_removed_while_a_window_runs(self) -> None:
+        # the login is what switches the router's Wi-Fi back on
+        status, body = self.post("/api/forced-windows/login/clear", {})
+        self.assertEqual(status, 409)
+        self.assertIn("End it first", body["error"])
+        self.assertNotIn("login-clear", self.client.calls)
+        self.service.phase = "idle"
+        self.assertEqual(self.post("/api/forced-windows/login/clear", {})[0], 200)
+        self.assertIn("login-clear", self.client.calls)
 
     def test_a_helper_error_is_shown(self) -> None:
         self.client.fail.add("login-save")
