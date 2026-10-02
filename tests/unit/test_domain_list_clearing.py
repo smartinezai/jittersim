@@ -117,12 +117,18 @@ class DomainListClearingTests(unittest.TestCase):
                 self.assertIsNone(upgraded.get_domain_list_clearing())
             finally:
                 upgraded.close()
+            # a name without a hardware address survives the next start too: it is not cleared again
             reopened = ConfigRepository(path)
             try:
-                self.assertIsNone(reopened.get_domain_list_clearing())
-                self.assertEqual(len(reopened.list_domain_observations()), 1)
+                reopened.save_domain_observations([observation("192.168.50.31", "later.example.com")], now=NOW)
             finally:
                 reopened.close()
+            again = ConfigRepository(path)
+            try:
+                self.assertIsNone(again.get_domain_list_clearing())
+                self.assertEqual(len(again.list_domain_observations()), 2)
+            finally:
+                again.close()
 
     def test_a_crash_while_recording_neither_loses_nor_repeats_the_record(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -144,6 +150,16 @@ class DomainListClearingTests(unittest.TestCase):
                 self.assertEqual(recovered.list_domain_observations(), ())
             finally:
                 recovered.close()
+
+    def test_a_second_record_never_replaces_the_first(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            upgraded = ConfigRepository(old_database(directory))
+            try:
+                first = upgraded.get_domain_list_clearing()
+                upgraded._record_domain_list_cleared(99)
+                self.assertEqual(upgraded.get_domain_list_clearing(), first)
+            finally:
+                upgraded.close()
 
     def test_a_current_database_is_left_alone(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

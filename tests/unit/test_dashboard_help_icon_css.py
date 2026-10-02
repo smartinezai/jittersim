@@ -55,4 +55,4 @@ def test_the_label_keeps_the_icon_on_its_line():
 def test_the_icon_has_a_hover_and_a_keyboard_focus_state():
     assert re.search(r"\.help-icon:hover,[^{]*\{[^}]*background", CSS)
     focus = rule(".help-icon:focus-visible")
-    assert "outline" in focus and "outline-offset" in focus
+    assert re.match(r"\d+px solid #", focus["outline"]) and "outline-offset" in focus
