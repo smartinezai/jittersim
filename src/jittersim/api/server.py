@@ -12130,8 +12130,13 @@ class ControlServer(HTTPServer):
                         raise ValueError("site_blocks must be a list of at most 32 rules")
                     blocks = tuple(SiteBlock(**rule) for rule in blocks)
                 options = AccessOptions(**payload["options"]) if "options" in payload else None
+                # Check every supplied section above, then write only the sections the
+                # request carried. An omitted section keeps its stored value, while an
+                # explicit empty section resets just that section.
                 self.repository.save_access_policies(
-                    mac_policy, website_policy, blocks=blocks, options=options,
+                    mac_policy if "mac" in payload else None,
+                    website_policy if "websites" in payload else None,
+                    blocks=blocks, options=options,
                     expected_version=payload.get("version"),
                 )
             except DeviceConflictError as error:

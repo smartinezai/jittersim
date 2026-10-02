@@ -2985,17 +2985,25 @@ class ConfigRepository:
              for r in blocks),
         )
 
-    def save_access_policies(self, mac: MacPolicy, websites: WebsitePolicy, *,
+    def save_access_policies(self, mac: Optional[MacPolicy], websites: Optional[WebsitePolicy], *,
                              blocks=None, options=None, expected_version=None) -> None:
-        """Replace all access rules together and reject an obsolete browser edit."""
+        """Save the given access rules together and reject an obsolete browser edit.
+
+        A section passed as None keeps its stored value, so a request that only
+        carries website rules cannot clear the device rules (and the other way
+        round). Every section that is given is written in one transaction, so a
+        failed write restores the whole request.
+        """
         with self.transaction():
             if expected_version is not None and (
                 isinstance(expected_version, bool) or not isinstance(expected_version, int)
                 or self.get_runtime_state().configuration_version != expected_version
             ):
                 raise DeviceConflictError("settings changed since this form was loaded")
-            self.save_mac_policy(mac)
-            self.save_website_policy(websites)
+            if mac is not None:
+                self.save_mac_policy(mac)
+            if websites is not None:
+                self.save_website_policy(websites)
             if blocks is not None:
                 self._write_site_blocks(blocks)
             if options is not None:
