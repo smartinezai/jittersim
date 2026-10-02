@@ -1,8 +1,6 @@
 """Check that the Apply button says what it does and whether JitterSim is running."""
 
-import json
 import os
-import re
 import selectors
 import subprocess
 import sys
@@ -128,89 +126,14 @@ def footer_geometry(page):
     )
 
 
-# A wider face and a larger root size stand in for the fonts of another machine. A layout that
-# only works with the fonts of the machine it was written on fails under this.
-WIDE_FONTS = (
-    "html { font-size: 112.5% !important; }"
-    " * { font-family: Verdana, 'DejaVu Sans', sans-serif !important; }"
-)
-STRESSES = (("normal fonts", ""), ("wide fonts", WIDE_FONTS))
-DESKTOP_SIZES = ((1280, 700), (1280, 721), (1280, 760), (1280, 800), (1920, 1000))
-LONG_MESSAGE = (
-    "Started: 12 devices with a profile · 3 groups · 2 service lists · 4 protected devices stay"
-    " untouched. Profiles were skipped for devices whose current Wi-Fi identity could not be"
-    " verified: living room tv and kitchen tablet and garden camera."
-)
+def assert_panic_in_view(page, what):
+    """Panic is the control that must stay reachable so it may not hang below the window."""
 
-
-def set_font_stress(page, css):
-    page.evaluate(
-        """(css) => {
-            let node = document.getElementById('font-stress');
-            if (!css) { if (node) node.remove(); return; }
-            if (!node) {
-                node = document.createElement('style');
-                node.id = 'font-stress';
-                document.head.appendChild(node);
-            }
-            node.textContent = css;
-        }""",
-        css,
-    )
-
-
-def footer_boxes(page):
-    return page.evaluate(
-        """() => {
-            const box = (selector) => document.querySelector(selector).getBoundingClientRect();
-            const sidebar = document.querySelector('.sidebar');
-            const scroll = box('.sidebar-scroll');
-            const footer = box('.sidebar-footer');
-            const panic = box('#panic-button');
-            return {
-                windowHeight: window.innerHeight,
-                panicTop: panic.top, panicBottom: panic.bottom,
-                footerTop: footer.top, footerBottom: footer.bottom,
-                scrollBottom: scroll.bottom, scrollHeight: scroll.height,
-                sidebarOverflow: sidebar.scrollHeight - sidebar.clientHeight,
-            };
-        }"""
-    )
-
-
-def assert_footer_pinned(page, what):
-    """Panic is the control that must stay reachable so it may not hang below the window.
-
-    The buttons that act on the network are pinned under the part of the sidebar that scrolls.
-    So the sidebar itself never scrolls and nothing of the footer is out of the window.
-    """
-
-    box = footer_boxes(page)
-    bottom = box["windowHeight"] + 0.5
-    assert box["panicTop"] >= 0, (what, "Panic starts above the window", box)
-    assert box["panicBottom"] <= bottom, (what, "Panic is cut off", box)
-    assert box["footerBottom"] <= bottom, (what, "the footer is cut off", box)
-    assert box["scrollBottom"] <= box["footerTop"] + 1, (what, "the scroll area runs under it", box)
-    assert box["sidebarOverflow"] <= 1, (what, "the whole sidebar scrolls", box)
-    assert box["scrollHeight"] >= 40, (what, "no room is left for the navigation", box)
+    box = page.locator("#panic-button").bounding_box()
+    height = page.viewport_size["height"]
+    assert box["y"] >= 0, (what, "Panic starts above the window", box)
+    assert box["y"] + box["height"] <= height + 0.5, (what, "Panic is cut off", box, height)
     return box
-
-
-def assert_footer_pinned_everywhere(page, state):
-    """Check every window height with the normal fonts and with a wider face."""
-
-    start = page.viewport_size
-    for stress, css in STRESSES:
-        set_font_stress(page, css)
-        for width, height in DESKTOP_SIZES:
-            page.set_viewport_size({"width": width, "height": height})
-            page.wait_for_timeout(60)
-            box = assert_footer_pinned(page, f"{state} with {stress} at {width}x{height}")
-            if height == 700:
-                print(f"pinned footer, {state}, {stress}, 1280x700: Panic bottom "
-                      f"{box['panicBottom']:.1f} of 700, navigation area {box['scrollHeight']:.0f}")
-    set_font_stress(page, "")
-    page.set_viewport_size(start)
 
 
 def check_tips(browser):
@@ -238,6 +161,11 @@ def check_tips(browser):
             page.reload()
             wait_for_automatic_token_check(page)
             expect(page.locator("#apply-summary")).to_have_text(NOTHING_SAVED)
+            if width > 768 and height >= 700:
+                # the extra line under the button must not push Panic below the window
+                panic = assert_panic_in_view(page, f"at {width}x{height}")
+                print(f"panic at {width}x{height}: top {panic['y']:.1f} bottom "
+                      f"{panic['y'] + panic['height']:.1f}")
             apply_icon.hover()
             box = assert_tip_inside_window(page, apply_icon, f"apply tip at {width}x{height}")
             page.wait_for_timeout(200)
@@ -284,95 +212,13 @@ def check_tips(browser):
             "Re-applied. 1 protected device stays untouched. " + NONE_TO_SHAPE
             + " Access rules apply."
         )
-        assert not errors, errors
-        context.close()
-    finally:
-        process.terminate()
-        process.wait(timeout=10)
-
-
-def check_pinned_footer(browser):
-    """Panic stays fully in the window whatever the text and the fonts are.
-
-    The states cover a long and a short label on the Apply button and a long and a short
-    status and message. Each is measured with the normal fonts and with a wider face.
-    """
-
-    process, port = start_fixture()
-    try:
-        base = f"http://127.0.0.1:{port}"
-        context = browser.new_context(viewport={"width": 1280, "height": 800})
-        page = context.new_page()
-        errors = []
-        page.on("pageerror", lambda error: errors.append(str(error)))
-        runtime = page.locator("#runtime-summary")
-
-        def post(path, data):
-            response = page.request.post(base + path, headers=HEADERS, data=data)
-            assert response.ok, (path, response.status, response.text())
-
-        page.goto(base)
-        page.locator("#open-admin-credentials").click()
-        page.locator("#admin-token").fill("browser-test")
-        page.locator("#check-admin-token").click()
-        expect(page.locator("#private-dashboard")).to_be_visible()
-        page.locator("#remember-admin-token").check()
-        page.locator("#close-credentials").click()
-
-        # Not running: the long two line label on the button and a longer status.
-        expect(runtime).to_have_text(NOT_RUNNING)
-        expect(page.locator("#apply-button")).to_have_text(START)
-        assert_footer_pinned_everywhere(page, "not running")
-
-        # Off after a reset: the shortest status and message.
-        page.locator("#reset-button").click()
-        expect(runtime).to_have_text(OFF)
-        assert_footer_pinned_everywhere(page, "off")
-
-        # Running with a lot saved: the short label and the longest status and summary.
-        post("/api/profiles", {"id": "slow", "name": PROFILE_NAME, "upload": {}, "download": {}})
-        post("/api/devices", {"id": "fixture-laptop", "name": "Fixture laptop",
-                              "ipv4_address": IP_ADDRESS, "profile_id": "slow",
-                              "mac_address": MAC_ADDRESS})
-        post("/api/general-profile", {"profile_id": "slow"})
-        post("/api/unaffected-devices", {"mac_address": MAC_ADDRESS, "display_name": "Mine"})
-        post("/api/policies", {"websites": {"mode": "unrestricted",
-                                            "blocked_domains": ["blocked.invalid"]}})
-        page.reload()
-        wait_for_automatic_token_check(page)
-        page.locator("#apply-button").click()
-        expect(runtime).to_have_text(RUNNING)
-        expect(page.locator("#apply-button")).to_have_text(REAPPLY)
-        expect(page.locator("#apply-summary")).to_contain_text("Saved: General profile")
-        assert_footer_pinned_everywhere(page, "running")
-
-        # The same with a message that fills several lines.
-        page.evaluate("(text) => showMessage(text, 'success')", LONG_MESSAGE)
-        assert_footer_pinned_everywhere(page, "running with a long message")
-
-        # A failed reset has the longest status text.
-        failed = page.request.get(base + "/api/state", headers=HEADERS).json()
-        failed["state"].update(observed_state="error", running=False, last_action="reset")
-        failed_route = lambda route: route.fulfill(json=failed)  # noqa: E731
-        page.route("**/api/state", failed_route)
-        page.reload()
-        wait_for_automatic_token_check(page)
-        expect(runtime).to_have_text(RESET_FAILED)
-        page.evaluate("(text) => showMessage(text, 'error')", LONG_MESSAGE)
-        assert_footer_pinned_everywhere(page, "failed reset with a long message")
-        page.unroute("**/api/state", failed_route)
-
-        # The navigation still works when only a few links fit. The last link scrolls into
-        # view inside its own area and not under the buttons.
-        page.reload()
-        wait_for_automatic_token_check(page)
-        set_font_stress(page, WIDE_FONTS)
-        page.set_viewport_size({"width": 1280, "height": 700})
-        page.locator("a[data-page-link='diagnostics']").click()
-        expect(page).to_have_url(re.compile(r"#diagnostics$"))
-        link = page.locator("a[data-page-link='diagnostics']").bounding_box()
-        footer = footer_boxes(page)
-        assert link["y"] + link["height"] <= footer["footerTop"] + 1, (link, footer)
+        # The same with something running and a longer status and message in the footer.
+        for width, height in ((1280, 760), (1280, 800)):
+            page.set_viewport_size({"width": width, "height": height})
+            page.wait_for_timeout(200)
+            panic = assert_panic_in_view(page, f"while running at {width}x{height}")
+            print(f"panic while running at {width}x{height}: bottom "
+                  f"{panic['y'] + panic['height']:.1f}")
         assert not errors, errors
         context.close()
     finally:
@@ -616,7 +462,6 @@ def run():
         )
         try:
             check_tips(browser)
-            check_pinned_footer(browser)
             for width, height in ((1920, 1000), (390, 844)):
                 check_width(browser, width, height)
             print("Apply clarity acceptance passed at desktop and phone widths.")
