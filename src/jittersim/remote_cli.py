@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from jittersim import dashboard_rules as rules
+from jittersim.config.models import normalize_domain
 from jittersim.remote_client import (
     CA_CERT_ENV,
     EXAMPLE_URL,
@@ -427,6 +428,238 @@ def _stop_all(arguments: argparse.Namespace) -> int:
 
 
 # --- end: profiles
+
+
+# --- section: traffic ---------------------------------------------------------------------
+
+SCAN_TIMEOUT_SECONDS = 120.0
+ENFORCE_NOTE = (
+    "It applies on its own while JitterSim is running. "
+    "After Reset or Panic choose Start with saved settings."
+)
+KIND_TAGS = {
+    "app": "app",
+    "system": "system",
+    "tracker": "tracker",
+    "iot": "smart-home",
+    "cdn": "CDN",
+    "unknown": "unknown",
+}
+
+
+def _traffic_parser() -> argparse.ArgumentParser:
+    parser = _parser(
+        "jittersim traffic",
+        "Show the names each test device looked up (Traffic discovery). Names are grouped by "
+        "app or site. Labels come from a built-in table and 'seen with' is a guess. Use "
+        "'jittersim traffic block DOMAIN' or 'jittersim traffic unblock DOMAIN' to change the "
+        "global block list.",
+    )
+    parser.add_argument("--device", metavar="NAME_OR_IP", help="only this device")
+    parser.add_argument(
+        "--scan", action="store_true",
+        help="sample DNS lookups on the test Wi-Fi first (takes a few seconds)",
+    )
+    parser.add_argument("--expand", action="store_true", help="list every name of each group")
+    parser.add_argument("--blocked", action="store_true", help="only globally blocked names")
+    return parser
+
+
+def _block_parser(word: str, text: str) -> Callable[[], argparse.ArgumentParser]:
+    def build() -> argparse.ArgumentParser:
+        parser = _parser(
+            f"jittersim traffic {word}",
+            f"{text} the global block list. The change is saved and applies on its own while "
+            "JitterSim is running.",
+        )
+        parser.add_argument("domain", metavar="DOMAIN")
+        return parser
+
+    return build
+
+
+def _label_text(parts: Dict[str, Any]) -> str:
+    pieces = []
+    if parts["showName"]:
+        pieces.append(parts["labelName"])
+    if parts["showCategory"]:
+        pieces.append(parts["category"])
+    # Like the page: a row of a group shows no label line when it would only repeat the header.
+    if not pieces:
+        return ""
+    text = " · ".join(pieces)
+    tag = KIND_TAGS.get(parts["kind"], "")
+    return f"[{tag}] {text}" if tag else text
+
+
+def _name_row(observation: Dict[str, Any], group: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if group is None:
+        parts = rules.row_label_parts(observation)
+    else:
+        parts = rules.row_label_parts(
+            observation, group["name"], rules.group_categories_uniform(group)
+        )
+    hint = rules.domain_hint(observation)
+    label = observation.get("label") or {}
+    return {
+        "domain": observation.get("domain"),
+        "query_count": observation.get("query_count"),
+        "queries": rules.query_count_text(observation.get("query_count")),
+        "label": {key: label.get(key) for key in ("name", "category", "kind")},
+        "label_text": _label_text(parts),
+        "kind": KIND_TAGS.get(label.get("kind"), label.get("kind")),
+        "seen_with": list(observation.get("seen_with") or []),
+        "seen_with_text": hint["text"],
+        "blocked": observation.get("globally_blocked") is True,
+    }
+
+
+def _traffic_device(device: Dict[str, Any], blocked_only: bool) -> Optional[Dict[str, Any]]:
+    domains = [item for item in device.get("domains") or [] if isinstance(item, dict)]
+    if blocked_only:
+        domains = [item for item in domains if item.get("globally_blocked") is True]
+        if not domains:
+            return None
+    groups = []
+    for group in rules.group_observations(domains):
+        names = [_name_row(item, None if group["single"] else group) for item in group["names"]]
+        groups.append({
+            "name": group["name"],
+            "kind": KIND_TAGS.get(group["kind"], group["kind"]),
+            "single": group["single"],
+            "names_count": len(group["names"]),
+            "queries": rules.query_count_text(group["totalQueries"]),
+            "total_queries": group["totalQueries"],
+            "blocked_text": rules.group_blocked_text(group),
+            "names": names,
+        })
+    return {
+        "name": rules.device_display_name(device),
+        "ipv4_address": device.get("ipv4_address"),
+        "groups": groups,
+    }
+
+
+def _print_name(row: Dict[str, Any], indent: str) -> None:
+    pieces = [row["domain"]]
+    if row["label_text"]:
+        pieces.append(row["label_text"])
+    pieces.append(row["queries"])
+    if row["blocked"]:
+        pieces.append("Blocked")
+    if row["seen_with_text"]:
+        pieces.append(row["seen_with_text"])
+    _out(indent + "  ".join(str(piece) for piece in pieces))
+
+
+@register("traffic", _traffic_parser)
+def _traffic(arguments: argparse.Namespace) -> int:
+    client = _client(arguments)
+    scan = None
+    if arguments.scan:
+        if not arguments.json:
+            print("Sampling DNS queries from the test network...", file=sys.stderr)
+        scan = client.post("/api/observations/scan", {}, timeout=SCAN_TIMEOUT_SECONDS)
+    data = client.get("/api/observations")
+    if not data.get("available"):
+        raise RemoteError(str(data.get("message") or "Traffic discovery is unavailable."))
+    devices = [item for item in _require(data.get("devices") or [], list) if isinstance(item, dict)]
+    if arguments.device:
+        wanted = arguments.device.strip().lower()
+        devices = [
+            item for item in devices
+            if wanted in (
+                str(item.get("ipv4_address") or "").lower(),
+                rules.device_display_name(item).lower(),
+            )
+        ]
+        if not devices:
+            raise RemoteError(f"No device named or at {arguments.device} has traffic in the list.")
+    shown = [
+        result for result in (_traffic_device(item, arguments.blocked) for item in devices)
+        if result is not None
+    ]
+    if arguments.json:
+        _print_json({
+            "scan": {"captured_observations": scan.get("captured_observations")} if scan else None,
+            "total_domains": data.get("total_domains"),
+            "devices": shown,
+            "note": "Labels come from a built-in table. seen_with is a guess.",
+        })
+        return 0
+    if scan is not None:
+        _out(
+            f"Traffic scan complete: {scan.get('captured_observations')} domain observations "
+            "captured."
+        )
+    if not shown:
+        _out(
+            "No globally blocked names in the list." if arguments.blocked
+            else "No DNS observations yet. Connect a device and run a scan."
+        )
+        return 0
+    _out(
+        f"{data.get('total_domains', 0)} domains. Labels come from a built-in table. "
+        "'Seen with' is a guess."
+    )
+    for device in shown:
+        _out("")
+        _out(f"{device['name']}  ({device['ipv4_address']})")
+        for group in device["groups"]:
+            if group["single"]:
+                _print_name(group["names"][0], "  ")
+                continue
+            pieces = [group["name"]]
+            if group["kind"]:
+                pieces.append(f"[{group['kind']}]")
+            pieces += [rules.group_names_text(group["names_count"]), group["queries"]]
+            if group["blocked_text"]:
+                pieces.append(group["blocked_text"])
+            _out("  " + "  ".join(str(piece) for piece in pieces))
+            if arguments.expand:
+                for row in group["names"]:
+                    _print_name(row, "      ")
+    if not arguments.expand and any(
+        not group["single"] for device in shown for group in device["groups"]
+    ):
+        _out("")
+        _out("Add --expand to list every name of a group.")
+    return 0
+
+
+def _traffic_block(arguments: argparse.Namespace, *, block: bool) -> int:
+    try:
+        domain = normalize_domain(arguments.domain)
+    except ValueError as error:
+        raise RemoteError("That is not a valid DNS name.", exit_code=2) from error
+    client = _client(arguments)
+    path = "/api/observations/" + ("add-global-block" if block else "remove-global-block")
+    result = client.post(path, {"domain": domain})
+    listed = ((result.get("policies") or {}).get("websites") or {}).get("blocked_domains")
+    if not isinstance(listed, list) or (domain in listed) != block:
+        raise RemoteError("The dashboard did not confirm the change to the global block list.")
+    message = (
+        f"Saved: added {domain} to the global block list. " if block
+        else f"Saved: removed {domain} from the global block list. "
+    ) + ENFORCE_NOTE
+    if arguments.json:
+        _print_json({"domain": domain, "blocked": block, "saved": True, "message": message})
+    else:
+        _out(message)
+    return 0
+
+
+@register("traffic block", _block_parser("block", "Add one name to"))
+def _block(arguments: argparse.Namespace) -> int:
+    return _traffic_block(arguments, block=True)
+
+
+@register("traffic unblock", _block_parser("unblock", "Remove one name from"))
+def _unblock(arguments: argparse.Namespace) -> int:
+    return _traffic_block(arguments, block=False)
+
+
+# --- end: traffic
 
 
 def _command_words(argv: List[str]) -> List[str]:

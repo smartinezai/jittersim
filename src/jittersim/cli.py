@@ -37,7 +37,7 @@ LOG_SERVICES = {
 }
 MAX_LOG_LINES = 200
 MAX_LOG_OUTPUT_CHARS = 32_000
-REMOTE_COMMANDS = ("connect", "profiles")
+REMOTE_COMMANDS = ("connect", "profiles", "traffic")
 
 
 def _build_parser() -> argparse.ArgumentParser:

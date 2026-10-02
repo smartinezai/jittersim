@@ -6,7 +6,7 @@ to one shared place without changing the page. `tests/unit/test_dashboard_rules_
 runs both versions on the same inputs and fails when they drift apart.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from jittersim.remote_client import js_number, js_round
 
@@ -250,3 +250,132 @@ def profile_summary(profile: Dict[str, Any]) -> str:
 # --- end: profiles
 
 
+# --- section: traffic
+
+
+def device_display_name(device: Dict[str, Any]) -> str:
+    """deviceDisplayName."""
+
+    return (
+        device.get("display_name")
+        or device.get("name")
+        or device.get("assigned_device_name")
+        or device.get("ipv4_address")
+        or "Unknown device"
+    )
+
+
+def query_count_text(count: Any) -> str:
+    """queryCountText."""
+
+    return js_number(count) + (" query" if count == 1 else " queries")
+
+
+def group_names_text(count: int) -> str:
+    """groupNamesText."""
+
+    return str(count) + (" name" if count == 1 else " names")
+
+
+def is_risky_group_kind(kind: Any) -> bool:
+    """isRiskyGroupKind."""
+
+    return kind in ("system", "cdn")
+
+
+def _number(value: Any) -> float:
+    """JavaScript's `Number(value) || 0` for a query count."""
+
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return value if value == value else 0
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0
+    return number if number == number else 0
+
+
+def group_observations(domains: Optional[Sequence[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """groupObservations: one entry per app or registrable domain, busiest first."""
+
+    groups: Dict[str, Dict[str, Any]] = {}
+    for observation in domains or []:
+        group = observation.get("group") or {
+            "key": "domain:" + str(observation.get("domain")),
+            "name": observation.get("domain"),
+        }
+        key = group.get("key")
+        if key not in groups:
+            groups[key] = {
+                "key": key,
+                "name": group.get("name"),
+                "kind": group.get("kind") or "",
+                "names": [],
+                "totalQueries": 0,
+                "single": True,
+            }
+        entry = groups[key]
+        if not is_risky_group_kind(entry["kind"]) and is_risky_group_kind(group.get("kind")):
+            entry["kind"] = group.get("kind")
+        entry["names"].append(observation)
+        entry["totalQueries"] += _number(observation.get("query_count"))
+        entry["single"] = len(entry["names"]) == 1
+    return sorted(
+        groups.values(),
+        key=lambda item: (-item["totalQueries"], str(item["name"]).lower()),
+    )
+
+
+def domain_hint(observation: Dict[str, Any]) -> Dict[str, Any]:
+    """domainHint: the seen-with guess and whether a web search is offered."""
+
+    label = observation.get("label") or {}
+    apps = observation.get("seen_with") or []
+    return {
+        "text": "Seen with " + " and ".join(apps) + " (guess)" if apps else "",
+        "searchable": label.get("kind") in ("unknown", "cdn"),
+    }
+
+
+def group_blocked_text(group: Dict[str, Any]) -> str:
+    """groupBlockedText."""
+
+    blocked = sum(
+        1 for observation in group["names"] if observation.get("globally_blocked") is True
+    )
+    if blocked == 0:
+        return ""
+    return "All blocked" if blocked == len(group["names"]) else str(blocked) + " blocked"
+
+
+def group_categories_uniform(group: Dict[str, Any]) -> bool:
+    """groupCategoriesUniform."""
+
+    def category(observation: Dict[str, Any]) -> str:
+        return (observation.get("label") or {}).get("category") or ""
+
+    names = group["names"]
+    return all(category(observation) == category(names[0]) for observation in names)
+
+
+def row_label_parts(
+    observation: Dict[str, Any], group_name: str = "", categories_uniform: bool = False
+) -> Dict[str, Any]:
+    """domainRowParts and rowLabelParts: what one name's label line shows."""
+
+    label = observation.get("label") or {}
+    label_name = label.get("name") or ""
+    category = label.get("category") or ""
+    repeated = bool(group_name) and label_name == group_name
+    return {
+        "labelName": label_name,
+        "category": category,
+        "kind": label.get("kind") or "",
+        "showName": bool(label_name) and not repeated,
+        "showCategory": bool(category) and not (repeated and categories_uniform),
+    }
+
+
+# --- end: traffic

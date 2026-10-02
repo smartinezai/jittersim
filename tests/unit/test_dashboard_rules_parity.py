@@ -1,10 +1,13 @@
 """The terminal's copies of the dashboard rules give the same answers as the served page."""
 
 import itertools
+import time
 
 import pytest
 
 from jittersim import dashboard_rules as rules
+from jittersim.api.server import _labelled_domain_payloads
+from jittersim.config.models import DomainObservation
 from jittersim.remote_client import js_number, js_round
 from tests.dashboard_script import NODE, function_source, run_node
 
@@ -177,6 +180,96 @@ def test_profile_summaries_match_the_page():
 
 
 # --- end: profiles
+
+
+# --- section: traffic
+
+
+def labelled_rows():
+    """Observed names labelled by the server code the page receives them from."""
+
+    now = int(time.time())
+    rows = [
+        ("mmx-ds.cdn.whatsapp.net", 12, 0), ("a1051.dscg4.akamai.net", 3, 0),
+        ("tags-eu.tiqcdn.com", 2, 399), ("api.header.immobilienscout24.de", 4, 400),
+        ("content.header.immobilienscout24.de", 4, 400), ("tracking.immobilienscout24.de", 6, 400),
+        ("logs.dradis.netflix.com", 3, 1200), ("ipv4-c179-fra002-ix.1.oca.nflxvideo.net", 40, 1200),
+        ("config.extension.grammarly.com", 5, 2000), ("cdn.somesmallsite.io", 1, 400),
+        ("very-long-unknown-name.sub.example-sample-site.co.uk", 1, 900),
+        ("10000.mt.eu.iot.dreame.tech", 7, 0), ("gateway.icloud.com", 5, 0),
+        ("www.googleapis.com", 9, 5), ("fonts.gstatic.com", 9, 6), ("Zeta.example.com", 2, 7),
+        ("alpha.example.com", 2, 8),
+    ]
+    observations = [
+        DomainObservation("192.168.50.124", domain.lower(), count, now - offset, now - offset)
+        for domain, count, offset in rows
+    ]
+    blocked = {"tracking.immobilienscout24.de", "logs.dradis.netflix.com",
+               "ipv4-c179-fra002-ix.1.oca.nflxvideo.net"}
+    return _labelled_domain_payloads(observations, blocked)
+
+
+TRAFFIC_FUNCTIONS = [
+    "groupObservations", "isRiskyGroupKind", "domainHint", "groupBlockedText",
+    "groupCategoriesUniform", "rowLabelParts", "domainRowParts", "domainSearchUrl",
+    "queryCountText", "groupNamesText", "deviceDisplayName",
+]
+
+
+def test_traffic_groups_labels_and_markers_match_the_page():
+    rows = labelled_rows()
+    sets = [rows, rows[:3], [row for row in rows if row["globally_blocked"]], [],
+            [{"domain": "plain.example", "query_count": "3"},
+             {"domain": "b.example", "query_count": 1}]]
+    program = [function_source(name) for name in TRAFFIC_FUNCTIONS]
+    page = run_node(program, f"""{js(sets)}.map((domains) =>
+      groupObservations(domains).map((g) => ({{
+        key: g.key, name: g.name, kind: g.kind, single: g.single, totalQueries: g.totalQueries,
+        names: g.names.map((o) => o.domain), blocked: groupBlockedText(g),
+        uniform: groupCategoriesUniform(g),
+        rows: g.names.map((o) => {{
+          const parts = domainRowParts(o);
+          const shown = rowLabelParts(parts, g.single ? "" : g.name,
+                                      g.single ? false : groupCategoriesUniform(g));
+          return [parts.labelName, parts.category, parts.kind, shown.showName,
+                  shown.showCategory, domainHint(o).text, domainHint(o).searchable,
+                  queryCountText(o.query_count)];
+        }})
+      }})))""")
+    for domains, expected in zip(sets, page):
+        mine = []
+        for group in rules.group_observations(domains):
+            uniform = rules.group_categories_uniform(group)
+            mine.append({
+                "key": group["key"], "name": group["name"], "kind": group["kind"],
+                "single": group["single"], "totalQueries": group["totalQueries"],
+                "names": [item["domain"] for item in group["names"]],
+                "blocked": rules.group_blocked_text(group), "uniform": uniform,
+                "rows": [
+                    [
+                        parts["labelName"], parts["category"], parts["kind"], parts["showName"],
+                        parts["showCategory"], rules.domain_hint(item)["text"],
+                        rules.domain_hint(item)["searchable"],
+                        rules.query_count_text(item.get("query_count")),
+                    ]
+                    for item in group["names"]
+                    for parts in [rules.row_label_parts(
+                        item, "" if group["single"] else group["name"],
+                        False if group["single"] else uniform)]
+                ],
+            })
+        assert mine == expected
+
+
+def test_device_names_match_the_page():
+    devices = [{"display_name": "A", "name": "B"}, {"name": "B"}, {"assigned_device_name": "C"},
+               {"ipv4_address": "192.168.50.5"}, {}, {"display_name": "", "name": None}]
+    page = run_node([function_source("deviceDisplayName")],
+                    f"{js(devices)}.map((d) => deviceDisplayName(d))")
+    assert [rules.device_display_name(device) for device in devices] == page
+
+
+# --- end: traffic
 
 
 # --- section: numbers
