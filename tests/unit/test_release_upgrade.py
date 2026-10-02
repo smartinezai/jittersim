@@ -182,3 +182,43 @@ def test_failed_recovery_keeps_the_original_folders(tmp_path, monkeypatch):
         release.replace_source(source, installed)
     recovery = next(installed.glob(".release-*/previous"))
     assert (recovery / "src/current.py").read_text() == "working release"
+
+
+def test_the_release_label_of_the_source_is_installed_with_it(tmp_path):
+    source, installed = tmp_path / "source", tmp_path / "installed"
+    source_tree(source)
+    source_tree(installed)
+    (installed / ".jittersim-release.json").write_text('{"version": "old1234"}')
+    (source / ".jittersim-release.json").write_text('{"version": "new5678"}')
+    release.replace_source(source, installed)
+    assert (installed / ".jittersim-release.json").read_text() == '{"version": "new5678"}'
+
+
+def test_a_source_without_a_label_removes_the_old_label(tmp_path):
+    source, installed = tmp_path / "source", tmp_path / "installed"
+    source_tree(source)
+    source_tree(installed)
+    (installed / ".jittersim-release.json").write_text('{"version": "old1234"}')
+    release.replace_source(source, installed)
+    assert not (installed / ".jittersim-release.json").exists()
+    assert (installed / "src/current.py").read_text() == "current release"
+
+
+def test_a_failed_swap_restores_the_old_label(tmp_path, monkeypatch):
+    source, installed = tmp_path / "source", tmp_path / "installed"
+    source_tree(source)
+    source_tree(installed)
+    (installed / ".jittersim-release.json").write_text('{"version": "old1234"}')
+    (source / ".jittersim-release.json").write_text('{"version": "new5678"}')
+    original_rename = Path.rename
+
+    def fail_label(path, target):
+        if path.name == ".jittersim-release.json" and path.parent.name.startswith(".release-"):
+            raise OSError("disk error during replacement")
+        return original_rename(path, target)
+
+    monkeypatch.setattr(Path, "rename", fail_label)
+    with pytest.raises(OSError, match="disk error"):
+        release.replace_source(source, installed)
+    assert (installed / ".jittersim-release.json").read_text() == '{"version": "old1234"}'
+    assert not list(installed.glob(".release-*"))
