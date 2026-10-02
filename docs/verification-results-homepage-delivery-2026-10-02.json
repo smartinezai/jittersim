@@ -1,7 +1,7 @@
 {
   "date": "2026-10-02",
   "scope": "Reference and DNS acceptance delivered onto current integration",
-  "integration_base": "a1da456ac2fa70462a063757d1e9707d3cf5ae69",
+  "integration_base": "4065e72c3daa6ade4fb33b3812de3994ad777217",
   "tested_source": "c10149af8b8b0c3070f1c8666d9bd926b178107f",
   "reviewed_source_commits": [
     "0541cc29255c0765533ce430c5f9bf018409d008",
@@ -80,5 +80,20 @@
     "kernel_checks": 37,
     "final_source_ci": "Required before merge"
   },
-  "validation_scope": "The full Python suite and DNS journey ran on the earlier stated source. After the control-only cleanup repair, all nine HTTP checks and all 32 extension checks passed again. Full checks run in CI on the published head before merge."
+  "validation_scope": "The full Python suite and DNS journey ran on the earlier stated source. After the control-only cleanup repair, all nine HTTP checks and all 32 extension checks passed again. Full checks run in CI on the published head before merge.",
+  "original_integration_base": "a1da456ac2fa70462a063757d1e9707d3cf5ae69",
+  "latest_combination": {
+    "source": "34b810843a2ca74dfed4607e323385aec0cbf257",
+    "focused_python": "passed",
+    "dns_dashboard": "passed at desktop and phone widths",
+    "required_ruff": "passed",
+    "full_ci": "Required on the published combined source before merge"
+  },
+  "previous_final_ci": {
+    "source": "fae24a6c26e3f33c7d5725383c04dd08b472313f",
+    "checks": 9,
+    "result": "passed",
+    "tests_run": "https://github.com/smartinezai/jittersim/actions/runs/37060711817",
+    "pi_run": "https://github.com/smartinezai/jittersim/actions/runs/37060711822"
+  }
 }

@@ -60,3 +60,10 @@ stalled browser requests before the repair. Verify route separation and recovery
 The DNS journey must wait for the dashboard to finish reading the saved version
 before clicking Apply. A successful save response alone does not prove that
 the displayed access state has caught up.
+
+## Current integration update
+
+Integration advanced to `4065e72` before merge. Bring it into this branch and
+verify the combined partial-save behavior, dashboard messages and DNS journey.
+All nine checks on the earlier `fae24a6` source passed but the new combination
+needs its own clean CI before merge. Keep existing owner changes intact.
