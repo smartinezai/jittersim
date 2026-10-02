@@ -70,3 +70,13 @@ fixture children and browser contexts even after exceptions or cancellation.
 
 Recent GitHub jobs have no executed steps. CI must actually run and pass before
 the release coordinator merges. Local checks cannot substitute for this gate.
+
+Registry DNS also prevents fetching a new Python base image. Add an optional
+cached-browser verification path using a locally present image fixed by its
+digest. Build a portable dashboard wheel on the host from the recorded Git
+archive. Install it without downloads into a disposable container with a fresh
+working directory and tracked tests mounted read-only. Verify actual Python,
+Playwright and dependency versions. Record the wheel hash and image identity.
+Disable pulls and preserve the cached image. The existing fresh-build path
+keeps its original contract. Container execution remains with the release
+coordinator after the shared Docker lock is released.

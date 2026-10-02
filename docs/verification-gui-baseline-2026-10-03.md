@@ -6,8 +6,8 @@ The Phase 0 test baseline captures all 40 dashboard states with screenshots,
 source statistics and local accessibility reports. Production files are
 unchanged. The first release gate is real green CI on the final combined
 source. GitHub currently refuses to start jobs because of account billing or
-spending limits. Clean Linux container verification is also pending while the
-shared Docker host is occupied.
+spending limits. The shared Docker slot is available for the cached Linux
+browser check. A fresh image build remains pending registry availability.
 
 ## Local evidence
 
@@ -17,7 +17,7 @@ with Chromium 153.0.8010.12 were used on macOS. The manifests distinguish the
 installed package from checkout source and record the actual served HTML hash.
 
 - Existing unit suite: 2,833 passed.
-- Final focused report, failure and container checks: 49 passed with warnings
+- Final focused report, failure and container checks: 55 passed with warnings
   treated as errors.
 - Existing browser journeys: passed against the installed wheel.
 - Screenshot matrix: all 40 states completed with 40 PNGs and 40 statistics files.
@@ -68,13 +68,19 @@ credential token was present in saved JSON.
 The full matrices were repeated on clean local checkpoint
 `44ff8650c41ed992d337461fc6e56d65902c8415`. Both manifests recorded a clean
 checkout and all 40 completed states. The screenshot run took 94.2 seconds
-and the accessibility run took 74.0 seconds.
+and the accessibility run took 74.0 seconds. Both matrices also passed on
+clean checkpoint `76e6366ad073b8f9a075a541277c21a8972677ae`. Its screenshot
+run took 94.6 seconds and its accessibility run took 65.7 seconds.
 The container handoff then identified that the browser image has no Git
 checkout. Explicit supplied source metadata and a bounded container command
 were added to support that path. The command uses only tracked files from
 the recorded commit with a base image fixed by its digest and owns its temporary
-context, image tag and container. Actual clean Linux execution remains
-pending the shared Docker lock.
+context, image tag and container. A second path supports an inspected cached
+browser image when the registry is unavailable. It installs a fresh portable
+wheel offline in an owned container and checks every app file hash plus the
+import locations of the app and current tests. The report distinguishes this
+cached runtime check from a fresh image build. Actual cached Linux execution
+is the next verification step.
 The final combined release needs another baseline after chart, router-copy,
 polling and sign-in work is integrated by their current owners.
 

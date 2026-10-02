@@ -207,3 +207,151 @@ def test_staged_dockerfile_must_honor_requested_digest(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="pinned base image"):
         with gui_container.source_context(tmp_path, COMMIT):
             pytest.fail("An unpinned Dockerfile must not produce a build context")
+
+
+CACHED = "jittersim-browser-tests@sha256:" + "e" * 64
+
+
+def portable_wheel(directory, suffix="py3-none-any", server=b"new server", helper=b"new helper"):
+    directory.mkdir(exist_ok=True)
+    path = directory / ("jittersim-0.1.0-" + suffix + ".whl")
+    import zipfile
+
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("jittersim/__init__.py", b"")
+        archive.writestr("jittersim/api/server.py", server)
+        archive.writestr("jittersim/networking/helper.py", helper)
+        archive.writestr("jittersim/api/access.css", b"safe CSS")
+        archive.writestr("jittersim-0.1.0.dist-info/WHEEL", "Wheel-Version: 1.0\nTag: py3-none-any\n")
+    return path
+
+
+def test_wheel_requires_one_portable_file_and_records_all_runtime_hashes(tmp_path):
+    path = portable_wheel(tmp_path)
+    identity = gui_container.wheel_identity(tmp_path)
+    assert identity["bytes"] == path.stat().st_size
+    assert set(identity["runtime_files_sha256"]) == {
+        "jittersim/__init__.py", "jittersim/api/server.py", "jittersim/networking/helper.py",
+        "jittersim/api/access.css"}
+    portable_wheel(tmp_path, suffix="cp313-cp313-linux_x86_64")
+    with pytest.raises(RuntimeError, match="one universal"):
+        gui_container.wheel_identity(tmp_path)
+    path.unlink()
+    with pytest.raises(RuntimeError, match="one universal"):
+        gui_container.wheel_identity(tmp_path)
+
+
+def test_cached_identity_rejects_old_source_tests_and_helper_mismatch(tmp_path, monkeypatch):
+    import zipfile
+    from types import SimpleNamespace
+
+    wheel_dir = tmp_path / "wheels"
+    wheel_path = portable_wheel(wheel_dir)
+    identity = gui_container.wheel_identity(wheel_dir)
+    site = tmp_path / "site-packages"
+    with zipfile.ZipFile(wheel_path) as archive:
+        archive.extractall(site)
+    package = site / "jittersim/__init__.py"
+    server = site / "jittersim/api/server.py"
+    tests = "/jittersim-gui-baseline/tests/__init__.py"
+    fixture = "/jittersim-gui-baseline/tests/browser/fixture.py"
+    monkeypatch.setattr(gui_container, "sys", SimpleNamespace(modules={}))
+    gui_container.verify_cached_install(package, server, tests, fixture, identity)
+    with pytest.raises(RuntimeError, match="old checkout"):
+        gui_container.verify_cached_install(tmp_path / "old/jittersim/__init__.py", server,
+                                            tests, fixture, identity)
+    with pytest.raises(RuntimeError, match="old tests"):
+        gui_container.verify_cached_install(package, server, "/jittersim/tests/__init__.py",
+                                            fixture, identity)
+    (site / "jittersim/networking/helper.py").write_bytes(b"stale helper")
+    with pytest.raises(RuntimeError, match="differs"):
+        gui_container.verify_cached_install(package, server, tests, fixture, identity)
+    (site / "jittersim/networking/helper.py").write_bytes(b"new helper")
+    gui_container.sys.modules["jittersim.old"] = SimpleNamespace(__file__="/jittersim/src/jittersim/old.py")
+    with pytest.raises(RuntimeError, match="old source"):
+        gui_container.verify_cached_install(package, server, tests, fixture, identity)
+
+
+def test_cached_timeout_never_builds_pulls_or_removes_cached_image(tmp_path, monkeypatch):
+    @contextmanager
+    def context(*_args):
+        yield tmp_path / "context"
+
+    calls = []
+
+    def execute(command, **kwargs):
+        calls.append(command)
+        if command[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "c" * 64 + "\n")
+        if command[:2] == ["docker", "run"]:
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"], output="secret value")
+        return subprocess.CompletedProcess(command, 0)
+
+    wheel = {"file": "jittersim-0.1.0-py3-none-any.whl", "bytes": 100,
+             "sha256": "f" * 64, "server_source_sha256": "b" * 64,
+             "runtime_files_sha256": {"jittersim/api/server.py": "b" * 64}}
+    monkeypatch.setattr(gui_container, "clean_source", lambda *_args: (tmp_path, COMMIT))
+    monkeypatch.setattr(gui_container, "source_context", context)
+    monkeypatch.setattr(gui_container, "build_host_wheel", lambda *_args: wheel)
+    monkeypatch.setattr(gui_container.subprocess, "run", execute)
+    with pytest.raises(subprocess.TimeoutExpired):
+        gui_container.run(None, tmp_path, CACHED)
+    directory = next((tmp_path / "test-results").iterdir())
+    text = (directory / "container-report.json").read_text()
+    report = json.loads(text)
+    assert report["verification_mode"] == "cached-runtime"
+    assert report["complete"] is False
+    assert report["stage"] == "run"
+    assert report["wheel"] == wheel
+    assert "secret value" not in text
+    assert calls[0][-1] == CACHED
+    assert all(command[:2] not in (["docker", "build"], ["docker", "pull"]) for command in calls)
+    assert calls[-1] == ["docker", "rm", "--force", report["container_name"]]
+    runtime = next(command for command in calls if command[:2] == ["docker", "run"])
+    assert "--pull=never" in runtime
+    assert runtime[runtime.index("--workdir") + 1] == "/jittersim-gui-baseline"
+    assert "PYTHONPATH=" in runtime
+    mounts = [runtime[index + 1] for index, value in enumerate(runtime) if value == "--volume"]
+    assert sum(value.endswith(":ro") for value in mounts) == 2
+    assert all(command[:3] != ["docker", "image", "rm"] for command in calls)
+
+
+def test_cached_reference_and_exclusive_modes_reject_before_inspection(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(gui_container.subprocess, "run", lambda *args, **kwargs: calls.append(args))
+    for reference in ("jittersim-browser-tests:latest", "other@sha256:" + "e" * 64):
+        with pytest.raises(ValueError):
+            gui_container.run(None, tmp_path, reference)
+    with pytest.raises(ValueError):
+        gui_container.run(BASE, tmp_path, CACHED)
+    assert calls == []
+
+
+def test_host_wheel_timeout_cleans_its_process_group(tmp_path, monkeypatch):
+    class Process:
+        def wait(self, timeout):
+            assert timeout == 120
+            raise subprocess.TimeoutExpired("pip-wheel", timeout)
+
+    process = Process()
+    commands = []
+    cleaned = []
+
+    def start(command, **kwargs):
+        commands.append((command, kwargs))
+        return process
+
+    monkeypatch.setattr(gui_container.subprocess, "Popen", start)
+    monkeypatch.setattr(gui_container, "stop_fixture", lambda value: cleaned.append(value))
+    with pytest.raises(subprocess.TimeoutExpired):
+        gui_container.build_host_wheel(tmp_path / "context", tmp_path / "wheels")
+    assert cleaned == [process]
+    assert "--no-deps" in commands[0][0]
+    assert commands[0][1]["start_new_session"] is True
+
+
+def test_oversized_wheel_fails_before_installation(tmp_path, monkeypatch):
+    portable_wheel(tmp_path)
+    monkeypatch.setattr(gui_container, "MAX_WHEEL_BYTES", 10)
+    with pytest.raises(RuntimeError, match="byte limit"):
+        gui_container.wheel_identity(tmp_path)
