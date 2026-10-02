@@ -39,6 +39,11 @@ def validate_label(value: Any) -> str:
     return value.strip()
 
 
+def is_active(device: Dict[str, Any]) -> bool:
+    """A replaced entry is kept for undo but no longer grants access."""
+    return "replaced_by" not in device
+
+
 class AccessStore:
     """One root-owned file replaced atomically under the helper's lock."""
 
@@ -74,8 +79,14 @@ class AccessStore:
                 devices = data["devices"]
                 seen = set()
                 for device in devices:
-                    if not isinstance(device, dict) or set(device) != {"mac_address", "name", "added_at"}:
+                    base = {"mac_address", "name", "added_at"}
+                    if (not isinstance(device, dict)
+                            or set(device) not in (base, base | {"replaced_by", "replaced_at"})):
                         raise ValueError("invalid entry")
+                    if "replaced_by" in device:
+                        if (normalize_mac(device["replaced_by"]) != device["replaced_by"]
+                                or type(device["replaced_at"]) is not int or device["replaced_at"] < 0):
+                            raise ValueError("invalid replacement")
                     mac = normalize_mac(device["mac_address"])
                     if mac != device["mac_address"] or mac in seen:
                         raise ValueError("duplicate or unnormalized address")
@@ -99,11 +110,53 @@ class AccessStore:
         name = validate_label(name)
         with self._lock:
             devices = self.list_devices()
-            if any(device["mac_address"] == mac for device in devices):
+            if any(device["mac_address"] == mac and is_active(device) for device in devices):
                 return devices
+            # Registering a replaced address again supersedes its old entry.
+            devices = [device for device in devices if device["mac_address"] != mac]
             if len(devices) >= MAX_ACCESS_DEVICES:
                 raise AccessError("Dashboard access is limited to 64 devices. Remove an entry first.")
             devices.append({"mac_address": mac, "name": name, "added_at": int(time.time())})
+            self._save(devices)
+            return devices
+
+    def move(self, old_address: str, new_address: str) -> List[Dict[str, Any]]:
+        """Give an active entry to a new address and keep the old one marked as replaced."""
+        old = normalize_mac(old_address)
+        new = normalize_mac(new_address)
+        with self._lock:
+            devices = self.list_devices()
+            entry = next((item for item in devices if item["mac_address"] == old), None)
+            if entry is None or not is_active(entry) or old == new:
+                raise AccessError("That device is not on the allowed list.")
+            if any(item["mac_address"] == new and is_active(item) for item in devices):
+                raise AccessError("This device is already allowed.")
+            # An earlier replaced entry for the new address is superseded by the new one.
+            devices = [item for item in devices if item["mac_address"] != new]
+            if len(devices) >= MAX_ACCESS_DEVICES:
+                raise AccessError("Dashboard access is limited to 64 devices. Remove an entry first.")
+            now = int(time.time())
+            devices = [dict(item, replaced_by=new, replaced_at=now) if item["mac_address"] == old else item
+                       for item in devices]
+            devices.append({"mac_address": new, "name": entry["name"], "added_at": now})
+            self._save(devices)
+            return devices
+
+    def undo_move(self, old_address: str) -> List[Dict[str, Any]]:
+        """Reactivate a replaced entry and drop the address that took its place."""
+        old = normalize_mac(old_address)
+        with self._lock:
+            devices = self.list_devices()
+            entry = next((item for item in devices if item["mac_address"] == old), None)
+            if entry is None or is_active(entry):
+                raise AccessError("There is no move to undo for that device.")
+            new = entry["replaced_by"]
+            successor = next((item for item in devices if item["mac_address"] == new), None)
+            if successor is not None and not is_active(successor):
+                raise AccessError("That device moved again. Undo the latest move first.")
+            devices = [{key: value for key, value in item.items() if key not in ("replaced_by", "replaced_at")}
+                       if item["mac_address"] == old else item
+                       for item in devices if item["mac_address"] != new]
             self._save(devices)
             return devices
 

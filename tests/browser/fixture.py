@@ -11,6 +11,7 @@ from pathlib import Path
 
 import jittersim.api.server as server_module
 from jittersim.api.server import ControlServer
+from jittersim.config.exemptions import UnaffectedDevice
 from jittersim.config.models import Device, DomainObservation, Impairment, Profile, Scenario, ScenarioStep
 from jittersim.config.storage import ConfigRepository
 from jittersim.engine.runtime import RuntimeScheduler
@@ -170,6 +171,7 @@ def seed_demo_data(repository):
     )
 
 
+OLD_ADDRESS = "02:00:00:00:00:99"
 BUSY_ATTEMPTS = 100
 BUSY_WAIT_SECONDS = 0.05
 
@@ -295,9 +297,13 @@ def main():
             executor=executor, topology=topology, directory=root / "access",
             runtime_path=root / "access-policy.json", hostapd_path=root / "hostapd",
         )
+        access_store = AccessStore(root / "access.json")
+        if os.environ.get("JITTERSIM_BROWSER_TEST_OLD_ADDRESS") == "1":
+            # A device the owner saved earlier under an address it no longer uses.
+            access_store.add(OLD_ADDRESS, "Old Mac")
         service = DashboardHelperService(NetworkApplier(executor=executor, topology=topology),
                                          router_factory=lambda *_: DashboardRouter(),
-                                         access_store=AccessStore(root / "access.json"),
+                                         access_store=access_store,
                                          access_manager=access_manager)
         with UnixHelperServer(root / "wifi.sock", service) as helper:
             worker = threading.Thread(target=helper.serve_forever, daemon=True)
@@ -306,6 +312,8 @@ def main():
                 with ConfigRepository(root / "config.db") as repository:
                     seed_observations(repository)
                     seed_demo_data(repository)
+                    if os.environ.get("JITTERSIM_BROWSER_TEST_OLD_ADDRESS") == "1":
+                        repository.save_unaffected_device(UnaffectedDevice(OLD_ADDRESS, "Old Mac", 1))
                     helper_client = PatientHelperClient(socket_path=root / "wifi.sock")
                     keep_helper_busy(HelperClient(socket_path=root / "wifi.sock"))
                     scheduler = None

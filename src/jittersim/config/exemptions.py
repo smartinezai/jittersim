@@ -37,3 +37,29 @@ class UnaffectedDevice:
         """The display name, or the address when no name was given."""
 
         return self.display_name or self.mac_address
+
+
+MAX_ADDRESS_MOVES = 64
+
+
+@dataclass(frozen=True)
+class AddressMove:
+    """A device that came back with a new Wi-Fi address and took over its old entries."""
+
+    old_mac: str
+    new_mac: str
+    name: str = ""
+    moved_access: bool = False
+    moved_protection: bool = False
+    moved_at: int = 0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "old_mac", normalize_exempt_mac(self.old_mac))
+        object.__setattr__(self, "new_mac", normalize_exempt_mac(self.new_mac))
+        object.__setattr__(self, "name", normalize_device_display_name(self.name))
+        if self.old_mac == self.new_mac:
+            raise ValueError("A move needs two different addresses")
+        if type(self.moved_access) is not bool or type(self.moved_protection) is not bool:
+            raise ValueError("A move records what it moved")
+        if type(self.moved_at) is not int or self.moved_at < 0:
+            raise ValueError("move time must be a nonnegative integer")

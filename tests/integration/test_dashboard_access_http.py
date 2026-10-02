@@ -74,7 +74,8 @@ def test_unregistered_token_cannot_read_change_or_download(tmp_path):
         data = json.loads(request("/api/dashboard-access/status")[1])
         assert data["can_register"] and not data["allowed"]
         assert "devices" not in data
-        for path in WRITE_PATHS - {"/api/dashboard-access/register-self"}:
+        for path in WRITE_PATHS - {"/api/dashboard-access/register-self",
+                                   "/api/dashboard-access/move"}:
             status, body = request(path, "POST", {}, **{"X-Forwarded-For": "127.0.0.1"})
             assert status == 403, (path, body)
             assert json.loads(body)["registration_required"]
@@ -111,3 +112,45 @@ def test_ambiguous_and_unavailable_observations_fail_closed(tmp_path):
         applier.route = {}
         assert request("/api/dashboard-access/register-self", "POST", {})[0] == 503
         assert request("/api/backup")[0] != 200
+
+
+def test_moving_to_a_new_address_needs_the_token_and_the_connection_identity(tmp_path):
+    from jittersim.config.exemptions import UnaffectedDevice
+
+    old = "02:00:00:00:00:99"
+    with dashboard(tmp_path) as (request, store, _):
+        store.add(old, "Aeromac")
+        move = "/api/dashboard-access/move"
+        assert request(move, "POST", {"from_mac": old}, token=None)[0] == 401
+        assert request(move, "POST", {"from_mac": old}, token="wrong")[0] == 401
+        assert request("/api/dashboard-access/moves", token="wrong")[0] == 401
+        # The new address comes from the connection and never from the browser.
+        for forged in ({"from_mac": old, "to_mac": MAC}, {"from_mac": old, "mac_address": MAC}):
+            assert request(move, "POST", forged)[0] == 400
+        assert request(move, "POST", {"from_mac": old}, Origin="https://untrusted.example")[0] == 403
+        assert request(move, "POST", {}, **{"Sec-Fetch-Site": "cross-site"})[0] == 403
+        assert [item["mac_address"] for item in store.list_devices()] == [old]
+        assert request("/api/profiles")[0] == 403
+
+
+def test_moving_registers_the_new_address_and_undo_can_reverse_it(tmp_path):
+    old = "02:00:00:00:00:99"
+    with dashboard(tmp_path) as (request, store, _):
+        store.add(old, "Aeromac")
+        offer = json.loads(request("/api/dashboard-access/moves")[1])
+        assert offer["offer"] and offer["candidates"][0]["name"] == "Aeromac"
+        assert offer["replaced"] == []
+        status, body = request("/api/dashboard-access/move", "POST", {"from_mac": old})
+        assert status == 200, body
+        assert json.loads(body)["allowed"]
+        entries = store.list_devices()
+        assert entries[0]["replaced_by"] == MAC and entries[1]["mac_address"] == MAC
+        assert request("/api/profiles")[0] == 200
+        moves = json.loads(request("/api/dashboard-access/moves")[1])
+        assert moves["replaced"][0]["old_mac"] == old
+        # Undo needs the token and a registered device.
+        assert request("/api/dashboard-access/move-undo", "POST", {"from_mac": old}, token="wrong")[0] == 401
+        status, body = request("/api/dashboard-access/move-undo", "POST", {"from_mac": old})
+        assert status == 200, body
+        assert [item["mac_address"] for item in store.list_devices()] == [old]
+        assert request("/api/profiles")[0] == 403

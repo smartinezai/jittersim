@@ -54,6 +54,7 @@ jobs:
       - run: python -m playwright install --with-deps chromium
       - run: python -m tests.browser.wifi_recovery
       - run: python -m tests.browser.dashboard_access
+      - run: python -m tests.browser.address_move
       - run: python -m tests.browser.general_profile
       - run: python -m tests.browser.saved_profiles
       - run: python -m tests.browser.dashboard_navigation
