@@ -200,6 +200,118 @@ class DashboardConcurrencyTests(unittest.TestCase):
         self.assertEqual(failures, [])
         self.assertEqual(len(self.repository.list_profiles()), 1 + 2 * 10)
 
+    def test_panic_that_lands_just_before_the_scheduler_is_activated_still_wins(self):
+        self.helper.release_apply.set()
+        original = self.scheduler.activate_plan
+
+        def racing(**values):
+            # Panic arrives after the apply's last check and before it starts the scheduler.
+            self.scheduler.halt()
+            return original(**values)
+
+        with patch.object(self.scheduler, "activate_plan", side_effect=racing):
+            status, _, body = self.request("POST", "/api/apply", {})
+
+        self.assertEqual(status, 409, body)
+        self.assertFalse(self.scheduler.is_active, "the late apply restarted the scheduler")
+        self.assertGreaterEqual(self.helper.normal_access_calls, 1, "the late apply was not undone")
+        self.assertEqual(self.repository.get_runtime_state().observed_state, "reset")
+
+    def test_panic_still_gets_a_slot_when_every_worker_is_busy(self):
+        with patch.object(api, "MAX_DASHBOARD_WORKERS", 1):
+            result, thread = self.start_slow_apply()
+            deadline = time.monotonic() + 5
+            while self.server.active_workers < 1 and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            health, headers, _ = self.request("GET", "/api/health")
+            panic, _, data = self.request("POST", "/api/normal-access", {})
+
+            self.assertEqual(health, 503)
+            self.assertEqual(headers.get("Retry-After"), "1")
+            self.assertEqual(panic, 200, data)
+            self.assertEqual(self.helper.normal_access_calls, 1)
+            self.helper.release_apply.set()
+            thread.join(5)
+
+    def test_the_reserved_slot_serves_only_panic(self):
+        with patch.object(api, "MAX_DASHBOARD_WORKERS", 1):
+            result, thread = self.start_slow_apply()
+
+            status, headers, _ = self.request("POST", "/api/profiles", {"id": "x", "name": "X"})
+
+            self.assertEqual(status, 503)
+            self.assertEqual(headers.get("Retry-After"), "1")
+            self.helper.release_apply.set()
+            thread.join(5)
+
+    def test_a_refused_client_that_sent_one_byte_does_not_stall_the_accept_loop(self):
+        import socket
+
+        with patch.object(api, "MAX_DASHBOARD_WORKERS", 1), patch.object(
+            api, "RESERVED_PANIC_WORKERS", 0
+        ):
+            result, thread = self.start_slow_apply()
+            idle = []
+            for _ in range(6):
+                connection = socket.create_connection(self.server.server_address[:2])
+                connection.sendall(b"G")
+                idle.append(connection)
+            started = time.monotonic()
+            health = self.request("GET", "/api/health")[0]
+            elapsed = time.monotonic() - started
+            for connection in idle:
+                connection.close()
+
+            self.assertEqual(health, 503)
+            self.assertLess(elapsed, 0.2, "refusing idle clients stalled the accept loop")
+            self.helper.release_apply.set()
+            thread.join(5)
+
+    def test_mixed_requests_with_apply_and_panic_finish_without_errors_or_deadlock(self):
+        self.helper.release_apply.set()
+        bad = []
+        paths = ("/api/health", "/api/profiles", "/api/conditions", "/api/connected-devices",
+                 "/api/general-profile", "/api/devices", "/api/plan")
+
+        def reader(offset):
+            for step in range(12):
+                path = paths[(offset + step) % len(paths)]
+                status = self.request("GET", path)[0]
+                if status not in (200, 503):
+                    bad.append((path, status))
+
+        def applier():
+            for _ in range(6):
+                status = self.request("POST", "/api/apply", {})[0]
+                if status not in (200, 409, 503):
+                    bad.append(("apply", status))
+
+        def panicker():
+            for _ in range(6):
+                status = self.request("POST", "/api/normal-access", {})[0]
+                if status not in (200, 503):
+                    bad.append(("panic", status))
+
+        def writer(index):
+            for step in range(6):
+                body = {"id": "m%d-%d" % (index, step), "name": "M %d %d" % (index, step),
+                        "upload": {}, "download": {"delay_ms": 10}}
+                status = self.request("POST", "/api/profiles", body)[0]
+                if status not in (200, 201, 503):
+                    bad.append(("write", status))
+
+        workers = [threading.Thread(target=reader, args=(index,)) for index in range(4)]
+        workers += [threading.Thread(target=applier), threading.Thread(target=panicker)]
+        workers += [threading.Thread(target=writer, args=(index,)) for index in range(2)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(60)
+        self.assertEqual([worker.name for worker in workers if worker.is_alive()], [])
+        self.assertEqual(bad, [])
+        self.assertEqual(self.request("GET", "/api/health")[0], 200)
+
 
 if __name__ == "__main__":
     unittest.main()

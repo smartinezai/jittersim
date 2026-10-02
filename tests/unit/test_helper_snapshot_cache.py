@@ -136,6 +136,40 @@ class SnapshotCacheTests(unittest.TestCase):
 
         self.assertEqual(self.scans(), 2)
 
+    def test_clients_from_before_a_change_are_not_reused_as_a_stale_list(self):
+        eligibility.station_snapshot(self.client)
+        self.client.reset()
+        self.fail_clients = True
+
+        result = eligibility.station_snapshot(self.client)
+
+        self.assertEqual(result, {"devices": [], "association_status_available": False})
+
+    def test_a_busy_helper_still_gets_the_recent_list_when_nothing_changed(self):
+        self.client.snapshot_ttl_seconds = 0.0
+        good = eligibility.station_snapshot(self.client)
+        self.fail_clients = True
+
+        result = eligibility.station_snapshot(self.client)
+
+        self.assertTrue(result["stale"])
+        self.assertEqual(result["devices"], good["devices"])
+
+    def test_a_scan_that_finished_after_a_change_never_becomes_the_stale_list(self):
+        self.gate = threading.Event()
+        started = threading.Thread(target=eligibility.station_snapshot, args=(self.client,))
+        started.start()
+        time.sleep(0.1)
+        self.client.reset()
+        self.gate.set()
+        started.join(5)
+        self.gate = None
+        self.fail_clients = True
+
+        result = eligibility.station_snapshot(self.client)
+
+        self.assertEqual(result, {"devices": [], "association_status_available": False})
+
 
 class StationSnapshotTests(unittest.TestCase):
     class Helper:

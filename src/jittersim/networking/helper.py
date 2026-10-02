@@ -1389,6 +1389,8 @@ class _SnapshotCache:
         self.expires_at = 0.0
         self.value: Optional[Dict[str, Any]] = None
         self.flight: Optional[_SnapshotFlight] = None
+        # The last good scan and when it was read, for a short stand-in while the helper is busy.
+        self.recent: Optional[Tuple[float, Dict[str, Any]]] = None
 
 
 class HelperClient:
@@ -1413,13 +1415,28 @@ class HelperClient:
         client.snapshot_ttl_seconds = self.snapshot_ttl_seconds
         return client
 
-    def invalidate_connected_devices(self) -> None:
-        """Forget the shared client scan, for example after the network changed."""
+    def invalidate_connected_devices(self, *, keep_recent: bool = False) -> None:
+        """Forget the shared client scan, for example after the network changed.
+
+        `keep_recent` is for a change that has only started: the last good list still
+        describes the network until the change is done.
+        """
 
         with self._snapshots.lock:
             self._snapshots.generation += 1
             self._snapshots.value = None
             self._snapshots.expires_at = 0.0
+            if not keep_recent:
+                self._snapshots.recent = None
+
+    def recent_connected_devices(self, max_age_seconds: float) -> Optional[Dict[str, Any]]:
+        """Return the last good scan if it is young enough and no change has happened since."""
+
+        with self._snapshots.lock:
+            recent = self._snapshots.recent
+            if recent is None or not 0 <= time.monotonic() - recent[0] <= max_age_seconds:
+                return None
+            return copy.deepcopy(recent[1])
 
     def ping(self) -> Dict[str, Any]:
         """Check whether the helper is accepting requests."""
@@ -1677,6 +1694,7 @@ class HelperClient:
                 if flight.generation == cache.generation:
                     cache.value = value
                     cache.expires_at = time.monotonic() + self.snapshot_ttl_seconds
+                    cache.recent = (time.monotonic(), copy.deepcopy(value))
             return copy.deepcopy(value)
         finally:
             with cache.lock:
@@ -1885,7 +1903,7 @@ class HelperClient:
         if payload.get("action") in READ_ONLY_ACTIONS:
             return self._send(payload, timeout_seconds=timeout_seconds)
         # Anything else may change who is connected, so no earlier scan stays valid.
-        self.invalidate_connected_devices()
+        self.invalidate_connected_devices(keep_recent=True)
         try:
             return self._send(payload, timeout_seconds=timeout_seconds)
         finally:

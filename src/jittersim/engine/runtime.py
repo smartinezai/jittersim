@@ -490,10 +490,19 @@ class RuntimeScheduler:
             with self._lock:
                 if self._paused or self._helper_client is None:
                     return False
-            return self._tick(repository=repository, now=now)
+                halts_at_start = self._halt_count
+            return self._tick(repository=repository, now=now, halts_at_start=halts_at_start)
 
-    def _tick(self, *, repository: Optional[ConfigRepository], now: Optional[float]) -> bool:
+    def _tick(
+        self,
+        *,
+        repository: Optional[ConfigRepository],
+        now: Optional[float],
+        halts_at_start: Optional[int] = None,
+    ) -> bool:
         current_time = time.time() if now is None else now
+        if halts_at_start is None:
+            halts_at_start = self.halt_count
         owned_repository = repository is None
         active_repository = repository or ConfigRepository(self._database_path)
         try:
@@ -575,6 +584,17 @@ class RuntimeScheduler:
                 # scheduler must retry even if the desired plan is unchanged.
                 self.invalidate_applied_plan()
                 raise
+            with self._lock:
+                overtaken = self._halt_count != halts_at_start
+            if overtaken:
+                # Panic does not wait for an apply, so it may have run before this one
+                # reached the helper. Panic stays the last word.
+                try:
+                    self._helper_client.reset()
+                except HelperClientError:
+                    LOGGER.error("could not undo a scheduled apply that Panic overtook", exc_info=True)
+                self.invalidate_applied_plan()
+                return False
             active_repository.rebase_quota_counters(now=int(current_time))
             with self._lock:
                 self._current_payload = payload

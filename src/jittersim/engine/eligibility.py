@@ -74,15 +74,23 @@ def station_snapshot(helper) -> dict:
     try:
         snapshot = helper.connected_device_snapshot()
     except (AttributeError, HelperClientError, OSError, TypeError, ValueError):
+        recent_clients = getattr(helper, "recent_connected_devices", None)
+        if callable(recent_clients):
+            # The client remembers its last good scan and forgets it when the network changes.
+            recent = recent_clients(STALE_SNAPSHOT_SECONDS)
+            if isinstance(recent, dict):
+                return {**recent, "stale": True}
+            return {"devices": [], "association_status_available": False}
         last = getattr(helper, "_last_good_station_snapshot", None)
         if (isinstance(last, tuple) and len(last) == 2
                 and 0 <= time.monotonic() - last[0] <= STALE_SNAPSHOT_SECONDS):
             return {**last[1], "stale": True}
         return {"devices": [], "association_status_available": False}
-    try:
-        helper._last_good_station_snapshot = (time.monotonic(), snapshot)
-    except AttributeError:
-        pass
+    if not callable(getattr(helper, "recent_connected_devices", None)):
+        try:
+            helper._last_good_station_snapshot = (time.monotonic(), snapshot)
+        except AttributeError:
+            pass
     return snapshot
 
 

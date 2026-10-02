@@ -22,7 +22,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from ipaddress import IPv4Network
 from pathlib import Path
-from typing import Any, Collection, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Collection, Dict, List, Optional, Sequence, Set, Tuple
 from urllib.parse import parse_qs, urlsplit
 
 from jittersim.api.access import ACCESS_WRITES, read_access_api, write_access_api
@@ -143,6 +143,8 @@ MAX_PENDING_CONNECTION_LIFETIME_SECONDS = 30.0
 MAX_PENDING_DASHBOARD_CONNECTIONS = 16
 # Requests handled at the same time. A request over the limit gets a clear 503.
 MAX_DASHBOARD_WORKERS = 16
+# Extra threads kept for Panic alone, so it still gets in when every ordinary slot is busy.
+RESERVED_PANIC_WORKERS = 2
 RESPONSE_SEND_TIMEOUT_SECONDS = 5.0
 # A settings export with many profiles is larger than ordinary requests.
 MAX_IMPORT_BODY_BYTES = 1024 * 1024
@@ -10554,6 +10556,8 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
     allow_reuse_address = True
     daemon_threads = True
     block_on_close = False
+    # Browsers open several connections at once. The default queue of five resets the rest.
+    request_queue_size = 64
     request_timeout_seconds = 5.0
     # After a reboot the dashboard can start before the helper's socket exists.
     helper_startup_wait_seconds = 30.0
@@ -10596,6 +10600,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         self._stop_connections = threading.Event()
         self._workers_lock = threading.Lock()
         self._active_workers = 0
+        self._reserved_requests: Set[socket.socket] = set()
         super().__init__(server_address, ControlRequestHandler)
 
     @property
@@ -10607,8 +10612,11 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
 
     def process_request(self, request: socket.socket, client_address: Any) -> None:
         with self._workers_lock:
-            accepted = self._active_workers < MAX_DASHBOARD_WORKERS
+            accepted = self._active_workers < MAX_DASHBOARD_WORKERS + RESERVED_PANIC_WORKERS
             if accepted:
+                if self._active_workers >= MAX_DASHBOARD_WORKERS:
+                    # Only Panic is served from the reserve. The handler refuses the rest.
+                    self._reserved_requests.add(request)
                 self._active_workers += 1
         if not accepted:
             self._refuse_request(request)
@@ -10624,6 +10632,12 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             self.shutdown_request(request)
             raise
 
+    def is_reserved_request(self, request: socket.socket) -> bool:
+        """Tell whether this request runs in a slot that is kept for Panic."""
+
+        with self._workers_lock:
+            return request in self._reserved_requests
+
     def _serve_request(self, request: socket.socket, client_address: Any) -> None:
         try:
             self.process_request_thread(request, client_address)
@@ -10634,14 +10648,14 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
     def _refuse_request(self, request: socket.socket) -> None:
         """Tell a client over the limit to retry instead of leaving it hanging."""
 
+        # The accept loop must never wait for a client, so nothing here blocks.
         try:
-            request.settimeout(0.2)
-            request.sendall(
+            request.setblocking(False)
+            request.send(
                 b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\n"
                 b"Content-Length: 0\r\nConnection: close\r\n\r\n"
             )
             # Read what the client already sent so closing does not reset the reply.
-            request.settimeout(0.05)
             request.recv(65536)
         except (OSError, ssl.SSLError):
             pass
@@ -10730,6 +10744,8 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
 
     def shutdown_request(self, request: socket.socket) -> None:
         self._request_inputs.pop(request, None)
+        with self._workers_lock:
+            self._reserved_requests.discard(request)
         super().shutdown_request(request)
 
     def dashboard_access(self, peer: str, operation: str = "status", **values: Any) -> Dict[str, Any]:
@@ -13451,6 +13467,11 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         )
         if self.scheduler is not None:
             self.scheduler.activate_plan(repository=self.repository, prepared=prepared)
+            if self._panic_since(halts_at_start):
+                # Panic landed after the last check. It paused the scheduler and
+                # the activation above started it again, and the state written
+                # above hides Panic's own. Back out the same way as before.
+                return self._stopped_by_panic(undo=True)
         return (
             HTTPStatus.OK,
             "application/json",
@@ -13641,6 +13662,23 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
 
     def version_string(self) -> str:
         return self.server_version
+
+    def parse_request(self) -> bool:
+        if not super().parse_request():
+            return False
+        if self.server.is_reserved_request(self.connection) and not (
+            self.command == "POST" and urlsplit(self.path).path in PRIORITY_WRITE_PATHS
+        ):
+            # Every ordinary slot is busy and this one is kept for Panic.
+            self.close_connection = True
+            self._send_response(
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+                content_type="application/json",
+                body=_json_bytes({"error": "the dashboard is busy, try again"}),
+                headers={"Retry-After": "1"},
+            )
+            return False
+        return True
 
     def do_GET(self) -> None:
         parsed_path = urlsplit(self.path)
