@@ -545,7 +545,9 @@ buttons. A group opened stays open when the page refreshes.
   **Unblock blocked names** removes blocks from such a group.
 - **Add to profile** switches a profile to **Allow only listed domains** and
   lists only that name when the profile was not an allow-list already. Every
-  other site stops working for devices that use it. Check the profile first.
+  other site stops working for devices that use it. The page asks you to
+  confirm first and says so. **Add all to profile** asks the same. A profile
+  that already is an allow-list adds the names without a question.
 
 A block or profile change from this card is saved at once. It applies on its
 own while JitterSim is running. After Reset or Panic choose **Start with saved

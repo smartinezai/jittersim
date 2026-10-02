@@ -4703,6 +4703,28 @@ DASHBOARD_HTML = r"""<!doctype html>
       return { label: label, disabled: disabled, ariaLabel: label + " " + domain };
     }
 
+    // Adding a name to a profile that does not allow only listed sites yet turns it into an
+    // allow list, so every other site stops working for devices on it. The page asks first.
+    function needsAllowOnlyConfirm(profile) {
+      return Boolean(profile) && profile.website_mode !== "allow_only";
+    }
+
+    function allowOnlyConfirmText(subject, profile) {
+      return "Adding " + subject + " turns the profile " + profile.name + " into an allow list. " +
+        "Every other site will stop working for devices on that profile. Continue?";
+    }
+
+    // Callers wait for this only when needsAllowOnlyConfirm says so, so a profile that
+    // already is an allow list adds its names at once and with no pause.
+    async function askAllowOnly(subject, profile) {
+      try {
+        return await confirmWorkflow(allowOnlyConfirmText(subject, profile));
+      } catch (error) {
+        showMessage(error.message, "error");
+        return false;
+      }
+    }
+
     const ENFORCE_NOTE = "It applies on its own while JitterSim is running. " +
       "After Reset or Panic choose Start with saved settings. After Panic also turn household blocking back on.";
 
@@ -5224,6 +5246,8 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     async function addDomainToProfile(domain, profileId, button, onChange) {
       if (!profileId) return;
+      const profile = profiles.find((item) => item.id === profileId);
+      if (needsAllowOnlyConfirm(profile) && !await askAllowOnly(domain, profile)) return;
       setButtonBusy(button, true);
       showMessage("Adding " + domain + " to the profile...", "working");
       try {
@@ -5283,6 +5307,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       const action = groupProfileAction(group, profile);
       if (action.disabled) return;
       const messages = groupProfileMessages(group, action);
+      if (needsAllowOnlyConfirm(profile) &&
+          !await askAllowOnly(groupSubject(group, action.domains.length), profile)) return;
       setButtonBusy(button, true);
       showMessage(messages.busy, "working");
       try {
