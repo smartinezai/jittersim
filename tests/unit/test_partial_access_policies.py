@@ -200,3 +200,56 @@ def test_a_failed_site_rule_write_restores_the_supplied_section(server):
             )
     assert saved(server) == before
     assert server.repository.list_site_blocks() == ()
+
+
+def observed_state(server):
+    return server.repository.get_runtime_state().observed_state
+
+
+def test_options_only_save_bumps_the_version_and_flags_reapply(server):
+    before = saved(server)
+    status, _ = post(server, {"options": {"enabled": False}})
+    after = saved(server)
+    assert status == 200
+    assert server.repository.get_access_options().enabled is False
+    assert after[0] == before[0]
+    assert after[1] == before[1]
+    assert after[2] == before[2] + 1
+    assert observed_state(server) == "unknown"
+
+
+def test_site_rules_only_save_bumps_the_version_and_flags_reapply(server):
+    before = saved(server)
+    rule = {"id": "x", "name": "X", "domains": ["a.example.com"]}
+    status, _ = post(server, {"site_blocks": [rule]})
+    after = saved(server)
+    assert status == 200
+    assert [block.id for block in server.repository.list_site_blocks()] == ["x"]
+    assert after[0] == before[0]
+    assert after[1] == before[1]
+    assert after[2] == before[2] + 1
+    assert observed_state(server) == "unknown"
+
+
+def test_options_only_save_refuses_a_second_browser_with_the_old_version(server):
+    old = saved(server)[2]
+    assert post(server, {"version": old, "options": {"enabled": False}})[0] == 200
+    status, _ = post(server, {"version": old, "options": {"enabled": True}})
+    assert status == 409
+    assert server.repository.get_access_options().enabled is False
+
+
+def test_a_full_save_with_rules_and_options_still_bumps_the_version(server):
+    before = saved(server)
+    rule = {"id": "x", "name": "X", "domains": ["a.example.com"]}
+    status, _ = post(
+        server,
+        {
+            "mac": {"mode": "disabled"},
+            "websites": {"mode": "unrestricted"},
+            "site_blocks": [rule],
+            "options": {"enabled": False},
+        },
+    )
+    assert status == 200
+    assert saved(server)[2] > before[2]

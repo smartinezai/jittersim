@@ -3011,6 +3011,11 @@ class ConfigRepository:
                     "UPDATE network_policies SET access_options_json = ? WHERE id = 1",
                     (json.dumps(asdict(options)),),
                 )
+            if mac is None and websites is None and (blocks is not None or options is not None):
+                # The policy saves above bump the version themselves. When only
+                # site rules or options changed, bump here so other browsers are
+                # refused, the change is re-applied and the checkpoint is taken.
+                self._bump_configuration_version()
 
     def get_mac_policy(self) -> MacPolicy:
         """Return the saved MAC filtering policy."""
