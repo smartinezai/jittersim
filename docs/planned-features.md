@@ -56,7 +56,7 @@ The things the owner has to try on the Pi are in the [Pi acceptance checklist](p
 
 ### 4. Chrome cannot open the dashboard
 
-- **Status:** taken (the diagnosis is with a separate session).
+- **Status:** done on 2026-10-02: Chrome opens the dashboard once its Local Network permission is on (tested on the Pi at its router address). Kept here so the steps are not lost.
 - **Why:** Chrome showed "This site can't be reached" for the Pi's dashboard address while Safari worked.
 - **Notes:**
   - The Pi answered this Mac. The most likely cause is the macOS Local Network permission for Chrome. A VPN on the Mac can also hide the local network.
@@ -70,6 +70,20 @@ The things the owner has to try on the Pi are in the [Pi acceptance checklist](p
 - **Notes:**
   - The code lives in `networking/router.py` and `api/router_operations.py` and the `/api/router/` routes. Do not change router switching without asking.
   - Keep the Pi on Ethernet during the check. The router's own admin page is the way back.
+
+### Traffic discovery that does not miss devices
+
+- **Status:** planned (built in this order after the weekly usage reset).
+- **Why:** Scan now listens for only about 5 seconds, so a scan misses most names unless a device looks something up in that moment. The owner expected the page to show the last 30 days. A device that uses encrypted DNS (Firefox secure DNS or iCloud Private Relay) never shows up at all.
+- **Steps:**
+  1. **Longer window (small).** Make Scan now listen for about 30 seconds. The page says how long it listens and shows a countdown.
+  2. **Background collector (medium).** The small service `jittersim-service-watch` already reads every DNS answer sent to the test Wi-Fi and skips protected devices by hardware address. Let it also record the names into the Traffic discovery list. Batch the writes every few seconds. Keep names 30 days from their last sighting and cap the list size. Add a switch on the Traffic page named Collect names in the background and a Clear list button. The page text must say plainly when collection is on. The exclusions for protected devices stay.
+  3. **Secure DNS fallback (small).** The Pi answers "no such name" for `use-application-dns.net` so Firefox turns its secure DNS off on this network. It does the same for `mask.icloud.com` and `mask-h2.icloud.com` for iCloud Private Relay. It drops connections to well known public secure DNS servers so a browser set to one falls back to the Pi.
+  4. **Read the site name from the HTTPS handshake (medium).** Most HTTPS connections announce the site name in their first packet. Capture those names on the Pi for devices that skip DNS. Protected devices stay excluded in the capture filter. Sites that use Encrypted Client Hello hide the name, so this is a fallback and not a full answer.
+- **Notes:**
+  - Until step 3 exists, turn off DNS over HTTPS in Firefox (Settings, Privacy and Security) when you test the scan.
+  - Every capture must keep the rule that protected devices are never monitored and never appear in the list.
+  - The upgrade that added the hardware address column cleared the old list once. The planned notice for that is in `planned-fixes.md`.
 
 ## In progress
 
