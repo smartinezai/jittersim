@@ -1,5 +1,7 @@
+import logging
 import tempfile
 import threading
+import time
 import unittest
 from dataclasses import replace
 from datetime import datetime
@@ -2171,6 +2173,219 @@ class DeviceAddressTests(unittest.TestCase):
             self.scheduler.tick(repository=self.repository, now=now)
 
         self.assertEqual(self.helper.snapshots, 2)
+
+
+class PlanRetryBackoffTests(unittest.TestCase):
+    """A failing plan is retried after a growing pause instead of every second."""
+
+    LOGGER_NAME = "jittersim.engine.runtime"
+
+    def setUp(self) -> None:
+        self.repository = ConfigRepository(":memory:")
+        self.addCleanup(self.repository.close)
+        self.repository.save_profile(Profile(id="normal", name="Normal"))
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        self.helper = RecordingHelper()
+        self.attempts = []
+        self.now = 0
+        self.failure = HelperClientError("helper is down")
+        self.helper_works = False
+        real_apply = self.helper.apply
+
+        def apply(*, plan):
+            self.attempts.append(self.now)
+            if not self.helper_works:
+                raise self.failure
+            return real_apply(plan=plan)
+
+        self.helper.apply = apply
+        self.scheduler = RuntimeScheduler(database_path=":memory:", helper_client=self.helper)
+        self.scheduler._paused = False
+
+    def tick(self, now):
+        self.now = now
+        return self.scheduler.tick(repository=self.repository, now=now)
+
+    def error_records(self, logs):
+        return [record for record in logs.records if record.levelno >= logging.ERROR]
+
+    def test_retries_wait_one_two_four_eight_then_at_most_thirty_seconds(self) -> None:
+        with self.assertLogs(self.LOGGER_NAME, "ERROR"):
+            for second in range(0, 200):
+                self.tick(second)
+
+        self.assertEqual(self.attempts, [0, 1, 3, 7, 15, 31, 61, 91, 121, 151, 181])
+
+    def test_the_wait_is_not_cut_short_by_ticks_inside_it(self) -> None:
+        with self.assertLogs(self.LOGGER_NAME, "ERROR"):
+            self.tick(0)
+            self.tick(1)
+            # The second failure waits two seconds, so these ticks do not retry.
+            for now in (1.0, 1.5, 2.0, 2.999):
+                self.assertFalse(self.tick(now))
+
+        self.assertEqual(self.attempts, [0, 1])
+
+    def test_a_success_starts_the_next_failure_at_one_second_again(self) -> None:
+        with self.assertLogs(self.LOGGER_NAME, "ERROR"):
+            self.tick(0)
+            self.tick(1)
+            self.helper_works = True
+            self.assertTrue(self.tick(3))
+            self.helper_works = False
+            # The helper loses the rules again: the next failure must not inherit the 4 s wait.
+            self.scheduler.invalidate_applied_plan()
+            self.tick(4)
+            self.tick(4.5)
+            self.tick(5)
+
+        self.assertEqual(self.attempts, [0, 1, 3, 4, 5])
+
+    def test_a_saved_change_does_not_wait_for_the_backoff(self) -> None:
+        with self.assertLogs(self.LOGGER_NAME, "ERROR"):
+            for second in (0, 1, 3, 7):
+                self.tick(second)
+            self.assertEqual(self.attempts, [0, 1, 3, 7])
+            # The next retry is due at 15 s but the user saves a change at 8 s.
+            self.helper_works = True
+            self.repository.save_profile(
+                Profile(id="normal", name="Normal", download=Impairment(delay_ms=50))
+            )
+            self.assertTrue(self.tick(8))
+
+        self.assertEqual(self.attempts, [0, 1, 3, 7, 8])
+
+    def test_a_saved_change_that_still_fails_restarts_the_wait_at_one_second(self) -> None:
+        with self.assertLogs(self.LOGGER_NAME, "ERROR"):
+            for second in (0, 1, 3, 7):
+                self.tick(second)
+            self.repository.save_profile(
+                Profile(id="normal", name="Normal", download=Impairment(delay_ms=50))
+            )
+            self.tick(8)
+            self.tick(8.5)
+            self.tick(9)
+
+        self.assertEqual(self.attempts, [0, 1, 3, 7, 8, 9])
+
+    def test_a_manual_apply_does_not_wait_for_the_backoff(self) -> None:
+        with self.assertLogs(self.LOGGER_NAME, "ERROR"):
+            for second in (0, 1, 3, 7):
+                self.tick(second)
+        # The next retry is due at 15 s. The user applies by hand at 8 s and that works.
+        self.helper_works = True
+        prepared = self.scheduler.prepare_plan(repository=self.repository, now=8)
+        with patch.object(self.scheduler, "start"):
+            self.scheduler.activate_plan(repository=self.repository, prepared=prepared)
+        # The helper then drops its rules again without any saved change.
+        self.scheduler.invalidate_applied_plan()
+
+        self.assertTrue(self.tick(8.1))
+        self.assertEqual(self.attempts, [0, 1, 3, 7, 8.1])
+
+    def test_a_backwards_clock_jump_does_not_stall_the_retries(self) -> None:
+        with self.assertLogs(self.LOGGER_NAME, "ERROR"):
+            self.tick(1_000_000)
+            # The Pi corrects its clock by days: the saved wait is far in the future.
+            self.tick(10)
+
+        self.assertEqual(self.attempts, [1_000_000, 10])
+
+    def test_one_distinct_failure_reason_is_logged_once(self) -> None:
+        with self.assertLogs(self.LOGGER_NAME, "INFO") as logs:
+            for second in (0, 1, 3, 7):
+                self.tick(second)
+            self.assertEqual(len(self.error_records(logs)), 1)
+            self.failure = HelperClientError("helper refused the plan")
+            for second in (15, 31):
+                self.tick(second)
+            self.assertEqual(len(self.error_records(logs)), 2)
+            self.failure = HelperClientError("helper is down")
+            self.tick(61)
+            # A reason that was logged before but is not the latest one is logged again.
+            self.assertEqual(len(self.error_records(logs)), 3)
+
+        self.assertEqual(self.attempts, [0, 1, 3, 7, 15, 31, 61])
+        self.assertIn("helper is down", logs.output[0])
+
+    def test_a_recovery_is_logged_once_and_makes_the_next_failure_log_again(self) -> None:
+        with self.assertLogs(self.LOGGER_NAME, "INFO") as logs:
+            self.tick(0)
+            self.tick(1)
+            self.helper_works = True
+            self.tick(3)
+            self.helper_works = False
+            self.scheduler.invalidate_applied_plan()
+            self.tick(4)
+
+        self.assertEqual(len(self.error_records(logs)), 2)
+        recoveries = [record for record in logs.records if record.levelno == logging.INFO]
+        self.assertEqual(len(recoveries), 1)
+        self.assertIn("2 failed attempts", recoveries[0].getMessage())
+
+    def test_a_pause_clears_the_wait(self) -> None:
+        with self.assertLogs(self.LOGGER_NAME, "ERROR"):
+            self.tick(0)
+            self.tick(1)
+        self.scheduler.pause()
+        self.scheduler._paused = False
+        self.helper_works = True
+
+        self.assertTrue(self.tick(1.5))
+
+    def test_an_unexpected_tick_error_with_one_reason_is_logged_once(self) -> None:
+        scheduler = RuntimeScheduler(
+            database_path=":memory:", helper_client=self.helper, poll_seconds=0.01
+        )
+        calls = []
+        enough = threading.Event()
+
+        def broken_tick():
+            calls.append(len(calls))
+            if len(calls) >= 5:
+                enough.set()
+            raise RuntimeError("database is locked")
+
+        scheduler.tick = broken_tick
+        try:
+            with self.assertLogs(self.LOGGER_NAME, "ERROR") as logs:
+                scheduler.start()
+                self.assertTrue(enough.wait(timeout=5))
+        finally:
+            scheduler.stop()
+
+        self.assertEqual(len(logs.records), 1)
+
+    def test_the_running_loop_does_not_retry_every_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "jittersim.db"
+            with ConfigRepository(database_path) as repository:
+                repository.save_profile(Profile(id="slow", name="Slow"))
+                repository.save_device(Device("alice", "Alice", "192.168.50.10", "slow"))
+            first_attempt = threading.Event()
+            attempts = []
+
+            class FailingHelper(RecordingHelper):
+                def apply(self, *, plan):
+                    attempts.append(time.monotonic())
+                    first_attempt.set()
+                    raise HelperClientError("helper is down")
+
+            scheduler = RuntimeScheduler(
+                database_path=database_path,
+                helper_client=FailingHelper(),
+                poll_seconds=0.01,
+            )
+            try:
+                with self.assertLogs(self.LOGGER_NAME, "ERROR"):
+                    scheduler.activate(applied_payload={})
+                    self.assertTrue(first_attempt.wait(timeout=5))
+                    time.sleep(0.4)
+            finally:
+                scheduler.stop()
+
+        # Without a backoff the 10 ms poll would retry about forty times.
+        self.assertEqual(len(attempts), 1)
 
 
 if __name__ == "__main__":

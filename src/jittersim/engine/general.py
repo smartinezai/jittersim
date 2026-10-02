@@ -7,7 +7,7 @@ from .access import build_access_plan
 from .compiler import compile_plan
 from .plan import GeneralProfileRule, NetworkPlan
 from .service_lists import build_service_list_rules
-from .website import resolve_domains
+from .website import lookup_session, resolve_domains
 
 
 def compile_general_plan(
@@ -15,6 +15,15 @@ def compile_general_plan(
 ) -> NetworkPlan:
     """Keep global access checks separate from bypassable profile behavior."""
 
+    with lookup_session():
+        return _compile_general_plan(
+            repository=repository, profile=profile, outage_active=outage_active
+        )
+
+
+def _compile_general_plan(
+    *, repository: ConfigRepository, profile: Profile, outage_active: bool
+) -> NetworkPlan:
     website_policy = repository.get_website_policy()
     return compile_plan(
         devices=(),

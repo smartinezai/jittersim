@@ -62,7 +62,7 @@ from .schedules import active_schedule, next_schedule_change
 from .selection import choose_automation, reached_limit
 from .service_lists import build_service_list_rules
 from .service_resolver import ServiceAddressRefresher
-from .website import build_website_filters, resolve_domains
+from .website import build_website_filters, lookup_session, resolve_domains
 
 LOGGER = logging.getLogger(__name__)
 
@@ -120,6 +120,8 @@ class PreparedRuntimePlan:
 
     plan: NetworkPlan
     states: Dict[str, TargetState]
+    # Website names whose lookup missed the deadline, so the plan leaves them out.
+    unresolved_names: Tuple[str, ...] = ()
 
 
 @dataclass
@@ -142,6 +144,10 @@ class RuntimeScheduler:
 
     # How often saved devices are matched to the addresses their MAC addresses use.
     address_check_seconds = 30.0
+    # A plan that fails is tried again after 1 s then 2 4 8 and so on up to 30 s. A saved
+    # change or a manual apply starts again at once and a success clears the wait.
+    retry_base_seconds = 1.0
+    retry_max_seconds = 30.0
 
     def __init__(
         self,
@@ -178,6 +184,15 @@ class RuntimeScheduler:
         self._last_device_counters: Dict[str, int] = {}
         self._device_traffic_bytes: Dict[str, int] = {}
         self._group_members: Dict[str, frozenset] = {}
+        # The wait before a failed plan is tried again, guarded by `_lock`. The saved
+        # configuration version at the failure tells a saved change from a plain retry.
+        self._plan_failures = 0
+        self._plan_retry_at = 0.0
+        self._plan_failure_version: Optional[int] = None
+        # The website names the last built plan left out because their lookup was too slow.
+        self._unresolved_names: Tuple[str, ...] = ()
+        # The last reason logged for each kind of failure, so a repeat is not logged again.
+        self._reported_failures: Dict[str, Tuple[str, str]] = {}
         self._service_addresses = (
             None
             if helper_client is None
@@ -228,6 +243,8 @@ class RuntimeScheduler:
             # The apply recreated the helper counters, so keep the device
             # totals and count on from zero.
             self._last_device_counters = dict.fromkeys(self._last_device_counters, 0)
+            # The apply worked, so the next scheduled change does not wait for a retry.
+            self._clear_plan_failure()
         self.start()
 
     def invalidate_applied_plan(self) -> None:
@@ -284,7 +301,9 @@ class RuntimeScheduler:
             plan, states = self._build_plan(
                 repository=repository, now=current_time, connected_snapshot=connected_snapshot
             )
-            return PreparedRuntimePlan(plan=plan, states=states)
+            return PreparedRuntimePlan(
+                plan=plan, states=states, unresolved_names=self._unresolved_names
+            )
 
     @contextmanager
     def exclusive(self) -> Iterator[None]:
@@ -316,6 +335,60 @@ class RuntimeScheduler:
             self._group_members.clear()
             self._blocked_moves.clear()
             self._applied_states = None
+            self._clear_plan_failure()
+
+    def _clear_plan_failure(self) -> int:
+        """Forget the wait before a retry. Return how many tries had failed."""
+
+        with self._lock:
+            failures = self._plan_failures
+            self._plan_failures = 0
+            self._plan_retry_at = 0.0
+            self._plan_failure_version = None
+            self._reported_failures.pop("plan", None)
+        return failures
+
+    def _plan_retry_is_waiting(self, *, now: float, configuration_version: int) -> bool:
+        """Tell whether a failed plan is still inside its wait before the next try."""
+
+        with self._lock:
+            if not self._plan_failures:
+                return False
+            if configuration_version != self._plan_failure_version:
+                # A saved change gets a try at once. The wait then starts again at the
+                # shortest step and the reason already logged stays logged.
+                self._plan_failures = 0
+                self._plan_retry_at = 0.0
+                self._plan_failure_version = None
+                return False
+            wait = self._plan_retry_at - now
+            # A wait longer than the longest step means the clock went backwards.
+            return 0 < wait <= self.retry_max_seconds
+
+    def _note_plan_failure(
+        self, error: BaseException, *, now: float, configuration_version: Optional[int]
+    ) -> Tuple[bool, float]:
+        """Set the wait before the next try. Return whether the reason is new and the wait."""
+
+        with self._lock:
+            wait = min(
+                self.retry_base_seconds * 2 ** min(self._plan_failures, 16),
+                self.retry_max_seconds,
+            )
+            self._plan_failures += 1
+            self._plan_retry_at = now + wait
+            self._plan_failure_version = configuration_version
+            return self._is_new_failure("plan", error), wait
+
+    def _is_new_failure(self, kind: str, error: BaseException) -> bool:
+        """Tell whether this reason differs from the last one logged for this kind of failure."""
+
+        reason = (type(error).__name__, str(error))
+        with self._lock:
+            if self._reported_failures.get(kind) == reason:
+                return False
+            self._reported_failures[kind] = reason
+            return True
 
     def sample_usage(self, *, repository: ConfigRepository) -> None:
         """Record quota and device traffic before the helper counters restart."""
@@ -435,6 +508,7 @@ class RuntimeScheduler:
         current_time = time.time() if now is None else now
         owned_repository = repository is None
         active_repository = repository or ConfigRepository(self._database_path)
+        configuration_version: Optional[int] = None
         try:
             read_gateway_status = getattr(self._helper_client, "gateway_status", None)
             try:
@@ -456,7 +530,9 @@ class RuntimeScheduler:
                 gateway_status.get("recovery_pending") is True
                 and gateway_status.get("gateway_state") == "available"
             )
-            if active_repository.get_runtime_state().last_action == "reset":
+            runtime_state = active_repository.get_runtime_state()
+            configuration_version = runtime_state.configuration_version
+            if runtime_state.last_action == "reset":
                 self._honor_external_reset(repository=active_repository, now=current_time)
                 return False
             self._follow_device_addresses(repository=active_repository, now=current_time)
@@ -473,6 +549,12 @@ class RuntimeScheduler:
                         exc_info=True,
                     )
                 self._last_analytics_cleanup_at = current_time
+            if self._plan_retry_is_waiting(
+                now=current_time, configuration_version=configuration_version
+            ):
+                # The last plan failed a moment ago and nothing was saved since.
+                # Sampling above carries on, only the plan waits.
+                return False
             random_website_outcomes: List[RandomWebsiteOutcome] = []
             self._analytics_batch_overflowed = False
             plan, states = self._build_plan(
@@ -501,6 +583,7 @@ class RuntimeScheduler:
             if unchanged:
                 # The network already runs this plan, for example one the
                 # dashboard applied after a saved change.
+                self._log_plan_recovery(self._clear_plan_failure())
                 self._record_activity(repository=active_repository, states=states, now=current_time)
                 return False
             # Applying recreates the helper's counters at zero, so record the
@@ -518,14 +601,30 @@ class RuntimeScheduler:
             with self._lock:
                 self._current_payload = payload
                 self._last_device_counters = dict.fromkeys(self._last_device_counters, 0)
+            self._log_plan_recovery(self._clear_plan_failure())
             if not active_repository.record_schedule_result(success=True):
                 # A reset was recorded while this plan was being applied.
                 self._honor_external_reset(repository=active_repository, now=current_time)
                 return False
             self._record_activity(repository=active_repository, states=states, now=current_time)
             return True
-        except (HelperClientError, PlanError, StorageError, OSError):
-            LOGGER.exception("scheduled network plan failed")
+        except (HelperClientError, PlanError, StorageError, OSError) as error:
+            is_new_reason, wait = self._note_plan_failure(
+                error, now=current_time, configuration_version=configuration_version
+            )
+            if is_new_reason:
+                LOGGER.exception(
+                    "scheduled network plan failed (%s); trying again in %.0f s and then less often",
+                    error,
+                    wait,
+                )
+            else:
+                LOGGER.debug(
+                    "scheduled network plan failed again (%s); trying again in %.0f s",
+                    error,
+                    wait,
+                    exc_info=True,
+                )
             try:
                 active_repository.record_schedule_result(success=False)
             except StorageError:
@@ -534,6 +633,15 @@ class RuntimeScheduler:
         finally:
             if owned_repository:
                 active_repository.close()
+
+    @staticmethod
+    def _log_plan_recovery(failed_tries: int) -> None:
+        if failed_tries:
+            LOGGER.info(
+                "scheduled network plan works again after %d failed %s",
+                failed_tries,
+                "attempt" if failed_tries == 1 else "attempts",
+            )
 
     def _follow_device_addresses(self, *, repository: ConfigRepository, now: float) -> None:
         """Move saved devices to the addresses their MAC addresses use now.
@@ -660,8 +768,31 @@ class RuntimeScheduler:
         random_website_outcomes: Optional[List[RandomWebsiteOutcome]] = None,
         connected_snapshot: Optional[dict] = None,
     ) -> Tuple[NetworkPlan, Dict[str, TargetState]]:
-        """Build the runtime plan and what applies to each target, for the activity log."""
+        """Build the runtime plan and what applies to each target, for the activity log.
 
+        The website lookups of the plan share one deadline. Names that miss it are
+        left out of the plan and listed in `_unresolved_names` for the caller.
+        """
+
+        with lookup_session() as lookups:
+            try:
+                return self._build_plan_with_lookups(
+                    repository=repository,
+                    now=now,
+                    random_website_outcomes=random_website_outcomes,
+                    connected_snapshot=connected_snapshot,
+                )
+            finally:
+                self._unresolved_names = tuple(lookups.timed_out)
+
+    def _build_plan_with_lookups(
+        self,
+        *,
+        repository: ConfigRepository,
+        now: float,
+        random_website_outcomes: Optional[List[RandomWebsiteOutcome]] = None,
+        connected_snapshot: Optional[dict] = None,
+    ) -> Tuple[NetworkPlan, Dict[str, TargetState]]:
         general_profile = repository.get_general_profile()
         if general_profile is not None:
             return self._build_general_plan(repository=repository, profile=general_profile, now=now)
@@ -1489,7 +1620,11 @@ class RuntimeScheduler:
         while not self._stop_event.wait(self._poll_seconds):
             try:
                 self.tick()
-            except Exception:
+            except Exception as error:
                 # Keep schedules, timers, outages and quotas running; the next
-                # tick retries with fresh state.
-                LOGGER.exception("scheduler tick failed unexpectedly")
+                # tick retries with fresh state. The same reason is logged once.
+                if self._is_new_failure("tick", error):
+                    LOGGER.exception("scheduler tick failed unexpectedly")
+            else:
+                with self._lock:
+                    self._reported_failures.pop("tick", None)

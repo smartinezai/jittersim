@@ -108,6 +108,7 @@ from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.scenarios import active_scenario_runs
 from jittersim.engine.schedules import active_schedule
 from jittersim.engine.service import compile_stored_plan
+from jittersim.engine.website import describe_timed_out_names
 from jittersim.networking.applier import MAX_PROTECTED_MACS
 from jittersim.networking.helper import (
     HELPER_OUT_OF_DATE_MESSAGE,
@@ -13225,11 +13226,9 @@ class ControlServer(HTTPServer):
                     "state": self._runtime_state_with_running(state),
                     "applied": self._applied_summary(plan),
                     "unverified_device_ids": list(plan.unverified_device_ids),
-                    "warning": (
-                        "Profiles were skipped for devices whose current Wi-Fi identity could not be verified: "
-                        + ", ".join(plan.unverified_device_ids)
-                        if plan.unverified_device_ids
-                        else None
+                    "warning": _apply_warning(
+                        plan.unverified_device_ids,
+                        prepared.unresolved_names if prepared is not None else (),
                     ),
                 }
             ),
@@ -13637,6 +13636,25 @@ def _safe_wifi_copy_message(error: HelperClientError) -> str:
     if str(error) == WIFI_DETAILS_MISSING_MESSAGE:
         return WIFI_DETAILS_MISSING_MESSAGE
     return safe_router_check_message(str(error))
+
+
+def _apply_warning(
+    unverified_device_ids: Sequence[str], unresolved_names: Sequence[str]
+) -> Optional[str]:
+    """Say in plain words what an apply left out, or None when it left nothing out."""
+
+    parts = []
+    if unverified_device_ids:
+        parts.append(
+            "Profiles were skipped for devices whose current Wi-Fi identity could not be verified: "
+            + ", ".join(unverified_device_ids)
+        )
+    if unresolved_names:
+        parts.append(
+            "These website names could not be looked up in time and are left out of the rules "
+            "until their lookup works: " + describe_timed_out_names(unresolved_names)
+        )
+    return ". ".join(parts) if parts else None
 
 
 def _bad_request(message: str, error: Exception) -> Tuple[int, str, bytes]:
