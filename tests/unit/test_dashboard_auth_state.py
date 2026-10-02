@@ -31,6 +31,7 @@ def test_token_checks_and_edits_release_all_private_loading_states():
       const listeners = new Map();
       let adminTokenVerified = false;
       let adminTokenRevision = 0;
+      let messageSerial = 0;  // showMessage is stubbed here so nothing else ever speaks
       let adminTokenChecking = false;
       let adminTokenRejected = false;
       let refreshCalls = 0;
