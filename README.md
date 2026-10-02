@@ -104,6 +104,56 @@ restarts test Wi-Fi, so its clients need to reconnect. Add `--yes` when running
 without a prompt. This command needs the local helper but not the dashboard or
 its settings database.
 
+### Use the terminal on your Mac
+
+These commands run on your **Mac** (or any computer that reaches the dashboard)
+and talk to the Pi's HTTPS dashboard with the same checks as the browser. They
+need no `sudo` and no SSH. Install the command once from a checkout:
+
+```sh
+python3 -m venv ~/.jittersim-cli
+~/.jittersim-cli/bin/pip install .
+```
+
+Copy `/etc/jittersim/dashboard.crt` from the Pi through a connection you
+already trust and compare its SHA-256 fingerprint with the one the installer
+printed. Then save the address and the certificate path once:
+
+```sh
+~/.jittersim-cli/bin/jittersim connect --url https://192.168.0.17:8080 --ca-cert ~/jittersim-dashboard.crt
+```
+
+`connect` checks that the dashboard presents exactly that certificate and saves
+only the address and the certificate path in `~/.config/jittersim/cli.json`.
+Every other command asks for the **admin token** with a hidden prompt each time.
+The token is never saved and never accepted as an argument. Scripts may set
+`JITTERSIM_ADMIN_TOKEN` instead: other programs that can read your environment
+can then read it too. Plain HTTP, redirects and addresses with a user name,
+path or query are refused.
+
+| Command (on the Mac) | What it does |
+| --- | --- |
+| `jittersim status` | Whether JitterSim is running, the general profile and each affected connected device with its profile. Protected devices are never listed. |
+| `jittersim profiles list` | The saved profiles with a one-line summary. The general profile is marked. |
+| `jittersim profiles apply-all PROFILE_ID` | Makes that profile the general profile for every connected device. Protected devices stay untouched. |
+| `jittersim profiles stop-all` | Stops the general profile. Saved device rules resume. |
+| `jittersim traffic` | The names each test device looked up, grouped by app or site like **Traffic discovery**. Add `--scan` to sample first, `--expand` for every name, `--blocked` for blocked names only or `--device NAME_OR_IP`. |
+| `jittersim traffic block DOMAIN` | Adds a name to the global block list. `traffic unblock DOMAIN` removes it. |
+| `jittersim wifi show` | The router's own Wi-Fi name, read live from the router. It also asks for the router admin password with a hidden prompt. Add `--password` to show the Wi-Fi password too. |
+| `jittersim impact` | The **Impact** check: two samples of the Pi's queues `--wait` seconds apart (10 by default) judged with the dashboard's rules. |
+
+Add `--json` to any of them for machine-readable output or `--help` for details.
+On the Pi itself `sudo jittersim status` still shows the local helper status
+and `sudo jittersim wifi reset` still runs there.
+
+To put a new release on the Pi from the Mac, run
+`deploy/raspberry-pi/deploy-from-mac.sh` in a checkout. It runs on the Mac and
+needs only git, ssh, scp, tar and shasum. It builds the release archive of a
+commit, copies it to the Pi with your SSH key and stages it for the verified
+update service. `--install` also installs it and shows the release the Pi now
+runs. The Pi asks for its `sudo` password in your terminal. See
+[Deploy from a Mac](deploy/raspberry-pi/README.md#deploy-from-a-mac).
+
 ## Features
 
 ### Profiles and network effects

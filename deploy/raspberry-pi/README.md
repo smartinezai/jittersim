@@ -50,6 +50,10 @@ archive:
 sudo deploy/raspberry-pi/install.sh
 ```
 
+From a Mac, `deploy/raspberry-pi/deploy-from-mac.sh --use-installer --install`
+copies the release of a commit to the Pi and runs this installer from it. See
+[Deploy from a Mac](#deploy-from-a-mac).
+
 This Pi release replaces its source folders on upgrade so removed modules do
 not remain in the installed package. The installer installs the access
 recovery, DNS, update and Wi-Fi units and enables the recovery and Wi-Fi units.
@@ -711,6 +715,55 @@ Automated tests exercise file validation and recovery with disposable files.
 They do not establish radio coverage, uninterrupted household service or actual
 Pi restart behavior. Complete the household and recovery trial on the Pi before
 relying on it for everyday access.
+
+### Deploy from a Mac
+
+`deploy/raspberry-pi/deploy-from-mac.sh` does the build, copy and staging steps
+above in one command. It runs on the **Mac** in a JitterSim checkout and needs
+only git, ssh, scp, tar and shasum (not the Python package):
+
+```sh
+deploy/raspberry-pi/deploy-from-mac.sh --ref RELEASE_REF --dry-run
+deploy/raspberry-pi/deploy-from-mac.sh --ref RELEASE_REF
+deploy/raspberry-pi/deploy-from-mac.sh --ref RELEASE_REF --install
+```
+
+The defaults are `--host jittersim@192.168.0.17` and
+`--key ~/.ssh/jittersim_ed25519`. `--ref` defaults to `HEAD`.
+
+1. It builds the archive of the commit with `build-release.sh` so uncommitted
+   changes are left out. It prints the commit and the SHA-256 checksum and
+   checks that checksum with `shasum`.
+2. It checks that the Pi has the update service and copies the archive to the
+   login's home folder with `scp`.
+3. It stages the archive with the update service's own copy of `updates.py`
+   (`sudo /usr/bin/python3 -I /usr/local/lib/jittersim-update.py stage ...`).
+   Staging checks the checksum and every archive entry again. This is the one
+   step that needs root. It runs through `ssh -t` so the Pi asks for its `sudo`
+   password in your terminal. The script never reads, stores or passes a
+   password.
+4. Without `--install` it prints the exact command to install the staged
+   release. You can also choose **Check for updates** and then **Install staged
+   release** in Setup. With `--install` the same terminal session runs
+   `sudo jittersim update install --yes` and waits for the update service. Then
+   it reads `jittersim update check` and prints the release the Pi now runs.
+   Compare it with `git rev-parse --short RELEASE_REF`.
+
+The release is named after the short commit. The Pi records it in
+`/opt/jittersim/.jittersim-release.json`.
+
+A Pi without the update service (a release from before staged updates) needs
+the full installer once. `--use-installer` copies the archive, checks its
+checksum on the Pi and unpacks it to `~/jittersim-release-COMMIT` as the login
+user. It then prints the installer command or runs it with `--install`. Use it
+as well for OS package or Wi-Fi changes.
+
+Every ssh and scp call has a ten second connection timeout and uses only the
+given key. All of them except the `sudo` step run in `BatchMode` so they never
+ask anything. Host keys come from your `known_hosts` as they are: connect once
+with `ssh -i ~/.ssh/jittersim_ed25519 jittersim@192.168.0.17` and check the
+host key before the first deploy. `--dry-run` prints every command and runs
+none.
 
 ## Persistent access rules and normal access
 
