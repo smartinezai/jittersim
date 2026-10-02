@@ -297,7 +297,9 @@ function installFieldHelp() {
     item.tip.style.top = Math.max(12, Math.min(anchor.top >= size.height + 20 ? anchor.top - size.height - 8 : field.bottom + 8, innerHeight - size.height - 12)) + 'px';
   }
   document.querySelectorAll('.help-icon[data-help]').forEach((old, index) => {
-    const button = textNode('button', '?', 'help-icon'); button.type = 'button';
+    // The sidebar's action buttons keep the Pi line's pinned tips next to the sidebar.
+    if (old.closest('.sidebar-action-row')) return;
+    const button = textNode('button', '?', 'help-icon field-help'); button.type = 'button';
     button.setAttribute('aria-label', old.getAttribute('aria-label') || 'Field help'); button.setAttribute('aria-expanded', 'false');
     const tip = textNode('div', old.dataset.help.replace(/\s+/g, ' ').trim(), 'field-tooltip');
     tip.id = 'field-help-' + index; tip.setAttribute('role', 'tooltip'); tip.hidden = true;

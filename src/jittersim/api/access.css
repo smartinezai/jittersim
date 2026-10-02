@@ -28,7 +28,7 @@ select:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px sol
 #site-rule-domains { min-height: 7rem; }
 .help-icon { display: inline-grid; width: 1.8rem; height: 1.8rem; min-height: 1.8rem; flex: 0 0 auto; padding: 0; margin: 0; border-radius: 50%; background: #142338; color: #b9d8f4; cursor: pointer; }
 label > .help-icon { justify-self: start; }
-.help-icon::after, .help-icon:hover::after, .help-icon:focus-visible::after { display: none; content: none; }
+.help-icon.field-help::after, .help-icon.field-help:hover::after, .help-icon.field-help:focus-visible::after { display: none; content: none; }
 .field-tooltip { position: fixed; z-index: 120; max-width: min(24rem, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: auto; padding: .9rem 1rem; border: 1px solid #547392; border-radius: var(--radius); background: #08101c; color: #dcecff; font-size: .9rem; line-height: 1.55; box-shadow: 0 .5rem 1.5rem #0008; }
 #profile-form > .fields { margin-bottom: 1.5rem; }
 .profile-directions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.5rem; margin: 1rem 0; }

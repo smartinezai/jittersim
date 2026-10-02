@@ -168,8 +168,8 @@ def check_many_queues(service, applier):
         ]
         for item in joined.values()
     }
-    assert parents["19:"] == ["10:a"], parents["19:"]
-    assert parents["25:"] == ["10:10"], parents["25:"]
+    assert parents[queue_handle(9)] == ["10:a"], parents[queue_handle(9)]
+    assert parents[queue_handle(15)] == ["10:10"], parents[queue_handle(15)]
     assert len(joined) == 2 * MAX_SHAPED_MARKS_PER_PLAN
     return len(joined)
 
