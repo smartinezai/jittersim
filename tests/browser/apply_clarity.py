@@ -55,7 +55,10 @@ def start_fixture():
 
 
 def wait_for_automatic_token_check(page):
-    expect(page.locator("#message")).to_contain_text("Token accepted. Diagnostics loaded.")
+    # The check ends after many requests so a slow shared machine needs more than 5 seconds.
+    expect(page.locator("#message")).to_contain_text(
+        "Token accepted. Diagnostics loaded.", timeout=20000
+    )
 
 
 def assert_old_wording_is_gone(page):
@@ -134,6 +137,8 @@ WIDE_FONTS = (
     " * { font-family: Verdana, 'DejaVu Sans', sans-serif !important; }"
 )
 STRESSES = (("normal fonts", ""), ("wide fonts", WIDE_FONTS))
+# The fixture can put the wide fonts on every page. Then there are no normal fonts to check.
+WIDE_PAGE = os.environ.get("JITTERSIM_BROWSER_TEST_WIDE_FONTS") == "1"
 # The sidebar scrolls as a whole. A window as tall as the content shows all of it and a shorter
 # one shows what it can and scrolls to the rest. So the journey asks for the first only on the
 # tall window and for the reach of every control on the others.
@@ -266,7 +271,7 @@ def assert_sidebar_everywhere(page, state):
         width, height = TALL_WINDOW
         page.set_viewport_size({"width": width, "height": height})
         page.evaluate("document.querySelector('.sidebar').scrollTo(0, 0)")
-        if css:
+        if css or WIDE_PAGE:
             # Wider fonts need a taller window to show everything. A window that is just tall
             # enough for the normal fonts is no promise for them so only the reach is checked.
             assert_reachable(page, f"{state} with {stress} at {width}x{height}")
@@ -537,7 +542,10 @@ def check_width(browser, width, height):
         # The label changes between one and two lines in the narrow sidebar. The button and the
         # buttons below it must keep their size and spacing so that the footer does not jump.
         running_geometry = footer_geometry(page)
-        assert running_geometry == stopped_geometry, (stopped_geometry, running_geometry)
+        for name in stopped_geometry:
+            # Fonts round to a fraction of a pixel in a different way for each label.
+            assert abs(running_geometry[name] - stopped_geometry[name]) <= 1, (
+                name, stopped_geometry, running_geometry)
 
         # applying again while it runs
         apply_button.click()

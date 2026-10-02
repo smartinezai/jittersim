@@ -757,6 +757,24 @@ def test_the_sidebar_tips_stay_in_the_window_and_the_apply_button_keeps_its_heig
     assert re.search(r"#apply-button \{[^{}]*min-height: calc\(2lh \+ 1\.24rem \+ 2px\)", css)
 
 
+def test_the_sidebar_is_one_column_that_scrolls_as_a_whole():
+    # A pinned footer hid the router Wi-Fi switch and the copy buttons on a laptop window with
+    # the taller fonts of the CI machine. They stay in the one column below Panic instead and the
+    # column scrolls. So the controls that matter are reachable whatever the fonts are.
+    dock = sidebar_html()
+    assert "sidebar-scroll" not in DASHBOARD_HTML and "sidebar-secondary" not in DASHBOARD_HTML
+    order = [dock.index(marker) for marker in (
+        'class="sidebar-brand"', '<nav class="sidebar-nav"', 'id="sidebar-status"',
+        'id="apply-button"', 'id="reset-button"', 'id="panic-button"',
+        'class="router-wifi-control"', 'class="router-wifi-copy"', 'class="sidebar-credentials"',
+    )]
+    assert order == sorted(order)
+    css = re.search(r"<style>(.*?)</style>", DASHBOARD_HTML, re.DOTALL).group(1)
+    sidebar_rule = re.search(r"\n    \.sidebar \{([^{}]*)\}", css).group(1)
+    assert "overflow-y: auto" in sidebar_rule
+    assert "height: 100dvh" in sidebar_rule
+
+
 def test_a_short_window_gives_the_footer_room_so_panic_stays_in_view():
     css = re.search(r"<style>(.*?)</style>", DASHBOARD_HTML, re.DOTALL).group(1)
     block = re.search(
