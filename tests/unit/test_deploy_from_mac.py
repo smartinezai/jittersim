@@ -685,12 +685,10 @@ WITHOUT_GIT = {
     "test_unknown_options_are_usage_errors",
     "test_help_names_the_defaults_where_it_runs_and_the_network",
     "test_the_script_never_handles_a_password_or_trusts_new_host_keys",
+    "test_a_mac_on_the_test_wifi_stops_before_anything_is_built_or_sent",
+    "test_a_pi_address_on_the_test_wifi_stops_before_ssh",
+    "test_the_retry_command_quotes_odd_arguments",
 }
-needs_a_checkout = pytest.mark.skipif(
-    not _in_a_checkout(), reason="the deploy script builds from a git checkout")
-for _name, _test in list(globals().items()):
-    if _name.startswith("test_") and _name not in WITHOUT_GIT:
-        globals()[_name] = needs_a_checkout(_test)
 
 
 # The Mac on the Pi's test Wi-Fi
@@ -751,3 +749,11 @@ def test_every_connection_has_a_short_timeout_and_a_plain_message(fakes):
     assert NETWORK_HINT in result.stderr
     assert calls and all("ConnectTimeout=8" in call["argv"] for call in calls
                          if call["tool"] == "ssh")
+
+
+# Applied last so it also covers the tests defined above this line.
+needs_a_checkout = pytest.mark.skipif(
+    not _in_a_checkout(), reason="the deploy script builds from a git checkout")
+for _name, _test in list(globals().items()):
+    if _name.startswith("test_") and _name not in WITHOUT_GIT:
+        globals()[_name] = needs_a_checkout(_test)
