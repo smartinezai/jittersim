@@ -214,7 +214,7 @@ function wifiPollDependencies(retry) {
     ].concat(wifiJoinHint ? [wifiJoinHint] : [])),
     onReconnecting: showReconnectingBanner,
     onGivenUp: () => showWifiBanner("warning", "The Pi has not answered yet", [
-      "Check that this Mac is on the Pi’s test Wi-Fi network, then check again. If the name or password changed, join it again in the Wi-Fi menu. Nothing was lost: your sign-in is kept in this browser.",
+      "Check that this Mac is on the Pi’s test Wi-Fi network, then check again. If the name or password changed, join it again in the Wi-Fi menu. If the Pi answers but says this device is not allowed, press Allow this device again: a new Wi-Fi name gives this Mac a new private address. Nothing was lost: your sign-in is kept in this browser.",
     ].concat(wifiJoinHint ? [wifiJoinHint] : []), [{label: "Check again", run: retry}]),
   };
 }

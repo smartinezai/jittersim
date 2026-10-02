@@ -318,3 +318,18 @@ def test_waiting_after_an_access_point_change_names_the_network_but_never_the_pa
     assert "Wi-Fi menu" in outcome["waiting"][0]
     assert "hunter22" not in outcome["all"]
     assert "rejoin on its own" not in outcome["waiting"][0]
+
+
+@NEEDS_NODE
+def test_giving_up_points_to_allow_this_device_for_a_mac_with_a_new_private_address():
+    """A new Wi-Fi name gives the Mac a new private address that the Pi has not allowed yet."""
+
+    outcome = run_node(
+        PAGE_STUBS
+        + """
+        wifiPollDependencies(() => {}).onGivenUp();
+        console.log(JSON.stringify({ text: banners.map((banner) => banner.lines.join(" ")).join(" ") }));
+        """
+    )
+    assert "Allow this device" in outcome["text"]
+    assert "private address" in outcome["text"]
