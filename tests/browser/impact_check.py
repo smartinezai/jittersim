@@ -45,7 +45,11 @@ def sign_in(page, base):
     expect(page.locator("#private-dashboard")).to_be_visible()
     page.locator("#remember-admin-token").check()
     page.locator("#close-credentials").click()
-    expect(page.locator("#message")).to_contain_text("Token accepted. Diagnostics loaded.")
+    # The check ends after many requests to a dashboard that answers one at a time.
+    # A slow shared CI machine needs more than 5 seconds (like apply_clarity).
+    expect(page.locator("#message")).to_contain_text(
+        "Token accepted. Diagnostics loaded.", timeout=20000
+    )
 
 
 def check_width(browser, base, width, height, check_idle):

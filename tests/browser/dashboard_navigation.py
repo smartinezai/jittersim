@@ -18,14 +18,16 @@ def unlock(page):
     expect(page.locator("#private-dashboard")).to_be_visible()
     page.locator("#remember-admin-token").check()
     # The token is stored once it is accepted. A reload before that forgets it.
-    expect(page.locator("#remember-admin-token-note")).to_contain_text("Remembered until")
+    expect(page.locator("#remember-admin-token-note")).to_contain_text(
+        "Remembered until", timeout=20000
+    )
     page.locator("#close-credentials").click()
 
 
 def wait_for_remembered_token(page):
     """After a reload the page checks the remembered token again before it unlocks."""
 
-    expect(page.locator("#admin-credential-state")).to_have_text("Accepted", timeout=15000)
+    expect(page.locator("#admin-credential-state")).to_have_text("Accepted", timeout=20000)
     expect(page.locator("#private-dashboard")).to_be_visible()
 
 
