@@ -6,7 +6,11 @@ protection and service-list/general/device priority. It never contacts the Pi
 or observes ordinary browsing. The effect starts off.
 
 Only Article and Notes are enrolled. A fresh valid policy chooses either that
-HTML page or its exact origin root. Local Off cancels an outstanding action.
+HTML page or its exact origin root. Local Off and closing the dedicated test
+tab cancel an outstanding action. Re-pairing discards the old local session
+and stays off. A rejected session requires pairing and explicit Enable again.
+A worker restart keeps pairing but resets Enable. A browser restart clears
+the session credential.
 Unknown/protected identity and unavailable, malformed or expired policy remove
 the effect. They leave a new ordinary test navigation usable. No action is
 repeated when the resulting home page loads.
@@ -41,7 +45,7 @@ acceptance. Normal-browser forms, downloads, login callbacks, server redirects
 and random destinations remain outside this explicit-action slice.
 The focused plan records the future delivery requirements.
 
-## Verification on 2 October 2026
+## Initial verification on 2 October 2026
 
 The served browser journey passed all 18 checks using the actual Manifest V3
 extension in an isolated Google Chrome for Testing profile. It covered 0% and
@@ -53,3 +57,33 @@ rejected. Full Ruff and JavaScript syntax checks passed.
 These results establish the reference flow only. They do not establish a live
 Pi identity endpoint, HTTPS pairing or physical device protection. Docker was
 not used and the user's Chrome profile and OS permissions were unchanged.
+
+
+## Focused review on 2 October 2026
+
+The actual extension passed 32 browser checks after fixing two reproduced
+races: Enable during re-pairing and a delayed navigation after test-tab closure.
+The journey also checks malformed pairing replies, replayed codes, session
+loss, one outstanding action, Off followed by Enable and actual worker and
+browser restarts. Eight HTTP checks cover credential deadlines, replacement,
+harness isolation, malformed requests and four stalled handlers with recovery.
+Full Ruff, JavaScript syntax and diff checks passed.
+
+Run the focused HTTP checks with:
+
+```sh
+python -m pytest tests/test_homepage_reference_fixture.py
+```
+
+The fixture keeps one session and one pending pairing code. The browser keeps
+one dedicated test tab and one pending action. Both request and response JSON
+are limited to 8 KiB. Policy lookups have a 750 ms deadline and a maximum
+one-second lease measured from the request start. Already issued navigations
+cannot be recalled.
+
+The machine-readable results are in
+`docs/verification-results-homepage-reference-review-2026-10-02.json`.
+Linux DNS packet acceptance still waits for the shared Docker VM. Physical
+three-device acceptance still waits for the phones and safe Pi recovery.
+These checks remain a local simulation and do not verify the newer integration
+or Pi releases. No push or deployment was performed.

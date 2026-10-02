@@ -1,0 +1,106 @@
+{
+  "date": "2026-10-02",
+  "scope": "Isolated loopback homepage reference only",
+  "branch": "codex/homepage-reference-review",
+  "tested_commit": "eeeb3e4a932e8c439d277685ca0c20a6fb9cdf9b",
+  "base_reference_commit": "8aa7f80",
+  "integration_base": "6aae9d819f0fc91b391198ce2e2f63e31c26dd45",
+  "dns_acceptance_commit": "0541cc2",
+  "confirmed_before_fixes": [
+    "Enable during rejected re-pairing left the old credential enabled while the interface reported pairing unavailable.",
+    "Closing the dedicated test tab during a delayed lookup created a replacement tab."
+  ],
+  "changes": [
+    "Clear old local pairing before a new valid pairing attempt and refuse Enable until it finishes.",
+    "Keep successful pairing off and require new pairing after credential rejection.",
+    "Cancel pending work after Off or test-tab closure without reviving it after Enable.",
+    "Ignore older interface replies after a newer command.",
+    "Require a strict pairing response and string credential with a valid stored revision.",
+    "Abort unread failed responses and declare fixture connection closure."
+  ],
+  "browser": {
+    "result": "passed",
+    "checks": 32,
+    "evidence": [
+      "Off default preserves the named page without a policy request",
+      "Disposable simulated pairing uses a separate credential and clears the input",
+      "0% keeps the deep page",
+      "100% chooses the exact origin root",
+      "Service-list zero wins before general 100",
+      "General 100 wins before device zero",
+      "Protected identity disables bounce",
+      "Unknown identity disables bounce",
+      "Unavailable policy leaves the named page usable",
+      "Expired lease disables bounce",
+      "Transit consumes a short lease",
+      "Malformed chance is rejected",
+      "A policy naming a private origin is rejected",
+      "A reply for another request is rejected",
+      "A regressed policy revision is rejected",
+      "An enabled policy for protected identity is rejected",
+      "Oversized policy is rejected",
+      "Lookup timeout leaves the named page usable",
+      "Reloading the home page makes no repeated chance decision",
+      "Off cancels a real outstanding lookup and prevents late navigation",
+      "Private URLs and unenrolled callback/download actions cannot navigate",
+      "One request is allowed at a time and Off followed by Enable cannot revive it",
+      "Replayed pairing is refused and failed re-pairing removes the old local session",
+      "Enable during an in-progress pair is refused and successful pairing stays off",
+      "Unexpected pairing fields and non-string credentials cannot restore a local session",
+      "Off during pairing prevents session restoration and an older interface reply",
+      "Simulated expire-session loses pairing and cannot silently re-enable",
+      "Simulated restart loses pairing and cannot silently re-enable",
+      "Closing the test tab cancels pending navigation and a fresh action creates one tab",
+      "A real worker restart preserves pairing and the dedicated tab while resetting Enable",
+      "Installed extension has no history or browsing-monitor permissions",
+      "A real browser restart clears the session credential and keeps the effect off"
+    ]
+  },
+  "http_checks": {
+    "result": "passed",
+    "tests": 8,
+    "module": "tests/test_homepage_reference_fixture.py",
+    "covers": [
+      "Pairing-code replay and replacement",
+      "Elapsed code and session deadlines",
+      "Browser credential cannot control the harness",
+      "Malformed and oversized request recovery",
+      "Four stalled handlers refuse a fifth request then recover"
+    ]
+  },
+  "static_checks": {
+    "ruff": "passed",
+    "javascript_syntax": "passed",
+    "diff_whitespace": "passed"
+  },
+  "review": {
+    "complete_reference_diff": "reviewed",
+    "production_modules_changed": false,
+    "bounds": {
+      "browser_pending_actions": 1,
+      "dedicated_test_tabs": 1,
+      "fixture_sessions": 1,
+      "fixture_pairing_codes": 1,
+      "fixture_handlers": 4,
+      "json_bytes": 8192,
+      "lookup_ms": 750,
+      "lease_ms_maximum": 1000
+    }
+  },
+  "test_development_note": "Two expanded runs encountered a closed fixture count-read socket. Final cases separate artificial delays and the fixture explicitly declares connection closure. No retry was added. The final browser journey and HTTP checks passed. The earlier socket failure cause was not established.",
+  "unverified": [
+    "Extended Linux DNS packet case: fourteen unrelated containers occupied the shared Docker VM. No new container was started.",
+    "Physical three-device general sharing and protection: two phones remain unavailable and acceptance is deferred.",
+    "WPA3 join/rejoin and household coverage remain outside this local review.",
+    "Live helper/peer identity and normally trusted HTTPS pairing remain unimplemented.",
+    "Installed Pi revision remains unconfirmed and management or local recovery is unavailable on the test Wi-Fi connection.",
+    "Latest fetched integration aef052e and Pi line d38c590 are not verified by this reference review."
+  ],
+  "delivery": {
+    "pushed": false,
+    "pull_request_opened": false,
+    "merged": false,
+    "deployed": false,
+    "user_browser_profile_or_os_permissions_changed": false
+  }
+}

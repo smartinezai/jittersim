@@ -305,3 +305,12 @@ finishes. Successful pairing stays off. Rejecting an expired or replaced
 session clears local pairing. Make Off and tab closure invalidate pending
 work. Prevent an older interface reply from overwriting a newer Off result.
 Extend only the disposable harness to model pairing delay and session loss.
+
+
+The reviewed reference at `eeeb3e4` passed 32 browser checks and eight focused
+HTTP checks. Actual worker and browser restarts were exercised. Strict pairing
+shape, session loss, elapsed deadlines and the four-handler limit were also
+checked. Full Ruff, JavaScript syntax and diff checks passed. Results are in
+`docs/verification-results-homepage-reference-review-2026-10-02.json`.
+The stated Docker and physical blockers remain unchanged. No production
+module, live setting or other owner's worktree changed.
