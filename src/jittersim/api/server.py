@@ -12376,6 +12376,9 @@ class ControlServer(HTTPServer):
 
     def _handle_router_request(self, path, payload):
         self._record_router_outcome()
+        # A copy of the router Wi-Fi replaces the remembered Wi-Fi change. Write the last one
+        # into the history first, on this request thread, so it is not lost.
+        self._record_wifi_outcome()
         password = payload.get("admin_password")
         if not isinstance(password, str) or not password or len(password) > 1024:
             return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(

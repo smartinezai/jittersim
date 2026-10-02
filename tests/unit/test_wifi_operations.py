@@ -265,6 +265,19 @@ class ServerWifiRestartTests(unittest.TestCase):
         self.assertEqual(status, 409)
         self.finish()
 
+    def test_a_change_nobody_polled_is_not_lost_from_the_history_when_a_router_copy_follows(self):
+        self.helper.release.set()
+        self.post("/api/access-point/reset-name")
+        self.assertTrue(wait_until(lambda: not self.server.wifi_operations.busy()))
+        # Nobody asked for the result, because the Mac never came back.
+        self.post("/api/router/sync-ap", {"admin_password": "router-secret",
+                                          "expected_fingerprint": "a" * 64, "background": True})
+        self.assertTrue(wait_until(lambda: not self.server.wifi_operations.busy()))
+        self.last()
+        actions = [entry["action"] for entry in self.repository.list_recent_actions()]
+        self.assertIn("/api/access-point/reset-name", actions)
+        self.assertIn("/api/router/sync-ap", actions)
+
     def test_wifi_operation_is_an_authenticated_read(self):
         from jittersim.api.server import PUBLIC_READ_PATHS
 
