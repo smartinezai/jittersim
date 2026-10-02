@@ -67,3 +67,11 @@ select:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px sol
   .help-icon::before { width: 2.75rem; height: 2.75rem; }
   .sidebar .sidebar-action-row .help-icon { margin: 0 0.75rem; }
 }
+/* The forced test network window. */
+.forced-window-banner { margin: 0 0 1rem; padding: .8rem 1rem; border: 1px solid #c08b51; border-radius: var(--radius); background: #2a2110; color: #ffe3b8; font-weight: 600; }
+.forced-window-banner[hidden] { display: none; }
+.forced-window-list { list-style: none; margin: 0 0 1rem; padding: 0; display: grid; gap: .5rem; }
+.forced-window-row { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; padding: .5rem .75rem; border: 1px solid var(--border); border-radius: var(--radius); background: #0d1b2d; overflow-wrap: anywhere; }
+.forced-window-row span { flex: 1 1 14rem; }
+.forced-window-row button { margin-top: 0; }
+.forced-window-problem { color: #f5ca78; }

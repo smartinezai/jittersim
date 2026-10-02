@@ -3,7 +3,7 @@
 import json
 from datetime import datetime
 
-from jittersim.config.forced_window import ForcedWindow
+from jittersim.config.forced_window import IDLE, ForcedWindow
 from jittersim.config.storage import StorageError
 from jittersim.networking.helper import HelperClientError
 
@@ -33,6 +33,14 @@ def window_payload(window):
         "end_minute": window.end_minute,
         "enabled": window.enabled,
     }
+
+
+def _rearm(repository):
+    """Saving or deleting a window ends the pause that Panic or End window now started."""
+
+    state = repository.get_forced_window_state()
+    if state.phase == IDLE and state.skipped_until:
+        repository.save_forced_window_state(state.but(skipped_until=0.0))
 
 
 def _notice(state):
@@ -85,6 +93,7 @@ def write_forced_window_api(server, path, payload):
             if window.id not in known and len(known) >= MAX_WINDOWS:
                 raise ValueError("too many windows")
             repository.save_forced_window(window)
+            _rearm(repository)
         except (KeyError, TypeError, ValueError, StorageError) as error:
             return response({"error": f"invalid window: {error}"}, 400)
         return response({"window": window_payload(window)})
@@ -92,6 +101,7 @@ def write_forced_window_api(server, path, payload):
         window_id = payload.get("id")
         if not isinstance(window_id, str) or not repository.delete_forced_window(window_id):
             return response({"error": "window no longer exists"}, 404)
+        _rearm(repository)
         return response({"deleted": True})
     client = server.helper_client
     if client is None:

@@ -257,6 +257,19 @@ class ApiTests(unittest.TestCase):
                         pass  # what Panic or Reset does next is not under test
                     self.assertEqual(self.service.ended, 1)
 
+    def test_saving_or_deleting_a_window_ends_the_pause_after_panic(self) -> None:
+        paused = WindowState(skipped_until=9e9)
+        for path, payload in (("/api/forced-windows", self.WINDOW), ("/api/forced-windows/delete", {"id": "night"})):
+            with self.subTest(path=path):
+                self.post("/api/forced-windows", self.WINDOW)
+                self.repository.save_forced_window_state(paused)
+                self.assertEqual(self.post(path, payload)[0], 200)
+                self.assertEqual(self.repository.get_forced_window_state().skipped_until, 0.0)
+        # a running window is not touched
+        self.repository.save_forced_window_state(WindowState(phase="active", window_id="night", skipped_until=5.0))
+        self.post("/api/forced-windows", self.WINDOW)
+        self.assertEqual(self.repository.get_forced_window_state().skipped_until, 5.0)
+
     def test_a_failure_while_ending_the_window_never_stops_panic(self) -> None:
         self.service.fail = True
 
