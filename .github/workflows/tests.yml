@@ -68,3 +68,28 @@ jobs:
       - run: python -m playwright install --with-deps chromium
       - run: python -m pytest tests/test_homepage_reference_fixture.py
       - run: python -m tests.browser.homepage_bounce_reference
+
+  gui-baseline:
+    name: GUI baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      # Keep test engines outside the installed dashboard wheel.
+      - run: pip install '.[dev]' 'playwright==1.63.0'
+      - run: python -m playwright install --with-deps chromium
+      - run: python -m pytest tests/unit/test_gui_capture.py tests/unit/test_gui_axe_report.py
+      - run: python -m tests.browser.gui_baseline
+      - run: python -m tests.browser.a11y_axe
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: gui-baseline-results
+          path: |
+            test-results/gui-baseline/
+            test-results/gui-axe/
+          if-no-files-found: error
+          retention-days: 7
