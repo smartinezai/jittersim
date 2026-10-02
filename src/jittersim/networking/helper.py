@@ -76,7 +76,7 @@ QUEUE_STATS_COUNTERS = (
     "packets", "bytes", "drops", "overlimits", "requeues", "backlog_bytes", "qlen"
 )
 _QUEUE_DEVICE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_:-]{0,127}$")
-_QUEUE_HANDLE_PATTERN = re.compile(r"^[0-9]{1,5}:$")
+_QUEUE_HANDLE_PATTERN = re.compile(r"^[0-9a-f]{1,4}:$")
 _QUEUE_GENERATION_PATTERN = re.compile(r"^[0-9a-f-]{1,24}$")
 _QUEUE_IMPAIRMENT_LIMITS = {
     "delay_ms": 60_000,
