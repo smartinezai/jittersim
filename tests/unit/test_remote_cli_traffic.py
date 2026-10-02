@@ -171,3 +171,14 @@ def test_block_refuses_an_invalid_name_before_the_prompt(dashboard, capsys):
     assert code == 2
     prompt.assert_not_called()
     assert dashboard.requests == []
+
+
+def test_the_saved_note_is_the_page_note_word_for_word():
+    import re
+
+    from jittersim.api.server import DASHBOARD_HTML
+    from jittersim.remote_cli import ENFORCE_NOTE
+
+    declaration = re.search(r"const ENFORCE_NOTE = (.*?);", DASHBOARD_HTML, re.S).group(1)
+    page_note = "".join(json.loads(part) for part in re.findall(r'"(?:[^"\\]|\\.)*"', declaration))
+    assert ENFORCE_NOTE == page_note
