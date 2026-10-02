@@ -260,8 +260,11 @@ def certificate_for(directory, san):
 
 
 @contextmanager
-def tls_server(certificate, key, respond):
-    """A one-thread HTTPS server that answers each request with `respond(connection)`."""
+def tls_server(certificate, key, respond, handshake_delay=0.0):
+    """A one-thread HTTPS server that answers each request with `respond(connection)`.
+
+    `handshake_delay` makes the server wait that long before it starts the TLS handshake.
+    """
 
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(str(certificate), str(key))
@@ -279,6 +282,8 @@ def tls_server(certificate, key, respond):
             except socket.timeout:
                 continue
             try:
+                if handshake_delay:
+                    time.sleep(handshake_delay)
                 secure = context.wrap_socket(connection, server_side=True)
                 secure.settimeout(5)
                 data = b""
@@ -377,6 +382,16 @@ def trickle(connection, stop):
         time.sleep(0.2)
 
 
+def trickle_headers(connection, stop):
+    head = (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+            b"X-Padding: " + b"a" * 400 + b"\r\nContent-Length: 2\r\n\r\n{}")
+    for index in range(len(head)):
+        if stop.is_set():
+            return
+        connection.sendall(head[index:index + 1])
+        time.sleep(0.05)
+
+
 def finishes(call, seconds=15):
     outcome = {}
 
@@ -413,6 +428,54 @@ def test_a_trickling_answer_stops_at_the_deadline(tmp_path):
         outcome = finishes(lambda: dashboard.get("/api/state"))
     assert "did not finish its answer within 1 seconds" in outcome["error"].message
     assert time.monotonic() - started < 5
+
+
+def test_headers_trickling_in_stop_at_the_deadline(tmp_path):
+    certificate, key = make_certificate(tmp_path)
+    with tls_server(certificate, key, trickle_headers) as (url, _):
+        dashboard = DashboardClient(Connection(url, certificate), TEST_TOKEN, timeout=0.5)
+        started = time.monotonic()
+        outcome = finishes(lambda: dashboard.get("/api/state"))
+    assert "error" in outcome, "a slow answer was accepted as a success"
+    assert "did not answer within 0.5 seconds" in outcome["error"].message
+    assert time.monotonic() - started < 2
+
+
+def test_one_deadline_covers_the_handshake_and_the_headers_together(tmp_path):
+    certificate, key = make_certificate(tmp_path)
+    with tls_server(certificate, key, trickle_headers, handshake_delay=0.3) as (url, _):
+        dashboard = DashboardClient(Connection(url, certificate), TEST_TOKEN, timeout=0.5)
+        started = time.monotonic()
+        outcome = finishes(lambda: dashboard.get("/api/state"))
+    assert "error" in outcome, "a slow answer was accepted as a success"
+    assert "did not answer within 0.5 seconds" in outcome["error"].message
+    assert time.monotonic() - started < 1.5
+
+
+def test_a_handshake_that_never_starts_stops_at_the_deadline(tmp_path):
+    certificate, _ = make_certificate(tmp_path)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(5)
+    try:
+        url = f"https://127.0.0.1:{listener.getsockname()[1]}"
+        dashboard = DashboardClient(Connection(url, certificate), TEST_TOKEN, timeout=0.5)
+        started = time.monotonic()
+        outcome = finishes(lambda: dashboard.get("/api/state"))
+    finally:
+        listener.close()
+    assert "did not answer within 0.5 seconds" in outcome["error"].message
+    assert time.monotonic() - started < 2
+
+
+def test_a_timeout_of_a_given_call_is_one_deadline_too(tmp_path):
+    certificate, key = make_certificate(tmp_path)
+    with tls_server(certificate, key, trickle_headers) as (url, _):
+        dashboard = DashboardClient(Connection(url, certificate), TEST_TOKEN, timeout=30)
+        started = time.monotonic()
+        outcome = finishes(lambda: dashboard.get("/api/state", timeout=0.5))
+    assert "did not answer within 0.5 seconds" in outcome["error"].message
+    assert time.monotonic() - started < 2
 
 
 def test_deeply_nested_json_is_a_plain_failure(tmp_path):
