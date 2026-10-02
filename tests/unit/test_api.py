@@ -1638,7 +1638,8 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("Dashboard refresh failed:", DASHBOARD_HTML)
         self.assertNotIn('element("admin-token").addEventListener("change"', DASHBOARD_HTML)
         self.assertIn(
-            'element("check-admin-token").addEventListener("click", checkAdminToken)',
+            'element("check-admin-token").addEventListener("click", async () => {\n'
+            "      await checkAdminToken();\n",
             DASHBOARD_HTML,
         )
         self.assertIn('id="toast" class="toast" role="status"', DASHBOARD_HTML)

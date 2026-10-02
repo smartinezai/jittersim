@@ -22,6 +22,10 @@ def served_functions():
         + block("async function request(", "const adminTokenHelp =")
         + block("async function checkAdminToken()", "async function refresh()")
         + block(
+            'element("check-admin-token").addEventListener("click",',
+            'element("traffic-rate-form").addEventListener("submit",',
+        )
+        + block(
             'element("admin-token").addEventListener("input",',
             'element("traffic-device").addEventListener("change",',
         )
@@ -51,7 +55,8 @@ const window = {innerHeight: 800, setInterval() {}, confirm() {return true},
 }};
 let clock = 1700000000000;
 Date.now = () => clock;
-const DAY = 24 * 60 * 60 * 1000;
+const HOUR = 60 * 60 * 1000;
+const DAY = 24 * HOUR;
 const ADMIN_KEY = "jittersim.remembered.admin-token";
 const ROUTER_KEY = "jittersim.remembered.router-password";
 let pendingFormSubmitButton = null;
@@ -97,6 +102,21 @@ function tick(id, on) {
 function enter(id, value) {
   element(id).value = value;
   element(id).dispatchEvent(new Event("input"));
+}
+// What a person does: choose Check token. The page restore and other buttons call
+// checkAdminToken() directly instead.
+async function clickCheckToken() {
+  await element("check-admin-token").listeners.get("click")({type: "click"});
+}
+function rememberNote(kind) {
+  return element(kind === "admin" ? "remember-admin-token-note" : "remember-router-password-note")
+    .textContent;
+}
+function untilNote(expires) {
+  return "Remembered until " + rememberedUntil(expires) + ".";
+}
+function savedEntry(key) {
+  return JSON.parse(storage.get(key));
 }
 """
 
@@ -594,6 +614,167 @@ CASES = {
       await checkRouterPassword();
       assert.equal(networkCalls.length, 2);
       assert.equal(element("router-credential-state").textContent, "Accepted");
+    """,
+    "checking_the_same_token_again_starts_a_new_24_hours": r"""
+      tick("remember-admin-token", true);
+      enter("admin-token", "fixture token");
+      await clickCheckToken();
+      const first = clock + DAY;
+      assert.deepEqual(savedEntry(ADMIN_KEY), {value: "fixture token", expires: first});
+      clock += 20 * HOUR;
+      enter("admin-token", "fixture token");
+      const before = rememberNote("admin");
+      assert.equal(before, untilNote(first));
+      await clickCheckToken();
+      assert.deepEqual(savedEntry(ADMIN_KEY), {value: "fixture token", expires: clock + DAY});
+      assert.equal(rememberNote("admin"), untilNote(clock + DAY));
+      assert.notEqual(rememberNote("admin"), before);
+      clock += HOUR;  // Check token again without typing it
+      await clickCheckToken();
+      assert.deepEqual(savedEntry(ADMIN_KEY), {value: "fixture token", expires: clock + DAY});
+      assert.equal(rememberNote("admin"), untilNote(clock + DAY));
+    """,
+    "the_check_on_load_and_other_buttons_keep_the_end_time": r"""
+      const ends = clock + 4 * HOUR;  // saved 20 hours ago
+      storage.set(ADMIN_KEY, JSON.stringify({value: "saved token", expires: ends}));
+      await restoreRememberedCredentials();
+      assert.equal(adminTokenVerified, true);
+      assert.deepEqual(savedEntry(ADMIN_KEY), {value: "saved token", expires: ends});
+      assert.equal(rememberNote("admin"), untilNote(ends));
+      clock += HOUR;
+      await checkAdminToken();  // Allow this device and Check for devices call this
+      syncRememberedCredentials();
+      updateCredentialStatus();
+      assert.deepEqual(savedEntry(ADMIN_KEY), {value: "saved token", expires: ends});
+      assert.equal(rememberNote("admin"), untilNote(ends));
+      clock = ends;
+      syncRememberedCredentials();
+      assert.equal(storage.has(ADMIN_KEY), false);
+      assert.equal(element("remember-admin-token").checked, false);
+      assert.equal(rememberNote("admin"), "Forgot the saved token after 24 hours.");
+    """,
+    "a_restored_token_checked_again_starts_a_new_24_hours": r"""
+      // An entry in the shape every earlier version saved keeps working.
+      storage.set(ADMIN_KEY, JSON.stringify({value: "saved token", expires: clock + 2 * HOUR}));
+      await restoreRememberedCredentials();
+      assert.equal(savedEntry(ADMIN_KEY).expires, clock + 2 * HOUR);
+      clock += HOUR;
+      await clickCheckToken();
+      assert.deepEqual(savedEntry(ADMIN_KEY), {value: "saved token", expires: clock + DAY});
+      assert.deepEqual(Object.keys(savedEntry(ADMIN_KEY)).sort(), ["expires", "value"]);
+      assert.equal(rememberNote("admin"), untilNote(clock + DAY));
+    """,
+    "a_failed_or_rejected_check_does_not_start_a_new_24_hours": r"""
+      tick("remember-admin-token", true);
+      enter("admin-token", "fixture token");
+      await clickCheckToken();
+      const first = clock + DAY;
+      clock += 20 * HOUR;
+      for (const failure of [{ok: false, message: "Failed to fetch"},
+                             {ok: false, message: "service unavailable", status: 503}]) {
+        toolResult = failure;
+        await clickCheckToken();
+        assert.deepEqual(savedEntry(ADMIN_KEY), {value: "fixture token", expires: first});
+        assert.equal(rememberNote("admin"), untilNote(first), failure.message);
+      }
+      toolResult = {ok: false, message: "unauthorized", status: 401};
+      await clickCheckToken();
+      assert.equal(storage.has(ADMIN_KEY), false);
+      assert.equal(rememberNote("admin"), "Not remembered: the token was rejected.");
+      assert.equal(element("remember-admin-token").checked, true);
+    """,
+    "checking_the_same_router_password_again_starts_a_new_24_hours": r"""
+      enter("admin-token", "fixture token");
+      enter("router-admin-password", "fixture password");
+      tick("remember-router-password", true);
+      network = async () => ({ok: true, json: async () => ({result: {ok: true}})});
+      await checkRouterPassword();
+      const first = clock + DAY;
+      assert.deepEqual(savedEntry(ROUTER_KEY), {value: "fixture password", expires: first});
+      clock += 20 * HOUR;
+      enter("router-admin-password", "fixture password");
+      const before = rememberNote("router");
+      assert.equal(before, untilNote(first));
+      await checkRouterPassword();
+      assert.deepEqual(savedEntry(ROUTER_KEY), {value: "fixture password", expires: clock + DAY});
+      assert.equal(rememberNote("router"), untilNote(clock + DAY));
+      assert.notEqual(rememberNote("router"), before);
+      assert.equal(networkCalls.length, 2);
+    """,
+    "only_the_router_check_button_starts_a_new_24_hours": r"""
+      const fixtureNetwork = network;
+      helperConfigured = true;
+      enter("admin-token", "fixture token");
+      adminTokenVerified = true;
+      enter("router-admin-password", "fixture password");
+      tick("remember-router-password", true);
+      network = async () => ({ok: true, json: async () => ({result: {ok: true}})});
+      await checkRouterPassword();
+      const first = clock + DAY;
+      clock += 20 * HOUR;
+      network = async () => ({ok: true, json: async () => ({result: {
+        enabled: true, checked_at: clock / 1000, busy: false, changing: false, retry_after: 15}})});
+      await pollRouterWifi();  // the automatic status check
+      assert.equal(routerPasswordVerified, true);
+      assert.deepEqual(savedEntry(ROUTER_KEY), {value: "fixture password", expires: first});
+      network = fixtureNetwork;
+      await routerAction("/api/router/sync-ap", {}, "Importing", element("sync-router-ap"));
+      assert.equal(routerPasswordVerified, true);
+      assert.deepEqual(savedEntry(ROUTER_KEY), {value: "fixture password", expires: first});
+      const unreachable = "Could not contact the router. Try again.";
+      network = async () => ({ok: false, status: 502, json: async () => ({error: unreachable})});
+      await checkRouterPassword();
+      assert.deepEqual(savedEntry(ROUTER_KEY), {value: "fixture password", expires: first});
+      assert.equal(rememberNote("router"), untilNote(first));
+      const refused = "Router login failed. Check the router admin password and try again.";
+      network = async () => ({ok: false, status: 502, json: async () => ({error: refused})});
+      await checkRouterPassword();
+      assert.equal(storage.has(ROUTER_KEY), false);
+      assert.equal(rememberNote("router"), "Not remembered: the password was rejected.");
+    """,
+    "a_new_24_hours_still_ends_and_unticking_still_forgets": r"""
+      enter("admin-token", "fixture token");
+      await clickCheckToken();
+      assert.equal(storage.size, 0);  // nothing is kept while the boxes are clear
+      enter("router-admin-password", "fixture password");
+      network = async () => ({ok: true, json: async () => ({result: {ok: true}})});
+      await checkRouterPassword();
+      assert.equal(storage.size, 0);
+      tick("remember-admin-token", true);
+      tick("remember-router-password", true);
+      clock += 20 * HOUR;
+      await clickCheckToken();
+      await checkRouterPassword();
+      const renewedAt = clock;
+      assert.equal(savedEntry(ADMIN_KEY).expires, renewedAt + DAY);
+      assert.equal(savedEntry(ROUTER_KEY).expires, renewedAt + DAY);
+      clock = renewedAt + DAY - 1;
+      syncRememberedCredentials();
+      assert.equal(storage.size, 2);
+      clock = renewedAt + DAY;
+      syncRememberedCredentials();
+      assert.equal(storage.size, 0);
+      assert.equal(element("remember-admin-token").checked, false);
+      assert.equal(element("remember-router-password").checked, false);
+      assert.equal(rememberNote("admin"), "Forgot the saved token after 24 hours.");
+      assert.equal(rememberNote("router"), "Forgot the saved password after 24 hours.");
+      assert.equal(element("admin-token").value, "fixture token");
+      tick("remember-admin-token", true);
+      tick("remember-router-password", true);
+      await clickCheckToken();
+      await checkRouterPassword();
+      assert.equal(storage.size, 2);
+      tick("remember-admin-token", false);
+      tick("remember-router-password", false);
+      assert.equal(storage.size, 0);
+      assert.equal(rememberNote("admin"), "");
+      assert.equal(rememberNote("router"), "");
+      await clickCheckToken();
+      assert.equal(storage.size, 0);
+      assert.equal(rememberNote("admin"), "");
+      await checkRouterPassword();
+      assert.equal(storage.size, 0);
+      assert.equal(rememberNote("router"), "");
     """,
 }
 
