@@ -76,6 +76,7 @@ class DowngradeTests(unittest.TestCase):
         self.assertTrue((self.root / "request.json").exists())
 
 
+@unittest.skipIf(shutil.which("git") is None, "git is required to build a release")
 class BuildScriptTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
