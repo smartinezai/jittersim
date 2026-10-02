@@ -6818,18 +6818,28 @@ DASHBOARD_HTML = r"""<!doctype html>
       });
     }
 
-    const PANIC_QUEUED = "Panic is queued and runs as soon as the current change finishes";
+    const PANIC_QUEUED = "Panic is sent now. It runs as soon as the Pi can take it";
 
-    // The server may answer that it is busy. Panic then asks again until it is taken.
-    const BUSY_STATUSES = [409, 423, 429, 503];
+    const PANIC_RETRYING = "The Pi has not taken Panic yet, trying again";
+
+    // The server never answers 409 or 423 to Panic. The one-request-at-a-time server keeps a
+    // Panic that arrives during a change waiting in line and runs it when that change is
+    // over, which can be later than the request timeout. The threaded server gives Panic its own
+    // worker and never makes it wait. What can come back is a timeout, a 503 from the helper
+    // (its answer says to retry Panic) or a 429 or 503 from something in front of the Pi.
+    // A Panic that ran after the page gave up is harmless to repeat, because Panic can be done twice.
+    const PANIC_RETRY_STATUSES = [429, 503];
+
+    const PANIC_ATTEMPTS = 3;
 
     async function requestPanic(path) {
-      for (let attempt = 0; ; attempt += 1) {
+      for (let attempt = 1; ; attempt += 1) {
         try {
           return await request(path, "POST", {});
         } catch (error) {
-          if (!BUSY_STATUSES.includes(error.status) || attempt >= 60) throw error;
-          showMessage(PANIC_QUEUED, "working");
+          const again = error.timeout === true || PANIC_RETRY_STATUSES.includes(error.status);
+          if (!again || attempt >= PANIC_ATTEMPTS) throw error;
+          showMessage(PANIC_RETRYING, "working");
           await new Promise((resolve) => window.setTimeout(resolve, 1000));
         }
       }
@@ -9779,17 +9789,22 @@ DASHBOARD_HTML = r"""<!doctype html>
       // Starting, stopping and the general profile change what is running.
       [/^\/api\/(apply|reset|normal-access|general-profile)/,
         ["state", "general", "conditions", "plan", "health", "connected", "activity", "uplink"]],
+      // A profile is offered as "Add to" on the observed names, so those are read too.
       [/^\/api\/profiles/, ["profiles", "general", "plan", "state", "conditions", "everyoneElse",
-        "devicesForSchedule", "devices", "scenarios", "serviceAssignments", "activity", "settingsHistory"]],
-      [/^\/api\/(devices|unaffected-devices|groups|connected-devices|connected-device-labels)/,
+        "devicesForSchedule", "devices", "scenarios", "serviceAssignments", "observations",
+        "activity", "settingsHistory"]],
+      // A protected device is no longer watched, so its observed names go with it.
+      [/^\/api\/(devices|unaffected-devices|groups|connected-devices)/,
         ["devicesForSchedule", "devices", "groups", "plan", "state", "conditions", "connected",
-         "unaffected", "activity", "settingsHistory"]],
+         "unaffected", "observations", "activity", "settingsHistory"]],
       [/^\/api\/(schedules|timers|progressions|scenarios|data-limits|group-data-limits|time-quotas|service-quotas|everyone-else)/,
         ["schedules", "timers", "progressions", "scenarios", "quotas", "everyoneElse", "plan",
          "state", "conditions", "devicesForSchedule", "activity", "settingsHistory"]],
       [/^\/api\/(service-lists|service-assignments|observations)/,
         ["serviceLists", "serviceAssignments", "profiles", "plan", "observations", "activity",
          "settingsHistory"]]
+      // Device names (connected-device-labels) are not listed: they show on most pages, so a
+      // save of one reads everything.
     ];
 
     function readsAfterWrites(paths) {
@@ -9803,11 +9818,21 @@ DASHBOARD_HTML = r"""<!doctype html>
       return names;
     }
 
+    // The diagnostics text and the website choices cost several reads and sit on two pages.
+    const ADMIN_TOOLS_PAGES = ["traffic", "diagnostics"];
+
+    let adminToolsStale = false;
+
     async function refreshDashboard(only) {
       // only is null for everything, otherwise the names of the parts to read again.
-      const pageJobs = only ? new Set(pagePollJobs(currentPage())) : null;
+      const page = currentPage();
+      const pageJobs = only
+        ? new Set([...pagePollJobs(page), ...(ADMIN_TOOLS_PAGES.includes(page) ? [loadAdminTools] : [])])
+        : null;
       const wanted = (name, job) => !only || only.has(name) || pageJobs.has(job);
       const run = (name, job, call) => wanted(name, job) ? call() : null;
+      // A save elsewhere leaves them as they were. The first visit to either page reads them.
+      adminToolsStale = !wanted("adminTools", loadAdminTools);
       if (wanted("profiles", null)) await loadPrivateDataPanel("profiles", loadProfiles);
       if (wanted("health", loadHealth)) await loadHealth();
       if (wanted("observations", loadObservations)) await loadObservations();
@@ -9848,6 +9873,13 @@ DASHBOARD_HTML = r"""<!doctype html>
       populateWorkflowMenus();
       populateAccessTargets();
       await loadWorkspace();
+    }
+
+    function readOldAdminTools(page) {
+      if (!adminToolsStale || !adminTokenVerified || !dashboardLoaded) return;
+      if (!ADMIN_TOOLS_PAGES.includes(page)) return;
+      adminToolsStale = false;
+      loadAdminTools().catch(() => { adminToolsStale = true; });
     }
 
     function startEditing(prefix, label) {
@@ -10184,6 +10216,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       if (userInitiated) window.scrollTo(0, 0);
       // A chart drawn while its page was hidden has no size, so draw it again.
       if (typeof syncTrafficSampling === "function") syncTrafficSampling();
+      if (typeof readOldAdminTools === "function") readOldAdminTools(id);
       if (id === "traffic" && typeof drawTrafficChart === "function") drawTrafficChart();
       if (id === "measurements" && typeof drawMeasurementChart === "function") drawMeasurementChart();
       if (userInitiated && typeof pollDashboard === "function") pollDashboard();

@@ -91,6 +91,9 @@ let helperKnown = true;
 let applyBusy = false;
 let serviceCatalogue = [];
 let networkActionRevision = 0;
+const unansweredPaths = new Set();
+const runningActions = new Set();
+let connectedRenderKey = null;
 const connectedDrafts = new Map();
 const clearConnectedDrafts = new Set();
 const messages = [];
@@ -145,8 +148,9 @@ SIDEBAR = lambda: between("function sidebarStatus(", "function connectedRowState
 CONNECTED = lambda: between(  # noqa: E731
     "function connectedRowState(", "function renderSavedConnectedDeviceLabels("
 )
+INTERACTION = lambda: between("function interactionInside(", "// Draws a container again")  # noqa: E731
 LOAD_CONNECTED = lambda: between(  # noqa: E731
-    "async function loadConnectedDevices(", "async function checkForDevices("
+    "const CONNECTED_FAILURES_BEFORE_UNAVAILABLE", "async function checkForDevices("
 )
 SERVICE_LISTS = lambda: between("function renderServiceLists(", "function editServiceList(")  # noqa: E731
 # loadGeneralProfile follows loadProfiles in the page so one slice holds both.
@@ -161,7 +165,7 @@ PRIVATE_PANELS = lambda: (  # noqa: E731
 ACTIONS = lambda: between(  # noqa: E731
     "function setActionBusy(", 'element("apply-button").addEventListener'
 )
-POLL = lambda: between("function pollLiveStatus(", "window.setInterval(pollLiveStatus")  # noqa: E731
+POLL = lambda: between("function pollLiveStatus(", "// The three are polled apart")  # noqa: E731
 
 
 def run(body):
@@ -170,6 +174,7 @@ def run(body):
         + PRIVATE_PANELS()
         + SIDEBAR()
         + CONNECTED()
+        + INTERACTION()
         + LOAD_CONNECTED()
         + SERVICE_LISTS()
         + LOAD_PROFILES()
@@ -303,22 +308,51 @@ def test_an_unavailable_device_list_says_so(payload):
     assert result["lists"] == "Service lists: Video (every unprotected device)"
 
 
-def test_a_failed_device_request_is_unavailable_and_recovery_lists_again():
+def test_a_failed_device_request_is_unavailable_after_three_and_recovery_lists_again():
     body = (
         "\n".join(LOADERS[name] for name in ("runtime", "profiles", "general", "lists", "clients"))
         + "\nresponses['/api/connected-devices'] = new Error('refused');"
         "\nresponses['/api/connected-device-labels'] = {labels: []};"
         "\nawait loadConnectedDevices();"
+        "\nawait loadConnectedDevices();"
+        "\nconst kept = block();"
+        "\nawait loadConnectedDevices();"
         "\nconst failed = block();"
         "\nresponses['/api/connected-devices'] = %s;" % json.dumps(GOOD_CLIENTS)
         + "\nawait loadConnectedDevices();"
-        "\nconsole.log(JSON.stringify({failed, recovered: block()}));"
+        "\nconsole.log(JSON.stringify({kept, failed, recovered: block()}));"
     )
     result = run(body)
+    # A busy helper answers badly for a moment: the last list stays for two failures in a row.
+    assert result["kept"]["summary"] == "1 device affected"
+    assert result["kept"]["items"] == [["Laptop", "Slow network"]]
     assert result["failed"]["plain"] == "Connected devices unavailable"
     assert result["failed"]["items"] == []
     assert result["recovered"]["summary"] == "1 device affected"
     assert result["recovered"]["items"] == [["Laptop", "Slow network"]]
+
+
+def test_a_server_that_says_unavailable_is_shown_at_once():
+    body = (
+        "\n".join(LOADERS[name] for name in ("runtime", "profiles", "general", "lists", "clients"))
+        + "\nresponses['/api/connected-devices'] = {available: false, devices: [], message: 'no scan'};"
+        "\nresponses['/api/connected-device-labels'] = {labels: []};"
+        "\nawait loadConnectedDevices();"
+        "\nconsole.log(JSON.stringify(block()));"
+    )
+    result = run(body)
+    assert result["plain"] == "Connected devices unavailable"
+
+
+def test_a_failed_read_keeps_the_last_list_and_says_it_is_updating():
+    body = (
+        "\n".join(LOADERS[name] for name in ("runtime", "profiles", "general", "lists", "clients"))
+        + "\nresponses['/api/connected-devices'] = new Error('refused');"
+        "\nresponses['/api/connected-device-labels'] = {labels: []};"
+        "\nawait loadConnectedDevices();"
+        "\nconsole.log(JSON.stringify({status: element('connected-refresh-status').textContent}));"
+    )
+    assert "Updating" in run(body)["status"]
 
 
 # The runtime state

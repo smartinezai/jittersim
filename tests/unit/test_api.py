@@ -3212,8 +3212,8 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("return deviceConditionCell(device.id);", DASHBOARD_HTML)
         self.assertIn('request("/api/conditions", "GET")', DASHBOARD_HTML)
         self.assertIn('id="device-conditions-note"', DASHBOARD_HTML)
-        refresh = DASHBOARD_HTML.split("async function refreshDashboard() {", 1)[1].split("\n    }\n", 1)[0]
-        self.assertIn("loadConditions()", refresh)
+        refresh = DASHBOARD_HTML.split("async function refreshDashboard(only) {", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("loadConditions", refresh)
 
     def test_dashboard_condition_lookup_ignores_built_in_names(self) -> None:
         node = shutil.which("node")
@@ -3251,8 +3251,8 @@ class ControlServerTests(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, DASHBOARD_HTML)
-        refresh = DASHBOARD_HTML.split("async function refreshDashboard() {", 1)[1].split("\n    }\n", 1)[0]
-        self.assertIn("loadEveryoneElse()", refresh)
+        refresh = DASHBOARD_HTML.split("async function refreshDashboard(only) {", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("loadEveryoneElse", refresh)
 
     def _run_dashboard_functions(self, names, setup, calls):
         node = shutil.which("node")
@@ -3369,9 +3369,9 @@ class ControlServerTests(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, rules)
         self.assertLess(rules.index("Run a profile timer"), rules.index("<h2>Scenarios</h2>"))
-        refresh = DASHBOARD_HTML.split("async function refreshDashboard() {", 1)[1].split("\n    }\n", 1)[0]
-        self.assertIn("loadScenarios()", refresh)
-        self.assertIn("window.setInterval(pollDashboard, 5000);", DASHBOARD_HTML)
+        refresh = DASHBOARD_HTML.split("async function refreshDashboard(only) {", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("loadScenarios", refresh)
+        self.assertIn("makePoller(pollDashboard, 5000);", DASHBOARD_HTML)
 
     def test_scenario_steps_durations_and_running_text(self) -> None:
         result = self._run_dashboard_functions(
@@ -3623,9 +3623,9 @@ class ControlServerTests(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, overview)
-        refresh = DASHBOARD_HTML.split("async function refreshDashboard() {", 1)[1].split("\n    }\n", 1)[0]
-        self.assertIn("loadActivity()", refresh)
-        self.assertIn("window.setInterval(pollDashboard, 5000);", DASHBOARD_HTML)
+        refresh = DASHBOARD_HTML.split("async function refreshDashboard(only) {", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("loadActivity", refresh)
+        self.assertIn("makePoller(pollDashboard, 5000);", DASHBOARD_HTML)
 
     def test_the_activity_log_copies_as_markdown(self) -> None:
         result = self._run_dashboard_functions(
@@ -4062,7 +4062,7 @@ class ControlServerTests(unittest.TestCase):
     def test_refresh_requested_during_a_refresh_reloads_after_it(self) -> None:
         result = self._run_dashboard_functions(
             ["refresh"],
-            "let dashboardPoll = null, dashboardRefresh = null, refreshAgain = false;\n"
+            "let dashboardPoll = null, dashboardRefresh = null, refreshAgain = false, refreshWanted;\n"
             "let release; const hold = new Promise(resolve => {release = resolve;});\n"
             "let active = 0, peak = 0, calls = 0;\n"
             "async function refreshDashboard() { calls++; active++; peak = Math.max(peak, active);\n"
@@ -4236,7 +4236,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertLess(
             overview.index('id="getting-started"'), overview.index('id="connected-devices"')
         )
-        refresh = DASHBOARD_HTML.split("async function refreshDashboard() {", 1)[1].split("\n    }\n", 1)[0]
+        refresh = DASHBOARD_HTML.split("async function refreshDashboard(only) {", 1)[1].split("\n    }\n", 1)[0]
         self.assertIn("renderGettingStarted()", refresh)
 
     def test_forms_offer_the_connected_devices(self) -> None:
