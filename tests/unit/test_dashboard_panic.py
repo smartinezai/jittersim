@@ -212,7 +212,33 @@ CASES = {
       assert.equal(element("apply-button").disabled, true);
       renderMode({helper_configured: true});
       assert.equal(
-        element("runtime-summary").textContent, "Not started. Choose Start with saved settings."
+        element("runtime-summary").textContent, "JitterSim is not running. Choose Start with saved settings."
+      );
+    """,
+    "an_apply_with_nothing_to_shape_says_so_and_names_the_access_rules": r"""
+      element("admin-token").value = "fixture token";
+      const send = (applied) => {
+        network = async () => ({ok: true, json: async () => ({
+          state: {observed_state: "applied", running: true}, applied
+        })});
+        press("apply-button");
+      };
+      const none = {devices: 0, groups: 0, service_lists: 0, protected: 0, general_profile: null};
+      send({...none, access_rules: false});
+      await flush();
+      assert.equal(refreshMessages.at(-1), "Started. No device profiles or service lists are saved yet.");
+      send({...none, access_rules: true});
+      await flush();
+      assert.equal(
+        refreshMessages.at(-1),
+        "Re-applied. No device profiles or service lists are saved yet. Access rules apply."
+      );
+      send({...none, protected: 1, access_rules: true});
+      await flush();
+      assert.equal(
+        refreshMessages.at(-1),
+        "Re-applied. 1 protected device stays untouched. " +
+        "No device profiles or service lists are saved yet. Access rules apply."
       );
     """,
     "locks_every_action_while_running": r"""

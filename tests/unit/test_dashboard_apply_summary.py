@@ -59,7 +59,7 @@ STATUS = {
     (False, "applying"): ("Applying…", "working"),
     (False, "resetting"): ("Resetting…", "working"),
     (False, "reset"): ("Off. No traffic shaping is running.", "muted"),
-    (False, "unknown"): ("Not started. Choose Start with saved settings.", "pending"),
+    (False, "unknown"): ("JitterSim is not running. Choose Start with saved settings.", "pending"),
     (False, "error"): ("The last start failed. Check the Pi and try again.", "error"),
     (False, "applied"): ("Applied. Waiting for the scheduler.", "muted"),
 }
@@ -93,8 +93,8 @@ def test_a_missing_running_flag_counts_as_not_running():
     )
     assert result == [
         {"text": "Applied. Waiting for the scheduler.", "tone": "muted"},
-        {"text": "Not started. Choose Start with saved settings.", "tone": "pending"},
-        {"text": "Not started. Choose Start with saved settings.", "tone": "pending"},
+        {"text": "JitterSim is not running. Choose Start with saved settings.", "tone": "pending"},
+        {"text": "JitterSim is not running. Choose Start with saved settings.", "tone": "pending"},
         "Start with saved settings",
     ]
 
@@ -134,7 +134,7 @@ def test_without_the_pi_helper_the_status_says_so(running, state):
 @pytest.mark.parametrize("context", ["{helperConfigured: true}", "{}", "undefined"])
 def test_a_helper_that_is_not_ruled_out_leaves_the_normal_text(context):
     result = evaluate('runtimeStatusText("unknown", false, %s)' % context)
-    assert result == {"text": "Not started. Choose Start with saved settings.", "tone": "pending"}
+    assert result == {"text": "JitterSim is not running. Choose Start with saved settings.", "tone": "pending"}
 
 
 @needs_node
@@ -221,6 +221,66 @@ def test_the_saved_line_says_saved_and_leaves_the_empty_case_alone():
     ]
 
 
+@needs_node
+def test_nothing_saved_still_says_that_access_rules_are_saved():
+    # Start enforces the website and MAC rules so the line must not read as an empty start.
+    result = evaluate(
+        "[savedLine({accessRules: true}), savedLine({accessRules: false}),"
+        " savedLine({devices: 1, accessRules: true})]"
+    )
+    assert result == [
+        NOTHING + ". Access rules are saved too.",
+        NOTHING,
+        "Saved: 1 device with a profile",
+    ]
+
+
+def started(wasRunning="false", **fields):
+    base = {"devices": 0, "groups": 0, "serviceLists": 0, "protected": 0,
+            "generalProfileName": None, "accessRules": False}
+    return evaluate("startedText(%s, %s)" % (json.dumps({**base, **fields}), wasRunning))
+
+
+@needs_node
+@pytest.mark.parametrize(
+    "fields,lead,rest",
+    [
+        ({"devices": 1}, "Started: ", "1 device with a profile."),
+        ({"devices": 2, "groups": 1, "serviceLists": 1, "protected": 1}, "Started: ",
+         "2 devices with a profile · 1 group · 1 service list"
+         " · 1 protected device stays untouched."),
+        ({"generalProfileName": "Office"}, "Started: ",
+         'General profile "Office" for every unprotected device.'),
+        # access rules alone do not change a message that lists what was started
+        ({"devices": 1, "accessRules": True}, "Started: ", "1 device with a profile."),
+    ],
+)
+def test_the_message_after_a_start_lists_what_started(fields, lead, rest):
+    assert started(**fields) == lead + rest
+    assert started("true", **fields) == "Re-applied: " + rest
+
+
+@needs_node
+def test_a_start_with_nothing_to_shape_does_not_pretend_to_list_something():
+    empty = "No device profiles or service lists are saved yet."
+    assert started() == "Started. " + empty
+    assert started("true") == "Re-applied. " + empty
+    assert started(accessRules=True) == "Started. " + empty + " Access rules apply."
+    assert started("true", accessRules=True) == "Re-applied. " + empty + " Access rules apply."
+
+
+@needs_node
+def test_a_start_with_only_protected_devices_says_so_and_that_nothing_else_is_saved():
+    empty = "No device profiles or service lists are saved yet."
+    assert started(protected=1) == "Started. 1 protected device stays untouched. " + empty
+    assert started("true", protected=3) == (
+        "Re-applied. 3 protected devices stay untouched. " + empty
+    )
+    assert started(protected=2, accessRules=True) == (
+        "Started. 2 protected devices stay untouched. " + empty + " Access rules apply."
+    )
+
+
 HARNESS = r"""
 const nodes = new Map();
 function makeNode(tag) {
@@ -268,6 +328,7 @@ let savedDevicesLoaded = true;
 let groups = [];
 let groupsLoaded = true;
 let unaffectedMacs = [];
+let accessRulesSaved = false;
 let applyBusy = false;
 """
 
@@ -331,6 +392,18 @@ def test_the_line_names_the_general_profile_as_plain_text_and_counts_the_lists()
 
 
 @needs_node
+def test_the_empty_line_mentions_saved_access_rules_when_there_are_some():
+    out = render(
+        """
+        accessRulesSaved = true;
+        renderApplySummary();
+        console.log(JSON.stringify(element("apply-summary").textContent));
+        """
+    )
+    assert out == NOTHING + ". Access rules are saved too."
+
+
+@needs_node
 def test_the_empty_line_does_not_repeat_the_word_saved():
     out = render(
         """
@@ -351,6 +424,7 @@ def test_the_empty_line_does_not_repeat_the_word_saved():
         "unaffectedMacs = null;",
         "serviceListsLoaded = false;",
         "generalProfileState = null;",
+        "accessRulesSaved = null;",
     ],
 )
 def test_the_line_waits_until_every_input_is_loaded(unloaded):
@@ -395,11 +469,12 @@ def test_locking_forgets_the_counts_so_a_new_check_cannot_show_old_ones():
         adminTokenVerified = false;
         renderSidebarStatus();
         console.log(JSON.stringify({unaffected: unaffectedMacs, devices: savedDevicesLoaded,
-          groups: groupsLoaded, lists: serviceListsLoaded, general: generalProfileState}));
+          groups: groupsLoaded, lists: serviceListsLoaded, general: generalProfileState,
+          rules: accessRulesSaved}));
         """
     )
     assert out == {"unaffected": None, "devices": False, "groups": False, "lists": False,
-                   "general": None}
+                   "general": None, "rules": None}
 
 
 @needs_node
@@ -489,7 +564,7 @@ def test_the_runtime_summary_uses_the_table_and_remembers_the_running_flag():
             "stored": True,
         },
         {
-            "text": "Not started. Choose Start with saved settings.",
+            "text": "JitterSim is not running. Choose Start with saved settings.",
             "className": "runtime-summary unknown tone-pending",
             "button": "Start with saved settings",
             "stored": True,
@@ -558,7 +633,7 @@ def test_the_helper_is_not_ruled_out_before_the_health_check_answered():
         console.log(JSON.stringify(element("runtime-summary").textContent));
         """
     )
-    assert out == "Not started. Choose Start with saved settings."
+    assert out == "JitterSim is not running. Choose Start with saved settings."
 
 
 @needs_node
@@ -605,6 +680,7 @@ def test_the_loaders_that_feed_the_line_refresh_it_and_say_they_loaded():
         ("async function loadDevicesForSchedule(", "async function loadGroups(",
          "savedDevicesLoaded = true;"),
         ("function renderGroups(", "function renderGroupDataLimits(", "groupsLoaded = true;"),
+        ("async function loadPolicies(", "async function loadState(", "accessRulesSaved ="),
     ]
     for start, end, flag in loaders:
         body = between(start, end)
@@ -641,7 +717,8 @@ def test_the_apply_and_reset_buttons_each_have_a_help_icon():
         dock,
     )
     by_label = dict(helps)
-    apply_help = by_label["Start with saved settings help"]
+    # One label for both states because the button reads Start or Re-apply.
+    apply_help = by_label["Start or re-apply saved settings help"]
     reset_help = by_label["Reset network help"]
     assert len(apply_help) <= 260
     for fact in (
@@ -678,6 +755,15 @@ def test_the_sidebar_tips_stay_in_the_window_and_the_apply_button_keeps_its_heig
     assert "left: 16rem" in tip
     # One line and two lines of the label need the same room so the footer does not jump.
     assert re.search(r"#apply-button \{[^{}]*min-height: calc\(2lh \+ 1\.24rem \+ 2px\)", css)
+
+
+def test_a_short_window_gives_the_footer_room_so_panic_stays_in_view():
+    css = re.search(r"<style>(.*?)</style>", DASHBOARD_HTML, re.DOTALL).group(1)
+    block = re.search(
+        r"@media \(min-width: 48\.01rem\) and \(max-height: 800px\) \{([^@]*?)\n    \}", css
+    ).group(1)
+    assert re.search(r"\.sidebar \{[^{}]*gap: 0\.6rem", block)
+    assert re.search(r"\.sidebar-nav a \{[^{}]*padding-block: 0\.25rem", block)
 
 
 def test_panic_says_how_to_run_again():

@@ -1784,6 +1784,7 @@ class ControlServerTests(unittest.TestCase):
                 "service_lists": 0,
                 "protected": 0,
                 "general_profile": None,
+                "access_rules": False,
             },
         )
 
@@ -1820,6 +1821,7 @@ class ControlServerTests(unittest.TestCase):
                 "service_lists": 1,
                 "protected": 1,
                 "general_profile": None,
+                "access_rules": False,
             },
         )
 
@@ -1840,8 +1842,42 @@ class ControlServerTests(unittest.TestCase):
                 "service_lists": 0,
                 "protected": 1,
                 "general_profile": "Slow",
+                "access_rules": False,
             },
         )
+
+    def test_apply_says_whether_access_rules_were_started(self) -> None:
+        # Block rules and an allow list and a MAC list are all enforced by Start. The words
+        # after a start with nothing else saved must not say that nothing is running.
+        from jittersim.config.models import MacPolicy, WebsitePolicy
+
+        self.server.helper_client = FakeHelper()
+
+        def started():
+            status, _, body = self.server.write_response_for("/api/apply", {})
+            self.assertEqual(status, 200, body)
+            return json.loads(body)["applied"]["access_rules"]
+
+        self.assertFalse(started())
+        # An allow list that is not switched on does nothing.
+        self.repository.save_website_policy(
+            WebsitePolicy(mode="unrestricted", allowed_domains=("example.com",))
+        )
+        self.assertFalse(started())
+        self.repository.save_website_policy(
+            WebsitePolicy(mode="unrestricted", blocked_domains=("ads.example.com",))
+        )
+        self.assertTrue(started())
+        self.repository.save_website_policy(
+            WebsitePolicy(mode="allow_only", allowed_domains=("example.com",))
+        )
+        self.assertTrue(started())
+        self.repository.save_website_policy(WebsitePolicy())
+        self.assertFalse(started())
+        self.repository.save_mac_policy(
+            MacPolicy(mode="denylist", denylist=("aa:bb:cc:dd:ee:ff",))
+        )
+        self.assertTrue(started())
 
     def test_a_failed_apply_has_the_same_body_as_before_the_summary_existed(self) -> None:
         # The dashboard shows the error and the hint. A summary of what was sent would say

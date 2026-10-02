@@ -84,6 +84,7 @@ let serviceListsState = [];
 let serviceListsLoaded = false;
 let profilesLoaded = false;
 let unaffectedMacs = null;
+let accessRulesSaved = null;
 let savedDevicesLoaded = false;
 let groupsLoaded = false;
 let helperKnown = true;
@@ -329,7 +330,7 @@ def test_a_state_without_the_running_flag_does_not_count_as_running():
         "\nconsole.log(JSON.stringify(block()));"
     )
     result = run(body)
-    assert result["plain"] == "Not started yet"
+    assert result["plain"] == "Not running"
     assert result["lists"] == ""
     assert result["items"] == []
 

@@ -116,8 +116,10 @@ The helper applies these rules on the Pi and reset pauses scheduled changes
 before removing them. A timer temporarily takes priority for its device then
 returns to the normal schedule or profile when it expires.
 After a service restart, JitterSim restores the last applied plan or completes
-the last reset. A fresh installation with no prior action leaves the network
-unchanged.
+the last reset. A saved change that the running scheduler did not need to apply
+clears that record so JitterSim is then not running after a restart until you
+choose Start with saved settings or Reset network. A fresh installation with no
+prior action leaves the network unchanged.
 
 The **General profile** control applies one saved profile to every unprotected
 test Wi-Fi client, including later arrivals. Its speed limit is shared by

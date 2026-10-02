@@ -293,8 +293,9 @@ remove every rule from the Pi. Your saved settings are kept. Choose **Start with
 saved settings** to run them again. Protected devices are never touched.
 
 The line under the button counts what is saved. The message after a start counts
-what JitterSim really started. Without the Pi helper the dashboard says that it
-needs the helper to run.
+what JitterSim really started. Access rules also run after a start so a start
+with no profiles saved says that they apply. Without the Pi helper the dashboard
+says that it needs the helper to run.
 
 ### General profile
 
@@ -321,8 +322,10 @@ the per-device random website history.
 **Stop general profile** resumes the saved device rules that are current at
 that moment. **Panic** or **Reset network** turns all profiles off while keeping
 the selection. **Apply to all** or **Start with saved settings** resumes it.
-A restart restores the last apply or reset. Protected clients remain protected
-through reconnects and IP changes.
+A restart repeats the last Start or Reset unless a saved change cleared that
+record. Then JitterSim is not running until you choose **Start with saved
+settings** or **Reset network**. Protected clients remain protected through
+reconnects and IP changes.
 
 ### Connected clients and unaffected devices
 

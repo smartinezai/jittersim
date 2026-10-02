@@ -767,6 +767,11 @@ DASHBOARD_HTML = """<!doctype html>
     @media (min-width: 701px) {
       .sidebar .sidebar-action-row .help-icon::after { position: fixed; top: auto; bottom: 1rem; left: 16rem; right: auto; width: min(22rem, calc(100vw - 17rem)); }
     }
+    /* A short window needs the room for the footer so that Panic stays in view. */
+    @media (min-width: 48.01rem) and (max-height: 800px) {
+      .sidebar { gap: 0.6rem; }
+      .sidebar-nav a { padding-block: 0.25rem; }
+    }
     /* The label wraps to two lines in the narrow sidebar. Both labels need the same room so the
        buttons below do not jump when it changes. */
     @media (min-width: 48.01rem) {
@@ -891,7 +896,7 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="sidebar-actions">
           <div class="sidebar-action-row">
             <button id="apply-button" class="primary" type="button">Start with saved settings</button>
-            <span class="help-icon" tabindex="0" role="img" aria-label="Start with saved settings help" data-help="Starts JitterSim with everything you saved: device and group profiles and schedules and limits and service lists and access rules. While it runs saved changes apply on their own within a few seconds. Reset or Panic stops it. Protected devices stay untouched.">?</span>
+            <span class="help-icon" tabindex="0" role="img" aria-label="Start or re-apply saved settings help" data-help="Starts JitterSim with everything you saved: device and group profiles and schedules and limits and service lists and access rules. While it runs saved changes apply on their own within a few seconds. Reset or Panic stops it. Protected devices stay untouched.">?</span>
           </div>
           <p id="apply-summary" class="apply-summary" aria-live="polite" hidden></p>
           <div class="sidebar-action-row">
@@ -2318,6 +2323,7 @@ DASHBOARD_HTML = """<!doctype html>
     let profilesLoaded = false;
     let savedProfileBusy = null;
     let unaffectedMacs = null;
+    let accessRulesSaved = null;
     let savedDevicesLoaded = false;
     let groupsLoaded = false;
     let applyBusy = false;
@@ -2867,7 +2873,7 @@ DASHBOARD_HTML = """<!doctype html>
           ? "Last reset failed. The Pi may still be shaping."
           : "Last network action failed");
       } else if (!running) {
-        devices = quiet("Not started yet");
+        devices = quiet("Not running");
       } else if (input.clientsAvailable !== true) {
         devices = quiet("Connected devices unavailable");
       } else {
@@ -2925,6 +2931,7 @@ DASHBOARD_HTML = """<!doctype html>
       serviceListsLoaded = false;
       profilesLoaded = false;
       unaffectedMacs = null;
+      accessRulesSaved = null;
       savedDevicesLoaded = false;
       groupsLoaded = false;
     }
@@ -3006,10 +3013,6 @@ DASHBOARD_HTML = """<!doctype html>
     // leaves out devices that are not connected so this never claims what will run.
     function applySummary(input) {
       const count = (number, one, many) => number + " " + (number === 1 ? one : many);
-      const protectedCount = input.protected || 0;
-      const protectedText = protectedCount === 1
-        ? "1 protected device stays untouched"
-        : protectedCount + " protected devices stay untouched";
       const parts = [];
       if (input.generalProfileName) {
         // The server runs the enabled service lists together with the general profile.
@@ -3023,14 +3026,40 @@ DASHBOARD_HTML = """<!doctype html>
       if (input.serviceLists > 0) {
         parts.push(count(input.serviceLists, "service list", "service lists"));
       }
-      if (protectedCount > 0) parts.push(protectedText);
+      if (input.protected > 0) parts.push(protectedDevicesText(input.protected));
       return parts.length ? parts.join(" · ") : "No device profiles or service lists saved yet";
+    }
+
+    function protectedDevicesText(count) {
+      return count === 1
+        ? "1 protected device stays untouched"
+        : count + " protected devices stay untouched";
+    }
+
+    // True when there is anything to shape. Protected devices and access rules are not shaped.
+    function hasProfilesOrLists(input) {
+      return !!input.generalProfileName || input.devices > 0 || input.groups > 0 ||
+        input.serviceLists > 0;
     }
 
     // The line under the button. Nothing saved is already a full sentence.
     function savedLine(input) {
-      const text = applySummary(input);
-      return text === applySummary({}) ? text : "Saved: " + text;
+      if (hasProfilesOrLists(input) || input.protected > 0) return "Saved: " + applySummary(input);
+      // A start also enforces the access rules so an empty line must not hide them.
+      const nothing = applySummary({});
+      return input.accessRules ? nothing + ". Access rules are saved too." : nothing;
+    }
+
+    // The message after Start or Re-apply. A start with nothing to shape does not list anything.
+    // The full stop keeps a warning about skipped devices from running on.
+    function startedText(input, wasRunning) {
+      const lead = wasRunning ? "Re-applied" : "Started";
+      if (hasProfilesOrLists(input)) return lead + ": " + applySummary(input) + ".";
+      const sentences = [lead + "."];
+      if (input.protected > 0) sentences.push(protectedDevicesText(input.protected) + ".");
+      sentences.push("No device profiles or service lists are saved yet.");
+      if (input.accessRules) sentences.push("Access rules apply.");
+      return sentences.join(" ");
     }
 
     // Says whether JitterSim is running on the Pi. A saved change sets the state to "unknown".
@@ -3061,7 +3090,7 @@ DASHBOARD_HTML = """<!doctype html>
           return {text: "Off. No traffic shaping is running.", tone: "muted"};
         }
         if (state === "unknown") {
-          return {text: "Not started. Choose Start with saved settings.", tone: "pending"};
+          return {text: "JitterSim is not running. Choose Start with saved settings.", tone: "pending"};
         }
         if (state === "error") {
           return options.lastAction === "reset"
@@ -3106,7 +3135,7 @@ DASHBOARD_HTML = """<!doctype html>
     // The line is kept back until every input of the count has arrived.
     function applyInputsLoaded() {
       return savedDevicesLoaded && groupsLoaded && unaffectedMacs !== null && serviceListsLoaded &&
-        generalProfileState !== null;
+        generalProfileState !== null && accessRulesSaved !== null;
     }
 
     function renderApplySummary() {
@@ -3126,7 +3155,8 @@ DASHBOARD_HTML = """<!doctype html>
           ).length,
           serviceLists: serviceListsState.filter((serviceList) => serviceList.enabled).length,
           protected: unaffectedMacs.length,
-          generalProfileName: generalProfile ? generalProfile.name || generalProfile.id : ""
+          generalProfileName: generalProfile ? generalProfile.name || generalProfile.id : "",
+          accessRules: accessRulesSaved
         });
       }
       setTextIfChanged(line, text);
@@ -5326,6 +5356,9 @@ DASHBOARD_HTML = """<!doctype html>
       element("website-mode").value = data.websites.mode;
       element("website-allowlist").value = data.websites.allowed_domains.join(", ");
       element("website-blocklist").value = data.websites.blocked_domains.join(", ");
+      accessRulesSaved = data.websites.mode === "allow_only" ||
+        data.websites.blocked_domains.length > 0 || data.mac.mode !== "disabled";
+      renderApplySummary();
     }
 
     async function loadState() {
@@ -5622,14 +5655,14 @@ DASHBOARD_HTML = """<!doctype html>
       if (!applied) {
         return wasRunning ? "Re-applied your saved settings." : "Started with your saved settings.";
       }
-      // The full stop keeps a warning about skipped devices from running on.
-      return (wasRunning ? "Re-applied: " : "Started: ") + applySummary({
+      return startedText({
         devices: applied.devices,
         groups: applied.groups,
         serviceLists: applied.service_lists,
         protected: applied.protected,
-        generalProfileName: applied.general_profile
-      }) + ".";
+        generalProfileName: applied.general_profile,
+        accessRules: applied.access_rules === true
+      }, wasRunning);
     }
 
     element("apply-button").addEventListener("click", () => {
@@ -7502,6 +7535,7 @@ class ControlServer(HTTPServer):
         """Count what an apply sent so the dashboard can say what is now running."""
 
         device_ids = {rule.device_id for rule in plan.mark_rules}
+        websites = self.repository.get_website_policy()
         general_name = None
         if plan.general_profile is not None:
             general = self.repository.get_profile(plan.general_profile.profile_id)
@@ -7516,6 +7550,12 @@ class ControlServer(HTTPServer):
             "service_lists": len(plan.service_list_rules),
             "protected": len(plan.protected_mac_addresses),
             "general_profile": general_name,
+            # Start enforces the block list and the allow list and the MAC list too.
+            "access_rules": (
+                websites.mode == "allow_only"
+                or bool(websites.blocked_domains)
+                or self.repository.get_mac_policy().mode != "disabled"
+            ),
         }
 
     def response_for(self, path: str, query: str = "") -> Tuple[int, str, bytes]:

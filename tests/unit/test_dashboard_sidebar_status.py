@@ -79,7 +79,7 @@ def test_empty_input_gives_quiet_lines():
         "visible": True,
         "loading": False,
         "general": {"text": "General profile: none", "tone": "muted"},
-        "devices": {"summary": "Not started yet", "items": [], "more": 0},
+        "devices": {"summary": "Not running", "items": [], "more": 0},
         "lists": {"text": ""},
     }
 
@@ -168,9 +168,9 @@ def test_a_saved_change_does_not_make_the_general_profile_look_unapplied():
     "state,summary",
     [
         ("reset", "Profiles off"),
-        ("unknown", "Not started yet"),
-        (None, "Not started yet"),
-        ("applied", "Not started yet"),
+        ("unknown", "Not running"),
+        (None, "Not running"),
+        ("applied", "Not running"),
         ("applying", "Changing…"),
         ("resetting", "Changing…"),
         ("error", "Last network action failed"),
@@ -412,7 +412,7 @@ def test_an_unavailable_device_list_is_not_reported_as_no_affected_devices(gener
 def test_the_other_summaries_do_not_depend_on_the_device_list(state, summary):
     assert status(runtimeState=state, clientsAvailable=False)["devices"]["summary"] == summary
     assert status(running=False, clientsAvailable=False)["devices"]["summary"] == (
-        "Not started yet"
+        "Not running"
     )
 
 
