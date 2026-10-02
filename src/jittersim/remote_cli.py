@@ -294,6 +294,20 @@ def _release(client: DashboardClient) -> Dict[str, Any]:
             "message": None}
 
 
+def _forced_window_notice(client: DashboardClient) -> Optional[str]:
+    """The sentence the dashboard shows while a forced window keeps the router's Wi-Fi off."""
+
+    try:
+        data = client.get("/api/forced-windows")
+    except RemoteError as error:
+        if error.status in (401, 403):
+            raise
+        # An older dashboard has no forced windows. The rest of the status still counts.
+        return None
+    notice = data.get("notice")
+    return notice if isinstance(notice, str) and notice else None
+
+
 def _release_text(release: Dict[str, Any]) -> str:
     if release["installed"] is None:
         return "Release on the Pi: unknown" + (
@@ -319,6 +333,7 @@ def _status(arguments: argparse.Namespace) -> int:
     profiles = _require(client.get("/api/profiles").get("profiles"), list)
     lists = _require(client.get("/api/service-lists").get("service_lists"), list)
     release = _release(client)
+    window_notice = _forced_window_notice(client)
     clients = _require(connected.get("devices") or [], list)
     clients_available = (connected.get("available") is not False
                          and connected.get("association_status_available") is not False)
@@ -367,11 +382,14 @@ def _status(arguments: argparse.Namespace) -> int:
             "service_lists": enabled_lists,
             "protected_connected_devices": protected,
             "release": {"installed": release["installed"], "staged": release["staged"]},
+            "forced_window_notice": window_notice,
         })
         return 0
     _out(f"Dashboard: {client.url}")
     _out(_release_text(release))
     _out(summary["text"])
+    if window_notice:
+        _out(window_notice)
     if state.get("last_action"):
         result = f" ({state['last_result']})" if state.get("last_result") else ""
         _out(f"Last action: {state['last_action']}{result}")

@@ -87,6 +87,7 @@ def test_status_json_shape(dashboard, capsys):
         "service_lists": [],
         "protected_connected_devices": 0,
         "release": {"installed": "abc1234", "staged": None},
+        "forced_window_notice": None,
     }
 
 
@@ -152,3 +153,42 @@ def test_status_json_names_a_staged_release(dashboard, capsys):
     code, out, _, _ = run(dashboard, capsys, "status", "--json")
     assert code == 0
     assert json.loads(out)["release"] == {"installed": "abc1234", "staged": "def5678"}
+
+
+NOTICE = "The router's Wi-Fi is off until Sunday 05:00."
+
+
+def test_status_says_when_a_forced_window_keeps_the_router_wifi_off(dashboard, capsys):
+    serve_status(dashboard, general=PROFILES[0], active=True)
+    dashboard.answer("GET", "/api/forced-windows", {"available": True, "windows": [], "notice": NOTICE})
+    code, out, _, _ = run(dashboard, capsys, "status")
+    assert code == 0
+    lines = out.splitlines()
+    assert NOTICE in lines
+    # right under the one line summary of the network
+    assert lines[lines.index(NOTICE) - 1].startswith("Running.")
+
+
+def test_status_json_carries_the_forced_window_notice(dashboard, capsys):
+    serve_status(dashboard, general=PROFILES[0], active=True)
+    dashboard.answer("GET", "/api/forced-windows", {"available": True, "windows": [], "notice": NOTICE})
+    code, out, _, _ = run(dashboard, capsys, "status", "--json")
+    assert code == 0 and json.loads(out)["forced_window_notice"] == NOTICE
+
+
+def test_status_stays_quiet_without_a_window_or_on_an_older_dashboard(dashboard, capsys):
+    serve_status(dashboard, general=PROFILES[0], active=True)
+    code, out, _, _ = run(dashboard, capsys, "status")  # the older dashboard does not answer the path
+    assert code == 0 and "Wi-Fi is off" not in out
+    for notice in (None, "", 5):
+        dashboard.answer("GET", "/api/forced-windows", {"available": True, "windows": [], "notice": notice})
+        code, out, _, _ = run(dashboard, capsys, "status")
+        assert code == 0 and "Wi-Fi is off" not in out and "5" not in out.splitlines()
+
+
+def test_status_with_a_refused_token_on_the_window_path_exits_one(dashboard, capsys):
+    serve_status(dashboard, general=PROFILES[0], active=True)
+    dashboard.answer("GET", "/api/forced-windows", {"error": "unauthorized"}, status=401)
+    code, out, err, _ = run(dashboard, capsys, "status")
+    assert code == 1
+    assert TEST_TOKEN not in out + err
