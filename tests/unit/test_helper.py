@@ -1,4 +1,6 @@
+import io
 import json
+import socketserver
 import logging
 import tempfile
 import threading
@@ -31,6 +33,7 @@ from jittersim.networking.helper import (
     HelperClient,
     HelperClientError,
     HelperError,
+    HelperRequestHandler,
     HelperService,
     UnixHelperServer,
     _merge_connected_device_output,
@@ -2430,6 +2433,83 @@ class QueueReadAndWriteTests(unittest.TestCase):
         box, thread = self.in_thread(self.client().queue_stats)
         self.assertTrue(self.executor.gated.wait(5))
         return box, thread
+
+    def assert_completed_reply_does_not_block(self, *, failure, before_write) -> None:
+        self.service._access_manager = FakeAccessManager()
+        transport_entered = threading.Event()
+        first_response = threading.Event()
+        release_transport = threading.Event()
+        original_write = socketserver._SocketWriter.write
+
+        def held_write(writer, response):
+            if first_response.is_set():
+                return original_write(writer, response)
+            first_response.set()
+            if before_write:
+                transport_entered.set()
+                if not release_transport.wait(5):
+                    raise TimeoutError("test did not release response transport")
+            result = original_write(writer, response)
+            if not before_write:
+                transport_entered.set()
+                if not release_transport.wait(5):
+                    raise TimeoutError("test did not release response transport")
+            return result
+
+        payload = {"action": "apply", "plan": None} if failure else {"action": "reset"}
+        with mock.patch.object(socketserver._SocketWriter, "write", held_write):
+            first, first_thread = self.in_thread(lambda: self.client()._request(payload))
+            try:
+                self.assertTrue(transport_entered.wait(5))
+                with self.subTest(operation="read"):
+                    self.assertTrue(self.client().gateway_status()["ok"])
+                with self.subTest(operation="Panic"):
+                    with mock.patch("jittersim.networking.helper.WRITE_LOCK_WAIT_SECONDS", 0.1):
+                        self.assertTrue(self.client().normal_access()["access_disabled"])
+            finally:
+                release_transport.set()
+                first_thread.join(5)
+            self.assertFalse(first_thread.is_alive())
+            if failure:
+                self.assertIn("error", first)
+                self.assertNotEqual(first["error"].reason, "helper-busy")
+            else:
+                self.assertEqual(first["result"]["action"], "reset")
+
+    def test_reads_and_panic_continue_before_a_success_reply_is_sent(self) -> None:
+        self.assert_completed_reply_does_not_block(failure=False, before_write=True)
+
+    def test_reads_and_panic_continue_after_a_success_reply_is_sent(self) -> None:
+        self.assert_completed_reply_does_not_block(failure=False, before_write=False)
+
+    def test_reads_and_panic_continue_before_an_error_reply_is_sent(self) -> None:
+        self.assert_completed_reply_does_not_block(failure=True, before_write=True)
+
+    def test_reads_and_panic_continue_after_an_error_reply_is_sent(self) -> None:
+        self.assert_completed_reply_does_not_block(failure=True, before_write=False)
+
+    def test_operation_lock_is_released_when_a_request_raises(self) -> None:
+        for phase in ("service", "serialization", "transport"):
+            with self.subTest(phase=phase):
+                handler = object.__new__(HelperRequestHandler)
+                handler.server = self.server
+                handler.rfile = io.BytesIO(b'{"action":"capabilities"}\n')
+                handler.wfile = mock.Mock()
+                if phase == "service":
+                    answer = mock.Mock(side_effect=RuntimeError("service failed"))
+                    expected_error = RuntimeError
+                elif phase == "serialization":
+                    answer = mock.Mock(return_value={"ok": True, "invalid": object()})
+                    expected_error = TypeError
+                else:
+                    answer = mock.Mock(return_value={"ok": True})
+                    handler.wfile.write.side_effect = OSError("client disconnected")
+                    expected_error = OSError
+                with mock.patch.object(self.service, "handle_payload", answer):
+                    with self.assertRaises(expected_error):
+                        handler._handle_request()
+                self.assertFalse(self.server.operation_lock.locked())
+                self.assertTrue(self.client().gateway_status()["ok"])
 
     def test_a_reset_that_arrives_during_a_slow_queue_read_waits_and_runs(self) -> None:
         reader, reader_thread = self.hold_a_read()
