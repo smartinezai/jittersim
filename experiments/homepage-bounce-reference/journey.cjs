@@ -12,6 +12,7 @@ async function run() {
   const profile = process.env.HOMEPAGE_REFERENCE_PROFILE;
   assert.equal(new URL(origin).hostname, "127.0.0.1");
   const launchBrowser = () => chromium.launchPersistentContext(profile, {
+    channel: "chromium",
     executablePath: process.env.JITTERSIM_BROWSER_EXECUTABLE,
     headless: true,
     args: ["--disable-extensions-except=" + extension, "--load-extension=" + extension],

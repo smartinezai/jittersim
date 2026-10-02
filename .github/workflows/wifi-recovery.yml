@@ -64,6 +64,7 @@ jobs:
       - run: python -m tests.browser.router_copy
       - run: python -m tests.browser.device_names
       - run: python -m tests.browser.token_remember
+      - run: python -m tests.browser.dns_failure
       - uses: actions/upload-artifact@v5
         if: always()
         with:

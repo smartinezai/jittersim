@@ -87,3 +87,23 @@ Linux DNS packet acceptance still waits for the shared Docker VM. Physical
 three-device acceptance still waits for the phones and safe Pi recovery.
 These checks remain a local simulation and do not verify the newer integration
 or Pi releases. No push or deployment was performed.
+
+
+## Delivery on current integration
+
+The reviewed reference and DNS acceptance were carried onto integration
+`a1da456` without editing another worktree. The DNS dashboard journey now
+runs in the Pi browser workflow. A separate five-minute CI job runs the
+eight HTTP checks and the actual extension journey. Python and Node use
+Playwright 1.63.0. The Node dependency is pinned in the package lock.
+
+The extension journey selects full Chromium so headless CI can load the
+extension. See [Playwright extension testing](https://playwright.dev/docs/chrome-extensions).
+The existing Linux job collects the extended DNS packet case in a clean
+privileged container. It has a ten-minute job limit. This gives that case
+an isolated runner while unrelated local Docker containers remain active.
+
+These are reference and DNS acceptance checks. The live helper identity
+route and normally trusted HTTPS pairing are not supplied by this experiment.
+Keep the original review report as evidence for its exact historical source.
+The delivery report records the newer combined source separately.
