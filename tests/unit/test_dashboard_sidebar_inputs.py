@@ -83,6 +83,12 @@ let lastRuntimeState = null;
 let serviceListsState = [];
 let serviceListsLoaded = false;
 let profilesLoaded = false;
+let unaffectedMacs = null;
+let accessRulesSaved = null;
+let savedDevicesLoaded = false;
+let groupsLoaded = false;
+let helperKnown = true;
+let applyBusy = false;
 let serviceCatalogue = [];
 let networkActionRevision = 0;
 const connectedDrafts = new Map();
@@ -324,7 +330,7 @@ def test_a_state_without_the_running_flag_does_not_count_as_running():
         "\nconsole.log(JSON.stringify(block()));"
     )
     result = run(body)
-    assert result["plain"] == "Not started yet"
+    assert result["plain"] == "Not running"
     assert result["lists"] == ""
     assert result["items"] == []
 
@@ -443,7 +449,7 @@ def test_an_external_reset_is_picked_up_by_the_next_poll():
     assert result["polled"]["items"] == []
     assert result["polled"]["lists"] == ""
     assert "GET /api/state" in result["requests"]
-    assert result["runtime"] == "Network reset successfully"
+    assert result["runtime"] == "Off. No traffic shaping is running."
 
 
 @pytest.mark.parametrize(
@@ -496,27 +502,40 @@ def test_a_poll_answer_that_arrives_after_an_action_started_is_dropped():
     )
     result = run(body)
     assert result["shown"] == "Profiles off"
-    assert result["runtime"] == "Network reset successfully"
+    assert result["runtime"] == "Off. No traffic shaping is running."
 
 
 # A failed Apply or Reset
 
-@pytest.mark.parametrize("path", ["/api/apply", "/api/reset"])
-def test_a_failed_action_refreshes_the_state_once(path):
+@pytest.mark.parametrize(
+    "path,last_action,runtime,shown",
+    [
+        ("/api/apply", "apply", "The last start failed. Check the Pi and try again.",
+         "Last network action failed"),
+        # The scheduler is paused before the Pi is asked to remove its rules. A failed reset
+        # therefore reads as an error with running false and the last action "reset".
+        ("/api/reset", "reset", "The last reset failed. The Pi may still be shaping. Check it.",
+         "Last reset failed. The Pi may still be shaping."),
+    ],
+)
+def test_a_failed_action_refreshes_the_state_once(path, last_action, runtime, shown):
     body = (
         everything_loaded()
         + "\nrequests.length = 0;"
         "\nresponses[%s] = new Error('network helper failed');" % json.dumps(path)
-        + "\nresponses['/api/state'] = {state: {observed_state: 'error', running: false}};"
-        "\nawait runAction(%s, 'done', 'working');" % json.dumps(path)
+        + "\nresponses['/api/state'] = {state: {observed_state: 'error', running: false,"
+        " last_action: %s}};" % json.dumps(last_action)
+        + "\nawait runAction(%s, 'done', 'working');" % json.dumps(path)
         + "\nawait flush();"
         "\nconsole.log(JSON.stringify({requests, messages, shown: block().plain,"
-        " runtime: element('runtime-summary').textContent}));"
+        " runtime: element('runtime-summary').textContent,"
+        " button: element('apply-button').textContent}));"
     )
     result = run(body)
     assert result["requests"].count("GET /api/state") == 1
-    assert result["shown"] == "Last network action failed"
-    assert result["runtime"] == "The last network action failed"
+    assert result["shown"] == shown
+    assert result["runtime"] == runtime
+    assert result["button"] == "Start with saved settings"
     assert result["messages"][-1] == ["network helper failed", "error"]
 
 
