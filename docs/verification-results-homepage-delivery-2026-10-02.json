@@ -1,0 +1,62 @@
+{
+  "date": "2026-10-02",
+  "scope": "Reference and DNS acceptance delivered onto current integration",
+  "integration_base": "a1da456ac2fa70462a063757d1e9707d3cf5ae69",
+  "tested_source": "66c1bb1d75d06b288affd251fc56884845094c2b",
+  "reviewed_source_commits": [
+    "0541cc29255c0765533ce430c5f9bf018409d008",
+    "8aa7f80a2b0d8cba8f66056bcc2084c07866ac69",
+    "eeeb3e4a932e8c439d277685ca0c20a6fb9cdf9b",
+    "985f2eae61884dfcc198974f5c552825d7ec3fb4"
+  ],
+  "python": {
+    "tests": 2858,
+    "errors": 0,
+    "failures": 0,
+    "skipped": 37,
+    "passed": 2821
+  },
+  "reference_browser": {
+    "result": "passed",
+    "checks": 32,
+    "playwright": "1.63.0",
+    "browser": "Disposable Chromium with the full Chromium channel"
+  },
+  "dns_dashboard": {
+    "result": "passed",
+    "viewports": [
+      [
+        1440,
+        1000
+      ],
+      [
+        390,
+        844
+      ]
+    ],
+    "network_executor": "simulated"
+  },
+  "static_checks": {
+    "required_ruff": "passed",
+    "reference_ruff": "passed",
+    "javascript_syntax": "passed",
+    "workflow_yaml": "passed",
+    "whitespace": "passed"
+  },
+  "ci_registration": {
+    "homepage_reference": ".github/workflows/tests.yml",
+    "dns_dashboard": ".github/workflows/wifi-recovery.yml",
+    "dns_packets": "Existing privileged Linux datapath job collects tests/kernel/test_access.py",
+    "job_limits_minutes": {
+      "homepage_reference": 5,
+      "kernel": 10
+    }
+  },
+  "unverified": [
+    "Local DNS packet execution: fourteen unrelated containers still occupy the shared Docker VM",
+    "Live helper identity and normally trusted HTTPS pairing are unimplemented",
+    "Physical phone acceptance requires available devices and safe Pi recovery",
+    "This source has not been installed on the Pi"
+  ],
+  "production_modules_changed": false
+}
