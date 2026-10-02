@@ -10,7 +10,7 @@ from jittersim.config.storage import ConfigRepository
 from jittersim.networking.helper import HelperClientError
 from tests.unit.test_api import FakeHelper
 
-RESET_MESSAGE = "Network is reset. Apply the configuration to start impact checks."
+RESET_MESSAGE = "Network is reset. Choose Start with saved settings to start impact checks."
 NO_HELPER_MESSAGE = "Impact needs the Pi helper."
 OUT_OF_DATE_MESSAGE = "The networking helper is out of date. Update it to see the impact check."
 UNREADABLE_MESSAGE = "Impact could not be read right now."

@@ -7380,7 +7380,7 @@ def _device_title(
 
 
 IMPACT_NO_HELPER_MESSAGE = "Impact needs the Pi helper."
-IMPACT_RESET_MESSAGE = "Network is reset. Apply the configuration to start impact checks."
+IMPACT_RESET_MESSAGE = "Network is reset. Choose Start with saved settings to start impact checks."
 IMPACT_OUT_OF_DATE_MESSAGE = (
     "The networking helper is out of date. Update it to see the impact check."
 )

@@ -737,8 +737,8 @@ def test_a_new_state_message_is_announced_once():
         const status = element("impact-status");
         const unavailable = (message) => responses.push({available: false, paused: false,
           message: message, sampled_at: 0, queues: [], protected: []});
-        unavailable("Network is reset. Apply the configuration to start impact checks.");
-        unavailable("Network is reset. Apply the configuration to start impact checks.");
+        unavailable("Network is reset. Choose Start with saved settings to start impact checks.");
+        unavailable("Network is reset. Choose Start with saved settings to start impact checks.");
         unavailable("Impact needs the Pi helper.");
         syncImpact();
         await new Promise((resolve) => setTimeout(resolve, 5));
@@ -749,7 +749,7 @@ def test_a_new_state_message_is_announced_once():
         dump({first, second, third: [status.textContent, status.writes]});
         """
     )
-    assert result["first"][0] == "Network is reset. Apply the configuration to start impact checks."
+    assert result["first"][0] == "Network is reset. Choose Start with saved settings to start impact checks."
     assert result["second"] == result["first"]
     assert result["third"][0] == "Impact needs the Pi helper."
     assert result["third"][1] == result["first"][1] + 1
@@ -849,7 +849,7 @@ def test_going_from_rows_to_a_message_and_back_leaves_no_old_rows():
     result = run(
         """
         answer([entry()], 0);
-        responses.push({available: false, paused: false, message: "Network is reset. Apply the configuration to start impact checks.",
+        responses.push({available: false, paused: false, message: "Network is reset. Choose Start with saved settings to start impact checks.",
           sampled_at: 5, queues: [], protected: []});
         answer([entry()], 10);
         syncImpact();
