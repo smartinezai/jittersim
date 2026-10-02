@@ -22,7 +22,9 @@ reviewed. Publication, fixes, testing and merging are authorized.
    Playwright versions. Use the full Chromium channel so the actual extension
    loads in headless CI. Run the eight HTTP checks and all 32 browser checks.
    Follow [the extension guide](https://playwright.dev/docs/chrome-extensions).
-4. Keep the existing collected kernel test in the clean Linux job. Confirm the
+4. Include the reference fixture in the Pi test image because its HTTP tests
+   load that file. Copy the fixture only rather than local Node dependencies.
+   Keep the existing collected kernel test in the clean Linux job. Confirm the
    extended DNS packet case runs there even while local Docker is occupied.
 5. Review the complete diff. Run the focused browser and Python checks locally
    then the full Python suite and lint before one final push.
