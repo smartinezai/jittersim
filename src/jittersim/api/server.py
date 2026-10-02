@@ -4,6 +4,7 @@ import argparse
 import base64
 import hashlib
 import hmac
+import ipaddress
 import io
 import json
 import logging
@@ -25,6 +26,8 @@ from typing import Any, Collection, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, urlsplit
 
 from jittersim.api.access import ACCESS_WRITES, read_access_api, write_access_api
+from jittersim.api.trust import TRUST_DOWNLOADS, easy_address, read_trust_api
+from jittersim.localname import read_local_name
 from jittersim.api.workflows import WORKFLOW_WRITES, machine_health, read_workflow, write_workflow
 from jittersim.config.device_labels import (
     DeviceLabelError,
@@ -1123,6 +1126,24 @@ DASHBOARD_HTML = r"""<!doctype html>
     <p>Saved access keeps this dashboard usable during tests. Internet traffic still follows profiles.
       A changed private Wi-Fi address needs registration again. The admin token is always required.</p>
     <div id="dashboard-access-list" hidden></div>
+    <p id="easy-address" class="form-note">On the Pi Wi-Fi you can also open
+      <strong>@@EASY_ADDRESS@@</strong>. After signing in, Trust this Pi removes the certificate warning.</p>
+  <div id="trust-pi" aria-labelledby="trust-pi-title" role="group" hidden>
+    <h3 id="trust-pi-title">Trust this Pi</h3>
+    <p>Install the Pi's certificate on this device once and the dashboard opens without a certificate warning.
+      Use the easy address <strong id="trust-address">...</strong> on the Pi Wi-Fi.</p>
+    <div class="action-buttons">
+      <button id="trust-download-profile" class="primary" type="button">Download Apple profile (.mobileconfig)</button>
+      <button id="trust-download-crt" type="button">Download certificate (.crt)</button>
+    </div>
+    <h4>Mac</h4>
+    <ol id="trust-steps-mac" class="getting-started-steps"></ol>
+    <h4>iPhone and iPad</h4>
+    <ol id="trust-steps-iphone" class="getting-started-steps"></ol>
+    <p id="trust-status" class="form-note" role="status">Checking the certificate...</p>
+    <p class="form-note">Certificate fingerprint (SHA-256): <span id="trust-fingerprint">unknown</span>.
+      Only install it if it matches the fingerprint printed by the installer on the Pi.</p>
+  </div>
   </section>
   <div id="private-dashboard" hidden>
   <p id="mode-notice" class="notice" role="status">Checking control mode...</p>
@@ -2382,6 +2403,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     function setDashboardUnlocked(allowed) {
       element("private-dashboard").hidden = !allowed;
       element("dashboard-access-list").hidden = !allowed;
+      element("trust-pi").hidden = !allowed;
+      if (allowed && typeof loadTrustDetails === "function") loadTrustDetails();
       document.body.classList.toggle("dashboard-locked", !allowed);
     }
 
@@ -9973,6 +9996,7 @@ DASHBOARD_HTML = DASHBOARD_HTML.replace("</style>", Path(__file__).with_name("wo
 DASHBOARD_HTML = DASHBOARD_HTML.replace("    startDashboard();", Path(__file__).with_name("workflows.js").read_text(encoding="utf-8") + "\n    startDashboard();")
 DASHBOARD_HTML = DASHBOARD_HTML.replace("</style>", Path(__file__).with_name("access.css").read_text(encoding="utf-8") + "</style>", 1)
 DASHBOARD_HTML = DASHBOARD_HTML.replace("    startDashboard();", Path(__file__).with_name("access.js").read_text(encoding="utf-8") + "\n    startDashboard();")
+DASHBOARD_HTML = DASHBOARD_HTML.replace("    startDashboard();", Path(__file__).with_name("trust.js").read_text(encoding="utf-8") + "\n    startDashboard();")
 
 
 def _inline_source_hashes(tag: str, page: str = DASHBOARD_HTML) -> str:
@@ -10557,6 +10581,10 @@ class ControlServer(HTTPServer):
         scheduler: Optional[RuntimeScheduler] = None,
         tls_certfile: Optional[Path] = None,
         tls_keyfile: Optional[Path] = None,
+        tls_wifi_certfile: Optional[Path] = None,
+        tls_wifi_network: str = "192.168.50.0/24",
+        trust_ca_path: Optional[Path] = None,
+        local_name: Optional[str] = None,
     ) -> None:
         if admin_token == "":
             raise ValueError("admin_token must not be empty")
@@ -10567,12 +10595,32 @@ class ControlServer(HTTPServer):
             tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             tls_context.minimum_version = ssl.TLSVersion.TLSv1_2
             tls_context.load_cert_chain(str(tls_certfile), str(tls_keyfile))
+            if tls_wifi_certfile is not None:
+                # Devices on the test Wi-Fi see a certificate that names only the
+                # neutral name and the gateway, before they sign in.
+                wifi_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                wifi_context.minimum_version = ssl.TLSVersion.TLSv1_2
+                wifi_context.load_cert_chain(str(tls_wifi_certfile), str(tls_keyfile))
+                wifi_network = ipaddress.ip_network(tls_wifi_network)
+
+                def choose_certificate(connection, server_name, original_context):
+                    try:
+                        local = ipaddress.ip_address(connection.getsockname()[0])
+                    except (OSError, ValueError, IndexError):
+                        return None
+                    if local in wifi_network:
+                        connection.context = wifi_context
+                    return None
+
+                tls_context.sni_callback = choose_certificate
         bind_host = server_address[0]
         if tls_context is None and bind_host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValueError("TLS is required when the dashboard listens beyond this device")
         self.repository = repository
         WorkflowStore(repository).checkpoint("Initial settings")
         self.admin_token = admin_token
+        self.trust_ca_path = trust_ca_path
+        self.local_name = local_name or read_local_name()
         self.helper_client = helper_client
         self.scheduler = scheduler
         self.router_operations = RouterOperations(
@@ -10778,8 +10826,14 @@ class ControlServer(HTTPServer):
         workflow = read_workflow(self, path)
         if workflow is not None:
             return workflow
+        trust = read_trust_api(self, path)
+        if trust is not None:
+            return trust
         if path == "/":
-            return HTTPStatus.OK, "text/html; charset=utf-8", DASHBOARD_HTML.encode("utf-8")
+            # Only the neutral name goes into the page text. The inline script and
+            # style stay unchanged so their hashes in the policy still match.
+            page = DASHBOARD_HTML.replace("@@EASY_ADDRESS@@", easy_address(self))
+            return HTTPStatus.OK, "text/html; charset=utf-8", page.encode("utf-8")
         if path == "/api/health":
             helper_reachable = False
             if self.helper_client is not None:
@@ -13605,6 +13659,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         downloads = {
             "/api/backup": "jittersim-backup.db",
             "/api/export": "jittersim-settings.json",
+            **{trust_path: trust_file for trust_path, (_, trust_file) in TRUST_DOWNLOADS.items()},
         }
         headers = (
             {"Content-Disposition": f'attachment; filename="{downloads[path]}"'}
@@ -14452,6 +14507,8 @@ def run_server(
     helper_timeout_seconds: float = 8.0,
     tls_certfile: Optional[Path] = None,
     tls_keyfile: Optional[Path] = None,
+    tls_wifi_certfile: Optional[Path] = None,
+    trust_ca_path: Optional[Path] = None,
 ) -> None:
     """Run the dashboard until the process receives Ctrl-C."""
 
@@ -14476,6 +14533,8 @@ def run_server(
             scheduler=scheduler,
             tls_certfile=tls_certfile,
             tls_keyfile=tls_keyfile,
+            tls_wifi_certfile=tls_wifi_certfile,
+            trust_ca_path=trust_ca_path,
         ) as server:
             LOGGER.info("jittersim dashboard listening on %s:%s", host, port)
             try:
@@ -14496,6 +14555,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--helper-timeout-seconds", type=float, default=8.0)
     parser.add_argument("--tls-cert", type=Path)
     parser.add_argument("--tls-key", type=Path)
+    parser.add_argument("--tls-cert-wifi", type=Path,
+                        help="certificate for test Wi-Fi clients (neutral names only)")
+    parser.add_argument("--trust-ca", type=Path,
+                        help="public certificate of the local authority offered for download")
     parser.add_argument(
         "--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO"
     )
@@ -14519,5 +14582,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         helper_timeout_seconds=arguments.helper_timeout_seconds,
         tls_certfile=arguments.tls_cert,
         tls_keyfile=arguments.tls_key,
+        tls_wifi_certfile=arguments.tls_cert_wifi,
+        trust_ca_path=arguments.trust_ca,
     )
     return 0

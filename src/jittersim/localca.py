@@ -16,6 +16,7 @@ import re
 import secrets
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -294,7 +295,7 @@ def certificate_download(certificate: Path) -> bytes:
 
 def apple_profile(certificate: Path) -> bytes:
     """An Apple configuration profile that installs the authority as a trusted root."""
-    der = _openssl("x509", "-in", str(certificate), "-outform", "der").stdout
+    der = ssl.PEM_cert_to_DER_cert(certificate_download(certificate).decode("ascii"))
     seed = hashlib.sha256(der).hexdigest()
     profile = {
         "PayloadType": "Configuration",
