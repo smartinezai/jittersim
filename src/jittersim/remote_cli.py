@@ -26,6 +26,7 @@ from jittersim.remote_client import (
     DashboardClient,
     RemoteError,
     config_path,
+    hidden_prompt,
     read_token,
     resolve_connection,
     validate_url,
@@ -660,6 +661,61 @@ def _unblock(arguments: argparse.Namespace) -> int:
 
 
 # --- end: traffic
+
+
+# --- section: wifi ------------------------------------------------------------------------
+
+ROUTER_TIMEOUT_SECONDS = 45.0
+
+
+def _wifi_show_parser() -> argparse.ArgumentParser:
+    parser = _parser(
+        "jittersim wifi show",
+        "Show the router's own Wi-Fi name, read live from the router through the dashboard. "
+        "The router admin password is asked with a hidden prompt and is never shown or saved. "
+        "'jittersim wifi reset' is different: it runs on the Pi with sudo.",
+    )
+    parser.add_argument(
+        "--password", action="store_true",
+        help="also show the router's Wi-Fi password (the terminal keeps it in its scrollback)",
+    )
+    return parser
+
+
+@register("wifi show", _wifi_show_parser)
+def _wifi_show(arguments: argparse.Namespace) -> int:
+    client = _client(arguments)
+    password = hidden_prompt("Router admin password (hidden): ")
+    if not password:
+        raise RemoteError("Enter the router admin password.")
+    client.add_secret(password)
+    result = client.post(
+        "/api/router/wifi-credentials",
+        {"admin_password": password, "include_password": bool(arguments.password)},
+        timeout=ROUTER_TIMEOUT_SECONDS,
+    )
+    found = _require(result.get("result"), dict)
+    ssid = _require(found.get("ssid"), str)
+    wifi_password = _require(found.get("password"), str) if arguments.password else None
+    if arguments.password:
+        print(
+            "Warning: the router Wi-Fi password is shown below and stays in this terminal's "
+            "scrollback.",
+            file=sys.stderr,
+        )
+    if arguments.json:
+        value = {"ssid": ssid}
+        if arguments.password:
+            value["password"] = wifi_password
+        _print_json(value)
+        return 0
+    _out(f"Router Wi-Fi name: {ssid}")
+    if arguments.password:
+        _out(f"Router Wi-Fi password: {wifi_password}")
+    return 0
+
+
+# --- end: wifi
 
 
 def _command_words(argv: List[str]) -> List[str]:

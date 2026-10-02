@@ -776,9 +776,23 @@ def _simulate(argv: Sequence[str]) -> int:
 
 
 def _wifi_command(argv: Sequence[str]) -> int:
-    parser = argparse.ArgumentParser(prog="jittersim wifi")
+    if list(argv[:1]) == ["show"]:
+        from jittersim.remote_cli import main as remote_main
+
+        return remote_main(["wifi", *argv])
+    parser = argparse.ArgumentParser(
+        prog="jittersim wifi",
+        description="'wifi reset' runs on the Pi with sudo and talks to the local helper. "
+                    "'wifi show' runs on your Mac through the Pi's HTTPS dashboard.",
+    )
     commands = parser.add_subparsers(dest="wifi_command", required=True)
-    reset = commands.add_parser("reset", help="restore the name and keep the password")
+    commands.add_parser(
+        "show", add_help=False,
+        help="on your Mac: show the router's own Wi-Fi name (see 'jittersim wifi show --help')",
+    )
+    reset = commands.add_parser(
+        "reset", help="on the Pi: restore the test Wi-Fi name and keep the password"
+    )
     reset.add_argument("--yes", action="store_true", help="confirm without a prompt")
     reset.add_argument("--helper-socket", type=Path, default=Path("/run/jittersim/helper.sock"))
     arguments = parser.parse_args(argv)
