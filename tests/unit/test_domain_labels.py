@@ -19,14 +19,23 @@ from jittersim.config.service_catalogue import SERVICE_CATALOGUE
     ("domain", "kind", "name", "category"),
     [
         ("mmx-ds.cdn.whatsapp.net", "app", "WhatsApp", "Messaging"),
-        ("a1051.dscg4.akamai.net", "cdn", "Akamai", "Shared CDN"),
+        ("a1051.dscg4.akamai.net", "cdn", "Akamai", "Content delivery for many sites"),
         ("10000.mt.eu.iot.dreame.tech", "iot", "Dreame", "Robot vacuum"),
         ("api.header.immobilienscout24.de", "app", "ImmoScout24", "Real estate"),
         ("osa.s24-media.immobilienscout24.de", "app", "ImmoScout24", "Real estate"),
+        ("sso.immobilienscout24.de", "app", "ImmoScout24", "Real estate"),
+        ("tenant-network.immobilienscout24.de", "app", "ImmoScout24", "Real estate"),
+        ("tracking.immobilienscout24.de", "app", "ImmoScout24", "Real estate"),
+        ("web.chatbot.immobilienscout24.de", "app", "ImmoScout24", "Real estate"),
+        ("www.immobilienscout24.de", "app", "ImmoScout24", "Real estate"),
+        ("www.static-immobilienscout24.de", "app", "ImmoScout24", "Real estate"),
         ("logs.dradis.netflix.com", "app", "Netflix", "Streaming"),
         ("ipv4-c179-fra002-ix.1.oca.nflxvideo.net", "app", "Netflix", "Streaming"),
         ("config.extension.grammarly.com", "app", "Grammarly", "Writing assistant"),
-        ("tags-eu.tiqcdn.com", "tracker", "Tealium", "Tag manager"),
+        ("tags-eu.tiqcdn.com", "tracker", "Tealium", "Loads tracking scripts for websites"),
+        ("accounts.google.com", "system", "Google", "Google sign-in"),
+        ("e8091.e3.akamaiedge.net", "cdn", "Akamai", "Content delivery for many sites"),
+        ("smp-device-content.g.aaplimg.com", "system", "Apple", "Apple content delivery"),
     ],
 )
 def test_real_names_from_the_dashboard(domain, kind, name, category):
@@ -78,6 +87,24 @@ def test_the_table_is_clean():
         assert normalize_domain(suffix) == suffix
         assert kind in LABEL_KINDS and kind != "unknown"
         assert name.strip() and category.strip()
+
+
+def test_every_category_fits_on_the_one_line_of_its_label_chip():
+    # The dashboard shows the category in a chip that does not wrap.
+    for suffix, _, _, category in TABLE_SOURCE:
+        assert len(category) <= 40, suffix
+
+
+def test_the_obscure_vendor_names_say_in_plain_words_what_they_are():
+    # The owner had no clue what tiqcdn.com is, so the chip says what the vendor does.
+    tealium = label_domain("tags-eu.tiqcdn.com")
+    assert tealium.name == "Tealium"
+    assert "tracking" in tealium.category.lower()
+    assert "tag manager" not in tealium.category.lower()
+    assert label_domain("a.tealiumiq.com") == tealium
+    akamai = label_domain("e8091.e3.akamaiedge.net")
+    assert "content delivery" in akamai.category.lower()
+    assert "cdn" not in akamai.category.lower()
 
 
 def test_every_catalogue_hostname_is_in_the_table_as_an_app():
@@ -337,8 +364,26 @@ def test_every_immoscout_name_shares_a_group():
         "tracking.immobilienscout24.de",
         "web.chatbot.immobilienscout24.de",
         "api.header.immobilienscout24.de",
+        "www.immobilienscout24.de",
+        # A separate registered domain of the same company.
+        "www.static-immobilienscout24.de",
     ]
     assert {group_domain(name)["key"] for name in names} == {"label:immoscout24"}
+
+
+def test_sign_in_stays_in_the_google_group_and_says_what_it_is():
+    sign_in = group_domain("accounts.google.com")
+    assert sign_in == group_domain("www.google.com")
+    assert sign_in == {"key": "label:google", "name": "Google", "kind": "system"}
+
+
+def test_the_screenshot_names_get_the_right_group():
+    assert key_and_name("e8091.e3.akamaiedge.net") == {
+        "key": "domain:akamaiedge.net", "name": "akamaiedge.net"}
+    assert group_domain("e8091.e3.akamaiedge.net")["kind"] == "cdn"
+    assert key_and_name("smp-device-content.g.aaplimg.com") == {
+        "key": "label:apple", "name": "Apple"}
+    assert group_domain("smp-device-content.g.aaplimg.com")["kind"] == "system"
 
 
 def test_shared_infrastructure_groups_by_registrable_domain():
