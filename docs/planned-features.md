@@ -85,6 +85,19 @@ The things the owner has to try on the Pi are in the [Pi acceptance checklist](p
   - Every capture must keep the rule that protected devices are never monitored and never appear in the list.
   - The upgrade that added the hardware address column cleared the old list once. The planned notice for that is in `planned-fixes.md`.
 
+### Keep a device protected when its Wi-Fi address changes
+
+- **Status:** planned (small to medium).
+- **Why:** protection is tied to the device's hardware address. Modern devices use a private random address for each network and some rotate it, so a protected device can come back with a new address and be shaped by accident. This happened with the MacBook Air on 2026-10-02.
+- **Plan:**
+  1. Tell people how to fix the address on the device: Private Wi-Fi address set to Fixed on a Mac or iPhone and Use device MAC on Android. Put this in the dashboard help and the Pi guide.
+  2. Suggest protection when a protected name reappears. The Pi sees the host name a device announces when it joins. If an unprotected client has the same host name as a protected entry, show a banner such as "This looks like Aeromac. Protect it too?" with one click. Do not protect it silently because anyone could copy a name and escape the profiles.
+  3. Optional: protect by a fixed address outside the Pi's handout range (`.100` to `.199`) for devices set up by hand.
+- **Notes:**
+  - The second hex digit of the address is 2, 6, A or E for a private address.
+  - A saved device without a hardware address should be linked to the protected entry by the same banner.
+  - The session that investigates the protected device with a profile (branch `fix/protected-device-with-profile`) touches the same code.
+
 ## In progress
 
 ### 6. Remote command line and one-command deploy from the Mac

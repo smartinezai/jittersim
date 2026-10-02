@@ -17,6 +17,10 @@ How to read an entry: the title then the status and size in brackets then what g
 
 ## Network and recovery
 
+- **The filtered DNS service did not start on the Pi** (fixed in the integration branch, not yet released). The unit allowed only two network socket types and Unbound needs a third to list the network interfaces, so Block globally saved the name but could not enforce it. The fix adds `AF_NETLINK`. A temporary drop-in file was added by hand on the owner's Pi on 2026-10-02 and can stay until the next release.
+- **The dashboard logs an error every two seconds while the network is reset** (planned, small). Reading the live traffic counters fails when the network tables do not exist and the page log fills with a full error trace. Fix: log it once and answer "not running" quietly.
+
+
 - **Outage latch is lost on update or reboot** (needs a decision, small). The latch lives in a runtime folder, so profiles can come back on after a Pi restart although an outage was meant to keep them off. Decide first whether a restart should keep profiles off.
 - **Panic can answer busy** (planned, small). Panic waits at most three seconds for the helper. During a long access apply it can answer busy. Fix: let Panic interrupt an access apply, or lengthen the wait with a clear message.
 - **Two brief traffic pauses per install or update** (planned, small). The guard table and the resolver restart pause test traffic for about a second, twice. Fix: do both in one step.
