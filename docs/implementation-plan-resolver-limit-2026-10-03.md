@@ -63,3 +63,8 @@ after the blocked workers were released.
 
 Exact combined verification, published CI and real installation remain
 separate gates. Verification results include the checked source hashes.
+
+The exact merge with integration `cf2a6fe` produced tree `86821a7` without
+conflicts. It passed 3,011 Python checks with 37 Linux-only skips, the
+existing dashboard browser journey and lint. This checks the corrected
+resolver alongside the current phone and homepage reference changes.

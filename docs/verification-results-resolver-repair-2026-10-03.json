@@ -42,7 +42,6 @@
     "independent_final_review": "No remaining source blocker. Separate cancellation reproduction and 37 focused checks passed"
   },
   "remaining_gates": [
-    "Verify final source combined with current integration",
     "Publish one finished correction",
     "Actual exact-head green CI",
     "Merged release identity and independent management recovery before deployment"
@@ -54,5 +53,21 @@
     "pi_lan_route": "192.168.50.1 on en0",
     "known_host_ssh_to_pi_lan": "Timed out after five seconds",
     "installed_identity": "unconfirmed"
+  },
+  "combined_verification": {
+    "repair_commit": "60b1792abe8dde00eb546517e5f04bca09bc1cd0",
+    "integration_head": "cf2a6fe44ec245061839a44b09a57e0b28782a6a",
+    "tree": "86821a746125e3dc1057ace7679e5ab9f6a5a52b",
+    "conflicts": false,
+    "python_passed": 3011,
+    "linux_only_skipped": 37,
+    "python_seconds": 116.6,
+    "python_exit_code": 0,
+    "python_log": "/private/tmp/jittersim-resolver-final-combined-tests-2026-10-03.log",
+    "browser_module": "tests.browser.journeys",
+    "browser_exit_code": 0,
+    "browser_log": "/private/tmp/jittersim-resolver-final-combined-browser-2026-10-03.log",
+    "browser_fixture_only": true,
+    "lint": "passed"
   }
 }
