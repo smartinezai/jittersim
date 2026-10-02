@@ -19,13 +19,15 @@ OLD_PHRASES = (
     "Configuration applied successfully",
 )
 
-NOT_STARTED = "Not started. Choose Start with saved settings."
+NOT_RUNNING = "JitterSim is not running. Choose Start with saved settings."
 OFF = "Off. No traffic shaping is running."
 RUNNING = "Running. Your saved settings are applied. New changes apply on their own."
 CHANGE_PENDING = "Running. Your latest change applies on its own."
 RESET_FAILED = "The last reset failed. The Pi may still be shaping. Check it."
 NEEDS_HELPER = "Needs the Pi helper to run."
 SAVED_DEVICE = "Saved: 1 device with a profile"
+NOTHING_SAVED = "No device profiles or service lists saved yet"
+NONE_TO_SHAPE = "No device profiles or service lists are saved yet."
 START = "Start with saved settings"
 REAPPLY = "Re-apply saved settings"
 APPLY_HELP = (
@@ -124,6 +126,16 @@ def footer_geometry(page):
     )
 
 
+def assert_panic_in_view(page, what):
+    """Panic is the control that must stay reachable so it may not hang below the window."""
+
+    box = page.locator("#panic-button").bounding_box()
+    height = page.viewport_size["height"]
+    assert box["y"] >= 0, (what, "Panic starts above the window", box)
+    assert box["y"] + box["height"] <= height + 0.5, (what, "Panic is cut off", box, height)
+    return box
+
+
 def check_tips(browser):
     """Hover and focus both help icons on short and tall windows and on a phone."""
 
@@ -143,10 +155,17 @@ def check_tips(browser):
         page.locator("#close-credentials").click()
         apply_icon = page.locator("#apply-button + .help-icon")
         reset_icon = page.locator("#reset-button + .help-icon")
-        for width, height in ((1280, 560), (1280, 800), (390, 844), (1920, 1000)):
+        sizes = ((1280, 560), (1280, 700), (1280, 721), (1280, 800), (390, 844), (1920, 1000))
+        for width, height in sizes:
             page.set_viewport_size({"width": width, "height": height})
             page.reload()
             wait_for_automatic_token_check(page)
+            expect(page.locator("#apply-summary")).to_have_text(NOTHING_SAVED)
+            if width > 768 and height >= 700:
+                # the extra line under the button must not push Panic below the window
+                panic = assert_panic_in_view(page, f"at {width}x{height}")
+                print(f"panic at {width}x{height}: top {panic['y']:.1f} bottom "
+                      f"{panic['y'] + panic['height']:.1f}")
             apply_icon.hover()
             box = assert_tip_inside_window(page, apply_icon, f"apply tip at {width}x{height}")
             page.wait_for_timeout(200)
@@ -157,6 +176,49 @@ def check_tips(browser):
             expect(reset_icon).to_be_focused()
             assert_tip_inside_window(page, reset_icon, f"reset tip at {width}x{height}")
             print(f"tips at {width}x{height}: apply tip {box}")
+
+        # A start with nothing to shape must not list what is not there.
+        page.set_viewport_size({"width": 1280, "height": 800})
+        page.reload()
+        wait_for_automatic_token_check(page)
+        apply_button = page.locator("#apply-button")
+        message = page.locator("#message")
+        summary = page.locator("#apply-summary")
+
+        def post(path, data):
+            response = page.request.post(base + path, headers=HEADERS, data=data)
+            assert response.ok, (path, response.status, response.text())
+
+        apply_button.click()
+        expect(message).to_have_text("Started. " + NONE_TO_SHAPE)
+        # Start also enforces the access rules so the words and the line mention them.
+        post("/api/policies", {"websites": {"mode": "unrestricted",
+                                            "blocked_domains": ["blocked.invalid"]}})
+        page.reload()
+        wait_for_automatic_token_check(page)
+        expect(summary).to_have_text(NOTHING_SAVED + ". Access rules are saved too.")
+        expect(apply_button).to_have_text(REAPPLY)
+        apply_button.click()
+        expect(message).to_have_text(
+            "Re-applied. " + NONE_TO_SHAPE + " Access rules apply."
+        )
+        # a protected device alone is not something that is shaped
+        post("/api/unaffected-devices", {"mac_address": MAC_ADDRESS, "display_name": "Mine"})
+        page.reload()
+        wait_for_automatic_token_check(page)
+        expect(summary).to_have_text("Saved: 1 protected device stays untouched")
+        apply_button.click()
+        expect(message).to_have_text(
+            "Re-applied. 1 protected device stays untouched. " + NONE_TO_SHAPE
+            + " Access rules apply."
+        )
+        # The same with something running and a longer status and message in the footer.
+        for width, height in ((1280, 760), (1280, 800)):
+            page.set_viewport_size({"width": width, "height": height})
+            page.wait_for_timeout(200)
+            panic = assert_panic_in_view(page, f"while running at {width}x{height}")
+            print(f"panic while running at {width}x{height}: bottom "
+                  f"{panic['y'] + panic['height']:.1f}")
         assert not errors, errors
         context.close()
     finally:
@@ -219,7 +281,7 @@ def check_width(browser, width, height):
         wait_for_automatic_token_check(page)
 
         # nothing started yet
-        expect(runtime).to_have_text(NOT_STARTED)
+        expect(runtime).to_have_text(NOT_RUNNING)
         expect(apply_button).to_have_text(START)
         expect(summary).to_have_text(SAVED_DEVICE)
         assert_old_wording_is_gone(page)
@@ -236,7 +298,7 @@ def check_width(browser, width, height):
         # the help text beside each button opens on hover and on keyboard focus
         apply_icon = page.locator("#apply-button + .help-icon")
         reset_icon = page.locator("#reset-button + .help-icon")
-        expect(apply_icon).to_have_attribute("aria-label", "Start with saved settings help")
+        expect(apply_icon).to_have_attribute("aria-label", "Start or re-apply saved settings help")
         assert not tip_of(page, apply_icon)["shown"]
         apply_icon.hover()
         tip = tip_of(page, apply_icon)
