@@ -196,6 +196,7 @@ function installAccessControls() {
   card.querySelector('h2').after(summary);
   const options = document.createElement('div'); options.className = 'access-options';
   options.innerHTML = `<label class="quota-check"><input id="access-enabled" type="checkbox" checked>Enable household access rules</label>
+    <p class="form-note">Household rules filter test Wi-Fi DNS through the Pi's own resolver and stay on after Reset. A Pi upgraded from the Pi line starts with them off.</p>
     <label class="quota-check"><input id="access-admission" type="checkbox">Also refuse blocked devices when they join Wi-Fi</label>
     <p id="admission-note" class="form-note"></p>
     <label>DNS failure chance (0 to 100%)

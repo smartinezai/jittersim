@@ -42,6 +42,8 @@ def test_traffic_and_access_texts_say_that_subdomains_are_blocked_too():
     access = (ROOT / "src/jittersim/api/access.js").read_text()
     assert "global blocked domains include subdomains while household access rules are on" in access
     assert "Unblock removes the exact name and its subdomains resolve again." in access
+    # The household toggle says what it does in one line.
+    assert "Household rules filter test Wi-Fi DNS through the Pi" in access
     assert "does not match subdomains" not in (ROOT / "src/jittersim/api/server.py").read_text()
 
 

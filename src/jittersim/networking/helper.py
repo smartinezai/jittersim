@@ -732,8 +732,9 @@ class HelperService:
         if getattr(self._access_manager, "dns_failed", False):
             return (
                 "Website rules were not applied because the filtered DNS service did not "
-                "start. Panic and Normal access still work. Read the cause with "
-                "sudo jittersim logs dns."
+                "start. Panic and Normal access still work. Turn household access rules "
+                "off on the Access and rules page or check jittersim-dns (read the cause "
+                "with sudo jittersim logs dns)."
             )
         return "access rules could not be applied"
 

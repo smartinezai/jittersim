@@ -206,6 +206,10 @@ class ConfigRepository:
                 self._connection.execute(f"RELEASE {savepoint}")
 
     def _initialize_schema(self) -> None:
+        # An existing settings table without access options comes from the Pi line.
+        pi_line_policies = self._connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'network_policies'"
+        ).fetchone() is not None
         self._connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS settings_history (
@@ -530,7 +534,17 @@ class ConfigRepository:
                 CHECK (device_id IS NULL OR group_id IS NULL)
             )
         """)
-        self._add_column_if_missing("network_policies", "access_options_json", "TEXT NOT NULL DEFAULT '{}'")
+        if self._add_column_if_missing(
+            "network_policies", "access_options_json", "TEXT NOT NULL DEFAULT '{}'"
+        ) and pi_line_policies:
+            # The Pi line never filtered DNS. Household rules start off there so the
+            # first Start does not send all test-client DNS through Unbound, block
+            # subdomains or move the MAC lists into the table that survives Reset.
+            # Fresh installs and main's databases keep main's default (on).
+            self._connection.execute(
+                "UPDATE network_policies SET access_options_json = ? WHERE id = 1",
+                (json.dumps(asdict(AccessOptions(enabled=False))),),
+            )
         self._add_column_if_missing("test_sessions", "captures_json", "TEXT NOT NULL DEFAULT '[]'")
         self._add_column_if_missing("test_sessions", "captures_truncated", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing("activity_log", "device_ids_json", "TEXT NOT NULL DEFAULT '[]'")
