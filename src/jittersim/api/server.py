@@ -9023,8 +9023,11 @@ class ControlServer(HTTPServer):
                 return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
                     {"error": "invalid network policy configuration"}
                 )
-            self.repository.save_mac_policy(mac_policy)
-            self.repository.save_website_policy(website_policy)
+            with self.repository.transaction():
+                if "mac" in payload:
+                    self.repository.save_mac_policy(mac_policy)
+                if "websites" in payload:
+                    self.repository.save_website_policy(website_policy)
             return HTTPStatus.OK, "application/json", _json_bytes(
                 _policies_payload(self.repository)
             )
