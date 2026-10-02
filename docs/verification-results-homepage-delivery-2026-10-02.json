@@ -2,7 +2,7 @@
   "date": "2026-10-02",
   "scope": "Reference and DNS acceptance delivered onto current integration",
   "integration_base": "a1da456ac2fa70462a063757d1e9707d3cf5ae69",
-  "tested_source": "f6f4c4a77fa3ca873b632d90b3e5929d95a41844",
+  "tested_source": "c10149af8b8b0c3070f1c8666d9bd926b178107f",
   "reviewed_source_commits": [
     "0541cc29255c0765533ce430c5f9bf018409d008",
     "8aa7f80a2b0d8cba8f66056bcc2084c07866ac69",
@@ -14,7 +14,8 @@
     "errors": 0,
     "failures": 0,
     "skipped": 37,
-    "passed": 2821
+    "passed": 2821,
+    "tested_source": "f6f4c4a77fa3ca873b632d90b3e5929d95a41844"
   },
   "reference_browser": {
     "result": "passed",
@@ -61,14 +62,16 @@
   "production_modules_changed": false,
   "ci_repairs": [
     "Copy the experiment fixture into the clean Pi test image",
-    "Separate test-runner controls from the four browser handlers with one bounded loopback handler",
+    "Separate test-runner controls from the four browser handlers with one sequential loopback handler and a listen backlog of one",
     "Wait for the exact saved version to reach the dashboard before Apply"
   ],
   "fixture_http": {
     "result": "passed",
-    "checks": 8,
+    "checks": 9,
     "runner_saturation_regression": "Failed before the repair and passed afterward",
-    "route_separation": "passed"
+    "route_separation": "passed",
+    "cleanup_race_regression": "Failed with the one-slot threaded listener and passed with sequential controls",
+    "control_capacity": "One sequential handler and a listen backlog of one"
   },
   "ci_packet_evidence": {
     "tested_source": "ff11268fe80dbc9479da63d3183014cdea59610b",
@@ -76,5 +79,6 @@
     "result": "passed",
     "kernel_checks": 37,
     "final_source_ci": "Required before merge"
-  }
+  },
+  "validation_scope": "The full Python suite and DNS journey ran on the earlier stated source. After the control-only cleanup repair, all nine HTTP checks and all 32 extension checks passed again. Full checks run in CI on the published head before merge."
 }
