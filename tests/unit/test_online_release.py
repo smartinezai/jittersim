@@ -10,6 +10,7 @@ import logging
 import shutil
 import ssl
 import stat
+import time
 
 import pytest
 
@@ -398,6 +399,21 @@ def test_a_slow_github_times_out_with_a_plain_message(online):
 def test_the_total_time_is_limited(online):
     online.github.delay = 1
     refused(online, "took too long", source=online.source(timeout=5, total=1))
+
+
+def test_a_download_that_trickles_is_stopped_at_the_total_time(online):
+    # One byte every 0.1 s never trips the per-read timeout. Only the total time can stop it.
+    online.github.trickle = 0.1
+    started = time.monotonic()
+    refused(online, "took too long", source=online.source(timeout=5, total=2))
+    assert time.monotonic() - started < 8
+
+
+def test_answer_headers_that_trickle_are_stopped_at_the_total_time(online):
+    online.github.trickle_headers = 0.1
+    started = time.monotonic()
+    refused(online, "took too long", source=online.source(timeout=5, total=2))
+    assert time.monotonic() - started < 8
 
 
 def test_an_unreachable_github_is_a_plain_message(online):

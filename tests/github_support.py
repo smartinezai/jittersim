@@ -54,6 +54,10 @@ class FakeGitHub:
         self.redirect_to = {}
         self.hops = {}
         self.delay = 0
+        # Seconds between single bytes of an asset body or of the answer headers. A server that
+        # trickles never trips a per-read timeout, so only the total time stops it.
+        self.trickle = 0
+        self.trickle_headers = 0
         self.asset_status = {}
         self.length_lie = {}
         self.requests = []
@@ -101,6 +105,16 @@ class FakeGitHub:
                 except OSError:
                     pass
 
+            def drip(self, data, pause):
+                try:
+                    for index in range(len(data)):
+                        self.wfile.write(data[index:index + 1])
+                        self.wfile.flush()
+                        time.sleep(pause)
+                except OSError:
+                    pass
+                self.close_connection = True
+
             def do_GET(self):
                 owner.requests.append({
                     "host": self.headers.get("Host"), "path": self.path,
@@ -109,6 +123,9 @@ class FakeGitHub:
                 })
                 if owner.delay:
                     time.sleep(owner.delay)
+                if owner.trickle_headers:
+                    return self.drip(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-Pad: "
+                                     + b"a" * 400 + b"\r\n\r\nhello", owner.trickle_headers)
                 latest = f"/repos/{REPO}/releases/latest"
                 prefix = f"/repos/{REPO}/releases/assets/"
                 if self.path == latest:
@@ -132,6 +149,11 @@ class FakeGitHub:
                         return self.send(302, b"", {"Location": owner.hops[self.path]})
                     number = int(self.path[4:])
                     body = owner.files[number]
+                    if owner.trickle:
+                        self.send_response(200)
+                        self.send_header("Content-Length", str(len(body) + 400))
+                        self.end_headers()
+                        return self.drip(b"x" * (len(body) + 400), owner.trickle)
                     return self.send(200, body, {"Content-Type": "application/octet-stream"},
                                      length=owner.length_lie.get(number))
                 return self.send(404, b"{}")

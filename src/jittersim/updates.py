@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 from collections import namedtuple
 from contextlib import contextmanager
@@ -1063,6 +1064,9 @@ def _web_failure(error, deadline):
     """A plain message for a failed connection. It never repeats what the error holds."""
     if isinstance(error, OnlineError):
         return error
+    if time.monotonic() >= deadline:
+        # The watchdog cut the connection or the time ran out in a read.
+        return OnlineError("the check took too long and was stopped")
     if isinstance(error, ssl.SSLCertVerificationError):
         return OnlineError(
             "the certificate of GitHub could not be verified. Check the Pi's date and time"
@@ -1087,6 +1091,19 @@ def _request(source, url, headers, limit, deadline, destination=None):
         parts.hostname, parts.port or 443, timeout=min(source.timeout, _left(deadline)),
         context=source.context,
     )
+
+    def cut():
+        # A server that sends one byte at a time never trips the per-read timeout and a read of
+        # a whole block waits for the block. At the deadline the connection is shut down so
+        # that every read in progress ends. Only the socket is shut down, never the TLS layer.
+        try:
+            socket.socket.shutdown(connection.sock, socket.SHUT_RDWR)
+        except (OSError, TypeError, AttributeError):
+            pass
+
+    watchdog = threading.Timer(_left(deadline), cut)
+    watchdog.daemon = True
+    watchdog.start()
     try:
         connection.request("GET", path, headers=headers)
         response = connection.getresponse()
@@ -1128,6 +1145,7 @@ def _request(source, url, headers, limit, deadline, destination=None):
     except (OSError, http.client.HTTPException) as error:
         raise _web_failure(error, deadline) from None
     finally:
+        watchdog.cancel()
         connection.close()
 
 
