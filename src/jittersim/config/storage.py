@@ -16,6 +16,7 @@ from .device_labels import (
     normalize_device_type,
 )
 from .exemptions import MAX_UNAFFECTED_DEVICES, UnaffectedDevice, normalize_exempt_mac
+from .forced_window import ForcedWindow, WindowState
 from .models import (
     AccessOptions,
     DataLimit,
@@ -477,6 +478,28 @@ class ConfigRepository:
             );
             CREATE INDEX IF NOT EXISTS domain_observations_last_seen_idx
                 ON domain_observations (last_seen);
+            CREATE TABLE IF NOT EXISTS forced_windows (
+                id TEXT PRIMARY KEY,
+                start_day INTEGER NOT NULL CHECK (start_day BETWEEN 0 AND 6),
+                start_minute INTEGER NOT NULL CHECK (start_minute BETWEEN 0 AND 1439),
+                end_day INTEGER NOT NULL CHECK (end_day BETWEEN 0 AND 6),
+                end_minute INTEGER NOT NULL CHECK (end_minute BETWEEN 1 AND 1440),
+                enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))
+            );
+            CREATE TABLE IF NOT EXISTS forced_window_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                phase TEXT NOT NULL,
+                window_id TEXT,
+                ends_at REAL,
+                error TEXT,
+                problem TEXT,
+                attempts INTEGER NOT NULL,
+                next_attempt_at REAL NOT NULL,
+                stop_requested INTEGER NOT NULL,
+                pi_reset_done INTEGER NOT NULL,
+                router_on_done INTEGER NOT NULL,
+                skipped_until REAL NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS domain_list_clearing (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 cleared_at INTEGER NOT NULL,
@@ -1192,6 +1215,76 @@ class ConfigRepository:
         except sqlite3.IntegrityError as error:
             self._rollback()
             raise StorageError(f"profile {profile_id} does not exist") from error
+
+    def save_forced_window(self, window: ForcedWindow) -> None:
+        try:
+            self._connection.execute(
+                """
+                INSERT INTO forced_windows (id, start_day, start_minute, end_day, end_minute, enabled)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    start_day = excluded.start_day, start_minute = excluded.start_minute,
+                    end_day = excluded.end_day, end_minute = excluded.end_minute,
+                    enabled = excluded.enabled
+                """,
+                (window.id, window.start_day, window.start_minute, window.end_day,
+                 window.end_minute, int(window.enabled)),
+            )
+            self._commit()
+        except sqlite3.Error as error:
+            self._rollback()
+            raise StorageError("could not save the forced window") from error
+
+    def list_forced_windows(self) -> tuple:
+        rows = self._connection.execute(
+            "SELECT id, start_day, start_minute, end_day, end_minute, enabled "
+            "FROM forced_windows ORDER BY id"
+        ).fetchall()
+        try:
+            return tuple(ForcedWindow(**{**dict(row), "enabled": bool(row["enabled"])}) for row in rows)
+        except (TypeError, ValueError) as error:
+            raise StorageError("a stored forced window is invalid") from error
+
+    def delete_forced_window(self, window_id: str) -> bool:
+        try:
+            cursor = self._connection.execute("DELETE FROM forced_windows WHERE id = ?", (window_id,))
+            self._commit()
+        except sqlite3.Error as error:
+            self._rollback()
+            raise StorageError("could not delete the forced window") from error
+        return cursor.rowcount > 0
+
+    def get_forced_window_state(self) -> WindowState:
+        row = self._connection.execute(
+            "SELECT phase, window_id, ends_at, error, problem, attempts, next_attempt_at, stop_requested, "
+            "pi_reset_done, router_on_done, skipped_until FROM forced_window_state WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            return WindowState()
+        try:
+            return WindowState(**{**dict(row), "stop_requested": bool(row["stop_requested"]),
+                                  "pi_reset_done": bool(row["pi_reset_done"]),
+                                  "router_on_done": bool(row["router_on_done"])})
+        except (TypeError, ValueError) as error:
+            raise StorageError("the stored forced window state is invalid") from error
+
+    def save_forced_window_state(self, state: WindowState) -> None:
+        try:
+            self._connection.execute(
+                """
+                INSERT OR REPLACE INTO forced_window_state (
+                    id, phase, window_id, ends_at, error, problem, attempts, next_attempt_at,
+                    stop_requested, pi_reset_done, router_on_done, skipped_until
+                ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (state.phase, state.window_id, state.ends_at, state.error, state.problem, state.attempts,
+                 state.next_attempt_at, int(state.stop_requested), int(state.pi_reset_done),
+                 int(state.router_on_done), state.skipped_until),
+            )
+            self._commit()
+        except sqlite3.Error as error:
+            self._rollback()
+            raise StorageError("could not save the forced window state") from error
 
     def list_unaffected_devices(self) -> tuple:
         rows = self._connection.execute(
