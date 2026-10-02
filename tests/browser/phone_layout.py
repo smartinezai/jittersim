@@ -140,7 +140,12 @@ def small_targets(page):
                 .filter((node) => node.getClientRects().length && getComputedStyle(node).visibility !== 'hidden')
                 .filter((node) => !(node.tagName === 'A' && getComputedStyle(node).display === 'inline'))
                 .map((node) => {
-                    const rect = node.getBoundingClientRect();
+                    let rect = node.getBoundingClientRect();
+                    if (node.classList.contains('help-icon')) {
+                        // A help icon is a small circle. Its invisible ::before is the touch target.
+                        const hit = getComputedStyle(node, '::before');
+                        rect = {width: parseFloat(hit.width), height: parseFloat(hit.height)};
+                    }
                     const name = node.id || node.getAttribute('aria-label') || node.textContent.trim().slice(0, 30);
                     return {name, width: Math.round(rect.width * 10) / 10, height: Math.round(rect.height * 10) / 10,
                             tag: node.tagName};

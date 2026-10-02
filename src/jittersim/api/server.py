@@ -4981,7 +4981,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       if (devices.length === 0) {
         const empty = document.createElement("p");
         empty.className = "device-empty";
-        empty.textContent = "No DNS observations yet. Connect a device and run a scan.";
+        // After an upgrade cleared the list the page says so until the first new name arrives.
+        empty.textContent = (data.list_cleared && data.list_cleared.message)
+          || "No DNS observations yet. Connect a device and run a scan.";
         container.appendChild(empty);
         return;
       }
@@ -10705,6 +10707,28 @@ def _domain_observation_payload(observation: DomainObservation) -> Dict[str, Any
     }
 
 
+def _domain_list_cleared_payload(repository: ConfigRepository) -> Optional[dict]:
+    """Say that an upgrade emptied the Traffic list and the list has not filled again.
+
+    The dashboard and the command line show the message as it is so both use the same words.
+    """
+
+    clearing = repository.get_domain_list_clearing()
+    if clearing is None:
+        return None
+    cleared_at, rows_cleared = clearing
+    day = datetime.fromtimestamp(cleared_at)
+    return {
+        "cleared_at": cleared_at,
+        "rows_cleared": rows_cleared,
+        "message": (
+            f"The list was cleared on {day.day} {day.strftime('%B %Y')} when JitterSim was upgraded "
+            "because protected devices exist. It fills again as devices browse. "
+            "Names are kept for 30 days from their last sighting."
+        ),
+    }
+
+
 def _labelled_domain_payloads(
     rows: Sequence[DomainObservation], blocked_domains: Collection[str] = ()
 ) -> List[Dict[str, Any]]:
@@ -11380,6 +11404,7 @@ class ControlServer(HTTPServer):
                         "available": self.helper_client is not None,
                         "devices": devices,
                         "total_domains": sum(len(rows) for rows in grouped.values()),
+                        "list_cleared": _domain_list_cleared_payload(self.repository),
                         "message": (
                             None
                             if self.helper_client is not None
