@@ -146,6 +146,17 @@ The things the owner has to try on the Pi are in the [Pi acceptance checklist](p
   - Seven id patterns in the forms (nine on the integration branch) use `[a-z0-9_-]` which browsers with the newer `v` regex flag reject and ignore. Escape the hyphen as the service list form does.
   - **Add to profile** switches a profile to "allow only listed domains" when it was not an allow list. Every other site then stops working for devices on that profile. Ask for confirmation first.
 
+### Switch the saved profile from the left panel
+
+- **Status:** in progress (draft pull request "Add a phone layout to the dashboard", branch `feat/phone-layout`, which carries the Active profile control).
+- **Why:** the owner wants the Profiles page for editing and creating profiles only. Choosing or switching the active profile should take one step from the left panel on every page.
+- **What it is:** a control above the Start button that names the active general profile. A select lists the saved profiles. A button applies the chosen one to all devices and turns into Stop while that profile is active.
+- **To check when it lands:**
+  - Switching from one active profile to another works from the panel in one step. Today the control applies the choice and the old one stops being the general profile.
+  - The panel shows the name of the profile and how many devices it affects, as the status block does now.
+  - It works at phone width inside the Controls sheet.
+- **Notes:** asked for again on 2026-10-02 while testing on the Pi.
+
 ## Ideas that look useful
 
 These come from reviews of the recent work. Nobody has asked for them yet unless an entry says so.
