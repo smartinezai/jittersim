@@ -477,8 +477,9 @@ def test_a_symlinked_connection_file_is_refused(tmp_path):
     real.chmod(0o600)
     link = tmp_path / "cli.json"
     link.symlink_to(real)
-    with pytest.raises(RemoteError):
+    with pytest.raises(RemoteError) as error:
         read_config(link)
+    assert "is not a regular file" in error.value.message
 
 
 def test_saving_never_follows_a_planted_link(tmp_path):
@@ -568,3 +569,12 @@ def test_status_help_on_a_mac_explains_both_ways(capsys):
     text = " ".join(capsys.readouterr().out.split())
     assert stop.value.code == 0
     assert "Runs on your Mac" in text and "sudo jittersim status" in text
+
+
+@pytest.mark.parametrize("arguments", [["traffic", "--exp"], ["wifi", "show", "--pass"],
+                                       ["impact", "--wai", "5"]])
+def test_an_abbreviated_option_is_not_taken_for_the_long_one(capsys, arguments):
+    with pytest.raises(SystemExit) as stop:
+        main(arguments)
+    assert stop.value.code == 2
+    assert "unrecognized arguments (not shown here)" in capsys.readouterr().err

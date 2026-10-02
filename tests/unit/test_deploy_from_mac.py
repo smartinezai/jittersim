@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -53,6 +54,8 @@ if tool == "scp":
     sys.exit(int(os.environ.get("FAKE_SCP_EXIT", "0")))
 remote = sys.argv[-1]
 if remote.startswith("if test -f "):
+    if os.environ.get("FAKE_PID_FILE"):
+        open(os.environ["FAKE_PID_FILE"], "w").write(str(os.getpid()))
     if os.environ.get("FAKE_HANG") == "probe":
         time.sleep(60)
     if os.environ.get("FAKE_PROBE_EXIT", "0") != "0":
@@ -321,6 +324,39 @@ def test_a_call_that_hangs_is_stopped_at_its_deadline(fakes, hang, words):
     assert result.returncode == 1
     assert words in result.stderr and NETWORK_HINT in result.stderr
     assert time.monotonic() - started < 30
+    assert leftovers(fakes) == []
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_ctrl_c_also_stops_a_running_call(fakes, tmp_path, shell):
+    """Background calls ignore Ctrl-C: the script stops them itself."""
+
+    pid_file = tmp_path / "ssh.pid"
+    env = {"PATH": f"{fakes['bin']}:{os.environ['PATH']}", "HOME": os.environ.get("HOME", "/tmp"),
+           "TMPDIR": str(fakes["tmp"]), "FAKE_LOG": str(fakes["log"]),
+           "FAKE_HANG": "probe", "FAKE_PID_FILE": str(pid_file)}
+    process = subprocess.Popen([shell, str(SCRIPT), "--key", str(fakes["key"])], env=env,
+                               cwd=str(ROOT), stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        deadline = time.monotonic() + 30
+        while not pid_file.exists() or not pid_file.read_text():
+            assert time.monotonic() < deadline, "the probe never started"
+            time.sleep(0.05)
+        os.killpg(process.pid, signal.SIGINT)
+        assert process.wait(timeout=15) != 0
+        pid = int(pid_file.read_text())
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            assert time.monotonic() < deadline, "the hanging ssh call kept running"
+            time.sleep(0.05)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
     assert leftovers(fakes) == []
 
 

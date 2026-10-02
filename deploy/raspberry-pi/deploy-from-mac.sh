@@ -119,6 +119,8 @@ with_deadline() {
         fi
     ) </dev/null >/dev/null 2>&1 &
     watchdog=$!
+    # Background calls ignore Ctrl-C so it stops them here.
+    trap 'kill -TERM "$child" "$watchdog" 2>/dev/null; exit 1' HUP INT TERM
     # Keep the caller's errexit setting: it may be checking the result itself.
     case $- in
         *e*) errexit=yes ;;
@@ -129,6 +131,7 @@ with_deadline() {
     result=$?
     kill -TERM "$watchdog" 2>/dev/null
     wait "$watchdog" 2>/dev/null
+    trap 'exit 1' HUP INT TERM
     if [ "$errexit" = yes ]; then
         set -e
     fi
