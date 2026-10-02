@@ -228,6 +228,8 @@ def _status(arguments: argparse.Namespace) -> int:
     repository = _open_repository(arguments.database)
     if repository is None:
         print(f"Database: not readable at {arguments.database}")
+        print("On your Mac use 'jittersim connect --url https://PI:8080 --ca-cert PATH' once "
+              "and then 'jittersim status'.", file=sys.stderr)
     else:
         try:
             state = repository.get_runtime_state()
@@ -684,6 +686,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         from jittersim.remote_cli import main as remote_main
 
         return remote_main(raw_arguments)
+    if raw_arguments and raw_arguments[0] == "status":
+        from jittersim.remote_cli import main as remote_main
+        from jittersim.remote_cli import remote_status_wanted
+
+        if remote_status_wanted(raw_arguments[1:]):
+            return remote_main(raw_arguments)
     if raw_arguments and raw_arguments[0] in CONTROL_COMMANDS:
         command = raw_arguments[0]
         arguments = _build_control_parser(command).parse_args(raw_arguments[1:])

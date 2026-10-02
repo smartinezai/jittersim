@@ -8,11 +8,13 @@ its handler below.
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
+from jittersim import dashboard_rules as rules
 from jittersim.remote_client import (
     CA_CERT_ENV,
     EXAMPLE_URL,
@@ -184,6 +186,131 @@ def _connect(arguments: argparse.Namespace) -> int:
 
 
 # --- end: connect
+
+
+# --- section: status ----------------------------------------------------------------------
+
+LOCAL_STATUS_OPTIONS = ("--database", "--helper-socket", "--timeout-seconds")
+REMOTE_STATUS_OPTIONS = ("--url", "--ca-cert", "--json")
+
+
+def remote_status_wanted(argv: Sequence[str], environ: Optional[Mapping[str, str]] = None) -> bool:
+    """Decide whether `jittersim status` reads the dashboard or the local Pi helper.
+
+    Local options keep the Pi's own status. Remote options or a saved or exported dashboard
+    address choose the dashboard.
+    """
+
+    environ = os.environ if environ is None else environ
+    if _secret_argument(argv):
+        # The remote command refuses it without repeating it. argparse would print it.
+        return True
+    names = {argument.split("=", 1)[0] for argument in argv if argument.startswith("--")}
+    if names & set(LOCAL_STATUS_OPTIONS):
+        return False
+    if names & set(REMOTE_STATUS_OPTIONS):
+        return True
+    return bool(environ.get(URL_ENV)) or config_path(environ).exists()
+
+
+def _status_parser() -> argparse.ArgumentParser:
+    return _parser(
+        "jittersim status",
+        "Show whether JitterSim is running, the general profile and the connected devices that "
+        "are affected right now with the profile each one gets. Protected devices are never "
+        "listed. On the Pi without a saved connection 'sudo jittersim status' shows the local "
+        "helper status instead.",
+    )
+
+
+def _general_status(view_text: str, general: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    profile = (general or {}).get("profile")
+    if not profile:
+        return None
+    return {
+        "id": profile.get("id"),
+        "name": profile.get("name") or profile.get("id"),
+        "status": view_text.rsplit(" · ", 1)[-1],
+    }
+
+
+@register("status", _status_parser)
+def _status(arguments: argparse.Namespace) -> int:
+    client = _client(arguments)
+    health = client.get("/api/health")
+    state = _require(client.get("/api/state").get("state"), dict)
+    general = client.get("/api/general-profile")
+    connected = client.get("/api/connected-devices")
+    profiles = _require(client.get("/api/profiles").get("profiles"), list)
+    lists = _require(client.get("/api/service-lists").get("service_lists"), list)
+    clients = _require(connected.get("devices") or [], list)
+    observed = state.get("observed_state")
+    running = state.get("running") is True
+    view = rules.sidebar_status(
+        {
+            "adminTokenVerified": True,
+            "loaded": {name: True for name in rules.SIDEBAR_INPUTS},
+            "runtimeState": observed,
+            "running": running,
+            "lastAction": state.get("last_action"),
+            "generalState": general,
+            "profiles": profiles,
+            "clients": clients,
+            "clientsAvailable": connected.get("available") is not False
+            and connected.get("association_status_available") is not False,
+            "serviceLists": lists,
+        },
+        limit=None,
+    )
+    summary = rules.runtime_status_text(
+        observed,
+        running,
+        {
+            "lastAction": state.get("last_action"),
+            "helperConfigured": health.get("helper_configured") is not False,
+        },
+    )
+    protected = sum(1 for item in clients if isinstance(item, dict) and item.get("unaffected"))
+    enabled_lists = [
+        item.get("name") for item in lists
+        if view["lists"]["text"] and isinstance(item, dict) and item.get("enabled")
+    ]
+    if arguments.json:
+        _print_json({
+            "dashboard": client.url,
+            "running": running,
+            "state": observed,
+            "summary": summary["text"],
+            "last_action": state.get("last_action"),
+            "last_result": state.get("last_result"),
+            "general_profile": _general_status(view["general"]["text"], general),
+            "devices_summary": view["devices"]["summary"],
+            "affected_devices": view["devices"]["items"],
+            "service_lists": enabled_lists,
+            "protected_connected_devices": protected,
+        })
+        return 0
+    _out(f"Dashboard: {client.url}")
+    _out(summary["text"])
+    if state.get("last_action"):
+        result = f" ({state['last_result']})" if state.get("last_result") else ""
+        _out(f"Last action: {state['last_action']}{result}")
+    _out(view["general"]["text"])
+    items = view["devices"]["items"]
+    _out(view["devices"]["summary"] + (":" if items else ""))
+    for item in items:
+        _out(f"  {item['name']}" + (f": {item['profile']}" if item.get("profile") else ""))
+    if view["lists"]["text"]:
+        _out(view["lists"]["text"])
+    if protected:
+        _out(
+            "1 protected device stays untouched" if protected == 1
+            else f"{protected} protected devices stay untouched"
+        )
+    return 0
+
+
+# --- end: status
 
 
 def _command_words(argv: List[str]) -> List[str]:

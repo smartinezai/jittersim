@@ -1,0 +1,134 @@
+"""The terminal's copies of the dashboard rules give the same answers as the served page."""
+
+import itertools
+
+import pytest
+
+from jittersim import dashboard_rules as rules
+from jittersim.remote_client import js_number, js_round
+from tests.dashboard_script import NODE, function_source, run_node
+
+pytestmark = pytest.mark.skipif(NODE is None, reason="Node.js is required to run the dashboard")
+
+
+def js(value):
+    import json
+
+    return json.dumps(value)
+
+
+# --- section: status
+
+
+def client(name, mac, **fields):
+    return {"display_name": name, "mac_address": mac, "unaffected": False,
+            "association_verified": True, "assigned_device_id": None,
+            "assigned_profile_id": None, "group_profile_id": None, **fields}
+
+
+PROFILES = [
+    {"id": "slow", "name": "Slow"}, {"id": "lossy", "name": ""}, {"id": "cap", "name": "Cap"}
+]
+CLIENT_SETS = [
+    [],
+    [client("Phone", "02:00:00:00:00:01")],
+    [
+        client("Tablet", "02:00:00:00:00:02", assigned_device_id="t", assigned_profile_id="slow",
+               group_profile_id="cap"),
+        client("", "02:00:00:00:00:03", assigned_device_id="m", assigned_profile_id="lossy"),
+        client(None, None, assigned_device_id="x", assigned_profile_id="gone"),
+        client("Shielded", "02:00:00:00:00:04", unaffected=True, assigned_device_id="s",
+               assigned_profile_id="slow"),
+        client("Unverified", "02:00:00:00:00:05", association_verified=False),
+    ],
+    [client(f"Device {index}", f"02:00:00:00:01:{index:02d}", assigned_device_id=str(index),
+            assigned_profile_id="slow") for index in range(7)],
+]
+GENERALS = [
+    None,
+    {"profile": None, "active": False},
+    {"profile": {"id": "slow", "name": "Shared slow"}, "active": False},
+    {"profile": {"id": "slow", "name": "Shared slow"}, "active": True},
+    {"profile": {"id": "cap", "name": ""}, "active": True},
+]
+LISTS = [[], [{"name": "Games", "enabled": True}, {"name": "Off", "enabled": False},
+              {"name": "Video", "enabled": True}]]
+
+
+def sidebar_inputs():
+    inputs = []
+    for state, running, last_action, general, clients, available, lists in itertools.product(
+        ("applied", "unknown", "reset", "applying", "resetting", "error", None),
+        (True, False),
+        ("apply", "reset"),
+        GENERALS,
+        CLIENT_SETS,
+        (True, False),
+        LISTS,
+    ):
+        inputs.append({
+            "adminTokenVerified": True,
+            "loaded": {name: True for name in rules.SIDEBAR_INPUTS},
+            "runtimeState": state, "running": running, "lastAction": last_action,
+            "generalState": general, "profiles": PROFILES, "clients": clients,
+            "clientsAvailable": available, "serviceLists": lists,
+        })
+    inputs.append({"adminTokenVerified": True, "loaded": {"runtime": True}})
+    inputs.append({"adminTokenVerified": False, "loaded": {}})
+    return inputs
+
+
+def test_sidebar_status_matches_the_page_for_every_state_and_device_mix():
+    inputs = sidebar_inputs()
+    expected = run_node([function_source("sidebarStatus")],
+                        f"{js(inputs)}.map((input) => sidebarStatus(input))")
+    assert len(expected) == len(inputs) > 1000
+    for data, page in zip(inputs, expected):
+        assert rules.sidebar_status(data) == page, data
+
+
+def test_the_terminal_lists_every_affected_device_and_the_page_the_first_five():
+    data = sidebar_inputs()[0]
+    data.update({"clients": CLIENT_SETS[3], "runtimeState": "applied", "running": True,
+                 "generalState": None, "clientsAvailable": True})
+    assert rules.sidebar_status(data)["devices"]["more"] == 2
+    full = rules.sidebar_status(data, limit=None)["devices"]
+    assert (len(full["items"]), full["more"], full["summary"]) == (7, 0, "7 devices affected")
+
+
+def test_runtime_status_text_matches_the_page():
+    cases = [
+        [state, running, {"lastAction": action, "helperConfigured": helper}]
+        for state, running, action, helper in itertools.product(
+            ("applied", "unknown", "reset", "applying", "resetting", "error", "other", None),
+            (True, False), ("apply", "reset", None), (True, False, None),
+        )
+    ]
+    page = run_node([function_source("runtimeStatusText")],
+                    f"{js(cases)}.map((c) => runtimeStatusText(c[0], c[1], c[2]))")
+    for (state, running, context), expected in zip(cases, page):
+        assert rules.runtime_status_text(state, running, context) == expected
+
+
+# --- end: status
+
+
+# --- section: numbers
+
+NUMBERS = [0, 1, 2, -2, 2.5, 4.7, 21.6, 0.1, 0.2 + 0.1, 1 / 3, 1e21, 1e20, 123456789.125, 1e-7,
+           0.000001, 0.0000015, 5e-324, 1.7976931348623157e308, -0.5, 99.95, 1799.9999999]
+
+
+def test_numbers_print_like_the_page():
+    page = run_node([], f"{js(NUMBERS)}.map((n) => String(n))")
+    assert [js_number(number) for number in NUMBERS] == page
+
+
+def test_rounding_matches_math_round():
+    values = [0.5, 1.5, 2.5, -0.5, -1.5, -2.5, 0.49999999999999994, 1799.5, 239.99, 4.45 * 10,
+              1e15 + 0.5]
+    page = run_node([], f"{js(values)}.map((n) => Math.round(n))")
+    assert [js_round(value) for value in values] == page
+
+
+# --- end: numbers
