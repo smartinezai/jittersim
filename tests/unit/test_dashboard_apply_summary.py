@@ -757,13 +757,32 @@ def test_the_sidebar_tips_stay_in_the_window_and_the_apply_button_keeps_its_heig
     assert re.search(r"#apply-button \{[^{}]*min-height: calc\(2lh \+ 1\.24rem \+ 2px\)", css)
 
 
-def test_a_short_window_gives_the_footer_room_so_panic_stays_in_view():
+def test_only_the_navigation_scrolls_and_the_buttons_that_act_stay_pinned():
+    # A height measured on one machine is no promise on another. The pinned footer does not
+    # depend on how tall the text is so Panic is in view with any font.
+    dock = sidebar_html()
+    scrolling = dock[dock.index('<div class="sidebar-scroll">') : dock.index('<div class="sidebar-footer">')]
+    pinned = dock[dock.index('<div class="sidebar-footer">') :]
+    for element_id in ("apply-button", "apply-summary", "reset-button", "runtime-summary",
+                       "message", "panic-button"):
+        assert f'id="{element_id}"' in pinned, element_id
+        assert f'id="{element_id}"' not in scrolling, element_id
+    for element_id in ("sidebar-status", "router-wifi-toggle", "copy-wifi-name",
+                       "open-admin-credentials"):
+        assert f'id="{element_id}"' in scrolling, element_id
+    assert "<nav " in scrolling and "<nav " not in pinned
+
     css = re.search(r"<style>(.*?)</style>", DASHBOARD_HTML, re.DOTALL).group(1)
-    block = re.search(
-        r"@media \(min-width: 48\.01rem\) and \(max-height: 800px\) \{([^@]*?)\n    \}", css
-    ).group(1)
-    assert re.search(r"\.sidebar \{[^{}]*gap: 0\.6rem", block)
-    assert re.search(r"\.sidebar-nav a \{[^{}]*padding-block: 0\.25rem", block)
+    scroll_rule = re.search(r"\n    \.sidebar-scroll \{([^{}]*)\}", css).group(1)
+    assert "overflow-y: auto" in scroll_rule
+    assert "min-height: 0" in scroll_rule
+    assert "flex: 1 1 0" in scroll_rule
+    footer_rule = re.search(r"\n    \.sidebar-footer \{([^{}]*)\}", css).group(1)
+    assert "flex: none" in footer_rule
+    # The phone keeps its old single column in the old order.
+    phone = css[css.index("@media (max-width: 48rem)") :]
+    phone = phone[: phone.index("\n    }\n")]
+    assert ".sidebar-scroll { display: contents; }" in phone
 
 
 def test_panic_says_how_to_run_again():
