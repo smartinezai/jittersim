@@ -98,3 +98,7 @@ The installer also runs only the obsolete-table cleanup after replacing the serv
 ## Obsolete-rule repair validation
 
 304 tests passed on Mac and in a fresh Linux package installation. Real Linux packets reproduce the old management drop and prove that apply, repeated reset and installer cleanup restore reception. Current test-network mDNS input and output stay blocked. Current control rules and a separate foreign table are preserved. The check refuses every existing table that it would change or delete. Genuine cleanup failures remain errors. Internal review found no remaining production blocker. Management name queries and HTTPS must be checked again on the installed Pi.
+
+## Resolver port after the main integration
+
+The access controls that merged from main first ran their filtered resolver on port 5353 and closed that port outside the test interface and loopback. That brought back the repair above and also made test-client DNS time out once the management firewall dropped mDNS on the test interface. The resolver now listens on port 5335 (`DNS_PORT` in `networking/access.py`). The access table keeps only that port private. Port 5353 stays open to Avahi and the management firewall still blocks it on the test interface. Kernel tests keep a responder on port 5353 in the Pi namespace and check that name queries still reach it after the access restore and after an Apply.

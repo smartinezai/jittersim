@@ -27,7 +27,10 @@ from .topology import Topology
 LOGGER = logging.getLogger(__name__)
 ACCESS_DIRECTORY = Path("/var/lib/jittersim-access")
 ACCESS_RUNTIME = Path("/run/jittersim/access-policy.json")
-DNS_PORT = 5353
+# The filtered resolver listens here. Port 5353 belongs to mDNS: the Avahi
+# publisher answers `<pi-name>.local` there and the access table must never
+# close it.
+DNS_PORT = 5335
 
 
 def atomic_write(path: Path, content: str, mode: int = 0o640) -> None:
@@ -63,8 +66,8 @@ def render_dns(plan: AccessPlan) -> str:
     """Use Unbound views to check each client's rules before answering from cache."""
     lines = [
         "server:",
-        "  interface: 127.0.0.1@5353",
-        "  interface: 192.168.50.1@5353",
+        f"  interface: 127.0.0.1@{DNS_PORT}",
+        f"  interface: 192.168.50.1@{DNS_PORT}",
         "  ip-freebind: yes",
         '  chroot: ""',
         '  directory: "/"',

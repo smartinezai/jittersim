@@ -18,6 +18,7 @@ from jittersim.networking.access import AccessManager, read_access
 from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.commands import CommandResult
 from jittersim.networking.executor import CommandExecutionError
+from jittersim.networking.helper import HelperService
 from tests.kernel.lab import (
     CLIENT,
     CLIENT_ADDRESS,
@@ -32,6 +33,8 @@ from tests.kernel.lab import (
     remove_lab,
     run_in,
 )
+
+ROOT = Path(__file__).resolve().parents[2]
 
 ENABLED = (
     sys.platform == "linux"
@@ -344,6 +347,108 @@ class AccessDatapathTests(unittest.TestCase):
         self.assertNotIn("table inet jittersim\n", run_in(PI, "nft", "list", "tables").stdout)
         for interface in ("eth0", "wlan0"):
             self.assertNotIn("htb", run_in(PI, "tc", "qdisc", "show", "dev", interface).stdout)
+
+    def udp_arrives(self, port, *, address="192.168.0.2"):
+        """Send one datagram from the router side to a socket bound in the Pi namespace."""
+
+        receiver = subprocess.Popen(
+            [
+                "ip", "netns", "exec", PI, "python", "-u", "-c",
+                "import socket\n"
+                "s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+                "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+                f"s.bind(('0.0.0.0', {port}))\n"
+                "s.settimeout(1)\n"
+                "print('ready')\n"
+                "try:\n"
+                "    print(s.recv(32).decode())\n"
+                "except socket.timeout:\n"
+                "    print('blocked')\n",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            self.assertTrue(select.select([receiver.stdout], [], [], 3)[0])
+            self.assertEqual(receiver.stdout.readline().strip(), "ready")
+            run_in(
+                ROUTER, "python", "-c",
+                "import socket; "
+                "socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b'arrived', "
+                f"('{address}', {port}))",
+            )
+            output, error = receiver.communicate(timeout=3)
+            self.assertEqual(receiver.returncode, 0, error)
+            return output.strip()
+        finally:
+            if receiver.poll() is None:
+                receiver.kill()
+                receiver.communicate(timeout=3)
+
+    def test_name_queries_still_reach_avahi_after_restore_and_apply(self):
+        # Avahi answers `<pi-name>.local` and `jittersim.local` on UDP 5353 from the
+        # Ethernet side. The access table must leave that port alone while it keeps
+        # the filtered resolver's own port private.
+        self.assertEqual(self.udp_arrives(5353), "arrived")
+        self.manager.restore()
+        self.assertEqual(self.udp_arrives(5353), "arrived")
+        self.manager.apply(self.plan)
+        self.assertEqual(self.udp_arrives(5353), "arrived")
+        self.assertEqual(self.udp_arrives(5335), "blocked")
+        self.manager.apply(
+            replace(
+                self.plan,
+                mac=MacPolicy("denylist", (), (CLIENT_MAC,)),
+                options=AccessOptions(dns_failure_percent=50),
+            )
+        )
+        self.assertEqual(self.udp_arrives(5353), "arrived")
+        self.manager.restore()
+        self.assertEqual(self.udp_arrives(5353), "arrived")
+        self.assertEqual(self.udp_arrives(5335), "blocked")
+
+    def load_control_firewall(self):
+        text = (ROOT / "deploy/raspberry-pi/jittersim-control-firewall.nft").read_text()
+        path = self.directory / "control.nft"
+        path.write_text(
+            text.replace("@TEST_INTERFACE@", TOPOLOGY.test_interface).replace(
+                "@UPLINK_INTERFACE@", TOPOLOGY.uplink_interface
+            )
+        )
+        run_in(PI, "nft", "-f", str(path))
+
+    def helper(self):
+        return HelperService(
+            NetworkApplier(executor=self.executor, topology=TOPOLOGY),
+            active_plan_path=self.directory / "active-plan.json",
+            access_manager=self.manager,
+        )
+
+    def test_test_client_dns_works_with_the_control_firewall_and_a_global_block_list(self):
+        self.load_control_firewall()
+        self.manager.apply(
+            AccessPlan(websites=WebsitePolicy(blocked_domains=("video.example.com",)))
+        )
+        # The control firewall drops mDNS on the test interface. Redirected DNS
+        # must not look like mDNS to it, over UDP or TCP.
+        for namespace in (CLIENT, OTHER_CLIENT):
+            for tcp in (False, True):
+                with self.subTest(namespace=namespace, tcp=tcp):
+                    self.assertIn("203.0.113.7", self.query("news.example.com", namespace, tcp=tcp))
+                    self.assertIn(
+                        "status: NXDOMAIN", self.query("video.example.com", namespace, tcp=tcp)
+                    )
+        self.assertTrue(self.helper().handle_payload({"action": "normal-access"})["ok"])
+        for tcp in (False, True):
+            self.assertIn(
+                "203.0.113.7",
+                self.query("video.example.com", resolver="192.168.50.1", tcp=tcp),
+            )
+        # Plain DNS from the test network still works with the firewall loaded.
+        tables = run_in(PI, "nft", "list", "tables").stdout
+        self.assertIn("jittersim_control", tables)
+        self.assertNotIn("jittersim_access_transition", tables)
 
     def test_real_hostapd_control_replaces_and_clears_admission_lists(self):
         control = self.directory / "hostapd"

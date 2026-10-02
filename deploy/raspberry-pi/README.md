@@ -726,6 +726,11 @@ The dashboard cannot write its files directly. DNS failures keep blocked
 traffic blocked. A failed policy recovery closes test-network traffic while
 leaving the Ethernet management path available.
 
+The filtered resolver listens on `127.0.0.1` and `192.168.50.1` at port 5335.
+The access table redirects test-client DNS there and keeps that port closed to
+every other interface. Port 5353 stays free for the Avahi publisher so
+`<pi-name>.local` and `jittersim.local` keep resolving from the laptop.
+
 `jittersim-dns.service` is installed but not enabled. The helper starts it
 when saved access rules are on, at boot through `jittersim-access-boot` and
 on each access apply. It is expected to be inactive while access rules are off.

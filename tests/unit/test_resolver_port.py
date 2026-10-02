@@ -1,0 +1,65 @@
+"""The filtered resolver keeps its own port and never touches the mDNS port."""
+
+import re
+import unittest
+from pathlib import Path
+
+from jittersim.config.models import AccessOptions, SiteBlock
+from jittersim.engine.access import AccessClient, AccessPlan
+from jittersim.networking import access
+from jittersim.networking.access import render_access_firewall, render_dns
+from jittersim.networking.topology import Topology
+
+ROOT = Path(__file__).resolve().parents[2]
+TOPOLOGY = Topology("eth0", "wlan0")
+BLOCKED = AccessPlan(
+    blocks=(SiteBlock("video", "Video", ("video.example.com",), device_id="child"),),
+    clients=(AccessClient("child", "192.168.50.10", "02:00:00:00:50:0a", ("video",)),),
+)
+
+
+class ResolverPortTests(unittest.TestCase):
+    def test_resolver_listens_on_5335_and_is_redirected_to(self):
+        self.assertEqual(access.DNS_PORT, 5335)
+        config = render_dns(BLOCKED)
+        self.assertIn("interface: 127.0.0.1@5335", config)
+        self.assertIn("interface: 192.168.50.1@5335", config)
+        self.assertNotIn("5353", config)
+        rules = render_access_firewall(BLOCKED, TOPOLOGY)
+        # A redirect to :53 would loop test-client queries back to dnsmasq and
+        # skip the filter.
+        for protocol in ("udp", "tcp"):
+            self.assertIn(f'iifname "wlan0" {protocol} dport 53 redirect to :5335', rules)
+        self.assertNotIn("redirect to :53\n", rules)
+
+    def test_access_table_never_mentions_the_mdns_port(self):
+        # Avahi answers `<pi-name>.local` and `jittersim.local` on 5353. Any rule
+        # on that port in the access table stops the laptop resolving the Pi.
+        for plan in (
+            AccessPlan(),
+            AccessPlan(options=AccessOptions(enabled=False)),
+            BLOCKED,
+            AccessPlan(options=AccessOptions(dns_failure_percent=100)),
+        ):
+            rules = render_access_firewall(plan, TOPOLOGY)
+            self.assertNotRegex(rules, r"\b5353\b")
+            # The private resolver port stays closed to everything but the test
+            # interface and loopback.
+            self.assertIn(
+                'iifname != "wlan0" iifname != "lo" meta l4proto { tcp, udp } th dport 5335 drop',
+                rules,
+            )
+
+    def test_control_firewall_blocks_mdns_but_not_the_resolver_port(self):
+        text = (ROOT / "deploy/raspberry-pi/jittersim-control-firewall.nft").read_text()
+        rules = [line.strip() for line in text.splitlines() if not line.strip().startswith("#")]
+        mdns = [line for line in rules if re.search(r"\b(dport|sport) 5353\b", line)]
+        self.assertEqual(len(mdns), 4)
+        self.assertTrue(all("drop" in line for line in mdns))
+        # Test-client DNS arrives on the test interface at the resolver port
+        # after the redirect. Dropping it times out UDP lookups.
+        self.assertFalse([line for line in rules if "5335" in line])
+
+
+if __name__ == "__main__":
+    unittest.main()
