@@ -44,12 +44,15 @@ class ForcedWindowRunner:
         clock: Callable[[], float] = time.time,
         ready: Callable[[], Optional[str]] = lambda: None,
         on_event: Callable[[str], None] = lambda message: None,
+        interrupted: Callable[[], bool] = lambda: False,
     ) -> None:
         self._repository = repository
         self._actions = actions
         self._clock = clock
         self._ready = ready
         self._on_event = on_event
+        # True while Panic or Reset waits to end the window. A start stops between its steps.
+        self._interrupted = interrupted
 
     def status(self) -> dict:
         state = self._repository.get_forced_window_state()
@@ -130,6 +133,10 @@ class ForcedWindowRunner:
                 running.but(skipped_until=ends_at), None, f"The window could not start: {error}"
             )
         running = self._save(running.but(phase=COPIED))
+        if self._interrupted():
+            message = "The window was ended while it started."
+            self._on_event(message)
+            return self._begin_restore(running.but(skipped_until=ends_at), None, message)
         return self._switch_off(running, now)
 
     def _switch_off(self, state: WindowState, now: float) -> WindowState:

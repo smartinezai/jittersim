@@ -66,6 +66,7 @@ jobs:
       - run: python -m tests.browser.device_names
       - run: python -m tests.browser.phone_layout
       - run: python -m tests.browser.help_icons
+      - run: python -m tests.browser.forced_window
       - run: python -m tests.browser.token_remember
       - uses: actions/upload-artifact@v5
         if: always()

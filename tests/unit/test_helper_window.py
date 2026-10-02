@@ -3,12 +3,13 @@
 import os
 import stat
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
 from jittersim.engine.forced_window import HelperWindowActions, WindowActionError
 from jittersim.networking.applier import NetworkApplier
-from jittersim.networking.helper import HelperClient, HelperClientError, HelperService
+from jittersim.networking.helper import HelperClient, HelperClientError, HelperService, UnixHelperServer
 from jittersim.networking.router import RouterError, RouterWifiSettings
 from jittersim.networking.topology import Topology
 from tests.unit.test_helper import FakeRouter, UplinkOutputExecutor
@@ -151,6 +152,26 @@ class WindowHelperTests(unittest.TestCase):
                 self.assertEqual(response, {"ok": False, "error": "router Wi-Fi state is invalid"})
         self.assertEqual(self.routers, [])
 
+    def test_the_login_file_can_be_checked_and_removed_while_a_router_step_runs(self) -> None:
+        service = self.service()
+        service.handle_payload({"action": "window-login-save", "admin_password": "router-secret"})
+        self.assertTrue(service._router_lock.acquire(blocking=False))
+        try:
+            status = service.handle_payload({"action": "window-login-status"})
+            self.assertEqual((status["ok"], status["saved"]), (True, True))
+            self.assertEqual(service.handle_payload({"action": "window-login-clear"})["saved"], False)
+        finally:
+            service._router_lock.release()
+
+    def test_the_socket_lets_the_login_file_actions_through_a_busy_helper(self) -> None:
+        from jittersim.networking import helper as helper_module
+
+        for action in ("window-login-status", "window-login-clear"):
+            self.assertNotIn(action, helper_module.ROUTER_ACTIONS)
+            self.assertIn(action, helper_module.WINDOW_LOGIN_FILE_ACTIONS)
+        for action in ("window-login-save", "window-copy", "window-router"):
+            self.assertIn(action, helper_module.ROUTER_ACTIONS)
+
     def test_a_busy_router_answers_busy_for_the_window_steps(self) -> None:
         service = self.service()
         service.handle_payload({"action": "window-login-save", "admin_password": "router-secret"})
@@ -160,6 +181,62 @@ class WindowHelperTests(unittest.TestCase):
                 self.assertEqual(service.handle_payload(payload)["reason"], "helper-busy")
         finally:
             service._router_lock.release()
+
+
+class WindowSocketTests(unittest.TestCase):
+    """The same steps over the real socket with a real client."""
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.routers = []
+
+        def factory(address, password):
+            router = FakeRouter(address, password)
+            self.routers.append(router)
+            return router
+
+        service = HelperService(
+            NetworkApplier(
+                executor=UplinkOutputExecutor(),
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            ),
+            router_factory=factory,
+            router_login_path=Path(self.directory.name) / "router-login",
+        )
+        socket_path = Path(self.directory.name) / "helper.sock"
+        self.server = UnixHelperServer(socket_path, service)
+        thread = threading.Thread(target=self.server.serve_forever)
+        thread.start()
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.client = HelperClient(socket_path=socket_path)
+
+    def test_a_window_works_through_the_socket(self) -> None:
+        self.assertEqual(self.client.window_login_status()["saved"], False)
+        self.client.window_login_save(admin_password="router-secret")
+        self.assertEqual(self.client.window_login_status()["saved"], True)
+
+        self.assertEqual(self.client.window_copy()["ssid"], "Vodafone-Test")
+        self.assertEqual(self.client.window_router(enabled=False)["enabled"], False)
+        self.assertEqual(self.client.window_router(enabled=True)["enabled"], True)
+        self.assertTrue(all(router.password == "router-secret" for router in self.routers))
+
+    def test_a_missing_login_is_a_client_error_with_a_message(self) -> None:
+        with self.assertRaisesRegex(HelperClientError, "No router login is saved"):
+            self.client.window_copy()
+        with self.assertRaisesRegex(HelperClientError, "No router login is saved"):
+            self.client.window_router(enabled=False)
+
+    def test_the_login_file_actions_answer_while_the_helper_is_busy(self) -> None:
+        self.client.window_login_save(admin_password="router-secret")
+        self.assertTrue(self.server.operation_lock.acquire(blocking=False))
+        try:
+            self.assertEqual(self.client.window_login_status()["saved"], True)
+            self.assertEqual(self.client.window_login_clear()["saved"], False)
+        finally:
+            self.server.operation_lock.release()
 
 
 class WindowClientTests(unittest.TestCase):

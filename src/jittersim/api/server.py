@@ -10232,6 +10232,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
 DASHBOARD_HTML = DASHBOARD_HTML.replace("</style>", Path(__file__).with_name("workflows.css").read_text(encoding="utf-8") + "</style>", 1)
 DASHBOARD_HTML = DASHBOARD_HTML.replace("    startDashboard();", Path(__file__).with_name("workflows.js").read_text(encoding="utf-8") + "\n    startDashboard();")
+DASHBOARD_HTML = DASHBOARD_HTML.replace("    startDashboard();", Path(__file__).with_name("forcedwindow.js").read_text(encoding="utf-8") + "\n    startDashboard();")
 DASHBOARD_HTML = DASHBOARD_HTML.replace("</style>", Path(__file__).with_name("access.css").read_text(encoding="utf-8") + "</style>", 1)
 # The phone layout comes last so that it wins over the earlier narrow-screen rules.
 DASHBOARD_HTML = DASHBOARD_HTML.replace("</style>", Path(__file__).with_name("phone.css").read_text(encoding="utf-8") + "</style>", 1)

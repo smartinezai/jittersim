@@ -15,6 +15,7 @@ from jittersim.config.storage import ConfigRepository
 from jittersim.engine.forced_window_service import (
     CLOCK_NOT_SET,
     HELPER_UNREACHABLE,
+    NO_ETHERNET,
     NO_LOGIN,
     ForcedWindowService,
 )
@@ -42,7 +43,11 @@ class FakeClient:
         self.calls = []
         self.saved = True
         self.unreachable = False
+        self.gateway = "192.168.0.1"
         self.fail = set()
+
+    def uplink_info(self):
+        return {"interface": "eth0", "connection_name": "wired", "gateway": self.gateway}
 
     def _do(self, name):
         self.calls.append(name)
@@ -111,11 +116,12 @@ class ServiceTests(unittest.TestCase):
             (CLOCK_NOT_SET, lambda: setattr(self, "now", 1000.0)),
             (NO_LOGIN, lambda: setattr(self.client, "saved", False)),
             (HELPER_UNREACHABLE, lambda: setattr(self.client, "unreachable", True)),
+            (NO_ETHERNET, lambda: setattr(self.client, "gateway", None)),
         )
         for reason, make in cases:
             with self.subTest(reason=reason):
                 self.now = saturday(16)
-                self.client.saved, self.client.unreachable = True, False
+                self.client.saved, self.client.unreachable, self.client.gateway = True, False, "192.168.0.1"
                 self.repository.save_forced_window_state(WindowState())
                 self.client.calls.clear()
                 make()
@@ -135,6 +141,47 @@ class ServiceTests(unittest.TestCase):
 
         self.assertTrue(wait_until(lambda: self.client.calls[-2:] == ["pi-reset", "router-on"]))
         self.assertTrue(wait_until(lambda: service.status()["phase"] == "idle"))
+
+    def test_a_window_after_panic_starts_normally(self) -> None:
+        service = self.service()
+        service.tick()
+        service.request_end()
+        self.assertTrue(wait_until(lambda: service.status()["phase"] == "idle"))
+        self.assertTrue(wait_until(lambda: not service._end_requested.is_set()))
+        self.client.calls.clear()
+
+        self.now = saturday(16) + 7 * 24 * 3600  # the next Saturday
+        service.tick()
+
+        self.assertEqual(self.client.calls[-2:], ["copy", "router-off"])
+        self.assertTrue(service.status()["router_wifi_off"])
+
+    def test_panic_returns_at_once_while_a_helper_step_is_running(self) -> None:
+        release = threading.Event()
+        entered = threading.Event()
+        original = self.client.window_copy
+
+        def slow_copy():
+            entered.set()
+            release.wait(10)
+            return original()
+
+        self.client.window_copy = slow_copy
+        service = self.service()
+        ticking = threading.Thread(target=service.tick)
+        ticking.start()
+        self.assertTrue(entered.wait(5))
+
+        started = time.monotonic()
+        service.request_end()
+        self.assertLess(time.monotonic() - started, 1.0, "Panic must not wait for the helper step")
+
+        release.set()
+        ticking.join(10)
+        # the window never switched the router off and everything is back
+        self.assertTrue(wait_until(lambda: service.status()["phase"] == "idle"))
+        self.assertNotIn("router-off", self.client.calls)
+        self.assertEqual(self.client.calls[-2:], ["pi-reset", "router-on"])
 
     def test_the_loop_ticks_and_stops(self) -> None:
         service = self.service()
@@ -160,6 +207,7 @@ class SpyService:
         self.ended = 0
         self.fail = fail
         self.router_wifi_off = True
+        self.phase = "active"
 
     def request_end(self):
         self.ended += 1
@@ -167,7 +215,7 @@ class SpyService:
             raise RuntimeError("boom")
 
     def status(self):
-        return {"phase": "active", "window_id": "night", "ends_at": datetime(2026, 10, 4, 5).timestamp(),
+        return {"phase": self.phase, "window_id": "night", "ends_at": datetime(2026, 10, 4, 5).timestamp(),
                 "error": None, "problem": None, "attempts": 0, "router_wifi_off": self.router_wifi_off}
 
 
@@ -232,9 +280,20 @@ class ApiTests(unittest.TestCase):
         self.assertIn(("save", "router-secret"), self.client.calls)
         self.assertNotIn("router-secret", json.dumps(self.get()))
         self.assertEqual(self.get()["login_saved"], True)
+        self.service.phase = "idle"
         self.assertEqual(self.post("/api/forced-windows/login/clear", {}), (200, {"login_saved": False}))
         for bad in ({}, {"admin_password": ""}, {"admin_password": 5}):
             self.assertEqual(self.post("/api/forced-windows/login", bad)[0], 400)
+
+    def test_the_saved_login_cannot_be_removed_while_a_window_runs(self) -> None:
+        # the login is what switches the router's Wi-Fi back on
+        status, body = self.post("/api/forced-windows/login/clear", {})
+        self.assertEqual(status, 409)
+        self.assertIn("End it first", body["error"])
+        self.assertNotIn("login-clear", self.client.calls)
+        self.service.phase = "idle"
+        self.assertEqual(self.post("/api/forced-windows/login/clear", {})[0], 200)
+        self.assertIn("login-clear", self.client.calls)
 
     def test_a_helper_error_is_shown(self) -> None:
         self.client.fail.add("login-save")
@@ -256,6 +315,19 @@ class ApiTests(unittest.TestCase):
                     except Exception:
                         pass  # what Panic or Reset does next is not under test
                     self.assertEqual(self.service.ended, 1)
+
+    def test_saving_or_deleting_a_window_ends_the_pause_after_panic(self) -> None:
+        paused = WindowState(skipped_until=9e9)
+        for path, payload in (("/api/forced-windows", self.WINDOW), ("/api/forced-windows/delete", {"id": "night"})):
+            with self.subTest(path=path):
+                self.post("/api/forced-windows", self.WINDOW)
+                self.repository.save_forced_window_state(paused)
+                self.assertEqual(self.post(path, payload)[0], 200)
+                self.assertEqual(self.repository.get_forced_window_state().skipped_until, 0.0)
+        # a running window is not touched
+        self.repository.save_forced_window_state(WindowState(phase="active", window_id="night", skipped_until=5.0))
+        self.post("/api/forced-windows", self.WINDOW)
+        self.assertEqual(self.repository.get_forced_window_state().skipped_until, 5.0)
 
     def test_a_failure_while_ending_the_window_never_stops_panic(self) -> None:
         self.service.fail = True

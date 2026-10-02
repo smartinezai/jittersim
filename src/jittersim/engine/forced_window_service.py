@@ -15,6 +15,7 @@ FIRST_PLAUSIBLE_TIME = 1_767_225_600  # 2026-01-01
 NO_LOGIN = "No router login is saved on the Pi. Save it on the Schedules page."
 CLOCK_NOT_SET = "The Pi's clock is not set yet."
 HELPER_UNREACHABLE = "The networking helper does not answer."
+NO_ETHERNET = "The Pi has no Ethernet connection to the router. Connect it before a window can start."
 
 
 class ForcedWindowService:
@@ -38,6 +39,8 @@ class ForcedWindowService:
         self._repository_factory = repository_factory
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
+        # Set by Panic and Reset at once. A tick that is already running sees it between its steps.
+        self._end_requested = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
     def _ready(self) -> Optional[str]:
@@ -46,6 +49,9 @@ class ForcedWindowService:
         try:
             if not self._client.window_login_status().get("saved"):
                 return NO_LOGIN
+            # The router's Wi-Fi goes off. The Pi must keep its own way to the router and the dashboard.
+            if not self._client.uplink_info().get("gateway"):
+                return NO_ETHERNET
         except self._error_type:
             return HELPER_UNREACHABLE
         return None
@@ -65,6 +71,7 @@ class ForcedWindowService:
             clock=self._clock,
             ready=self._ready,
             on_event=record,
+            interrupted=self._end_requested.is_set,
         )
 
     def tick(self) -> None:
@@ -72,17 +79,23 @@ class ForcedWindowService:
             self._runner(repository).tick()
 
     def request_end(self) -> None:
-        """End the running window at the next tick. Panic and Reset call this."""
+        """End the running window. Panic and Reset call this and it never waits.
 
-        with self._lock, self._repository_factory(self._database_path) as repository:
-            self._runner(repository).request_end()
-        # Do not wait for the next poll: the person pressed Panic. The steps can take minutes so
-        # they run beside the request.
-        threading.Thread(target=self._restore_now, name="jittersim-forced-window-end", daemon=True).start()
+        A tick can be in the middle of a helper step that takes minutes. The request only raises a
+        flag and a thread does the rest as soon as that tick lets go.
+        """
 
-    def _restore_now(self) -> None:
+        self._end_requested.set()
+        threading.Thread(target=self._end_and_restore, name="jittersim-forced-window-end", daemon=True).start()
+
+    def _end_and_restore(self) -> None:
         try:
-            self.tick()
+            with self._lock, self._repository_factory(self._database_path) as repository:
+                try:
+                    self._runner(repository).request_end()
+                finally:
+                    self._end_requested.clear()
+                self._runner(repository).tick()
         except Exception:
             LOGGER.exception("could not restore the network after the window ended")
 

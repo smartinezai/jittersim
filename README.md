@@ -735,6 +735,39 @@ when the list was cleared until the first new name arrives and `jittersim
 traffic` says the same. The list fills again as devices browse. Names are kept
 for 30 days from their last sighting. Nothing else is lost.
 
+### Forced test network window
+
+A forced window is a weekly time span in which the router's Wi-Fi is off and the Pi's
+test Wi-Fi uses the router's name and password. Every device has to join the Pi. When the
+window ends the Pi gets its own name back and the router's Wi-Fi comes on again.
+
+Open **Schedules** and find **Forced test network window**.
+
+1. Save the router admin password with **Save login**. The Pi keeps it in a file that only
+   the root helper can read. The dashboard never shows it again. Without a saved login no
+   window starts.
+2. Add a window: a start day and time and an end day and time. An end time of 00:00 ends at
+   midnight at the start of that day so Friday 18:00 to Monday 00:00 covers the weekend. A
+   window may run over midnight or over the end of the week. Times use the Pi's clock.
+3. While a window runs every page shows `The router's Wi-Fi is off until <day> <time>`.
+   **End window now** stops it. Panic and Reset stop it too.
+
+What the Pi does:
+
+- It copies the router's Wi-Fi first and switches the router off only when that worked. If the
+  copy fails nothing is switched off. If the switch-off fails the Pi goes back to its own name.
+- At the end the Pi's own name comes back first and the router's Wi-Fi goes on after it. If the
+  router does not answer the Pi tries again every minute and shows an alert.
+- A window does not start when the Pi's clock is not set or no login is saved or the Pi has no
+  Ethernet connection to the router. The card says which.
+- A restart in the middle of a window carries on or restores. Ending a window by hand or with
+  Panic pauses it until its normal end. Saving or deleting the window ends that pause.
+- The saved login cannot be removed while a window runs because it is what switches the
+  router's Wi-Fi back on.
+
+Try a short window first and keep Ethernet or SSH connected. A router that uses an older Wi-Fi
+security mode is not copied without a person present. Copy it by hand instead.
+
 The test network requires WPA3 with AES and protected Wi-Fi management messages.
 Upgrades save the stronger security settings and report when an active network
 needs a planned restart. Manual

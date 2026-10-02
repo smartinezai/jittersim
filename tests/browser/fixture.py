@@ -13,6 +13,7 @@ import jittersim.api.server as server_module
 from jittersim.api.server import ControlServer
 from jittersim.config.models import Device, DomainObservation, Impairment, Profile, Scenario, ScenarioStep
 from jittersim.config.storage import ConfigRepository
+from jittersim.engine.forced_window_service import ForcedWindowService
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.networking.access import AccessManager
 from jittersim.networking.applier import NetworkApplier
@@ -205,6 +206,9 @@ def allow_wide_fonts_style():
 
 class FixtureServer(ControlServer):
     def response_for(self, path, query=""):
+        if path == "/fixture/router-wifi":
+            # What the simulated router does now. The dashboard's own router status is cached.
+            return 200, "application/json", json.dumps({"enabled": DashboardRouter.enabled}).encode()
         status, content_type, body = super().response_for(path, query)
         if path == "/" and os.environ.get("JITTERSIM_BROWSER_TEST_WIDE_FONTS") == "1":
             body = body.replace(b"</head>", WIDE_FONTS_STYLE + b"</head>", 1)
@@ -284,7 +288,8 @@ def main():
         service = DashboardHelperService(NetworkApplier(executor=executor, topology=topology),
                                          router_factory=lambda *_: DashboardRouter(),
                                          access_store=AccessStore(root / "access.json"),
-                                         access_manager=access_manager)
+                                         access_manager=access_manager,
+                                         router_login_path=root / "router-login")
         with UnixHelperServer(root / "wifi.sock", service) as helper:
             worker = threading.Thread(target=helper.serve_forever, daemon=True)
             worker.start()
@@ -300,14 +305,22 @@ def main():
                         scheduler = RuntimeScheduler(
                             database_path=root / "config.db", helper_client=helper_client
                         )
+                    # Forced windows tick every half second so a journey does not wait.
+                    forced_window = ForcedWindowService(
+                        database_path=root / "config.db", helper_client=helper_client,
+                        error_type=HelperClientError, poll_seconds=0.5,
+                    )
                     try:
                         with FixtureServer(
                             ("127.0.0.1", 0), repository, admin_token="browser-test",
                             helper_client=helper_client, scheduler=scheduler,
+                            forced_window=forced_window,
                         ) as server:
+                            forced_window.start()
                             print(server.server_address[1], flush=True)
                             server.serve_forever()
                     finally:
+                        forced_window.stop()
                         if scheduler is not None:
                             scheduler.stop()
             finally:

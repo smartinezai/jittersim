@@ -136,10 +136,10 @@ class RunnerTests(unittest.TestCase):
         self.reason = None
         self.runner = self.make_runner()
 
-    def make_runner(self):
+    def make_runner(self, **options):
         return ForcedWindowRunner(
             repository=self.repository, actions=self.actions, clock=lambda: self.now,
-            ready=lambda: self.reason, on_event=self.events.append,
+            ready=lambda: self.reason, on_event=self.events.append, **options,
         )
 
     def tick_at(self, moment):
@@ -236,6 +236,26 @@ class RunnerTests(unittest.TestCase):
         state = self.tick_at(at(SUN, 6))
         self.assertEqual(self.actions.calls, ["pi-reset", "router-on", "pi-reset"])
         self.assertEqual(state.phase, IDLE)
+
+    def test_panic_during_the_start_stops_before_the_router_goes_off(self) -> None:
+        class EndsDuringCopy(FakeActions):
+            def copy_router_wifi(inner):
+                inner._do("copy")
+                interrupted.append(True)
+
+        interrupted = []
+        self.actions = EndsDuringCopy()
+        runner = self.make_runner(interrupted=lambda: bool(interrupted))
+        self.now = at(SAT, 15).timestamp()
+
+        state = runner.tick()
+
+        self.assertEqual(self.actions.calls, ["copy", "pi-reset", "router-on"])
+        self.assertEqual(state.phase, IDLE)
+        self.assertIn("ended while it started", state.problem)
+        self.now = at(SAT, 16).timestamp()
+        runner.tick()
+        self.assertEqual(self.actions.calls, ["copy", "pi-reset", "router-on"])
 
     def test_a_restart_in_the_middle_of_the_copy_is_undone(self) -> None:
         self.repository.save_forced_window_state(
