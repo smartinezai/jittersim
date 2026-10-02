@@ -1,7 +1,7 @@
 // Pi Wi-Fi restarts. The Wi-Fi goes down for a few seconds and takes this browser with it,
 // so the page waits for the Pi to answer again and then reads how the change went.
 // This file is sent before anyone has signed in. Keep the product name out of every text here.
-const WIFI_RESTART_NOTICE = "The Pi's Wi-Fi will restart now. This Mac will lose its connection for up to a minute and should rejoin on its own. This page waits for the Pi and then shows how the change went.";
+const WIFI_RESTART_NOTICE = "The Pi's Wi-Fi will restart now. This Mac will lose its connection for up to a minute. If the Wi-Fi name or password changes, this Mac cannot rejoin by itself: choose the network again in the Wi-Fi menu. This page waits for the Pi and then shows how the change went.";
 const RECONNECT_STEPS_MS = [1000, 2000, 3000];
 const RECONNECT_LIMIT_MS = 90000;
 const WIFI_RUN_LIMIT_MS = 240000;
@@ -9,6 +9,8 @@ const LOST_CONNECTION_TEXT = "Lost the connection to the Pi. If its Wi-Fi is res
 const WIFI_DISMISSED_KEY = "wifi-change-dismissed";
 let reconnectGrace = 0;
 let reconnectHappened = false;
+// The network a person has to join again after a change. Only the name, never a password.
+let wifiJoinHint = null;
 
 // A browser reports a dropped connection as "Load failed" or "Failed to fetch". Those words
 // tell nobody what to do, so they are replaced and the error is marked.
@@ -34,6 +36,25 @@ function wifiReconnectActive() {
 async function withReconnectGrace(work) {
   reconnectGrace += 1;
   try { return await work(); } finally { reconnectGrace -= 1; }
+}
+
+// Run one request after the Pi is back. The Pi may not have matched this Mac to its connection
+// yet and a dropped connection can follow, so both are waited out for a while.
+async function retryAfterRejoin(send) {
+  return withReconnectGrace(async () => {
+    let waited = 0;
+    for (let attempt = 0;; attempt += 1) {
+      try {
+        return await send();
+      } catch (error) {
+        const waitable = isConnectionLost(error) || Boolean(error && error.transient);
+        if (!waitable || waited >= RECONNECT_LIMIT_MS) throw error;
+        const delay = reconnectDelay(attempt);
+        waited += delay;
+        await wifiSleep(delay);
+      }
+    }
+  });
 }
 
 function reconnectDelay(attempt) {
@@ -168,9 +189,10 @@ function showWifiBanner(kind, title, lines, buttons) {
 function showReconnectingBanner() {
   reconnectHappened = true;
   showWifiBanner("working", "Reconnecting to the Pi…", [
-    "The Pi’s Wi-Fi is restarting. This Mac should rejoin on its own, usually within a minute.",
-    "This page keeps trying and shows the result when the Pi answers. If the Mac does not rejoin, choose the Pi’s test Wi-Fi network in the Wi-Fi menu.",
-  ]);
+    "The Pi’s Wi-Fi is restarting. If its name or password changed, this Mac does not rejoin by itself: choose the Pi’s test Wi-Fi network in the Wi-Fi menu.",
+  ].concat(wifiJoinHint ? [wifiJoinHint] : [], [
+    "This page keeps trying and shows the result as soon as the Pi answers.",
+  ]));
 }
 
 function showWifiResult(operation) {
@@ -188,12 +210,12 @@ function wifiPollDependencies(retry) {
     sleep: wifiSleep,
     now: () => Date.now(),
     onRunning: () => showWifiBanner("working", "Restarting the Pi’s Wi-Fi", [
-      "This Mac may disconnect for up to a minute and should rejoin on its own.",
-    ]),
+      "This Mac may disconnect for up to a minute. If the name or password changed, choose the network again in the Wi-Fi menu.",
+    ].concat(wifiJoinHint ? [wifiJoinHint] : [])),
     onReconnecting: showReconnectingBanner,
     onGivenUp: () => showWifiBanner("warning", "The Pi has not answered yet", [
-      "Check that this Mac is on the Pi’s test Wi-Fi network, then check again. Nothing was lost: your sign-in is kept in this browser.",
-    ], [{label: "Check again", run: retry}]),
+      "Check that this Mac is on the Pi’s test Wi-Fi network, then check again. If the name or password changed, join it again in the Wi-Fi menu. Nothing was lost: your sign-in is kept in this browser.",
+    ].concat(wifiJoinHint ? [wifiJoinHint] : []), [{label: "Check again", run: retry}]),
   };
 }
 
@@ -215,9 +237,20 @@ async function followStoredWifiChange(identifier, onFinished) {
 
 // Send a change that restarts the Pi's Wi-Fi and follow it. The Pi answers before it restarts.
 async function runWifiChange(path, body, onFinished) {
+  wifiJoinHint = body && typeof body.ssid === "string" && body.ssid
+    ? "Join “" + body.ssid + "” with the new password you set."
+    : null;
+  try {
+    return await sendAndFollowWifiChange(path, body, onFinished);
+  } finally {
+    wifiJoinHint = null;
+  }
+}
+
+async function sendAndFollowWifiChange(path, body, onFinished) {
   const sentAt = Date.now() / 1000;
   showWifiBanner("working", "Sending the Wi-Fi change", [
-    "The Pi’s Wi-Fi restarts a moment after it confirms. This Mac should rejoin on its own.",
+    "The Pi’s Wi-Fi restarts a moment after it confirms. This Mac loses its connection until it joins again.",
   ]);
   let identifier;
   try {
@@ -229,7 +262,7 @@ async function runWifiChange(path, body, onFinished) {
     showReconnectingBanner();
     const back = await withReconnectGrace(() => waitForPi({probe: probePi, sleep: wifiSleep,
                                                           now: () => Date.now()}));
-    const last = back ? await request("/api/wifi-operation", "GET") : null;
+    const last = back ? await retryAfterRejoin(() => request("/api/wifi-operation", "GET")) : null;
     const operation = last && last.operation;
     if (!operation || operation.started_at < sentAt - 5) {
       hideWifiBanner();
@@ -244,9 +277,10 @@ async function runWifiChange(path, body, onFinished) {
 
 // Run one request of a longer job (a router change) and wait out a restart in between.
 async function requestAcrossWifiRestart(send) {
+  let afterRestart = false;
   for (;;) {
     try {
-      const response = await send();
+      const response = afterRestart ? await retryAfterRejoin(send) : await send();
       if (reconnectHappened) hideWifiBanner();
       return response;
     } catch (error) {
@@ -258,6 +292,7 @@ async function requestAcrossWifiRestart(send) {
         hideWifiBanner();
         throw new Error("The Pi has not answered yet. Check that this Mac is on the Pi’s test Wi-Fi network, then check the router state before another change.");
       }
+      afterRestart = true;
     }
   }
 }

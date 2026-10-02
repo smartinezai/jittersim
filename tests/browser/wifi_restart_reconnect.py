@@ -56,7 +56,7 @@ def check_reset_name(page):
     def confirm(dialog):
         # Said plainly before anything is sent.
         assert "Wi-Fi will restart" in dialog.message
-        assert "rejoin on its own" in dialog.message
+        assert "Wi-Fi menu" in dialog.message
         dialog.accept()
 
     page.once("dialog", confirm)

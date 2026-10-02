@@ -230,3 +230,91 @@ def test_a_lost_connection_does_not_mark_the_token_as_rejected():
     catch = source[source.index("} catch (error) {"):]
     assert "isConnectionLost(error)" in catch
     assert "forgetCredential" not in source
+
+
+# --- review fixes -------------------------------------------------------------------------
+
+# Stand-ins for the page: no document, instant sleeps, a Pi that is always reachable and a
+# request() that answers like the real one (a device check that lags is "transient" only
+# while the page is waiting out a restart, otherwise it locks the dashboard).
+PAGE_STUBS = """
+        let locked = 0; const banners = [];
+        wifiSleep = sleep; probePi = async () => {};
+        showWifiBanner = (kind, title, lines) => banners.push({ kind, title, lines: lines || [] });
+        hideWifiBanner = () => {};
+        const laggingCheck = () => {
+          if (wifiReconnectActive()) return Object.assign(new Error("Allow this device to use the dashboard."), { status: 403, transient: true });
+          locked += 1;
+          return Object.assign(new Error("Allow this device to use the dashboard."), { status: 403 });
+        };
+"""
+
+
+@NEEDS_NODE
+def test_the_result_read_right_after_the_rejoin_waits_out_a_lagging_device_check():
+    outcome = run_node(
+        PAGE_STUBS
+        + """
+        const replies = [
+          () => { throw lostConnectionError(new TypeError("Load failed")); },
+          () => { throw laggingCheck(); },
+          () => ({ operation: { id: "a", started_at: 1e12, state: "running" } }),
+          () => ({ operation: { id: "a", started_at: 1e12, state: "succeeded", ssid: "Lab", message: "done" } }),
+        ];
+        request = async () => replies.shift()();
+        let finished = null;
+        const result = await runWifiChange("/api/access-point", { ssid: "Lab", password: "hunter22" },
+                                           (operation) => { finished = operation; });
+        console.log(JSON.stringify({ locked, state: finished && finished.state, left: replies.length }));
+        """
+    )
+    assert outcome == {"locked": 0, "state": "succeeded", "left": 0}
+
+
+@NEEDS_NODE
+def test_a_router_poll_after_the_rejoin_waits_out_a_lagging_device_check():
+    outcome = run_node(
+        PAGE_STUBS
+        + """
+        const replies = [
+          () => { throw lostConnectionError(new TypeError("Load failed")); },
+          () => { throw laggingCheck(); },
+          () => ({ result: "ok" }),
+        ];
+        const answer = await requestAcrossWifiRestart(async () => replies.shift()());
+        console.log(JSON.stringify({ locked, answer, left: replies.length }));
+        """
+    )
+    assert outcome == {"locked": 0, "answer": {"result": "ok"}, "left": 0}
+
+
+def test_the_notice_does_not_promise_a_rejoin_when_the_name_or_password_changes():
+    """A Mac only rejoins by itself while the saved name and password still match."""
+
+    notice = re.search(r'const WIFI_RESTART_NOTICE = "([^"]*)"', SOURCE.read_text(encoding="utf-8")).group(1)
+    assert "name or password" in notice
+    assert "Wi-Fi menu" in notice
+    assert "rejoin on its own" not in notice
+
+
+@NEEDS_NODE
+def test_waiting_after_an_access_point_change_names_the_network_but_never_the_password():
+    outcome = run_node(
+        PAGE_STUBS
+        + """
+        const replies = [
+          () => { throw lostConnectionError(new TypeError("Load failed")); },
+          () => ({ operation: { id: "a", started_at: 1e12, state: "succeeded", ssid: "Lab net", message: "done" } }),
+          () => ({ operation: { id: "a", started_at: 1e12, state: "succeeded", ssid: "Lab net", message: "done" } }),
+        ];
+        request = async () => replies.shift()();
+        await runWifiChange("/api/access-point", { ssid: "Lab net", password: "hunter22 secret" }, () => {});
+        const waiting = banners.filter((banner) => banner.kind === "working" && /Reconnecting/.test(banner.title));
+        console.log(JSON.stringify({ waiting: waiting.map((banner) => banner.lines.join(" ")),
+                                     all: JSON.stringify(banners) }));
+        """
+    )
+    assert outcome["waiting"] and "Lab net" in outcome["waiting"][0]
+    assert "Wi-Fi menu" in outcome["waiting"][0]
+    assert "hunter22" not in outcome["all"]
+    assert "rejoin on its own" not in outcome["waiting"][0]
