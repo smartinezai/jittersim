@@ -1223,13 +1223,19 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
                                  "reason": "helper-busy"})
             return
         try:
-            self._send_response(self.server.service.handle_payload(payload))
+            # Finish the response snapshot before another operation can change state.
+            encoded = self._encode_response(self.server.service.handle_payload(payload))
         finally:
             self.server.operation_lock.release()
+        # A slow client must not hold the lock after its operation has finished.
+        self.wfile.write(encoded)
+
+    @staticmethod
+    def _encode_response(payload: Dict[str, Any]) -> bytes:
+        return (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
 
     def _send_response(self, payload: Dict[str, Any]) -> None:
-        encoded = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
-        self.wfile.write(encoded)
+        self.wfile.write(self._encode_response(payload))
 
 
 class UnixHelperServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
