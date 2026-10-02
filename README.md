@@ -443,8 +443,8 @@ buttons. A group opened stays open when the page refreshes.
   other site stops working for devices that use it. Check the profile first.
 
 A block or profile change from this card is saved at once. It applies on its
-own while JitterSim is running. After Reset or Panic choose **Apply current
-configuration**.
+own while JitterSim is running. After Reset or Panic choose **Start with saved
+settings**.
 
 ### Impact check
 
@@ -455,8 +455,9 @@ device name and direction then what is set and what happened:
 
 - Loss: `set 5% · actual 4.7% (31 of 660 packets dropped)`.
 - Speed: `set 2 Mbit/s · using 727 kbit/s · peak 2 Mbit/s · cap reached`. The
-  rate is judged for each five second interval so a burst is not averaged away.
-  A capped queue also shows `Queue wait now: about 320 ms`.
+  rate is judged for each five second interval and a backlog that is waiting
+  at a sample also counts as capped. A burst that drains between two samples
+  can still be missed. A capped queue also shows `Queue wait now: about 320 ms`.
 - Delay and jitter and reordering and duplication and corruption show what is set
   and say **not measured** because the counters cannot see them.
 - A verdict in plain words: `Affected in the last minute` or `No traffic in the
