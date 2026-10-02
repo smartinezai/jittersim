@@ -66,6 +66,52 @@ class GatewayProbeExecutor(FakeExecutor):
         return CommandResult(return_code=0)
 
 
+QUEUE_SAMPLE = json.dumps(
+    [
+        {
+            "kind": "prio",
+            "handle": "10:",
+            "root": True,
+            "options": {"bands": 3},
+            "bytes": 100,
+            "packets": 2,
+            "drops": 0,
+            "overlimits": 0,
+            "requeues": 0,
+            "backlog": 0,
+            "qlen": 0,
+        },
+        {
+            "kind": "netem",
+            "handle": "11:",
+            "parent": "10:2",
+            "options": {"limit": 1000, "loss-random": {"loss": 0.2, "correlation": 0}},
+            "bytes": 1500,
+            "packets": 10,
+            "drops": 3,
+            "overlimits": 0,
+            "requeues": 0,
+            "backlog": 0,
+            "qlen": 0,
+        },
+    ]
+)
+
+
+class QueueStatsExecutor(FakeExecutor):
+    """Answer the queue counter command with canned output per interface."""
+
+    def __init__(self, outputs):
+        super().__init__()
+        self.outputs = outputs
+
+    def run(self, command):
+        if command.executable == "tc" and command.arguments[:3] == ("-s", "-j", "qdisc"):
+            self.commands.append(command)
+            return CommandResult(return_code=0, stdout=self.outputs[command.arguments[-1]])
+        return super().run(command)
+
+
 class NetworkApplierTests(unittest.TestCase):
     def setUp(self) -> None:
         self.topology = Topology(uplink_interface="eth0", test_interface="wlan0")
@@ -248,6 +294,42 @@ class NetworkApplierTests(unittest.TestCase):
             applier.apply(plan=make_plan())
 
         self.assertIsNotNone(context.exception.reset_error)
+
+
+    def test_queue_stats_reads_both_interfaces_and_keys_them_by_name(self) -> None:
+        executor = QueueStatsExecutor({"eth0": QUEUE_SAMPLE, "wlan0": "[]"})
+
+        stats = NetworkApplier(executor=executor, topology=self.topology).queue_stats()
+
+        self.assertEqual(list(stats), ["eth0", "wlan0"])
+        self.assertEqual(stats["eth0"], json.loads(QUEUE_SAMPLE))
+        self.assertEqual(stats["wlan0"], [])
+        self.assertEqual(
+            [(command.executable, command.arguments) for command in executor.commands],
+            [
+                ("tc", ("-s", "-j", "qdisc", "show", "dev", "eth0")),
+                ("tc", ("-s", "-j", "qdisc", "show", "dev", "wlan0")),
+            ],
+        )
+
+    def test_queue_stats_rejects_output_that_is_not_json(self) -> None:
+        executor = QueueStatsExecutor({"eth0": "not json", "wlan0": "[]"})
+
+        with self.assertRaisesRegex(CommandExecutionError, "not JSON"):
+            NetworkApplier(executor=executor, topology=self.topology).queue_stats()
+
+    def test_queue_stats_rejects_a_json_object(self) -> None:
+        executor = QueueStatsExecutor({"eth0": "[]", "wlan0": json.dumps({"kind": "prio"})})
+
+        with self.assertRaisesRegex(CommandExecutionError, "unexpected queue counters"):
+            NetworkApplier(executor=executor, topology=self.topology).queue_stats()
+
+    def test_queue_stats_rejects_oversized_output(self) -> None:
+        huge = json.dumps([{"kind": "x" * (600 * 1024)}])
+        executor = QueueStatsExecutor({"eth0": huge, "wlan0": "[]"})
+
+        with self.assertRaisesRegex(CommandExecutionError, "too large"):
+            NetworkApplier(executor=executor, topology=self.topology).queue_stats()
 
 
 if __name__ == "__main__":

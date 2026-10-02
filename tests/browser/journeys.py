@@ -126,7 +126,7 @@ def check_access_and_help(page):
     page.get_by_role("button", name="Edit Video for the test phone", exact=True).click()
     page.get_by_label("Domains to block", exact=True).fill("unfinished.example.com")
     # Polling status must not overwrite an unfinished domain list.
-    page.get_by_role("button", name="Apply current configuration", exact=True).click()
+    page.locator("#apply-button").click()
     expect(page.locator("#message")).to_contain_text("Configuration applied")
     expect(page.get_by_label("Domains to block", exact=True)).to_have_value("unfinished.example.com")
     page.set_viewport_size({"width": 320, "height": 740})
@@ -318,7 +318,7 @@ def run():
                 page.get_by_role("link", name="Access and rules", exact=True).click()
                 draft = page.get_by_label("Global blocked domains (comma separated)", exact=True)
                 draft.fill("unsaved.example")
-                page.get_by_role("button", name="Apply current configuration", exact=True).click()
+                page.locator("#apply-button").click()
                 expect(page.locator("#message")).to_contain_text("applied")
                 expect(draft).to_have_value("unsaved.example")
                 page.get_by_role("link", name=DEVICES_LINK).click()
@@ -543,9 +543,9 @@ def run():
                     page.get_by_role("dialog").get_by_role(
                         "button", name="Continue", exact=True
                     ).click()
-                page.get_by_role("button", name="Apply current configuration", exact=True).click()
+                page.locator("#apply-button").click()
                 expect(page.locator("#message")).to_contain_text(
-                    "Configuration applied successfully."
+                    re.compile(r"^(Started|Re-applied)")
                 )
                 page.set_viewport_size({"width": 390, "height": 844})
                 page.get_by_role("link", name=DEVICES_LINK).click()

@@ -2,13 +2,23 @@ import json
 import logging
 import tempfile
 import threading
+import re
+import time
 import unittest
+from ipaddress import IPv4Address
 from pathlib import Path
+from unittest import mock
 from unittest.mock import patch
 
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.engine.codec import plan_to_payload
-from jittersim.engine.compiler import compile_plan
+from jittersim.engine.compiler import MAX_SHAPED_MARKS_PER_PLAN, compile_plan
+from jittersim.engine.plan import (
+    GeneralProfileRule,
+    ServiceAssignmentRule,
+    ServiceListRule,
+    ServiceQuotaRule,
+)
 from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.browser_proxy import load_active_plan
 from jittersim.networking.commands import CommandResult
@@ -31,7 +41,6 @@ from jittersim.networking.helper import (
     _parse_traffic_counter_output,
     run_helper,
 )
-from jittersim.networking.renderer import render_command_plan
 from jittersim.networking.router import (
     ROUTER_CHECK_MESSAGES,
     ROUTER_IMPORT_MESSAGES,
@@ -39,6 +48,7 @@ from jittersim.networking.router import (
     RouterError,
     RouterWifiSettings,
 )
+from jittersim.networking.renderer import queue_handle, render_command_plan
 from jittersim.networking.topology import Topology
 
 
@@ -1896,6 +1906,757 @@ class OldHelperTests(unittest.TestCase):
 
             (capture,) = captures(executor)
             self.assertIn(self.MAC, capture.arguments)
+
+
+def lossy_plan():
+    profile = Profile(
+        id="lossy",
+        name="Lossy",
+        upload=Impairment(loss_percent=20),
+        download=Impairment(loss_percent=20),
+    )
+    return compile_plan(
+        devices=(Device("lab", "Lab", "192.168.50.10", "lossy"),),
+        profiles={"lossy": profile},
+    )
+
+
+def qdisc(handle, parent, **counters):
+    entry = {
+        "kind": "netem",
+        "handle": handle,
+        "parent": parent,
+        "bytes": 0,
+        "packets": 0,
+        "drops": 0,
+        "overlimits": 0,
+        "requeues": 0,
+        "backlog": 0,
+        "qlen": 0,
+    }
+    entry.update(counters)
+    return entry
+
+
+class QueueExecutor(FakeExecutor):
+    """Answer the queue counter command with canned stats per interface."""
+
+    def __init__(self, stats, fail=False):
+        super().__init__()
+        self.stats = stats
+        self.fail = fail
+        # A queue plan command that fails after the commands before it ran.
+        self.fail_apply = False
+        # A test can hold the commands that match `gate` until it sets `release`.
+        self.gate = None
+        self.gated = threading.Event()
+        self.release = threading.Event()
+        self.read_seconds = 0.0
+
+    def run(self, command):
+        if self.gate is not None and self.gate(command):
+            self.gated.set()
+            self.release.wait(10)
+        if (
+            self.fail_apply
+            and command.executable == "tc"
+            and command.arguments[:2] == ("qdisc", "replace")
+            and not command.ignore_failure
+        ):
+            raise CommandExecutionError("simulated tc failure while applying")
+        if command.executable == "tc" and command.arguments[:3] == ("-s", "-j", "qdisc"):
+            self.commands.append(command)
+            time.sleep(self.read_seconds)
+            if self.fail:
+                raise CommandExecutionError("simulated tc failure")
+            return CommandResult(return_code=0, stdout=json.dumps(self.stats[command.arguments[-1]]))
+        return super().run(command)
+
+
+def is_queue_read(command):
+    return command.executable == "tc" and command.arguments[:3] == ("-s", "-j", "qdisc")
+
+
+def is_queue_install(command):
+    return command.executable == "tc" and command.arguments[:2] == ("qdisc", "replace")
+
+
+ROOT_QDISC = {"kind": "prio", "handle": "10:", "root": True, "bytes": 9, "packets": 1,
+              "drops": 0, "overlimits": 0, "requeues": 0, "backlog": 0, "qlen": 0}
+
+
+class QueueStatsHelperTests(unittest.TestCase):
+    def helper(self, stats, *, plan=lossy_plan(), fail=False, plan_path=None):
+        executor = QueueExecutor(stats, fail=fail)
+        service = HelperService(
+            NetworkApplier(
+                executor=executor,
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            ),
+            active_plan_path=plan_path,
+        )
+        if plan is not None:
+            self.assertTrue(
+                service.handle_payload({"action": "apply", "plan": plan_to_payload(plan)})["ok"]
+            )
+        executor.commands.clear()
+        return service, executor
+
+    def test_joins_each_queue_to_the_plan_the_helper_applied(self) -> None:
+        service, executor = self.helper(
+            {
+                "eth0": [ROOT_QDISC, qdisc(queue_handle(1), "10:2", packets=10, drops=3, bytes=1500)],
+                "wlan0": [
+                    ROOT_QDISC,
+                    qdisc(queue_handle(1), "10:2", packets=40, drops=9, bytes=6000, backlog=300, qlen=2,
+                          overlimits=4, requeues=1),
+                ],
+            }
+        )
+
+        response = service.handle_payload({"action": "queue-stats"})
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["action"], "queue-stats")
+        upload, download = response["queues"]
+        self.assertEqual(
+            (upload["device_id"], upload["direction"], upload["interface"], upload["handle"]),
+            ("lab", "upload", "eth0", queue_handle(1)),
+        )
+        self.assertEqual(
+            (download["device_id"], download["direction"], download["interface"]),
+            ("lab", "download", "wlan0"),
+        )
+        self.assertEqual(upload["kind"], "netem")
+        self.assertEqual(upload["impairment"]["loss_percent"], 20)
+        self.assertEqual(
+            {key: upload[key] for key in ("packets", "bytes", "drops", "backlog_bytes", "qlen")},
+            {"packets": 10, "bytes": 1500, "drops": 3, "backlog_bytes": 0, "qlen": 0},
+        )
+        self.assertEqual(
+            {key: download[key] for key in (
+                "packets", "bytes", "drops", "overlimits", "requeues", "backlog_bytes", "qlen")},
+            {"packets": 40, "bytes": 6000, "drops": 9, "overlimits": 4, "requeues": 1,
+             "backlog_bytes": 300, "qlen": 2},
+        )
+        self.assertEqual(
+            [command.arguments for command in executor.commands],
+            [
+                ("-s", "-j", "qdisc", "show", "dev", "eth0"),
+                ("-s", "-j", "qdisc", "show", "dev", "wlan0"),
+            ],
+        )
+
+    def test_without_an_applied_plan_it_reports_no_queues_and_reads_nothing(self) -> None:
+        service, executor = self.helper({}, plan=None)
+
+        self.assertEqual(
+            service.handle_payload({"action": "queue-stats"}),
+            {"ok": True, "action": "queue-stats", "queues": []},
+        )
+        self.assertEqual(executor.commands, [])
+
+    def test_only_queues_with_the_project_handle_and_parent_are_used(self) -> None:
+        service, _ = self.helper(
+            {
+                "eth0": [
+                    qdisc(queue_handle(2), "10:2", packets=111),
+                    qdisc(queue_handle(1), "10:5", packets=222),
+                    {"kind": "fq_codel", "handle": queue_handle(1), "packets": 333},
+                    qdisc(queue_handle(1), "10:2", packets=7),
+                ],
+                "wlan0": [qdisc(queue_handle(1), "1:2", packets=444)],
+            }
+        )
+
+        response = service.handle_payload({"action": "queue-stats"})
+
+        self.assertEqual([(q["interface"], q["packets"]) for q in response["queues"]],
+                         [("eth0", 7)])
+
+    def test_a_plan_queue_without_a_kernel_queue_is_left_out(self) -> None:
+        service, _ = self.helper({"eth0": [ROOT_QDISC], "wlan0": [qdisc(queue_handle(1), "10:2", packets=5)]})
+
+        response = service.handle_payload({"action": "queue-stats"})
+
+        self.assertEqual([(q["direction"], q["packets"]) for q in response["queues"]],
+                         [("download", 5)])
+
+    def test_a_failed_read_gives_a_plain_error(self) -> None:
+        service, _ = self.helper({}, fail=True)
+
+        with self.assertLogs("jittersim.networking.helper", level="WARNING"):
+            response = service.handle_payload({"action": "queue-stats"})
+
+        self.assertEqual(response, {"ok": False, "error": "queue statistics unavailable"})
+
+    def test_a_restarted_helper_reads_and_adopts_the_published_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            plan_path = Path(directory) / "active-plan.json"
+            stats = {"eth0": [qdisc(queue_handle(1), "10:2", packets=1)], "wlan0": []}
+            self.helper(stats, plan_path=plan_path)
+            restarted, _ = self.helper(stats, plan=None, plan_path=plan_path)
+
+            response = restarted.handle_payload({"action": "queue-stats"})
+
+            self.assertEqual([q["device_id"] for q in response["queues"]], ["lab"])
+            self.assertIsNotNone(restarted._active_plan)
+
+    def test_a_failed_read_is_logged_once_for_each_reason(self) -> None:
+        service, executor = self.helper({"eth0": [qdisc(queue_handle(1), "10:2")], "wlan0": []}, fail=True)
+
+        with self.assertLogs("jittersim.networking.helper", level="WARNING") as logged:
+            for _ in range(3):
+                self.assertFalse(service.handle_payload({"action": "queue-stats"})["ok"])
+            executor.fail = False
+            self.assertTrue(service.handle_payload({"action": "queue-stats"})["ok"])
+            executor.fail = True
+            for _ in range(2):
+                self.assertFalse(service.handle_payload({"action": "queue-stats"})["ok"])
+
+        self.assertEqual(len(logged.records), 2)
+        self.assertTrue(all(record.exc_info for record in logged.records))
+
+    def test_a_queue_read_holds_no_lock_of_its_own(self) -> None:
+        """Only the socket handler's lock keeps it apart from an apply and a Wi-Fi action never
+        changes queues so it must not be refused because of a read."""
+
+        service, executor = self.helper({"eth0": [qdisc(queue_handle(1), "10:2")], "wlan0": []})
+        executor.gate = is_queue_read
+        reader = threading.Thread(
+            target=lambda: service.handle_payload({"action": "queue-stats"})
+        )
+        reader.start()
+        self.addCleanup(reader.join, 5)
+        self.addCleanup(executor.release.set)
+        self.assertTrue(executor.gated.wait(5))
+
+        self.assertTrue(service._network_lock.acquire(blocking=False))
+        service._network_lock.release()
+        refused = service.handle_payload({"action": "wifi-reset"})
+        self.assertNotEqual(refused.get("reason"), "helper-busy")
+
+    def test_every_entry_carries_the_generation_of_the_applied_plan(self) -> None:
+        stats = {"eth0": [qdisc(queue_handle(1), "10:2")], "wlan0": [qdisc(queue_handle(1), "10:2")]}
+        with mock.patch("jittersim.networking.helper.secrets.token_hex", return_value="0a1b2c3d"):
+            service, _ = self.helper(stats)
+            first = service.handle_payload({"action": "queue-stats"})["queues"]
+            self.assertTrue(
+                service.handle_payload({"action": "apply", "plan": plan_to_payload(lossy_plan())})["ok"]
+            )
+            second = service.handle_payload({"action": "queue-stats"})["queues"]
+            self.assertEqual(
+                service.handle_payload({"action": "queue-stats"})["queues"][0]["generation"],
+                second[0]["generation"],
+            )
+
+        self.assertEqual({item["generation"] for item in first}, {"0a1b2c3d-1"})
+        self.assertEqual({item["generation"] for item in second}, {"0a1b2c3d-2"})
+
+    def test_a_failed_apply_does_not_change_the_generation(self) -> None:
+        stats = {"eth0": [qdisc(queue_handle(1), "10:2")], "wlan0": [qdisc(queue_handle(1), "10:2")]}
+        service, _ = self.helper(stats)
+        before = service.handle_payload({"action": "queue-stats"})["queues"][0]["generation"]
+
+        refused = service.handle_payload({"action": "apply", "plan": {"mark_rules": "bad"}})
+
+        self.assertFalse(refused["ok"])
+        after = service.handle_payload({"action": "queue-stats"})["queues"][0]["generation"]
+        self.assertEqual(before, after)
+
+    def test_a_valid_apply_that_fails_halfway_does_not_change_the_generation(self) -> None:
+        stats = {"eth0": [qdisc(queue_handle(1), "10:2")], "wlan0": [qdisc(queue_handle(1), "10:2")]}
+        with mock.patch("jittersim.networking.helper.secrets.token_hex", return_value="0a1b2c3d"):
+            service, executor = self.helper(stats)
+            self.assertEqual(self.generation(service), "0a1b2c3d-1")
+
+            executor.fail_apply = True
+            failed = service.handle_payload(
+                {"action": "apply", "plan": plan_to_payload(lossy_plan())}
+            )
+            self.assertEqual(failed["error"], "network plan apply failed")
+            self.assertEqual(service.handle_payload({"action": "queue-stats"})["queues"], [])
+
+            executor.fail_apply = False
+            self.assertTrue(
+                service.handle_payload({"action": "apply", "plan": plan_to_payload(lossy_plan())})["ok"]
+            )
+            # one successful apply since the first one and the failed one did not count
+            self.assertEqual(self.generation(service), "0a1b2c3d-2")
+
+    def test_a_reset_and_the_same_plan_again_get_a_new_generation(self) -> None:
+        stats = {"eth0": [qdisc(queue_handle(1), "10:2")], "wlan0": [qdisc(queue_handle(1), "10:2")]}
+        with mock.patch("jittersim.networking.helper.secrets.token_hex", return_value="0a1b2c3d"):
+            service, _ = self.helper(stats)
+            first = self.generation(service)
+            self.assertTrue(service.handle_payload({"action": "reset"})["ok"])
+            self.assertTrue(
+                service.handle_payload({"action": "apply", "plan": plan_to_payload(lossy_plan())})["ok"]
+            )
+            second = self.generation(service)
+
+        self.assertEqual((first, second), ("0a1b2c3d-1", "0a1b2c3d-2"))
+
+    def generation(self, service):
+        queues = service.handle_payload({"action": "queue-stats"})["queues"]
+        self.assertEqual(len({queue["generation"] for queue in queues}), 1)
+        return queues[0]["generation"]
+
+    def test_a_restarted_helper_has_a_new_boot_nonce_and_counts_the_adopted_plan(self) -> None:
+        stats = {"eth0": [qdisc(queue_handle(1), "10:2")], "wlan0": [qdisc(queue_handle(1), "10:2")]}
+        with tempfile.TemporaryDirectory() as directory:
+            plan_path = Path(directory) / "active-plan.json"
+            with mock.patch(
+                "jittersim.networking.helper.secrets.token_hex", side_effect=["aaaa0001", "bbbb0002"]
+            ):
+                first, _ = self.helper(stats, plan_path=plan_path)
+                restarted, _ = self.helper(stats, plan=None, plan_path=plan_path)
+
+            before = first.handle_payload({"action": "queue-stats"})["queues"][0]["generation"]
+            after = restarted.handle_payload({"action": "queue-stats"})["queues"][0]["generation"]
+
+        self.assertEqual(before, "aaaa0001-1")
+        self.assertEqual(after, "bbbb0002-1")
+
+    def assert_every_queue_joins(self, plan) -> None:
+        """Feed the queues the renderer installs back as kernel stats and join every plan queue."""
+
+        topology = Topology(uplink_interface="eth0", test_interface="wlan0")
+        installed = re.compile(
+            r"(?:apply \w+ impairment for|preserve fair queuing for) device (\S+) on (\S+)$"
+        )
+        expected = {}
+        kernel = {"eth0": [ROOT_QDISC], "wlan0": [ROOT_QDISC]}
+        counter = 100
+        for command in render_command_plan(plan=plan, topology=topology):
+            if command.executable != "tc" or command.arguments[:2] != ("qdisc", "replace"):
+                continue
+            if "parent" not in command.arguments:
+                continue
+            arguments = command.arguments
+            interface = arguments[arguments.index("dev") + 1]
+            parent = arguments[arguments.index("parent") + 1]
+            handle = arguments[arguments.index("handle") + 1]
+            kind = arguments[arguments.index("handle") + 2]
+            counter += 1
+            entry = qdisc(handle, parent, packets=counter, drops=counter // 10)
+            entry["kind"] = kind
+            kernel[interface].append(entry)
+            found = installed.search(command.purpose)
+            if found:
+                expected[(found.group(1), interface)] = (handle, kind, counter)
+        self.assertEqual(len(expected), len(plan.queues))
+        service, _ = self.helper(kernel, plan=plan)
+
+        response = service.handle_payload({"action": "queue-stats"})
+
+        self.assertTrue(response["ok"])
+        joined = {(item["device_id"], item["interface"]): item for item in response["queues"]}
+        self.assertEqual(set(joined), set(expected))
+        for key, (handle, kind, counter) in expected.items():
+            self.assertEqual(
+                (joined[key]["handle"], joined[key]["kind"], joined[key]["packets"]),
+                (handle, kind, counter),
+                key,
+            )
+
+    def plan_with_every_queue_kind(self, device_count):
+        impairment = Impairment(loss_percent=7)
+        profile = Profile("p", "P", upload=impairment, download=impairment)
+        plain = Profile("plain", "Plain")
+        devices = tuple(
+            Device(
+                f"d{index:02d}", f"D{index:02d}", f"192.168.50.{10 + index}",
+                "plain" if index == 1 else "p", f"02:00:00:00:00:{index + 1:02x}",
+            )
+            for index in range(device_count)
+        )
+        return compile_plan(
+            devices=devices,
+            profiles={"p": profile, "plain": plain},
+            service_quota_rules=(
+                ServiceQuotaRule(
+                    "q1", "d00", devices[0].ipv4_address, (IPv4Address("198.18.0.2"),),
+                    0, impairment, impairment, True,
+                ),
+            ),
+            service_assignment_rules=(
+                ServiceAssignmentRule(
+                    "a1", "d00", devices[0].ipv4_address, ("example.com",),
+                    0, impairment, impairment,
+                ),
+            ),
+            service_list_rules=(ServiceListRule("s1", ("x.example",), 0, impairment, impairment),),
+        )
+
+    def test_every_queue_kind_joins_at_marks_above_one(self) -> None:
+        general = compile_plan(
+            devices=(),
+            profiles={"p": Profile("p", "P", upload=Impairment(loss_percent=7))},
+            general_profile=GeneralProfileRule("p"),
+            service_list_rules=(
+                ServiceListRule("s1", ("x.example",), 0, Impairment(loss_percent=7), Impairment()),
+            ),
+        )
+        for plan in (self.plan_with_every_queue_kind(3), general):
+            with self.subTest(marks=sorted({queue.mark for queue in plan.queues})):
+                self.assertGreaterEqual(max(queue.mark for queue in plan.queues), 2)
+                self.assert_every_queue_joins(plan)
+
+    def test_every_queue_joins_at_every_mark_up_to_the_limit_including_hex_bands(self) -> None:
+        plan = self.plan_with_every_queue_kind(MAX_SHAPED_MARKS_PER_PLAN - 3)
+        marks = sorted({queue.mark for queue in plan.queues})
+        self.assertEqual(marks, list(range(1, MAX_SHAPED_MARKS_PER_PLAN + 1)))
+        self.assertEqual(
+            {queue.device_id for queue in plan.queues if queue.mark in (9, 15)},
+            {"d08", "servicelist:s1"},
+        )
+        parents = {
+            arguments[arguments.index("parent") + 1]
+            for command in render_command_plan(
+                plan=plan, topology=Topology(uplink_interface="eth0", test_interface="wlan0")
+            )
+            if command.executable == "tc" and command.arguments[:2] == ("qdisc", "replace")
+            for arguments in (command.arguments,)
+            if "parent" in arguments
+        }
+        self.assertIn("10:a", parents)
+        self.assertIn("10:10", parents)
+        self.assert_every_queue_joins(plan)
+
+    def test_after_a_reset_it_reports_no_queues(self) -> None:
+        service, _ = self.helper({"eth0": [qdisc(queue_handle(1), "10:2", packets=1)], "wlan0": []})
+        self.assertTrue(service.handle_payload({"action": "reset"})["ok"])
+
+        self.assertEqual(service.handle_payload({"action": "queue-stats"})["queues"], [])
+
+    def test_the_client_returns_validated_entries_over_the_socket(self) -> None:
+        stats = {
+            "eth0": [qdisc(queue_handle(1), "10:2", packets=10, drops=3, bytes=1500)],
+            "wlan0": [qdisc(queue_handle(1), "10:2", packets=40, drops=9, bytes=6000)],
+        }
+        service, _ = self.helper(stats)
+        with tempfile.TemporaryDirectory() as directory:
+            queue_socket = Path(directory) / "q.sock"
+            server = UnixHelperServer(queue_socket, service)
+            thread = threading.Thread(target=server.serve_forever)
+            thread.start()
+            try:
+                queues = HelperClient(socket_path=queue_socket).queue_stats()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+        self.assertEqual([(q["device_id"], q["direction"], q["drops"]) for q in queues],
+                         [("lab", "upload", 3), ("lab", "download", 9)])
+        self.assertEqual(queues[0]["impairment"]["loss_percent"], 20)
+
+
+class QueueReadAndWriteTests(unittest.TestCase):
+    """A read never makes Panic or an apply fail and a write never waits for ever."""
+
+    STATS = {"eth0": [qdisc("11:", "10:2", packets=5)], "wlan0": [qdisc("11:", "10:2", packets=5)]}
+
+    def setUp(self) -> None:
+        self.executor = QueueExecutor(self.STATS)
+        self.service = HelperService(
+            NetworkApplier(
+                executor=self.executor,
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            )
+        )
+        self.assertTrue(
+            self.service.handle_payload({"action": "apply", "plan": plan_to_payload(lossy_plan())})["ok"]
+        )
+        self.executor.commands.clear()
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.server = UnixHelperServer(Path(directory.name) / "helper.sock", self.service)
+        self.thread = threading.Thread(target=self.server.serve_forever)
+        self.thread.start()
+        self.addCleanup(self.stop_server)
+
+    def stop_server(self) -> None:
+        self.executor.release.set()
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+    def client(self) -> HelperClient:
+        return HelperClient(socket_path=self.server.socket_path, timeout_seconds=10)
+
+    def in_thread(self, call):
+        """Run a client call in a thread and keep its answer or its error in a dictionary."""
+
+        box = {}
+
+        def work() -> None:
+            started = time.monotonic()
+            try:
+                box["result"] = call()
+            except HelperClientError as error:
+                box["error"] = error
+            box["seconds"] = time.monotonic() - started
+
+        thread = threading.Thread(target=work)
+        thread.start()
+        self.addCleanup(thread.join, 10)
+        return box, thread
+
+    def hold_a_read(self):
+        self.executor.gate = is_queue_read
+        box, thread = self.in_thread(self.client().queue_stats)
+        self.assertTrue(self.executor.gated.wait(5))
+        return box, thread
+
+    def test_a_reset_that_arrives_during_a_slow_queue_read_waits_and_runs(self) -> None:
+        reader, reader_thread = self.hold_a_read()
+        writer, writer_thread = self.in_thread(self.client().reset)
+
+        time.sleep(0.3)
+        self.assertEqual(writer, {})
+        self.executor.release.set()
+        writer_thread.join(5)
+        reader_thread.join(5)
+
+        self.assertEqual(writer["result"]["action"], "reset")
+        self.assertGreater(writer["seconds"], 0.25)
+        self.assertIn("result", reader)
+        self.assertIsNone(self.service._active_plan)
+
+    def test_an_apply_that_arrives_during_a_slow_queue_read_waits_and_runs(self) -> None:
+        reader, reader_thread = self.hold_a_read()
+        writer, writer_thread = self.in_thread(lambda: self.client().apply(plan=lossy_plan()))
+
+        time.sleep(0.3)
+        self.assertEqual(writer, {})
+        self.executor.release.set()
+        writer_thread.join(5)
+        reader_thread.join(5)
+
+        self.assertEqual(writer["result"]["action"], "apply")
+        self.assertIn("result", reader)
+        self.assertEqual(self.service._plan_count, 2)
+
+    def test_a_read_that_arrives_during_a_write_is_refused_at_once(self) -> None:
+        self.executor.gate = is_queue_install
+        writer, writer_thread = self.in_thread(lambda: self.client().apply(plan=lossy_plan()))
+        self.assertTrue(self.executor.gated.wait(5))
+
+        for read in (
+            self.client().queue_stats,
+            lambda: self.client()._request({"action": "traffic-counters"}),
+            lambda: self.client()._request({"action": "capabilities"}),
+        ):
+            answer, thread = self.in_thread(read)
+            thread.join(5)
+            self.assertEqual(answer["error"].reason, "helper-busy")
+            self.assertLess(answer["seconds"], 0.25)
+        self.executor.release.set()
+        writer_thread.join(5)
+        self.assertEqual(writer["result"]["action"], "apply")
+
+    def test_a_write_waits_only_a_bounded_time_for_a_hung_read(self) -> None:
+        with mock.patch("jittersim.networking.helper.WRITE_LOCK_WAIT_SECONDS", 0.4):
+            reader, reader_thread = self.hold_a_read()
+            refused, thread = self.in_thread(self.client().reset)
+            thread.join(5)
+
+            self.assertEqual(refused["error"].reason, "helper-busy")
+            self.assertGreater(refused["seconds"], 0.35)
+            self.assertLess(refused["seconds"], 2.5)
+            self.executor.release.set()
+            reader_thread.join(5)
+            self.assertEqual(self.client().reset()["action"], "reset")
+
+    def test_a_write_also_waits_for_the_network_lock_of_a_direct_call(self) -> None:
+        holder = threading.Event()
+        self.assertTrue(self.service._network_lock.acquire(blocking=False))
+
+        def release_later() -> None:
+            holder.wait(0.3)
+            self.service._network_lock.release()
+
+        thread = threading.Thread(target=release_later)
+        thread.start()
+        started = time.monotonic()
+        answer = self.service.handle_payload({"action": "reset"})
+        thread.join(5)
+
+        self.assertTrue(answer["ok"])
+        self.assertGreater(time.monotonic() - started, 0.25)
+
+        with mock.patch("jittersim.networking.helper.WRITE_LOCK_WAIT_SECONDS", 0.2):
+            self.assertTrue(self.service._network_lock.acquire(blocking=False))
+            try:
+                answer = self.service.handle_payload({"action": "reset"})
+            finally:
+                self.service._network_lock.release()
+        self.assertEqual(answer["reason"], "helper-busy")
+
+    def test_panic_never_fails_while_the_dashboard_keeps_polling(self) -> None:
+        self.executor.read_seconds = 0.02
+        stop = threading.Event()
+        refusals = []
+
+        def poll(call) -> None:
+            while not stop.is_set():
+                try:
+                    call()
+                except HelperClientError as error:
+                    # a read may be refused when it meets a write but never for another reason
+                    if error.reason != "helper-busy":
+                        refusals.append(str(error))
+                time.sleep(0.005)
+
+        pollers = [
+            threading.Thread(target=poll, args=(self.client().queue_stats,)),
+            threading.Thread(
+                target=poll, args=(lambda: self.client()._request({"action": "capabilities"}),)
+            ),
+        ]
+        for thread in pollers:
+            thread.start()
+        try:
+            for round_number in range(30):
+                client = self.client()
+                if round_number % 2:
+                    self.assertEqual(client.apply(plan=lossy_plan())["action"], "apply")
+                else:
+                    self.assertEqual(client.reset()["action"], "reset")
+                time.sleep(0.01)
+        finally:
+            stop.set()
+            for thread in pollers:
+                thread.join(5)
+        self.assertEqual(refusals, [])
+
+
+def good_queue(**changes):
+    entry = {
+        "device_id": "lab",
+        "direction": "upload",
+        "interface": "eth0",
+        "handle": "11:",
+        "kind": "netem",
+        "impairment": {
+            "delay_ms": 0, "jitter_ms": 0, "loss_percent": 20, "bandwidth_kbit": None,
+            "reorder_percent": 0, "duplicate_percent": 0, "corrupt_percent": 0,
+        },
+        "packets": 10, "bytes": 1500, "drops": 3, "overlimits": 0, "requeues": 0,
+        "backlog_bytes": 0, "qlen": 0, "generation": "a1b2c3d4-1",
+    }
+    entry.update(changes)
+    return entry
+
+
+class QueueStatsClientTests(unittest.TestCase):
+    def read(self, queues):
+        client = RecordingHelperClient({"ok": True, "action": "queue-stats", "queues": queues})
+        result = client.queue_stats()
+        self.assertEqual(client.sent, [{"action": "queue-stats"}])
+        return result
+
+    def test_accepts_good_entries_for_every_queue_kind(self) -> None:
+        entries = [
+            good_queue(),
+            good_queue(device_id="general-profile", direction="download", kind="fq_codel",
+                       impairment=dict(good_queue()["impairment"], bandwidth_kbit=2000)),
+            good_queue(device_id="quota:abc-1"),
+            good_queue(device_id="servicelist:streaming", handle="25:"),
+        ]
+
+        self.assertEqual([q["device_id"] for q in self.read(entries)],
+                         ["lab", "general-profile", "quota:abc-1", "servicelist:streaming"])
+
+    def test_keeps_only_the_numbers_the_dashboard_uses_from_the_impairment(self) -> None:
+        impairment = dict(good_queue()["impairment"], loss_randomness={"variation_percent": 5})
+
+        (entry,) = self.read([good_queue(impairment=impairment)])
+
+        self.assertNotIn("loss_randomness", entry["impairment"])
+        self.assertEqual(entry["impairment"]["loss_percent"], 20)
+
+    def test_rejects_every_malformed_entry(self) -> None:
+        bad_impairment = dict(good_queue()["impairment"])
+        del bad_impairment["delay_ms"]
+        cases = {
+            "negative counter": [good_queue(drops=-1)],
+            "bool counter": [good_queue(packets=True)],
+            "float counter": [good_queue(bytes=1.5)],
+            "huge counter": [good_queue(bytes=2**63)],
+            "string counter": [good_queue(qlen="3")],
+            "bad handle": [good_queue(handle="abc")],
+            "long handle": [good_queue(handle="123456:")],
+            "bad direction": [good_queue(direction="sideways")],
+            "bad kind": [good_queue(kind="tbf")],
+            "bad id": [good_queue(device_id="Lab Phone")],
+            "empty id": [good_queue(device_id="")],
+            "long id": [good_queue(device_id="a" * 129)],
+            "long interface": [good_queue(interface="e" * 33)],
+            "non string interface": [good_queue(interface=5)],
+            "impairment not a dict": [good_queue(impairment=[])],
+            "impairment missing key": [good_queue(impairment=bad_impairment)],
+            "impairment bad value": [good_queue(impairment=dict(
+                good_queue()["impairment"], loss_percent="20"))],
+            "impairment bool value": [good_queue(impairment=dict(
+                good_queue()["impairment"], delay_ms=True))],
+            "entry not a dict": ["lab"],
+            "too many entries": [good_queue() for _ in range(601)],
+            "not a list": {"lab": good_queue()},
+            "missing field": [{key: value for key, value in good_queue().items() if key != "qlen"}],
+            "missing generation": [{key: value for key, value in good_queue().items()
+                                    if key != "generation"}],
+            "empty generation": [good_queue(generation="")],
+            "upper case generation": [good_queue(generation="A1B2C3D4-1")],
+            "long generation": [good_queue(generation="a" * 25)],
+            "generation with a space": [good_queue(generation="a1 b2")],
+            "numeric generation": [good_queue(generation=7)],
+            "delay above the limit": [good_queue(impairment=dict(
+                good_queue()["impairment"], delay_ms=60_001))],
+            "jitter above the limit": [good_queue(impairment=dict(
+                good_queue()["impairment"], jitter_ms=60_001))],
+            "negative delay": [good_queue(impairment=dict(
+                good_queue()["impairment"], delay_ms=-1))],
+            "loss above 100": [good_queue(impairment=dict(
+                good_queue()["impairment"], loss_percent=101))],
+            "reorder above 100": [good_queue(impairment=dict(
+                good_queue()["impairment"], reorder_percent=101))],
+            "duplicate above 100": [good_queue(impairment=dict(
+                good_queue()["impairment"], duplicate_percent=101))],
+            "corrupt above 100": [good_queue(impairment=dict(
+                good_queue()["impairment"], corrupt_percent=101))],
+            "boolean bandwidth": [good_queue(impairment=dict(
+                good_queue()["impairment"], bandwidth_kbit=True))],
+            "zero bandwidth": [good_queue(impairment=dict(
+                good_queue()["impairment"], bandwidth_kbit=0))],
+            "bandwidth above the limit": [good_queue(impairment=dict(
+                good_queue()["impairment"], bandwidth_kbit=1_000_001))],
+            "string bandwidth": [good_queue(impairment=dict(
+                good_queue()["impairment"], bandwidth_kbit="2000"))],
+        }
+        for name, queues in cases.items():
+            with self.subTest(name):
+                with self.assertRaisesRegex(
+                    HelperClientError, "^helper returned invalid queue statistics$"
+                ):
+                    self.read(queues)
+
+    def test_accepts_the_largest_allowed_impairment_values(self) -> None:
+        largest = dict(
+            good_queue()["impairment"], delay_ms=60_000, jitter_ms=60_000, loss_percent=100,
+            reorder_percent=100, duplicate_percent=100, corrupt_percent=100,
+            bandwidth_kbit=1_000_000,
+        )
+
+        (entry,) = self.read([good_queue(impairment=largest, generation="0a-" + "f" * 21)])
+
+        self.assertEqual(entry["impairment"], largest)
+        self.assertEqual(entry["generation"], "0a-" + "f" * 21)
+
+    def test_accepts_exactly_600_entries(self) -> None:
+        self.assertEqual(len(self.read([good_queue() for _ in range(600)])), 600)
 
 
 if __name__ == "__main__":

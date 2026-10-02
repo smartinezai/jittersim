@@ -101,7 +101,7 @@ from jittersim.engine.compiler import (
 )
 from jittersim.engine.conditions import device_conditions, everyone_else_condition
 from jittersim.engine.eligibility import eligible_clients, station_snapshot
-from jittersim.engine.plan import EVERYONE_ELSE_QUEUE_ID, GENERAL_QUEUE_ID
+from jittersim.engine.plan import EVERYONE_ELSE_QUEUE_ID, GENERAL_QUEUE_ID, NetworkPlan
 from jittersim.engine.progression import progression_factor
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.scenarios import active_scenario_runs
@@ -289,6 +289,11 @@ DASHBOARD_HTML = r"""<!doctype html>
     .runtime-summary.applied, .runtime-summary.reset { color: #8de2bc !important; }
     .runtime-summary.error { color: #ff9e9e !important; }
     .runtime-summary.applying, .runtime-summary.resetting { color: #f5ca78 !important; }
+    .runtime-summary.tone-ok { color: #8de2bc !important; }
+    .runtime-summary.tone-working { color: #f5ca78 !important; }
+    .runtime-summary.tone-pending { color: #9fd0ff !important; }
+    .runtime-summary.tone-error { color: #ff9e9e !important; }
+    .runtime-summary.tone-muted { color: #c4d5e8 !important; }
     .action-buttons { display: flex; align-items: center; gap: 0.6rem; }
     button {
       margin-top: 1rem;
@@ -426,6 +431,19 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
     .saved-device-labels h3 { margin-top: 0; }
     .saved-device-label-row { grid-template-columns: minmax(0, 1fr) auto auto; }
+    .impact-card { position: relative; }
+    .impact-status { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
+    .impact-note { margin: 0 0 0.75rem; color: #a8b8ce; font-size: 0.82rem; }
+    .impact-list { display: grid; gap: 0.6rem; color: #c4d5e8; font-size: 0.9rem; }
+    .impact-row { padding: 0.75rem; border: 1px solid #2b435f; border-radius: 0.6rem; background: #0d1b2d; }
+    .impact-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.3rem 0.75rem; }
+    .impact-name { color: #edf5ff; font-weight: 700; overflow-wrap: anywhere; }
+    .impact-direction { color: #a8b8ce; font-size: 0.8rem; }
+    .impact-chip { margin-left: auto; padding: 0.1rem 0.6rem; border: 1px solid #46627f; border-radius: 999px; background: #142338; color: #c6dbf4; font-size: 0.75rem; font-weight: 700; white-space: nowrap; }
+    .impact-chip.affected { border-color: #a77b31; background: #3b2a12; color: #f5ca78; }
+    .impact-chip.idle, .impact-chip.too-few, .impact-chip.clean, .impact-chip.unmeasured, .impact-chip.collecting { border-color: #3a4656; background: #111b29; color: #b3c1d3; }
+    .impact-lines { display: grid; gap: 0.15rem; margin: 0.45rem 0 0; padding: 0; list-style: none; color: #c4d5e8; font-size: 0.85rem; }
+    .impact-protected { margin: 0.75rem 0 0; color: #9fb0c4; font-size: 0.8rem; overflow-wrap: anywhere; }
     .saved-profile-row {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
@@ -751,6 +769,9 @@ DASHBOARD_HTML = r"""<!doctype html>
     .sidebar-credentials button { min-height: 2.4rem; padding: 0.35rem 0.5rem; font-size: 0.8rem; }
     .sidebar button { margin: 0; min-height: 2.6rem; text-align: left; }
     .sidebar-actions button { text-align: center; }
+    .sidebar-action-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 0.45rem; }
+    .sidebar .sidebar-action-row .help-icon { display: inline-grid; flex: none; }
+    .sidebar .apply-summary { margin: -0.15rem 0 0; color: var(--muted); font-size: 0.76rem; line-height: 1.35; overflow-wrap: anywhere; }
     .sidebar span { display: block; }
     .sidebar .runtime-summary { margin: 0; font-size: 0.78rem; }
     .sidebar .action-message { min-height: 0; padding: 0.4rem 0.55rem; font-size: 0.78rem; }
@@ -795,6 +816,21 @@ DASHBOARD_HTML = r"""<!doctype html>
     .analytics-table td { color: #d7e4f2; font-size: 0.84rem; }
     .analytics-table td:nth-child(n + 3) { text-align: right; font-variant-numeric: tabular-nums; }
     .analytics-domain { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+    /* The sidebar scrolls so a tip placed inside it is cut off on a short window. Next to the
+       sidebar the tip is fixed to the window and always has room. */
+    @media (min-width: 701px) {
+      .sidebar .sidebar-action-row .help-icon::after { position: fixed; top: auto; bottom: 1rem; left: 16rem; right: auto; width: min(22rem, calc(100vw - 17rem)); }
+    }
+    /* A short window needs the room for the footer so that Panic stays in view. */
+    @media (min-width: 48.01rem) and (max-height: 800px) {
+      .sidebar { gap: 0.6rem; }
+      .sidebar-nav a { padding-block: 0.25rem; }
+    }
+    /* The label wraps to two lines in the narrow sidebar. Both labels need the same room so the
+       buttons below do not jump when it changes. */
+    @media (min-width: 48.01rem) {
+      .sidebar .sidebar-actions #apply-button { min-height: 4.1rem; min-height: calc(2lh + 1.24rem + 2px); }
+    }
     @media (max-width: 700px) {
       .help-icon::after { position: fixed; top: auto; bottom: 1rem; left: 1rem; width: calc(100vw - 2rem); }
       .badge { display: inline-block; margin-top: 1rem; }
@@ -1018,13 +1054,20 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="sidebar-footer">
       <div class="sidebar-operate">
         <div class="sidebar-actions">
-          <button id="apply-button" class="primary" type="button">Apply current configuration</button>
-          <button id="reset-button" class="danger" type="button">Reset network</button>
+          <div class="sidebar-action-row">
+            <button id="apply-button" class="primary" type="button">Start with saved settings</button>
+            <span class="help-icon" tabindex="0" role="img" aria-label="Start or re-apply saved settings help" data-help="Starts JitterSim with everything you saved: device and group profiles and schedules and limits and service lists and access rules. While it runs saved changes apply on their own within a few seconds. Reset or Panic stops it. Protected devices stay untouched.">?</span>
+          </div>
+          <p id="apply-summary" class="apply-summary" aria-live="polite" hidden></p>
+          <div class="sidebar-action-row">
+            <button id="reset-button" class="danger" type="button">Reset network</button>
+            <span class="help-icon" tabindex="0" role="img" aria-label="Reset network help" data-help="Stops JitterSim and removes every rule from the Pi so all devices run normally. Your saved settings are kept. Choose Start with saved settings to run them again.">?</span>
+          </div>
         </div>
         <p id="runtime-summary" class="runtime-summary unknown">Check the admin token to view the network state.</p>
         <p id="message" class="action-message" role="status" aria-live="polite">Ready.</p>
         <button id="panic-button" class="danger panic-button" type="button"
-          title="Remove all traffic shaping now. Choose Apply current configuration to resume.">
+          title="Remove all traffic shaping now. Choose Start with saved settings to run again.">
           <span>Panic</span><span id="panic-state" class="credential-state">Turn all profiles off</span>
         </button>
         <div class="router-wifi-control">
@@ -1495,7 +1538,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         <label>Scenario <select id="scenario-start-scenario" required></select></label>
         <label>Applies to <select id="scenario-start-target" required></select></label>
       </div>
-      <p class="form-note">Apply the configuration before starting a scenario. Its clock starts
+      <p class="form-note">Choose Start with saved settings before starting a scenario. Its clock starts
         when you press Start. A running scenario takes over from schedules, as a timer does.
         For a device, starting a timer or a scenario replaces the other and a device's own
         timer or scenario wins over its group's. Data limits still win.</p>
@@ -2110,6 +2153,16 @@ DASHBOARD_HTML = r"""<!doctype html>
     </section>
   </section><!-- /page:access -->
   <section class="page" id="page-diagnostics" data-page="diagnostics" aria-label="Diagnostics" tabindex="-1" hidden>
+    <section class="card impact-card" data-collapse="open" aria-labelledby="impact-title">
+      <div class="section-heading">
+        <div><h2 id="impact-title">Impact</h2><p>What the queues did in the last minute</p></div>
+        <span id="impact-state" class="count-badge">Check token</span>
+      </div>
+      <p id="impact-note" class="impact-note">Counts come from the Pi's queues. Delay, jitter, reorder, duplicate and corrupt are shown as configured because queue counters cannot measure them.</p>
+      <div id="impact-list" class="impact-list">Check the admin token to see the impact.</div>
+      <p id="impact-protected" class="impact-protected" hidden></p>
+      <p id="impact-status" class="impact-status" role="status"></p>
+    </section>
     <section class="card" data-collapse="closed">
       <div class="section-heading"><h2>Profiles</h2><p>Saved network behavior</p></div>
       <pre id="profiles">Enter the admin token and choose Check token to load.</pre>
@@ -2385,6 +2438,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       element("uplink-state").textContent = state;
       element("runtime-summary").textContent = message;
       element("runtime-summary").className = "runtime-summary unknown";
+      // The panels go blank whenever the token is not trusted, so the impact card follows.
+      if (typeof syncImpact === "function") syncImpact();
       renderSidebarStatus();
     }
 
@@ -2397,6 +2452,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     let helperConfigured = false;
+
+    let helperKnown = false;
 
     let adminTokenVerified = false;
 
@@ -2703,6 +2760,16 @@ DASHBOARD_HTML = r"""<!doctype html>
     let profilesLoaded = false;
 
     let savedProfileBusy = null;
+
+    let unaffectedMacs = null;
+
+    let accessRulesSaved = null;
+
+    let savedDevicesLoaded = false;
+
+    let groupsLoaded = false;
+
+    let applyBusy = false;
 
     let networkActionBusy = false;
 
@@ -3062,7 +3129,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       element("traffic-profile-status").textContent = selectedDevice === "@all"
         ? "Select one device to see its applied default queue limit. Service-specific limits are not shown."
         : !data.profile_limits_available
-          ? "No applied plan is available. Apply the configuration to see current default queue limits."
+          ? "No plan is running yet. Choose Start with saved settings to see current default queue limits."
           : !profileAvailable
             ? "The selected device has no applied default queue limits available."
             : deviceLimits.upload_kbit === null && deviceLimits.download_kbit === null
@@ -3092,7 +3159,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         const queueTotals = selectedQueueTotals(counters.queues);
         if (!totals) {
           resetTrafficHistory();
-          element("traffic-status").textContent = "No counters yet. Assign a profile and apply the configuration.";
+          element("traffic-status").textContent = "No counters yet. Assign a profile and choose Start with saved settings.";
           return;
         }
         const sampledAt = performance.now();
@@ -3226,6 +3293,8 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     function renderMode(data) {
       helperConfigured = data.helper_configured;
+      helperKnown = true;
+      renderRuntimeText();
       const badge = element("mode-badge");
       const notice = element("mode-notice");
       badge.textContent = helperConfigured ? "Hardware mode" : "Configuration only";
@@ -3249,6 +3318,410 @@ DASHBOARD_HTML = r"""<!doctype html>
         !generalProfileState || !generalProfileState.profile;
       renderSavedProfiles();
     }
+
+    const IMPACT_WINDOW_SECONDS = 60;
+
+    const IMPACT_MIN_PACKETS = 50;
+
+    const IMPACT_CAP_RATIO = 0.9;
+
+    const IMPACT_MAX_SAMPLES = 13;
+
+    const IMPACT_MIN_EXPECTED_DROPS = 3;
+
+    const IMPACT_MIN_QUEUE_WAIT_MS = 10;
+
+    const IMPACT_NOT_MEASURED = " · configured, not measured";
+
+    function impactSample(entry, nowSeconds) {
+      return {
+        t: nowSeconds,
+        packets: entry.packets,
+        drops: entry.drops,
+        bytes: entry.bytes,
+        overlimits: entry.overlimits,
+        backlog_bytes: entry.backlog_bytes,
+        qlen: entry.qlen || 0
+      };
+    }
+
+    function impactQueueReplaced(previous, entry, sample) {
+      const last = previous.samples[previous.samples.length - 1];
+      return !last || sample.t <= last.t || sample.packets < last.packets ||
+        sample.drops < last.drops || sample.bytes < last.bytes ||
+        previous.latest.generation !== entry.generation ||
+        previous.latest.device_id !== entry.device_id ||
+        previous.latest.direction !== entry.direction ||
+        JSON.stringify(previous.latest.impairment) !== JSON.stringify(entry.impairment);
+    }
+
+    function recordImpactSample(history, response, nowSeconds) {
+      const next = {};
+      (response.queues || []).forEach((entry) => {
+        const key = entry.interface + "/" + entry.handle;
+        const sample = impactSample(entry, nowSeconds);
+        const previous = history[key];
+        const kept = previous && !impactQueueReplaced(previous, entry, sample)
+          ? previous.samples : [];
+        next[key] = {latest: entry, samples: kept.concat([sample]).slice(-IMPACT_MAX_SAMPLES)};
+      });
+      return next;
+    }
+
+    function impactHasNoImpairment(impairment) {
+      return !impairment.delay_ms && !impairment.jitter_ms && !impairment.loss_percent &&
+        !impairment.bandwidth_kbit && !impairment.reorder_percent &&
+        !impairment.duplicate_percent && !impairment.corrupt_percent;
+    }
+
+    function formatImpactRate(kbit) {
+      return kbit >= 1000 ? (Math.round(kbit / 10) / 100) + " Mbit/s" : kbit + " kbit/s";
+    }
+
+    function impactIntervals(used) {
+      const intervals = [];
+      for (let index = 1; index < used.length; index += 1) {
+        const before = used[index - 1];
+        const after = used[index];
+        const seconds = after.t - before.t;
+        if (seconds <= 0) continue;
+        intervals.push({
+          offered: after.packets - before.packets + after.drops - before.drops,
+          kbit: (after.bytes - before.bytes) * 8 / 1000 / seconds
+        });
+      }
+      return intervals;
+    }
+
+    function impactVerdict(impairment, offered, packets, drops, capReached) {
+      if (drops > 0 || capReached) return "affected";
+      if (offered === 0 && packets === 0) return "idle";
+      const hasLoss = impairment.loss_percent > 0;
+      if (!hasLoss && !impairment.bandwidth_kbit) return "unmeasured";
+      if (offered < IMPACT_MIN_PACKETS ||
+          (hasLoss && offered * impairment.loss_percent / 100 < IMPACT_MIN_EXPECTED_DROPS)) {
+        return "too-few";
+      }
+      return "clean";
+    }
+
+    function impactLossLine(impairment, drops, offered, lossPercent) {
+      const head = impairment.loss_percent > 0
+        ? "Loss: set " + impairment.loss_percent + "%"
+        : impairment.bandwidth_kbit ? "Dropped (queue full at the speed cap)" : "Dropped (queue full)";
+      return head + " · actual " + lossPercent + "% (" + drops + " of " + offered +
+        " packets dropped)" + (impairment.duplicate_percent > 0
+          ? " (may read low because duplicated packets are counted)" : "");
+    }
+
+    function impactRow(key, entry) {
+      const latest = entry.latest;
+      const impairment = latest.impairment;
+      const row = {
+        key: key,
+        name: latest.name,
+        direction: latest.direction,
+        configured: impairment,
+        windowSeconds: 0,
+        offered: 0,
+        packets: 0,
+        drops: 0,
+        lossPercent: 0,
+        rateKbit: 0,
+        peakKbit: 0,
+        capReached: false,
+        queueWaitMs: null,
+        verdict: "collecting",
+        lines: ["Collecting…"]
+      };
+      const newest = entry.samples[entry.samples.length - 1];
+      const used = entry.samples.filter((sample) => newest.t - sample.t <= IMPACT_WINDOW_SECONDS);
+      const first = used[0];
+      const seconds = newest.t - first.t;
+      if (used.length < 2 || seconds <= 0) return row;
+      const packets = newest.packets - first.packets;
+      const drops = newest.drops - first.drops;
+      // Drops are counted when a packet arrives and packets when they leave. A packet that
+      // still waits in the queue has arrived so the queue length change is added.
+      const waiting = newest.qlen - first.qlen;
+      const offered = Math.max(0, packets + drops + waiting);
+      const intervals = impactIntervals(used);
+      const limit = impairment.bandwidth_kbit;
+      const noDelay = !impairment.delay_ms && !impairment.jitter_ms;
+      // Without a delay a backlog of at least 10 ms of cap time can only come from the cap.
+      const backlogSeen = !!limit && noDelay && used.some((sample) =>
+        Math.round(sample.backlog_bytes * 8 / limit) >= IMPACT_MIN_QUEUE_WAIT_MS);
+      const capReached = !!limit && (backlogSeen || intervals.some((interval) =>
+        interval.offered > 0 && Math.round(interval.kbit) >= IMPACT_CAP_RATIO * limit));
+      row.windowSeconds = seconds;
+      row.offered = offered;
+      row.packets = packets;
+      row.drops = drops;
+      row.lossPercent = offered ? Math.round(drops * 1000 / offered) / 10 : 0;
+      row.rateKbit = Math.round((newest.bytes - first.bytes) * 8 / 1000 / seconds);
+      row.peakKbit = Math.round(Math.max(0, ...intervals.map((interval) => interval.kbit)));
+      row.capReached = capReached;
+      row.queueWaitMs = limit && noDelay && capReached
+        ? Math.round(newest.backlog_bytes * 8 / limit) : null;
+      row.verdict = impactVerdict(impairment, offered, packets, drops, capReached);
+      row.lines = [];
+      if (row.verdict === "unmeasured") {
+        row.lines.push(packets + (packets === 1 ? " packet" : " packets") + " passed in the last minute");
+      }
+      if (impairment.loss_percent > 0 || drops > 0) {
+        row.lines.push(impactLossLine(impairment, drops, offered, row.lossPercent));
+      }
+      if (limit) {
+        row.lines.push("Speed: set " + formatImpactRate(limit) + " · using " +
+          formatImpactRate(row.rateKbit) + " · peak " + formatImpactRate(row.peakKbit) +
+          (capReached ? " · cap reached" : " · below the cap"));
+      }
+      if (row.queueWaitMs !== null && row.queueWaitMs >= IMPACT_MIN_QUEUE_WAIT_MS) {
+        row.lines.push("Queue wait now: about " + row.queueWaitMs + " ms");
+      }
+      if (impairment.delay_ms > 0 || impairment.jitter_ms > 0) {
+        row.lines.push("Delay: set " + impairment.delay_ms + " ms" +
+          (impairment.jitter_ms > 0 ? " ± " + impairment.jitter_ms : "") + IMPACT_NOT_MEASURED);
+      }
+      [["reorder_percent", "Reorder"], ["duplicate_percent", "Duplicate"],
+       ["corrupt_percent", "Corrupt"]].forEach((item) => {
+        if (impairment[item[0]] > 0) {
+          row.lines.push(item[1] + ": set " + impairment[item[0]] + "%" + IMPACT_NOT_MEASURED);
+        }
+      });
+      return row;
+    }
+
+    function impactRows(history) {
+      return Object.keys(history)
+        .filter((key) => !impactHasNoImpairment(history[key].latest.impairment))
+        .map((key) => impactRow(key, history[key]))
+        .sort((a, b) => a.name.localeCompare(b.name) ||
+          (a.direction === b.direction ? 0 : a.direction === "upload" ? -1 : 1));
+    }
+    // end of the impact functions
+
+    const IMPACT_POLL_INTERVAL_MS = 5000;
+
+    const IMPACT_UNREADABLE = "Impact could not be read right now.";
+
+    const IMPACT_VERDICT_LABELS = {
+      affected: "Affected in the last minute",
+      idle: "No traffic in the last minute",
+      "too-few": "Too few packets to judge",
+      clean: "No drops or cap hit seen",
+      unmeasured: "Effect not measured here",
+      collecting: "Collecting…"
+    };
+
+    let impactHistory = {};
+
+    let impactPollTimer = null;
+
+    let impactRequestInFlight = false;
+
+    let impactGeneration = 0;
+
+    let impactLastGoodAt = null;
+
+    let impactRowParts = new Map();
+
+    let impactVerdicts = {};
+
+    let impactShowsRows = false;
+
+    function impactVisible() {
+      return document.body.dataset.section === "diagnostics" && !document.hidden;
+    }
+
+    function setImpactText(node, text) {
+      if (node.textContent !== text) node.textContent = text;
+    }
+
+    function announceImpact(text) {
+      element("impact-status").textContent = text;
+    }
+
+    function showImpactMessage(message, state) {
+      const list = element("impact-list");
+      if (impactShowsRows || list.textContent !== message) list.textContent = message;
+      impactShowsRows = false;
+      impactRowParts = new Map();
+      impactVerdicts = {};
+      setImpactText(element("impact-state"), state);
+      element("impact-note").hidden = true;
+      element("impact-protected").hidden = true;
+      if (element("impact-status").textContent !== message) announceImpact(message);
+    }
+
+    function stopImpact(message, state) {
+      if (impactPollTimer !== null) {
+        window.clearInterval(impactPollTimer);
+        impactPollTimer = null;
+      }
+      impactGeneration += 1;
+      impactHistory = {};
+      impactLastGoodAt = null;
+      showImpactMessage(message, state);
+    }
+
+    function createImpactRowParts() {
+      const item = document.createElement("div");
+      item.className = "impact-row";
+      const head = document.createElement("div");
+      head.className = "impact-head";
+      const name = document.createElement("span");
+      name.className = "impact-name";
+      const direction = document.createElement("span");
+      direction.className = "impact-direction";
+      const chip = document.createElement("span");
+      head.append(name, direction, chip);
+      const lines = document.createElement("ul");
+      lines.className = "impact-lines";
+      item.append(head, lines);
+      return {item: item, name: name, direction: direction, chip: chip, lines: lines};
+    }
+
+    function updateImpactRow(parts, row) {
+      setImpactText(parts.name, row.name);
+      setImpactText(parts.direction, row.direction === "upload" ? "Upload" : "Download");
+      const chipClass = "impact-chip " + row.verdict;
+      if (parts.chip.className !== chipClass) parts.chip.className = chipClass;
+      setImpactText(parts.chip, IMPACT_VERDICT_LABELS[row.verdict]);
+      const lines = row.verdict === "collecting" ? [] : row.lines;
+      lines.forEach((text, index) => {
+        if (!parts.lines.children[index]) parts.lines.appendChild(document.createElement("li"));
+        setImpactText(parts.lines.children[index], text);
+      });
+      while (parts.lines.children.length > lines.length) {
+        parts.lines.children[parts.lines.children.length - 1].remove();
+      }
+      parts.lines.hidden = lines.length === 0;
+    }
+
+    function impactAnnouncements(rows) {
+      const spoken = [];
+      rows.forEach((row) => {
+        const before = impactVerdicts[row.key];
+        if (before !== undefined && before !== row.verdict && row.verdict !== "collecting") {
+          spoken.push(row.name + " " + row.direction + ": " + IMPACT_VERDICT_LABELS[row.verdict]);
+        }
+      });
+      impactVerdicts = {};
+      rows.forEach((row) => { impactVerdicts[row.key] = row.verdict; });
+      return spoken;
+    }
+
+    function renderImpactRows(rows) {
+      const list = element("impact-list");
+      if (!impactShowsRows) {
+        list.textContent = "";
+        impactShowsRows = true;
+      }
+      const wanted = new Set(rows.map((row) => row.key));
+      impactRowParts.forEach((parts, key) => {
+        if (!wanted.has(key)) {
+          parts.item.remove();
+          impactRowParts.delete(key);
+        }
+      });
+      rows.forEach((row, index) => {
+        let parts = impactRowParts.get(row.key);
+        if (!parts) {
+          parts = createImpactRowParts();
+          impactRowParts.set(row.key, parts);
+        }
+        updateImpactRow(parts, row);
+        if (list.children[index] !== parts.item) {
+          list.insertBefore(parts.item, list.children[index] || null);
+        }
+      });
+    }
+
+    function renderImpact(protectedNames) {
+      const rows = impactRows(impactHistory);
+      if (rows.length) {
+        renderImpactRows(rows);
+        const spoken = impactAnnouncements(rows);
+        if (spoken.length) announceImpact(spoken.join(". "));
+      } else {
+        showImpactMessage(
+          "Nothing is slowed down right now. Apply a profile to a device to see its impact here.",
+          "Live");
+      }
+      setImpactText(element("impact-state"), "Live");
+      element("impact-note").hidden = false;
+      const protectedLine = element("impact-protected");
+      protectedLine.hidden = protectedNames.length === 0;
+      setImpactText(protectedLine, protectedNames.length
+        ? "Protected (not affected): " + protectedNames.join(", ") : "");
+    }
+
+    function pauseImpact(message) {
+      const age = impactLastGoodAt === null ? Infinity : (Date.now() - impactLastGoodAt) / 1000;
+      if (age > IMPACT_WINDOW_SECONDS) {
+        impactHistory = {};
+        impactLastGoodAt = null;
+        showImpactMessage(message, "Update paused");
+        return;
+      }
+      setImpactText(element("impact-state"), "Update paused");
+    }
+
+    async function loadImpact() {
+      if (impactRequestInFlight || !adminTokenVerified || !impactVisible()) return;
+      impactRequestInFlight = true;
+      const generation = impactGeneration;
+      try {
+        const data = await request("/api/impact", "GET");
+        if (generation !== impactGeneration) return;
+        if (data.paused) {
+          pauseImpact(data.message || IMPACT_UNREADABLE);
+          return;
+        }
+        if (!data.available) {
+          impactHistory = {};
+          impactLastGoodAt = null;
+          showImpactMessage(data.message || "Impact is not available.", "Unavailable");
+          return;
+        }
+        impactHistory = recordImpactSample(impactHistory, data, data.sampled_at);
+        impactLastGoodAt = Date.now();
+        renderImpact(Array.isArray(data.protected) ? data.protected : []);
+      } catch (error) {
+        if (generation !== impactGeneration) return;
+        if (error.status === 401) {
+          stopImpact("Check the admin token to see the impact.", "Check token");
+        } else {
+          pauseImpact(IMPACT_UNREADABLE);
+        }
+      } finally {
+        impactRequestInFlight = false;
+      }
+    }
+
+    function syncImpact() {
+      if (!adminTokenVerified) {
+        stopImpact("Check the admin token to see the impact.", "Check token");
+        return;
+      }
+      if (!helperConfigured) {
+        stopImpact("Impact needs the Pi helper.", "Unavailable");
+        return;
+      }
+      if (!impactVisible()) {
+        if (impactPollTimer !== null) {
+          window.clearInterval(impactPollTimer);
+          impactPollTimer = null;
+        }
+        return;
+      }
+      if (impactPollTimer === null) {
+        impactPollTimer = window.setInterval(loadImpact, IMPACT_POLL_INTERVAL_MS);
+        loadImpact();
+      }
+    }
+    // end of the impact card
 
     function sidebarStatus(input) {
       const visible = !!input.adminTokenVerified;
@@ -3294,9 +3767,11 @@ DASHBOARD_HTML = r"""<!doctype html>
       } else if (state === "applying" || state === "resetting") {
         devices = quiet("Changing…");
       } else if (state === "error") {
-        devices = quiet("Last network action failed");
+        devices = quiet(input.lastAction === "reset"
+          ? "Last reset failed. The Pi may still be shaping."
+          : "Last network action failed");
       } else if (!running) {
-        devices = quiet("Not started yet");
+        devices = quiet("Not running");
       } else if (input.clientsAvailable !== true) {
         devices = quiet("Connected devices unavailable");
       } else {
@@ -3351,6 +3826,10 @@ DASHBOARD_HTML = r"""<!doctype html>
       serviceListsState = [];
       serviceListsLoaded = false;
       profilesLoaded = false;
+      unaffectedMacs = null;
+      accessRulesSaved = null;
+      savedDevicesLoaded = false;
+      groupsLoaded = false;
     }
 
     function renderSidebarStatus() {
@@ -3365,6 +3844,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         },
         runtimeState: lastRuntimeState ? lastRuntimeState.observed_state : null,
         running: !!lastRuntimeState && lastRuntimeState.running === true,
+        lastAction: lastRuntimeState ? lastRuntimeState.last_action : null,
         generalState: generalProfileState,
         profiles,
         clients: connectedClients,
@@ -3372,6 +3852,8 @@ DASHBOARD_HTML = r"""<!doctype html>
         serviceLists: serviceListsState
       });
       element("sidebar-status").hidden = !view.visible;
+      renderApplySummary();
+      renderApplyButton();
       const generalLine = element("status-general");
       const devicesBlock = element("status-devices");
       const devicesPlain = element("status-devices-plain");
@@ -3423,21 +3905,165 @@ DASHBOARD_HTML = r"""<!doctype html>
       listsLine.textContent = view.lists.text;
     }
 
+    function applySummary(input) {
+      const count = (number, one, many) => number + " " + (number === 1 ? one : many);
+      const parts = [];
+      if (input.generalProfileName) {
+        // The server runs the enabled service lists together with the general profile.
+        parts.push('General profile "' + input.generalProfileName + '" for every unprotected device');
+      } else {
+        if (input.devices > 0) {
+          parts.push(count(input.devices, "device", "devices") + " with a profile");
+        }
+        if (input.groups > 0) parts.push(count(input.groups, "group", "groups"));
+      }
+      if (input.serviceLists > 0) {
+        parts.push(count(input.serviceLists, "service list", "service lists"));
+      }
+      if (input.protected > 0) parts.push(protectedDevicesText(input.protected));
+      return parts.length ? parts.join(" · ") : "No device profiles or service lists saved yet";
+    }
+
+    function protectedDevicesText(count) {
+      return count === 1
+        ? "1 protected device stays untouched"
+        : count + " protected devices stay untouched";
+    }
+
+    function hasProfilesOrLists(input) {
+      return !!input.generalProfileName || input.devices > 0 || input.groups > 0 ||
+        input.serviceLists > 0;
+    }
+
+    function savedLine(input) {
+      if (hasProfilesOrLists(input) || input.protected > 0) return "Saved: " + applySummary(input);
+      // A start also enforces the access rules so an empty line must not hide them.
+      const nothing = applySummary({});
+      return input.accessRules ? nothing + ". Access rules are saved too." : nothing;
+    }
+
+    function startedText(input, wasRunning) {
+      const lead = wasRunning ? "Re-applied" : "Started";
+      if (hasProfilesOrLists(input)) return lead + ": " + applySummary(input) + ".";
+      const sentences = [lead + "."];
+      if (input.protected > 0) sentences.push(protectedDevicesText(input.protected) + ".");
+      sentences.push("No device profiles or service lists are saved yet.");
+      if (input.accessRules) sentences.push("Access rules apply.");
+      return sentences.join(" ");
+    }
+
+    function runtimeStatusText(state, running, context) {
+      const options = context || {};
+      if (options.helperConfigured === false) {
+        return {text: "Needs the Pi helper to run.", tone: "muted"};
+      }
+      if (state === "applying") return {text: "Applying…", tone: "working"};
+      if (state === "resetting") return {text: "Resetting…", tone: "working"};
+      if (running === true) {
+        if (state === "applied") {
+          return {
+            text: "Running. Your saved settings are applied. New changes apply on their own.",
+            tone: "ok"
+          };
+        }
+        if (state === "unknown") {
+          return {text: "Running. Your latest change applies on its own.", tone: "ok"};
+        }
+        if (state === "error") return {text: "The last apply failed. Check the Pi.", tone: "error"};
+      } else {
+        if (state === "reset") {
+          return {text: "Off. No traffic shaping is running.", tone: "muted"};
+        }
+        if (state === "unknown") {
+          return {text: "JitterSim is not running. Choose Start with saved settings.", tone: "pending"};
+        }
+        if (state === "error") {
+          return options.lastAction === "reset"
+            ? {
+                text: "The last reset failed. The Pi may still be shaping. Check it.",
+                tone: "error"
+              }
+            : {text: "The last start failed. Check the Pi and try again.", tone: "error"};
+        }
+        if (state === "applied") {
+          return {text: "Applied. Waiting for the scheduler.", tone: "muted"};
+        }
+      }
+      return {text: "State unknown.", tone: "muted"};
+    }
+
+    function applyButtonLabel(state, running) {
+      const keepsRunning = state === "applied" || state === "unknown" || state === "error" ||
+        state === "applying" || state === "resetting";
+      return running === true && keepsRunning ? "Re-apply saved settings" : "Start with saved settings";
+    }
+
+    function currentApplyLabel() {
+      const known = adminTokenVerified && !!lastRuntimeState;
+      return applyButtonLabel(
+        known ? lastRuntimeState.observed_state : null,
+        known && lastRuntimeState.running === true
+      );
+    }
+
+    function setTextIfChanged(node, text) {
+      if (node.textContent !== text) node.textContent = text;
+    }
+
+    function renderApplyButton() {
+      if (applyBusy) return;
+      setTextIfChanged(element("apply-button"), currentApplyLabel());
+    }
+
+    function applyInputsLoaded() {
+      return savedDevicesLoaded && groupsLoaded && unaffectedMacs !== null && serviceListsLoaded &&
+        generalProfileState !== null && accessRulesSaved !== null;
+    }
+
+    function renderApplySummary() {
+      const line = element("apply-summary");
+      let text = "";
+      if (adminTokenVerified && applyInputsLoaded()) {
+        const generalProfile = generalProfileState.profile ? generalProfileState.profile : null;
+        const protectedMacs = new Set(unaffectedMacs);
+        const affected = savedDevices.filter(
+          (device) => !device.mac_address || !protectedMacs.has(device.mac_address)
+        );
+        const affectedIds = new Set(affected.map((device) => device.id));
+        text = savedLine({
+          devices: affected.length,
+          groups: groups.filter(
+            (group) => (group.device_ids || []).some((id) => affectedIds.has(id))
+          ).length,
+          serviceLists: serviceListsState.filter((serviceList) => serviceList.enabled).length,
+          protected: unaffectedMacs.length,
+          generalProfileName: generalProfile ? generalProfile.name || generalProfile.id : "",
+          accessRules: accessRulesSaved
+        });
+      }
+      setTextIfChanged(line, text);
+      if (line.hidden !== (text === "")) line.hidden = text === "";
+    }
+
+    function renderRuntimeText() {
+      if (!lastRuntimeState) return;
+      const status = runtimeStatusText(
+        lastRuntimeState.observed_state,
+        lastRuntimeState.running === true,
+        {
+          lastAction: lastRuntimeState.last_action,
+          helperConfigured: helperKnown ? helperConfigured : true
+        }
+      );
+      const summary = element("runtime-summary");
+      setTextIfChanged(summary, status.text);
+      const className = "runtime-summary " + lastRuntimeState.observed_state + " tone-" + status.tone;
+      if (summary.className !== className) summary.className = className;
+    }
+
     function renderRuntimeSummary(state) {
       lastRuntimeState = state;
-      const labels = {
-        unknown: "No network action has run yet",
-        applying: "Applying configuration...",
-        resetting: "Resetting network...",
-        applied: "Configuration applied successfully",
-        reset: "Network reset successfully",
-        error: "The last network action failed"
-      };
-      const summary = element("runtime-summary");
-      summary.textContent = state.observed_state === "unknown" && state.last_action
-        ? "Settings changed since the last network action"
-        : labels[state.observed_state] || "Runtime state unavailable";
-      summary.className = "runtime-summary " + state.observed_state;
+      renderRuntimeText();
       renderSidebarStatus();
     }
 
@@ -3885,6 +4511,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       const container = element("unaffected-devices");
       try {
         const data = await request("/api/unaffected-devices", "GET");
+        unaffectedMacs = data.devices.map((device) => device.mac_address);
+        renderApplySummary();
         container.replaceChildren();
         if (!data.devices.length) {
           container.textContent = "No devices are protected. Choose Make unaffected beside a connected client.";
@@ -4064,7 +4692,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     const ENFORCE_NOTE = "It applies on its own while JitterSim is running. " +
-      "After Reset or Panic choose Apply current configuration.";
+      "After Reset or Panic choose Start with saved settings.";
 
     function queryCountText(count) {
       return count + (count === 1 ? " query" : " queries");
@@ -4811,6 +5439,8 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     function renderGroups(data) {
       groups = data.groups || [];
+      groupsLoaded = true;
+      renderApplySummary();
       const container = element("group-list");
       container.replaceChildren();
       if (!groups.length) {
@@ -5411,7 +6041,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       status.textContent = !data.profile
         ? profiles.length ? "No general profile. Saved device rules apply when profiles are on." : "Create a saved profile below to use this control."
         : data.active ? "Active: " + data.profile.name + ". Applies to every unprotected device."
-        : data.state.observed_state === "reset" ? "Paused: " + data.profile.name + ". Choose Apply to all or Apply current configuration to resume."
+        : data.state.observed_state === "reset" ? "Paused: " + data.profile.name + ". Choose Apply to all or Start with saved settings to resume."
         : data.state.observed_state === "error" ? "Saved: " + data.profile.name + ". Network update failed. Retry Apply to all."
         : "Saved: " + data.profile.name + ". Apply to all to start.";
       updateTrafficDeviceOptions(savedDevices);
@@ -5421,6 +6051,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     async function loadDevicesForSchedule() {
       const data = await request("/api/devices", "GET");
       savedDevices = data.devices;
+      savedDevicesLoaded = true;
+      renderApplySummary();
       updateGroupMemberOptions();
       [
         "timer-device",
@@ -5668,6 +6300,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       element("website-allowlist").value = data.websites.allowed_domains.join(", ");
       element("website-blocklist").value = data.websites.blocked_domains.join(", ");
       }
+      accessRulesSaved = data.websites.mode === "allow_only" ||
+        data.websites.blocked_domains.length > 0 || data.mac.mode !== "disabled";
+      renderApplySummary();
       updateAccessForms(data);
       await loadAccessStatus();
     }
@@ -5868,6 +6503,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           if (tokenRevision !== adminTokenRevision) return;
           await startTrafficSampling();
           if (tokenRevision !== adminTokenRevision) return;
+          if (typeof syncImpact === "function") syncImpact();
         } else {
           adminTokenVerified = false;
           adminTokenRejected = true;
@@ -5921,9 +6557,10 @@ DASHBOARD_HTML = r"""<!doctype html>
       const resetButton = element("reset-button");
       applyButton.disabled = busy || !helperConfigured;
       resetButton.disabled = busy || !helperConfigured;
-      applyButton.setAttribute("aria-busy", String(busy && path === "/api/apply"));
+      applyBusy = busy && path === "/api/apply";
+      applyButton.setAttribute("aria-busy", String(applyBusy));
       resetButton.setAttribute("aria-busy", String(busy && path === "/api/reset"));
-      applyButton.textContent = busy && path === "/api/apply" ? "Applying..." : "Apply current configuration";
+      applyButton.textContent = applyBusy ? "Applying…" : currentApplyLabel();
       resetButton.textContent = busy && path === "/api/reset" ? "Resetting..." : "Reset network";
       const panicButton = element("panic-button");
       const panicking = busy && path === "/api/reset";
@@ -5942,12 +6579,15 @@ DASHBOARD_HTML = r"""<!doctype html>
         showMessage("Network actions are unavailable in configuration-only mode.", "error");
         return;
       }
+      const wasRunning = !!lastRuntimeState && lastRuntimeState.running === true;
       setActionBusy(true, path);
       showMessage(workingMessage, "working");
       try {
         const data = await request(path, "POST", {});
         if (data.state) renderRuntimeSummary(data.state);
-        refreshAfterSuccess(successMessage + (data.warning ? " " + data.warning : ""));
+        const done = typeof successMessage === "function"
+          ? successMessage(data, wasRunning) : successMessage;
+        refreshAfterSuccess(done + (data.warning ? " " + data.warning : ""));
       } catch (error) {
         showMessage(error.message, "error");
         // A failed action can still have changed the state so the page reads it again.
@@ -5957,8 +6597,23 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
     }
 
+    function appliedMessage(data, wasRunning) {
+      const applied = data.applied;
+      if (!applied) {
+        return wasRunning ? "Re-applied your saved settings." : "Started with your saved settings.";
+      }
+      return startedText({
+        devices: applied.devices,
+        groups: applied.groups,
+        serviceLists: applied.service_lists,
+        protected: applied.protected,
+        generalProfileName: applied.general_profile,
+        accessRules: applied.access_rules === true
+      }, wasRunning);
+    }
+
     element("apply-button").addEventListener("click", () => {
-      runAction("/api/apply", "Configuration applied successfully.", "Applying configuration...");
+      runAction("/api/apply", appliedMessage, "Applying your saved settings…");
     });
 
     element("reset-button").addEventListener("click", () => {
@@ -5968,7 +6623,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     element("panic-button").addEventListener("click", () => {
       runAction(
         "/api/reset",
-        "All profiles are off. Choose Apply current configuration to resume.",
+        "All profiles are off. Choose Start with saved settings to resume.",
         "Turning all profiles off..."
       );
     });
@@ -6403,7 +7058,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         refreshAfterSuccess(
           result.live_applied
             ? "Timer started and the profile is active now."
-            : "Timer saved. Apply the configuration to start it.",
+            : "Timer saved. Choose Start with saved settings to start it.",
         );
       } catch (error) {
         showMessage(error.message, "error");
@@ -6435,7 +7090,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         refreshAfterSuccess(
           result.live_applied
             ? "Progression started and is active now."
-            : "Progression saved. Apply the configuration to start it.",
+            : "Progression saved. Choose Start with saved settings to start it.",
         );
       } catch (error) {
         showMessage(error.message, "error");
@@ -6521,6 +7176,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
       drawTrafficChart();
     });
+
+    document.addEventListener("visibilitychange", syncImpact);
 
     window.addEventListener("resize", drawTrafficChart);
 
@@ -8015,7 +8672,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       // Configuration-only mode can't apply anything. Any network action counts,
       // so a later Reset doesn't bring the list back.
       if (state.canApply) {
-        steps.push({ text: "Apply the configuration", tab: null, done: Boolean(state.lastAction) });
+        steps.push({ text: "Start with saved settings", tab: null, done: Boolean(state.lastAction) });
       }
       return steps;
     }
@@ -8176,7 +8833,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     function savedChangeMessage(message, result) {
       if (result.live_applied !== false) return message;
       return helperConfigured
-        ? message + " The network is reset, so apply the configuration to use it."
+        ? message + " The network is reset, so choose Start with saved settings to use it."
         : message + " It takes effect when the dashboard runs in hardware mode.";
     }
 
@@ -9121,6 +9778,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       if (id === "traffic" && typeof drawTrafficChart === "function") drawTrafficChart();
       if (id === "measurements" && typeof drawMeasurementChart === "function") drawMeasurementChart();
       if (userInitiated && typeof pollDashboard === "function") pollDashboard();
+      if (typeof syncImpact === "function") syncImpact();
     }
 
     function storedCardState(key) {
@@ -9260,6 +9918,37 @@ def _device_title(
     if name == UNKNOWN_DEVICE_NAME:
         return f"{UNKNOWN_DEVICE_NAME} ({device.ipv4_address})"
     return name
+
+
+IMPACT_NO_HELPER_MESSAGE = "Impact needs the Pi helper."
+IMPACT_RESET_MESSAGE = "Network is reset. Choose Start with saved settings to start impact checks."
+IMPACT_OUT_OF_DATE_MESSAGE = (
+    "The networking helper is out of date. Update it to see the impact check."
+)
+IMPACT_UNREADABLE_MESSAGE = "Impact could not be read right now."
+
+
+def _impact_queue_name(
+    queue_id: str,
+    *,
+    devices_by_id: Dict[str, Device],
+    labels_by_mac: Dict[str, Dict[str, str]],
+    list_names: Dict[str, str],
+) -> Tuple[str, str]:
+    """Name one queue of the impact check and say what kind of queue it is."""
+
+    if queue_id == GENERAL_QUEUE_ID:
+        return "General profile", "General profile"
+    for prefix, label in (("quota:", "Service quota"), ("assignment:", "Browser service profile")):
+        if queue_id.startswith(prefix):
+            return f"{label} {queue_id[len(prefix):]}", label
+    if queue_id.startswith("servicelist:"):
+        list_id = queue_id[len("servicelist:"):]
+        return f"Service list {list_names.get(list_id, list_id)}", "Service list"
+    device = devices_by_id.get(queue_id)
+    if device is not None:
+        return _device_title(device, labels_by_mac, queue_id), "Device"
+    return queue_id, "Queue"
 
 
 def _device_payload(
@@ -9923,6 +10612,33 @@ class ControlServer(HTTPServer):
         payload["running"] = self.scheduler is not None and self.scheduler.is_active
         return payload
 
+    def _applied_summary(self, plan: NetworkPlan) -> Dict[str, Any]:
+        """Count what an apply sent so the dashboard can say what is now running."""
+
+        device_ids = {rule.device_id for rule in plan.mark_rules}
+        websites = self.repository.get_website_policy()
+        general_name = None
+        if plan.general_profile is not None:
+            general = self.repository.get_profile(plan.general_profile.profile_id)
+            general_name = general.name if general is not None else None
+        return {
+            "devices": len(plan.mark_rules),
+            "groups": sum(
+                1
+                for group in self.repository.list_device_groups()
+                if device_ids.intersection(group.device_ids)
+            ),
+            "service_lists": len(plan.service_list_rules),
+            "protected": len(plan.protected_mac_addresses),
+            "general_profile": general_name,
+            # Start enforces the block list and the allow list and the MAC list too.
+            "access_rules": (
+                websites.mode == "allow_only"
+                or bool(websites.blocked_domains)
+                or self.repository.get_mac_policy().mode != "disabled"
+            ),
+        }
+
     def response_for(self, path: str, query: str = "") -> Tuple[int, str, bytes]:
         """Build the response body for a supported GET path."""
 
@@ -10455,7 +11171,7 @@ class ControlServer(HTTPServer):
                         "message": (
                             "Live traffic needs hardware mode."
                             if self.helper_client is None
-                            else "Network is reset. Apply the configuration to start traffic measurements."
+                            else "Network is reset. Choose Start with saved settings to start traffic measurements."
                         ),
                         "devices": {},
                         "isp_limits": isp_limits,
@@ -10504,6 +11220,8 @@ class ControlServer(HTTPServer):
                     ),
                 }
             )
+        if path == "/api/impact":
+            return HTTPStatus.OK, "application/json", _json_bytes(self._impact_status())
         if path == "/api/diagnostics":
             runtime = self.repository.get_runtime_state()
             diagnostics = {
@@ -10513,7 +11231,7 @@ class ControlServer(HTTPServer):
                 "connected_clients": None,
                 "traffic_counters": None,
                 "traffic_counters_message": (
-                    "Network is reset. Apply the configuration to start traffic measurements."
+                    "Network is reset. Choose Start with saved settings to start traffic measurements."
                     if runtime.observed_state == "reset"
                     else None
                 ),
@@ -10831,7 +11549,7 @@ class ControlServer(HTTPServer):
                     {
                         "timer": _timer_payload(timer),
                         "live_applied": False,
-                        "message": "timer saved; apply the configuration in hardware mode to start it",
+                        "message": "timer saved; choose Start with saved settings in hardware mode to start it",
                     }
                 )
             status, content_type, body = self._apply_after_change()
@@ -10909,7 +11627,7 @@ class ControlServer(HTTPServer):
                             now=int(time.time()),
                         ),
                         "live_applied": False,
-                        "message": "progression saved; apply the configuration in hardware mode to start it",
+                        "message": "progression saved; choose Start with saved settings in hardware mode to start it",
                     }
                 )
             status, content_type, body = self._apply_after_change()
@@ -11773,7 +12491,7 @@ class ControlServer(HTTPServer):
                     {
                         **fields,
                         "live_applied": False,
-                        "message": "Saved. The network is reset, so apply the configuration to use it.",
+                        "message": "Saved. The network is reset, so choose Start with saved settings to use it.",
                     }
                 ),
             )
@@ -11789,6 +12507,68 @@ class ControlServer(HTTPServer):
                 + response.get("error", "")
             )
         return status, content_type, _json_bytes(response)
+
+    def _impact_status(self) -> Dict[str, Any]:
+        """Name what each applied queue did so far and list the protected devices."""
+
+        def unavailable(message: str, *, paused: bool = False) -> Dict[str, Any]:
+            # `paused` means the answer is only late: the page keeps what it shows.
+            return {
+                "available": False,
+                "paused": paused,
+                "message": message,
+                "sampled_at": time.time(),
+                "queues": [],
+                "protected": [],
+            }
+
+        if self.helper_client is None:
+            return unavailable(IMPACT_NO_HELPER_MESSAGE)
+        if self.repository.get_runtime_state().observed_state == "reset":
+            return unavailable(IMPACT_RESET_MESSAGE)
+        read_queues = getattr(self.helper_client, "queue_stats", None)
+        if read_queues is None:
+            return unavailable(IMPACT_OUT_OF_DATE_MESSAGE)
+        try:
+            queues = read_queues()
+        except HelperClientError as error:
+            # A helper from before this check answers that it does not know the action.
+            if str(error) == "unknown action":
+                return unavailable(IMPACT_OUT_OF_DATE_MESSAGE)
+            LOGGER.warning("could not read queue statistics for the impact check")
+            return unavailable(IMPACT_UNREADABLE_MESSAGE, paused=True)
+        # The page divides counter changes by the time between samples so the time is taken
+        # when the helper answers and not after the names are looked up.
+        sampled_at = time.time()
+        devices_by_id = {device.id: device for device in self.repository.list_devices()}
+        labels_by_mac = self.repository.list_connected_device_labels()
+        list_names = {item.id: item.name for item in self.repository.list_service_lists()}
+        protected = self.repository.list_unaffected_devices()
+        protected_hardware = {item.mac_address for item in protected}
+        entries = []
+        for queue in queues:
+            device = devices_by_id.get(queue["device_id"])
+            # A protected device has no queue. A stale plan must never put one on screen.
+            if device is not None and device.mac_address in protected_hardware:
+                continue
+            name, kind_label = _impact_queue_name(
+                queue["device_id"],
+                devices_by_id=devices_by_id,
+                labels_by_mac=labels_by_mac,
+                list_names=list_names,
+            )
+            entries.append({**queue, "name": name, "kind_label": kind_label})
+        return {
+            "available": True,
+            "paused": False,
+            "message": None,
+            "sampled_at": sampled_at,
+            "queues": entries,
+            "protected": sorted(
+                (item.display_name or item.mac_address for item in protected),
+                key=lambda name: (name.lower(), name),
+            ),
+        }
 
     def _general_profile_status(self) -> dict:
         operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
@@ -12184,7 +12964,7 @@ class ControlServer(HTTPServer):
             or self.scheduler.applied_plan() is None
         ):
             return HTTPStatus.CONFLICT, "application/json", _json_bytes(
-                {"error": "Apply the configuration before starting a scenario."}
+                {"error": "Choose Start with saved settings before starting a scenario."}
             )
         if run.everyone_else and not self._everyone_else_counted():
             capacity_error = self._capacity_error(adding=1)
@@ -12197,10 +12977,10 @@ class ControlServer(HTTPServer):
             # Do not let a failed Start count down or resume during recovery.
             self.repository.stop_scenario_run(run.id)
             response["live_applied"] = False
-            response["message"] = "Scenario did not start. Apply the configuration then start it again."
+            response["message"] = "Scenario did not start. Choose Start with saved settings, then start it again."
             if status == HTTPStatus.OK:
                 status = HTTPStatus.CONFLICT
-                response["error"] = "Apply the configuration before starting a scenario."
+                response["error"] = "Choose Start with saved settings before starting a scenario."
         else:
             response["run"] = asdict(run)
             response["live_applied"] = True
@@ -12221,7 +13001,7 @@ class ControlServer(HTTPServer):
                     {
                         key: value,
                         "live_applied": False,
-                        "message": "settings saved; apply the configuration in hardware mode to start them",
+                        "message": "settings saved; choose Start with saved settings in hardware mode to start them",
                     }
                 ),
             )
@@ -12289,7 +13069,7 @@ class ControlServer(HTTPServer):
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {
                     "live_applied": False,
-                    "message": "saved; the network is reset, so apply the configuration to use it",
+                    "message": "saved; the network is reset, so choose Start with saved settings to use it",
                 }
             )
         if self.helper_client is not None:
@@ -12306,7 +13086,7 @@ class ControlServer(HTTPServer):
                         "live_applied": False,
                         "message": (
                             "saved; automatic recovery is paused. Check gateway status "
-                            "then Apply the configuration when it is safe"
+                            "then choose Start with saved settings when it is safe"
                         ),
                     }
                 )
@@ -12407,6 +13187,7 @@ class ControlServer(HTTPServer):
                 {
                     "result": result,
                     "state": self._runtime_state_with_running(state),
+                    "applied": self._applied_summary(plan),
                     "unverified_device_ids": list(plan.unverified_device_ids),
                     "warning": (
                         "Profiles were skipped for devices whose current Wi-Fi identity could not be verified: "

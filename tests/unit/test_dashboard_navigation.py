@@ -88,8 +88,11 @@ def test_floating_dock_and_sticky_bar_are_gone():
             r"([^{}]+)\{([^{}]*position:\s*(?:fixed|sticky)[^{}]*)\}", css
         )
     }
+    # The sidebar scrolls so the tips of its buttons are fixed to the window instead.
     # .field-tooltip is the help bubble that follows its button.
-    assert pinned <= {".sidebar", ".toast", ".credentials-panel", ".help-icon::after", ".field-tooltip"}, pinned
+    allowed = {".sidebar", ".toast", ".credentials-panel", ".help-icon::after",
+               ".sidebar .sidebar-action-row .help-icon::after", ".field-tooltip"}
+    assert pinned <= allowed, pinned
 
 
 SECOND_SCRIPT = (

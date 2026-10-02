@@ -41,6 +41,7 @@ from jittersim.config.models import (
     Profile,
     RandomWebsiteOutcome,
     Schedule,
+    ServiceList,
 )
 from jittersim.config.storage import ConfigRepository, StorageError
 from jittersim.engine.runtime import PreparedRuntimePlan, RuntimeScheduler
@@ -372,7 +373,7 @@ EXPECTED_PAGE_HEADINGS = {
     "page-activity": ["Activity log"],
     "page-access": ["Network access rules"],
     "page-diagnostics": [
-        "Profiles", "Devices", "Compiled plan", "Runtime state", "Access rules", "Diagnostics",
+        "Impact", "Profiles", "Devices", "Compiled plan", "Runtime state", "Access rules", "Diagnostics",
         "Backup and action history",
     ],
 }
@@ -2847,7 +2848,7 @@ class ControlServerTests(unittest.TestCase):
         # message, which says so.
         assign = DASHBOARD_HTML.split("async function applyProfileToDevice(", 1)[1]
         self.assertIn("result.message", assign.split("\n    }\n", 1)[0])
-        self.assertIn("apply the configuration", json.loads(body)["message"])
+        self.assertIn("Start with saved settings", json.loads(body)["message"])
 
     def test_profile_assignment_rejects_a_neighbor_without_verified_association(self) -> None:
         class UnverifiedHelper(FakeHelper):
@@ -3783,7 +3784,7 @@ class ControlServerTests(unittest.TestCase):
             messages,
             [
                 "Saved.",
-                "Saved. The network is reset, so apply the configuration to use it.",
+                "Saved. The network is reset, so choose Start with saved settings to use it.",
                 "Saved. It takes effect when the dashboard runs in hardware mode.",
             ],
         )
@@ -4383,12 +4384,13 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("Shared group data limit", DASHBOARD_HTML)
         self.assertIn("/api/groups", DASHBOARD_HTML)
         self.assertIn("/api/group-data-limits", DASHBOARD_HTML)
-        self.assertIn("Apply current configuration", DASHBOARD_HTML)
+        self.assertIn("Start with saved settings", DASHBOARD_HTML)
+        self.assertNotIn("Apply current configuration", DASHBOARD_HTML)
         self.assertIn("Reset network", DASHBOARD_HTML)
         self.assertIn("setButtonBusy(event.submitter, true)", DASHBOARD_HTML)
         self.assertIn("if (submitButton) setButtonBusy(submitButton, false);", DASHBOARD_HTML)
         self.assertIn("Dashboard refresh failed:", DASHBOARD_HTML)
-        self.assertIn("Settings changed since the last network action", DASHBOARD_HTML)
+        self.assertIn("Start with saved settings", DASHBOARD_HTML)
         self.assertIn('id="toast" class="toast" role="status"', DASHBOARD_HTML)
         self.assertIn(
             'element("toast-dismiss").addEventListener("click", dismissToast)',
@@ -4517,6 +4519,146 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertIs(json.loads(apply_body)["state"]["running"], True)
         self.assertIs(json.loads(reset_body)["state"]["running"], False)
+
+    def test_apply_reports_what_it_sent(self) -> None:
+        self.server.helper_client = FakeHelper()
+
+        status, _, body = self.server.write_response_for("/api/apply", {})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            json.loads(body)["applied"],
+            {
+                "devices": 1,
+                "groups": 0,
+                "service_lists": 0,
+                "protected": 0,
+                "general_profile": None,
+                "access_rules": False,
+            },
+        )
+
+    def test_apply_counts_groups_protected_devices_and_service_lists(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.repository.save_device(
+            Device(
+                id="laptop",
+                name="Laptop",
+                ipv4_address="192.168.50.178",
+                profile_id="slow",
+                mac_address="dc:1e:d5:3e:97:4c",
+            )
+        )
+        self.repository.save_device_group(DeviceGroup("family", "Family", ("laptop",), "slow"))
+        self.repository.save_device_group(DeviceGroup("others", "Others", ("alice",), "slow"))
+        self.repository.save_service_list(
+            ServiceList("video", "Video", "slow", hostnames=("video.example.com",))
+        )
+        self.repository.save_service_list(
+            ServiceList("paused", "Paused", "slow", hostnames=("paused.example.com",), enabled=False)
+        )
+        self.protect("02:00:00:00:00:01")
+
+        status, _, body = self.server.write_response_for("/api/apply", {})
+
+        self.assertEqual(status, 200, body)
+        # The unverified device alice is left out of the plan so her group is not counted.
+        self.assertEqual(
+            json.loads(body)["applied"],
+            {
+                "devices": 1,
+                "groups": 1,
+                "service_lists": 1,
+                "protected": 1,
+                "general_profile": None,
+                "access_rules": False,
+            },
+        )
+
+    def test_apply_names_the_general_profile_instead_of_counting_devices(self) -> None:
+        self.server.helper_client = FakeHelper()
+        self.repository.save_device_group(DeviceGroup("family", "Family", ("alice",), "slow"))
+        self.repository.save_general_profile("slow")
+        self.protect()
+
+        status, _, body = self.server.write_response_for("/api/apply", {})
+
+        self.assertEqual(status, 200, body)
+        self.assertEqual(
+            json.loads(body)["applied"],
+            {
+                "devices": 0,
+                "groups": 0,
+                "service_lists": 0,
+                "protected": 1,
+                "general_profile": "Slow",
+                "access_rules": False,
+            },
+        )
+
+    def test_apply_says_whether_access_rules_were_started(self) -> None:
+        # Block rules and an allow list and a MAC list are all enforced by Start. The words
+        # after a start with nothing else saved must not say that nothing is running.
+        from jittersim.config.models import MacPolicy, WebsitePolicy
+
+        self.server.helper_client = FakeHelper()
+
+        def started():
+            status, _, body = self.server.write_response_for("/api/apply", {})
+            self.assertEqual(status, 200, body)
+            return json.loads(body)["applied"]["access_rules"]
+
+        self.assertFalse(started())
+        # An allow list that is not switched on does nothing.
+        self.repository.save_website_policy(
+            WebsitePolicy(mode="unrestricted", allowed_domains=("example.com",))
+        )
+        self.assertFalse(started())
+        self.repository.save_website_policy(
+            WebsitePolicy(mode="unrestricted", blocked_domains=("ads.example.com",))
+        )
+        self.assertTrue(started())
+        self.repository.save_website_policy(
+            WebsitePolicy(mode="allow_only", allowed_domains=("example.com",))
+        )
+        self.assertTrue(started())
+        self.repository.save_website_policy(WebsitePolicy())
+        self.assertFalse(started())
+        self.repository.save_mac_policy(
+            MacPolicy(mode="denylist", denylist=("aa:bb:cc:dd:ee:ff",))
+        )
+        self.assertTrue(started())
+
+    def test_a_failed_apply_has_the_same_body_as_before_the_summary_existed(self) -> None:
+        # The dashboard shows the error and the hint. A summary of what was sent would say
+        # that something was started when nothing was.
+        self.server.helper_client = FakeHelper(fail_action="apply")
+
+        status, _, body = self.server.write_response_for("/api/apply", {})
+
+        self.assertEqual(status, 502)
+        failure = json.loads(body)
+        self.assertEqual(set(failure), {"error", "hint", "state"})
+        self.assertEqual(failure["error"], "network helper apply failed")
+        self.assertEqual(failure["state"]["observed_state"], "error")
+
+    def test_a_plan_that_cannot_be_built_has_the_same_body_as_before(self) -> None:
+        from jittersim.engine.compiler import PlanError
+
+        self.server.helper_client = FakeHelper()
+        with patch("jittersim.api.server.compile_stored_plan", side_effect=PlanError("broken")):
+            status, _, body = self.server.write_response_for("/api/apply", {})
+
+        self.assertEqual(status, 409)
+        self.assertEqual(
+            json.loads(body), {"error": "stored configuration cannot be applied"}
+        )
+
+    def test_apply_without_a_helper_has_the_same_body_as_before(self) -> None:
+        status, _, body = self.server.write_response_for("/api/apply", {})
+
+        self.assertEqual(status, 503)
+        self.assertEqual(json.loads(body), {"error": "network helper is not configured"})
 
     def test_diagnostics_runtime_carries_the_running_flag(self) -> None:
         self.server.helper_client = FakeHelper()
@@ -6078,8 +6220,8 @@ class ControlServerTests(unittest.TestCase):
     def test_a_block_list_change_before_the_first_apply_is_not_applied_by_the_scheduler(
         self,
     ) -> None:
-        # The success message tells the user to apply after Reset or Panic. The scheduler is
-        # paused then and a saved change waits for the Apply button.
+        # The success message tells the user to start again after Reset or Panic. The scheduler
+        # is paused then and a saved change waits for the Start with saved settings button.
         helper, scheduler = self._scheduled_server()
 
         self.server.write_response_for(

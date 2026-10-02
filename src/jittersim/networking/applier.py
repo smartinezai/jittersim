@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from ipaddress import IPv4Address
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from jittersim.config.exemptions import MAX_UNAFFECTED_DEVICES, normalize_exempt_mac
 from jittersim.config.models import ValidationError
@@ -428,6 +428,29 @@ class NetworkApplier:
             )
             outputs[direction] = result.stdout
         return outputs
+
+    def queue_stats(self) -> Dict[str, List[Dict[str, Any]]]:
+        """Read kernel queue counters on both project interfaces without changing anything."""
+
+        stats: Dict[str, List[Dict[str, Any]]] = {}
+        for interface in (self._topology.uplink_interface, self._topology.test_interface):
+            result = self._executor.run(
+                Command(
+                    executable="tc",
+                    arguments=("-s", "-j", "qdisc", "show", "dev", interface),
+                    purpose=f"read queue counters on {interface}",
+                )
+            )
+            if len(result.stdout) > 512 * 1024:
+                raise CommandExecutionError("queue counter response is too large")
+            try:
+                decoded = json.loads(result.stdout or "[]")
+            except json.JSONDecodeError as error:
+                raise CommandExecutionError(f"queue counters on {interface} are not JSON") from error
+            if not isinstance(decoded, list):
+                raise CommandExecutionError(f"unexpected queue counters on {interface}")
+            stats[interface] = decoded
+        return stats
 
     def configure_access_point(self, *, ssid: str, password: str, security: str = "WPA3") -> int:
         """Set the local test AP credentials without touching the upstream router."""

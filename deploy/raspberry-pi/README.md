@@ -161,8 +161,10 @@ The helper applies these rules on the Pi and reset pauses scheduled changes
 before removing them. A timer temporarily takes priority for its device then
 returns to the normal schedule or profile when it expires.
 After a service restart, JitterSim restores the last applied plan or completes
-the last reset. A fresh installation with no prior action leaves the network
-unchanged.
+the last reset. A saved change that the running scheduler did not need to apply
+clears that record so JitterSim is then not running after a restart until you
+choose Start with saved settings or Reset network. A fresh installation with no
+prior action leaves the network unchanged.
 
 The **General profile** control applies one saved profile to every unprotected
 test Wi-Fi client, including later arrivals. Its speed limit is shared by
@@ -267,7 +269,8 @@ records the remaining network-design decision.
    the setting inside Firefox. For Safari or Chrome, macOS offers **Secure Web
    Proxy (HTTPS)** under System Settings → Network → Wi-Fi → Details → Proxies.
    That system setting can also affect other apps that honor it.
-4. Apply the configuration in the dashboard. Try the selected service and an
+4. Choose **Start with saved settings** in the dashboard or **Re-apply saved
+   settings** if JitterSim already runs. Try the selected service and an
    unrelated HTTPS site in that browser. Use a simple profile with a visible
    delay for the first check. A shared destination address is safe because the
    proxy classifies each tunnel by its requested hostname. To check the proxy
@@ -305,9 +308,9 @@ It needs no proxy or setting on the client. Create one in the dashboard under
 **Schedules and limits** in the **Service lists** card. Use a simple profile with a visible delay for the first
 check.
 
-1. Apply the configuration. Connect a test client that is not in **Unaffected
-   by profiles** and open a listed service and then an unrelated site. Only the
-   listed service should show the profile's delay.
+1. Choose **Start with saved settings** in the dashboard. Connect a test client
+   that is not in **Unaffected by profiles** and open a listed service and then
+   an unrelated site. Only the listed service should show the profile's delay.
 2. Check the set the Pi keeps for the list. The set name is `svc_` followed by
    the list's queue number (the first list in a plan with no devices is
    `svc_1`):
@@ -464,7 +467,7 @@ JitterSim's effects and household restrictions. Saved lists remain available.
 A running dashboard notices the reset and stops scheduled changes. Use
 `sudo jittersim reset` to keep household restrictions active while stopping
 experiments. The older `jittersim-reset` command has the same limited scope.
-Choose **Apply current configuration** to resume experiments. Re-enable
+Choose **Start with saved settings** to resume experiments. Re-enable
 household access rules separately when ready.
 
 `sudo jittersim status` shows the last recorded network action and whether the
