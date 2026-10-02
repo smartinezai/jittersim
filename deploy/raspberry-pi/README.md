@@ -51,11 +51,12 @@ sudo deploy/raspberry-pi/install.sh
 ```
 
 This Pi release replaces its source folders on upgrade so removed modules do
-not remain in the installed package. It also retires the access recovery, DNS,
-update and Wi-Fi service definitions from the older main release. Their private
-recovery copies are kept in `/var/lib/jittersim-retired-services`. The active
-Wi-Fi connection stays running and NetworkManager reconnects it at boot.
-An active old update must finish before installation can proceed. Keep a
+not remain in the installed package. The installer installs the access
+recovery, DNS, update and Wi-Fi units and enables the recovery and Wi-Fi units.
+`jittersim-ap.service` starts the test Wi-Fi at boot after the management
+firewall and the access restore. An installer run never restarts a running
+Wi-Fi connection.
+An active release update must finish before installation can proceed. Keep a
 private backup of `/opt/jittersim`, `/etc/jittersim`, `/var/lib/jittersim`,
 the current service definitions and NetworkManager connections before changing
 releases. A software rollback must restore those service definitions and their
@@ -720,11 +721,24 @@ Subsequent release updates retain a recovery copy of both the database and
 `/var/lib/jittersim-access` alongside the service definitions.
 
 The installer turns off automatic activation of the NetworkManager AP profile.
-`jittersim-ap.service` starts it only after the management firewall and saved
-access rules have loaded. The privileged helper owns the applied access policy.
+`jittersim-ap.service` starts it after the management firewall is loaded and
+the saved access rules were tried. The unit only orders itself after those two
+units. It does not require them. The test Wi-Fi therefore comes up at boot even
+when restoring the access rules failed. In that case the guard table keeps test
+traffic closed while the Wi-Fi stays visible and Normal access opens it. The
+unit refuses to start without the management firewall. It has no stop action
+so restarting the firewall or the access unit during an install or an update
+never touches the running Wi-Fi. To take the Wi-Fi down on purpose run
+`sudo nmcli connection down jittersim-ap`. The privileged helper owns the
+applied access policy.
 The dashboard cannot write its files directly. DNS failures keep blocked
 traffic blocked. A failed policy recovery closes test-network traffic while
 leaving the Ethernet management path available.
+
+The filtered resolver listens on `127.0.0.1` and `192.168.50.1` at port 5335.
+The access table redirects test-client DNS there and keeps that port closed to
+every other interface. Port 5353 stays free for the Avahi publisher so
+`<pi-name>.local` and `jittersim.local` keep resolving from the laptop.
 
 `jittersim-dns.service` is installed but not enabled. The helper starts it
 when saved access rules are on, at boot through `jittersim-access-boot` and
@@ -738,8 +752,9 @@ limit covers expanded device/domain combinations. Queries are not logged.
 Existing on-demand DNS observations remain a separate feature.
 
 **Reset network** and `sudo jittersim reset` now clear experiment effects while
-preserving household restrictions. Use the **Normal access** panic button or
-`sudo jittersim normal-access` to disable both. They pause automatic changes,
+preserving household restrictions. Use the sidebar **Panic** button (the same
+as **Normal access** under Access rules) or `sudo jittersim normal-access` to
+disable both. They pause automatic changes,
 remove profiles and disable access rules without deleting the saved lists.
 DNS connection mappings are cleared so a reused resolver connection follows
 the new setting. The emergency action does not depend on restarting Unbound.
@@ -756,9 +771,9 @@ Changing AP backends requires hardware acceptance before enabling this option.
 If startup restoration fails, inspect `journalctl -u jittersim-access-boot`
 and `journalctl -u jittersim-helper` over Ethernet. Stop the dashboard and
 helper before restoring `/var/lib/jittersim-access` from the release recovery
-copy. Then restart `jittersim-access-boot.service`, `jittersim-ap.service` and
-the helper and dashboard. Do not remove the temporary firewall guard merely
-to hide a failed restoration.
+copy. Then restart `jittersim-access-boot.service` and the helper and dashboard.
+Start `jittersim-ap.service` too if the test Wi-Fi is not up. Do not remove the
+temporary firewall guard merely to hide a failed restoration.
 
 Settings exports use version 2 so an older reader cannot silently discard the
 new site rules. Restoring a release without access-control support is refused

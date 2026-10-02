@@ -35,7 +35,7 @@ APPLY_HELP = (
     "Starts JitterSim with everything you saved: device and group profiles and schedules"
     " and limits and service lists and access rules."
 )
-RESET_HELP = "Stops JitterSim and removes every rule from the Pi so all devices run normally."
+RESET_HELP = "Stops the profiles and removes their rules from the Pi so devices run normally."
 
 
 def start_fixture():
@@ -516,7 +516,7 @@ def check_width(browser, width, height):
         apply_icon.hover()
         tip = tip_of(page, apply_icon)
         assert tip["shown"] and tip["text"].startswith(APPLY_HELP), tip
-        assert "Reset or Panic stops it." in tip["text"], tip
+        assert "Reset or Panic stops the profiles." in tip["text"], tip
         page.wait_for_timeout(300)
         page.screenshot(path=f"test-results/apply-clarity-help-{width}.png")
         page.mouse.move(width // 2, 5)
@@ -647,7 +647,7 @@ def check_width(browser, width, height):
         # Panic stops it again and says how to run it
         page.locator("#panic-button").click()
         expect(message).to_contain_text(
-            "All profiles are off. Choose Start with saved settings to resume."
+            "All profiles and household blocking are off. Choose Start with saved settings"
         )
         expect(runtime).to_have_text(OFF)
         expect(apply_button).to_have_text(START)

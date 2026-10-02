@@ -720,7 +720,7 @@ def test_the_apply_and_reset_buttons_each_have_a_help_icon():
     # One label for both states because the button reads Start or Re-apply.
     apply_help = by_label["Start or re-apply saved settings help"]
     reset_help = by_label["Reset network help"]
-    assert len(apply_help) <= 260
+    assert len(apply_help) <= 280
     for fact in (
         "Starts JitterSim with everything you saved",
         "device and group profiles",
@@ -729,12 +729,13 @@ def test_the_apply_and_reset_buttons_each_have_a_help_icon():
         "service lists",
         "access rules",
         "saved changes apply on their own within a few seconds",
-        "Reset or Panic stops it",
+        "Reset or Panic stops the profiles",
         "Protected devices stay untouched",
     ):
         assert fact in apply_help, fact
     assert reset_help == (
-        "Stops JitterSim and removes every rule from the Pi so all devices run normally."
+        "Stops the profiles and removes their rules from the Pi so devices run normally."
+        " Household blocking of devices and sites stays on."
         " Your saved settings are kept."
         " Choose Start with saved settings to run them again."
     )
@@ -777,17 +778,19 @@ def test_the_sidebar_is_one_column_that_scrolls_as_a_whole():
 
 def test_a_short_window_gives_the_footer_room_so_panic_stays_in_view():
     css = re.search(r"<style>(.*?)</style>", DASHBOARD_HTML, re.DOTALL).group(1)
+    # Up to 900px of height (a laptop screen) the sidebar and its footer use tighter gaps.
     block = re.search(
-        r"@media \(min-width: 48\.01rem\) and \(max-height: 800px\) \{([^@]*?)\n    \}", css
+        r"@media \(min-width: 48\.01rem\) and \(max-height: 900px\) \{([^@]*?)\n    \}", css
     ).group(1)
-    assert re.search(r"\.sidebar \{[^{}]*gap: 0\.6rem", block)
-    assert re.search(r"\.sidebar-nav a \{[^{}]*padding-block: 0\.25rem", block)
+    assert re.search(r"\.sidebar \{[^{}]*gap: 0\.5rem", block)
+    assert re.search(r"\.sidebar-nav a \{[^{}]*padding-block: 0\.22rem", block)
+    assert re.search(r"\.sidebar-footer, \.sidebar-operate, \.sidebar-actions \{ gap: 0\.35rem", block)
 
 
 def test_panic_says_how_to_run_again():
     button = re.search(r'<button[^>]*id="panic-button"[^>]*>', sidebar_html()).group(0)
     assert (
-        'title="Remove all traffic shaping now. Choose Start with saved settings to run again."'
+        'title="Turn off all profiles and household blocking now. Your saved settings are kept."'
         in button
     )
 

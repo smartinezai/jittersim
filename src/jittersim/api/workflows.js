@@ -20,6 +20,13 @@ function rememberDraft(form) {
   renderDraftNotice();
 }
 
+// Call this after the page itself sets the fields of a form. A draft that stays
+// behind puts the old text back at the next refresh.
+function clearDraft(id) {
+  formDrafts.delete(id);
+  renderDraftNotice();
+}
+
 function restoreDrafts() {
   formDrafts.forEach((draft, id) => {
     const form = element(id);

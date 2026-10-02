@@ -124,5 +124,82 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("systemctl restart jittersim-control-firewall.service", self.installer)
 
 
+class AccessPointStartTests(unittest.TestCase):
+    """The test Wi-Fi starts at boot and an install or update never restarts it."""
+
+    PI = REPOSITORY_ROOT / "deploy" / "raspberry-pi"
+
+    def setUp(self) -> None:
+        self.installer = (self.PI / "install.sh").read_text()
+        # Comments explain the rules and may name the directives they forbid.
+        self.unit = "\n".join(
+            line
+            for line in (self.PI / "jittersim-ap.service").read_text().splitlines()
+            if not line.startswith("#")
+        )
+
+    def directives(self, text, name):
+        return [
+            line.split("=", 1)[1].split()
+            for line in text.splitlines()
+            if line.startswith(name + "=")
+        ]
+
+    def test_the_unit_only_orders_itself_after_the_firewall_and_the_access_restore(self):
+        wants = [word for line in self.directives(self.unit, "Wants") for word in line]
+        after = [word for line in self.directives(self.unit, "After") for word in line]
+        for needed in ("jittersim-access-boot.service", "jittersim-control-firewall.service"):
+            self.assertIn(needed, wants)
+            self.assertIn(needed, after)
+        self.assertIn("NetworkManager.service", after)
+        access_boot = (self.PI / "jittersim-access-boot.service").read_text()
+        self.assertEqual(self.directives(access_boot, "Before"), [["jittersim-ap.service"]])
+
+    def test_nothing_makes_a_restart_of_another_unit_restart_or_stop_the_wifi(self):
+        # Requires= and BindsTo= pass a restart on to the unit that needs them and
+        # a stop action would then take the connection down for every client.
+        for name in ("Requires", "BindsTo", "PartOf", "Requisite", "Upholds"):
+            self.assertEqual(self.directives(self.unit, name), [], name)
+        self.assertNotIn("ExecStop", self.unit)
+        self.assertNotIn("connection down", self.unit)
+        for path in sorted(self.PI.glob("*.service")):
+            text = path.read_text()
+            for name in ("Requires", "BindsTo", "PartOf", "Requisite", "Upholds"):
+                for line in self.directives(text, name):
+                    self.assertNotIn("jittersim-ap.service", line, f"{path.name} {name}")
+        self.assertIn("ExecStart=/usr/bin/nmcli connection up jittersim-ap", self.unit)
+        self.assertIn("RemainAfterExit=yes", self.unit)
+        # The one safety check that stays: no test Wi-Fi without the management firewall.
+        self.assertIn(
+            "ExecStartPre=/usr/sbin/nft list table inet jittersim_control", self.unit
+        )
+
+    def test_the_installer_enables_the_unit_and_keeps_boot_activation_with_it(self):
+        self.assertIn(
+            "systemctl enable jittersim-access-boot.service jittersim-ap.service", self.installer
+        )
+        # NetworkManager must not raise the access point before the access rules.
+        modify = self.installer[self.installer.index("nmcli connection modify jittersim-ap \\") :]
+        modify = modify[: modify.index("ap_settings_after")]
+        self.assertIn("connection.autoconnect no", modify)
+        self.assertNotIn("connection.autoconnect yes", self.installer)
+        self.assertIn("autoconnect no", self.installer.split("nmcli connection add", 1)[1][:200])
+
+    def test_an_installer_run_never_restarts_stops_or_drops_the_running_wifi(self):
+        for forbidden in (
+            "systemctl restart jittersim-ap",
+            "systemctl stop jittersim-ap",
+            "systemctl try-restart jittersim-ap",
+            "nmcli connection down",
+            "nmcli connection reload",
+        ):
+            self.assertNotIn(forbidden, self.installer)
+        # The unit is started only when no access point is active yet.
+        start = self.installer.index("systemctl start jittersim-ap.service")
+        branch = self.installer[: start].rindex("if [ \"$ap_active_connection\" = jittersim-ap ]")
+        self.assertIn("else", self.installer[branch:start])
+        self.assertNotIn("fi", self.installer[branch:start].split("else", 1)[1].split("\n", 1)[1])
+
+
 if __name__ == "__main__":
     unittest.main()
