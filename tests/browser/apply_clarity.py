@@ -1,5 +1,6 @@
 """Check that the Apply button says what it does and whether JitterSim is running."""
 
+import json
 import os
 import selectors
 import subprocess
@@ -126,14 +127,156 @@ def footer_geometry(page):
     )
 
 
-def assert_panic_in_view(page, what):
-    """Panic is the control that must stay reachable so it may not hang below the window."""
+# A wider face and a larger root size stand in for the fonts of another machine. What the
+# journey asserts has to hold with them as well.
+WIDE_FONTS = (
+    "html { font-size: 112.5% !important; }"
+    " * { font-family: Verdana, 'DejaVu Sans', sans-serif !important; }"
+)
+STRESSES = (("normal fonts", ""), ("wide fonts", WIDE_FONTS))
+# The sidebar scrolls as a whole. A window as tall as the content shows all of it and a shorter
+# one shows what it can and scrolls to the rest. So the journey asks for the first only on the
+# tall window and for the reach of every control on the others.
+TALL_WINDOW = (1920, 1000)
+REACH_SIZES = ((1280, 700), (1280, 721), (1280, 760), (1280, 800), (390, 844))
+REACH_TARGETS = ("#panic-button", "#router-wifi-toggle", "#copy-wifi-name", "#copy-wifi-password")
+LONG_MESSAGE = (
+    "Started: 12 devices with a profile · 3 groups · 2 service lists · 4 protected devices stay"
+    " untouched. Profiles were skipped for devices whose current Wi-Fi identity could not be"
+    " verified: living room tv and kitchen tablet and garden camera."
+)
 
-    box = page.locator("#panic-button").bounding_box()
-    height = page.viewport_size["height"]
-    assert box["y"] >= 0, (what, "Panic starts above the window", box)
-    assert box["y"] + box["height"] <= height + 0.5, (what, "Panic is cut off", box, height)
+
+def set_font_stress(page, css):
+    page.evaluate(
+        """(css) => {
+            let node = document.getElementById('font-stress');
+            if (!css) { if (node) node.remove(); return; }
+            if (!node) {
+                node = document.createElement('style');
+                node.id = 'font-stress';
+                document.head.appendChild(node);
+            }
+            node.textContent = css;
+        }""",
+        css,
+    )
+
+
+def inside_window(page, selector, what):
+    box = page.locator(selector).bounding_box()
+    size = page.viewport_size
+    assert box is not None, (what, selector, "is not on the page")
+    assert box["x"] >= 0 and box["y"] >= 0, (what, selector, "starts outside the window", box)
+    assert box["x"] + box["width"] <= size["width"] + 0.5, (what, selector, "runs past the right", box)
+    assert box["y"] + box["height"] <= size["height"] + 0.5, (what, selector, "is cut off", box, size)
     return box
+
+
+def assert_no_overlap_or_overflow(page, what):
+    """No control of the sidebar sits on another and nothing runs sideways."""
+
+    boxes = page.evaluate(
+        """() => Array.from(document.querySelectorAll(
+            '.sidebar button, .sidebar a, .sidebar .help-icon, .sidebar p, .sidebar summary'
+        )).map((node) => {
+            const box = node.getBoundingClientRect();
+            return {
+                name: node.id || node.textContent.trim().slice(0, 24),
+                shown: box.width > 0 && box.height > 0 && node.offsetParent !== null,
+                left: box.left, top: box.top, right: box.right, bottom: box.bottom,
+            };
+        }).filter((box) => box.shown)"""
+    )
+    for index, first in enumerate(boxes):
+        for second in boxes[index + 1 :]:
+            across = min(first["right"], second["right"]) - max(first["left"], second["left"])
+            down = min(first["bottom"], second["bottom"]) - max(first["top"], second["top"])
+            assert not (across > 1 and down > 1), (what, "controls overlap", first, second)
+    overflow = page.evaluate(
+        """() => {
+            const sidebar = document.querySelector('.sidebar');
+            return {
+                page: document.documentElement.scrollWidth - window.innerWidth,
+                sidebar: sidebar.scrollWidth - sidebar.clientWidth,
+            };
+        }"""
+    )
+    assert overflow["page"] <= 1 and overflow["sidebar"] <= 1, (what, "runs sideways", overflow)
+
+
+def fits_in_window(box, size):
+    return (box["x"] >= 0 and box["y"] >= 0 and box["x"] + box["width"] <= size["width"] + 0.5
+            and box["y"] + box["height"] <= size["height"] + 0.5)
+
+
+def scroll_like_a_person(page, selector, what):
+    """Turn the mouse wheel over the sidebar until the control is fully in the window.
+
+    A script can scroll an area that a person cannot reach so the wheel is used. It moves the
+    sidebar when the sidebar scrolls and the page when the sidebar is part of the page.
+    """
+
+    size = page.viewport_size
+    for _ in range(60):
+        box = page.locator(selector).bounding_box()
+        assert box is not None, (what, selector, "is not on the page")
+        if fits_in_window(box, size):
+            return box
+        sidebar = page.locator(".sidebar").bounding_box()
+        page.mouse.move(
+            sidebar["x"] + sidebar["width"] / 2,
+            min(sidebar["y"] + sidebar["height"] / 2, size["height"] / 2),
+        )
+        page.mouse.wheel(0, 120 if box["y"] + box["height"] > size["height"] else -120)
+        page.wait_for_timeout(20)
+    raise AssertionError((what, selector, "cannot be scrolled into the window", box, size))
+
+
+def assert_reachable(page, what):
+    """Scroll to each control that has to be reachable and find it fully in the window."""
+
+    for selector in REACH_TARGETS:
+        scroll_like_a_person(page, selector, what)
+        inside_window(page, selector, what)
+        assert_no_overlap_or_overflow(page, what)
+
+
+def assert_whole_sidebar_in_window(page, what):
+    """On a tall window the buttons that act on the network are in view with no scrolling."""
+
+    for selector in ("#apply-button", "#reset-button", "#panic-button"):
+        inside_window(page, selector, what)
+    scrolling = page.evaluate(
+        """() => {
+            const sidebar = document.querySelector('.sidebar');
+            return {top: sidebar.scrollTop, extra: sidebar.scrollHeight - sidebar.clientHeight};
+        }"""
+    )
+    assert scrolling["top"] == 0, (what, "the sidebar was scrolled", scrolling)
+    assert_no_overlap_or_overflow(page, what)
+
+
+def assert_sidebar_everywhere(page, state):
+    """Check the tall window and the shorter ones with the normal fonts and with wide ones."""
+
+    start = page.viewport_size
+    for stress, css in STRESSES:
+        set_font_stress(page, css)
+        width, height = TALL_WINDOW
+        page.set_viewport_size({"width": width, "height": height})
+        page.evaluate("document.querySelector('.sidebar').scrollTo(0, 0)")
+        if css:
+            # Wider fonts need a taller window to show everything. A window that is just tall
+            # enough for the normal fonts is no promise for them so only the reach is checked.
+            assert_reachable(page, f"{state} with {stress} at {width}x{height}")
+        else:
+            assert_whole_sidebar_in_window(page, f"{state} at {width}x{height}")
+        for width, height in REACH_SIZES:
+            page.set_viewport_size({"width": width, "height": height})
+            assert_reachable(page, f"{state} with {stress} at {width}x{height}")
+    set_font_stress(page, "")
+    page.set_viewport_size(start)
 
 
 def check_tips(browser):
@@ -161,11 +304,6 @@ def check_tips(browser):
             page.reload()
             wait_for_automatic_token_check(page)
             expect(page.locator("#apply-summary")).to_have_text(NOTHING_SAVED)
-            if width > 768 and height >= 700:
-                # the extra line under the button must not push Panic below the window
-                panic = assert_panic_in_view(page, f"at {width}x{height}")
-                print(f"panic at {width}x{height}: top {panic['y']:.1f} bottom "
-                      f"{panic['y'] + panic['height']:.1f}")
             apply_icon.hover()
             box = assert_tip_inside_window(page, apply_icon, f"apply tip at {width}x{height}")
             page.wait_for_timeout(200)
@@ -212,13 +350,83 @@ def check_tips(browser):
             "Re-applied. 1 protected device stays untouched. " + NONE_TO_SHAPE
             + " Access rules apply."
         )
-        # The same with something running and a longer status and message in the footer.
-        for width, height in ((1280, 760), (1280, 800)):
-            page.set_viewport_size({"width": width, "height": height})
-            page.wait_for_timeout(200)
-            panic = assert_panic_in_view(page, f"while running at {width}x{height}")
-            print(f"panic while running at {width}x{height}: bottom "
-                  f"{panic['y'] + panic['height']:.1f}")
+        assert not errors, errors
+        context.close()
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
+
+
+def check_sidebar_reach(browser):
+    """The controls of the sidebar are in view or reachable whatever the text and the fonts are.
+
+    The states give a long and a short label on the Apply button and a long and a short
+    status and message. Each is checked with the normal fonts and with a wider face.
+    """
+
+    process, port = start_fixture()
+    try:
+        base = f"http://127.0.0.1:{port}"
+        context = browser.new_context(viewport={"width": 1280, "height": 800})
+        page = context.new_page()
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        runtime = page.locator("#runtime-summary")
+
+        def post(path, data):
+            response = page.request.post(base + path, headers=HEADERS, data=data)
+            assert response.ok, (path, response.status, response.text())
+
+        page.goto(base)
+        page.locator("#open-admin-credentials").click()
+        page.locator("#admin-token").fill("browser-test")
+        page.locator("#check-admin-token").click()
+        expect(page.locator("#private-dashboard")).to_be_visible()
+        page.locator("#remember-admin-token").check()
+        page.locator("#close-credentials").click()
+
+        # Not running: the long two line label on the button and a longer status.
+        expect(runtime).to_have_text(NOT_RUNNING)
+        expect(page.locator("#apply-button")).to_have_text(START)
+        assert_sidebar_everywhere(page, "not running")
+
+        # Off after a reset: the shortest status and message.
+        page.locator("#reset-button").click()
+        expect(runtime).to_have_text(OFF)
+        assert_sidebar_everywhere(page, "off")
+
+        # Running with a lot saved: the short label and the longest status and Saved line.
+        post("/api/profiles", {"id": "slow", "name": PROFILE_NAME, "upload": {}, "download": {}})
+        post("/api/devices", {"id": "fixture-laptop", "name": "Fixture laptop",
+                              "ipv4_address": IP_ADDRESS, "profile_id": "slow",
+                              "mac_address": MAC_ADDRESS})
+        post("/api/general-profile", {"profile_id": "slow"})
+        post("/api/unaffected-devices", {"mac_address": MAC_ADDRESS, "display_name": "Mine"})
+        post("/api/policies", {"websites": {"mode": "unrestricted",
+                                            "blocked_domains": ["blocked.invalid"]}})
+        page.reload()
+        wait_for_automatic_token_check(page)
+        page.locator("#apply-button").click()
+        expect(runtime).to_have_text(RUNNING)
+        expect(page.locator("#apply-button")).to_have_text(REAPPLY)
+        expect(page.locator("#apply-summary")).to_contain_text("Saved: General profile")
+        assert_sidebar_everywhere(page, "running")
+
+        # The same with a message that fills several lines.
+        page.evaluate("(text) => showMessage(text, 'success')", LONG_MESSAGE)
+        assert_sidebar_everywhere(page, "running with a long message")
+
+        # A failed reset has the longest status text.
+        failed = page.request.get(base + "/api/state", headers=HEADERS).json()
+        failed["state"].update(observed_state="error", running=False, last_action="reset")
+        failed_route = lambda route: route.fulfill(json=failed)  # noqa: E731
+        page.route("**/api/state", failed_route)
+        page.reload()
+        wait_for_automatic_token_check(page)
+        expect(runtime).to_have_text(RESET_FAILED)
+        page.evaluate("(text) => showMessage(text, 'error')", LONG_MESSAGE)
+        assert_sidebar_everywhere(page, "failed reset with a long message")
+        page.unroute("**/api/state", failed_route)
         assert not errors, errors
         context.close()
     finally:
@@ -462,6 +670,7 @@ def run():
         )
         try:
             check_tips(browser)
+            check_sidebar_reach(browser)
             for width, height in ((1920, 1000), (390, 844)):
                 check_width(browser, width, height)
             print("Apply clarity acceptance passed at desktop and phone widths.")

@@ -128,7 +128,22 @@ class PatientHelperClient(HelperClient):
             time.sleep(BUSY_WAIT_SECONDS)
 
 
+# JITTERSIM_BROWSER_TEST_WIDE_FONTS=1 puts a wider face and a larger root size on the page so a
+# journey can show that it holds on a machine whose fonts are taller than the ones it was
+# written on.
+WIDE_FONTS_STYLE = (
+    b"<style>html { font-size: 112.5% !important; }"
+    b" * { font-family: Verdana, 'DejaVu Sans', sans-serif !important; }</style>"
+)
+
+
 class FixtureServer(ControlServer):
+    def response_for(self, path, query=""):
+        status, content_type, body = super().response_for(path, query)
+        if path == "/" and os.environ.get("JITTERSIM_BROWSER_TEST_WIDE_FONTS") == "1":
+            body = body.replace(b"</head>", WIDE_FONTS_STYLE + b"</head>", 1)
+        return status, content_type, body
+
     def get_request(self):
         connection, address = super().get_request()
         if os.environ.get("JITTERSIM_BROWSER_TEST_WIFI_PEER") == "1":
