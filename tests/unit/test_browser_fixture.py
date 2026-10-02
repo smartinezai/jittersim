@@ -1,7 +1,10 @@
 """Check the helper client that the browser journeys use."""
 
+import json
+
 import pytest
 
+from jittersim.networking.commands import Command
 from jittersim.networking.helper import HelperClient, HelperClientError
 from tests.browser import fixture
 
@@ -55,3 +58,59 @@ def test_a_helper_that_stays_busy_still_fails_in_the_end(monkeypatch):
         client()._request({"action": "apply"})
     assert error.value.reason == "helper-busy"
     assert len(calls) == fixture.BUSY_ATTEMPTS
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 1_000.0
+
+    def __call__(self):
+        return self.now
+
+
+def read_queue(executor, interface="wlan0"):
+    command = Command("tc", ("-s", "-j", "qdisc", "show", "dev", interface), "read queue counters")
+    queues = json.loads(executor.run(command).stdout)
+    return next(queue for queue in queues if queue["kind"] == "netem")
+
+
+@pytest.mark.parametrize("gap_seconds", [4.0, 5.0, 5.5, 8.0])
+def test_queue_bytes_follow_the_clock_so_the_rate_ignores_the_poll_gap(gap_seconds):
+    # The impact card divides the byte change by the time between two samples and calls the
+    # cap reached from 90% of it. A fixed amount per read gave 240 kbit/s for a 5 second gap
+    # but only 218 kbit/s for 5.5 seconds, so the journey failed on a slow CI machine.
+    clock = FakeClock()
+    executor = fixture.DashboardWifiExecutor(clock=clock)
+    first = read_queue(executor)
+    clock.now += gap_seconds
+    second = read_queue(executor)
+
+    kbit = (second["bytes"] - first["bytes"]) * 8 / 1000 / gap_seconds
+    assert kbit == pytest.approx(fixture.QUEUE_KBIT_PER_SECOND)
+
+
+def test_each_read_still_adds_the_same_packets_and_drops_whatever_the_gap():
+    # The 10% loss line (11 dropped of 111) must not depend on timing either.
+    clock = FakeClock()
+    executor = fixture.DashboardWifiExecutor(clock=clock)
+    first = read_queue(executor)
+    clock.now += 7.3
+    second = read_queue(executor)
+    clock.now += 0.4
+    third = read_queue(executor)
+
+    assert second["packets"] - first["packets"] == third["packets"] - second["packets"] == 100
+    assert second["drops"] - first["drops"] == third["drops"] - second["drops"] == 11
+
+
+def test_a_new_root_queue_starts_the_counters_again():
+    clock = FakeClock()
+    executor = fixture.DashboardWifiExecutor(clock=clock)
+    read_queue(executor)
+    clock.now += 6
+    assert read_queue(executor)["bytes"] > 0
+
+    executor.run(Command("tc", ("qdisc", "del", "dev", "wlan0", "root"), "remove the root queue"))
+    clock.now += 6
+    again = read_queue(executor)
+    assert (again["bytes"], again["packets"], again["drops"]) == (0, 100, 11)

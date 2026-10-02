@@ -452,3 +452,22 @@ def test_names_are_returned_as_plain_text_for_the_page_to_insert_safely():
 def test_the_status_code_never_writes_html():
     assert "innerHTML" not in served_function()
     assert "insertAdjacentHTML" not in served_function()
+
+
+def test_a_client_whose_saved_profile_is_paused_is_never_listed_as_affected():
+    result = status(
+        generalState=None,
+        profiles=[{"id": "slow", "name": "Slow network"}],
+        clients=[
+            client("Laptop", "02:00:00:00:00:01", assigned_device_id="laptop",
+                   assigned_profile_id="slow", assigned_effective_state="active"),
+            client("Unchecked phone", "02:00:00:00:00:02", assigned_device_id="phone",
+                   assigned_profile_id="slow", assigned_effective_state="unverified"),
+            client("Protected tablet", "02:00:00:00:00:03", assigned_device_id="tablet",
+                   assigned_profile_id="slow", assigned_effective_state="protected"),
+        ],
+    )
+    assert result["devices"]["summary"] == "1 device affected"
+    assert result["devices"]["items"] == [{"name": "Laptop", "profile": "Slow network"}]
+    assert "Unchecked phone" not in json.dumps(result)
+    assert "Protected tablet" not in json.dumps(result)

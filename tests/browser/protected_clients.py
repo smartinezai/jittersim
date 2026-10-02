@@ -12,6 +12,7 @@ from playwright.sync_api import expect, sync_playwright
 MAC_ADDRESS = "02:00:00:00:00:01"
 IP_ADDRESS = "192.168.50.184"
 HEADERS = {"Authorization": "Bearer browser-test"}
+BASE_URL = [""]
 
 
 def controls(row):
@@ -78,9 +79,67 @@ def sign_in(page, base):
     page.locator("#close-credentials").click()
 
 
+def saved_device_row(page, width, name):
+    """The row or card of the saved device with this address on the Devices page."""
+
+    page.locator('a[data-page-link="devices"]').first.click()
+    expect(page.locator("#page-devices")).to_be_visible()
+    if width > 600:
+        return page.locator("#device-table tbody tr", has_text=name)
+    return page.locator("#device-cards .device-card", has_text=name)
+
+
+def check_saved_device_rows(page, post, width):
+    """A saved device that is protected or cannot be checked never shows as degraded."""
+
+    saved = next(
+        device
+        for device in page.request.get(BASE_URL[0] + "/api/devices", headers=HEADERS).json()["devices"]
+        if device["ipv4_address"] == IP_ADDRESS
+    )
+    alice = {
+        "id": saved["id"], "name": saved["name"], "ipv4_address": IP_ADDRESS,
+        "profile_id": "slow",
+    }
+    name = IP_ADDRESS
+    # Saved with the protected MAC address: its profile is paused and the row is greyed out.
+    post("/api/devices", {**alice, "mac_address": MAC_ADDRESS})
+    page.reload()
+    row = saved_device_row(page, width, name)
+    expect(row).to_contain_text("Protected: profile paused")
+    expect(row).not_to_contain_text("Degraded")
+    expect(row).not_to_contain_text("delay")
+    if width > 600:
+        expect(row).to_have_class(re.compile(r"\bprotected\b"))
+        assert row.evaluate("(node) => getComputedStyle(node.cells[0]).color") != \
+            page.locator("#device-table tbody tr").first.evaluate(
+                "(node) => getComputedStyle(node.cells[0].querySelector('strong')).color"
+            )
+    # The sidebar does not count a paused device as affected.
+    expect(page.locator("#apply-summary")).not_to_contain_text("1 device")
+
+    # Saved without a MAC address while the protected client holds its address.
+    post("/api/devices", {**alice, "mac_address": None, "expected": {**alice, "mac_address": MAC_ADDRESS}})
+    page.reload()
+    row = saved_device_row(page, width, name)
+    expect(row).to_contain_text("Profile paused")
+    expect(row).to_contain_text("This saved device has no MAC address so JitterSim cannot tell it is the protected Fixture client")
+    expect(row).not_to_contain_text("Degraded")
+    if width > 600:
+        expect(row).to_have_class(re.compile(r"\bpaused\b"))
+        row.get_by_role("button", name=f"Save MAC {MAC_ADDRESS}").click()
+        expect(row).to_contain_text("Protected: profile paused")
+        expect(row.get_by_role("button", name=re.compile("^Save MAC"))).to_have_count(0)
+    else:
+        post("/api/devices", {**alice, "mac_address": MAC_ADDRESS, "expected": {**alice, "mac_address": None}})
+        page.reload()
+        expect(saved_device_row(page, width, name)).to_contain_text("Protected: profile paused")
+
+
 def check_width(browser, base, width, height):
     context = browser.new_context(viewport={"width": width, "height": height})
     page = context.new_page()
+    BASE_URL[0] = base
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
     sign_in(page, base)
@@ -140,6 +199,9 @@ def check_width(browser, base, width, height):
     page.wait_for_timeout(300)  # let the 160 ms button fade finish
     row.screenshot(path=f"test-results/protected-clients-protected-{width}.png")
     assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
+
+    check_saved_device_rows(page, post, width)
+    row = page.locator(f'.connected-row[data-mac-address="{MAC_ADDRESS}"]')
 
     row.get_by_role("button", name=re.compile("^Remove protection")).click()
     expect(row.get_by_role("button", name=re.compile("^Make unaffected"))).to_be_visible()

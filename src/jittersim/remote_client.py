@@ -10,6 +10,7 @@ connection file holds only the dashboard address and the certificate path.
 
 import getpass
 import http.client
+import io
 import json
 import os
 import socket
@@ -383,6 +384,149 @@ def _read_bounded(stream: Any, limit: int, deadline: float) -> bytes:
     return b"".join(chunks)
 
 
+class _DeadlineReader(io.RawIOBase):
+    """Reads from a socket and gives up when the shared deadline is over."""
+
+    def __init__(self, owner: "_DeadlineSocket") -> None:
+        super().__init__()
+        self._owner = owner
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int:
+        return self._owner.recv_into(buffer)
+
+    def close(self) -> None:
+        if not self.closed:
+            super().close()
+            self._owner._reader_closed()
+
+
+class _DeadlineSocket:
+    """A connected socket where every send and read only gets the time that is left.
+
+    One deadline covers the whole request. A server that sends one byte at a time can no longer
+    keep the client waiting, because each read is allowed only until the same final moment.
+    """
+
+    def __init__(self, sock: Any, deadline: float) -> None:
+        self._sock = sock
+        self._deadline = deadline
+        self._readers = 0
+        self._closing = False
+
+    def _remaining(self) -> float:
+        left = self._deadline - time.monotonic()
+        if left <= 0:
+            raise socket.timeout("timed out")
+        return left
+
+    def sendall(self, data: Any, *args: Any) -> None:
+        self._sock.settimeout(self._remaining())
+        self._sock.sendall(data, *args)
+
+    def recv_into(self, buffer: Any, *args: Any) -> int:
+        self._sock.settimeout(self._remaining())
+        return self._sock.recv_into(buffer, *args)
+
+    def recv(self, size: int, *args: Any) -> bytes:
+        self._sock.settimeout(self._remaining())
+        return self._sock.recv(size, *args)
+
+    def makefile(self, mode: str = "rb", buffering: Optional[int] = None, **_: Any) -> Any:
+        if "r" not in mode or "w" in mode:
+            raise ValueError("only reading is supported")
+        self._readers += 1
+        return io.BufferedReader(_DeadlineReader(self), 65536)
+
+    def _reader_closed(self) -> None:
+        self._readers -= 1
+        if self._closing and self._readers <= 0:
+            self._sock.close()
+
+    def close(self) -> None:
+        self._closing = True
+        if self._readers <= 0:
+            self._sock.close()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._sock, name)
+
+
+def _connect_before(host: str, port: int, deadline: float, source: Any) -> socket.socket:
+    """Open a TCP connection, trying each address only for the time that is left."""
+
+    failure: Optional[BaseException] = None
+    for family, kind, protocol, _, address in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise socket.timeout("timed out")
+        attempt = socket.socket(family, kind, protocol)
+        try:
+            attempt.settimeout(left)
+            if source:
+                attempt.bind(source)
+            attempt.connect(address)
+            return attempt
+        except OSError as error:
+            attempt.close()
+            failure = error
+    raise failure if failure is not None else OSError("no address for " + host)
+
+
+class _DeadlineConnection(http.client.HTTPSConnection):
+    """An HTTPS connection whose connect, handshake, send and reads share one deadline."""
+
+    def __init__(self, *args: Any, deadline: float, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._deadline = deadline
+
+    def connect(self) -> None:
+        sock = _connect_before(self.host, self.port, self._deadline, self.source_address)
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
+        try:
+            secure = self._context.wrap_socket(  # type: ignore[attr-defined]
+                sock, server_hostname=self.host, do_handshake_on_connect=False
+            )
+        except BaseException:
+            sock.close()
+            raise
+        try:
+            # The handshake call is limited as a whole, not once for every packet it reads.
+            secure.settimeout(max(self._deadline - time.monotonic(), 0.001))
+            secure.do_handshake()
+        except BaseException:
+            secure.close()
+            raise
+        self.sock = _DeadlineSocket(secure, self._deadline)  # type: ignore[assignment]
+
+
+class _DeadlineHTTPSHandler(HTTPSHandler):
+    def __init__(self, context: ssl.SSLContext, deadline: float) -> None:
+        super().__init__(context=context)
+        self._deadline = deadline
+
+    def https_open(self, req: Any) -> Any:
+        deadline = self._deadline
+
+        def connection(host: str, **kwargs: Any) -> _DeadlineConnection:
+            return _DeadlineConnection(host, deadline=deadline, **kwargs)
+
+        return self.do_open(connection, req, context=self._context)  # type: ignore[attr-defined]
+
+
+def _is_timeout(error: BaseException) -> bool:
+    """True for a timeout, which is socket.timeout and not TimeoutError before Python 3.10."""
+
+    if isinstance(error, (socket.timeout, TimeoutError)):
+        return True
+    return isinstance(error, ssl.SSLError) and "timed out" in str(error)
+
+
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -463,10 +607,6 @@ class DashboardClient:
             ) from error
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         self.context = context
-        # Environment proxies are ignored: the dashboard is on the local network.
-        self._opener = build_opener(
-            ProxyHandler({}), _NoRedirect(), HTTPSHandler(context=context)
-        )
 
     def add_secret(self, secret: str) -> None:
         """Remember another secret that must never appear in a message."""
@@ -516,9 +656,21 @@ class DashboardClient:
             data = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
         request = Request(self.url + path, data=data, method=method, headers=headers)
+        # One deadline for the whole request: connecting, the handshake, sending, the headers
+        # and the body all have to fit in it.
+        deadline = time.monotonic() + seconds
+        # Environment proxies are ignored: the dashboard is on the local network.
+        opener = build_opener(
+            ProxyHandler({}), _NoRedirect(), _DeadlineHTTPSHandler(self.context, deadline)
+        )
         try:
-            with self._opener.open(request, timeout=seconds) as response:
-                answer = _read_bounded(response, self.max_bytes + 1, time.monotonic() + seconds)
+            with opener.open(request, timeout=seconds) as response:
+                try:
+                    answer = _read_bounded(response, self.max_bytes + 1, deadline)
+                except (OSError, ssl.SSLError) as error:
+                    if _is_timeout(error):
+                        raise _TooSlow() from None
+                    raise
         except HTTPError as error:
             raise self._refused(error) from None
         except URLError as error:
@@ -533,7 +685,11 @@ class DashboardClient:
             ) from None
         except ssl.SSLCertVerificationError as error:
             raise RemoteError(certificate_message(error, self.host)) from None
-        except (ssl.SSLError, http.client.HTTPException, OSError):
+        except (ssl.SSLError, http.client.HTTPException, OSError) as error:
+            if _is_timeout(error):
+                raise RemoteError(
+                    f"The dashboard did not answer within {js_number(seconds)} seconds."
+                ) from None
             raise RemoteError("The connection to the dashboard failed.") from None
         if len(answer) > self.max_bytes:
             raise RemoteError("The dashboard answer was too large.")
@@ -548,10 +704,10 @@ class DashboardClient:
     def _unreachable(self, reason: Any, seconds: float) -> RemoteError:
         if isinstance(reason, ssl.SSLCertVerificationError):
             return RemoteError(certificate_message(reason, self.host))
+        if _is_timeout(reason):
+            return RemoteError(f"The dashboard did not answer within {js_number(seconds)} seconds.")
         if isinstance(reason, ssl.SSLError):
             return RemoteError("The secure connection to the dashboard failed.")
-        if isinstance(reason, (socket.timeout, TimeoutError)):
-            return RemoteError(f"The dashboard did not answer within {js_number(seconds)} seconds.")
         return RemoteError(
             f"Could not reach the dashboard at {self.url}. Check the address and that the Pi is on."
         )

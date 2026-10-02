@@ -20,9 +20,9 @@ SIGNERS=/etc/jittersim/release-signers
 INCOMING=incoming/jittersim-release.tar.gz
 INCOMING_PATH=/home/jittersim/$INCOMING
 COMMAND=/usr/local/bin/jittersim
-# Every ssh and scp call: a short connection timeout and a dead connection noticed within
-# 45 seconds. Host keys come from the user's known_hosts as they are.
-CONNECTION_OPTIONS="-o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+# Every ssh and scp call: a connection timeout of 8 seconds and a dead connection noticed
+# within 45 seconds. Host keys come from the user's known_hosts as they are.
+CONNECTION_OPTIONS="-o ConnectTimeout=8 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
 -o IdentitiesOnly=yes"
 # Whole-call limits in seconds for the calls that never ask anything.
 CHECK_SECONDS=60
@@ -38,7 +38,7 @@ router's Wi-Fi. A Mac on the Pi's test Wi-Fi cannot reach the Pi over SSH."
 usage() {
     cat <<EOF
 usage: deploy-from-mac.sh [--ref REF] [--host USER@HOST] [--key PATH] [--signing-key PATH]
-                          [--install] [--use-installer] [--dry-run]
+                          [--install] [--use-installer] [--skip-network-check] [--dry-run]
                           [--https | --ssh] [--url URL] [--ca-cert FILE] [--save-token]
 
 Runs on your Mac in a JitterSim checkout. It builds the release archive of REF with
@@ -61,6 +61,11 @@ terminal unless passwordless staging is on.
   --use-installer    unpack the archive on the Pi and use its full installer instead of the
                      update service. Needed once on a Pi without the update service and for
                      OS package or Wi-Fi changes.
+  --skip-network-check
+                     do not treat an address in 192.168.50.0/24 as the Pi's test Wi-Fi. On
+                     the test Wi-Fi SSH is blocked on purpose so the script deploys over
+                     HTTPS instead, or stops early with --ssh or --use-installer. Use this
+                     only when that address is not the test Wi-Fi.
   --dry-run          resolve REF and print every command without running any of them.
   --https            deploy through the Pi's HTTPS dashboard instead of SSH (also chosen when
                      this Mac is on the Pi's test Wi-Fi, 192.168.50.0/24, or SSH does not
@@ -181,6 +186,12 @@ run_limited() {
     with_deadline "$limit" "$@"
 }
 
+# The command that retries this run, for the message of a stop that is not a fault.
+retry="deploy/raspberry-pi/deploy-from-mac.sh"
+for word in "$@"; do
+    retry="$retry $(quote "$word")"
+done
+
 ref=HEAD
 transport=auto
 https_url=
@@ -191,6 +202,7 @@ signing_key=$DEFAULT_SIGNING_KEY
 install=no
 use_installer=no
 dry_run=no
+skip_network_check=no
 while [ "$#" -gt 0 ]; do
     case $1 in
         --https) transport=https; shift ;;
@@ -213,11 +225,42 @@ while [ "$#" -gt 0 ]; do
         --install) install=yes; shift ;;
         --use-installer) use_installer=yes; shift ;;
         --dry-run) dry_run=yes; shift ;;
+        --skip-network-check) skip_network_check=yes; shift ;;
         -h|--help) usage; exit 0 ;;
         *) usage >&2; exit 2 ;;
     esac
 done
 
+# Is this Mac on the Pi's test Wi-Fi (192.168.50.0/24, the Pi at 192.168.50.1)? The Pi
+# blocks SSH from there on purpose so a connection would only hang until it times out. The
+# answer comes from the Mac's own addresses and default route: nothing is sent anywhere.
+on_test_wifi() {
+    case ${host#*@} in
+        192.168.50.1) return 0 ;;
+    esac
+    if command -v ifconfig >/dev/null 2>&1; then
+        addresses=$(ifconfig 2>/dev/null || true)
+    elif command -v ip >/dev/null 2>&1; then
+        addresses=$(ip -4 addr 2>/dev/null || true)
+    else
+        addresses=
+    fi
+    if printf '%s\n' "$addresses" \
+        | grep -Eq '(^|[[:space:]])inet (addr:)?192\.168\.50\.[0-9]{1,3}([^0-9]|$)'; then
+        return 0
+    fi
+    if command -v route >/dev/null 2>&1; then
+        gateway=$(route -n get default 2>/dev/null || true)
+    elif command -v ip >/dev/null 2>&1; then
+        gateway=$(ip route show default 2>/dev/null || true)
+    else
+        gateway=
+    fi
+    if printf '%s\n' "$gateway" | grep -Eq '(gateway:|via)[[:space:]]+192\.168\.50\.1([^0-9]|$)'; then
+        return 0
+    fi
+    return 1
+}
 # Choose the way to reach the Pi. On the Pi's test Wi-Fi (192.168.50.0/24) SSH is blocked on
 # purpose, so the signed release goes through the HTTPS dashboard. Elsewhere SSH is tried
 # first and the HTTPS dashboard is the fallback when SSH does not answer.
@@ -233,8 +276,8 @@ if [ "$use_installer" = no ]; then
     if [ "$transport" = https ]; then
         over_https
     elif [ "$transport" = auto ]; then
-        if ifconfig 2>/dev/null | grep -q 'inet 192\.168\.50\.'; then
-            printf 'This Mac is on the Pi test Wi-Fi where SSH is blocked on purpose. Using the HTTPS upload.\n'
+        if [ "$skip_network_check" = no ] && on_test_wifi; then
+            printf 'On the Pi Wi-Fi: SSH is blocked on purpose there, so this deploys over HTTPS instead.\n'
             over_https
         fi
     fi
@@ -269,6 +312,13 @@ esac
 case $ref in
     ''|-*) fail "refusing ref '$ref'" 2 ;;
 esac
+
+if [ "$skip_network_check" = no ] && on_test_wifi; then
+    printf 'deploy-from-mac: %s\n' \
+        "SSH from the test Wi-Fi is blocked on purpose; join the home network or use Ethernet." >&2
+    printf 'Then run the same command again:\n  %s\n' "$retry" >&2
+    exit 1
+fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo=$(git -C "$script_dir" rev-parse --show-toplevel) || fail "run this from a JitterSim checkout"
