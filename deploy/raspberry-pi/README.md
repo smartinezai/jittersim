@@ -106,8 +106,9 @@ not normally carry mDNS between separate networks. If the name does not
 resolve from the management Wi-Fi, use the Pi's Ethernet address. Before
 trusting the local certificate in a browser, compare its SHA-256 fingerprint
 with the value printed by the installer. The certificate includes the Pi's
-current Ethernet address. If that address changes, run the installer again
-and verify and trust the newly printed certificate.
+current Ethernet address and the test Wi-Fi address `192.168.50.1`. If the
+Ethernet address changes, run the installer again and verify and trust the
+newly printed certificate.
 
 After updating from a version before September 2026, choose **Reset network**
 once. Older versions left duplicate traffic filters behind and a reset removes

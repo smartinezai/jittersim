@@ -63,6 +63,7 @@ jobs:
       - run: python -m tests.browser.sidebar_status
       - run: python -m tests.browser.apply_clarity
       - run: python -m tests.browser.router_copy
+      - run: python -m tests.browser.device_names
       - uses: actions/upload-artifact@v5
         if: always()
         with:
