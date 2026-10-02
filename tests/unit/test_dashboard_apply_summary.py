@@ -364,6 +364,24 @@ def test_the_line_says_what_is_saved_before_and_after_the_start():
 
 
 @needs_node
+def test_a_device_whose_profile_is_paused_is_not_counted():
+    out = render(
+        """
+        savedDevices = [
+          {id: "a", mac_address: "m1", effective_state: "active"},
+          {id: "b", mac_address: null, effective_state: "unverified"},
+          {id: "c", mac_address: "m3", effective_state: "protected"}
+        ];
+        groups = [{id: "g1", device_ids: ["b"]}];
+        unaffectedMacs = ["m3"];
+        renderApplySummary();
+        console.log(JSON.stringify(element("apply-summary").textContent));
+        """
+    )
+    assert out == "Saved: 1 device with a profile · 1 protected device stays untouched"
+
+
+@needs_node
 def test_a_group_whose_devices_are_all_protected_is_not_counted():
     out = render(
         """

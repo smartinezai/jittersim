@@ -341,7 +341,12 @@ def test_budget_rejection_preserves_protection_and_connected_assignments(control
     repo, helper, server = control
     repo.save_unaffected_device(UnaffectedDevice(ALICE))
     for index in range(14):
-        repo.save_device(Device(f"extra-{index}", "Extra", f"192.168.50.{30 + index}", "normal"))
+        repo.save_device(
+            Device(
+                f"extra-{index}", "Extra", f"192.168.50.{30 + index}", "normal",
+                f"02:00:00:00:01:{index:02x}",
+            )
+        )
     status, result = write(server, "/api/unaffected-devices/delete", {"mac_address": ALICE})
     assert status == 409 and "15 affected" in result["error"]
     assert repo.list_unaffected_devices()[0].mac_address == ALICE

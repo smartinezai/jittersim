@@ -63,3 +63,28 @@ class ResolverPortTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_the_guard_keeps_sign_in_and_dhcp_open_before_its_drops():
+    from jittersim.networking.access import transition_firewall
+
+    rules = transition_firewall(TOPOLOGY).splitlines()
+
+    def index(fragment):
+        matches = [number for number, line in enumerate(rules) if fragment in line]
+        assert matches, fragment
+        return matches[0]
+
+    for chain, direction, port_rule in (
+        ("input", "iifname", 'tcp dport 8080 accept'),
+        ("input", "iifname", 'udp dport 67 accept'),
+        ("output", "oifname", 'tcp sport 8080 accept'),
+        ("output", "oifname", 'udp sport 67 accept'),
+    ):
+        accept = index(f'jittersim_access_transition {chain} {direction} "wlan0" {port_rule}')
+        drop = index(f'jittersim_access_transition {chain} {direction} "wlan0" drop')
+        assert accept < drop, (chain, port_rule)
+    # Nothing is forwarded to or from the test Wi-Fi while the guard stands.
+    assert not [
+        line for line in rules if line.startswith("add rule") and " forward " in line and "accept" in line
+    ]

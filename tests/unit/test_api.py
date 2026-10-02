@@ -2806,6 +2806,7 @@ class ControlServerTests(unittest.TestCase):
                         "assigned_device_name": None,
                         "assigned_profile_id": None,
                         "unaffected": False,
+                        "assigned_effective_state": None,
                         "group_id": None,
                         "group_name": None,
                         "group_profile_id": None,
@@ -3207,7 +3208,8 @@ class ControlServerTests(unittest.TestCase):
         table = table.split("\n    }\n", 1)[0]
 
         self.assertIn('["Device", "Address", "Profile", "Condition"]', table)
-        self.assertIn("deviceConditionCell(device.id)", table)
+        self.assertIn("deviceStateCell(device)", table)
+        self.assertIn("return deviceConditionCell(device.id);", DASHBOARD_HTML)
         self.assertIn('request("/api/conditions", "GET")', DASHBOARD_HTML)
         self.assertIn('id="device-conditions-note"', DASHBOARD_HTML)
         refresh = DASHBOARD_HTML.split("async function refreshDashboard() {", 1)[1].split("\n    }\n", 1)[0]
@@ -4407,7 +4409,12 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("setButtonBusy(event.submitter, true)", DASHBOARD_HTML)
         self.assertIn("if (submitButton) setButtonBusy(submitButton, false);", DASHBOARD_HTML)
         self.assertIn("Dashboard refresh failed:", DASHBOARD_HTML)
-        self.assertIn("Start with saved settings", DASHBOARD_HTML)
+        self.assertNotIn('element("admin-token").addEventListener("change"', DASHBOARD_HTML)
+        self.assertIn(
+            'element("check-admin-token").addEventListener("click", async () => {\n'
+            "      await checkAdminToken();\n",
+            DASHBOARD_HTML,
+        )
         self.assertIn('id="toast" class="toast" role="status"', DASHBOARD_HTML)
         self.assertIn(
             'element("toast-dismiss").addEventListener("click", dismissToast)',
@@ -5651,6 +5658,11 @@ class ControlServerTests(unittest.TestCase):
         # Saving or editing it is allowed. The assignment stays dormant while protected.
         self.assertEqual(status, 200, body)
         self.assertEqual(self.repository.get_device("carol").mac_address, "cc:cc:cc:cc:cc:cc")
+        # A device without a MAC address cannot be told from a protected one so it
+        # needs a MAC to keep its profile next to protected clients.
+        self.repository.save_device(
+            Device("alice", "Alice's laptop", "192.168.50.10", "slow", "ba:aa:aa:aa:aa:aa")
+        )
         plan = compile_stored_plan(repository=self.repository)
         self.assertEqual([rule.device_id for rule in plan.mark_rules], ["alice"])
         self.assertIn("cc:cc:cc:cc:cc:cc", plan.protected_mac_addresses)

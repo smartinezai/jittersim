@@ -61,8 +61,9 @@ MAX_MESSAGE_BYTES = 256 * 1024
 MAX_HELPER_CONNECTIONS = 8
 # Apply and reset wait this long for a read to finish before they answer helper-busy.
 # Reads never wait so a dashboard poll cannot make Panic fail. Normal access is the
-# Panic action and waits like Reset.
-WRITE_ACTIONS = ("apply", "apply-experiment", "reset", "normal-access")
+# Panic action and waits like Reset. Access apply carries Block globally, Unblock,
+# Apply access rules and the device quick action so a poll must not refuse it either.
+WRITE_ACTIONS = ("apply", "apply-experiment", "reset", "normal-access", "access-apply")
 WRITE_LOCK_WAIT_SECONDS = 3.0
 WIFI_ACTIONS = ("configure-ap", "router-sync-ap", "router-preview-ap", "wifi-reset")
 ROUTER_ACTIONS = (
@@ -756,8 +757,9 @@ class HelperService:
         if getattr(self._access_manager, "dns_failed", False):
             return (
                 "Website rules were not applied because the filtered DNS service did not "
-                "start. Panic and Normal access still work. Read the cause with "
-                "sudo jittersim logs dns."
+                "start. Panic and Normal access still work. Turn household access rules "
+                "off on the Access and rules page or check jittersim-dns (read the cause "
+                "with sudo jittersim logs dns)."
             )
         return "access rules could not be applied"
 
