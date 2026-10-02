@@ -10,9 +10,9 @@ Move the existing combined action into the sidebar and remove the separate clipb
 
 The main risks are disconnecting test clients and hiding progress when the Router page is closed. Reuse the existing operation and keep the password out of the browser response and status text. Avoid new dependencies, endpoints or storage. Changing the sidebar also needs keyboard and phone checks.
 
-**Decision confirmed:** apply both settings to the Pi through the existing combined action. The owner approved proceeding with plans without repeated confirmation for the next 24 hours on 3 October. This authorizes the local implementation. Separate remote-push and live-deployment rules still apply.
+**Decision confirmed:** apply both settings to the Pi through the existing combined action. On 3 October the owner approved proceeding with agreed plans without repeated confirmation for the next 24 hours. The owner then extended that approval to pushing and merging work that is implemented, reviewed and tested locally with green CI. No further approval question is needed within that scope. Live Pi deployment was not included in this permission.
 
-The temporary permission was recorded at 00:41 Berlin time on 3 October and ends at approximately 00:41 on 4 October. It applies to the current requested work and does not assign unrelated projects.
+The latest temporary permission was recorded at 00:54 Berlin time on 3 October and ends at approximately 00:54 on 4 October. It applies to the current requested work and does not assign unrelated projects.
 
 **Risk:** medium for changing the place of a network-changing action. No pull request risk template was found in this checkout. Recheck the selected implementation base for one before opening a pull request.
 
@@ -31,7 +31,7 @@ The temporary permission was recorded at 00:41 Berlin time on 3 October and ends
 2. Recheck the selected branch and overlapping dashboard work. Use a separate `codex/` branch for code changes. Preserve unrelated untracked files.
 3. Move the existing `sync-router-ap` button under the router switch and retain its ID. Remove the old clipboard buttons and their frontend-only state and handlers after checking their uses. The browser clipboard helper is currently used only by those buttons and can also be removed. Keep the existing combined configuration operation and its preview, confirmation, busy state and credential checks. Move the shared `router-action-message` status into the sidebar so progress, cancellation and errors remain visible while the Router page is hidden. Keep accessible live feedback.
 4. Update help text, README instructions and Raspberry Pi deployment instructions. Replace the sidebar's two-column copy-button layout with a layout suited to one button. Update existing source-based checks and button lists that reference the removed controls. Do not remove the credentials API or helper permission as part of this UI change.
-5. Run focused checks and review the complete change before proposing a pull request. A push, pull request or live deployment requires the owner's explicit request.
+5. Run focused checks and review the complete change before proposing a pull request. Within the temporary permission, publishing and merging do not need repeated confirmation. Verify the final branch against its current target and require green CI before merging. Failed checks or jobs that cannot start must not be bypassed. Live deployment remains a separate action.
 
 ## Data, safety and limits
 
@@ -63,3 +63,7 @@ The sidebar now contains one **Copy router Wi-Fi to Pi** button and the action's
 The full Python suite and the existing CI lint rules passed. Browser checks for router copying, Wi-Fi recovery and action reachability passed. The final status correction then passed the focused credential checks and a fresh router-copy browser run at 1920 px and 375 px. Desktop and phone screenshots were inspected. Cancellation, a pending request, failed login, a missing helper and secret handling were checked with the disposable fixture.
 
 The final separate review found no blocking issue. There are no new build inputs or deployment changes. No remote push or live Pi change was performed. Physical reconnection after an installed update remains a release check.
+
+## Publication gate
+
+Fresh GitHub checks on 3 October show recent CI jobs failed before any steps ran. The checked Linux job reports that recent account payments failed or the spending limit needs to be increased. This does not provide a test result. The green-CI condition is therefore still unmet. No merge was performed and no branch protection or CI check was bypassed. Before publication, prepare a focused branch against the current agreed target so unrelated continuation commits are not included.
