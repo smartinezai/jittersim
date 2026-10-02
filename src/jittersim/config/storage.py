@@ -15,7 +15,9 @@ from .device_labels import (
     normalize_device_mac,
     normalize_device_type,
 )
-from .exemptions import MAX_UNAFFECTED_DEVICES, UnaffectedDevice, normalize_exempt_mac
+from .exemptions import (
+    MAX_ADDRESS_MOVES, MAX_UNAFFECTED_DEVICES, AddressMove, UnaffectedDevice, normalize_exempt_mac,
+)
 from .models import (
     AccessOptions,
     DataLimit,
@@ -449,6 +451,14 @@ class ConfigRepository:
             CREATE TABLE IF NOT EXISTS unaffected_devices (
                 mac_address TEXT PRIMARY KEY,
                 name TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS address_moves (
+                old_mac TEXT PRIMARY KEY,
+                new_mac TEXT NOT NULL,
+                name TEXT NOT NULL,
+                moved_access INTEGER NOT NULL CHECK (moved_access IN (0, 1)),
+                moved_protection INTEGER NOT NULL CHECK (moved_protection IN (0, 1)),
+                moved_at INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS runtime_state (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -1236,6 +1246,49 @@ class ConfigRepository:
             )
             if cursor.rowcount:
                 self._bump_configuration_version()
+            return bool(cursor.rowcount)
+
+    def list_address_moves(self) -> tuple:
+        rows = self._connection.execute(
+            "SELECT old_mac, new_mac, name, moved_access, moved_protection, moved_at "
+            "FROM address_moves ORDER BY moved_at DESC, old_mac LIMIT ?",
+            (MAX_ADDRESS_MOVES,),
+        ).fetchall()
+        try:
+            return tuple(
+                AddressMove(row[0], row[1], row[2], bool(row[3]), bool(row[4]), row[5])
+                for row in rows
+            )
+        except (TypeError, ValueError) as error:
+            raise StorageError("stored address move is invalid") from error
+
+    def get_address_move(self, old_mac: str):
+        key = normalize_exempt_mac(old_mac)
+        return next((move for move in self.list_address_moves() if move.old_mac == key), None)
+
+    def save_address_move(self, move: AddressMove) -> None:
+        """Remember what a move took over so it can be undone. Not part of the exported settings."""
+
+        with self.transaction():
+            self._connection.execute(
+                "INSERT OR REPLACE INTO address_moves "
+                "(old_mac, new_mac, name, moved_access, moved_protection, moved_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (move.old_mac, move.new_mac, move.name, int(move.moved_access),
+                 int(move.moved_protection), move.moved_at),
+            )
+            # Keep the newest records only.
+            self._connection.execute(
+                "DELETE FROM address_moves WHERE old_mac NOT IN ("
+                "SELECT old_mac FROM address_moves ORDER BY moved_at DESC, old_mac LIMIT ?)",
+                (MAX_ADDRESS_MOVES,),
+            )
+
+    def delete_address_move(self, old_mac: str) -> bool:
+        with self.transaction():
+            cursor = self._connection.execute(
+                "DELETE FROM address_moves WHERE old_mac = ?", (normalize_exempt_mac(old_mac),)
+            )
             return bool(cursor.rowcount)
 
     def rebase_time_quota_sample(self, quota_id: str, *, now: int) -> None:

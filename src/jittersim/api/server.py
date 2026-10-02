@@ -41,7 +41,7 @@ from jittersim.config.device_names import (
     saved_device_title,
 )
 from jittersim.config.domain_labels import group_domain, label_domain, seen_with
-from jittersim.config.exemptions import UnaffectedDevice, normalize_exempt_mac
+from jittersim.config.exemptions import AddressMove, UnaffectedDevice, normalize_exempt_mac
 from jittersim.config.models import (
     MAX_LISTED_DOMAINS,
     AccessOptions,
@@ -214,6 +214,8 @@ WRITE_PATHS = frozenset(
         "/api/reset",
         "/api/dashboard-access/register-self",
         "/api/dashboard-access/remove",
+        "/api/dashboard-access/move",
+        "/api/dashboard-access/move-undo",
     )
 )
 WRITE_PATHS = WRITE_PATHS | WORKFLOW_WRITES | ACCESS_WRITES | {"/api/schedules/preview"}
@@ -276,6 +278,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     .badge.hardware { border-color: #2c9d73; background: #10372d; color: #8de2bc; }
     .badge.configuration { border-color: #a77b31; background: #3b2a12; color: #f5ca78; }
     .badge.pending { color: #a8b8ce; }
+    .address-move label { display: block; margin: 0.6rem 0; }
     .notice {
       margin-bottom: 1rem;
       padding: 0.8rem 1rem;
@@ -1151,14 +1154,34 @@ DASHBOARD_HTML = r"""<!doctype html>
     </div>
   </aside>
   <main class="content" id="content">
+  <section class="notice address-move" id="address-move-card" aria-label="New address for one of your devices" hidden>
+    <p id="address-move-text" role="status"></p>
+    <label>Which device was it?
+      <select id="address-move-picker"></select>
+    </label>
+    <div class="connected-actions">
+      <button id="address-move-confirm" type="button">Yes, move it to this device</button>
+      <button id="address-move-dismiss" type="button">No, this is another device</button>
+    </div>
+    <p class="form-note">The old address is kept and marked as replaced. You can undo this under Dashboard access.</p>
+  </section>
   <section class="card" id="dashboard-access-panel" aria-labelledby="dashboard-access-title">
     <h2 id="dashboard-access-title">Dashboard access</h2>
     <p id="dashboard-access-status" role="status">Open Admin token and choose Check token to sign in.</p>
     <label>Device name (optional)<input id="dashboard-access-name" maxlength="64" autocomplete="off"></label>
     <button id="allow-dashboard-device" type="button" disabled>Allow this device</button>
     <p>Saved access keeps this dashboard usable during tests. Internet traffic still follows profiles.
-      A changed private Wi-Fi address needs registration again. The admin token is always required.</p>
+      A changed private Wi-Fi address needs a one-click move to the new address. The admin token is always required.</p>
+    <p id="address-type-note" class="form-note" hidden></p>
+    <details id="address-help">
+      <summary>Keep this device's Wi-Fi address from changing</summary>
+      <p class="form-note">On a Mac: System Settings, Wi-Fi, this network, Details, Private Wi-Fi address, Fixed.
+        On an iPhone or iPad: Settings, Wi-Fi, the (i) beside this network, Private Wi-Fi Address, Fixed.
+        On Android: Settings, Wi-Fi, this network, Privacy, Use device MAC.
+        A fixed address stays the same on this network, so saved access and protection keep working.</p>
+    </details>
     <div id="dashboard-access-list" hidden></div>
+    <div id="address-move-replaced" hidden></div>
   </section>
   <div id="private-dashboard" hidden>
   <p id="mode-notice" class="notice" role="status">Checking control mode...</p>
@@ -2425,10 +2448,118 @@ DASHBOARD_HTML = r"""<!doctype html>
       adminTokenVerified = false;
       setDashboardUnlocked(false);
       element("dashboard-access-list").replaceChildren();
+      element("address-move-card").hidden = true;
+      element("address-type-note").hidden = true;
+      element("address-move-replaced").hidden = true;
       element("dashboard-access-status").textContent = message;
       setPrivateDataPanels(message);
       stopTrafficSampling(message);
     }
+
+    const addressMoveDismissed = new Set();
+    let addressMoveOffer = null;
+
+    function addressMoveSentence(candidate, current) {
+      const needsAllow = !current.registered && candidate.registered;
+      const needsProtect = !current.protected && candidate.protected;
+      return "This looks like a new address for one of your devices. " + (
+        needsAllow && needsProtect ? "Allow this device and keep it protected?"
+        : needsAllow ? "Allow this device?" : "Keep this device protected?");
+    }
+
+    function renderAddressMoves(data) {
+      addressMoveOffer = data;
+      const current = data.current;
+      const note = element("address-type-note");
+      note.hidden = !current;
+      if (current) {
+        note.textContent = current.private_address
+          ? "This device uses a private Wi-Fi address (" + current.mac_address + "). It can change, and a changed address is not recognised until you move it here."
+          : "This device uses a fixed Wi-Fi address (" + current.mac_address + ").";
+      }
+      const card = element("address-move-card");
+      const candidates = current ? data.candidates : [];
+      card.hidden = !data.offer || !candidates.length || addressMoveDismissed.has(current.mac_address);
+      if (!card.hidden) {
+        const picker = element("address-move-picker");
+        const previous = picker.value;
+        picker.replaceChildren();
+        candidates.forEach((candidate) => {
+          const option = document.createElement("option");
+          option.value = candidate.mac_address;
+          option.textContent = candidate.name + " (" + [
+            candidate.registered ? "allowed" : null, candidate.protected ? "protected" : null
+          ].filter(Boolean).join(" and ") + ")";
+          picker.appendChild(option);
+        });
+        if (candidates.some((candidate) => candidate.mac_address === previous)) picker.value = previous;
+        const showSentence = () => {
+          const chosen = candidates.find((candidate) => candidate.mac_address === picker.value) || candidates[0];
+          element("address-move-text").textContent = addressMoveSentence(chosen, current);
+        };
+        picker.onchange = showSentence;
+        showSentence();
+      }
+      const replaced = element("address-move-replaced");
+      replaced.replaceChildren();
+      replaced.hidden = !(current && data.replaced.length);
+      if (!replaced.hidden) {
+        const heading = document.createElement("h3");
+        heading.textContent = "Replaced addresses";
+        replaced.appendChild(heading);
+        data.replaced.forEach((move) => {
+          const row = document.createElement("p");
+          const label = document.createElement("span");
+          label.textContent = move.name + " · replaced " + move.old_mac + " ";
+          const undo = document.createElement("button");
+          undo.type = "button";
+          undo.textContent = "Undo";
+          undo.addEventListener("click", async () => {
+            if (!window.confirm("Undo the move for " + move.name + "? This device will no longer be " +
+                "recognised under its current address and " + move.old_mac + " is used again.")) return;
+            setButtonBusy(undo, true);
+            try {
+              await request("/api/dashboard-access/move-undo", "POST", {from_mac: move.old_mac});
+              showMessage("Move undone. " + move.name + " uses its old address again.", "success");
+              await checkAdminToken();
+            } catch (error) { showMessage(error.message, "error"); }
+            finally { setButtonBusy(undo, false); }
+          });
+          row.append(label, undo);
+          replaced.appendChild(row);
+        });
+      }
+    }
+
+    async function loadAddressMoves() {
+      try {
+        renderAddressMoves(await request("/api/dashboard-access/moves", "GET"));
+      } catch (error) {
+        element("address-move-card").hidden = true;
+        element("address-type-note").hidden = true;
+        element("address-move-replaced").hidden = true;
+      }
+    }
+
+    element("address-move-dismiss").addEventListener("click", () => {
+      if (addressMoveOffer && addressMoveOffer.current) addressMoveDismissed.add(addressMoveOffer.current.mac_address);
+      element("address-move-card").hidden = true;
+    });
+
+    element("address-move-confirm").addEventListener("click", async () => {
+      const button = element("address-move-confirm");
+      const picker = element("address-move-picker");
+      const name = picker.selectedOptions.length ? picker.selectedOptions[0].textContent : "the device";
+      setButtonBusy(button, true);
+      try {
+        await request("/api/dashboard-access/move", "POST", {from_mac: picker.value});
+        showMessage("Moved. This device now takes over " + name + ". You can undo this under Dashboard access.", "success");
+        await checkAdminToken();
+      } catch (error) {
+        element("address-move-text").textContent = error.message;
+        showMessage(error.message, "error");
+      } finally { setButtonBusy(button, false); }
+    });
 
     async function loadDashboardAccess() {
       const data = await request("/api/dashboard-access/status", "GET");
@@ -2438,6 +2569,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         : data.can_register ? "Token accepted. Choose Allow this device to save dashboard access."
         : "Token accepted but this device could not be verified. Wait a few seconds and check again.";
       setDashboardUnlocked(data.allowed);
+      await loadAddressMoves();
       return data;
     }
 
@@ -2450,7 +2582,8 @@ DASHBOARD_HTML = r"""<!doctype html>
         data.devices.forEach((device) => {
           const row = document.createElement("p");
           const label = document.createElement("span");
-          label.textContent = (device.name || "Device") + " · " + device.mac_address + " ";
+          label.textContent = (device.name || "Device") + " · " + device.mac_address +
+            (device.replaced_by ? " · replaced by " + device.replaced_by : "") + " ";
           const remove = document.createElement("button");
           remove.type = "button";
           remove.textContent = "Remove";
@@ -13333,6 +13466,159 @@ class ControlServer(HTTPServer):
                 response["error"] = "Selection saved but the network update failed. " + response["error"]
             return status, content_type, _json_bytes(response)
 
+    def _active_access_entries(self) -> list:
+        """The saved dashboard access entries that grant access, or nothing when unreadable."""
+
+        reader = getattr(self.helper_client, "dashboard_access", None)
+        if reader is None:
+            return []
+        try:
+            devices = reader("local-list").get("devices", [])
+        except (HelperClientError, AttributeError, TypeError):
+            return []
+        return [item for item in devices if isinstance(item, dict) and "replaced_by" not in item]
+
+    def address_move_offer(self, identity: Dict[str, Any]) -> Dict[str, Any]:
+        """Describe the requester's address and the saved devices it could take over.
+
+        The identity comes from the helper. Nothing here reads a name or address from the browser.
+        """
+
+        none = {"offer": False, "current": None, "candidates": [], "replaced": []}
+        try:
+            current = normalize_exempt_mac(identity.get("mac_address"))
+        except ValueError:
+            return none
+        if identity.get("network") != "test":
+            return none
+        registered = bool(identity.get("allowed"))
+        protected_entries = {item.mac_address: item for item in self.repository.list_unaffected_devices()}
+        protected = current in protected_entries
+        private = int(current[1], 16) & 2 == 2
+        result = {
+            "offer": False,
+            "current": {"mac_address": current, "private_address": private,
+                        "registered": registered, "protected": protected},
+            "candidates": [],
+            "replaced": [],
+        }
+        if registered:
+            result["replaced"] = [
+                {"old_mac": move.old_mac, "new_mac": move.new_mac, "name": move.name or move.old_mac,
+                 "moved_access": move.moved_access, "moved_protection": move.moved_protection,
+                 "moved_at": move.moved_at}
+                for move in self.repository.list_address_moves()
+                if move.new_mac == current
+            ]
+        if registered and protected:
+            return result
+        # A device that is still connected under its own address is not an old address.
+        connected = {station_mac(item) for item in self._station_devices()}
+        candidates: Dict[str, Dict[str, Any]] = {}
+        if not registered:
+            for entry in self._active_access_entries():
+                try:
+                    mac = normalize_exempt_mac(entry.get("mac_address"))
+                except ValueError:
+                    continue
+                candidates[mac] = {"mac_address": mac, "name": str(entry.get("name") or mac),
+                                   "registered": True, "protected": False}
+        if not protected:
+            for mac, entry in protected_entries.items():
+                item = candidates.setdefault(
+                    mac, {"mac_address": mac, "name": entry.name, "registered": False, "protected": False})
+                item["protected"] = True
+                if entry.display_name:
+                    item["name"] = entry.display_name
+        replaced_targets = {move.old_mac for move in self.repository.list_address_moves()}
+        result["candidates"] = sorted(
+            (item for mac, item in candidates.items()
+             if mac != current and mac not in connected and mac not in replaced_targets),
+            key=lambda item: (item["name"].lower(), item["mac_address"]),
+        )
+        result["offer"] = bool(result["candidates"])
+        return result
+
+    def move_device_address(self, old_mac: str, new_mac: str, *, access_moved: bool,
+                            name: str = ""):
+        """Move protection to the verified new address in one saved change and one plan."""
+
+        operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
+        with operation:
+            try:
+                old = normalize_exempt_mac(old_mac)
+                new = normalize_exempt_mac(new_mac)
+                protected = {item.mac_address: item for item in self.repository.list_unaffected_devices()}
+                move_protection = old in protected and new not in protected
+                if old == new or not (move_protection or access_moved):
+                    return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+                        {"error": "There is nothing to move for that device."})
+                if move_protection:
+                    name = protected[old].display_name
+                    purge = {
+                        str(station["ipv4_address"])
+                        for station in self._station_devices()
+                        if station_mac(station) == new and station.get("ipv4_address")
+                    } | {
+                        str(device.ipv4_address)
+                        for device in self.repository.list_devices()
+                        if device.mac_address == new
+                    }
+                    if self.scheduler:
+                        self.scheduler.sample_before_control_change(repository=self.repository)
+                with self.repository.transaction():
+                    if move_protection:
+                        # Both changes sit in one saved version so the plan never sees the gap.
+                        self.repository.save_unaffected_device(
+                            UnaffectedDevice(new, name, int(time.time())))
+                        self.repository.delete_unaffected_device(old)
+                        self.repository.delete_domain_observations(purge, [new])
+                    self.repository.save_address_move(AddressMove(
+                        old, new, name, access_moved, move_protection, int(time.time())))
+                    if move_protection:
+                        self._validate_saved_plan()
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
+            fields = {"moved": {"old_mac": old, "new_mac": new, "access": access_moved,
+                                "protection": move_protection}}
+            if not move_protection:
+                return HTTPStatus.OK, "application/json", _json_bytes(fields)
+            return self._saved_control_response(fields)
+
+    def undo_device_address_move(self, old_mac: str, peer: str):
+        """Give the old address its entries back and drop the ones the move created."""
+
+        operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
+        with operation:
+            try:
+                record = self.repository.get_address_move(old_mac)
+                if record is None:
+                    return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                        {"error": "There is no move to undo for that device."})
+                if record.moved_access:
+                    try:
+                        self.dashboard_access(peer, "undo-move", mac_address=record.old_mac)
+                    except HelperClientError as error:
+                        return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
+                    record = replace(record, moved_access=False)
+                    self.repository.save_address_move(record)
+                if self.scheduler and record.moved_protection:
+                    self.scheduler.sample_before_control_change(repository=self.repository)
+                with self.repository.transaction():
+                    if record.moved_protection:
+                        self.repository.delete_unaffected_device(record.new_mac)
+                        self.repository.save_unaffected_device(
+                            UnaffectedDevice(record.old_mac, record.name, int(time.time())))
+                    self.repository.delete_address_move(record.old_mac)
+                    if record.moved_protection:
+                        self._validate_saved_plan()
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
+            fields = {"undone": {"old_mac": record.old_mac, "new_mac": record.new_mac}}
+            if not record.moved_protection:
+                return HTTPStatus.OK, "application/json", _json_bytes(fields)
+            return self._saved_control_response(fields)
+
     def _change_unaffected_device(self, payload: dict, *, remove: bool):
         operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
         with operation:
@@ -14081,10 +14367,15 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                     headers={"WWW-Authenticate": "Bearer"},
                 )
                 return
-            if path != "/api/dashboard-access/status" and not self._check_device_access():
+            if path not in ("/api/dashboard-access/status", "/api/dashboard-access/moves"
+                            ) and not self._check_device_access():
                 return
         try:
-            if path in ("/api/dashboard-access/status", "/api/dashboard-access"):
+            if path == "/api/dashboard-access/moves":
+                identity = self.server.dashboard_access(self.client_address[0])
+                status, content_type, body = (HTTPStatus.OK, "application/json",
+                                              _json_bytes(self.server.address_move_offer(identity)))
+            elif path in ("/api/dashboard-access/status", "/api/dashboard-access"):
                 data = self.server.dashboard_access(
                     self.client_address[0], "status" if path.endswith("/status") else "list")
                 status, content_type, body = HTTPStatus.OK, "application/json", _json_bytes(data)
@@ -14176,13 +14467,15 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 body=_json_bytes({"error": "not found"}),
             )
             return
-        if path != "/api/dashboard-access/register-self" and not self._check_device_access():
+        if path not in ("/api/dashboard-access/register-self", "/api/dashboard-access/move"
+                        ) and not self._check_device_access():
             return
 
         origin = self.headers.get("Origin")
         host = self.headers.get("Host", "")
         if (path.startswith("/api/router/") or path in ("/api/access-point/reset-name",
-                    "/api/dashboard-access/register-self", "/api/dashboard-access/remove")) and (
+                    "/api/dashboard-access/register-self", "/api/dashboard-access/remove",
+                    "/api/dashboard-access/move", "/api/dashboard-access/move-undo")) and (
             self.headers.get("Sec-Fetch-Site") == "cross-site"
             or (origin is not None and origin not in ("http://" + host, "https://" + host))
         ):
@@ -14201,7 +14494,29 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                     else MAX_JSON_BODY_BYTES
                 ),
             )
-            if path.startswith("/api/dashboard-access/"):
+            if path in ("/api/dashboard-access/move", "/api/dashboard-access/move-undo"):
+                # Only the old address is named. The new one is the verified connection.
+                if set(payload) != {"from_mac"} or not isinstance(payload["from_mac"], str):
+                    raise RequestError("Choose which device this is. Its new address comes from the connection.")
+                try:
+                    old = normalize_exempt_mac(payload["from_mac"])
+                except ValueError as error:
+                    raise RequestError("Choose a saved device.") from error
+                if path.endswith("-undo"):
+                    status, content_type, body = self.server.undo_device_address_move(
+                        old, self.client_address[0])
+                else:
+                    data = self.server.dashboard_access(
+                        self.client_address[0], "move-address", mac_address=old)
+                    status, content_type, body = self.server.move_device_address(
+                        old, data["mac_address"], access_moved=bool(data.get("moved")))
+                    if status == HTTPStatus.CONFLICT and data.get("moved"):
+                        # The protection change was refused, so put the saved access back.
+                        self.server.dashboard_access(self.client_address[0], "undo-move",
+                                                     mac_address=old)
+                    else:
+                        body = _json_bytes({**json.loads(body), "allowed": bool(data.get("allowed"))})
+            elif path.startswith("/api/dashboard-access/"):
                 register = path.endswith("/register-self")
                 if set(payload) - ({"name"} if register else {"mac_address"}):
                     raise RequestError("Device identity must come from the connection.")

@@ -27,7 +27,9 @@ from jittersim.updates import UpdateError, request_update, update_status
 
 from .access import AccessManager
 from .applier import MAX_PROTECTED_MACS, ApplyError, NetworkApplier
-from .dashboard_access import ACCESS_FILE, AccessError, AccessStore, identify_peer
+from .dashboard_access import (
+    ACCESS_FILE, AccessError, AccessStore, identify_peer, is_active, normalize_mac,
+)
 from .executor import CommandExecutionError, SubprocessExecutor
 from .renderer import queue_handle, queue_kind, queue_parent
 from .router import (
@@ -337,7 +339,7 @@ class HelperService:
                 return {"ok": True, "devices": store.remove(payload.get("mac_address"))}
             if operation == "local-list":
                 return {"ok": True, "devices": store.list_devices()}
-            if operation not in ("status", "register-self", "list", "remove"):
+            if operation not in ("status", "register-self", "list", "remove", "move-address", "undo-move"):
                 raise AccessError("Unknown dashboard access action.")
             peer = str(IPv4Address(payload.get("peer")))
             now = time.monotonic()
@@ -346,7 +348,8 @@ class HelperService:
                 identity = dict(cached[1])
             else:
                 identity = identify_peer(
-                    self._applier, peer, require_reachable=operation == "register-self"
+                    self._applier, peer,
+                    require_reachable=operation in ("register-self", "move-address"),
                 )
                 self._peer_cache = {key: value for key, value in self._peer_cache.items()
                                     if now - value[0] < 1}
@@ -355,7 +358,26 @@ class HelperService:
             devices = ([] if operation == "status" and identity["network"] == "management"
                        else store.list_devices())
             allowed = identity["network"] == "management" or any(
-                device["mac_address"] == identity["mac_address"] for device in devices)
+                device["mac_address"] == identity["mac_address"] and is_active(device)
+                for device in devices)
+            moved = False
+            if operation == "move-address":
+                # The new address is the verified requester. Nothing from the browser names it.
+                if not identity["can_register"]:
+                    raise AccessError("This device could not be verified. Connect directly to Pi Wi-Fi "
+                                      "and try again.")
+                old = payload.get("mac_address")
+                if not allowed and any(device["mac_address"] == normalize_mac(old) and is_active(device)
+                                       for device in devices):
+                    devices = store.move(old, identity["mac_address"])
+                    moved = allowed = True
+            if operation == "undo-move":
+                if not allowed:
+                    raise AccessError("Allow this device before using dashboard controls.")
+                devices = store.undo_move(payload.get("mac_address"))
+                allowed = identity["network"] == "management" or any(
+                    device["mac_address"] == identity["mac_address"] and is_active(device)
+                    for device in devices)
             if operation == "register-self":
                 if not identity["can_register"]:
                     raise AccessError("This device could not be verified. Connect directly to Pi Wi-Fi "
@@ -368,9 +390,12 @@ class HelperService:
                 devices = (store.remove(payload.get("mac_address")) if operation == "remove"
                            else devices)
                 allowed = identity["network"] == "management" or any(
-                    device["mac_address"] == identity["mac_address"] for device in devices)
+                    device["mac_address"] == identity["mac_address"] and is_active(device)
+                    for device in devices)
             result = {"ok": True, **identity, "allowed": allowed}
-            if operation in ("list", "remove"):
+            if operation == "move-address":
+                result["moved"] = moved
+            if operation in ("list", "remove", "undo-move"):
                 result["devices"] = devices
             return result
         except AccessError as error:
