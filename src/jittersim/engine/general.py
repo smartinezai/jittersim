@@ -1,19 +1,29 @@
 """Build a bounded shared profile without individual device assignments."""
 
+from typing import Optional, Sequence
+
 from jittersim.config.models import Profile
 from jittersim.config.storage import ConfigRepository
 
 from .access import build_access_plan
 from .compiler import compile_plan
-from .plan import GeneralProfileRule, NetworkPlan
+from .plan import GeneralProfileRule, NetworkPlan, ServiceListRule
 from .service_lists import build_service_list_rules
 from .website import resolve_domains
 
 
 def compile_general_plan(
-    *, repository: ConfigRepository, profile: Profile, outage_active: bool = False
+    *,
+    repository: ConfigRepository,
+    profile: Profile,
+    outage_active: bool = False,
+    service_list_rules: Optional[Sequence[ServiceListRule]] = None,
 ) -> NetworkPlan:
-    """Keep global access checks separate from bypassable profile behavior."""
+    """Keep global access checks separate from bypassable profile behavior.
+
+    `service_list_rules` carries lists the scheduler already rolled. Without
+    them the saved lists apply with their saved values.
+    """
 
     website_policy = repository.get_website_policy()
     return compile_plan(
@@ -34,6 +44,10 @@ def compile_general_plan(
             else None,
             outage_active=outage_active,
         ),
-        service_list_rules=build_service_list_rules(repository),
+        service_list_rules=(
+            build_service_list_rules(repository)
+            if service_list_rules is None
+            else service_list_rules
+        ),
         access=build_access_plan(repository.access_settings()),
     )

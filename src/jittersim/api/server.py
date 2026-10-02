@@ -1281,7 +1281,7 @@ DASHBOARD_HTML = r"""<!doctype html>
             <label><span class="field-label">Interval variation (%)<span class="help-icon" tabindex="0" role="img" aria-label="Interval variation help" data-help="The reroll interval can move this percentage below or above the base interval. For example, 20% of 5 minutes means 4 to 6 minutes.">?</span></span>
               <input id="profile-reroll-variation" type="number" min="0" max="100" value="0">
             </label>
-            <label><span class="field-label">Outage chance (%)<span class="help-icon" tabindex="0" role="img" aria-label="Outage chance help" data-help="The chance that a device is disconnected when the outage check runs.">?</span></span>
+            <label><span class="field-label">Outage chance (%)<span class="help-icon" tabindex="0" role="img" aria-label="Outage chance help" data-help="The chance that a device is disconnected when the outage check runs. A service list that uses this profile cuts only its listed services for every affected device.">?</span></span>
               <input id="profile-outage-probability" type="number" min="0" max="100" value="0">
             </label>
             <label><span class="field-label">Outage length (seconds)<span class="help-icon" tabindex="0" role="img" aria-label="Outage length help" data-help="How long a selected outage lasts before the device is allowed to use the network again.">?</span></span>
@@ -1290,7 +1290,7 @@ DASHBOARD_HTML = r"""<!doctype html>
             <label><span class="field-label">Outage check interval (seconds)<span class="help-icon" tabindex="0" role="img" aria-label="Outage interval help" data-help="How often JitterSim checks whether to start a new outage. Set this to 0 to use the reroll interval.">?</span></span>
               <input id="profile-outage-interval" type="number" min="0" value="0">
             </label>
-            <label><span class="field-label">Random seed (optional)<span class="help-icon" tabindex="0" role="img" aria-label="Random seed help" data-help="Makes the random changes repeat exactly. The same seed gives a device the same values in the same order every time. Leaving it empty is the same as 0. Pick another number for a different pattern.">?</span></span>
+            <label><span class="field-label">Random seed (optional)<span class="help-icon" tabindex="0" role="img" aria-label="Random seed help" data-help="Makes the random changes repeat exactly. The same seed gives a device or a service list the same values in the same order every time. Leaving it empty is the same as 0. Pick another number for a different pattern.">?</span></span>
               <input id="profile-seed" type="number" min="0">
             </label>
             <label><span class="field-label">Website mode<span class="help-icon" tabindex="0" role="img" aria-label="Website mode help" data-help="Unrestricted puts no site limit on this profile. Allow only listed domains limits the device to the sites named in Profile domains.">?</span></span>
@@ -1742,7 +1742,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         </label>
         <button type="button" id="service-list-add-observed">Add to hostnames</button>
       </div>
-      <p class="form-note">While a list is on, traffic to its services gets the list's profile instead of the device or general profile. Devices in Unaffected by profiles are not touched. Global access rules still apply. A hostname also matches its subdomains and can only be in one enabled list. Matching follows the DNS answers that devices receive from the Pi, so encrypted DNS, VPNs and apps that use fixed addresses are not covered. Other sites on the same server address are shaped the same way. Check the names a real session uses and add any that are missing. The profile's website list and random outages are not used for service lists.</p>
+      <p class="form-note">While a list is on, traffic to its services gets the list's profile instead of the device or general profile. Devices in Unaffected by profiles are not touched. Global access rules still apply. A hostname also matches its subdomains and can only be in one enabled list. Matching follows the DNS answers that devices receive from the Pi, so encrypted DNS, VPNs and apps that use fixed addresses are not covered. Other sites on the same server address are shaped the same way. Check the names a real session uses and add any that are missing. The profile's random variation and random outages apply to the whole list: all affected devices get the same new values and the same outages. During an outage the listed services are unreachable while the Pi's DNS and the dashboard and other sites keep working. The profile's website list is not used for service lists.</p>
       <button class="primary" type="submit">Save service list</button>
     </form>
     <div id="service-list-list" class="quota-list" aria-live="polite">Enter the admin token to view service lists.</div>
@@ -5578,7 +5578,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         title.textContent = serviceList.name + " (" + serviceList.id + ")";
         const detail = document.createElement("span");
         detail.textContent = "All affected devices → " + serviceList.profile_name +
-          (serviceList.enabled ? "" : " · disabled");
+          (!serviceList.enabled ? " · disabled" : serviceList.outage_now ? " · random outage now" : "");
         heading.append(title, detail);
         const names = serviceCatalogue
           .filter((service) => serviceList.services.includes(service.key))
@@ -9523,7 +9523,8 @@ DASHBOARD_HTML = r"""<!doctype html>
         const page = currentPage();
         const jobs = [loadHealth];
         if (page === "devices") jobs.push(loadDevicesForSchedule, loadConditions, loadWorkspace, loadAccessStatus);
-        if (page === "schedules") jobs.push(loadTimers, loadScenarios, loadProgressions, loadSchedules, loadQuotas);
+        // Service lists are read again for the random outage they may be in now.
+        if (page === "schedules") jobs.push(loadTimers, loadScenarios, loadProgressions, loadSchedules, loadQuotas, loadServiceLists);
         if (page === "traffic") jobs.push(loadObservations);
         if (page === "access") jobs.push(loadObservations, loadAccessStatus);
         if (page === "activity") jobs.push(loadActivity);
@@ -10191,8 +10192,10 @@ def _service_assignment_payload(
 
 
 def _service_list_payload(
-    service_list: ServiceList, *, repository: ConfigRepository
+    service_list: ServiceList, *, repository: ConfigRepository, outage_now: bool = False
 ) -> Dict[str, Any]:
+    """Describe one list. `outage_now` says the network cuts it for a random outage."""
+
     profile = repository.get_profile(service_list.profile_id)
     return {
         "id": service_list.id,
@@ -10203,6 +10206,7 @@ def _service_list_payload(
         "hostnames": list(service_list.hostnames),
         "domains": list(service_list.domains),
         "enabled": service_list.enabled,
+        "outage_now": service_list.enabled and outage_now,
     }
 
 
@@ -10830,10 +10834,20 @@ class ControlServer(HTTPServer):
                 }
             )
         if path == "/api/service-lists":
+            # Only the plan on the network says whether a list is in an outage now.
+            applied = self.scheduler.applied_plan() if self.scheduler is not None else None
+            outages = {
+                rule.list_id: rule.outage_active
+                for rule in (applied.service_list_rules if applied is not None else ())
+            }
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {
                     "service_lists": [
-                        _service_list_payload(service_list, repository=self.repository)
+                        _service_list_payload(
+                            service_list,
+                            repository=self.repository,
+                            outage_now=outages.get(service_list.id, False),
+                        )
                         for service_list in self.repository.list_service_lists()
                     ],
                     "catalogue": _service_catalogue_payload(),

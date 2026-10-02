@@ -359,6 +359,8 @@ def compile_plan(
         if list_rule.list_id in list_ids:
             raise PlanError(f"duplicate service list id: {list_rule.list_id}")
         list_ids.add(list_rule.list_id)
+        if type(list_rule.outage_active) is not bool:
+            raise PlanError(f"service list {list_rule.list_id} outage state is invalid")
         if not list_rule.domains:
             raise PlanError(f"service list {list_rule.list_id} has no hostnames")
         try:
@@ -393,6 +395,7 @@ def compile_plan(
                 mark=index,
                 upload_impairment=list_rule.upload_impairment,
                 download_impairment=list_rule.download_impairment,
+                outage_active=list_rule.outage_active,
             )
         )
         for direction, impairment in (

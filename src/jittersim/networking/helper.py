@@ -250,6 +250,7 @@ class HelperService:
                 "ok": True,
                 "general_profile": True,
                 "service_lists": True,
+                "service_list_outages": True,
                 "protected_dns_capture": True,
             }
         if action == "dashboard-access":
@@ -1383,7 +1384,9 @@ class HelperClient:
         if plan.general_profile is not None:
             self.check_general_profile_support()
         if plan.service_list_rules:
-            self.check_service_list_support()
+            self.check_service_list_support(
+                outages=any(rule.outage_active for rule in plan.service_list_rules)
+            )
 
     def apply(self, *, plan: NetworkPlan, explicit_apply: bool = False) -> Dict[str, Any]:
         """Ask the helper to apply one validated network plan."""
@@ -1429,8 +1432,13 @@ class HelperClient:
             raise HelperClientError("helper could not save gateway recovery state safely")
         return result
 
-    def check_service_list_support(self) -> None:
-        """Reject an older running helper before applying service lists."""
+    def check_service_list_support(self, *, outages: bool = False) -> None:
+        """Reject an older running helper before applying service lists.
+
+        With `outages` the helper must also enforce a list's random outage. An
+        older helper reads the plan without that field and would leave the
+        listed services reachable.
+        """
 
         try:
             capabilities = self._request({"action": "capabilities"})
@@ -1440,6 +1448,10 @@ class HelperClient:
             raise HelperClientError("Update the Pi helper before applying service lists") from error
         if capabilities.get("service_lists") is not True:
             raise HelperClientError("Update the Pi helper before applying service lists")
+        if outages and capabilities.get("service_list_outages") is not True:
+            raise HelperClientError(
+                "Update the Pi helper before a service list can have a random outage"
+            )
 
     def check_protected_dns_capture_support(self) -> None:
         """Reject an older running helper before it can capture protected traffic."""

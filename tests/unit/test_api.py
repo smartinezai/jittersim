@@ -4041,6 +4041,7 @@ class ControlServerTests(unittest.TestCase):
             "const loadQuotas = async () => {seen.push('limits');};\n"
             "const loadTimers = loadQuotas, loadScenarios = loadQuotas, loadProgressions = loadQuotas;\n"
             "const loadSchedules = loadQuotas; const element = () => ({});\n"
+            "const loadServiceLists = async () => {seen.push('service lists');};\n"
             "const refreshDashboard = async () => {seen.push('refresh');};\n",
             "(async () => {\n"
             " await pollDashboard(); const hidden = seen.length; document.hidden = false;\n"
@@ -4055,7 +4056,9 @@ class ControlServerTests(unittest.TestCase):
         # A second poll while one runs does nothing, and a refresh waits for the poll.
         self.assertEqual(result["before"], ["activity"])
         # Only the visible page's readers run.
-        self.assertEqual(result["seen"], ["activity", "refresh"] + ["limits"] * 5)
+        self.assertEqual(
+            result["seen"], ["activity", "refresh"] + ["limits"] * 5 + ["service lists"]
+        )
     def test_refresh_requested_during_a_refresh_reloads_after_it(self) -> None:
         result = self._run_dashboard_functions(
             ["refresh"],

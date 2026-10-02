@@ -15,6 +15,7 @@ from jittersim.config.models import (
     GroupDataLimit,
     Profile,
     RandomWebsiteOutcome,
+    ServiceList,
     ServiceQuota,
     TimeQuota,
     ValidationError,
@@ -43,6 +44,7 @@ from .general import compile_general_plan
 from .plan import (
     EVERYONE_ELSE_QUEUE_ID,
     GENERAL_QUEUE_ID,
+    SERVICE_LIST_QUEUE_PREFIX,
     EveryoneElseRule,
     NetworkPlan,
     ServiceAssignmentRule,
@@ -624,8 +626,19 @@ class RuntimeScheduler:
         if previous is None:
             return
         records = activity_records(previous, states)
-        self._record(repository, [(kind, message) for kind, message, _ in records], now,
-                     device_ids=[targets for _, _, targets in records])
+        # A service list belongs to no device, so its events name no device.
+        self._record(
+            repository,
+            [(kind, message) for kind, message, _ in records],
+            now,
+            device_ids=[
+                tuple(
+                    target for target in targets
+                    if not target.startswith(SERVICE_LIST_QUEUE_PREFIX)
+                )
+                for _, _, targets in records
+            ],
+        )
 
     @staticmethod
     def _record(
@@ -932,6 +945,13 @@ class RuntimeScheduler:
                 next_change_at=self._next_schedule_change(schedules, now, everyone_else=True),
             )
 
+        service_list_rules = self._build_service_list_rules(
+            repository=repository,
+            profiles=profiles,
+            now=now,
+            active_keys=active_device_ids,
+            states=states,
+        )
         self._rolls = {
             device_id: roll
             for device_id, roll in self._rolls.items()
@@ -999,7 +1019,7 @@ class RuntimeScheduler:
             blocked_device_addresses=blocked_addresses,
             service_quota_rules=service_quota_rules,
             service_assignment_rules=service_assignment_rules,
-            service_list_rules=build_service_list_rules(repository, profiles),
+            service_list_rules=service_list_rules,
             everyone_else=everyone_else,
         )
         return plan, states
@@ -1018,15 +1038,61 @@ class RuntimeScheduler:
             now=now,
             generator_key=GENERAL_QUEUE_ID,
         )
-        self._rolls = {key: roll}
+        # The activity log describes saved devices. The general profile covers
+        # every unprotected client, so it has no per-device sources to compare.
+        # Service lists still roll and their outages are still logged.
+        states: Dict[str, TargetState] = {}
+        active_keys = {key}
+        service_list_rules = self._build_service_list_rules(
+            repository=repository, profiles=None, now=now, active_keys=active_keys, states=states
+        )
+        self._rolls = {
+            roll_key: kept for roll_key, kept in self._rolls.items() if roll_key in active_keys
+        }
         plan = compile_general_plan(
             repository=repository,
             profile=roll.runtime_profile,
             outage_active=roll.outage_until > now,
+            service_list_rules=service_list_rules,
         )
-        # The activity log describes saved devices. The general profile covers
-        # every unprotected client, so it has no per-device sources to compare.
-        return plan, {}
+        return plan, states
+
+    def _build_service_list_rules(
+        self,
+        *,
+        repository: ConfigRepository,
+        profiles: Optional[Mapping[str, Profile]],
+        now: float,
+        active_keys: set,
+        states: Dict[str, TargetState],
+    ) -> tuple:
+        """Roll each enabled list once for all affected clients.
+
+        A list keeps one roll under its queue key so every affected device
+        shares its values and its outages, like the list's shared speed limit.
+        The roll uses the list's saved profile and adds the list's key to
+        `active_keys` and its outage state to `states` for the activity log.
+        """
+
+        def roll(service_list: ServiceList, profile: Profile) -> Tuple[Profile, bool]:
+            key = SERVICE_LIST_QUEUE_PREFIX + service_list.id
+            active_keys.add(key)
+            state = self._roll(
+                key=key,
+                selected_profile=profile,
+                source_key=profile.id,
+                source_profiles=profile,
+                now=now,
+            )
+            outage = state.outage_until > now
+            states[key] = TargetState(
+                name=f"Service list {service_list.name}",
+                source=Source("none", "none"),
+                outage=outage,
+            )
+            return state.runtime_profile, outage
+
+        return build_service_list_rules(repository, profiles, roll=roll)
 
     def _roll(
         self,
