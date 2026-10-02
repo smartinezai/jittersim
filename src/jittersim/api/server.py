@@ -3814,7 +3814,7 @@ DASHBOARD_HTML = """<!doctype html>
         groupSelect.setAttribute("aria-label", "Group for " + (device.display_name || device.mac_address));
         const groupPlaceholder = document.createElement("option");
         groupPlaceholder.value = "";
-        groupPlaceholder.textContent = groups.length ? "Choose group..." : "Create a group below";
+        groupPlaceholder.textContent = groups.length ? "Choose group..." : "Create a group on the Profiles page";
         groupSelect.appendChild(groupPlaceholder);
         groups.forEach((group) => {
           const option = document.createElement("option");
@@ -5545,7 +5545,7 @@ DASHBOARD_HTML = """<!doctype html>
       }
       const status = element("general-profile-status");
       status.textContent = !data.profile
-        ? profiles.length ? "No general profile. Saved device rules apply when profiles are on." : "Create a saved profile below to use this control."
+        ? profiles.length ? "No general profile. Saved device rules apply when profiles are on." : "Create a saved profile on the Profiles page to use this control."
         : data.active ? "Active: " + data.profile.name + ". Applies to every unprotected device."
         : data.state.observed_state === "reset" ? "Paused: " + data.profile.name + ". Choose Apply to all or Start with saved settings to resume."
         : data.state.observed_state === "error" ? "Saved: " + data.profile.name + ". Network update failed. Retry Apply to all."
@@ -5963,6 +5963,9 @@ DASHBOARD_HTML = """<!doctype html>
         if (tokenRevision !== adminTokenRevision) return;
         if (result.ok) {
           adminTokenVerified = true;
+          // Remember an accepted token now. The refresh below can take seconds and a
+          // reload in between would otherwise forget it.
+          updateCredentialStatus();
           await refresh();
           if (tokenRevision !== adminTokenRevision) return;
           await loadTrafficSettings();
@@ -7330,7 +7333,8 @@ DASHBOARD_HTML = """<!doctype html>
         showPage(page.dataset.page, false);
         window.history.replaceState(null, "", "#" + page.dataset.page);
       }
-      target.scrollIntoView({ behavior: "smooth", block: "center" });
+      const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      target.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "center" });
     }
 
     function syncDeviceChip() {
