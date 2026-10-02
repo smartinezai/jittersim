@@ -120,6 +120,14 @@ def test_help_names_where_the_commands_run_and_the_token_risk(capsys):
         assert "never accepted as an argument" in text
 
 
+def test_the_top_level_help_names_the_mac_commands_and_the_pi_commands(capsys):
+    assert main(["--help"]) == 0
+    text = " ".join(capsys.readouterr().out.split())
+    assert "Headless commands on the Pi:" in text
+    assert ("Commands for your Mac through the Pi's HTTPS dashboard: connect, status, "
+            "profiles list/apply-all/stop-all, traffic, wifi show and impact.") in text
+
+
 def test_the_remote_modules_load_without_the_pi_networking_code():
     for name in ("remote_cli.py", "remote_client.py", "dashboard_rules.py", "impact_rules.py"):
         source = (Path(__file__).parents[2] / "src" / "jittersim" / name).read_text()

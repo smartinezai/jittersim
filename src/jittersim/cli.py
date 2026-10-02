@@ -704,9 +704,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if raw_arguments and raw_arguments[0] in ("-h", "--help"):
         parser = _build_parser()
         parser.epilog = (
-            "Headless commands: access status, access apply, access dns-failure, "
+            "Headless commands on the Pi: access status, access apply, access dns-failure, "
             "persistence show, persistence set on/off, diagnostics, logs, "
-            "update check, update install, update rollback and wifi reset."
+            "update check, update install, update rollback and wifi reset. "
+            "Commands for your Mac through the Pi's HTTPS dashboard: connect, status, "
+            "profiles list/apply-all/stop-all, traffic, wifi show and impact. "
+            "Run one with --help for details."
         )
         parser.print_help()
         return 0
