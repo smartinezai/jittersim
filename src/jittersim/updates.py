@@ -336,6 +336,11 @@ def parse_public_key(text, label=None):
     return Signer(name, fields[1], key_fingerprint(fields[1]))
 
 
+# The trusted key list and its folder must belong to root whoever reads them, so that
+# the jittersim login can run list-keys and a file the caller owns is never trusted.
+TRUSTED_OWNER_UID = 0
+
+
 def trusted_keys(config=CONFIG_ROOT):
     """The trusted keys. A list that root does not own, that others may change or that
     holds a line trust-key did not write is refused as a whole."""
@@ -347,7 +352,7 @@ def trusted_keys(config=CONFIG_ROOT):
     if not stat.S_ISREG(info.st_mode):
         raise UpdateError(f"the trusted key list {path} must be a regular file, not a link")
     for item, name in ((info, f"the trusted key list {path}"), (os.stat(config), str(config))):
-        if item.st_uid != os.geteuid() or item.st_mode & 0o022:
+        if item.st_uid != TRUSTED_OWNER_UID or item.st_mode & 0o022:
             raise UpdateError(f"{name} must belong to root and must not be writable by others")
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     with os.fdopen(descriptor, "rb") as handle:

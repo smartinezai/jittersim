@@ -631,6 +631,47 @@ def test_a_list_that_is_a_link_or_writable_by_others_is_not_trusted(pi):
         updates.trusted_keys(pi.config)
 
 
+def as_stat_owner(monkeypatch, owner):
+    """Make every stat of the config folder and the list report OWNER as the owner."""
+
+    real_lstat, real_stat = os.lstat, os.stat
+
+    def with_owner(real):
+        def fake(path, *args, **kwargs):
+            info = real(path, *args, **kwargs)
+            fields = list(info)
+            fields[stat.ST_UID] = owner
+            return os.stat_result(fields)
+        return fake
+
+    monkeypatch.setattr(updates.os, "lstat", with_owner(real_lstat))
+    monkeypatch.setattr(updates.os, "stat", with_owner(real_stat))
+
+
+def test_the_list_is_read_by_a_caller_that_is_not_root_when_root_owns_it(pi, monkeypatch):
+    # On the Pi the list belongs to root and the caller of list-keys is the jittersim login.
+    monkeypatch.setattr(updates, "TRUSTED_OWNER_UID", 0)
+    monkeypatch.setattr(updates.os, "geteuid", lambda: 4242)
+    as_stat_owner(monkeypatch, 0)
+    assert [key.label for key in updates.trusted_keys(pi.config)] == ["owner@mac"]
+
+
+def test_a_list_owned_by_the_caller_but_not_by_root_is_not_trusted(pi, monkeypatch):
+    monkeypatch.setattr(updates, "TRUSTED_OWNER_UID", 0)
+    monkeypatch.setattr(updates.os, "geteuid", lambda: 4242)
+    as_stat_owner(monkeypatch, 4242)
+    with pytest.raises(updates.UpdateError, match="belong to root"):
+        updates.trusted_keys(pi.config)
+
+
+def test_list_keys_works_for_a_caller_that_is_not_root(local_pi, monkeypatch, capsys):
+    monkeypatch.setattr(updates, "TRUSTED_OWNER_UID", 0)
+    monkeypatch.setattr(updates.os, "geteuid", lambda: 4242)
+    as_stat_owner(monkeypatch, 0)
+    assert run_main(["list-keys"], root=False, monkeypatch=monkeypatch) == 0
+    assert "owner@mac" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("line", [
     "cert-authority " + ed25519_line(),
     'jittersim-release namespaces="*" ' + ed25519_line("x"),
