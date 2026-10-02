@@ -26,7 +26,7 @@ from typing import Any, Collection, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, urlsplit
 
 from jittersim.api.access import ACCESS_WRITES, read_access_api, write_access_api
-from jittersim.api.trust import TRUST_DOWNLOADS, easy_address, read_trust_api
+from jittersim.api.trust import TRUST_DOWNLOADS, dashboard_name_report, easy_address, read_trust_api
 from jittersim.localname import read_local_name
 from jittersim.api.workflows import WORKFLOW_WRITES, machine_health, read_workflow, write_workflow
 from jittersim.config.device_labels import (
@@ -1024,6 +1024,9 @@ DASHBOARD_HTML = r"""<!doctype html>
     <p id="token-check-status" class="token-check-status" role="status" aria-live="polite">Enter the token and choose Check token to load diagnostics.</p>
     <details class="credential-help">
       <summary>How to get the admin token</summary>
+      <p id="sign-in-address" class="credential-note">Open the dashboard at <strong>@@EASY_ADDRESS@@</strong>
+        on the router Wi-Fi or on the test Wi-Fi. It is the same address on both, so one saved sign-in
+        covers both.</p>
       <pre id="admin-token-help"></pre>
     </details>
     <div id="router-credentials">
@@ -1126,12 +1129,20 @@ DASHBOARD_HTML = r"""<!doctype html>
     <p>Saved access keeps this dashboard usable during tests. Internet traffic still follows profiles.
       A changed private Wi-Fi address needs registration again. The admin token is always required.</p>
     <div id="dashboard-access-list" hidden></div>
-    <p id="easy-address" class="form-note">On the Pi Wi-Fi you can also open
+    <p id="easy-address" class="form-note">One address works on the router Wi-Fi and on the test Wi-Fi:
       <strong>@@EASY_ADDRESS@@</strong>. After signing in, Trust this Pi removes the certificate warning.</p>
+  <div id="one-address" class="one-address" role="group" aria-labelledby="one-address-title" hidden>
+    <h3 id="one-address-title">One address for both networks</h3>
+    <p class="one-address-text">Bookmark <strong id="one-address-url">@@EASY_ADDRESS@@</strong>, it works on both networks.</p>
+    <p id="one-address-nudge" class="form-note" hidden>You opened this page at <span id="one-address-current"></span>.
+      <a id="one-address-link" href="@@EASY_ADDRESS@@/">Open it at the one address</a>.
+      A remembered sign-in belongs to one address, so enter the admin token once there.</p>
+    <p id="one-address-problem" class="form-note" role="status" hidden></p>
+  </div>
   <div id="trust-pi" aria-labelledby="trust-pi-title" role="group" hidden>
     <h3 id="trust-pi-title">Trust this Pi</h3>
     <p>Install the Pi's certificate on this device once and the dashboard opens without a certificate warning.
-      Use the easy address <strong id="trust-address">...</strong> on the Pi Wi-Fi.</p>
+      Use the one address <strong id="trust-address">...</strong> on either network.</p>
     <div class="action-buttons">
       <button id="trust-download-profile" class="primary" type="button">Download Apple profile (.mobileconfig)</button>
       <button id="trust-download-crt" type="button">Download certificate (.crt)</button>
@@ -2404,6 +2415,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       element("private-dashboard").hidden = !allowed;
       element("dashboard-access-list").hidden = !allowed;
       element("trust-pi").hidden = !allowed;
+      element("one-address").hidden = !allowed;
+      element("easy-address").hidden = allowed;
       if (allowed && typeof loadTrustDetails === "function") loadTrustDetails();
       document.body.classList.toggle("dashboard-locked", !allowed);
     }
@@ -10585,6 +10598,7 @@ class ControlServer(HTTPServer):
         tls_wifi_network: str = "192.168.50.0/24",
         trust_ca_path: Optional[Path] = None,
         local_name: Optional[str] = None,
+        name_status_path: Optional[Path] = None,
     ) -> None:
         if admin_token == "":
             raise ValueError("admin_token must not be empty")
@@ -10611,6 +10625,7 @@ class ControlServer(HTTPServer):
         self.admin_token = admin_token
         self.trust_ca_path = trust_ca_path
         self.local_name = local_name or read_local_name()
+        self.name_status_path = name_status_path
         self.helper_client = helper_client
         self.scheduler = scheduler
         self.router_operations = RouterOperations(
@@ -11441,6 +11456,7 @@ class ControlServer(HTTPServer):
                     else None
                 ),
                 "warnings": [],
+                "dashboard_name": dashboard_name_report(self),
             }
             if self.helper_client is not None:
                 try:

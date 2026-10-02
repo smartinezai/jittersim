@@ -1,7 +1,11 @@
-"""Offer the local certificate authority so a device can trust the dashboard.
+"""The one dashboard address, and the local certificate that makes it trusted.
 
-Everything here needs the admin token and a registered device. The easy address
-itself is a neutral name and also appears in the public health check.
+The dashboard has one neutral address (`https://netlab.local:8080` by default)
+that the Pi announces on the router network and on the test Wi-Fi. A browser
+keeps its remembered sign-in per address, so using the same one on both networks
+means signing in once. The trust downloads, the announcement status and the
+details here need the admin token and a registered device. The address itself is
+neutral and also appears in the public sign-in page.
 """
 
 import hashlib
@@ -10,7 +14,7 @@ import ssl
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
-from jittersim import localca, localname
+from jittersim import localca, localname, mdnsname
 
 TRUST_DOWNLOADS = {
     "/api/trust/ca.crt": ("application/x-x509-ca-cert", "local-dashboard.crt"),
@@ -42,6 +46,37 @@ def easy_address(server: Any) -> str:
     return "https://%s%s" % (name, "" if port == 443 else ":%d" % port)
 
 
+def dashboard_name_report(server: Any, *, neutral: bool = False) -> dict:
+    """Whether the name is announced on each network, in words for the dashboard.
+
+    The announcement is optional. When it fails the dashboard still opens by its
+    IP address, and this says what is wrong and how to fix it. The neutral form
+    leaves out the commands to run on the Pi, which name the product, and the
+    network details. Diagnostics carries the full report.
+    """
+    name = getattr(server, "local_name", None) or localname.DEFAULT_LOCAL_NAME
+    status = mdnsname.read_status(
+        getattr(server, "name_status_path", None) or mdnsname.STATUS_FILE, name=name)
+    # The report belongs to the name that was announced. After a rename it is
+    # old until the publisher has restarted with the new name.
+    if status.get("name") != name:
+        status = mdnsname.stopped_report(name)
+    if neutral:
+        return {"name": name, "address": easy_address(server),
+                "state": status["state"], "message": status["message"]}
+    return {
+        "name": name,
+        "address": easy_address(server),
+        "state": status["state"],
+        "message": status["message"],
+        "fix": status["fix"],
+        "networks": [
+            {"network": item.get("link"), "address": item.get("address"), "state": item.get("state")}
+            for item in status["links"]
+        ],
+    }
+
+
 def _authority(server: Any) -> Optional[bytes]:
     path = getattr(server, "trust_ca_path", None)
     if path is None:
@@ -65,6 +100,8 @@ def read_trust_api(server: Any, path: str) -> Optional[Tuple[int, str, bytes]]:
         return _json({
             "available": certificate is not None,
             "address": easy_address(server),
+            "name": getattr(server, "local_name", None) or localname.DEFAULT_LOCAL_NAME,
+            "announce": dashboard_name_report(server, neutral=True),
             "fingerprint": fingerprint(certificate) if certificate else None,
             "steps": TRUST_STEPS,
         })

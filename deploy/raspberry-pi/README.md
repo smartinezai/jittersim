@@ -24,7 +24,8 @@ require the admin token plus saved device access on test Wi-Fi. Choose
 **Check token** then **Allow this device** to register the requesting computer.
 Anyone holding the admin token may register their own device. The saved
 hardware address is not a second password. The nftables service keeps SSH
-and mDNS traffic blocked on the test interface. The service blocks
+blocked on the test interface and lets in only the mDNS questions (UDP 5353)
+that find the dashboard name. The service blocks
 private IPv4 destinations and local IPv6 addresses forwarded from the test
 interface to the uplink, including the router's web interface. The generated
 test Wi-Fi uses IPv4 sharing and does not offer client IPv6. Browser proxy
@@ -102,33 +103,75 @@ address ranges in use. Its private key is readable only by root. The
 installer prints the authority's fingerprint. It also links the `jittersim` command into
 `/usr/local/bin`.
 
-Open the dashboard at `https://jittersim.local:8080` or use the Pi's Ethernet
-address. Avahi publishes the name on the local network and the installer
-refreshes it when the management interface receives a new address. Routers do
-not normally carry mDNS between separate networks. If the name does not
-resolve from the management Wi-Fi, use the Pi's Ethernet address.
+**One address for both networks.** Open the dashboard at
+`https://netlab.local:8080`. The Pi announces this neutral name with mDNS
+(Avahi) on Ethernet, where it answers with the current Ethernet address, and on
+the test Wi-Fi, where it answers `192.168.50.1`. A Mac on the home router's
+Wi-Fi and the same Mac on the Pi's test Wi-Fi therefore use the same address
+and the same remembered sign-in. The Pi's Ethernet address and `192.168.50.1`
+remain as a fallback, and `https://pi.home.arpa:8080` still works on the test
+Wi-Fi for bookmarks made with the earlier name.
 
-**On the test Wi-Fi** use the easy address `https://pi.home.arpa:8080`. The
-Pi's own DNS answers this neutral name with `192.168.50.1`, with access rules
-on or off. It never contains the product name, because anyone on the test
-Wi-Fi can read it before signing in. To use another name, set
-`JITTERSIM_LOCAL_NAME=dash.home.arpa` in `/etc/jittersim/trust.env` (it must end
-in `.home.arpa`) and run the installer again. The name reaches the Pi's DHCP
-and DNS service when the test Wi-Fi restarts, so run
-`sudo nmcli connection up jittersim-ap` or reboot once after the first install.
-mDNS stays blocked on the test Wi-Fi. Devices there reach the Pi by the easy
-address or `192.168.50.1`, and by nothing else.
+How it works:
+
+- Avahi publishes an address record on every network unless the record is
+  bound to one interface, and its command line tools cannot bind a record. The
+  `jittersim-mdns` service talks to Avahi over D-Bus and binds each record to
+  its own interface, so each network gets the address that works for it. The
+  service uses the system Python and the `python3-dbus` package that the
+  installer adds.
+- Avahi's own publishing is switched off (`publish-addresses=no`,
+  `publish-workstation=no`, `publish-hinfo=no`, `publish-domain=no`,
+  `disable-user-service-publishing=yes`, no reflector, and the SSH, SFTP and
+  other `*.service` files in `/etc/avahi/services` are renamed to
+  `*.jittersim-disabled`) because Avahi cannot limit these to one network.
+  The Pi's host name is not changed. Its `<pi-name>.local` and `jittersim.local`
+  records are still announced, on Ethernet only. Nothing but the one neutral
+  name is announced on the test Wi-Fi.
+  The original settings are kept in `avahi-daemon.conf.jittersim-original`.
+  To undo this run `sudo systemctl disable --now jittersim-mdns.service`,
+  then `sudo /opt/jittersim/.venv/bin/python -m jittersim.mdnsname restore`
+  and `sudo systemctl restart avahi-daemon`.
+- The installer limits Avahi first and only then installs the control firewall
+  rules that let mDNS (UDP 5353, nothing else) in on the test Wi-Fi. If Avahi
+  cannot be limited the installer stops Avahi and does not start the name
+  service. The dashboard stays reachable by IP address either way.
+- A NetworkManager hook (`80-jittersim-mdns`) wakes the service when the
+  Ethernet address or the test Wi-Fi changes, and the service also checks every
+  few seconds. A renewed lease with the same address changes nothing.
+- The test Wi-Fi's own resolver also answers the name with `192.168.50.1` for
+  devices that do not use mDNS. Test Wi-Fi traffic is not reflected to
+  Ethernet or the other way round.
+
+Choose another name with `sudo jittersim dashboard-name set bench.local`. It
+must be one word of letters, digits and hyphens followed by `.local`, and must
+not contain the product name. The command issues the new certificate from the
+same authority, saves the name in `/etc/jittersim/trust.env`
+(`JITTERSIM_DASHBOARD_NAME`), updates the test Wi-Fi resolver record and
+restarts the name service and the dashboard. Devices that trust the authority
+need nothing. Each browser needs one fresh sign-in at the new address.
+`jittersim dashboard-name` shows the address and whether it is announced.
+
+If another device already uses the name, Avahi reports a conflict. The Pi never
+silently switches to `netlab-2.local`, because the certificate would not match.
+`sudo jittersim diagnostics`, the dashboard's diagnostics and `jittersim logs
+name` say which network has the conflict and the fix: choose another name with
+the command above or change the name on the other device.
+
+The name is also covered by the first sign-in. If the page was opened at an IP
+address or `pi.home.arpa`, the dashboard offers a link to the one address and
+says that the remembered sign-in is entered once there.
 
 **Trust the Pi once** to stop certificate warnings. The first time, open
-the easy address, accept the warning once, sign in with the admin token and
+the one address, accept the warning once, sign in with the admin token and
 choose **Allow this device**. A **Trust this Pi** section then offers the
 authority certificate as a `.crt` file and as an Apple profile
 (`.mobileconfig`) with three short steps for a Mac and for an iPhone or iPad.
 Compare the fingerprint shown there with the one the installer printed.
-After that, the easy address, `jittersim.local` and the Ethernet address open
+After that, the one address, `jittersim.local` and the Ethernet address open
 without a warning on that device. Test Wi-Fi devices receive a separate
-certificate that names only the easy address and `192.168.50.1`, so the
-sign-in page does not reveal other names.
+certificate that names only the one address, the earlier test Wi-Fi name and
+`192.168.50.1`, so the sign-in page does not reveal other names.
 
 The leaf certificate is renewed by the installer (and by dashboard updates)
 when its names or the Ethernet address change or fewer than 30 days remain.
@@ -143,12 +186,12 @@ everyone else. Older versions can't read those schedules, so before going back
 to one, delete them or restore a backup from before the update.
 
 The dashboard certificate is named after the Pi (`<pi-name>.local`) and also
-covers `jittersim.local`, the easy name and the current Ethernet address. If the
+covers `jittersim.local`, the one dashboard name and the current Ethernet address. If the
 host name or the address changes, run the installer again. It issues a new
 certificate from the same authority, so trusted devices keep working. The
 Ethernet address must stay in the same private range (for example
 `192.168.x.x`) as when the authority was created. For an address in another
-range, use the easy address, or delete `/etc/jittersim/ca` as root to create a
+range, use the one address, or delete `/etc/jittersim/ca` as root to create a
 new authority and trust it again on every device.
 
 Open **Admin token** in the sidebar and choose **Check token** to load the
@@ -790,8 +833,8 @@ leaving the Ethernet management path available.
 
 The filtered resolver listens on `127.0.0.1` and `192.168.50.1` at port 5335.
 The access table redirects test-client DNS there and keeps that port closed to
-every other interface. Port 5353 stays free for the Avahi publisher so
-`<pi-name>.local` and `jittersim.local` keep resolving from the laptop.
+every other interface. Port 5353 stays free for Avahi, which answers the one
+dashboard name (and on Ethernet `<pi-name>.local` and `jittersim.local`).
 
 `jittersim-dns.service` is installed but not enabled. The helper starts it
 when saved access rules are on, at boot through `jittersim-access-boot` and

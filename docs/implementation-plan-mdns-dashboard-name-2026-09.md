@@ -102,3 +102,28 @@ The installer also runs only the obsolete-table cleanup after replacing the serv
 ## Resolver port after the main integration
 
 The access controls that merged from main first ran their filtered resolver on port 5353 and closed that port outside the test interface and loopback. That brought back the repair above and also made test-client DNS time out once the management firewall dropped mDNS on the test interface. The resolver now listens on port 5335 (`DNS_PORT` in `networking/access.py`). The access table keeps only that port private. Port 5353 stays open to Avahi and the management firewall still blocks it on the test interface. Kernel tests keep a responder on port 5353 in the Pi namespace and check that name queries still reach it after the access restore and after an Apply.
+
+## Update 2026-10-02: one neutral name on both networks
+
+The owner decided to use one neutral `.local` name (default `netlab.local`, a
+setting, never containing the product name) that the Pi announces with mDNS on
+Ethernet (answering with the Ethernet address) and on the test Wi-Fi (answering
+`192.168.50.1`). This replaces the decision above to block mDNS on the test
+Wi-Fi and to publish `jittersim.local` with `avahi-publish-address`.
+
+- Avahi publishes address records on every network when it is not given an
+  interface, and `avahi-publish-address` cannot bind a record. The
+  `jittersim-mdns` service therefore talks to Avahi over D-Bus and binds each
+  record to its own interface (`jittersim.mdnsname`).
+- Avahi's own publishing (host name, workstation, services) is switched off
+  because it cannot be limited to one network. The original settings and the
+  renamed service files are kept and `python -m jittersim.mdnsname restore`
+  puts them back. `jittersim.local` and `<pi-name>.local` are announced on
+  Ethernet only.
+- The control firewall accepts UDP 5353 on the test interface and nothing else
+  new. The installer limits Avahi before the firewall opens that port.
+- A conflict is reported (never renamed) in `jittersim diagnostics` and the
+  dashboard, with the command that changes the name.
+- The decisions about optional Avahi, the NetworkManager hook and keeping the IP
+  address as a recovery path still hold. The hook now wakes the publisher
+  instead of restarting it.

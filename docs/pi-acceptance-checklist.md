@@ -115,9 +115,27 @@ Release tried: ________________  Date: ________________
 - [ ] **The first install makes a new certificate**
   - Do: install the release then open the dashboard in the browser. Compare the SHA-256 fingerprint the installer printed with the one the browser shows.
   - Expect: the browser warns once because the certificate is new. The fingerprints match. After you trust it the warning is gone.
-- [ ] **The Pi name resolves**
-  - Do: on the Mac run `ping -c 2 <pi-name>.local` and open `https://<pi-name>.local:8080`. Do the same with `jittersim.local`.
-  - Expect: both names answer and the dashboard opens. If a name does not resolve from the management Wi-Fi use the Ethernet address.
+- [ ] **The Pi name resolves on the router network**
+  - Do: on a Mac on the home router's Wi-Fi run `ping -c 2 <pi-name>.local` and `ping -c 2 netlab.local`, then open `https://netlab.local:8080`. Do the same with `jittersim.local`.
+  - Expect: the names answer, `netlab.local` shows the Pi's Ethernet address and the dashboard opens. If a name does not resolve use the Ethernet address.
+- [ ] **The same name resolves on the test Wi-Fi with the test address**
+  - Do: switch the same Mac to the `JitterSim` test Wi-Fi (or switch the router Wi-Fi off in the dashboard) and run `ping -c 2 netlab.local`, then open `https://netlab.local:8080`.
+  - Expect: the name answers with `192.168.50.1`, the dashboard opens and the remembered sign-in from the router network is still there. Before the first visit at this address you sign in once.
+- [ ] **Only the one name is announced on the test Wi-Fi**
+  - Do: on the Mac on the test Wi-Fi run `dns-sd -B _ssh._tcp local.` and `dns-sd -B _workstation._tcp local.` and `dns-sd -G v4 <pi-name>.local` for a few seconds each. On the Pi run `sudo tcpdump -ni wlan0 udp port 5353`.
+  - Expect: no SSH or workstation service appears and `<pi-name>.local` does not resolve on the test Wi-Fi. The capture shows the question and answer for `netlab.local` only.
+- [ ] **The name follows an Ethernet address change**
+  - Do: on the Pi run `sudo nmcli connection down <ethernet-connection>; sudo nmcli connection up <ethernet-connection>` (or renew the DHCP lease so the address changes). Then on the Mac run `dns-sd -G v4 netlab.local`.
+  - Expect: within a few seconds the name answers with the new Ethernet address on the router network and still with `192.168.50.1` on the test Wi-Fi. `sudo jittersim diagnostics` shows both.
+- [ ] **A name conflict is reported**
+  - Do: on another computer on the router network run `dns-sd -P Conflict _http._tcp local. 80 netlab.local 192.168.0.250` (or any device that claims `netlab.local`), then restart the name service with `sudo systemctl restart jittersim-mdns`.
+  - Expect: `sudo jittersim diagnostics` and the dashboard's diagnostics say another device already uses the name and give the fix. The Pi does not announce `netlab-2.local`. The dashboard still opens by IP address.
+- [ ] **Changing the name works**
+  - Do: `sudo jittersim dashboard-name set bench.local`, then open `https://bench.local:8080` on both networks.
+  - Expect: the new name opens without a certificate warning on a device that trusts the authority, you sign in once, and `netlab.local` no longer resolves.
+- [ ] **A failure of the name service never blocks the dashboard**
+  - Do: `sudo systemctl stop avahi-daemon avahi-daemon.socket`, then open the dashboard by its IP address.
+  - Expect: the dashboard opens and diagnostics say the name is not announced and how to fix it.
 - [ ] **Sign in again**
   - Do: choose **Check token**. From the test Wi-Fi also choose **Allow this device**.
   - Expect: the dashboard unlocks. Known limit of this build: the page still shows the name jittersim before you sign in.

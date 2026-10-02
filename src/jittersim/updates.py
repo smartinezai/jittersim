@@ -70,7 +70,8 @@ SERVICE_STEPS = (
     ("restart", "jittersim-dashboard.service"),
 )
 # install.sh publishes the dashboard name as a best effort. A failure only
-# means the name is not announced.
+# means the name is not announced. Avahi is limited first (see prepare_name_service
+# in apply_update), because the control firewall lets mDNS in on the test Wi-Fi.
 NAME_STEPS = (
     ("daemon-reload",),
     ("enable", NAME_UNIT),
@@ -95,9 +96,6 @@ VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 def release_files(*, code, units, dispatcher):
     """Files install.sh copies from a release as (source, destination, mode)."""
     files = [(PI + unit, units / unit, 0o644) for unit in UNITS]
-    files.append(
-        (PI + "publish-dashboard-name.sh", code / PI / "publish-dashboard-name.sh", 0o755)
-    )
     files.append((PI + "jittersim-mdns-dispatcher", dispatcher, 0o755))
     return files
 
@@ -478,8 +476,32 @@ def apply_update(
         def present(names):
             return [name for name in names if (units / name).exists()]
 
-        def restart_services():
+        def prepare_name_service():
+            """Limit Avahi like install.sh, before the firewall lets mDNS in.
+
+            Avahi cannot limit its own publishing to one network. If it cannot be
+            limited it is stopped, so it never announces the Pi on the test Wi-Fi
+            with its own settings, and the name service is not started.
+            """
+            try:
+                uplink, test_interface = runtime_interfaces(config)
+                run(
+                    [str(code / ".venv/bin/python"), "-m", "jittersim.mdnsname", "configure",
+                     "--uplink", uplink, "--test-interface", test_interface],
+                    60,
+                )
+                run(["systemctl", "restart", "avahi-daemon.service"], 120)
+                return True
+            except UpdateError:
+                try:
+                    run(["systemctl", "stop", "avahi-daemon.service", "avahi-daemon.socket"], 60)
+                except UpdateError:
+                    pass
+                return False
+
+        def restart_services(prepare_name=False):
             """Run the systemctl steps of install.sh for the units installed now."""
+            name_ready = prepare_name_service() if prepare_name else True
             try:
                 wifi = query(
                     ["nmcli", "-g", "GENERAL.CONNECTION", "device", "show",
@@ -496,7 +518,7 @@ def apply_update(
                 if action == "start" and wifi == "jittersim-ap":
                     continue
                 run(["systemctl", action, *installed], 120)
-            if present([NAME_UNIT]):
+            if name_ready and present([NAME_UNIT]):
                 for action, *names in NAME_STEPS:
                     try:
                         run(["systemctl", action, *names], 120)
@@ -698,7 +720,7 @@ def apply_update(
             ):
                 install_file(staged / source, destination, mode)
             progress("checking", "Restarting services and checking the dashboard and helper.")
-            restart_services()
+            restart_services(prepare_name=True)
             if not wait_healthy():
                 raise UpdateError("updated services failed their health check")
             install_manager(code / "src/jittersim/updates.py", manager)

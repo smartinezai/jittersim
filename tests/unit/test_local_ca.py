@@ -12,7 +12,7 @@ from pathlib import Path
 from jittersim import localca
 
 HAVE_OPENSSL = shutil.which("openssl") is not None
-NAMES = ("pi-lab.local", "jittersim.local", "pi.home.arpa")
+NAMES = ("pi-lab.local", "jittersim.local", "netlab.local", "pi.home.arpa")
 
 
 def run(*arguments: str) -> str:
@@ -54,9 +54,9 @@ class LocalAuthorityTests(unittest.TestCase):
 
     def leaf(self, **overrides):
         options = dict(
-            names=("pi-lab.local", "jittersim.local", "pi.home.arpa"),
+            names=NAMES,
             addresses=("192.168.1.20", "192.168.50.1"),
-            neutral_names=("pi.home.arpa",),
+            neutral_names=("netlab.local", "pi.home.arpa"),
             neutral_addresses=("192.168.50.1",),
         )
         options.update(overrides)
@@ -110,7 +110,7 @@ class LocalAuthorityTests(unittest.TestCase):
         self.assertTrue(result.reissued)
         self.assertEqual(
             alternative_names(self.cert),
-            {"DNS:pi-lab.local", "DNS:jittersim.local", "DNS:pi.home.arpa",
+            {"DNS:pi-lab.local", "DNS:jittersim.local", "DNS:netlab.local", "DNS:pi.home.arpa",
              "IP Address:192.168.1.20", "IP Address:192.168.50.1"},
         )
         self.assertLessEqual(lifetime_days(self.cert), 397)
@@ -120,13 +120,13 @@ class LocalAuthorityTests(unittest.TestCase):
         run("openssl", "verify", "-CAfile", str(self.ca / "ca.crt"), str(self.cert))
         self.assertEqual(self.key.stat().st_mode & 0o777, 0o600)
 
-    def test_the_wifi_leaf_names_nothing_but_the_neutral_name_and_gateway(self) -> None:
+    def test_the_wifi_leaf_names_nothing_but_the_neutral_names_and_gateway(self) -> None:
         self.authority()
         self.leaf()
 
         self.assertEqual(
             alternative_names(self.wifi_cert),
-            {"DNS:pi.home.arpa", "IP Address:192.168.50.1"},
+            {"DNS:netlab.local", "DNS:pi.home.arpa", "IP Address:192.168.50.1"},
         )
         self.assertNotIn("jittersim", certificate_text(self.wifi_cert).lower())
         self.assertNotIn("pi-lab", certificate_text(self.wifi_cert))
@@ -147,12 +147,16 @@ class LocalAuthorityTests(unittest.TestCase):
         self.assertIn("IP Address:192.168.1.99", alternative_names(self.cert))
         self.assertEqual(self.key.read_bytes(), key)
 
+        # Changing the dashboard name reissues both certificates under the same key.
         self.assertTrue(self.leaf(
             addresses=("192.168.1.99", "192.168.50.1"),
-            names=("pi-lab.local", "jittersim.local", "dash.home.arpa"),
-            neutral_names=("dash.home.arpa",)).reissued)
-        self.assertIn("DNS:dash.home.arpa", alternative_names(self.cert))
-        self.assertIn("DNS:dash.home.arpa", alternative_names(self.wifi_cert))
+            names=("pi-lab.local", "jittersim.local", "dash.local", "pi.home.arpa"),
+            neutral_names=("dash.local", "pi.home.arpa")).reissued)
+        for certificate in (self.cert, self.wifi_cert):
+            self.assertIn("DNS:dash.local", alternative_names(certificate))
+            self.assertNotIn("DNS:netlab.local", alternative_names(certificate))
+            run("openssl", "verify", "-CAfile", str(self.ca / "ca.crt"), str(certificate))
+        self.assertEqual(self.key.read_bytes(), key)
 
     def test_leaf_is_reissued_inside_the_renewal_window(self) -> None:
         self.authority()
@@ -226,7 +230,8 @@ class LocalAuthorityTests(unittest.TestCase):
         self.authority()
         self.leaf()
 
-        for certificate, name in ((self.cert, "jittersim.local"), (self.wifi_cert, "pi.home.arpa"),
+        for certificate, name in ((self.cert, "jittersim.local"), (self.cert, "netlab.local"),
+                                  (self.wifi_cert, "netlab.local"), (self.wifi_cert, "pi.home.arpa"),
                                   (self.wifi_cert, "192.168.50.1")):
             with self.subTest(name=name):
                 server = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -273,12 +278,71 @@ class LocalAuthorityTests(unittest.TestCase):
         output = run(
             "python3", "-m", "jittersim.localca", "ensure",
             "--config-dir", str(self.root), "--host-name", "pi-lab.local",
-            "--neutral-name", "pi.home.arpa", "--ethernet-ip", "192.168.1.20")
+            "--neutral-name", "netlab.local", "--ethernet-ip", "192.168.1.20")
 
         self.assertTrue((self.root / "ca" / "ca.crt").exists())
         self.assertTrue(self.cert.exists())
         self.assertTrue(self.wifi_cert.exists())
         self.assertNotIn("PRIVATE", output)
+
+    def test_the_authority_permits_dot_local_so_a_renamed_dashboard_needs_no_new_authority(self) -> None:
+        self.authority()
+        original = (self.ca / "ca.crt").read_bytes()
+        text = certificate_text(self.ca / "ca.crt")
+        constraints = text.split("Name Constraints")[-1]
+        self.assertIn("DNS:local", constraints)
+        self.assertNotIn("netlab", text)
+
+        self.leaf(names=("pi-lab.local", "other-name.local"), neutral_names=("other-name.local",))
+
+        for certificate in (self.cert, self.wifi_cert):
+            run("openssl", "verify", "-CAfile", str(self.ca / "ca.crt"), str(certificate))
+        self.assertIn("DNS:other-name.local", alternative_names(self.wifi_cert))
+        self.assertEqual((self.ca / "ca.crt").read_bytes(), original)
+
+    def test_a_neutral_name_the_authority_cannot_vouch_for_is_refused(self) -> None:
+        self.authority()
+
+        for bad in ("example.com", "jittersim.local", "two.labels.local", "netlab"):
+            with self.subTest(bad=bad), self.assertRaises((localca.TrustError, ValueError)):
+                self.leaf(names=("pi-lab.local",), neutral_names=(bad,))
+
+    def test_the_wifi_certificate_never_names_the_pi_or_the_product(self) -> None:
+        self.authority()
+        self.leaf()
+
+        text = certificate_text(self.wifi_cert).lower()
+        for secret in ("pi-lab", "jittersim", "192.168.1.20"):
+            self.assertNotIn(secret, text)
+
+    def test_prepare_covers_the_saved_name_on_both_certificates_and_reissues_on_change(self) -> None:
+        created, result = localca.prepare(
+            self.root, host_name="pi-lab.local", neutral_name="netlab.local",
+            ethernet_ip="192.168.1.20")
+        self.assertTrue(created and result.reissued)
+        for certificate in (self.cert, self.wifi_cert):
+            self.assertIn("DNS:netlab.local", alternative_names(certificate))
+        self.assertTrue({"DNS:pi-lab.local", "DNS:jittersim.local"} <= alternative_names(self.cert))
+        self.assertFalse(localca.prepare(
+            self.root, host_name="pi-lab.local", neutral_name="netlab.local",
+            ethernet_ip="192.168.1.20")[1].reissued)
+
+        created, result = localca.prepare(
+            self.root, host_name="pi-lab.local", neutral_name="bench.local",
+            ethernet_ip="192.168.1.20")
+
+        self.assertFalse(created)
+        self.assertTrue(result.reissued)
+        for certificate in (self.cert, self.wifi_cert):
+            self.assertIn("DNS:bench.local", alternative_names(certificate))
+            self.assertNotIn("DNS:netlab.local", alternative_names(certificate))
+            run("openssl", "verify", "-CAfile", str(self.ca / "ca.crt"), str(certificate))
+
+    def test_prepare_refuses_a_name_that_names_the_product(self) -> None:
+        with self.assertRaises(ValueError):
+            localca.prepare(
+                self.root, host_name="pi-lab.local", neutral_name="jittersim.local",
+                ethernet_ip="192.168.1.20")
 
 
 @unittest.skipUnless(HAVE_OPENSSL, "openssl is required")
@@ -286,14 +350,17 @@ class LocalAuthorityCommandTests(unittest.TestCase):
     def test_the_command_finds_the_name_and_host_itself_for_the_dashboard_update(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "trust.env").write_text("JITTERSIM_LOCAL_NAME=dash.home.arpa\n")
+            (root / "trust.env").write_text("JITTERSIM_DASHBOARD_NAME=dash.local\n")
 
             self.assertEqual(localca.main(["ensure", "--config-dir", str(root)]), 0)
 
             names = alternative_names(root / "dashboard-wifi.crt")
-            self.assertEqual(names, {"DNS:dash.home.arpa", "IP Address:192.168.50.1"})
+            self.assertEqual(
+                names, {"DNS:dash.local", "DNS:pi.home.arpa", "IP Address:192.168.50.1"})
             host = socket.gethostname().split(".")[0].lower() + ".local"
-            self.assertTrue({"DNS:jittersim.local", "DNS:" + host} <= alternative_names(root / "dashboard.crt"))
+            self.assertTrue(
+                {"DNS:jittersim.local", "DNS:dash.local", "DNS:" + host}
+                <= alternative_names(root / "dashboard.crt"))
 
     def test_the_command_sets_modes_and_skips_ownership_without_root(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -316,10 +383,10 @@ class LocalNameTests(unittest.TestCase):
     def test_default_and_validation(self) -> None:
         from jittersim import localname
 
-        self.assertEqual(localname.DEFAULT_LOCAL_NAME, "pi.home.arpa")
-        self.assertEqual(localname.validate_local_name("Dash.Home.Arpa."), "dash.home.arpa")
-        for bad in ("jittersim.home.arpa", "pi.example.com", "home.arpa", "-x.home.arpa",
-                    "a b.home.arpa", "", "x" * 70 + ".home.arpa"):
+        self.assertEqual(localname.DEFAULT_LOCAL_NAME, "netlab.local")
+        self.assertEqual(localname.validate_local_name("Dash.Local."), "dash.local")
+        for bad in ("jittersim.local", "pi.example.com", "local", "-x.local",
+                    "a b.local", "", "x" * 70 + ".local", "pi.home.arpa"):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 localname.validate_local_name(bad)
 

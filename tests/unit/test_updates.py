@@ -31,11 +31,12 @@ PI = Path(__file__).resolve().parents[2] / "deploy" / "raspberry-pi"
 WATCHER = "jittersim-service-watch.service"
 NAME_UNIT = "jittersim-mdns.service"
 # The installer switches off new package defaults and picks a message. Neither
-# changes a release file or a JitterSim service.
+# changes a release file or a JitterSim service. Stopping Avahi happens only when
+# it cannot be limited (a test below covers the update doing the same).
 NOT_MIRRORED_SYSTEMCTL = (
     "systemctl disable --now unbound.service",
     "systemctl disable --now hostapd.service",
-    "systemctl is-active --quiet jittersim-mdns.service",
+    "systemctl stop avahi-daemon.service avahi-daemon.socket",
 )
 
 
@@ -428,6 +429,12 @@ class UpdateTests(unittest.TestCase):
                         [str(self.code / ".venv/bin/python"), "-m", words[2], words[3]],
                         [command[:4] for command in commands],
                     )
+                elif words[1:3] == ["-m", "jittersim.mdnsname"]:
+                    # Avahi is limited with the saved interfaces before the
+                    # firewall lets mDNS in on the test Wi-Fi.
+                    self.assertIn(words, commands)
+                    self.assertEqual(words[3:], [
+                        "configure", "--uplink", "eth7", "--test-interface", "wlan7"])
                 elif Path(words[0]).name == "pip":
                     self.assertIn(
                         [str(self.code / ".venv/bin/python"), "-m", "pip", "install",
@@ -469,7 +476,7 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(
             packages,
             "dnsmasq-base iputils-ping iw wpasupplicant nftables openssl python3-venv "
-            "tcpdump unbound dnsutils hostapd conntrack avahi-daemon avahi-utils".split(),
+            "tcpdump unbound dnsutils hostapd conntrack avahi-daemon avahi-utils python3-dbus".split(),
         )
         # Retiring a unit needs its file and enabled state back on a rollback.
         self.assertIn("\nOBSOLETE_SERVICES = ()\n", (PI / "retire-services.py").read_text())
@@ -552,8 +559,39 @@ class UpdateTests(unittest.TestCase):
             self.dispatcher.read_text(), (PI / "jittersim-mdns-dispatcher").read_text()
         )
         self.assertEqual(self.dispatcher.stat().st_mode & 0o777, 0o755)
-        publisher = self.code / "deploy/raspberry-pi/publish-dashboard-name.sh"
-        self.assertEqual(publisher.stat().st_mode & 0o777, 0o755)
+        # The publisher ships inside the package, so no separate script is installed.
+        self.assertFalse((self.code / "deploy/raspberry-pi/publish-dashboard-name.sh").exists())
+
+    def test_avahi_is_limited_before_the_firewall_opens_mdns_on_the_test_wifi(self):
+        commands = self.install()
+        words = [" ".join(command) for command in self.after_package(commands)]
+        limit = next(i for i, text in enumerate(words) if "jittersim.mdnsname configure" in text)
+        restart = words.index("systemctl restart avahi-daemon.service")
+        firewall = words.index("systemctl restart jittersim-control-firewall.service")
+        publisher = words.index("systemctl restart " + NAME_UNIT)
+        self.assertLess(limit, restart)
+        self.assertLess(restart, firewall)
+        self.assertLess(firewall, publisher)
+
+    def test_when_avahi_cannot_be_limited_it_is_stopped_and_the_name_service_is_skipped(self):
+        commands = self.install(
+            fail=lambda command: "jittersim.mdnsname" in " ".join(command))
+        calls = self.systemctl(self.after_package(commands))
+        # The update still completes: the dashboard stays reachable by IP address.
+        self.assertEqual(update_status(root=self.root, code=self.code)["phase"], "complete")
+        self.assertIn("systemctl stop avahi-daemon.service avahi-daemon.socket", calls)
+        self.assertNotIn("systemctl restart avahi-daemon.service", calls)
+        self.assertNotIn("systemctl restart " + NAME_UNIT, calls)
+        self.assertIn("systemctl restart jittersim-control-firewall.service", calls)
+
+    def test_a_rollback_leaves_avahi_alone(self):
+        self.install()
+        request_update("", rollback=True, root=self.root, code=self.code, run=lambda *a: None)
+        commands, run = self.recorder()
+        self.apply(run, lambda: True)
+        text = [" ".join(command) for command in commands]
+        self.assertFalse([item for item in text if "mdnsname" in item])
+        self.assertFalse([item for item in text if "avahi" in item])
 
     def test_the_watcher_restarts_and_a_running_test_wifi_is_left_alone(self):
         commands = self.install()
@@ -613,9 +651,6 @@ class UpdateTests(unittest.TestCase):
                 self.dispatcher.chmod(0o755)
                 os.symlink("/old/jittersim", self.command)
                 (self.config / "jittersim-control-firewall.nft").write_text("old rules")
-                publisher = self.code / "deploy/raspberry-pi/publish-dashboard-name.sh"
-                publisher.parent.mkdir(parents=True)
-                publisher.write_text("old publisher")
                 self.stage()
                 request_update("v1", root=self.root, code=self.code, run=lambda *args: None)
                 commands, run = self.recorder(fail)
@@ -627,7 +662,6 @@ class UpdateTests(unittest.TestCase):
                 self.assertEqual(
                     (self.config / "jittersim-control-firewall.nft").read_text(), "old rules"
                 )
-                self.assertEqual(publisher.read_text(), "old publisher")
                 for unit in UNITS:
                     self.assertEqual((self.units / unit).read_text(), "old service")
                 self.assertEqual(self.manager.read_text(), "old recovery manager")
@@ -692,7 +726,7 @@ class UpdateTests(unittest.TestCase):
 
         if shutil.which("openssl") is None:
             self.skipTest("OpenSSL is required for the HTTPS health check")
-        localca.prepare(self.config, host_name="pi.local", neutral_name="pi.home.arpa",
+        localca.prepare(self.config, host_name="pi.local", neutral_name="netlab.local",
                         ethernet_ip="192.168.1.20")
         (self.config / "control.env").write_text("JITTERSIM_ADMIN_TOKEN=release-health-test\n")
         with ConfigRepository(self.base / "health.db") as repository:

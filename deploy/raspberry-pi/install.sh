@@ -158,8 +158,8 @@ fi
 # created once and kept across upgrades and rollbacks (the recovery copy holds the
 # whole configuration folder). Devices that trust the authority open the dashboard
 # without a warning. The certificate names the Pi, the jittersim.local name, the
-# Ethernet address, the test Wi-Fi gateway and the neutral test Wi-Fi name. A second
-# certificate for test Wi-Fi clients names only the neutral name and the gateway.
+# Ethernet address, the test Wi-Fi gateway and the one neutral dashboard name. A second
+# certificate for test Wi-Fi clients names only the neutral names and the gateway.
 # The same two commands run in the dashboard update. The first keeps the name
 # setting and the resolver record. The second keeps the authority and renews the
 # certificates. Only root reads the authority key.
@@ -174,6 +174,26 @@ dashboard_host="$(hostname -s).local"
 "$INSTALL_DIR/.venv/bin/python" -m jittersim.localca ensure \
     --config-dir "$CONFIG_DIR" --host-name "$dashboard_host" \
     --neutral-name "$local_name" --ethernet-ip "$dashboard_ip" --group jittersim >&2
+
+# The one neutral dashboard name is announced with mDNS on Ethernet and on the test
+# Wi-Fi, so the control firewall below lets mDNS in on the test Wi-Fi. Avahi cannot
+# limit its own publishing to one network. It is therefore limited first and
+# publishes nothing by itself (no host name, no services). The name publisher adds
+# one record per network. This is optional. A failure leaves the dashboard open by its
+# IP address, and the name publisher is then not started.
+prepare_dashboard_name_service() {
+    apt-get install -y avahi-daemon avahi-utils python3-dbus || return 1
+    "$INSTALL_DIR/.venv/bin/python" -m jittersim.mdnsname configure \
+        --uplink "$JITTERSIM_UPLINK" --test-interface "$JITTERSIM_TEST_INTERFACE" || return 1
+    systemctl restart avahi-daemon.service || return 1
+}
+dashboard_name_ready=yes
+if ! prepare_dashboard_name_service; then
+    dashboard_name_ready=no
+    echo "Warning: Avahi could not be prepared for the dashboard name. Use the Pi's Ethernet address." >&2
+    echo "Avahi is stopped so it cannot announce the Pi on the test Wi-Fi with its own settings." >&2
+    systemctl stop avahi-daemon.service avahi-daemon.socket || true
+fi
 
 sed \
     -e "s/@UPLINK_INTERFACE@/$JITTERSIM_UPLINK/g" \
@@ -259,14 +279,10 @@ systemctl restart jittersim-service-watch.service
 systemctl restart jittersim-dashboard.service
 
 setup_dashboard_name_service() {
-    apt-get install -y avahi-daemon avahi-utils || return 1
     install -d -m 0755 -o root -g root /etc/NetworkManager/dispatcher.d || return 1
     install -m 0644 -o root -g root \
         "$SOURCE_DIR/deploy/raspberry-pi/jittersim-mdns.service" \
         /etc/systemd/system/jittersim-mdns.service || return 1
-    install -m 0755 -o root -g root \
-        "$SOURCE_DIR/deploy/raspberry-pi/publish-dashboard-name.sh" \
-        "$INSTALL_DIR/deploy/raspberry-pi/publish-dashboard-name.sh" || return 1
     install -m 0755 -o root -g root \
         "$SOURCE_DIR/deploy/raspberry-pi/jittersim-mdns-dispatcher" \
         /etc/NetworkManager/dispatcher.d/80-jittersim-mdns || return 1
@@ -275,20 +291,18 @@ setup_dashboard_name_service() {
     systemctl restart jittersim-mdns.service || return 1
 }
 
-if setup_dashboard_name_service; then
-    if systemctl is-active --quiet jittersim-mdns.service; then
-        echo "Dashboard name publisher is active. Confirm jittersim.local from the management network." >&2
+if [ "$dashboard_name_ready" = yes ]; then
+    if setup_dashboard_name_service; then
+        echo "Dashboard name publisher started. Check it with: sudo jittersim diagnostics" >&2
     else
-        echo "Warning: dashboard name publication is not active. Use the Pi's Ethernet address." >&2
+        echo "Warning: local dashboard name setup failed. Use the Pi's Ethernet address." >&2
     fi
-else
-    echo "Warning: local dashboard name setup failed. Use the Pi's Ethernet address." >&2
 fi
 
 echo "JitterSim installed. Read the generated credentials locally from:" >&2
 echo "  $CONFIG_DIR/control.env" >&2
 echo "  $CONFIG_DIR/ap.env" >&2
-echo "Easy address on the test Wi-Fi: https://$local_name:8080" >&2
+echo "Dashboard address, the same on the router network and the test Wi-Fi: https://$local_name:8080" >&2
 echo "Certificate authority fingerprint (verify before trusting):" >&2
 openssl x509 -in "$CONFIG_DIR/ca/ca.crt" -noout -fingerprint -sha256 >&2
 echo "After signing in, the dashboard offers this certificate to trust on a Mac or iPhone." >&2

@@ -33,8 +33,8 @@ class ResolverPortTests(unittest.TestCase):
         self.assertNotIn("redirect to :53\n", rules)
 
     def test_access_table_never_mentions_the_mdns_port(self):
-        # Avahi answers `<pi-name>.local` and `jittersim.local` on 5353. Any rule
-        # on that port in the access table stops the laptop resolving the Pi.
+        # Avahi answers the dashboard name on 5353. Any rule on that port in the
+        # access table stops devices resolving the Pi.
         for plan in (
             AccessPlan(),
             AccessPlan(options=AccessOptions(enabled=False)),
@@ -50,12 +50,15 @@ class ResolverPortTests(unittest.TestCase):
                 rules,
             )
 
-    def test_control_firewall_blocks_mdns_but_not_the_resolver_port(self):
+    def test_control_firewall_opens_mdns_on_the_test_wifi_only_and_not_the_resolver_port(self):
         text = (ROOT / "deploy/raspberry-pi/jittersim-control-firewall.nft").read_text()
         rules = [line.strip() for line in text.splitlines() if not line.strip().startswith("#")]
         mdns = [line for line in rules if re.search(r"\b(dport|sport) 5353\b", line)]
-        self.assertEqual(len(mdns), 4)
-        self.assertTrue(all("drop" in line for line in mdns))
+        # One name is announced on the test Wi-Fi, so mDNS is accepted there and
+        # nowhere else. Nothing about it is dropped any more.
+        self.assertEqual(len(mdns), 2)
+        self.assertTrue(all("accept" in line and "udp" in line and "TEST_INTERFACE" in line
+                            for line in mdns))
         # Test-client DNS arrives on the test interface at the resolver port
         # after the redirect. Dropping it times out UDP lookups.
         self.assertFalse([line for line in rules if "5335" in line])

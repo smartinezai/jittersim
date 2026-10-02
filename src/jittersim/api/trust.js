@@ -8,6 +8,31 @@ function fillTrustSteps(id, steps) {
   }));
 }
 
+// The one address. The remembered sign-in belongs to one browser address, so a page opened
+// at an IP address or an older name offers the one address and says to sign in once there.
+function showOneAddress(data) {
+  let target;
+  try {
+    target = new URL(data.address);
+  } catch (error) {
+    return;
+  }
+  if (target.protocol !== 'https:') return;
+  element('one-address-url').textContent = data.address;
+  const current = window.location.hostname.toLowerCase();
+  const nudge = element('one-address-nudge');
+  nudge.hidden = current === target.hostname.toLowerCase();
+  if (!nudge.hidden) {
+    element('one-address-current').textContent = window.location.host;
+    element('one-address-link').href = target.origin + '/';
+  }
+  const announce = data.announce || {};
+  const problem = element('one-address-problem');
+  const healthy = announce.state === 'published' || announce.state === 'partial';
+  problem.hidden = healthy || !announce.message;
+  problem.textContent = healthy ? '' : announce.message + ' Diagnostics shows what to do.';
+}
+
 async function loadTrustDetails() {
   const status = element('trust-status');
   let data;
@@ -18,6 +43,7 @@ async function loadTrustDetails() {
     return;
   }
   element('trust-address').textContent = data.address;
+  showOneAddress(data);
   fillTrustSteps('trust-steps-mac', data.steps.mac);
   fillTrustSteps('trust-steps-iphone', data.steps.iphone);
   element('trust-fingerprint').textContent = data.fingerprint || 'not available';

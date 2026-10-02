@@ -25,7 +25,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional, Sequence, Tuple
 
-from .localname import DEFAULT_LOCAL_NAME, GATEWAY_ADDRESS, read_local_name, validate_local_name
+from .localname import (
+    DEFAULT_LOCAL_NAME,
+    GATEWAY_ADDRESS,
+    LEGACY_LOCAL_NAME,
+    read_local_name,
+    validate_local_name,
+)
 
 CA_DAYS = 7300
 LEAF_DAYS = 365
@@ -35,6 +41,10 @@ TEST_NETWORK = "192.168.50.0/24"
 CA_NAME = "Local Dashboard Authority"
 PROFILE_NAME = "Local Dashboard Certificate"
 _PRIVATE_BLOCKS = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+# The authority vouches for whole suffixes, not for one name. The dashboard
+# name is a setting, and a new name must not need a new authority, because every
+# device that trusts the authority would have to install it again. `.local` is
+# the neutral dashboard name, `home.arpa` its earlier test Wi-Fi form.
 _NAME_SUFFIXES = ("local", "home.arpa")
 
 
@@ -163,6 +173,12 @@ def _name_allowed(name: str, suffixes: Iterable[str]) -> bool:
     return any(name == suffix or name.endswith("." + suffix) for suffix in suffixes)
 
 
+def _neutral_name(value: str) -> str:
+    """The dashboard name, or the earlier test Wi-Fi name that is still served."""
+    name = str(value).strip().lower().rstrip(".")
+    return name if name == LEGACY_LOCAL_NAME else validate_local_name(name)
+
+
 def _alternative_names(certificate: Path) -> Optional[set]:
     try:
         text = _text(certificate)
@@ -217,15 +233,16 @@ def ensure_leaf(
     *,
     names: Sequence[str],
     addresses: Sequence[str],
-    neutral_names: Sequence[str] = (DEFAULT_LOCAL_NAME,),
+    neutral_names: Sequence[str] = (DEFAULT_LOCAL_NAME, LEGACY_LOCAL_NAME),
     neutral_addresses: Sequence[str] = (GATEWAY_ADDRESS,),
     days: int = LEAF_DAYS,
 ) -> LeafResult:
     """Issue the dashboard certificates from the authority when they need it.
 
     The full certificate names every way to reach the dashboard. The Wi-Fi
-    certificate names only the neutral name and the gateway address, so test
-    Wi-Fi devices learn nothing else before they sign in. Both share one key.
+    certificate names only the neutral names and the gateway address, so test
+    Wi-Fi devices learn nothing else before they sign in. Both share one key
+    and both are issued again when the dashboard name changes.
     """
     suffixes, networks = _permitted(authority)
     notes = []
@@ -252,7 +269,13 @@ def ensure_leaf(
         return kept
 
     full_addresses = usable(addresses)
-    wifi_names = [validate_local_name(name) for name in neutral_names]
+    wifi_names = []
+    for name in neutral_names:
+        name = _neutral_name(name)
+        if not _name_allowed(name, suffixes):
+            raise TrustError("the authority cannot vouch for %s" % name)
+        if name not in wifi_names:
+            wifi_names.append(name)
     wifi_addresses = usable(neutral_addresses)
     wanted_full = {"DNS:" + name for name in clean_names} | {"IP Address:" + a for a in full_addresses}
     wanted_wifi = {"DNS:" + name for name in wifi_names} | {"IP Address:" + a for a in wifi_addresses}
@@ -326,11 +349,11 @@ def prepare(config_dir: Path, *, host_name: str, neutral_name: str,
     addresses = [GATEWAY_ADDRESS]
     if ethernet_ip and ethernet_ip != "127.0.0.1":
         addresses.insert(0, ethernet_ip)
-    names = [host_name, "jittersim.local", neutral]
+    names = [host_name, "jittersim.local", neutral, LEGACY_LOCAL_NAME]
     result = ensure_leaf(
         config_dir / "ca", config_dir / "dashboard.crt", config_dir / "dashboard.key",
         config_dir / "dashboard-wifi.crt",
-        names=names, addresses=addresses, neutral_names=(neutral,),
+        names=names, addresses=addresses, neutral_names=(neutral, LEGACY_LOCAL_NAME),
         neutral_addresses=(GATEWAY_ADDRESS,))
     return created, result
 

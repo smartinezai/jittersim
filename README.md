@@ -240,11 +240,13 @@ requires the router network or a local Pi terminal.
 
 ### Dashboard access from Pi Wi-Fi
 
-On the Pi Wi-Fi open `https://pi.home.arpa:8080`. The Pi answers this neutral
-name itself, so it needs no router and no Ethernet cable. The address can be
-changed in `/etc/jittersim/trust.env` (see the Pi deployment guide). You can
-also use an address covered by the certificate, for example
-`https://192.168.50.1:8080`. Choose **Admin token** then **Check
+On the Pi Wi-Fi open `https://netlab.local:8080`, the same address that works
+on the router's Wi-Fi. The Pi announces this neutral name on the test Wi-Fi
+itself, so it needs no router and no Ethernet cable. Change it with
+`sudo jittersim dashboard-name set <name>.local` (see the Pi deployment guide).
+You can also use an address covered by the certificate, for example
+`https://192.168.50.1:8080`. A browser keeps its remembered sign-in per
+address, so use the one address on both networks to sign in once. Choose **Admin token** then **Check
 token** and **Allow this device**. This registers the actual requesting
 computer. The dashboard lists saved devices and supports removal.
 
@@ -679,15 +681,28 @@ through the Pi. The [Pi guide](deploy/raspberry-pi/README.md#remote-control-with
 has setup, access rules, checks and removal steps. Tailscale's Personal plan
 is [free for eligible home use](https://tailscale.com/pricing).
 
-On the Pi, open the dashboard over HTTPS at `https://jittersim.local:8080` or
-the Pi's Ethernet address. The installer publishes the local name through
-Avahi on the management network. If the router does not carry local name
-traffic between Ethernet and Wi-Fi, use the Ethernet address. The installer
-creates a local certificate and prints its SHA-256 fingerprint. Verify that
-fingerprint before trusting the certificate in your browser. A DHCP address
-change may require a new certificate. HTTPS protects the browser-to-Pi
-connection, but the TG3442DE's own local web interface still uses HTTP between
-the Pi and router.
+Open the dashboard at one address on every network: `https://netlab.local:8080`.
+The Pi announces this neutral name with mDNS on the home router's network and on
+the test Wi-Fi. The same address works whether the computer is on the router's
+Wi-Fi or on the Pi's test Wi-Fi, so a browser keeps one remembered sign-in
+instead of one per network. Bookmark it once. The Pi's Ethernet address and
+`192.168.50.1` still work as a fallback if name lookup fails.
+
+The name is one word followed by `.local` and never contains the product name,
+because anyone on the test Wi-Fi can read it before signing in. Only that one
+address record is announced on the test Wi-Fi: no host name, no SSH or other
+services. To use another name run `sudo jittersim dashboard-name set
+bench.local` (and `jittersim dashboard-name` to see the address and whether it
+is announced). Browsers keep a remembered sign-in per address, so a new name
+needs one fresh sign-in. If another device on the network already uses the
+name, `sudo jittersim diagnostics` and the dashboard say so and what to run.
+
+The installer creates a local certificate and prints its SHA-256 fingerprint.
+Verify that fingerprint before trusting the certificate in your browser. A
+DHCP address change on Ethernet is handled by the name itself: the Pi announces
+the new address, and the certificate is renewed by the next update. HTTPS
+protects the browser-to-Pi connection, but the TG3442DE's own local web
+interface still uses HTTP between the Pi and router.
 
 ## Set up the Pi
 

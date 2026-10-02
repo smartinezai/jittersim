@@ -21,7 +21,7 @@ from jittersim.engine.access import (
     domain_matches,
 )
 
-from jittersim.localname import GATEWAY_ADDRESS, read_local_name, validate_local_name
+from jittersim.localname import GATEWAY_ADDRESS, read_local_name, resolver_names, validate_local_name
 
 from .commands import Command
 from .executor import CommandExecutionError, SubprocessExecutor
@@ -72,11 +72,14 @@ def read_access(path: Path) -> AccessPlan:
 
 
 def _local_name_records(name: str) -> list:
-    """The dashboard's neutral name, answered here whatever the rules block."""
-    return [
-        f'  local-zone: "{name}." static',
-        f'  local-data: "{name}. 60 IN A {GATEWAY_ADDRESS}"',
-    ]
+    """The dashboard's neutral names, answered here whatever the rules block."""
+    records = []
+    for item in resolver_names(name):
+        records += [
+            f'  local-zone: "{item}." static',
+            f'  local-data: "{item}. 60 IN A {GATEWAY_ADDRESS}"',
+        ]
+    return records
 
 
 def render_dns(plan: AccessPlan, local_name: Optional[str] = None) -> str:

@@ -29,13 +29,13 @@ class TrustDownloadTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.config = Path(self.directory.name)
-        localca.prepare(self.config, host_name="pi-lab.local", neutral_name="pi.home.arpa",
+        localca.prepare(self.config, host_name="pi-lab.local", neutral_name="netlab.local",
                         ethernet_ip="192.168.1.20")
         self.repository = ConfigRepository(":memory:")
         self.addCleanup(self.repository.close)
         self.server = ControlServer(
             ("127.0.0.1", 0), self.repository, admin_token=TOKEN,
-            trust_ca_path=self.config / "ca" / "ca.crt", local_name="pi.home.arpa")
+            trust_ca_path=self.config / "ca" / "ca.crt", local_name="netlab.local")
         self.addCleanup(self.server.server_close)
 
     def get(self, path, token=TOKEN, peer="127.0.0.1"):
@@ -89,7 +89,7 @@ class TrustDownloadTests(unittest.TestCase):
         details = json.loads(self.get("/api/trust")["body"])
 
         self.assertTrue(details["available"])
-        self.assertEqual(details["address"], "https://pi.home.arpa:%d" % self.server.server_port)
+        self.assertEqual(details["address"], "https://netlab.local:%d" % self.server.server_port)
         self.assertRegex(details["fingerprint"], r"^([0-9A-F]{2}:){31}[0-9A-F]{2}$")
         self.assertEqual(len(details["steps"]["mac"]), 3)
         self.assertEqual(len(details["steps"]["iphone"]), 3)
@@ -106,7 +106,7 @@ class TrustDownloadTests(unittest.TestCase):
         page = self.get("/", token=None)
 
         self.assertEqual(page["status"], 200)
-        self.assertIn("<strong>https://pi.home.arpa:%d</strong>" % self.server.server_port,
+        self.assertIn("<strong>https://netlab.local:%d</strong>" % self.server.server_port,
                       page["body"].decode())
         self.assertNotIn("@@EASY_ADDRESS@@", page["body"].decode())
         self.assertEqual(PUBLIC_READ_PATHS, frozenset({"/", "/api/health"}))
@@ -130,7 +130,7 @@ class NeutralCertificateTests(unittest.TestCase):
     def test_test_wifi_clients_get_the_certificate_without_other_names(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory)
-            localca.prepare(config, host_name="pi-lab.local", neutral_name="pi.home.arpa",
+            localca.prepare(config, host_name="pi-lab.local", neutral_name="netlab.local",
                             ethernet_ip="192.168.1.20")
             repository = ConfigRepository(":memory:")
             self.addCleanup(repository.close)
@@ -161,7 +161,7 @@ class NeutralCertificateTests(unittest.TestCase):
     def test_a_test_wifi_client_gets_the_neutral_certificate_whichever_address_it_reaches(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory)
-            localca.prepare(config, host_name="pi-lab.local", neutral_name="pi.home.arpa",
+            localca.prepare(config, host_name="pi-lab.local", neutral_name="netlab.local",
                             ethernet_ip="192.168.1.20")
             repository = ConfigRepository(":memory:")
             self.addCleanup(repository.close)

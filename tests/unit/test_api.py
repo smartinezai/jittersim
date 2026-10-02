@@ -4397,7 +4397,7 @@ class ControlServerTests(unittest.TestCase):
         # Only the neutral easy address is filled in. Scripts and styles stay as they are.
         self.assertEqual(
             body.decode("utf-8"),
-            DASHBOARD_HTML.replace("@@EASY_ADDRESS@@", "https://pi.home.arpa:%d" % self.server.server_port),
+            DASHBOARD_HTML.replace("@@EASY_ADDRESS@@", "https://netlab.local:%d" % self.server.server_port),
         )
         self.assertIn("Checking control mode", DASHBOARD_HTML)
         self.assertIn("Save profile", DASHBOARD_HTML)
