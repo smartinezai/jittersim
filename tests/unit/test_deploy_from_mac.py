@@ -107,6 +107,10 @@ def make_fakes(tmp_path):
         path = bin_directory / name
         path.write_text(FAKE)
         path.chmod(0o755)
+    # This computer is not on the Pi's test Wi-Fi, whatever network the test runs on.
+    ifconfig = bin_directory / "ifconfig"
+    ifconfig.write_text("#!/bin/sh\necho 'en0: flags=8863<UP>'\necho '\tinet 192.168.0.5 netmask 0xffffff00'\n")
+    ifconfig.chmod(0o755)
     key = tmp_path / "keys dir" / "it's_ed25519"
     key.parent.mkdir()
     key.write_text("not a real key")
@@ -338,7 +342,7 @@ def test_a_pi_without_the_update_service_needs_the_installer_once(fakes):
 
 @pytest.mark.parametrize("extra", [(), ("--use-installer",)])
 def test_an_unreachable_pi_stops_before_copying_and_says_which_network(fakes, extra):
-    result, calls = deploy(fakes, *extra, FAKE_PROBE_EXIT="255")
+    result, calls = deploy(fakes, "--ssh", *extra, FAKE_PROBE_EXIT="255")
     assert result.returncode == 1
     assert f"could not reach {HOST} over SSH (exit 255)" in result.stderr
     assert NETWORK_HINT in result.stderr and "test Wi-Fi" in result.stderr
@@ -354,7 +358,7 @@ def test_an_unreachable_pi_stops_before_copying_and_says_which_network(fakes, ex
 ])
 def test_a_call_that_hangs_is_stopped_at_its_deadline(fakes, hang, words):
     started = time.monotonic()
-    result, _ = deploy(fakes, FAKE_HANG=hang, FAKE_SLEEP_SCALE="0.002")
+    result, _ = deploy(fakes, "--ssh", FAKE_HANG=hang, FAKE_SLEEP_SCALE="0.002")
     assert result.returncode == 1
     assert words in result.stderr and NETWORK_HINT in result.stderr
     assert time.monotonic() - started < 30
@@ -587,7 +591,7 @@ def test_plain_hosts_are_accepted(fakes, host):
 
 
 def test_a_missing_key_or_an_option_like_key_is_refused(fakes, tmp_path):
-    result, calls = deploy(fakes, "--key", str(tmp_path / "missing"))
+    result, calls = deploy(fakes, "--ssh", "--key", str(tmp_path / "missing"))
     assert result.returncode == 2 and calls == []
     assert "does not exist" in result.stderr
     result, calls = deploy(fakes, "--key", "-oProxyCommand=x")
@@ -628,7 +632,7 @@ def test_it_runs_under_each_available_shell(fakes, shell):
     result, calls = deploy(fakes, "--install", shell=shell, FAKE_INSTALLED=short_head())
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh", "scp", "ssh", "ssh"]
-    result, _ = deploy(fakes, shell=shell, FAKE_HANG="probe", FAKE_SLEEP_SCALE="0.002")
+    result, _ = deploy(fakes, "--ssh", shell=shell, FAKE_HANG="probe", FAKE_SLEEP_SCALE="0.002")
     assert "did not finish within 60 seconds" in result.stderr
 
 

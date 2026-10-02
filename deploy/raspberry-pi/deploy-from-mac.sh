@@ -39,6 +39,7 @@ usage() {
     cat <<EOF
 usage: deploy-from-mac.sh [--ref REF] [--host USER@HOST] [--key PATH] [--signing-key PATH]
                           [--install] [--use-installer] [--dry-run]
+                          [--https | --ssh] [--url URL] [--ca-cert FILE] [--save-token]
 
 Runs on your Mac in a JitterSim checkout. It builds the release archive of REF with
 build-release.sh, signs it, copies it to the Pi over SSH and stages it for the verified
@@ -61,6 +62,16 @@ terminal unless passwordless staging is on.
                      update service. Needed once on a Pi without the update service and for
                      OS package or Wi-Fi changes.
   --dry-run          resolve REF and print every command without running any of them.
+  --https            deploy through the Pi's HTTPS dashboard instead of SSH (also chosen when
+                     this Mac is on the Pi's test Wi-Fi, 192.168.50.0/24, or SSH does not
+                     answer). deploy-over-https.sh does it: the same signed archive goes to
+                     the dashboard, which accepts only a release the Pi trusts. It needs the
+                     admin token (JITTERSIM_TOKEN or the Keychain item jittersim-admin-token)
+                     and the Pi's certificate (--ca-cert FILE or 'jittersim connect').
+  --ssh              never switch to HTTPS, even when SSH does not answer.
+  --url URL          the dashboard address for the HTTPS path (https://PI:8080).
+  --ca-cert FILE     the Pi's dashboard certificate for the HTTPS path.
+  --save-token       store the admin token in the macOS Keychain and stop.
   -h, --help         show this help
 
 Deploying needs a connection to the Pi's router network (Ethernet or the router's Wi-Fi). A
@@ -171,6 +182,9 @@ run_limited() {
 }
 
 ref=HEAD
+transport=auto
+https_url=
+https_cert=
 host=$DEFAULT_HOST
 key=$DEFAULT_KEY
 signing_key=$DEFAULT_SIGNING_KEY
@@ -179,9 +193,16 @@ use_installer=no
 dry_run=no
 while [ "$#" -gt 0 ]; do
     case $1 in
-        --ref|--host|--key|--signing-key)
+        --https) transport=https; shift ;;
+        --ssh) transport=ssh; shift ;;
+        --save-token)
+            exec sh "$(dirname -- "$0")/deploy-over-https.sh" --save-token
+            ;;
+        --ref|--host|--key|--signing-key|--url|--ca-cert)
             [ "$#" -ge 2 ] || fail "$1 needs a value" 2
             case $1 in
+                --url) https_url=$2 ;;
+                --ca-cert) https_cert=$2 ;;
                 --ref) ref=$2 ;;
                 --host) host=$2 ;;
                 --key) key=$2 ;;
@@ -196,6 +217,28 @@ while [ "$#" -gt 0 ]; do
         *) usage >&2; exit 2 ;;
     esac
 done
+
+# Choose the way to reach the Pi. On the Pi's test Wi-Fi (192.168.50.0/24) SSH is blocked on
+# purpose, so the signed release goes through the HTTPS dashboard. Elsewhere SSH is tried
+# first and the HTTPS dashboard is the fallback when SSH does not answer.
+over_https() {
+    set -- --ref "$ref" --host "$host" --signing-key "$signing_key"
+    [ -z "$https_url" ] || set -- "$@" --url "$https_url"
+    [ -z "$https_cert" ] || set -- "$@" --ca-cert "$https_cert"
+    [ "$install" = no ] || set -- "$@" --install
+    [ "$dry_run" = no ] || set -- "$@" --dry-run
+    exec sh "$(dirname -- "$0")/deploy-over-https.sh" "$@"
+}
+if [ "$use_installer" = no ]; then
+    if [ "$transport" = https ]; then
+        over_https
+    elif [ "$transport" = auto ]; then
+        if ifconfig 2>/dev/null | grep -q 'inet 192\.168\.50\.'; then
+            printf 'This Mac is on the Pi test Wi-Fi where SSH is blocked on purpose. Using the HTTPS upload.\n'
+            over_https
+        fi
+    fi
+fi
 
 # A host is USER@NAME or NAME with ASCII letters, digits, dots, dashes and underscores only.
 # It never starts with a dash so ssh cannot read it as an option and it holds nothing a
@@ -213,7 +256,13 @@ valid_host "$host" \
 case $key in
     ''|-*) fail "refusing key path '$key'" 2 ;;
 esac
-[ -f "$key" ] || fail "the SSH key $key does not exist" 2
+if [ ! -f "$key" ]; then
+    if [ "$transport" = auto ] && [ "$use_installer" = no ]; then
+        printf 'There is no SSH key %s. Using the HTTPS upload instead.\n' "$key"
+        over_https
+    fi
+    fail "the SSH key $key does not exist" 2
+fi
 case $signing_key in
     ''|-*) fail "refusing signing key path '$signing_key'" 2 ;;
 esac
@@ -334,6 +383,10 @@ else
     answer=$(ssh_batch_answer "$CHECK_SECONDS" "$probe")
     status=$?
     set -e
+    if [ "$status" -ne 0 ] && [ "$transport" = auto ] && [ "$use_installer" = no ]; then
+        printf 'SSH to the Pi did not answer. Using the HTTPS upload instead.\n'
+        over_https
+    fi
     [ "$status" -eq 0 ] || unreachable "$status" "Checking the Pi" "$CHECK_SECONDS"
 fi
 running=$(printf '%s\n' "$answer" | sed -n 's/^Installed: //p' | head -n 1)
