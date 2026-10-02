@@ -60,7 +60,11 @@ def run_node(program):
 
 
 NAMES = "".join(
-    page_function(name) for name in ("deviceDisplayName", "deviceTitle", "devicePickerLabel")
+    page_function(name)
+    for name in (
+        "deviceDisplayName", "deviceTitle", "devicePickerLabel",
+        "deviceIsPaused", "deviceProfileCell", "deviceStateCell",
+    )
 )
 LAPTOP = {
     "id": "laptop", "name": "Client 192.168.50.11", "display_name": "Sam laptop",
@@ -103,6 +107,7 @@ function appliedProfileCell(name) { return [name, 'Saved profile']; }
 function profileName(id) { return id; }
 function deviceAccessText() { return 'Network access allowed'; }
 function conditionCell() { return '—'; }
+function deviceConditionCell() { return ['Normal', 'No network effects']; }
 function everyoneElseRow() { return null; }
 let workspaceDevice = null;
 """

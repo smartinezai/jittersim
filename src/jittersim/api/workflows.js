@@ -262,12 +262,12 @@ function renderDeviceCards() {
     const state = Object.prototype.hasOwnProperty.call(deviceConditions.devices, device.id) ? deviceConditions.devices[device.id] : null;
     const card = document.createElement('article');
     card.className = 'device-card';
-    const profile = appliedProfileCell(profileName(device.profile_id), state);
+    const profile = deviceProfileCell(device);
     // The name is the title and the address is small text under it.
     card.append(textNode('h3', deviceDisplayName(device)), textNode('p', device.ipv4_address, 'form-note'),
       textNode('p', profile[0]), textNode('p', profile[1], 'form-note'),
       textNode('p', deviceAccessText(device), 'device-access-status'),
-      textNode('p', conditionCell(state).join ? conditionCell(state).join(' · ') : conditionCell(state)),
+      textNode('p', [].concat(deviceStateCell(device)).join(' · ')),
       actionButton('Open ' + deviceTitle(device), () => openDevice(device.id)));
     container.append(card);
   });
@@ -285,7 +285,7 @@ function renderWorkspaceState() {
   if (!device) return;
   const state = Object.prototype.hasOwnProperty.call(deviceConditions.devices, device.id) ? deviceConditions.devices[device.id] : null;
   element('workspace-title').textContent = deviceDisplayName(device);
-  element('workspace-state').textContent = appliedProfileCell(profileName(device.profile_id), state).join(' · ');
+  element('workspace-state').textContent = [].concat(deviceIsPaused(device) ? deviceStateCell(device) : appliedProfileCell(profileName(device.profile_id), state)).join(' · ');
   element('workspace-access').textContent = deviceAccessText(device);
   element('workspace-address').textContent = device.ipv4_address + ' · ' + (device.mac_address || 'No saved MAC') + ' · Saved default: ' + profileName(device.profile_id);
 }
