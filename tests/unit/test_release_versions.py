@@ -125,6 +125,27 @@ class BuildScriptTests(unittest.TestCase):
         self.assertIn("does not match", result.stderr)
         self.assertEqual(list(self.out.iterdir()), [])
 
+    def test_the_version_alone_can_be_asked_for(self) -> None:
+        commit = subprocess.run(
+            ["git", "rev-parse", "--short=7", "HEAD"], cwd=self.repo, capture_output=True, text=True
+        ).stdout.strip()
+        untagged = subprocess.run(["sh", str(BUILD), "--version", "HEAD"], cwd=self.repo,
+                                  capture_output=True, text=True)
+        self.assertEqual((untagged.returncode, untagged.stdout, untagged.stderr),
+                         (0, f"0.2.0.dev+{commit}\n", ""))
+        self.git("tag", "v0.2.0")
+        tagged = subprocess.run(["sh", str(BUILD), "--version", "v0.2.0"], cwd=self.repo,
+                                capture_output=True, text=True)
+        self.assertEqual((tagged.returncode, tagged.stdout), (0, "0.2.0\n"))
+        self.assertEqual(list(self.out.iterdir()), [])
+
+    def test_asking_for_the_version_of_a_wrong_tag_fails(self) -> None:
+        self.git("tag", "v0.3.0")
+        result = subprocess.run(["sh", str(BUILD), "--version", "v0.3.0"], cwd=self.repo,
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+
     def test_a_named_archive_still_works(self) -> None:
         target = self.out / "custom.tar.gz"
         result = self.build("HEAD", target)

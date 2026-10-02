@@ -4,12 +4,20 @@ set -eu
 # A commit with a tag vMAJOR.MINOR.PATCH builds release MAJOR.MINOR.PATCH and the number must
 # match the version in pyproject.toml. Any other commit builds NUMBER.dev+COMMIT.
 # OUTPUT is a folder (the file is named after the version) or a name that ends in .tar.gz.
-if [ "$#" -ne 2 ]; then
+# build-release.sh --version REF only prints the version the commit would build.
+if [ "$#" -eq 2 ] && [ "$1" = "--version" ]; then
+    print_version=yes
+    ref=$2
+    output=
+elif [ "$#" -ne 2 ]; then
     echo 'usage: build-release.sh REF OUTPUT_DIR|OUTPUT.tar.gz' >&2
+    echo '       build-release.sh --version REF' >&2
     exit 1
+else
+    print_version=no
+    ref=$1
+    output=$2
 fi
-ref=$1
-output=$2
 commit=$(git rev-parse --verify "$ref^{commit}")
 number=$(git show "$commit:pyproject.toml" | sed -n 's/^version = "\(.*\)"$/\1/p' | head -n 1)
 tag=$(git tag --points-at "$commit" --list 'v[0-9]*' | head -n 1)
@@ -21,6 +29,10 @@ if [ -n "$tag" ]; then
     version=$number
 else
     version="$number.dev+$(printf %s "$commit" | cut -c1-7)"
+fi
+if [ "$print_version" = yes ]; then
+    echo "$version"
+    exit 0
 fi
 case "$output" in
     *.tar.gz) archive=$output ;;

@@ -677,7 +677,8 @@ Build a bundle from the tag on the development machine:
 The bundle is named `jittersim-MAJOR.MINOR.PATCH.tar.gz` and the script prints
 the version it built. A commit without a tag builds a test build named
 `NUMBER.dev+COMMIT` that never looks like a release. A second argument that ends
-in `.tar.gz` names the file yourself.
+in `.tar.gz` names the file yourself. `build-release.sh --version REF` only prints the version
+the commit would build.
 
 Save the printed SHA-256 checksum with the release record. Stage the version the script printed.
 The update refuses to install an older number over a newer one. Use Restore previous
