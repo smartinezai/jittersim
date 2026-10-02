@@ -681,13 +681,21 @@ Only the administrator can write the staged files. The dashboard can select
 only that staged release and cannot submit a URL, path or shell command.
 
 In Setup, press Check for updates then Install staged release. The operation
-stops the dashboard, helper and browser proxy. It backs up the installation,
-configuration, database and service definitions before installing the package.
-It restarts services then checks the authenticated HTTPS health response and
-helper connection. A failure after installation begins restores that backup.
-Allow a brief test-network interruption and keep the Ethernet or SSH recovery
-path available. A staged release updates the Python package and service files.
-OS packages and Wi-Fi topology changes still use the normal installer.
+runs the release steps of `install.sh`. It first runs the release's network
+preflight and kernel egress-hook check. If either fails nothing changes. It
+then stops the dashboard, helper and browser proxy. It backs up the
+installation, configuration, database, service definitions, the dashboard name
+dispatcher script and the `jittersim` command link before installing the
+package. It installs the same service files, dispatcher script and firewall
+rules as the installer and restarts the services in the installer's order,
+including the DNS watcher and the dashboard name publisher. A running test
+Wi-Fi is never restarted. It then checks the authenticated HTTPS health
+response and helper connection. A failure after installation begins restores
+that backup. Allow a brief test-network interruption and keep the Ethernet or
+SSH recovery path available. OS packages, credentials, the certificate and
+Wi-Fi settings still use the normal installer. The recovery program already on
+the Pi runs the update so changed install steps apply from the update after
+it. Run the installer once for a release that changes them.
 
 The recovery program uses system Python and is stored outside the app's virtual
 environment. A queued operation runs again after reboot. An interrupted install
