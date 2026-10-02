@@ -54,7 +54,7 @@ Please check `git branch -r` and the open pull requests before starting an item.
 
 ### 8. Forced test network window
 
-- **Status:** needs a decision (see the open questions).
+- **Status:** planned. The owner decided where the router login lives and what happens when the router does not answer.
 - **Why:** the owner wants a weekend where the only Wi-Fi at home is the Pi. A schedule such as Friday to Sunday or Saturday 15:00 to Sunday 05:00 switches the router's Wi-Fi off and makes the Pi's test Wi-Fi look like it. Every device has to join the Pi. When the window ends the Pi goes back to its own name and the router's Wi-Fi comes back on.
 - **How it would work:**
   - A new schedule kind with a start and an end. A window may cross midnight and may span several days.
@@ -68,9 +68,9 @@ Please check `git branch -r` and the open pull requests before starting an item.
   - The Pi stays reachable over Ethernet. Do not start a window without an Ethernet path.
   - Do not start a window when the Pi's clock is not synced.
   - The restore never depends on the router answering. The Pi's own name comes back first and the router's Wi-Fi is retried with a warning until it works.
-- **Open questions:**
-  - The unattended switch-on and switch-off need the router login on the Pi. Today it lives in the browser for 24 hours. Storing it on the Pi is a bigger step and needs the owner's decision.
-  - What the Pi does when the router is off at the end and does not answer. A retry with an alert is proposed.
+- **Decided:**
+  - The Pi stores the router login so the switch-off and switch-on run with nobody present. The file belongs to root and nobody else can read it. The dashboard never shows the password again after saving it.
+  - If the router does not answer when the window ends the Pi restores its own name first and keeps retrying the router with an alert on the dashboard and in the activity log until it works.
 - **Tests:**
   - Storage: a window that crosses midnight and one that spans days. State survives a reopen. A second restore changes nothing.
   - Runner with a fake router: start and end in order. A failed switch-off rolls back. A crash after the copy resumes. Panic ends the window.
