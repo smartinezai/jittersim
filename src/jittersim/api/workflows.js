@@ -263,10 +263,12 @@ function renderDeviceCards() {
     const card = document.createElement('article');
     card.className = 'device-card';
     const profile = appliedProfileCell(profileName(device.profile_id), state);
-    card.append(textNode('h3', device.name), textNode('p', profile[0]), textNode('p', profile[1], 'form-note'),
+    // The name is the title and the address is small text under it.
+    card.append(textNode('h3', deviceDisplayName(device)), textNode('p', device.ipv4_address, 'form-note'),
+      textNode('p', profile[0]), textNode('p', profile[1], 'form-note'),
       textNode('p', deviceAccessText(device), 'device-access-status'),
       textNode('p', conditionCell(state).join ? conditionCell(state).join(' · ') : conditionCell(state)),
-      actionButton('Open ' + device.name, () => openDevice(device.id)));
+      actionButton('Open ' + deviceTitle(device), () => openDevice(device.id)));
     container.append(card);
   });
   const others = everyoneElseRow();
@@ -282,7 +284,7 @@ function renderWorkspaceState() {
   const device = devices.find(item => item.id === workspaceDevice);
   if (!device) return;
   const state = Object.prototype.hasOwnProperty.call(deviceConditions.devices, device.id) ? deviceConditions.devices[device.id] : null;
-  element('workspace-title').textContent = device.name;
+  element('workspace-title').textContent = deviceDisplayName(device);
   element('workspace-state').textContent = appliedProfileCell(profileName(device.profile_id), state).join(' · ');
   element('workspace-access').textContent = deviceAccessText(device);
   element('workspace-address').textContent = device.ipv4_address + ' · ' + (device.mac_address || 'No saved MAC') + ' · Saved default: ' + profileName(device.profile_id);
@@ -384,7 +386,7 @@ function installDeviceWorkflows() {
   workspace.append(actionButton('Edit device settings', () => { const device=devices.find(item => item.id === workspaceDevice); if (device) { fillDeviceForm(device); element('device-name').focus(); } }));
   workspace.append(actionButton('Delete this device', async () => {
     const device=devices.find(item => item.id === workspaceDevice);
-    if (!device || !await confirmWorkflow('Delete ' + device.name + ' and its schedules, temporary runs and limits? A group with only this device is also deleted.')) return;
+    if (!device || !await confirmWorkflow('Delete ' + deviceTitle(device) + ' and its schedules, temporary runs and limits? A group with only this device is also deleted.')) return;
     await request('/api/devices/delete', 'POST', {id:device.id});
     workspaceDevice=null; workspace.hidden=true; refreshAfterSuccess('Device deleted.');
   }));
@@ -435,7 +437,8 @@ async function openTestSession(id) {
   element('test-session-details').hidden = false;
   element('test-session-heading').textContent = data.session.name;
   element('test-session-notes').value = data.session.notes;
-  element('test-session-summary').textContent = data.session.measurements.length + ' measurements · ' + data.session.events.length +
+  element('test-session-summary').textContent = 'Target: ' + (data.session.target_name || data.session.target) + ' · ' +
+    data.session.measurements.length + ' measurements · ' + data.session.events.length +
     ' events' + (data.session.events_truncated ? ' · Event limit reached' : '') + ' · Settings captured when this session started.';
   element('test-session-finish').disabled = data.session.ended_at !== null;
   element('test-session-list').value = id;

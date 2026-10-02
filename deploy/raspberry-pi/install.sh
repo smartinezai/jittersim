@@ -57,6 +57,13 @@ install -d -m 0750 -o jittersim -g jittersim "$DATA_DIR"
 chown -R jittersim:jittersim "$DATA_DIR"
 install -d -m 0755 -o root -g root "$INSTALL_DIR"
 
+# Releases with household access rules install jittersim-access-restore. Without it
+# the running release (the Pi line before the main merge) never wrote access state.
+previous_access_release=no
+if [ -x "$INSTALL_DIR/.venv/bin/jittersim-access-restore" ]; then
+    previous_access_release=yes
+fi
+
 python3 "$SOURCE_DIR/deploy/raspberry-pi/replace-source.py" "$SOURCE_DIR" "$INSTALL_DIR"
 
 python3 -m venv "$INSTALL_DIR/.venv"
@@ -148,14 +155,16 @@ if [ -z "$dashboard_ip" ]; then
     dashboard_ip=127.0.0.1
 fi
 # The certificate is named after the Pi and also covers the jittersim.local
-# name that the Avahi publisher announces on the management network.
+# name that the Avahi publisher announces on the management network and the
+# test Wi-Fi gateway address that browsers on the test Wi-Fi use.
 dashboard_host="$(hostname -s).local"
 dashboard_cert_matches=false
 if [ -s "$CONFIG_DIR/dashboard.crt" ] && [ -s "$CONFIG_DIR/dashboard.key" ]; then
     dashboard_cert_text=$(openssl x509 -in "$CONFIG_DIR/dashboard.crt" -noout -text 2>/dev/null || true)
     if printf '%s\n' "$dashboard_cert_text" | grep -Fq "IP Address:$dashboard_ip" \
         && printf '%s\n' "$dashboard_cert_text" | grep -Fq "DNS:$dashboard_host" \
-        && printf '%s\n' "$dashboard_cert_text" | grep -Fq "DNS:jittersim.local"; then
+        && printf '%s\n' "$dashboard_cert_text" | grep -Fq "DNS:jittersim.local" \
+        && printf '%s\n' "$dashboard_cert_text" | grep -Fq "IP Address:192.168.50.1"; then
         dashboard_cert_matches=true
     fi
 fi
@@ -165,7 +174,7 @@ if [ "$dashboard_cert_matches" = false ]; then
         -keyout "$CONFIG_DIR/dashboard.key" \
         -out "$CONFIG_DIR/dashboard.crt" \
         -subj "/CN=$dashboard_host" \
-        -addext "subjectAltName=DNS:$dashboard_host,DNS:jittersim.local,IP:$dashboard_ip" \
+        -addext "subjectAltName=DNS:$dashboard_host,DNS:jittersim.local,IP:$dashboard_ip,IP:192.168.50.1" \
         -addext "extendedKeyUsage=serverAuth"
 fi
 chown root:jittersim "$CONFIG_DIR/dashboard.key"
@@ -209,10 +218,36 @@ for access_service in jittersim-dns jittersim-access-boot jittersim-ap; do
     install -m 0644 -o root -g root "$SOURCE_DIR/deploy/raspberry-pi/$access_service.service" \
         "/etc/systemd/system/$access_service.service"
 done
+# An older main install kept household access state here. On an upgrade from a
+# release without access rules nothing in the database knows about it, so it is
+# moved to a dated folder that only root can read instead of being restored.
+archive_stale_access_state() {
+    if [ "$previous_access_release" = yes ] || [ ! -d /var/lib/jittersim-access ]; then
+        return 0
+    fi
+    if [ -z "$(ls -A /var/lib/jittersim-access)" ]; then
+        return 0
+    fi
+    access_backup="/var/lib/jittersim-access-before-$(date +%Y%m%d-%H%M%S)"
+    mv /var/lib/jittersim-access "$access_backup"
+    chown -R root:root "$access_backup"
+    chmod 0700 "$access_backup"
+    echo "Moved old household access state to $access_backup (not restored)." >&2
+}
+archive_stale_access_state
 install -d -m 0750 -o root -g jittersim /var/lib/jittersim-access
 systemctl daemon-reload
 systemctl enable jittersim-access-boot.service jittersim-ap.service
-systemctl restart jittersim-access-boot.service
+# A failed restore keeps test traffic closed behind the guard table (sign-in and DHCP
+# stay open). The installer carries on so the new helper starts and Normal access
+# (`sudo jittersim normal-access` or Panic) can open the test Wi-Fi again.
+restore_access_rules() {
+    if ! systemctl restart jittersim-access-boot.service; then
+        echo "Warning: the saved household access rules could not be restored." >&2
+        echo "Test Wi-Fi internet access stays closed until you run: sudo jittersim normal-access" >&2
+    fi
+}
+restore_access_rules
 systemctl enable jittersim-control-firewall.service
 systemctl restart jittersim-control-firewall.service
 systemctl enable jittersim-helper.service jittersim-dashboard.service jittersim-browser-proxy.service jittersim-service-watch.service

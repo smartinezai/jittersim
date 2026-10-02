@@ -2369,6 +2369,10 @@ class FakeAccessManager:
     def status(self):
         return {"available": True, "enabled": False}
 
+    def apply(self, plan):
+        self.applied = plan
+        return {"enabled": plan.options.enabled}
+
 
 class QueueReadAndWriteTests(unittest.TestCase):
     """A read never makes Panic or an apply fail and a write never waits for ever."""
@@ -2513,6 +2517,28 @@ class QueueReadAndWriteTests(unittest.TestCase):
         from jittersim.networking.helper import WRITE_ACTIONS
 
         self.assertIn("normal-access", WRITE_ACTIONS)
+
+    def test_access_apply_that_arrives_during_a_slow_queue_read_waits_and_runs(self) -> None:
+        # Block globally, Unblock, Apply access rules and the device quick action send
+        # access-apply. A poll of the helper at that moment must not make them fail
+        # with "Saved but the household access rules could not be updated".
+        from jittersim.engine.access import AccessPlan
+
+        access = FakeAccessManager()
+        self.service._access_manager = access
+        reader, reader_thread = self.hold_a_read()
+        writer, writer_thread = self.in_thread(lambda: self.client().apply_access(AccessPlan()))
+
+        time.sleep(0.3)
+        self.assertEqual(writer, {})
+        self.executor.release.set()
+        writer_thread.join(5)
+        reader_thread.join(5)
+
+        self.assertEqual(writer["result"]["ok"], True)
+        self.assertGreater(writer["seconds"], 0.25)
+        self.assertIn("result", reader)
+        self.assertEqual(access.applied, AccessPlan())
 
     def test_a_read_that_arrives_during_a_write_is_refused_at_once(self) -> None:
         self.executor.gate = is_queue_install

@@ -3312,8 +3312,8 @@ class ControlServerTests(unittest.TestCase):
         )
         result = self._run_dashboard_functions(
             [
-                "deviceName", "scheduleTargetFields", "scheduleTargetValue",
-                "scheduleTargetName", "scheduleTargetOptions",
+                "deviceDisplayName", "deviceTitle", "deviceName", "scheduleTargetFields",
+                "scheduleTargetValue", "scheduleTargetName", "scheduleTargetOptions",
             ],
             "function devicePickerLabel(device) { return device.name + ' (' + device.ipv4_address + ')'; }\n"
             "const devices = [{id: 'alice', name: 'Alice', ipv4_address: '192.168.50.10'}];\n"
@@ -4407,7 +4407,12 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn("setButtonBusy(event.submitter, true)", DASHBOARD_HTML)
         self.assertIn("if (submitButton) setButtonBusy(submitButton, false);", DASHBOARD_HTML)
         self.assertIn("Dashboard refresh failed:", DASHBOARD_HTML)
-        self.assertIn("Start with saved settings", DASHBOARD_HTML)
+        self.assertNotIn('element("admin-token").addEventListener("change"', DASHBOARD_HTML)
+        self.assertIn(
+            'element("check-admin-token").addEventListener("click", async () => {\n'
+            "      await checkAdminToken();\n",
+            DASHBOARD_HTML,
+        )
         self.assertIn('id="toast" class="toast" role="status"', DASHBOARD_HTML)
         self.assertIn(
             'element("toast-dismiss").addEventListener("click", dismissToast)',

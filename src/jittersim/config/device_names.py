@@ -53,3 +53,18 @@ def resolve_device_name(
     if saved and not is_automatic_device_name(saved):
         return saved
     return _usable(hostname) or UNKNOWN_DEVICE_NAME
+
+
+def saved_device_title(
+    *, saved_label: Optional[str], saved_name: Optional[str], ipv4_address: object
+) -> str:
+    """Name a saved device in a list or in a message about it.
+
+    An unnamed device keeps its address so that two of them never look the same.
+    """
+
+    name = resolve_device_name(saved_label=saved_label, saved_name=saved_name)
+    address = str(ipv4_address or "")
+    if name == UNKNOWN_DEVICE_NAME and address:
+        return f"{UNKNOWN_DEVICE_NAME} ({address})"
+    return name

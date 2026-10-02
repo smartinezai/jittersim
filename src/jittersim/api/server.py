@@ -37,6 +37,7 @@ from jittersim.config.device_names import (
     UNKNOWN_DEVICE_NAME,
     has_hidden_characters,
     resolve_device_name,
+    saved_device_title,
 )
 from jittersim.config.domain_labels import group_domain, label_domain, seen_with
 from jittersim.config.exemptions import UnaffectedDevice, normalize_exempt_mac
@@ -94,6 +95,7 @@ from jittersim.config.transfer import (
     settings_to_payload,
 )
 from jittersim.config.workflows import WorkflowStore
+from jittersim.engine.access import build_access_plan
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import (
     MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN,
@@ -2666,7 +2668,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       );
     }
 
-    function syncRememberedCredentials() {
+    // renew names the credential a person has just checked again. If it was accepted its
+    // 24 hours start again. Automatic checks never pass it so a remembered entry still ends.
+    function syncRememberedCredentials(renew) {
       if (!rememberedCredentialsReady) return;
       for (const kind of Object.keys(REMEMBERED)) {
         const config = REMEMBERED[kind];
@@ -2696,7 +2700,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           }
           ownedRemembered[kind] = null;
           note = "Not remembered: the " + config.noun + " was rejected.";
-        } else if (accepted && (!saved || saved.value !== value)) {
+        } else if (accepted && (!saved || saved.value !== value || renew === kind)) {
           if (saveCredential(kind, value)) {
             saved = savedCredential(kind);
             ownedRemembered[kind] = value;
@@ -2942,6 +2946,15 @@ DASHBOARD_HTML = r"""<!doctype html>
     function deviceDisplayName(device) {
       return device.display_name || device.name || device.assigned_device_name ||
         device.ipv4_address || "Unknown device";
+    }
+
+    // The name in a line of text such as a list row or a question. An unnamed device keeps its
+    // address there so that two of them never look the same.
+    function deviceTitle(device) {
+      const name = deviceDisplayName(device);
+      return name === "Unknown device" && device.ipv4_address
+        ? name + " (" + device.ipv4_address + ")"
+        : name;
     }
 
     function devicePickerLabel(device) {
@@ -4294,7 +4307,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         groupSelect.setAttribute("aria-label", "Group for " + (device.display_name || device.mac_address));
         const groupPlaceholder = document.createElement("option");
         groupPlaceholder.value = "";
-        groupPlaceholder.textContent = groups.length ? "Choose group..." : "Create a group below";
+        groupPlaceholder.textContent = groups.length ? "Choose group..." : "Create a group on the Profiles page";
         groupSelect.appendChild(groupPlaceholder);
         groups.forEach((group) => {
           const option = document.createElement("option");
@@ -4486,7 +4499,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
       setActionBusy(true, "/api/apply");
       setButtonBusy(button, true);
-      showMessage("Applying " + profileId + " to " + device.ipv4_address + "...", "working");
+      showMessage("Applying " + profileName(profileId) + " to " + (device.display_name || device.ipv4_address) + "...", "working");
       try {
         const result = await request("/api/connected-devices/apply-profile", "POST", {
           ipv4_address: device.ipv4_address,
@@ -6079,7 +6092,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
       const status = element("general-profile-status");
       status.textContent = !data.profile
-        ? profiles.length ? "No general profile. Saved device rules apply when profiles are on." : "Create a saved profile below to use this control."
+        ? profiles.length ? "No general profile. Saved device rules apply when profiles are on." : "Create a saved profile on the Profiles page to use this control."
         : data.active ? "Active: " + data.profile.name + ". Applies to every unprotected device."
         : data.state.observed_state === "reset" ? "Paused: " + data.profile.name + ". Choose Apply to all or Start with saved settings to resume."
         : data.state.observed_state === "error" ? "Saved: " + data.profile.name + ". Network update failed. Retry Apply to all."
@@ -6530,6 +6543,9 @@ DASHBOARD_HTML = r"""<!doctype html>
         if (tokenRevision !== adminTokenRevision) return;
         if (result.ok) {
           adminTokenVerified = true;
+          // Remember an accepted token now. The refresh below can take seconds and a
+          // reload in between would otherwise forget it.
+          updateCredentialStatus();
           await refresh();
           if (tokenRevision !== adminTokenRevision) return;
           if (!adminTokenVerified) {
@@ -7151,8 +7167,12 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     element("time-quota-device").addEventListener("change", () => populateTimeQuotaDomains());
 
-    element("check-admin-token").addEventListener("click", checkAdminToken);
-
+    // Only this button starts a new 24 hours for a remembered token. The check when the page
+    // restores a saved token and the other buttons call checkAdminToken directly.
+    element("check-admin-token").addEventListener("click", async () => {
+      await checkAdminToken();
+      syncRememberedCredentials("admin");
+    });
     element("traffic-rate-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       const button = event.currentTarget.querySelector("button[type='submit']");
@@ -7817,6 +7837,8 @@ DASHBOARD_HTML = r"""<!doctype html>
         await routerRequest("/api/router/check", { admin_password: password });
         if (passwordRevision !== routerPasswordRevision) return;
         routerPasswordVerified = true;
+        // Only Check password calls this so a remembered password gets a new 24 hours.
+        syncRememberedCredentials("router");
         status.textContent = "Router password accepted. Nothing on the router was changed.";
         showMessage(status.textContent, "success");
       } catch (error) {
@@ -8014,7 +8036,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     function deviceName(deviceId) {
       const device = devices.find((candidate) => candidate.id === deviceId);
-      return device ? device.name : deviceId;
+      return device ? deviceTitle(device) : deviceId;
     }
 
     function scheduleTargetFields(value) {
@@ -8173,7 +8195,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     function renderDeviceTable() {
       const rows = devices.map((device) => ({
         cells: [
-          [device.name, device.id],
+          [deviceDisplayName(device), device.id],
           [device.ipv4_address, device.mac_address || "No MAC address"],
           appliedProfileCell(profileName(device.profile_id),
             Object.prototype.hasOwnProperty.call(deviceConditions.devices, device.id)
@@ -8359,7 +8381,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       element("device-ip").value = device.ipv4_address;
       element("device-profile").value = device.profile_id;
       element("device-mac").value = device.mac_address || "";
-      startEditing("device", device.name);
+      startEditing("device", deviceTitle(device));
     }
 
     async function deleteItem(path, body, successMessage, button) {
@@ -8381,7 +8403,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function deleteDevice(device, button) {
-      const question = "Delete " + device.name + "? Its schedules, timers, progressions, " +
+      const question = "Delete " + deviceTitle(device) + "? Its schedules, timers, progressions, " +
         "limits and browser service profiles are deleted too, and so is a group it is the " +
         "only member of.";
       if (!window.confirm(question)) return;
@@ -9320,7 +9342,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         item.append(time, message);
         (event.device_ids || []).forEach(id => {
           const device = devices.find(candidate => candidate.id === id);
-          if (device) item.append(actionButton("Open " + device.name, () => openDevice(id)));
+          if (device) item.append(actionButton("Open " + deviceTitle(device), () => openDevice(id)));
         });
         list.appendChild(item);
       });
@@ -9877,7 +9899,8 @@ DASHBOARD_HTML = r"""<!doctype html>
         showPage(page.dataset.page, false);
         window.history.replaceState(null, "", "#" + page.dataset.page);
       }
-      target.scrollIntoView({ behavior: "smooth", block: "center" });
+      const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      target.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "center" });
     }
 
     function syncDeviceChip() {
@@ -9961,10 +9984,11 @@ def _device_title(
 
     if device is None:
         return fallback_id
-    name = _device_display_name(device, labels_by_mac)
-    if name == UNKNOWN_DEVICE_NAME:
-        return f"{UNKNOWN_DEVICE_NAME} ({device.ipv4_address})"
-    return name
+    return saved_device_title(
+        saved_label=labels_by_mac.get(device.mac_address or "", {}).get("display_name"),
+        saved_name=device.name,
+        ipv4_address=device.ipv4_address,
+    )
 
 
 IMPACT_NO_HELPER_MESSAGE = "Impact needs the Pi helper."
@@ -10120,8 +10144,11 @@ def _scenario_run_payload(
     """Describe one running scenario, its current step and the time left."""
 
     if run.device_id is not None:
-        device = repository.get_device(run.device_id)
-        target_name = device.name if device is not None else run.device_id
+        target_name = _device_title(
+            repository.get_device(run.device_id),
+            repository.list_connected_device_labels(),
+            run.device_id,
+        )
     elif run.group_id is not None:
         group = repository.get_device_group(run.group_id)
         target_name = "Group " + (group.name if group is not None else run.group_id)
@@ -12420,6 +12447,9 @@ class ControlServer(HTTPServer):
             self.repository.save_website_policy(updated)
         except (KeyError, TypeError, ValueError, StorageError) as error:
             return _bad_request("could not add domain to global block list", error)
+        failed = self._apply_household_block_list()
+        if failed is not None:
+            return failed
         return HTTPStatus.OK, "application/json", _json_bytes(
             {"policies": _policies_payload(self.repository)}
         )
@@ -12437,9 +12467,43 @@ class ControlServer(HTTPServer):
             return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
                 {"error": "could not remove domain from global block list"}
             )
+        failed = self._apply_household_block_list()
+        if failed is not None:
+            return failed
         return HTTPStatus.OK, "application/json", _json_bytes(
             {"policies": _policies_payload(self.repository)}
         )
+
+    def _apply_household_block_list(self) -> Optional[Tuple[int, str, bytes]]:
+        """Bring the filtered resolver in line with a changed global block list.
+
+        Block globally and Unblock act at once like main's device quick action. Main's
+        resolver otherwise kept refusing an unblocked name and the names under it until
+        someone chose Apply access rules. While household access rules are off the
+        resolver does not filter so nothing needs to change. The scheduler still blocks
+        the addresses of each listed name within a second while JitterSim runs.
+        """
+
+        settings = self.repository.access_settings()
+        if (
+            not settings.access_options.enabled
+            or self.helper_client is None
+            or not hasattr(self.helper_client, "apply_access")
+        ):
+            return None
+        try:
+            self.helper_client.apply_access(build_access_plan(settings))
+        except (HelperClientError, ValidationError):
+            LOGGER.warning("the global block list did not reach the filtered resolver")
+            return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                {
+                    "error": (
+                        "Saved but the household access rules could not be updated. "
+                        "Choose Apply access rules on the Access and rules page."
+                    )
+                }
+            )
+        return None
 
     def _save_service_list(self, payload: dict):
         operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
