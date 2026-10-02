@@ -341,6 +341,60 @@ class AccessDatapathTests(unittest.TestCase):
         self.manager.restore()
         self.assertIn("203.0.113.7", self.query("news.example.com", OTHER_CLIENT))
 
+    def dhcp_answers(self, namespace=CLIENT):
+        """A DHCP-shaped exchange: client port 68 to the Pi's port 67 and back."""
+
+        server = subprocess.Popen(
+            [
+                "ip", "netns", "exec", PI, "python", "-u", "-c",
+                "import socket\n"
+                "s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+                "s.bind(('0.0.0.0', 67))\n"
+                "s.settimeout(3)\n"
+                "print('ready')\n"
+                "data, peer = s.recvfrom(64)\n"
+                "s.sendto(b'offer', peer)\n",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        self.addCleanup(lambda: server.poll() is None and server.kill())
+        self.assertTrue(select.select([server.stdout], [], [], 3)[0])
+        self.assertEqual(server.stdout.readline().strip(), "ready")
+        result = run_in(
+            namespace, "python", "-c",
+            "import socket\n"
+            "s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+            "s.bind(('0.0.0.0', 68))\n"
+            "s.settimeout(1.5)\n"
+            "s.sendto(b'discover', ('192.168.50.1', 67))\n"
+            "try:\n"
+            "    print(s.recv(16).decode())\n"
+            "except socket.timeout:\n"
+            "    print('blocked')\n",
+            check=False,
+        )
+        return result.stdout.strip()
+
+    def test_a_guard_left_by_a_failed_recovery_keeps_sign_in_and_dhcp(self):
+        # Block globally sends the household rules at once. With Unbound failing the
+        # change and its recovery both fail and the guard stays. A person on the
+        # test Wi-Fi must still get an address and reach the dashboard sign-in.
+        self.sign_in_listeners()
+        self.manager.apply(self.plan)
+        self.executor.fail_restarts = 100
+        with self.assertLogs(level="ERROR"), self.assertRaises(CommandExecutionError):
+            self.manager.apply(
+                replace(self.plan, websites=WebsitePolicy(blocked_domains=("news.example.com",)))
+            )
+        self.assertIn("jittersim_access_transition", run_in(PI, "nft", "list", "tables").stdout)
+        self.assertTrue(self.reaches(CLIENT, 8080))
+        self.assertEqual(self.dhcp_answers(), "offer")
+        # Everything else stays closed behind the guard.
+        self.assertFalse(self.reaches(CLIENT, 8081))
+        self.assertNotIn("status: ", self.query("news.example.com", OTHER_CLIENT))
+
     def test_panic_clears_effects_and_reused_dns_routes_without_restarting_dns(self):
         from jittersim.config.models import Device, Impairment, Profile
         from jittersim.engine.codec import plan_to_payload

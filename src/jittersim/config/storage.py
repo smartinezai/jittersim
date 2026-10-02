@@ -206,6 +206,10 @@ class ConfigRepository:
                 self._connection.execute(f"RELEASE {savepoint}")
 
     def _initialize_schema(self) -> None:
+        # An existing settings table without access options comes from the Pi line.
+        pi_line_policies = self._connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'network_policies'"
+        ).fetchone() is not None
         self._connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS settings_history (
@@ -530,7 +534,17 @@ class ConfigRepository:
                 CHECK (device_id IS NULL OR group_id IS NULL)
             )
         """)
-        self._add_column_if_missing("network_policies", "access_options_json", "TEXT NOT NULL DEFAULT '{}'")
+        if self._add_column_if_missing(
+            "network_policies", "access_options_json", "TEXT NOT NULL DEFAULT '{}'"
+        ) and pi_line_policies:
+            # The Pi line never filtered DNS. Household rules start off there so the
+            # first Start does not send all test-client DNS through Unbound, block
+            # subdomains or move the MAC lists into the table that survives Reset.
+            # Fresh installs and main's databases keep main's default (on).
+            self._connection.execute(
+                "UPDATE network_policies SET access_options_json = ? WHERE id = 1",
+                (json.dumps(asdict(AccessOptions(enabled=False))),),
+            )
         self._add_column_if_missing("test_sessions", "captures_json", "TEXT NOT NULL DEFAULT '[]'")
         self._add_column_if_missing("test_sessions", "captures_truncated", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing("activity_log", "device_ids_json", "TEXT NOT NULL DEFAULT '[]'")
@@ -2971,17 +2985,25 @@ class ConfigRepository:
              for r in blocks),
         )
 
-    def save_access_policies(self, mac: MacPolicy, websites: WebsitePolicy, *,
+    def save_access_policies(self, mac: Optional[MacPolicy], websites: Optional[WebsitePolicy], *,
                              blocks=None, options=None, expected_version=None) -> None:
-        """Replace all access rules together and reject an obsolete browser edit."""
+        """Save the given access rules together and reject an obsolete browser edit.
+
+        A section passed as None keeps its stored value, so a request that only
+        carries website rules cannot clear the device rules (and the other way
+        round). Every section that is given is written in one transaction, so a
+        failed write restores the whole request.
+        """
         with self.transaction():
             if expected_version is not None and (
                 isinstance(expected_version, bool) or not isinstance(expected_version, int)
                 or self.get_runtime_state().configuration_version != expected_version
             ):
                 raise DeviceConflictError("settings changed since this form was loaded")
-            self.save_mac_policy(mac)
-            self.save_website_policy(websites)
+            if mac is not None:
+                self.save_mac_policy(mac)
+            if websites is not None:
+                self.save_website_policy(websites)
             if blocks is not None:
                 self._write_site_blocks(blocks)
             if options is not None:
@@ -2989,6 +3011,11 @@ class ConfigRepository:
                     "UPDATE network_policies SET access_options_json = ? WHERE id = 1",
                     (json.dumps(asdict(options)),),
                 )
+            if mac is None and websites is None and (blocks is not None or options is not None):
+                # The policy saves above bump the version themselves. When only
+                # site rules or options changed, bump here so other browsers are
+                # refused, the change is re-applied and the checkpoint is taken.
+                self._bump_configuration_version()
 
     def get_mac_policy(self) -> MacPolicy:
         """Return the saved MAC filtering policy."""
