@@ -551,7 +551,9 @@ def _block_parser(word: str, text: str) -> Callable[[], argparse.ArgumentParser]
         parser = _parser(
             f"jittersim traffic {word}",
             f"{text} the global block list. The change is saved and applies on its own while "
-            "JitterSim is running.",
+            "JitterSim is running. While household access rules are on a listed name also "
+            "blocks every name under it (example.com also blocks www.example.com). Unblock "
+            "takes the exact name that was blocked.",
         )
         parser.add_argument("domain", metavar="DOMAIN")
         return parser

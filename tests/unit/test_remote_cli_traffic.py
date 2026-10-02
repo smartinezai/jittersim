@@ -186,3 +186,12 @@ def test_the_saved_note_is_the_page_note_word_for_word():
     declaration = re.search(r"const ENFORCE_NOTE = (.*?);", DASHBOARD_HTML, re.S).group(1)
     page_note = "".join(json.loads(part) for part in re.findall(r'"(?:[^"\\]|\\.)*"', declaration))
     assert ENFORCE_NOTE == page_note
+
+
+def test_block_help_says_names_under_a_blocked_name_are_blocked_too(capsys):
+    from jittersim.cli import main
+
+    with pytest.raises(SystemExit):
+        main(["traffic", "block", "--help"])
+    text = " ".join(capsys.readouterr().out.split())
+    assert "example.com also blocks www.example.com" in text

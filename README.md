@@ -148,7 +148,7 @@ control characters.
 | `jittersim profiles apply-all PROFILE_ID` | Makes that profile the general profile for every connected device. Protected devices stay untouched. |
 | `jittersim profiles stop-all` | Stops the general profile. Saved device rules resume. |
 | `jittersim traffic` | The names each test device looked up, grouped by app or site like **Traffic discovery**. Add `--scan` to sample first, `--expand` for every name, `--blocked` for blocked names only or `--device NAME_OR_IP`. |
-| `jittersim traffic block DOMAIN` | Adds a name to the global block list. `traffic unblock DOMAIN` removes it. Both say so when nothing had to change. |
+| `jittersim traffic block DOMAIN` | Adds a name to the global block list. While household access rules are on the names under it are blocked too. `traffic unblock DOMAIN` removes the exact name. Both say so when nothing had to change. |
 | `jittersim wifi show` | The router's own Wi-Fi name, read live from the router. It also asks for the router admin password with a hidden prompt. Add `--password` to show the Wi-Fi password too. |
 | `jittersim impact` | The **Impact** check: two samples of the Pi's queues `--wait` seconds apart (10 by default, at most 50) judged with the dashboard's rules. The verdicts name the time it measured such as "in the last 10 seconds". |
 
