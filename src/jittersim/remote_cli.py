@@ -635,6 +635,14 @@ def _print_name(row: Dict[str, Any], indent: str) -> None:
     _out(indent + "  ".join(str(piece) for piece in pieces))
 
 
+def _cleared_list_message(data: Dict[str, Any]) -> Optional[str]:
+    """The dashboard's own sentence when an upgrade cleared the list and no name came back yet."""
+
+    cleared = data.get("list_cleared")
+    message = cleared.get("message") if isinstance(cleared, dict) else None
+    return message if isinstance(message, str) and message.strip() else None
+
+
 @register("traffic", _traffic_parser)
 def _traffic(arguments: argparse.Namespace) -> int:
     client = _client(arguments)
@@ -666,6 +674,7 @@ def _traffic(arguments: argparse.Namespace) -> int:
         _print_json({
             "scan": {"captured_observations": scan.get("captured_observations")} if scan else None,
             "total_domains": data.get("total_domains"),
+            "list_cleared": data.get("list_cleared") if _cleared_list_message(data) else None,
             "devices": shown,
             "note": "Labels come from a built-in table. seen_with is a guess.",
         })
@@ -678,7 +687,7 @@ def _traffic(arguments: argparse.Namespace) -> int:
     if not shown:
         _out(
             "No globally blocked names in the list." if arguments.blocked
-            else "No DNS observations yet. Connect a device and run a scan."
+            else _cleared_list_message(data) or "No DNS observations yet. Connect a device and run a scan."
         )
         return 0
     _out(
