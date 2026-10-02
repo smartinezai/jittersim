@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable, Optional, Sequence, Tuple
 
 from jittersim.config.exemptions import normalize_exempt_mac
-from jittersim.config.models import ValidationError, normalize_domain
+from jittersim.config.models import MacPolicy, ValidationError, normalize_domain
 from jittersim.engine.codec import PlanCodecError, plan_from_payload
 from jittersim.engine.plan import NetworkPlan
 
@@ -65,6 +65,15 @@ def _plan_generation(path: Path) -> Optional[tuple]:
     return metadata.st_dev, metadata.st_ino, metadata.st_mtime_ns
 
 
+def _check_mac_access(policy: MacPolicy, client_mac: Optional[str]) -> None:
+    if client_mac is None:
+        raise ProxyError("current Wi-Fi identity could not be verified")
+    if (policy.mode == "denylist" and client_mac in policy.denylist) or (
+        policy.mode == "allowlist" and client_mac not in policy.allowlist
+    ):
+        raise ProxyError("client is blocked by global access rules")
+
+
 def select_mark(
     plan: Optional[NetworkPlan],
     *,
@@ -79,10 +88,8 @@ def select_mark(
     if plan.protected_mac_addresses or plan.general_profile is not None:
         if client_mac is None:
             raise ProxyError("current Wi-Fi identity could not be verified")
-        if client_mac in plan.mac_policy.denylist or (
-            plan.mac_policy.mode == "allowlist" and client_mac not in plan.mac_policy.allowlist
-        ):
-            raise ProxyError("client is blocked by global access rules")
+        if plan.access is None:
+            _check_mac_access(plan.mac_policy, client_mac)
         if client_mac in plan.protected_mac_addresses:
             return 0, "unaffected"
     # A listed service replaces whatever profile behavior the client would get,
@@ -245,10 +252,13 @@ class _ProxyHandler(socketserver.BaseRequestHandler):
             policy = read_access(access_path)
             if not policy.permits_host(str(client_ip), host):
                 raise ProxyError("this destination is blocked by an access rule")
-            client_mac = (
-                self.server.identify_mac(peer_ip)
-                if plan and (plan.protected_mac_addresses or plan.general_profile is not None) else None
+            active_mac_rules = policy.options.enabled and policy.mac.mode != "disabled"
+            needs_mac = active_mac_rules or bool(
+                plan and (plan.protected_mac_addresses or plan.general_profile is not None)
             )
+            client_mac = self.server.identify_mac(peer_ip) if needs_mac else None
+            if active_mac_rules:
+                _check_mac_access(policy.mac, client_mac)
             mark, assignment_id = select_mark(
                 plan, client_ip=client_ip, host=host, client_mac=client_mac
             )
