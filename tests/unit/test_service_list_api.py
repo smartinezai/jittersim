@@ -126,6 +126,7 @@ class ServiceListApiTests(unittest.TestCase):
             ({"services": ["not-a-service"]}, "catalogue"),
             ({"services": [], "hostnames": []}, "at least one"),
             ({"hostnames": ["203.0.113.9"]}, "hostnames"),
+            ({"hostnames": ["com"]}, "at least two parts such as example.com"),
             ({"profile_id": "missing"}, "profile"),
             ({"id": "Bad Id"}, "id"),
             ({"enabled": "yes"}, "boolean"),
