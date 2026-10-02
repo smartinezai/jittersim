@@ -344,6 +344,24 @@ def js_round(value: float) -> int:
     return floor + 1 if value - floor >= 0.5 else floor
 
 
+def _read_small_file(path: Path, limit: int, what: str) -> bytes:
+    """Read a regular file of at most `limit` bytes or say in plain words what is wrong."""
+
+    try:
+        info = Path(path).stat()
+        if not stat.S_ISREG(info.st_mode):
+            raise RemoteError(f"The {what} {path} is not a regular file.", exit_code=2)
+        if info.st_size > limit:
+            raise RemoteError(f"The {what} {path} is larger than the Pi accepts.", exit_code=2)
+        with open(path, "rb") as handle:
+            data = handle.read(limit + 1)
+    except OSError:
+        raise RemoteError(f"The {what} {path} could not be read.", exit_code=2) from None
+    if not data or len(data) > limit:
+        raise RemoteError(f"The {what} {path} is empty or too large.", exit_code=2)
+    return data
+
+
 class _TooSlow(Exception):
     """The answer kept trickling in after its deadline."""
 
@@ -463,21 +481,44 @@ class DashboardClient:
     ) -> Dict[str, Any]:
         return self._send("POST", path, payload, timeout)
 
+    def upload_release(
+        self, archive: Path, signature: Path, *, timeout: float = 300.0
+    ) -> Dict[str, Any]:
+        """Send a signed release archive and its signature to /api/updates/upload.
+
+        Both files travel in one body (archive bytes, then signature bytes). The Pi's root
+        update manager checks the signature and the release order, not this client.
+        """
+
+        from jittersim import updates
+
+        archive_bytes = _read_small_file(archive, updates.MAX_ARCHIVE, "release archive")
+        signature_bytes = _read_small_file(signature, updates.MAX_SIGNATURE, "release signature")
+        return self._send(
+            "POST", "/api/updates/upload", None, timeout,
+            body=archive_bytes + signature_bytes,
+            extra_headers={
+                "Content-Type": "application/octet-stream",
+                "X-Jittersim-Archive-Bytes": str(len(archive_bytes)),
+            },
+        )
+
     def _send(
-        self, method: str, path: str, payload: Optional[Dict[str, Any]], timeout: Optional[float]
+        self, method: str, path: str, payload: Optional[Dict[str, Any]], timeout: Optional[float],
+        *, body: Optional[bytes] = None, extra_headers: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         seconds = self.timeout if timeout is None else timeout
-        headers = {"Accept": "application/json"}
+        headers = {"Accept": "application/json", **(extra_headers or {})}
         if self._token is not None:
             headers["Authorization"] = "Bearer " + self._token
-        data = None
+        data = body
         if payload is not None:
             data = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
         request = Request(self.url + path, data=data, method=method, headers=headers)
         try:
             with self._opener.open(request, timeout=seconds) as response:
-                body = _read_bounded(response, self.max_bytes + 1, time.monotonic() + seconds)
+                answer = _read_bounded(response, self.max_bytes + 1, time.monotonic() + seconds)
         except HTTPError as error:
             raise self._refused(error) from None
         except URLError as error:
@@ -494,10 +535,10 @@ class DashboardClient:
             raise RemoteError(certificate_message(error, self.host)) from None
         except (ssl.SSLError, http.client.HTTPException, OSError):
             raise RemoteError("The connection to the dashboard failed.") from None
-        if len(body) > self.max_bytes:
+        if len(answer) > self.max_bytes:
             raise RemoteError("The dashboard answer was too large.")
         try:
-            result = json.loads(body)
+            result = json.loads(answer)
         except (ValueError, RecursionError):
             raise RemoteError("The dashboard answer was not valid JSON.") from None
         if not isinstance(result, dict):

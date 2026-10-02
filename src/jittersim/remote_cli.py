@@ -947,6 +947,93 @@ def _impact(arguments: argparse.Namespace) -> int:
 # --- end: impact
 
 
+# --- section: remote update --------------------------------------------------------------
+
+DEFAULT_ARCHIVE = Path("jittersim-release.tar.gz")
+
+
+def _remote_update_parser() -> argparse.ArgumentParser:
+    parser = _parser(
+        "jittersim remote update",
+        "Deploy a signed release through the Pi's HTTPS dashboard when SSH is not possible, "
+        "for example from the Pi's test Wi-Fi. 'status' shows the release the Pi runs and a "
+        "staged one. 'upload' sends a release archive and its .sig file (build them with "
+        "deploy/raspberry-pi/build-release.sh REF OUTPUT KEY): the Pi stages it only when a key "
+        "it trusts signed it and it is newer than what it ran before. 'install' installs the "
+        "staged release, and with --wait waits until the Pi runs it.",
+    )
+    parser.add_argument("action", choices=("status", "upload", "install"))
+    parser.add_argument("--archive", type=Path, default=DEFAULT_ARCHIVE,
+                        help=f"upload: the release archive (default: {DEFAULT_ARCHIVE})")
+    parser.add_argument("--signature", type=Path,
+                        help="upload: its signature (default: the archive name plus .sig)")
+    parser.add_argument("--wait", type=float, default=0.0, metavar="SECONDS",
+                        help="install: wait up to this long until the Pi runs the release")
+    return parser
+
+
+def _release_lines(data: Dict[str, Any]) -> None:
+    installed, staged = data.get("installed"), data.get("available")
+    _out(f"Release on the Pi: {printable(installed) if installed else 'unknown'}")
+    _out(f"Staged release: {printable(staged) if staged else 'none'}")
+    if staged and data.get("installable") is False and data.get("reason"):
+        _out(f"It cannot be installed yet: {printable(data['reason'])}")
+    elif data.get("message"):
+        _out(printable(data["message"]))
+
+
+@register("remote update", _remote_update_parser)
+def _remote_update(arguments: argparse.Namespace) -> int:
+    client = _client(arguments)
+    if arguments.action == "status":
+        data = client.get("/api/updates")
+        if arguments.json:
+            _print_json(data)
+        else:
+            _release_lines(data)
+        return 0
+    if arguments.action == "upload":
+        signature = arguments.signature or arguments.archive.with_name(
+            arguments.archive.name + ".sig")
+        data = client.upload_release(arguments.archive, signature)
+        staged = data.get("staged_version") or data.get("available")
+        if not isinstance(staged, str) or not staged:
+            raise RemoteError(UNDERSTOOD_MESSAGE)
+        if arguments.json:
+            _print_json(data)
+        else:
+            _out(f"The Pi checked the signature and staged release {printable(staged)}.")
+            _out("Install it with: jittersim remote update install --wait 600")
+        return 0
+    status = client.get("/api/updates")
+    staged = status.get("available")
+    if not isinstance(staged, str) or not staged:
+        raise RemoteError("No release is staged on the Pi. Upload one first.")
+    if status.get("installable") is False:
+        raise RemoteError(
+            printable(status.get("reason") or "The staged release cannot be installed."))
+    client.post("/api/updates/install", {"version": staged, "confirm": True},
+                timeout=ACTION_TIMEOUT_SECONDS)
+    _out(f"Install of release {printable(staged)} queued.")
+    deadline = time.monotonic() + max(0.0, arguments.wait)
+    while arguments.wait > 0:
+        time.sleep(5)
+        try:
+            now = client.get("/api/updates")
+        except RemoteError:
+            now = {}
+        if now.get("installed") == staged:
+            _out(f"The Pi now runs release {printable(staged)}.")
+            return 0
+        if time.monotonic() >= deadline:
+            raise RemoteError(f"The Pi does not run release {printable(staged)} yet. "
+                              "Check again with: jittersim remote update status")
+    return 0
+
+
+# --- end: remote update
+
+
 def _command_words(argv: List[str]) -> List[str]:
     """Return the registered command name followed by the arguments for it."""
 

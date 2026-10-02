@@ -863,11 +863,37 @@ command can only install the release already staged. `sudo jittersim update
 disable-passwordless-staging` removes the rule. The dashboard service cannot
 use sudo at all (`NoNewPrivileges`).
 
+### Deploy without SSH (HTTPS upload)
+
+`deploy-from-mac.sh` picks the way by itself. On the Pi's test Wi-Fi
+(192.168.50.0/24) SSH is blocked on purpose, so the script builds, signs and
+uploads the release to `https://PI:8080/api/updates/upload`. Everywhere else it
+tries SSH first and uses HTTPS when SSH does not answer. `--https` and `--ssh`
+force one way. The upload path needs:
+
+- the admin token in `JITTERSIM_TOKEN` or in the macOS Keychain. Store it once
+  with `deploy-from-mac.sh --save-token` (Keychain item `jittersim-admin-token`).
+  The token is never printed and never put on a command line;
+- a copy of the Pi's `/etc/jittersim/dashboard.crt` (`--ca-cert FILE` or the file
+  saved by `jittersim connect`). Only that certificate is trusted;
+- on the test Wi-Fi: open the dashboard once in a browser on the Mac and choose
+  **Allow this device**.
+
+The dashboard streams the archive and signature into a spool folder of its own
+user (`/var/lib/jittersim/incoming-release`). The root helper copies them into a
+root-only folder and runs the same staging as `jittersim update stage`: a trusted
+key must have signed exactly those bytes and the sequence must be newer than the
+high-water mark. Limits: Content-Length is required, the archive is at most 25 MiB,
+the signature at most 16 KiB and the whole upload must finish within 120 seconds.
+`jittersim remote update status|upload|install` does the same from the command
+line, and `deploy/raspberry-pi/publish-release.sh REF` publishes the two release
+files to GitHub for the online release source.
+
 ### Who can do what
 
 | Someone has | They can | They cannot |
 | --- | --- | --- |
-| A leaked admin token | Use the dashboard. Install the release already staged (signed by your key and newer). Restore the one previous installation. | Stage or install any other code. Get root. |
+| A leaked admin token | Use the dashboard from a registered device (on the test Wi-Fi the device must be allowed first). Upload a release over HTTPS and install it, but the Pi stages it only when a key in `release-signers` signed it and it is newer than every release installed before. Install the release already staged. Restore the one previous installation. | Stage or install any release you did not sign. Get root. |
 | A stolen SSH key for the `jittersim` login | Log in as `jittersim` and do what that user can. With passwordless staging also stage and install releases you signed. | Install their own code or get root unless they also learn the sudo password (for example by watching you type it). |
 | A stolen release signing key | Sign archives. | Put an archive on the Pi. A signature alone stages nothing. |
 | The signing key and the SSH key | With passwordless staging install their own signed code and so get root. Without it they still need the sudo password. | Install anything once you remove the key with `untrust-key`. |

@@ -38,7 +38,7 @@ LOG_SERVICES = {
 }
 MAX_LOG_LINES = 200
 MAX_LOG_OUTPUT_CHARS = 32_000
-REMOTE_COMMANDS = ("connect", "profiles", "traffic", "impact")
+REMOTE_COMMANDS = ("connect", "profiles", "traffic", "impact", "remote")
 # `jittersim update` commands that the root update manager runs in this process.
 LOCAL_UPDATE_COMMANDS = {
     "stage": "verify a signed release archive and stage it (root)",
