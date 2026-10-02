@@ -16,6 +16,8 @@ is a private lab tool, not a replacement for a home router.
   and corruption.
 - Separate upload and download controls where the network supports them.
 - Per-device profile assignment from the dashboard.
+- A saved profiles list on the **Profiles** page with **Edit** and **Apply to
+  all** beside every profile. Every profile field has a **?** help icon.
 - A safe configuration-only mode for building plans without changing traffic.
 - Hardware mode with a protected Pi helper that applies and resets plans.
 - Browser service profiles that shape selected HTTPS hostnames on a managed Mac
@@ -54,8 +56,14 @@ is a private lab tool, not a replacement for a home router.
 - Profile-specific website lists that allow selected services while blocking
   the rest.
 - Per-device website rules that can change as a progression session advances.
-- Local DNS observations with query counts and buttons to add observed domains
-  to a profile or the global block list.
+- Device names in every list instead of bare IP addresses.
+- Local DNS observations with query counts and plain-language labels. Names that
+  belong to one app collapse into a group. Buttons add observed domains to a
+  profile or the global block list and show when a name is already blocked.
+- Protected devices are never monitored. They are greyed out and never appear
+  in traffic discovery or in the impact check.
+- An impact check in Diagnostics that shows packet loss and speed limits
+  actually happening to each device.
 
 ### Data quotas
 
@@ -87,6 +95,25 @@ Enter the router admin password to start automatic checks while the page is
 visible. A change shows **Changing** until the router confirms it. An
 unavailable status disables the switch instead of guessing. Keep the Pi
 connected by Ethernet when changing router Wi-Fi.
+
+Under the switch **Copy Wi-Fi name** and **Copy Wi-Fi password** put the
+router's own Wi-Fi name or password on the clipboard. The Pi reads them from
+the router with the router admin password and sends them to the page only when
+you press the button. The name button never requests the password. JitterSim
+does not store the password or log it or keep it in the page. The clipboard
+keeps whatever it holds until something else replaces it so paste it where you
+need it then copy something else. A wrong router password disables both
+buttons until the password changes so repeated guesses cannot lock the router
+login. Without a router password the buttons open the **Router password**
+panel. Use them on a computer that you trust.
+
+The sidebar also shows a short status block once the admin token is accepted.
+**General profile** says which saved profile is the general profile and whether
+it is active or paused or only saved. **Devices** says how many connected
+devices are affected right now and opens a list with the profile each one
+gets. Protected devices are never listed. **Service lists** names the enabled
+lists. The block says `Profiles off` after Reset or Panic and `Not started
+yet` before the first Apply.
 
 **Copy router Wi-Fi to Pi** checks the router's security before copying its
 name and password. The confirmation shows the source band and security type.
@@ -356,6 +383,92 @@ If applying a change fails, the dashboard reports that settings were saved
 but network protection is not confirmed. Retry **Start with saved settings**
 after fixing the helper error. The button reads **Re-apply saved settings** while
 JitterSim runs.
+
+### Device names
+
+Every list and menu shows a device by name. JitterSim takes the first name it
+has: the name you saved for the device's MAC address then a saved device name
+then the name the device announced to the Pi then **Unknown device**. A name
+you typed always beats one that a device announces. The IP address stays as
+small text under the name. A connected client saved without a name takes its
+announced name instead of `Client <ip>`.
+
+### Protected devices are never monitored
+
+A device in **Unaffected by profiles** is not monitored. Its row says `Traffic
+is not monitored` and is greyed out with its profile and group controls
+disabled. **Remove protection** and the name and type editor stay active.
+
+- The DNS scan behind Traffic discovery skips the device's frames before they
+  are captured. The Pi also drops any row that belongs to a protected MAC
+  address or to an IP address that device uses. Old rows never show.
+- Making a device protected deletes the lookups already stored for it.
+- The service list watcher skips answers sent to protected devices.
+- If protected devices exist and the helper cannot skip them (an older helper)
+  the scan refuses to run and asks you to restart the services or reinstall.
+- Protection follows the MAC address. A device that randomises its Wi-Fi address
+  looks like a new unprotected device until you add its new address.
+
+### Traffic discovery
+
+**Traffic discovery** is on the **Diagnostics** page. Press the scan button and
+it summarises the DNS names that devices on the test Wi-Fi looked up. A row
+shows what a name is for then the technical name in monospace below it. The
+labels are app or system or tracker or smart-home or content delivery network.
+A name that the table does not know shows its registered domain such as
+`immobilienscout24.de`. A content delivery or tracker or unknown name can show
+a **seen with** hint that names the app the same device used a moment before.
+That hint is a guess from timing and says so. **What is this?** opens a web
+search for the name in a new tab. The Pi never contacts an outside service for
+this and nothing leaves it until you click.
+
+Names that belong to one app collapse into one row per device such as
+ImmoScout24 or Netflix. The row shows the number of names and the total
+queries and how many names are blocked. Open it to see the names and their
+buttons. A group opened stays open when the page refreshes.
+
+- **Block globally** on a name that is already blocked turns into **Unblock**
+  and shows a **Blocked** badge. **Add to profile** reads **Already in** and the
+  profile name when the name is in the selected profile's website list.
+- **Add all to profile** adds every name of a group to the profile chosen on the
+  device card. **Block all** blocks every name. It reads **Block remaining**
+  when some are blocked and **Unblock all** when all are. One call changes the
+  whole group or nothing. A call takes at most 64 names and a block list or a
+  profile website list holds 100 names.
+- A group of system or content delivery names has no **Block all** because one
+  click could cut the device off the internet. Block single names instead.
+  **Unblock blocked names** removes blocks from such a group.
+- **Add to profile** switches a profile to **Allow only listed domains** and
+  lists only that name when the profile was not an allow-list already. Every
+  other site stops working for devices that use it. Check the profile first.
+
+A block or profile change from this card is saved at once. It applies on its
+own while JitterSim is running. After Reset or Panic choose **Start with saved
+settings**.
+
+### Impact check
+
+The **Impact** card at the top of **Diagnostics** shows what the Pi's queues
+really do to each device. It reads the kernel's counters for the last minute
+and refreshes every five seconds while the card is visible. A row shows the
+device name and direction then what is set and what happened:
+
+- Loss: `set 5% · actual 4.7% (31 of 660 packets dropped)`.
+- Speed: `set 2 Mbit/s · using 727 kbit/s · peak 2 Mbit/s · cap reached`. The
+  rate is judged for each five second interval and a backlog that is waiting
+  at a sample also counts as capped. A burst that drains between two samples
+  can still be missed. A capped queue also shows `Queue wait now: about 320 ms`.
+- Delay and jitter and reordering and duplication and corruption show what is set
+  and say **not measured** because the counters cannot see them.
+- A verdict in plain words: `Affected in the last minute` or `No traffic in the
+  last minute` or `Too few packets to judge` or `No drops or cap hit seen` or
+  `Effect not measured here`.
+
+General profile and service list and quota queues appear with their own names.
+Protected devices are listed on one muted line and never get a row. Applying a
+plan restarts the history. A busy helper keeps the rows and shows `Update
+paused`. Counters describe packets and drops. They cannot prove how much delay
+a device saw. An older helper makes the card ask for an update.
 
 ## Network layout
 

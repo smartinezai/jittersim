@@ -133,6 +133,37 @@ keeps the new plan format available to both processes. Before rolling back to
 a version without general profiles, reset and verify normal traffic under
 the newer version so the older dashboard restores the reset state.
 
+## Device visibility features
+
+Three dashboard features ask the root helper for new actions. Traffic discovery
+needs `protected_dns_capture` so protected devices are skipped. The router Wi-Fi
+copy buttons need `router-wifi-credentials`. The **Impact** card in Diagnostics
+needs `queue-stats`. An update restarts the helper so all three arrive
+together. If the dashboard still says the helper needs updating after an update,
+restart the services or run the installer again:
+
+```sh
+sudo systemctl restart jittersim-helper.service jittersim-dashboard.service
+```
+
+Traffic discovery refuses to scan while protected devices exist and the helper
+cannot skip them. It never captures protected traffic as a fallback.
+
+Check the features on the Pi after an update:
+
+1. Open Traffic discovery and scan. Device names appear instead of bare
+   addresses. Add a phone to **Unaffected by profiles** then scan again. The
+   phone's lookups disappear and its row says `Traffic is not monitored`.
+2. Open a group such as ImmoScout24 or Netflix. **Block all** then **Unblock
+   all** change every name in one step.
+3. Give a phone a profile with 10% loss and a 2 Mbit/s cap. Open Diagnostics
+   and watch the **Impact** card while the phone loads a video. The loss line
+   and the cap line fill in and the verdict turns to `Affected in the last
+   minute`.
+4. Enter the router admin password then press **Copy Wi-Fi name** and **Copy
+   Wi-Fi password** in the sidebar. Paste each one somewhere harmless to check
+   then copy something else so the password does not stay on the clipboard.
+
 ## Connected device details
 
 The dashboard lists Wi-Fi clients currently associated with the Pi. It joins
