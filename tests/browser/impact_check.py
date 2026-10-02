@@ -1,8 +1,9 @@
 """Check the Impact card in Diagnostics: live rows and a restart and reset and protected clients.
 
 The fixture's fake kernel answers every queue counter read with larger numbers: 100 more
-forwarded packets and 11 more dropped ones and 150000 more bytes. A profile with 10% loss shows
-about 9.9% actual loss and the download cap of 250 kbit/s is reached at about 240 kbit/s.
+forwarded packets and 11 more dropped ones, and bytes that grow at 250 kbit/s of elapsed time
+whatever the gap between two reads. A profile with 10% loss shows about 9.9% actual loss and the
+download cap of 250 kbit/s is reached.
 """
 
 import json

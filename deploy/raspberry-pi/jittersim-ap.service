@@ -12,7 +12,11 @@ After=NetworkManager.service jittersim-access-boot.service jittersim-control-fir
 Type=oneshot
 # Never open the test Wi-Fi without the management firewall.
 ExecStartPre=/usr/sbin/nft list table inet jittersim_control
-ExecStart=/usr/bin/nmcli connection up jittersim-ap
+# NetworkManager counts as started before wlan0 may be ready and autoconnect is off,
+# so the start tries up to ten times 3 s apart. A connection that is already active
+# counts as success and is never brought up again or taken down.
+ExecStart=/bin/sh -c 'for try in 1 2 3 4 5 6 7 8 9 10; do [ "$$(/usr/bin/nmcli -g GENERAL.STATE connection show jittersim-ap 2>/dev/null)" = activated ] && exit 0; /usr/bin/nmcli --wait 10 connection up jittersim-ap && exit 0; sleep 3; done; echo "The test Wi-Fi did not start after 10 tries. Check nmcli device status." >&2; exit 1'
+TimeoutStartSec=180
 RemainAfterExit=yes
 
 [Install]

@@ -265,11 +265,25 @@ def transition_firewall(topology: Topology, *, clear: bool = False) -> str:
     if clear:
         lines.append(f"delete table inet {table}")
     else:
+        interface = topology.test_interface
         for chain in ("input", "forward", "output"):
             lines += [
                 f"add chain inet {table} {chain} "
                 f"{{ type filter hook {chain} priority -350; policy accept; }}"
             ]
+            # A guard left by a failed restore or recovery must not lock people out:
+            # the device still gets an address (DHCP) and reaches the dashboard sign-in
+            # where Panic opens the network again. Nothing is forwarded.
+            if chain == "input":
+                lines += [
+                    f'add rule inet {table} input iifname "{interface}" tcp dport {DASHBOARD_PORT} accept',
+                    f'add rule inet {table} input iifname "{interface}" udp dport 67 accept',
+                ]
+            if chain == "output":
+                lines += [
+                    f'add rule inet {table} output oifname "{interface}" tcp sport {DASHBOARD_PORT} accept',
+                    f'add rule inet {table} output oifname "{interface}" udp sport 67 accept',
+                ]
             if chain != "output":
                 lines.append(
                     f'add rule inet {table} {chain} iifname "{topology.test_interface}" drop'

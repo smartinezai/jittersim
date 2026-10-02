@@ -41,7 +41,13 @@ def test_traffic_and_access_texts_say_that_subdomains_are_blocked_too():
     assert "Blocked and Unblock show on the exact name that was blocked." in DASHBOARD_HTML
     access = (ROOT / "src/jittersim/api/access.js").read_text()
     assert "global blocked domains include subdomains while household access rules are on" in access
-    assert "Unblock removes the exact name and its subdomains resolve again." in access
+    # A subdomain listed on its own stays blocked after its parent is unblocked.
+    assert (
+        "Unblock frees the exact name and the names under it unless one is listed on its own."
+        in access
+    )
+    # The household toggle says what it does in one line.
+    assert "Household rules filter test Wi-Fi DNS through the Pi" in access
     assert "does not match subdomains" not in (ROOT / "src/jittersim/api/server.py").read_text()
 
 
