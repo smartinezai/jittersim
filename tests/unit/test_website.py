@@ -56,6 +56,20 @@ class WebsiteResolutionTests(unittest.TestCase):
         self.assertEqual(filters[0].allowed_addresses, (IPv4Address("203.0.113.20"),))
         self.assertEqual(filters[0].blocked_addresses, (IPv4Address("203.0.113.30"),))
 
+    def test_blocked_domains_alone_do_not_create_an_allowlist(self) -> None:
+        device = Device("alice", "Alice", "192.168.50.10", "normal")
+
+        _, filters = build_website_filters(
+            devices=(device,),
+            profiles={"normal": Profile(id="normal", name="Normal")},
+            global_policy=WebsitePolicy(),
+            blocked_domains_by_device={"alice": ("blocked.example",)},
+            resolver=fake_resolver,
+        )
+
+        self.assertIsNone(filters[0].allowed_addresses)
+        self.assertEqual(filters[0].blocked_addresses, (IPv4Address("203.0.113.30"),))
+
     def test_default_resolution_is_cached_until_the_short_ttl_expires(self) -> None:
         result = ((None, None, None, None, ("203.0.113.10", 0)),)
         with patch("jittersim.engine.website.socket.getaddrinfo", return_value=result) as lookup:

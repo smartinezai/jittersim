@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 from jittersim.api.server import ControlServer
-from jittersim.config.models import DomainObservation
+from jittersim.config.models import Device, DomainObservation, Impairment, Profile, Scenario, ScenarioStep
 from jittersim.config.storage import ConfigRepository
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.networking.applier import NetworkApplier
@@ -67,6 +67,39 @@ class DashboardRouter:
         pass
 
 
+class DashboardHelperService(HelperService):
+    """The real helper, plus a staged release when the demo data is seeded."""
+
+    def _handle_payload(self, payload):
+        if seeded() and isinstance(payload, dict) and payload.get("action") == "update-status":
+            return {
+                "ok": True,
+                "phase": "idle",
+                "installed": "test-release",
+                "available": "candidate-release",
+                "rollback_available": False,
+                "message": "A verified release is staged and ready.",
+            }
+        return super()._handle_payload(payload)
+
+
+def seeded():
+    return os.environ.get("JITTERSIM_BROWSER_TEST_SEED") == "1"
+
+
+def seed_demo_data(repository):
+    """Save two profiles, a device and a scenario when JITTERSIM_BROWSER_TEST_SEED is 1."""
+
+    if not seeded():
+        return
+    repository.save_profile(Profile("normal", "Normal connection"))
+    repository.save_profile(Profile("slow", "Slow connection", download=Impairment(delay_ms=300)))
+    repository.save_device(Device("alice", "Test phone", "192.168.50.184", "normal", "02:00:00:00:00:01"))
+    repository.save_scenario(
+        Scenario("commute", "Commute", (ScenarioStep("slow", 10), ScenarioStep("normal", 10)))
+    )
+
+
 class FixtureServer(ControlServer):
     def get_request(self):
         connection, address = super().get_request()
@@ -112,16 +145,17 @@ def seed_observations(repository):
 def main():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        service = HelperService(NetworkApplier(executor=DashboardWifiExecutor(),
-                                              topology=Topology("eth0", "wlan0")),
-                                router_factory=lambda *_: DashboardRouter(),
-                                access_store=AccessStore(root / "access.json"))
+        service = DashboardHelperService(NetworkApplier(executor=DashboardWifiExecutor(),
+                                                       topology=Topology("eth0", "wlan0")),
+                                         router_factory=lambda *_: DashboardRouter(),
+                                         access_store=AccessStore(root / "access.json"))
         with UnixHelperServer(root / "wifi.sock", service) as helper:
             worker = threading.Thread(target=helper.serve_forever, daemon=True)
             worker.start()
             try:
                 with ConfigRepository(root / "config.db") as repository:
                     seed_observations(repository)
+                    seed_demo_data(repository)
                     helper_client = HelperClient(socket_path=root / "wifi.sock")
                     scheduler = None
                     if os.environ.get("JITTERSIM_BROWSER_TEST_SCHEDULER") == "1":

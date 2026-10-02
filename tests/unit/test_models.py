@@ -2,6 +2,7 @@ import unittest
 from ipaddress import IPv4Address
 
 from jittersim.config.models import (
+    AccessOptions,
     Device,
     DeviceGroup,
     DataLimit,
@@ -12,14 +13,28 @@ from jittersim.config.models import (
     Progression,
     Randomness,
     RuntimeState,
+    Scenario,
+    ScenarioRun,
+    ScenarioStep,
     Schedule,
     ServiceQuota,
     Timer,
     TimeQuota,
     time_quota_counter_id,
+    UnaffectedDevice,
     ValidationError,
     WebsitePolicy,
 )
+
+
+class AccessOptionsTests(unittest.TestCase):
+    def test_dns_failure_chance_accepts_endpoints_and_rejects_bad_numbers(self) -> None:
+        self.assertEqual(AccessOptions().dns_failure_percent, 0)
+        self.assertEqual(AccessOptions(dns_failure_percent=100).dns_failure_percent, 100)
+        for value in (-1, 101, True, 12.5, "25"):
+            with self.subTest(value=value):
+                with self.assertRaises(ValidationError):
+                    AccessOptions(dns_failure_percent=value)
 
 
 class ImpairmentTests(unittest.TestCase):
@@ -68,6 +83,17 @@ class ImpairmentTests(unittest.TestCase):
     def test_rejects_boolean_numeric_values(self) -> None:
         with self.assertRaises(ValidationError):
             Impairment(loss_percent=True)
+
+
+class BurstLossTests(unittest.TestCase):
+    def test_loss_is_independent_by_default(self) -> None:
+        self.assertEqual(Impairment().loss_burst_packets, 0)
+
+    def test_rejects_burst_lengths_outside_the_supported_range(self) -> None:
+        for value in (-1, 101, 2.5, True):
+            with self.subTest(value=value):
+                with self.assertRaises(ValidationError):
+                    Impairment(loss_percent=5, loss_burst_packets=value)
 
 
 class ProfileTests(unittest.TestCase):
@@ -260,6 +286,72 @@ class PolicyAndScheduleTests(unittest.TestCase):
         self.assertEqual(website_policy.blocked_domains, ("ads.example.com",))
         self.assertEqual(schedule.days_of_week, (0, 2))
 
+    def test_schedule_targets_a_device_a_group_or_everyone_else(self) -> None:
+        window = {"profile_id": "slow", "days_of_week": (0,), "start_minute": 60, "end_minute": 120}
+
+        device = Schedule(id="device", device_id="alice", **window)
+        group = Schedule(id="group", device_id=None, group_id="family", **window)
+        everyone = Schedule(id="everyone", device_id=None, everyone_else=True, **window)
+
+        self.assertEqual(
+            (device.device_id, device.group_id, device.everyone_else), ("alice", None, False)
+        )
+        self.assertEqual((group.device_id, group.group_id), (None, "family"))
+        self.assertTrue(everyone.everyone_else)
+
+    def test_schedule_needs_exactly_one_target(self) -> None:
+        window = {"profile_id": "slow", "days_of_week": (0,), "start_minute": 60, "end_minute": 120}
+        for targets in (
+            {"device_id": None},
+            {"device_id": "alice", "group_id": "family"},
+            {"device_id": "alice", "everyone_else": True},
+            {"device_id": None, "group_id": "family", "everyone_else": True},
+        ):
+            with self.subTest(targets=targets):
+                with self.assertRaisesRegex(ValidationError, "exactly one of a device"):
+                    Schedule(id="bad", **targets, **window)
+        with self.assertRaisesRegex(ValidationError, "everyone_else must be a boolean"):
+            Schedule(id="bad", device_id=None, everyone_else=1, **window)
+        with self.assertRaises(ValidationError):
+            Schedule(id="bad", device_id=None, group_id="Not An ID", **window)
+
+    def test_scenario_steps_and_their_limits(self) -> None:
+        steps = (ScenarioStep("3g", 60), ScenarioStep("offline", 10))
+        scenario = Scenario(id="commute", name=" Commute ", steps=list(steps), loop=True)
+
+        self.assertEqual(scenario.steps, steps)
+        self.assertEqual(scenario.name, "Commute")
+        self.assertEqual(scenario.total_seconds, 70)
+        for duration in (9, 86_401, 1.5, True):
+            with self.subTest(duration=duration):
+                with self.assertRaisesRegex(
+                    ValidationError, "a step must last 10 seconds to 24 hours"
+                ):
+                    ScenarioStep("3g", duration)
+        ScenarioStep("3g", 86_400)
+        for bad_steps, message in (
+            ((), "at least one step"),
+            ((ScenarioStep("3g", 60),) * 21, "at most 20 steps"),
+            (("3g",), "ScenarioStep"),
+        ):
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValidationError, message):
+                    Scenario(id="commute", name="Commute", steps=bad_steps)
+        with self.assertRaisesRegex(ValidationError, "loop must be a boolean"):
+            Scenario(id="commute", name="Commute", steps=steps, loop=1)
+
+    def test_a_scenario_run_has_exactly_one_target(self) -> None:
+        run = ScenarioRun(id="run-1", scenario_id="commute", started_at=100, group_id="family")
+
+        self.assertEqual((run.device_id, run.group_id, run.everyone_else), (None, "family", False))
+        with self.assertRaisesRegex(ValidationError, "exactly one of a device"):
+            ScenarioRun(id="run-1", scenario_id="commute", started_at=100)
+        with self.assertRaisesRegex(ValidationError, "exactly one of a device"):
+            ScenarioRun(
+                id="run-1", scenario_id="commute", started_at=100, device_id="alice",
+                everyone_else=True,
+            )
+
     def test_timer_requires_a_positive_window(self) -> None:
         with self.assertRaisesRegex(ValueError, "expires_at must be later"):
             Timer(
@@ -281,6 +373,23 @@ class PolicyAndScheduleTests(unittest.TestCase):
                 duration_seconds=600,
                 mode="traffic",
             )
+
+    def test_a_moved_traffic_progression_may_count_from_below_zero(self) -> None:
+        # A device that moves to an address with fewer recorded queries keeps
+        # its progress through a baseline below zero.
+        progression = Progression(
+            id="degrade",
+            device_id="alice",
+            start_profile_id="normal",
+            end_profile_id="slow",
+            started_at=100,
+            duration_seconds=600,
+            mode="traffic",
+            traffic_target_queries=200,
+            traffic_baseline_queries=-100,
+        )
+
+        self.assertEqual(progression.traffic_baseline_queries, -100)
 
     def test_bytes_progression_requires_a_positive_byte_target(self) -> None:
         with self.assertRaisesRegex(ValueError, "positive byte target"):
@@ -384,6 +493,25 @@ class RuntimeStateTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             RuntimeState(configuration_version=-1)
 
+
+class UnaffectedDeviceTests(unittest.TestCase):
+    def test_normalizes_the_address_and_names_it_after_the_address(self) -> None:
+        device = UnaffectedDevice("AA-BB-CC-DD-EE-FF")
+
+        self.assertEqual(device.mac_address, "aa:bb:cc:dd:ee:ff")
+        self.assertEqual(device.name, "aa:bb:cc:dd:ee:ff")
+        self.assertEqual(UnaffectedDevice("aa:bb:cc:dd:ee:ff", "  My phone ").name, "My phone")
+
+    def test_rejects_a_bad_address_or_name(self) -> None:
+        for mac_address, name in (
+            ("not-a-mac", ""),
+            ("aa:bb:cc:dd:ee:ff", "x" * 101),
+            ("aa:bb:cc:dd:ee:ff", 5),
+        ):
+            with self.subTest(mac_address=mac_address, name=name):
+                # The shared device-label checks raise their own ValueError.
+                with self.assertRaises(ValueError):
+                    UnaffectedDevice(mac_address, name)
 
 if __name__ == "__main__":
     unittest.main()

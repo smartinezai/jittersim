@@ -68,7 +68,7 @@ class ClientsHelper:
     def connected_device_snapshot(self):
         return {"devices": self.clients, "association_status_available": self.available}
 
-    def apply(self, *, plan):
+    def apply(self, *, plan, explicit_apply=False):
         if self.fail_apply:
             raise HelperClientError("apply failed")
         self.plans.append(plan)
@@ -421,7 +421,7 @@ def test_protection_precedes_every_runtime_profile_source(control, source):
     ):
         scheduler._build_plan(repository=repo, now=100)
         outcomes = []
-        plan = scheduler._build_plan(repository=repo, now=now, random_website_outcomes=outcomes)
+        plan, _ = scheduler._build_plan(repository=repo, now=now, random_website_outcomes=outcomes)
     assert [rule.device_id for rule in plan.mark_rules] == ["bob"]
     assert all(item.device_id != "alice" for item in outcomes)
     assert all(item.device_ip != IPv4Address("192.168.50.10") for item in plan.website_filters)

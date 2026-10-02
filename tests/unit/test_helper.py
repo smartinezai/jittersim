@@ -4,6 +4,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from jittersim.config.models import Device, Impairment, Profile
 from jittersim.engine.codec import plan_to_payload
@@ -25,10 +26,12 @@ from jittersim.networking.helper import (
     _merge_connected_device_output,
     _parse_dhcp_lease_output,
     _parse_neighbor_output,
+    _parse_queue_statistics,
     _parse_station_output,
     _parse_traffic_counter_output,
     run_helper,
 )
+from jittersim.networking.renderer import render_command_plan
 from jittersim.networking.router import (
     ROUTER_CHECK_MESSAGES,
     ROUTER_IMPORT_MESSAGES,
@@ -64,6 +67,43 @@ class OutputExecutor(FakeExecutor):
         return CommandResult(return_code=0, stdout=self.output)
 
 
+# Real kernel output after applying 50% upload loss and 20 ms download delay
+# to alice (mark 1) and sending 40 pings.
+NFT_COUNTERS_WITH_MARKS = (
+    '{"nftables":['
+    '{"rule":{"comment":"usage-device alice upload","expr":['
+    '{"mangle":{"key":{"meta":{"key":"mark"}},"value":1}},'
+    '{"counter":{"packets":40,"bytes":3360}}]}},'
+    '{"rule":{"comment":"usage-device alice download","expr":['
+    '{"mangle":{"key":{"meta":{"key":"mark"}},"value":1}},'
+    '{"counter":{"packets":16,"bytes":1344}}]}}]}'
+)
+TC_UPLOAD_STATISTICS = (
+    '[{"kind":"prio","handle":"10:","root":true,"drops":24,"backlog":0,"qlen":0},'
+    '{"kind":"netem","handle":"11:","parent":"10:2","bytes":1568,"packets":16,'
+    '"drops":24,"backlog":0,"qlen":0}]'
+)
+TC_DOWNLOAD_STATISTICS = (
+    '[{"kind":"prio","handle":"10:","root":true,"drops":0,"backlog":0,"qlen":0},'
+    '{"kind":"netem","handle":"11:","parent":"10:2","bytes":1568,"packets":16,'
+    '"drops":0,"backlog":196,"qlen":2}]'
+)
+
+
+class CounterExecutor(FakeExecutor):
+    """Answer nft and tc statistics commands the way the kernel does."""
+
+    def run(self, command):
+        self.commands.append(command)
+        if command.arguments == ("-j", "list", "table", "netdev", "jittersim_download"):
+            return CommandResult(return_code=0, stdout='{"nftables":[]}')
+        if command.executable == "nft":
+            return CommandResult(return_code=0, stdout=NFT_COUNTERS_WITH_MARKS)
+        interface = command.argv[-1]
+        output = TC_UPLOAD_STATISTICS if interface == "eth0" else TC_DOWNLOAD_STATISTICS
+        return CommandResult(return_code=0, stdout=output)
+
+
 class UplinkOutputExecutor(WifiExecutor):
     def run(self, command):
         if command.executable == "wpa_cli":
@@ -79,6 +119,31 @@ class UplinkOutputExecutor(WifiExecutor):
             return_code=0,
             stdout="default via 192.168.0.1 dev eth0 proto dhcp src 192.168.0.17\n",
         )
+
+
+class GatewayProbeApplier(NetworkApplier):
+    def __init__(self, *, executor, topology) -> None:
+        super().__init__(executor=executor, topology=topology)
+        self.probe_results = []
+        self.probe_calls = 0
+        self.reset_calls = 0
+        self.apply_calls = 0
+        self.reset_failures = 0
+
+    def probe_default_gateway(self):
+        self.probe_calls += 1
+        return self.probe_results.pop(0)
+
+    def reset(self):
+        self.reset_calls += 1
+        if self.reset_failures:
+            self.reset_failures -= 1
+            raise CommandExecutionError("simulated gateway reset failure")
+        return super().reset()
+
+    def apply(self, *, plan, service_addresses=None):
+        self.apply_calls += 1
+        return super().apply(plan=plan, service_addresses=service_addresses)
 
 
 class FakeRouter:
@@ -209,7 +274,8 @@ class HelperServiceTests(unittest.TestCase):
         response = self.service.handle_payload({"action": "reset"})
 
         self.assertEqual(response["action"], "reset")
-        self.assertEqual(response["commands_run"], 3)
+        # Both project tables go. Without project root queues no tc command runs.
+        self.assertEqual(response["commands_run"], 2)
 
     def test_publishes_and_clears_the_proxy_plan_with_network_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -273,6 +339,7 @@ class HelperServiceTests(unittest.TestCase):
         self.assertTrue(routers[0].logged_in)
         self.assertTrue(routers[0].closed)
         self.assertEqual(executor.settings["802-11-wireless-security.proto"], "rsn")
+        self.assertEqual(executor.settings["802-11-wireless-security.group"], "ccmp")
         self.assertEqual(executor.settings["802-11-wireless-security.key-mgmt"], "wpa-psk")
 
     def test_failed_router_read_never_changes_ap_or_logs_credentials(self) -> None:
@@ -672,6 +739,20 @@ class HelperServiceTests(unittest.TestCase):
         self.assertEqual(response, {"ok": False, "error": "invalid access point settings"})
         self.assertEqual(self.executor.commands, [])
 
+    def test_reading_router_state_never_changes_wifi_or_returns_credentials(self) -> None:
+        from unittest.mock import patch
+
+        router = FakeRouter("192.168.0.1", "router-secret")
+        service = HelperService(
+            NetworkApplier(executor=UplinkOutputExecutor(),
+                           topology=Topology(uplink_interface="eth0", test_interface="wlan0")),
+            router_factory=lambda address, password: router,
+        )
+        with patch.object(router, "set_wifi_enabled", side_effect=AssertionError("unexpected write")):
+            response = service.handle_payload({"action": "router-status", "admin_password": "router-secret"})
+        self.assertEqual(response, {"ok": True, "action": "router-status", "enabled": True})
+        self.assertTrue(router.closed)
+
     def test_lists_associated_wifi_clients_and_joins_local_details(self) -> None:
         station_output = (
             "Station dc:1e:d5:3e:97:4c (on wlan0)\n"
@@ -1018,7 +1099,9 @@ class HelperServiceTests(unittest.TestCase):
             )
         )
 
-        response = service.handle_payload({"action": "traffic-counters"})
+        # This executor answers tc with nftables output, so queue figures are skipped.
+        with self.assertLogs("jittersim.networking.helper", level="WARNING"):
+            response = service.handle_payload({"action": "traffic-counters"})
 
         self.assertEqual(response["action"], "traffic-counters")
         self.assertEqual(
@@ -1044,12 +1127,257 @@ class HelperServiceTests(unittest.TestCase):
                         }
                     },
                 },
+                "queues": {"devices": {}},
             },
         )
         self.assertEqual(
             executor.commands[0].argv,
             ("nft", "-j", "list", "table", "inet", "jittersim"),
         )
+
+    def test_reports_what_each_device_queue_dropped_or_holds(self) -> None:
+        executor = CounterExecutor()
+        service = HelperService(
+            NetworkApplier(
+                executor=executor,
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            )
+        )
+
+        response = service.handle_payload({"action": "traffic-counters"})
+
+        self.assertEqual(
+            response["counters"]["queues"],
+            {
+                "devices": {
+                    "alice": {
+                        "upload_dropped": 24,
+                        "download_dropped": 0,
+                        "upload_queued": 0,
+                        "download_queued": 2,
+                    }
+                }
+            },
+        )
+        self.assertEqual(
+            [command.argv for command in executor.commands[1:]],
+            [
+                ("nft", "-j", "list", "table", "netdev", "jittersim_download"),
+                ("tc", "-s", "-j", "qdisc", "show", "dev", "eth0"),
+                ("tc", "-s", "-j", "qdisc", "show", "dev", "wlan0"),
+            ],
+        )
+
+    def test_queue_figures_include_browser_service_profile_queues(self) -> None:
+        # The output chain counts proxied traffic by the service profile's mark.
+        nft = (
+            '{"nftables":['
+            '{"rule":{"comment":"usage-device alice upload","expr":['
+            '{"mangle":{"key":{"meta":{"key":"mark"}},"value":1}},'
+            '{"counter":{"packets":40,"bytes":3360}}]}},'
+            '{"rule":{"comment":"usage-device alice upload","expr":['
+            '{"match":{"op":"==","left":{"meta":{"key":"oifname"}},"right":"eth0"}},'
+            '{"match":{"op":"==","left":{"meta":{"key":"mark"}},"right":2}},'
+            '{"counter":{"packets":5,"bytes":3000}}]}}]}'
+        )
+        upload = (
+            '[{"kind":"netem","handle":"41:","parent":"10:2","drops":24,"qlen":0},'
+            '{"kind":"netem","handle":"42:","parent":"10:3","drops":500,"qlen":7}]'
+        )
+
+        class Executor(FakeExecutor):
+            def run(self, command):
+                self.commands.append(command)
+                if command.executable == "nft":
+                    return CommandResult(return_code=0, stdout=nft)
+                return CommandResult(
+                    return_code=0, stdout=upload if command.argv[-1] == "eth0" else "[]"
+                )
+
+        service = HelperService(
+            NetworkApplier(
+                executor=Executor(),
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            )
+        )
+
+        queues = service.handle_payload({"action": "traffic-counters"})["counters"]["queues"]
+
+        self.assertEqual(queues["devices"]["alice"]["upload_dropped"], 524)
+        self.assertEqual(queues["devices"]["alice"]["upload_queued"], 7)
+
+    def test_counts_what_everyone_else_sends_and_what_its_queues_hold(self) -> None:
+        nft = (
+            '{"nftables":['
+            '{"rule":{"comment":"usage-device alice upload","expr":['
+            '{"mangle":{"key":{"meta":{"key":"mark"}},"value":1}},'
+            '{"counter":{"packets":1,"bytes":100}}]}},'
+            '{"rule":{"comment":"everyone else upload","expr":['
+            '{"mangle":{"key":{"meta":{"key":"mark"}},"value":2}},'
+            '{"counter":{"packets":7,"bytes":7000}}]}},'
+            '{"rule":{"comment":"everyone else download","expr":['
+            '{"mangle":{"key":{"meta":{"key":"mark"}},"value":2}},'
+            '{"counter":{"packets":9,"bytes":90000}}]}}]}'
+        )
+        upload = (
+            '[{"kind":"netem","handle":"41:","parent":"10:2","drops":3,"qlen":0},'
+            '{"kind":"netem","handle":"42:","parent":"10:3","drops":11,"qlen":4}]'
+        )
+
+        class Executor(FakeExecutor):
+            def run(self, command):
+                self.commands.append(command)
+                if command.arguments == ("-j", "list", "table", "netdev", "jittersim_download"):
+                    return CommandResult(return_code=0, stdout='{"nftables":[]}')
+                if command.executable == "nft":
+                    return CommandResult(return_code=0, stdout=nft)
+                return CommandResult(
+                    return_code=0, stdout=upload if command.argv[-1] == "eth0" else "[]"
+                )
+
+        service = HelperService(
+            NetworkApplier(
+                executor=Executor(),
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            )
+        )
+
+        counters = service.handle_payload({"action": "traffic-counters"})["counters"]
+
+        self.assertEqual(
+            counters["everyone_else"],
+            {
+                "upload_bytes": 7_000,
+                "download_bytes": 90_000,
+                "upload_packets": 7,
+                "download_packets": 9,
+            },
+        )
+        self.assertEqual(
+            counters["queues"]["everyone_else"],
+            {
+                "upload_dropped": 11,
+                "download_dropped": 0,
+                "upload_queued": 4,
+                "download_queued": 0,
+            },
+        )
+        # Everyone else isn't a device.
+        self.assertEqual(set(counters["devices"]), {"alice"})
+        self.assertEqual(set(counters["queues"]["devices"]), {"alice"})
+        self.assertEqual(counters["queues"]["devices"]["alice"]["upload_dropped"], 3)
+
+    def test_client_checks_everyone_else_counters(self) -> None:
+        # The socket is never opened: the request itself is replaced.
+        client = HelperClient(socket_path=Path("unused.sock"))
+        base = {
+            "devices": {},
+            "services": {},
+            "directions": {"devices": {}, "services": {}},
+            "queues": {"devices": {}},
+        }
+        flows = {"upload_bytes": 1, "download_bytes": 2, "upload_packets": 3, "download_packets": 4}
+        queue = {
+            "upload_dropped": 5, "download_dropped": 0, "upload_queued": 0, "download_queued": 1
+        }
+
+        def answer(counters):
+            client._request = lambda payload: {"ok": True, "counters": counters}
+            return client.traffic_counters()
+
+        # A helper without everyone else reports none.
+        self.assertIsNone(answer(base)["everyone_else"])
+        counters = answer(
+            {**base, "everyone_else": flows, "queues": {"devices": {}, "everyone_else": queue}}
+        )
+        self.assertEqual(counters["everyone_else"], flows)
+        self.assertEqual(counters["queues"]["everyone_else"], queue)
+        with self.assertRaises(HelperClientError):
+            answer({**base, "everyone_else": {**flows, "upload_bytes": -1}})
+
+    def test_queue_figures_include_an_active_service_limit_queue(self) -> None:
+        # A service limit's rules match the device's address, not its name.
+        nft = (
+            '{"nftables":['
+            '{"rule":{"comment":"usage-device alice upload","expr":['
+            '{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"saddr"}},'
+            '"right":"192.168.50.10"}},'
+            '{"mangle":{"key":{"meta":{"key":"mark"}},"value":1}},'
+            '{"counter":{"packets":40,"bytes":3360}}]}},'
+            '{"rule":{"comment":"apply-service-quota video upload","expr":['
+            '{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"saddr"}},'
+            '"right":"192.168.50.10"}},'
+            '{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},'
+            '"right":{"set":["203.0.113.10"]}}},'
+            '{"mangle":{"key":{"meta":{"key":"mark"}},"value":3}}]}}]}'
+        )
+        upload = (
+            '[{"kind":"netem","handle":"41:","parent":"10:2","drops":5,"qlen":0},'
+            '{"kind":"netem","handle":"43:","parent":"10:4","drops":40,"qlen":1}]'
+        )
+
+        class Executor(FakeExecutor):
+            def run(self, command):
+                self.commands.append(command)
+                if command.executable == "nft":
+                    return CommandResult(return_code=0, stdout=nft)
+                return CommandResult(
+                    return_code=0, stdout=upload if command.argv[-1] == "eth0" else "[]"
+                )
+
+        service = HelperService(
+            NetworkApplier(
+                executor=Executor(),
+                topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+            )
+        )
+
+        queues = service.handle_payload({"action": "traffic-counters"})["counters"]["queues"]
+
+        self.assertEqual(queues["devices"]["alice"]["upload_dropped"], 45)
+        self.assertEqual(queues["devices"]["alice"]["upload_queued"], 1)
+
+    def test_queue_statistics_follow_the_rendered_queue_layout(self) -> None:
+        plan = compile_plan(
+            devices=(
+                Device("alice", "Alice", "192.168.50.10", "slow"),
+                Device("bob", "Bob", "192.168.50.11", "normal"),
+            ),
+            profiles={
+                "slow": Profile(id="slow", name="Slow", upload=Impairment(delay_ms=100)),
+                "normal": Profile(id="normal", name="Normal"),
+            },
+        )
+        commands = render_command_plan(
+            plan=plan, topology=Topology(uplink_interface="eth0", test_interface="wlan0")
+        )
+        # Answer as tc would for every child queue the renderer creates.
+        qdiscs = {"upload": [], "download": []}
+        for argv in (command.argv for command in commands):
+            if argv[:3] == ("tc", "qdisc", "replace") and "parent" in argv:
+                handle = argv.index("handle")
+                qdiscs["upload" if argv[4] == "eth0" else "download"].append(
+                    {
+                        "kind": argv[handle + 2],
+                        "handle": argv[handle + 1],
+                        "parent": argv[argv.index("parent") + 1],
+                        "drops": 7,
+                        "qlen": 3,
+                    }
+                )
+
+        statistics = _parse_queue_statistics(
+            {direction: json.dumps(values) for direction, values in qdiscs.items()},
+            marks={rule.device_id: {rule.mark} for rule in plan.mark_rules},
+        )
+
+        figures = {
+            "upload_dropped": 7,
+            "download_dropped": 7,
+            "upload_queued": 3,
+            "download_queued": 3,
+        }
+        self.assertEqual(statistics, {"devices": {"alice": figures, "bob": figures}})
 
     def test_rejects_invalid_traffic_counter_json(self) -> None:
         with self.assertRaises(ValueError):
@@ -1286,6 +1614,140 @@ class RouterWifiCredentialsClientTests(unittest.TestCase):
                 client.read_router_wifi_credentials(
                     admin_password="router-secret", include_password=True)
         self.assertEqual(str(caught.exception), "unknown action")
+class GatewayPersistenceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        directory = Path(self.temp.name)
+        self.active_plan_path = directory / "active-plan.json"
+        self.gateway_state_path = directory / "gateway-state.json"
+        self.executor = FakeExecutor()
+        self.applier = GatewayProbeApplier(
+            executor=self.executor,
+            topology=Topology(uplink_interface="eth0", test_interface="wlan0"),
+        )
+        self.service = self._new_service()
+        result = self.service.handle_payload(
+            {"action": "apply-experiment", "plan": plan_to_payload(make_plan())}
+        )
+        self.assertTrue(result["ok"])
+
+    def _new_service(self):
+        return HelperService(
+            self.applier,
+            active_plan_path=self.active_plan_path,
+            gateway_state_path=self.gateway_state_path,
+        )
+
+    def _check_probes(self, results):
+        self.applier.probe_results = list(results)
+        for _ in results:
+            self.service.monitor_gateway_once()
+
+    def test_off_mode_stops_once_and_stays_stopped_until_explicit_apply(self) -> None:
+        self.service.handle_payload({"action": "gateway-persistence", "enabled": False})
+        self._check_probes([False, False, False, True, True])
+
+        status = self.service.handle_payload({"action": "gateway-status"})
+        self.assertEqual(status["gateway_state"], "available")
+        self.assertTrue(status["outage_stop_latched"])
+        self.assertFalse(status["reset_pending"])
+        self.assertEqual(self.applier.reset_calls, 1)
+        self.assertFalse(self.active_plan_path.exists())
+
+        restarted = self._new_service()
+        restarted_status = restarted.handle_payload({"action": "gateway-status"})
+        self.assertTrue(restarted_status["outage_stop_latched"])
+        commands_before = len(self.executor.commands)
+        blocked = restarted.handle_payload(
+            {"action": "apply-experiment", "plan": plan_to_payload(make_plan())}
+        )
+        self.assertFalse(blocked["ok"])
+        self.assertIn("use Apply", blocked["error"])
+        self.assertEqual(len(self.executor.commands), commands_before)
+
+        applied = restarted.handle_payload(
+            {
+                "action": "apply",
+                "explicit_apply": True,
+                "plan": plan_to_payload(make_plan()),
+            }
+        )
+        self.assertTrue(applied["ok"])
+        self.assertFalse(restarted.handle_payload({"action": "gateway-status"})[
+            "outage_stop_latched"
+        ])
+        self.assertTrue(self.active_plan_path.exists())
+
+    def test_on_mode_keeps_plan_and_marks_one_reapply_after_recovery(self) -> None:
+        self.service.handle_payload({"action": "gateway-persistence", "enabled": True})
+        self._check_probes([False, False, False, True, True])
+
+        status = self.service.handle_payload({"action": "gateway-status"})
+        self.assertEqual(status["gateway_state"], "available")
+        self.assertTrue(status["recovery_pending"])
+        self.assertEqual(self.applier.reset_calls, 0)
+        self.assertTrue(self.active_plan_path.exists())
+        self.assertEqual(self.applier.apply_calls, 1)
+
+        result = self.service.handle_payload(
+            {"action": "apply-experiment", "plan": plan_to_payload(make_plan())}
+        )
+        self.assertTrue(result["ok"])
+        self.assertFalse(self.service.handle_payload({"action": "gateway-status"})[
+            "recovery_pending"
+        ])
+        self.assertEqual(self.applier.apply_calls, 2)
+
+    def test_unknown_gateway_probe_does_not_stop_profiles_or_count_as_failure(self) -> None:
+        self.service.handle_payload({"action": "gateway-persistence", "enabled": False})
+        self._check_probes([False, False, None, False])
+
+        status = self.service.handle_payload({"action": "gateway-status"})
+        self.assertEqual(status["gateway_state"], "unknown")
+        self.assertFalse(status["outage_stop_latched"])
+        self.assertEqual(self.applier.reset_calls, 0)
+        self.assertTrue(self.active_plan_path.exists())
+
+    def test_route_lost_after_a_reachable_gateway_counts_as_an_outage(self) -> None:
+        # A router reboot drops the Ethernet link, and the default route with it.
+        self.service.handle_payload({"action": "gateway-persistence", "enabled": False})
+        self._check_probes([True, True, False, None, None])
+
+        status = self.service.handle_payload({"action": "gateway-status"})
+        self.assertEqual(status["gateway_state"], "unavailable")
+        self.assertTrue(status["outage_stop_latched"])
+        self.assertEqual(self.applier.reset_calls, 1)
+        self.assertFalse(self.active_plan_path.exists())
+
+    def test_status_reports_whether_the_mode_was_received(self) -> None:
+        fresh = HelperService(self.applier, active_plan_path=self.active_plan_path)
+        self.assertFalse(fresh.handle_payload({"action": "gateway-status"})["mode_initialized"])
+        fresh.handle_payload({"action": "gateway-persistence", "enabled": True})
+        self.assertTrue(fresh.handle_payload({"action": "gateway-status"})["mode_initialized"])
+
+    def test_failed_outage_reset_stays_latched_and_retries_after_backoff(self) -> None:
+        self.service.handle_payload({"action": "gateway-persistence", "enabled": False})
+        self.applier.reset_failures = 1
+        self.applier.probe_results = [False, False, False, False, False]
+
+        with patch("jittersim.networking.helper.time.monotonic", return_value=100):
+            for _ in range(3):
+                self.service.monitor_gateway_once()
+            status = self.service.handle_payload({"action": "gateway-status"})
+            self.assertTrue(status["outage_stop_latched"])
+            self.assertTrue(status["reset_pending"])
+            self.assertTrue(self.active_plan_path.exists())
+            self.service.monitor_gateway_once()
+            self.assertEqual(self.applier.reset_calls, 1)
+
+        with patch("jittersim.networking.helper.time.monotonic", return_value=130):
+            self.service.monitor_gateway_once()
+        self.assertFalse(self.service.handle_payload({"action": "gateway-status"})[
+            "reset_pending"
+        ])
+        self.assertFalse(self.active_plan_path.exists())
+        self.assertEqual(self.applier.reset_calls, 2)
 
 
 class UnixHelperServerTests(unittest.TestCase):
@@ -1344,13 +1806,15 @@ class UnixHelperServerTests(unittest.TestCase):
         traffic_thread = threading.Thread(target=traffic_server.serve_forever)
         traffic_thread.start()
         try:
-            counters = HelperClient(socket_path=traffic_socket).traffic_counters()
+            with self.assertLogs("jittersim.networking.helper", level="WARNING"):
+                counters = HelperClient(socket_path=traffic_socket).traffic_counters()
         finally:
             traffic_server.shutdown()
             traffic_server.server_close()
             traffic_thread.join(timeout=2)
 
         self.assertEqual(counters["devices"], {"alice": 1_200})
+        self.assertEqual(counters["queues"], {"devices": {}})
         self.assertEqual(
             counters["directions"]["devices"]["alice"],
             {

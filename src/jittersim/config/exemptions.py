@@ -31,3 +31,9 @@ class UnaffectedDevice:
             or self.created_at < 0
         ):
             raise ValueError("creation time must be a nonnegative integer")
+
+    @property
+    def name(self) -> str:
+        """The display name, or the address when no name was given."""
+
+        return self.display_name or self.mac_address

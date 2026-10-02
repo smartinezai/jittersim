@@ -82,9 +82,14 @@ class NetworkApplier:
         """
 
         try:
-            for interface in (self._topology.uplink_interface, self._topology.test_interface):
-                self._root_queue(interface, for_apply=True)
+            project_roots = {
+                interface: self._root_queue(interface, for_apply=True)
+                for interface in (self._topology.uplink_interface, self._topology.test_interface)
+            }
             if not plan.queues:
+                # prio needs at least two bands, so remove the project roots.
+                # The nft script replaces the tables in one transaction, so their
+                # deny and block rules stay in place meanwhile.
                 for command in render_reset_commands(topology=self._topology):
                     if command.executable == "tc" and self._root_queue(
                         command.arguments[3], for_apply=False
@@ -315,6 +320,42 @@ class NetworkApplier:
             "gateway": gateway_match.group(1) if gateway_match else None,
         }
 
+    def probe_default_gateway(self) -> Optional[bool]:
+        """Return gateway reachability, or None when a safe probe is unavailable."""
+
+        uplink = self.uplink_info()
+        gateway = uplink["gateway"]
+        if not gateway:
+            return None
+        result = self._executor.run(
+            Command(
+                executable="ping",
+                arguments=(
+                    "-n",
+                    "-c",
+                    "1",
+                    "-W",
+                    "1",
+                    "-I",
+                    self._topology.uplink_interface,
+                    gateway,
+                ),
+                purpose="check reachability of the configured router gateway",
+                ignore_failure=True,
+                timeout_seconds=2,
+            )
+        )
+        if result.return_code == 0:
+            return True
+        if result.return_code == 1:
+            return False
+        raise CommandExecutionError(
+            "the configured router gateway could not be checked",
+            return_code=result.return_code,
+            stdout=result.stdout,
+            stderr=result.stderr,
+        )
+
     def capture_dns_queries(self, excluded_macs: Sequence[str] = ()) -> str:
         """Capture a bounded sample of DNS packets arriving from the test network.
 
@@ -369,6 +410,24 @@ class NetworkApplier:
                 raise CommandExecutionError("traffic counter response is too large")
             entries.extend(json.loads(result.stdout).get("nftables", []))
         return json.dumps({"nftables": entries})
+
+    def queue_statistics(self) -> Dict[str, str]:
+        """Read traffic-control queue statistics as JSON for each direction."""
+
+        outputs = {}
+        for direction, interface in (
+            ("upload", self._topology.uplink_interface),
+            ("download", self._topology.test_interface),
+        ):
+            result = self._executor.run(
+                Command(
+                    executable="tc",
+                    arguments=("-s", "-j", "qdisc", "show", "dev", interface),
+                    purpose=f"inspect JitterSim queues on {interface}",
+                )
+            )
+            outputs[direction] = result.stdout
+        return outputs
 
     def configure_access_point(self, *, ssid: str, password: str, security: str = "WPA3") -> int:
         """Set the local test AP credentials without touching the upstream router."""

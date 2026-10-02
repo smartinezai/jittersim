@@ -128,6 +128,21 @@ class RandomizerTests(unittest.TestCase):
         self.assertFalse(outage_is_selected(profile=profile, generator=generator))
 
 
+class BurstLossRandomnessTests(unittest.TestCase):
+    def test_rerolls_and_progressions_keep_the_burst_length(self) -> None:
+        bursty = Impairment(loss_percent=10, loss_burst_packets=4)
+
+        rerolled = reroll_impairment(impairment=bursty, generator=random.Random(1))
+        halfway = interpolate_impairment(
+            start=Impairment(loss_percent=0, loss_burst_packets=2),
+            end=Impairment(loss_percent=10, loss_burst_packets=6),
+            factor=0.5,
+        )
+
+        self.assertEqual(rerolled.loss_burst_packets, 4)
+        self.assertEqual(halfway.loss_burst_packets, 4)
+
+
 class ScheduleTests(unittest.TestCase):
     def setUp(self) -> None:
         self.schedule = Schedule(
@@ -176,6 +191,38 @@ class ScheduleTests(unittest.TestCase):
         )
 
         self.assertEqual(selected.id, "overnight")
+
+    def test_a_turned_off_schedule_is_never_active(self) -> None:
+        off = Schedule(
+            id="overnight", device_id="alice", profile_id="slow", days_of_week=(0,),
+            start_minute=1_380, end_minute=60, enabled=False,
+        )
+
+        moment = datetime(2026, 9, 21, 23, 30)
+
+        self.assertIsNone(active_schedule(schedules=(off,), device_id="alice", moment=moment))
+
+    def test_active_schedule_keeps_devices_groups_and_everyone_else_apart(self) -> None:
+        window = {
+            "profile_id": "slow", "days_of_week": (0,), "start_minute": 1_380, "end_minute": 60
+        }
+        group = Schedule(id="a-group", device_id=None, group_id="family", **window)
+        everyone = Schedule(id="b-everyone", device_id=None, everyone_else=True, **window)
+        schedules = (group, everyone, self.schedule)
+        moment = datetime(2026, 9, 21, 23, 30)
+
+        self.assertEqual(
+            active_schedule(schedules=schedules, device_id="alice", moment=moment).id, "overnight"
+        )
+        self.assertEqual(
+            active_schedule(schedules=schedules, group_id="family", moment=moment).id, "a-group"
+        )
+        self.assertEqual(
+            active_schedule(schedules=schedules, everyone_else=True, moment=moment).id,
+            "b-everyone",
+        )
+        self.assertIsNone(active_schedule(schedules=schedules, device_id="bob", moment=moment))
+        self.assertIsNone(active_schedule(schedules=schedules, group_id="other", moment=moment))
 
 
 class ProgressionTests(unittest.TestCase):

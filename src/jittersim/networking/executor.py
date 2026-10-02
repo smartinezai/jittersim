@@ -56,7 +56,10 @@ class FakeExecutor:
 class SubprocessExecutor:
     """Execute only supported Linux networking commands with a bounded timeout."""
 
-    _ALLOWED_EXECUTABLES = frozenset(("ip", "iw", "nft", "tc", "tcpdump", "nmcli", "wpa_cli"))
+    _ALLOWED_EXECUTABLES = frozenset((
+        "ip", "iw", "nft", "tc", "tcpdump", "nmcli", "unbound-checkconf",
+        "systemctl", "dig", "hostapd_cli", "wpa_cli", "conntrack", "ping",
+    ))
 
     def __init__(self, timeout_seconds: float = 10.0) -> None:
         if timeout_seconds <= 0 or timeout_seconds > 60:

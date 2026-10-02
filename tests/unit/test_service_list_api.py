@@ -22,7 +22,13 @@ class Helper:
         if self.outdated:
             raise HelperClientError("Update the Pi helper before applying service lists")
 
-    def apply(self, *, plan):
+    def gateway_status(self):
+        return {"outage_stop_latched": False, "state_error": False}
+
+    def ping(self):
+        return {"ok": True}
+
+    def apply(self, *, plan, explicit_apply=False):
         if self.fail:
             raise HelperClientError("simulated helper failure")
         self.applied_plan = plan

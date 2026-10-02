@@ -13,14 +13,20 @@ from jittersim.engine.plan import (
 )
 
 from .commands import Command
-from .legacy import LEGACY_ACCESS_CLEANUP, cleanup_command
 from .topology import Topology
 
 PROJECT_TABLE = "jittersim"
 DOWNLOAD_TABLE = "jittersim_download"
 ROOT_HANDLE = "10:"
+# prio class minors start at 1, so band 0 is class 10:1. Band 0 keeps unmarked
+# traffic (the Pi itself, ARP, DHCP and unassigned clients) on a fair queue.
+DEFAULT_CLASS = f"{ROOT_HANDLE}1"
 DASHBOARD_REPLY_MARK = 0x80000000
 GENERAL_DOWNLOAD_MARK = 0x40000000
+# Forwarded downloads for everyone else carry this mark until the download hook
+# turns it into their queue mark. The hook sees the client MAC, so protected
+# devices are left alone there.
+EVERYONE_DOWNLOAD_MARK = 0x10000000
 # Forwarded downloads from a listed service carry this base plus the list's mark
 # until the download hook turns them back into the plain queue mark.
 SERVICE_DOWNLOAD_MARK_BASE = 0x20000000
@@ -58,6 +64,30 @@ def _render_set(values: Sequence[object]) -> str:
     return "{ " + ", ".join(str(value) for value in values) + " }"
 
 
+# A rate far above any real link. netem only keeps packets in order when a
+
+
+# netem keeps jittered packets in order only when a rate serializes them.
+ORDERING_RATE = "10gbit"
+
+
+def _loss_arguments(loss_percent: int, burst_packets: int) -> List[str]:
+    if burst_packets < 2 or loss_percent >= 100:
+        return ["loss", "random", f"{loss_percent}%"]
+    # Gilbert model: the bad state loses every packet and the good state none.
+    # Leaving the bad state with probability r gives bursts of 1/r packets, and
+    # entering it with p = L * r / (1 - L) keeps the average loss at L.
+    loss = loss_percent / 100
+    exit_bad = 1 / burst_packets
+    enter_bad = loss * exit_bad / (1 - loss)
+    if enter_bad > 1:
+        # Runs this short cannot lose this much. Leave the good state after
+        # every packet and make the runs longer so the average stays L.
+        enter_bad = 1.0
+        exit_bad = (1 - loss) / loss
+    return ["loss", "gemodel", f"{enter_bad * 100:.4f}%", f"{exit_bad * 100:.4f}%"]
+
+
 def _format_impairment_arguments(queue: QueueSpec) -> List[str]:
     impairment = queue.impairment
     arguments = ["netem"]
@@ -66,17 +96,24 @@ def _format_impairment_arguments(queue: QueueSpec) -> List[str]:
         if impairment.jitter_ms:
             arguments.append(f"{impairment.jitter_ms}ms")
     if impairment.loss_percent:
-        arguments.extend(["loss", "random", f"{impairment.loss_percent}%"])
+        arguments.extend(_loss_arguments(impairment.loss_percent, impairment.loss_burst_packets))
     # netem reorders by sending some packets without the configured delay, so tc
     # rejects reordering without one. Randomness can also switch the delay off.
     if impairment.reorder_percent and impairment.delay_ms:
         arguments.extend(["reorder", f"{impairment.reorder_percent}%"])
     if impairment.duplicate_percent:
         arguments.extend(["duplicate", f"{impairment.duplicate_percent}%"])
-    if impairment.corrupt_percent:
-        arguments.extend(["corrupt", f"{impairment.corrupt_percent}%"])
+    # "tc qdisc replace" changes an existing netem in place and keeps any
+    # corrupt or rate setting it is not given, so always state both. A rate
+    # also keeps jittered packets in order.
+    arguments.extend(["corrupt", f"{impairment.corrupt_percent}%"])
     if impairment.bandwidth_kbit is not None:
-        arguments.extend(["rate", f"{impairment.bandwidth_kbit}kbit"])
+        rate = f"{impairment.bandwidth_kbit}kbit"
+    elif impairment.jitter_ms:
+        rate = ORDERING_RATE
+    else:
+        rate = "0bit"
+    arguments.extend(["rate", rate])
     return arguments
 
 
@@ -88,6 +125,55 @@ def _service_guard(plan: NetworkPlan) -> str:
     )
 
 
+def _render_everyone_else_rules(plan: NetworkPlan, topology: Topology, guard: str) -> List[str]:
+    """Shape clients that are neither saved devices nor protected.
+
+    Uploads are marked in the forward hook. Downloads get a marker there and
+    the download hook on the test interface, which sees the client MAC, turns
+    it into the queue mark after the protected return rule has had its turn.
+    Service lists win over this rule like they win over device rules.
+    """
+
+    rule = plan.everyone_else
+    test_interface = topology.test_interface
+    saved = _render_set([mark_rule.ipv4_address for mark_rule in plan.mark_rules])
+    upload = f'iifname "{test_interface}" meta nfproto ipv4'
+    download = f'oifname "{test_interface}" meta nfproto ipv4'
+    if plan.mark_rules:
+        # Saved devices keep their own rules, counters and limits.
+        upload += f" ip saddr != {saved}"
+        download += f" ip daddr != {saved}"
+    lines = []
+    if rule.blocked:
+        # A client asking for an address sends from 0.0.0.0 and may be a saved
+        # device, so DHCP still reaches the Pi.
+        lines.append(
+            f"add rule inet {PROJECT_TABLE} input {upload} ip saddr != 0.0.0.0 drop "
+            'comment "temporarily disconnect everyone else"'
+        )
+        lines.append(
+            f"add rule inet {PROJECT_TABLE} forward {upload} {guard}drop "
+            'comment "temporarily disconnect everyone else"'
+        )
+        lines.append(
+            f"add rule netdev {DOWNLOAD_TABLE} download meta mark {EVERYONE_DOWNLOAD_MARK} drop "
+            'comment "temporarily disconnect everyone else"'
+        )
+    lines.append(
+        f"add rule inet {PROJECT_TABLE} forward {upload} {guard}meta mark set {rule.mark} counter "
+        'comment "everyone else upload"'
+    )
+    lines.append(
+        f"add rule inet {PROJECT_TABLE} forward {download} "
+        f'meta mark set {EVERYONE_DOWNLOAD_MARK} comment "identify everyone else downloads"'
+    )
+    lines.append(
+        f"add rule netdev {DOWNLOAD_TABLE} download meta mark {EVERYONE_DOWNLOAD_MARK} "
+        f'meta mark set {rule.mark} counter comment "everyone else download"'
+    )
+    return lines
+
+
 def _render_nft_script(
     plan: NetworkPlan,
     topology: Topology,
@@ -96,8 +182,9 @@ def _render_nft_script(
     test_interface = topology.test_interface
     guard = _service_guard(plan)
     # Adding an existing table is harmless. Delete and recreate both in one batch.
+    # nft applies the script as one transaction: declaring, deleting and
+    # rebuilding the tables replaces them without a moment with no rules.
     lines = [
-        *LEGACY_ACCESS_CLEANUP.splitlines(),
         f"add table inet {PROJECT_TABLE}",
         f"delete table inet {PROJECT_TABLE}",
         f"add table netdev {DOWNLOAD_TABLE}",
@@ -140,7 +227,10 @@ def _render_nft_script(
         f'add rule netdev {DOWNLOAD_TABLE} download meta mark {DASHBOARD_REPLY_MARK} '
         'meta mark set 0 return comment "keep local dashboard replies usable"',
     ])
-    if plan.mac_policy.denylist:
+    # Each MAC mode enforces only its own list. The persistent access policy
+    # renders these rules too; the copy here keeps the protected bypass below
+    # them while an experiment runs.
+    if plan.mac_policy.mode == "denylist" and plan.mac_policy.denylist:
         lines.append(
             f'add rule inet {PROJECT_TABLE} input iifname "{test_interface}" '
             f"ether saddr {_render_set(plan.mac_policy.denylist)} drop "
@@ -178,8 +268,11 @@ def _render_nft_script(
             f'add rule inet {PROJECT_TABLE} forward iifname "{test_interface}" '
             f'{match}drop comment "enforce global website allowlist"'
         )
-    if plan.protected_mac_addresses:
-        macs = _render_set(plan.protected_mac_addresses)
+    protected_macs = set(plan.protected_mac_addresses)
+    if plan.everyone_else is not None:
+        protected_macs.update(plan.everyone_else.unaffected_macs)
+    if protected_macs:
+        macs = _render_set(sorted(protected_macs))
         for chain in ("input", "forward"):
             lines.append(
                 f'add rule inet {PROJECT_TABLE} {chain} iifname "{test_interface}" '
@@ -260,6 +353,8 @@ def _render_nft_script(
             f"ip saddr {_render_set(plan.blocked_device_addresses)} {guard}drop "
             'comment "temporarily disconnect randomized clients"'
         )
+    if plan.everyone_else is not None:
+        lines.extend(_render_everyone_else_rules(plan, topology, guard))
     for rule in plan.mark_rules:
         lines.append(
             f"add rule inet {PROJECT_TABLE} forward "
@@ -334,12 +429,7 @@ def _render_nft_script(
     return "\n".join(lines) + "\n"
 
 
-def _render_tc_commands(
-    *,
-    queues: Sequence[QueueSpec],
-    interface: str,
-    device_count: int,
-) -> List[Command]:
+def _render_tc_commands(*, queues: Sequence[QueueSpec], interface: str) -> List[Command]:
     commands = [
         Command(
             executable="tc",
@@ -353,7 +443,7 @@ def _render_tc_commands(
                 ROOT_HANDLE,
                 "prio",
                 "bands",
-                str(device_count + 1),
+                str(max(queue.mark for queue in queues) + 1),
                 "priomap",
                 *("0" for _ in range(16)),
             ),
@@ -367,7 +457,7 @@ def _render_tc_commands(
                 "dev",
                 interface,
                 "parent",
-                f"{ROOT_HANDLE}1",
+                DEFAULT_CLASS,
                 "handle",
                 "100:",
                 "fq_codel",
@@ -487,21 +577,14 @@ def render_command_plan(
     ]
     upload_queues = tuple(queue for queue in plan.queues if queue.direction == Direction.UPLOAD)
     download_queues = tuple(queue for queue in plan.queues if queue.direction == Direction.DOWNLOAD)
+    # A plan without queues is applied after a reset, which removes the roots.
     if upload_queues:
         commands.extend(
-            _render_tc_commands(
-                queues=upload_queues,
-                interface=topology.uplink_interface,
-                device_count=max(queue.mark for queue in upload_queues),
-            )
+            _render_tc_commands(queues=upload_queues, interface=topology.uplink_interface)
         )
     if download_queues:
         commands.extend(
-            _render_tc_commands(
-                queues=download_queues,
-                interface=topology.test_interface,
-                device_count=max(queue.mark for queue in download_queues),
-            )
+            _render_tc_commands(queues=download_queues, interface=topology.test_interface)
         )
     return tuple(commands)
 
@@ -567,7 +650,6 @@ def render_reset_commands(*, topology: Topology) -> Sequence[Command]:
             ignore_failure=True,
         )
     )
-    commands.append(cleanup_command())
     for interface in (topology.uplink_interface, topology.test_interface):
         commands.append(
             Command(

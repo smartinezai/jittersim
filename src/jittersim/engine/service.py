@@ -4,10 +4,11 @@ from dataclasses import replace
 
 from jittersim.config.storage import ConfigRepository
 
+from .access import build_access_plan
 from .compiler import compile_plan
 from .eligibility import eligible_clients
 from .general import compile_general_plan
-from .plan import NetworkPlan, ServiceAssignmentRule, ServiceQuotaRule
+from .plan import EveryoneElseRule, NetworkPlan, ServiceAssignmentRule, ServiceQuotaRule
 from .service_lists import build_service_list_rules
 from .website import build_website_filters, resolve_domains
 
@@ -111,12 +112,29 @@ def compile_stored_plan(*, repository: ConfigRepository, connected_snapshot=None
                 download_impairment=profile.download,
             )
         )
+    everyone_else = None
+    everyone_else_profile_id = repository.get_everyone_else_profile_id()
+    if everyone_else_profile_id is not None:
+        profile = profiles.get(everyone_else_profile_id)
+        if profile is None:
+            raise ValueError(
+                f"everyone else references missing profile {everyone_else_profile_id}"
+            )
+        everyone_else = EveryoneElseRule(
+            mark=0,
+            upload_impairment=profile.upload,
+            download_impairment=profile.download,
+            unaffected_macs=tuple(
+                unaffected.mac_address for unaffected in repository.list_unaffected_devices()
+            ),
+        )
     return compile_plan(
         devices=devices,
         profiles=profiles,
         protected_mac_addresses=clients.protected_macs,
         unverified_device_ids=clients.unverified_ids,
         mac_policy=repository.get_mac_policy(),
+        access=build_access_plan(repository.access_settings()),
         global_blocked_addresses=global_blocked,
         global_allowed_addresses=resolve_domains(domains=website_policy.allowed_domains)
         if website_policy.mode == "allow_only"
@@ -125,4 +143,5 @@ def compile_stored_plan(*, repository: ConfigRepository, connected_snapshot=None
         service_quota_rules=service_quota_rules,
         service_assignment_rules=service_assignment_rules,
         service_list_rules=build_service_list_rules(repository, profiles),
+        everyone_else=everyone_else,
     )

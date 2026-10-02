@@ -1,0 +1,50 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: pip install "ruff>=0.6,<1"
+      # Only errors that break code: syntax errors, undefined names and
+      # definitions that replace each other. Long lines are a separate backlog.
+      - run: ruff check --select E9,F63,F7,F82,F811 src tests
+
+  linux:
+    name: Linux datapath
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: ./tests/kernel/run-in-docker.sh
+
+  browser:
+    name: Browser journeys
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      # Install a wheel so missing dashboard assets fail this check.
+      - run: pip install . 'playwright==1.63.0'
+      - run: python -m playwright install --with-deps chromium
+      - run: python -m tests.browser.journeys
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: browser-results
+          path: test-results/
+          retention-days: 7

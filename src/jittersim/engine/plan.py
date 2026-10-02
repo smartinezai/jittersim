@@ -7,6 +7,8 @@ from typing import Optional, Tuple
 
 from jittersim.config.models import Impairment, MacPolicy
 
+from .access import AccessPlan
+
 
 class Direction(str, Enum):
     """A direction relative to the controlled test device."""
@@ -39,6 +41,7 @@ class WebsiteFilter:
     """Resolved destination addresses allowed or blocked for one test client."""
 
     device_ip: IPv4Address
+    # None means no allowlist. An empty tuple allows nothing.
     allowed_addresses: Optional[Tuple[IPv4Address, ...]]
     blocked_addresses: Tuple[IPv4Address, ...] = ()
 
@@ -68,6 +71,22 @@ class ServiceAssignmentRule:
     mark: int
     upload_impairment: Impairment
     download_impairment: Impairment
+
+
+# Queue key for everyone else. Device IDs can't contain a colon.
+EVERYONE_ELSE_QUEUE_ID = "rule:everyone-else"
+
+
+@dataclass(frozen=True)
+class EveryoneElseRule:
+    """The shared queue for test Wi-Fi clients that are neither saved nor unaffected."""
+
+    mark: int
+    upload_impairment: Impairment
+    download_impairment: Impairment
+    unaffected_macs: Tuple[str, ...] = ()
+    # True while an outage of the everyone-else profile disconnects them.
+    blocked: bool = False
 
 
 @dataclass(frozen=True)
@@ -121,3 +140,5 @@ class NetworkPlan:
     service_assignment_rules: Tuple[ServiceAssignmentRule, ...] = ()
     general_profile: Optional[GeneralProfileRule] = None
     service_list_rules: Tuple[ServiceListRule, ...] = ()
+    everyone_else: Optional[EveryoneElseRule] = None
+    access: Optional[AccessPlan] = None

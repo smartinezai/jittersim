@@ -150,6 +150,11 @@ def interpolate_impairment(
             end.corrupt_randomness,
             factor,
         ),
+        loss_burst_packets=_interpolate_integer(
+            start.loss_burst_packets,
+            end.loss_burst_packets,
+            factor,
+        ),
     )
 
 

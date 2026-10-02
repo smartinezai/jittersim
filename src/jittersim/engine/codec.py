@@ -22,9 +22,12 @@ from .compiler import (
     MAX_SERVICE_QUOTAS_PER_PLAN,
     MAX_SHAPED_MARKS_PER_PLAN,
 )
+from .access import access_from_payload
 from .plan import (
+    EVERYONE_ELSE_QUEUE_ID,
     GENERAL_QUEUE_ID,
     Direction,
+    EveryoneElseRule,
     GeneralProfileRule,
     MarkRule,
     NetworkPlan,
@@ -62,7 +65,7 @@ def _as_integer(value: Any, field_name: str) -> int:
 
 
 def _impairment_from_payload(value: Any) -> Impairment:
-    impairment_data = _as_mapping(value, "impairment")
+    impairment_data = dict(_as_mapping(value, "impairment"))
     try:
         for field_name in (
             "delay_randomness",
@@ -94,6 +97,7 @@ def plan_to_payload(plan: NetworkPlan) -> Dict[str, Any]:
         },
         "protected_mac_addresses": list(plan.protected_mac_addresses),
         "unverified_device_ids": list(plan.unverified_device_ids),
+        "access": plan.access.payload() if plan.access is not None else None,
         "mark_rules": [
             {
                 "device_id": rule.device_id,
@@ -166,6 +170,17 @@ def plan_to_payload(plan: NetworkPlan) -> Dict[str, Any]:
             }
             for rule in plan.service_list_rules
         ],
+        "everyone_else": (
+            None
+            if plan.everyone_else is None
+            else {
+                "mark": plan.everyone_else.mark,
+                "upload_impairment": asdict(plan.everyone_else.upload_impairment),
+                "download_impairment": asdict(plan.everyone_else.download_impairment),
+                "unaffected_macs": list(plan.everyone_else.unaffected_macs),
+                "blocked": plan.everyone_else.blocked,
+            }
+        ),
     }
 
 
@@ -316,7 +331,11 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
         if mark <= len(mark_data) + len(service_quota_rules) or mark > MAX_SHAPED_MARKS_PER_PLAN:
             raise PlanCodecError(f"service_assignment_rules[{index}].mark is outside the safe range")
         key = f"assignment:{assignment_id}"
-        if key in service_marks or mark in service_marks.values():
+        if (
+            key in service_marks
+            or mark in marks_by_device.values()
+            or mark in service_marks.values()
+        ):
             raise PlanCodecError(f"duplicate service assignment mark {mark}")
         prior_domains = domains_by_device.setdefault(device_id, [])
         for domain in domains:
@@ -365,6 +384,48 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
             raise PlanCodecError("a general profile cannot contain individual profile rules")
         general_profile = GeneralProfileRule(profile_id, addresses, data["outage_active"])
         service_marks[GENERAL_QUEUE_ID] = 1
+
+    everyone_else = None
+    everyone_else_data = plan_data.get("everyone_else")
+    if everyone_else_data is not None:
+        rule_data = _as_mapping(everyone_else_data, "everyone_else")
+        try:
+            mark = _as_integer(rule_data["mark"], "everyone_else.mark")
+            upload_impairment = _impairment_from_payload(rule_data["upload_impairment"])
+            download_impairment = _impairment_from_payload(rule_data["download_impairment"])
+            unaffected_macs = tuple(
+                normalize_exempt_mac(value)
+                for value in _as_list(
+                    rule_data.get("unaffected_macs", []), "everyone_else.unaffected_macs"
+                )
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise PlanCodecError("everyone_else is invalid") from error
+        blocked = rule_data.get("blocked", False)
+        if not isinstance(blocked, bool):
+            raise PlanCodecError("everyone_else.blocked is invalid")
+        if (
+            len(unaffected_macs) > MAX_UNAFFECTED_DEVICES
+            or len(set(unaffected_macs)) != len(unaffected_macs)
+        ):
+            raise PlanCodecError("everyone_else.unaffected_macs is invalid")
+        if general_profile is not None:
+            raise PlanCodecError("a general profile already covers everyone else")
+        if (
+            mark <= len(mark_data) + len(service_quota_rules) + len(service_assignment_rules)
+            or mark > MAX_SHAPED_MARKS_PER_PLAN
+            or mark in marks_by_device.values()
+            or mark in service_marks.values()
+        ):
+            raise PlanCodecError("everyone_else.mark is outside the safe range")
+        service_marks[EVERYONE_ELSE_QUEUE_ID] = mark
+        everyone_else = EveryoneElseRule(
+            mark=mark,
+            upload_impairment=upload_impairment,
+            download_impairment=download_impairment,
+            unaffected_macs=unaffected_macs,
+            blocked=blocked,
+        )
 
     list_data = _as_list(plan_data.get("service_list_rules", []), "service_list_rules")
     if (
@@ -486,6 +547,13 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
             or queue_impairments[(key, Direction.DOWNLOAD)] != rule.download_impairment
         ):
             raise PlanCodecError("browser service queue impairment does not match its rule")
+    if everyone_else is not None and (
+        queue_impairments[(EVERYONE_ELSE_QUEUE_ID, Direction.UPLOAD)]
+        != everyone_else.upload_impairment
+        or queue_impairments[(EVERYONE_ELSE_QUEUE_ID, Direction.DOWNLOAD)]
+        != everyone_else.download_impairment
+    ):
+        raise PlanCodecError("everyone-else queue impairment does not match its rule")
 
     for rule in service_list_rules:
         key = f"servicelist:{rule.list_id}"
@@ -528,13 +596,14 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
         for index, raw_filter in enumerate(website_filters_data):
             filter_data = _as_mapping(raw_filter, f"website_filters[{index}]")
             device_ip = IPv4Address(filter_data["device_ip"])
+            allowed_data = filter_data.get("allowed_addresses", [])
             allowed_addresses = (
                 None
-                if filter_data.get("allowed_addresses", []) is None
+                if allowed_data is None
                 else tuple(
                     IPv4Address(value)
                     for value in _as_list(
-                        filter_data.get("allowed_addresses", []),
+                        allowed_data,
                         f"website_filters[{index}].allowed_addresses",
                     )
                 )
@@ -592,6 +661,14 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
             raise PlanCodecError("unverified device IDs are invalid")
     except ValueError as error:
         raise PlanCodecError(str(error)) from error
+    try:
+        access = (
+            access_from_payload(plan_data["access"])
+            if plan_data.get("access") is not None
+            else None
+        )
+    except (TypeError, ValueError) as error:
+        raise PlanCodecError("access policy is invalid") from error
     return NetworkPlan(
         protected_mac_addresses=protected_macs,
         unverified_device_ids=tuple(unverified_ids),
@@ -606,4 +683,6 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
         service_assignment_rules=tuple(service_assignment_rules),
         general_profile=general_profile,
         service_list_rules=tuple(service_list_rules),
+        everyone_else=everyone_else,
+        access=access,
     )

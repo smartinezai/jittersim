@@ -1,11 +1,14 @@
 """Small HTTP server for the jittersim control plane."""
 
 import argparse
+import base64
+import hashlib
 import hmac
 import io
 import json
 import logging
 import os
+import re
 import select
 import socket
 import ssl
@@ -21,6 +24,8 @@ from pathlib import Path
 from typing import Any, Collection, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, urlsplit
 
+from jittersim.api.access import ACCESS_WRITES, read_access_api, write_access_api
+from jittersim.api.workflows import WORKFLOW_WRITES, machine_health, read_workflow, write_workflow
 from jittersim.config.device_labels import (
     DeviceLabelError,
     guess_device_type,
@@ -37,6 +42,7 @@ from jittersim.config.domain_labels import group_domain, label_domain, seen_with
 from jittersim.config.exemptions import UnaffectedDevice, normalize_exempt_mac
 from jittersim.config.models import (
     MAX_LISTED_DOMAINS,
+    AccessOptions,
     DataLimit,
     Device,
     DeviceGroup,
@@ -48,15 +54,21 @@ from jittersim.config.models import (
     Progression,
     Randomness,
     RuntimeState,
+    SavedSettings,
+    Scenario,
+    ScenarioRun,
+    ScenarioStep,
     Schedule,
     ServiceAssignment,
     ServiceList,
     ServiceQuota,
+    SiteBlock,
     TimeQuota,
     Timer,
     ValidationError,
     WebsitePolicy,
     normalize_domain,
+    normalize_mac_address,
     time_quota_counter_id,
 )
 from jittersim.config.protection import (
@@ -70,15 +82,29 @@ from jittersim.config.service_catalogue import SERVICE_CATALOGUE
 from jittersim.config.storage import (
     ConfigRepository,
     DatabasePath,
+    DeviceConflictError,
     StorageError,
     TrafficRateSettingsError,
 )
+from jittersim.config.transfer import (
+    SETTINGS_FORMAT,
+    SETTINGS_VERSION,
+    check_settings,
+    settings_to_payload,
+)
+from jittersim.config.workflows import WorkflowStore
 from jittersim.engine.codec import plan_to_payload
-from jittersim.engine.compiler import MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN, PlanError
+from jittersim.engine.compiler import (
+    MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN,
+    MAX_SHAPED_MARKS_PER_PLAN,
+    PlanError,
+)
+from jittersim.engine.conditions import device_conditions, everyone_else_condition
 from jittersim.engine.eligibility import eligible_clients, station_snapshot
-from jittersim.engine.plan import GENERAL_QUEUE_ID
+from jittersim.engine.plan import EVERYONE_ELSE_QUEUE_ID, GENERAL_QUEUE_ID
 from jittersim.engine.progression import progression_factor
 from jittersim.engine.runtime import RuntimeScheduler
+from jittersim.engine.scenarios import active_scenario_runs
 from jittersim.engine.schedules import active_schedule
 from jittersim.engine.service import compile_stored_plan
 from jittersim.networking.applier import MAX_PROTECTED_MACS
@@ -96,6 +122,7 @@ from jittersim.networking.router import (
 )
 from jittersim.networking.wifi_security import SECURITY_MODES
 from jittersim.api.router_operations import RouterOperations
+from jittersim.engine.timeline import overlapping_schedules
 
 LOGGER = logging.getLogger(__name__)
 WIFI_COPY_BUSY_MESSAGE = "The router is busy right now. Try again in a moment."
@@ -107,40 +134,53 @@ REQUEST_INPUT_TIMEOUT_SECONDS = 10.0
 MAX_PENDING_CONNECTION_LIFETIME_SECONDS = 30.0
 MAX_PENDING_DASHBOARD_CONNECTIONS = 16
 RESPONSE_SEND_TIMEOUT_SECONDS = 5.0
+# A settings export with many profiles is larger than ordinary requests.
+MAX_IMPORT_BODY_BYTES = 1024 * 1024
 WRITE_PATHS = frozenset(
     (
         "/api/profiles",
         "/api/general-profile",
         "/api/general-profile/stop",
+        "/api/profiles/delete",
         "/api/devices",
         "/api/unaffected-devices",
         "/api/unaffected-devices/delete",
         "/api/connected-devices/group",
+        "/api/devices/delete",
         "/api/groups",
         "/api/groups/delete",
         "/api/schedules",
+        "/api/schedules/delete",
         "/api/timers",
         "/api/timers/cancel",
+        "/api/scenarios",
+        "/api/scenarios/delete",
+        "/api/scenarios/start",
+        "/api/scenarios/stop",
         "/api/progressions",
         "/api/progressions/stop",
         "/api/data-limits",
+        "/api/data-limits/delete",
         "/api/data-limits/reset",
         "/api/group-data-limits",
+        "/api/group-data-limits/delete",
         "/api/group-data-limits/reset",
         "/api/service-quotas",
+        "/api/service-quotas/delete",
         "/api/service-quotas/reset",
         "/api/service-assignments",
         "/api/service-assignments/delete",
         "/api/service-lists",
         "/api/service-lists/delete",
         "/api/time-quotas",
-        "/api/action-history",
-        "/api/diagnostics",
-        "/api/backup",
+        "/api/time-quotas/delete",
         "/api/time-quotas/reset",
         "/api/time-quotas/start",
         "/api/time-quotas/stop",
         "/api/policies",
+        "/api/everyone-else",
+        "/api/unaffected-devices",
+        "/api/unaffected-devices/delete",
         "/api/access-point",
         "/api/access-point/reset-name",
         "/api/router/sync-ap",
@@ -154,22 +194,29 @@ WRITE_PATHS = frozenset(
         "/api/connected-device-labels",
         "/api/connected-device-labels/delete",
         "/api/traffic-settings",
+        "/api/gateway-persistence",
         "/api/observations/scan",
         "/api/observations/add-to-profile",
         "/api/observations/add-global-block",
         "/api/observations/remove-global-block",
+        "/api/import",
+        "/api/activity/clear",
         "/api/apply",
         "/api/reset",
         "/api/dashboard-access/register-self",
         "/api/dashboard-access/remove",
     )
 )
-ACTION_PATHS = frozenset(("/api/apply", "/api/reset", "/api/observations/scan",
-                          "/api/access-point/reset-name"))
+WRITE_PATHS = WRITE_PATHS | WORKFLOW_WRITES | ACCESS_WRITES | {"/api/schedules/preview"}
+ACTION_PATHS = frozenset(
+    ("/api/apply", "/api/reset", "/api/observations/scan", "/api/update-preferences",
+     "/api/access-point/reset-name")
+)
 PUBLIC_READ_PATHS = frozenset(("/", "/api/health"))
 
 
-DASHBOARD_HTML = """<!doctype html>
+# Raw string: JavaScript escapes such as "\n" must reach the browser unchanged.
+DASHBOARD_HTML = r"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -281,7 +328,7 @@ DASHBOARD_HTML = """<!doctype html>
     .action-message.working { background: #3b2d15; color: #f5ca78; }
     .toast {
       position: fixed;
-      top: 1rem;
+      bottom: 1rem;
       right: 1rem;
       z-index: 100;
       display: grid;
@@ -424,7 +471,7 @@ DASHBOARD_HTML = """<!doctype html>
     .traffic-rate-form button { margin: 0; }
     .traffic-rate-help, .traffic-profile-status { margin: 0; color: #91a8c1; font-size: 0.78rem; }
     .traffic-rate-help { flex-basis: 100%; }
-    .traffic-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.75rem; margin-top: 1rem; }
+    .traffic-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.75rem; margin-top: 1rem; }
     .traffic-metric { min-width: 0; padding: 0.75rem; border: 1px solid #2b435f; border-radius: 0.6rem; background: #0d1b2d; }
     .traffic-metric span { display: block; color: #91a8c1; font-size: 0.76rem; }
     .traffic-metric strong { display: block; margin-top: 0.25rem; color: #edf5ff; font-size: 1.05rem; overflow-wrap: anywhere; }
@@ -526,16 +573,10 @@ DASHBOARD_HTML = """<!doctype html>
       font-size: 0.78rem;
       font-weight: 400;
       line-height: 1.4;
-      opacity: 0;
       pointer-events: none;
-      visibility: hidden;
       box-shadow: 0 0.6rem 1.2rem rgba(0, 0, 0, 0.35);
     }
-    .help-icon:hover::after, .help-icon:focus-visible::after {
-      display: block;
-      opacity: 1;
-      visibility: visible;
-    }
+    .help-icon:hover::after, .help-icon:focus-visible::after { display: block; }
     @media (min-width: 701px) {
       /* In a form grid the label is as wide as its column so the tooltip takes that width.
          The grid has as many columns as fit and a fixed width could run past the card edge. */
@@ -607,7 +648,7 @@ DASHBOARD_HTML = """<!doctype html>
       grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
       align-items: start;
     }
-    label { display: grid; gap: 0.3rem; color: #c7d7eb; font-size: 0.88rem; }
+    label { display: grid; align-content: start; gap: 0.3rem; color: #c7d7eb; font-size: 0.88rem; }
     input {
       width: 100%;
       max-width: 100%;
@@ -759,9 +800,9 @@ DASHBOARD_HTML = """<!doctype html>
       .badge { display: inline-block; margin-top: 1rem; }
       .action-buttons { flex-wrap: wrap; }
       .action-buttons button { margin-top: 0.9rem; }
-      .content-grid, .data-grid { grid-template-columns: 1fr; }
-      .policy-grid { grid-template-columns: 1fr; }
-      .uplink-grid { grid-template-columns: 1fr; }
+      .content-grid, .data-grid { grid-template-columns: minmax(0, 1fr); }
+      .policy-grid { grid-template-columns: minmax(0, 1fr); }
+      .uplink-grid { grid-template-columns: minmax(0, 1fr); }
       .connected-row { grid-template-columns: auto minmax(0, 1fr) auto; }
       .saved-profile-row { grid-template-columns: minmax(0, 1fr); }
       .saved-profile-actions button { flex: 1; }
@@ -774,20 +815,126 @@ DASHBOARD_HTML = """<!doctype html>
       .observation-actions { margin-top: 0.75rem; }
       .observation-actions button { width: 100%; }
       .observation-device-heading { display: block; }
-      .randomness-inputs { grid-template-columns: 1fr; }
+      .randomness-inputs { grid-template-columns: minmax(0, 1fr); }
       .timer-row { display: block; }
       .timer-row button { width: 100%; margin-top: 0.7rem; }
       .progression-row-heading { display: block; }
       .progression-row button { width: 100%; margin-top: 0.7rem; }
       .quota-row-heading { display: block; }
       .quota-actions button { flex: 1; }
-      .traffic-controls { grid-template-columns: 1fr; }
+      .traffic-controls { grid-template-columns: minmax(0, 1fr); }
       .traffic-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .analytics-controls { grid-template-columns: 1fr; }
+      .scenario-step { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+      .activity-card .section-heading { display: block; }
+      .activity-actions { margin-top: 0.6rem; }
+      .activity-list li { grid-template-columns: minmax(0, 1fr); gap: 0.15rem; }
+      .scenario-step label:first-child, .scenario-step button { grid-column: 1 / -1; }
+      .analytics-controls { grid-template-columns: minmax(0, 1fr); }
     }
     @media (prefers-reduced-motion: reduce) {
       button { transition: none; }
       .toast.working .toast-icon, button[aria-busy="true"]::after { animation: none; }
+    }
+  
+
+    /* Cards and controls that arrived with main's dashboard. */
+    /* Rules such as label { display: grid }
+    .activity-card { margin-top: 1rem; }
+    .activity-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+    .activity-actions button { margin-top: 0; }
+    .activity-list {
+      display: grid; gap: 0.35rem; max-height: 24rem; margin: 0.75rem 0 0; padding: 0;
+      overflow-y: auto; list-style: none;
+    }
+    .activity-list li {
+      display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.75rem;
+      padding: 0.45rem 0.6rem; border-radius: 0.45rem; background: #0d1b2d;
+      color: #c7d7eb; font-size: 0.82rem;
+    }
+    .activity-list time { color: #91a8c1; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .activity-markdown { width: 100%; min-height: 10rem; margin-top: 0.75rem; font-size: 0.78rem; }
+    .measurement-actions {
+      display: flex; flex-wrap: wrap; align-items: end; gap: 0.75rem; margin: 0.75rem 0;
+    }
+    .measurement-actions button { margin: 0; }
+    #measurement-chart { display: block; width: 100%; height: 14rem; margin-top: 1rem; }
+    .measurement-key {
+      display: inline-block; width: 0.7rem; height: 0.7rem;
+      margin-right: 0.45rem; border-radius: 0.2rem;
+    }
+    .scenario-card { margin-top: 1rem; }
+    .scenario-card h3 { margin-top: 1.5rem; }
+    .scenario-steps { display: grid; gap: 0.5rem; margin: 0.75rem 0; }
+    .scenario-step {
+      display: grid; gap: 0.5rem; align-items: end;
+      grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr);
+    }
+    .scenario-step button { margin-top: 0; }
+    .scenario-step-actions { display: flex; flex-wrap: wrap; gap: 0.35rem; grid-column: 1 / -1; }
+    .scenario-step { border-bottom: 1px solid #2b435f; padding-bottom: 0.75rem; }
+    .update-auto-check {
+      display: flex; align-items: center; gap: 0.7rem; margin: 1rem 0 0; padding: 0.85rem 0;
+      border-top: 1px solid #2b435f; border-bottom: 1px solid #2b435f; color: #edf5ff;
+    }
+    .update-auto-check input { flex: 0 0 auto; width: 1.1rem; height: 1.1rem; margin: 0; accent-color: #70b7ff; }
+    .update-auto-check span { flex: 1; min-width: 0; }
+    .update-preference-status { margin-top: 0.45rem; color: #a8c7e8; }
+    #release-actions { display: flex; flex-wrap: wrap; gap: 0.55rem; margin-top: 0.6rem; }
+    #release-actions button { margin-top: 0.45rem; }
+    .table-wrap { overflow-x: auto; }
+    .data-table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+    .data-table th {
+      padding: 0.45rem 0.6rem;
+      border-bottom: 1px solid #2b435f;
+      color: #91a8c1;
+      font-size: 0.72rem;
+      letter-spacing: 0.06em;
+      text-align: left;
+      text-transform: uppercase;
+    }
+    .data-table td {
+      padding: 0.55rem 0.6rem;
+      border-bottom: 1px solid #1d2f45;
+      color: #c7d7eb;
+      vertical-align: top;
+    }
+    .data-table td strong { color: #edf5ff; }
+    .data-table td small { display: block; color: #91a8c1; font-size: 0.76rem; }
+    .row-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.4rem; }
+    .row-actions button { margin-top: 0; padding: 0.35rem 0.6rem; }
+    .edit-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      margin-bottom: 0.75rem;
+      padding: 0.55rem 0.75rem;
+      border: 1px solid #a77b31;
+      border-radius: 0.5rem;
+      background: #3b2a12;
+    }
+    .edit-bar[hidden] { display: none; }
+    .edit-bar p { margin: 0; color: #f5ca78; }
+    .edit-bar button { margin-top: 0; }
+    .schedule-row div:first-child { display: grid; gap: 0.15rem; }
+    .transfer-actions { justify-content: flex-start; margin-top: 1rem; }
+    .schedule-row small { color: #91a8c1; }
+    .getting-started-steps { margin: 0; padding: 0; list-style: none; }
+    .getting-started-steps li {
+      display: flex; gap: 0.65rem; align-items: baseline; padding: 0.3rem 0;
+    }
+    .getting-started-steps .step-mark { min-width: 1.2rem; color: #8cc4ff; font-weight: 700; }
+    .getting-started-steps li.done { color: #91a8c1; }
+    .getting-started-steps li.done .step-mark { color: #8de2bc; }
+    .connected-picker { display: flex; gap: 0.5rem; align-items: end; }
+    .connected-picker label { flex: 1; min-width: 0; }
+    /* A long device name must not push the menu past the card. */
+    .connected-picker select { width: 100%; min-width: 0; text-overflow: ellipsis; }
+    .picker-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: end; }
+    .update-badge {
+      display: inline-flex; align-items: center; margin-left: 0.4rem; padding: 0.1rem 0.42rem;
+      border: 1px solid #4777a5; border-radius: 999px; background: #14324e;
+      color: #d9ecff; font-size: 0.68rem; font-weight: 600;
     }
   </style>
 </head>
@@ -852,8 +999,10 @@ DASHBOARD_HTML = """<!doctype html>
         <li><a href="#devices" data-page-link="devices">Devices <span id="nav-devices-count" class="nav-chip" hidden></span></a></li>
         <li><a href="#profiles" data-page-link="profiles">Profiles</a></li>
         <li><a href="#schedules" data-page-link="schedules">Schedules and limits</a></li>
-        <li><a href="#router" data-page-link="router">Router and Wi-Fi</a></li>
+        <li><a href="#router" data-page-link="router" id="setup-tab-link">Router and Wi-Fi <span id="staged-release-badge" class="update-badge" hidden>Release staged</span></a></li>
         <li><a href="#traffic" data-page-link="traffic">Traffic</a></li>
+        <li><a href="#measurements" data-page-link="measurements">Measurements</a></li>
+        <li><a href="#activity" data-page-link="activity">Activity</a></li>
         <li><a href="#access" data-page-link="access">Access and rules</a></li>
         <li><a href="#diagnostics" data-page-link="diagnostics">Diagnostics</a></li>
       </ul>
@@ -916,7 +1065,11 @@ DASHBOARD_HTML = """<!doctype html>
   </section>
   <div id="private-dashboard" hidden>
   <p id="mode-notice" class="notice" role="status">Checking control mode...</p>
-  <section class="page" id="page-devices" data-page="devices" aria-label="Devices">
+  <section class="page" id="page-devices" data-page="devices" aria-label="Devices" tabindex="-1">
+  <section class="card getting-started" id="getting-started" hidden>
+    <h2>Getting started</h2>
+    <ol id="getting-started-steps" class="getting-started-steps"></ol>
+  </section>
   <section class="card" aria-labelledby="general-profile-title">
     <h2 id="general-profile-title">General profile</h2>
     <p>Apply a saved profile to every device on JitterSim Wi-Fi except those in Unaffected by profiles. New arrivals are included.</p>
@@ -950,6 +1103,28 @@ DASHBOARD_HTML = """<!doctype html>
     </p>
     <div id="connected-devices" class="connected-list" aria-live="polite">Enter the admin token and choose Check token to view connected devices.</div>
   </section>
+  <section class="card" data-collapse="open">
+      <div class="section-heading"><h2>Saved devices</h2><p>Assigned test clients and their current conditions</p></div>
+      <p id="device-conditions-note" class="policy-note">Conditions load with the token.</p>
+      <div id="device-table" class="table-wrap">Loading...</div>
+    </section>
+  <section class="card" data-collapse="open">
+      <h2>Everyone else</h2>
+      <p class="form-note">Choose a profile for every test Wi-Fi client that isn't a saved
+        device or on the unaffected list. They share one connection, so a speed limit in
+        this profile is shared by all of them. A general profile covers everyone else too,
+        so the two cannot be used at the same time.</p>
+      <form id="everyone-else-form">
+        <div class="fields">
+          <label>Profile for everyone else
+            <select id="everyone-else-profile">
+              <option value="">None: normal connection</option>
+            </select>
+          </label>
+        </div>
+        <button type="submit">Save everyone-else profile</button>
+      </form>
+    </section>
   <section class="card connected-card" data-collapse="closed" aria-labelledby="unaffected-title">
     <div class="section-heading">
       <div>
@@ -962,6 +1137,14 @@ DASHBOARD_HTML = """<!doctype html>
       <summary>Add an offline device</summary>
       <form id="unaffected-form">
         <div class="fields">
+          <div class="connected-picker">
+            <label>Connected device
+              <select id="unaffected-picker">
+                <option value="">Loading connected devices...</option>
+              </select>
+            </label>
+            <button type="button" data-refresh-connected>Refresh</button>
+          </div>
           <label>Wi-Fi MAC address <input id="unaffected-mac" required placeholder="aa:bb:cc:dd:ee:ff"></label>
           <label>Name <input id="unaffected-name" maxlength="64" placeholder="Optional name"></label>
         </div>
@@ -971,7 +1154,7 @@ DASHBOARD_HTML = """<!doctype html>
     <p class="form-note">Use “Make unaffected” beside a connected device to add it without typing an address. If a device changes its private Wi-Fi MAC, add its new address.</p>
   </section>
   </section><!-- /page:devices -->
-  <section class="page" id="page-profiles" data-page="profiles" aria-label="Profiles" hidden>
+  <section class="page" id="page-profiles" data-page="profiles" aria-label="Profiles" tabindex="-1" hidden>
     <section class="card" data-collapse="open" aria-labelledby="saved-profiles-title">
       <h2 id="saved-profiles-title">Saved profiles</h2>
       <div id="saved-profiles" class="connected-list" aria-live="polite">Check the admin token to view saved profiles.</div>
@@ -979,9 +1162,16 @@ DASHBOARD_HTML = """<!doctype html>
     <section class="card" data-collapse="open">
       <h2 id="profile-form-title">Save profile</h2>
       <form id="profile-form">
+        <label><span class="field-label">Start from a preset<span class="help-icon" tabindex="0" role="img" aria-label="Profile preset help" data-help="Fills the form with rough values for a kind of network, such as a slow mobile connection. Change anything you like afterwards. Nothing is saved until you choose Save profile.">?</span></span>
+          <select id="profile-preset">
+            <option value="">Choose a preset...</option>
+          </select>
+        </label>
+        <p class="form-note">Presets fill the form with rough approximations of real networks.
+          Nothing is saved until you choose Save profile.</p>
         <div class="fields">
           <label><span class="field-label">Profile ID<span class="help-icon" tabindex="0" role="img" aria-label="Profile ID help" data-help="A short code that devices and schedules use to find this profile. Saving with an existing ID updates that profile and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The Name is what people read.">?</span></span>
-            <input id="profile-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}">
+            <input id="profile-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}">
           </label>
           <label><span class="field-label">Name<span class="help-icon" tabindex="0" role="img" aria-label="Profile name help" data-help="The name people read in lists and menus. Use any words you like. The Profile ID is the short code behind it.">?</span></span> <input id="profile-name" required></label>
         </div>
@@ -993,6 +1183,14 @@ DASHBOARD_HTML = """<!doctype html>
           </label>
           <label><span class="field-label">Loss (%)<span class="help-icon" tabindex="0" role="img" aria-label="Upload loss help" data-help="The chance that a packet is lost on the way. 5% means about 1 packet in 20 never arrives. Many apps notice and send it again which slows them down.">?</span></span>
             <input id="upload-loss" type="number" min="0" max="100" value="0" required>
+          </label>
+          <label>
+            <span class="field-label">Loss bursts (packets)<span
+              class="help-icon" tabindex="0" role="img" aria-label="Loss burst help"
+              data-help="0 loses packets independently. 4 makes losses arrive in runs of
+                about 4 packets, like a fading signal. The loss percentage stays the average."
+              >?</span></span>
+            <input id="upload-loss-burst" type="number" min="0" max="100" value="0">
           </label>
           <label><span class="field-label">Bandwidth (kbit/s, optional)<span class="help-icon" tabindex="0" role="img" aria-label="Upload bandwidth help" data-help="The top speed in kilobits per second. 1000 kbit/s is about 1 Mbit/s. Leave it empty for no limit.">?</span></span>
             <input id="upload-bandwidth" type="number" min="1">
@@ -1008,6 +1206,14 @@ DASHBOARD_HTML = """<!doctype html>
           </label>
           <label><span class="field-label">Loss (%)<span class="help-icon" tabindex="0" role="img" aria-label="Download loss help" data-help="The chance that a packet is lost on the way. 5% means about 1 packet in 20 never arrives. Many apps notice and send it again which slows them down.">?</span></span>
             <input id="download-loss" type="number" min="0" max="100" value="0" required>
+          </label>
+          <label>
+            <span class="field-label">Loss bursts (packets)<span
+              class="help-icon" tabindex="0" role="img" aria-label="Loss burst help"
+              data-help="0 loses packets independently. 4 makes losses arrive in runs of
+                about 4 packets, like a fading signal. The loss percentage stays the average."
+              >?</span></span>
+            <input id="download-loss-burst" type="number" min="0" max="100" value="0">
           </label>
           <label><span class="field-label">Bandwidth (kbit/s, optional)<span class="help-icon" tabindex="0" role="img" aria-label="Download bandwidth help" data-help="The top speed in kilobits per second. 1000 kbit/s is about 1 Mbit/s. Leave it empty for no limit.">?</span></span>
             <input id="download-bandwidth" type="number" min="1">
@@ -1171,8 +1377,20 @@ DASHBOARD_HTML = """<!doctype html>
     <section class="card">
       <h2>Assign a device</h2>
       <form id="device-form">
+        <div id="device-edit-bar" class="edit-bar" hidden>
+          <p id="device-edit-status" role="status"></p>
+          <button id="device-cancel-edit" type="button">Cancel editing</button>
+        </div>
         <div class="fields">
-          <label><span class="field-label">Device ID<span class="help-icon" tabindex="0" role="img" aria-label="Device ID help" data-help="A short code that identifies this device. Saving with an existing ID updates that device and a new ID adds a new one. Use only lowercase letters and digits and hyphens and underscores. The Name is what people read. Each device needs its own IP address.">?</span></span> <input id="device-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}"></label>
+          <div class="connected-picker">
+            <label>Connected device
+              <select id="device-picker">
+                <option value="">Loading connected devices...</option>
+              </select>
+            </label>
+            <button type="button" data-refresh-connected>Refresh</button>
+          </div>
+          <label><span class="field-label">Device ID<span class="help-icon" tabindex="0" role="img" aria-label="Device ID help" data-help="A short code that identifies this device. Saving with an existing ID updates that device and a new ID adds a new one. Use only lowercase letters and digits and hyphens and underscores. The Name is what people read. Each device needs its own IP address.">?</span></span> <input id="device-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}"></label>
           <label>Name <input id="device-name" required></label>
           <label>Reserved IPv4 address
             <input id="device-ip" required placeholder="192.168.50.10">
@@ -1190,7 +1408,7 @@ DASHBOARD_HTML = """<!doctype html>
       <p class="form-note">Select saved devices or connected clients. Choose a profile override when adding an unassigned client. A device can belong to one group.</p>
       <form id="group-form">
         <div class="fields">
-          <label><span class="field-label">Group ID<span class="help-icon" tabindex="0" role="img" aria-label="Group ID help" data-help="A short code that identifies this group. Saving with an existing ID updates that group and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The Group name is what people read.">?</span></span> <input id="group-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="family"></label>
+          <label><span class="field-label">Group ID<span class="help-icon" tabindex="0" role="img" aria-label="Group ID help" data-help="A short code that identifies this group. Saving with an existing ID updates that group and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The Group name is what people read.">?</span></span> <input id="group-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}" placeholder="family"></label>
           <label>Group name <input id="group-name" required placeholder="Family devices"></label>
           <label>Profile override
             <select id="group-profile"><option value="">Use each device profile</option></select>
@@ -1204,13 +1422,13 @@ DASHBOARD_HTML = """<!doctype html>
       <div id="group-list" class="quota-list" aria-live="polite">No groups saved.</div>
     </section>
   </section><!-- /page:profiles -->
-  <section class="page" id="page-schedules" data-page="schedules" aria-label="Schedules and limits" hidden>
+  <section class="page" id="page-schedules" data-page="schedules" aria-label="Schedules and limits" tabindex="-1" hidden>
     <section class="card" data-collapse="open">
       <h2>Schedule a profile</h2>
       <form id="schedule-form">
         <div class="fields">
-          <label><span class="field-label">Schedule ID<span class="help-icon" tabindex="0" role="img" aria-label="Schedule ID help" data-help="A short code that names this schedule in the list below. Saving with an existing ID updates that schedule and a new ID adds another one. Use only lowercase letters and digits and hyphens and underscores.">?</span></span> <input id="schedule-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}"></label>
-          <label>Device
+          <label><span class="field-label">Schedule ID<span class="help-icon" tabindex="0" role="img" aria-label="Schedule ID help" data-help="A short code that names this schedule in the list below. Saving with an existing ID updates that schedule and a new ID adds another one. Use only lowercase letters and digits and hyphens and underscores.">?</span></span> <input id="schedule-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}"></label>
+          <label>Applies to
             <select id="schedule-device" required></select>
           </label>
           <label>Profile
@@ -1233,6 +1451,10 @@ DASHBOARD_HTML = """<!doctype html>
           <label>Start <input id="schedule-start" type="time" value="09:00" required></label>
           <label>End <input id="schedule-end" type="time" value="17:00" required></label>
         </div>
+        <label class="quota-check"><input id="schedule-enabled" type="checkbox" checked> Enabled</label>
+        <p id="schedule-clock" class="form-note"></p>
+        <p class="form-note">A device's own schedule wins over its group's. Timers and
+          progressions win over schedules.</p>
         <button type="submit">Save schedule</button>
       </form>
       <div id="schedule-list" class="schedule-list" aria-live="polite">No schedules yet.</div>
@@ -1261,6 +1483,45 @@ DASHBOARD_HTML = """<!doctype html>
       <button class="primary" type="submit">Start timer</button>
     </form>
     <div id="timer-list" class="timer-list" aria-live="polite">No active timers.</div>
+  </section>
+  <section class="card scenario-card" data-collapse="closed">
+    <div class="section-heading">
+      <div>
+        <h2>Scenarios</h2>
+        <p>Profiles that follow each other for a device, a group or everyone else</p>
+      </div>
+      <span id="scenario-count" class="count-badge">None running</span>
+    </div>
+    <form id="scenario-start-form">
+      <div class="fields">
+        <label>Scenario <select id="scenario-start-scenario" required></select></label>
+        <label>Applies to <select id="scenario-start-target" required></select></label>
+      </div>
+      <p class="form-note">Apply the configuration before starting a scenario. Its clock starts
+        when you press Start. A running scenario takes over from schedules, as a timer does.
+        For a device, starting a timer or a scenario replaces the other and a device's own
+        timer or scenario wins over its group's. Data limits still win.</p>
+      <button class="primary" type="submit">Start scenario</button>
+    </form>
+    <div id="scenario-run-list" class="timer-list">No running scenarios.</div>
+    <h3>Saved scenarios</h3>
+    <div id="scenario-list" class="schedule-list">No scenarios yet.</div>
+    <form id="scenario-form">
+      <div class="fields">
+        <label><span class="field-label">Scenario ID<span class="help-icon" tabindex="0" role="img" aria-label="Scenario ID help" data-help="A short code that identifies this scenario. Saving with an existing ID updates that scenario and a new ID adds a new one. Use only lowercase letters and digits and hyphens and underscores. The Name is what people read.">?</span></span>
+          <input id="scenario-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}">
+        </label>
+        <label>Name <input id="scenario-name" required></label>
+      </div>
+      <div id="scenario-steps" class="scenario-steps"></div>
+      <button type="button" id="scenario-add-step">Add step</button>
+      <p id="scenario-duration" class="form-note" aria-live="polite"></p>
+      <label class="quota-check"><input id="scenario-loop" type="checkbox"> Repeat from the
+        first step until stopped</label>
+      <p class="form-note">Each step lasts 10 seconds to 24 hours. A scenario has up to 20
+        steps. Editing a running scenario changes it at once.</p>
+      <button type="submit">Save scenario</button>
+    </form>
   </section>
   <section class="card progression-card" data-collapse="closed">
     <div class="section-heading">
@@ -1407,7 +1668,7 @@ DASHBOARD_HTML = """<!doctype html>
     <form id="service-list-form">
       <div class="fields">
         <label><span class="field-label">List ID<span class="help-icon" tabindex="0" role="img" aria-label="List ID help" data-help="A short code that identifies this service list. Saving with an existing ID updates that list and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The List name is what people read.">?</span></span>
-          <input id="service-list-id" required pattern="[a-z0-9][a-z0-9_\\-]{0,63}" placeholder="work-apps">
+          <input id="service-list-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}" placeholder="work-apps">
         </label>
         <label>List name
           <input id="service-list-name" required placeholder="Work apps">
@@ -1445,7 +1706,7 @@ DASHBOARD_HTML = """<!doctype html>
     <form id="service-assignment-form">
       <div class="fields">
         <label><span class="field-label">Service ID<span class="help-icon" tabindex="0" role="img" aria-label="Browser service profile ID help" data-help="A short code that identifies this browser service profile. Saving with an existing ID updates it and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The Service name is what people read.">?</span></span>
-          <input id="service-assignment-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="alice-video">
+          <input id="service-assignment-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}" placeholder="alice-video">
         </label>
         <label>Service name
           <input id="service-assignment-name" required placeholder="Video sites">
@@ -1477,7 +1738,7 @@ DASHBOARD_HTML = """<!doctype html>
     <form id="service-quota-form">
       <div class="fields">
         <label><span class="field-label">Service ID<span class="help-icon" tabindex="0" role="img" aria-label="Service data limit ID help" data-help="A short code that identifies this service data limit. Saving with an existing ID updates it and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The Service name is what people read.">?</span></span>
-          <input id="service-quota-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="alice-netflix">
+          <input id="service-quota-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}" placeholder="alice-netflix">
         </label>
         <label>Service name
           <input id="service-quota-name" required placeholder="Netflix">
@@ -1534,7 +1795,7 @@ DASHBOARD_HTML = """<!doctype html>
     <form id="time-quota-form">
       <div class="fields">
         <label><span class="field-label">Service ID<span class="help-icon" tabindex="0" role="img" aria-label="Service time limit ID help" data-help="A short code that identifies this service time limit. Saving with an existing ID updates it and a new ID creates a new one. Use only lowercase letters and digits and hyphens and underscores. The Service name is what people read.">?</span></span>
-          <input id="time-quota-id" required pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="alice-netflix-time">
+          <input id="time-quota-id" required pattern="[a-z0-9][a-z0-9_\-]{0,63}" placeholder="alice-netflix-time">
         </label>
         <label>Service name
           <input id="time-quota-name" required placeholder="Netflix time">
@@ -1581,7 +1842,7 @@ DASHBOARD_HTML = """<!doctype html>
     <div id="time-quota-list" class="quota-list" aria-live="polite">Enter the admin token to view time limits.</div>
   </section>
   </section><!-- /page:schedules -->
-  <section class="page" id="page-router" data-page="router" aria-label="Router and Wi-Fi" hidden>
+  <section class="page" id="page-router" data-page="router" aria-label="Router and Wi-Fi" tabindex="-1" hidden>
     <section class="card wifi-name-card">
     <h2>Wi-Fi name</h2>
     <p>Restore the Pi's test network name to JitterSim. It keeps the password and security type. Test devices disconnect while Wi-Fi restarts. Use management access.</p>
@@ -1609,6 +1870,20 @@ DASHBOARD_HTML = """<!doctype html>
       <p id="router-action-message" class="policy-note" role="status" aria-live="polite">Keep the Pi connected to the router by Ethernet before changing the router Wi-Fi.</p>
     </div>
   </section>
+  <section class="card" data-collapse="open">
+    <div class="section-heading">
+      <div>
+        <h2>Router outage behavior</h2>
+        <p>Choose what happens when the Pi loses its router connection</p>
+      </div>
+    </div>
+    <p class="policy-note">When on, active profiles stay in place and return with the router. When off, a confirmed router outage stops profiles until you choose Apply. Saved profiles and schedules are kept. This setting does not change what happens after a Pi restart.</p>
+    <label class="quota-check"><input id="gateway-persistence-toggle" type="checkbox"> Keep active profiles through router outages</label>
+    <div class="action-buttons">
+      <button id="gateway-persistence-save" class="primary" type="button">Save outage behavior</button>
+    </div>
+    <p id="gateway-persistence-state" class="token-check-status" role="status" aria-live="polite">Checking the router connection...</p>
+  </section>
   <section class="card" data-collapse="closed">
     <h2>Manual Pi access-point fallback</h2>
     <form id="access-point-form">
@@ -1626,7 +1901,7 @@ DASHBOARD_HTML = """<!doctype html>
     <p class="policy-note">To restore the JitterSim name without changing the password, use Reset Wi-Fi name above.</p>
   </section>
   </section><!-- /page:router -->
-  <section class="page" id="page-traffic" data-page="traffic" aria-label="Traffic" hidden>
+  <section class="page" id="page-traffic" data-page="traffic" aria-label="Traffic" tabindex="-1" hidden>
   <section class="card traffic-card" data-collapse="open" aria-labelledby="traffic-title">
     <div class="section-heading">
       <div>
@@ -1638,7 +1913,7 @@ DASHBOARD_HTML = """<!doctype html>
     <div class="traffic-controls">
       <label>Device
         <select id="traffic-device">
-          <option value="all">All assigned devices</option>
+          <option value="@all">All assigned devices</option>
         </select>
       </label>
       <p id="traffic-status" class="traffic-status" role="status" aria-live="polite">Check the admin token to start live traffic sampling.</p>
@@ -1659,6 +1934,12 @@ DASHBOARD_HTML = """<!doctype html>
       <div class="traffic-metric"><span>Download rate</span><strong id="traffic-download-rate">—</strong></div>
       <div class="traffic-metric"><span>Upload packet rate</span><strong id="traffic-upload-packets">—</strong></div>
       <div class="traffic-metric"><span>Download packet rate</span><strong id="traffic-download-packets">—</strong></div>
+      <div class="traffic-metric">
+        <span>Dropped by JitterSim</span><strong id="traffic-drop-rate">—</strong>
+      </div>
+      <div class="traffic-metric">
+        <span>Waiting in JitterSim</span><strong id="traffic-queued">—</strong>
+      </div>
     </div>
     <div class="traffic-chart-wrap">
       <canvas id="traffic-chart" width="900" height="320" role="img" aria-label="Live upload and download rates at JitterSim with configured ISP and device queue limits over the last 60 seconds">Live traffic chart. Check the admin token to begin sampling.</canvas>
@@ -1672,6 +1953,8 @@ DASHBOARD_HTML = """<!doctype html>
       </div>
     </div>
     <p id="traffic-profile-status" class="traffic-profile-status" role="status" aria-live="polite">Select one device to show its applied default queue limits.</p>
+    <p class="traffic-note">Dropped and waiting show packets JitterSim itself discarded or is still
+      delaying, in both directions.</p>
     <p class="traffic-note">Traffic lines count bytes at JitterSim before its queues. They do not show the speed a device receives. Dashed lines show configured limits. The ISP plan line is shared with household traffic and is not a live measurement of spare capacity. Service-specific queues may use different limits. Only assigned devices are included. Check the admin token to start; sampling pauses when this tab is hidden.</p>
   </section>
   <section class="card observations-card" data-collapse="closed">
@@ -1714,7 +1997,63 @@ DASHBOARD_HTML = """<!doctype html>
       </div>
     </section>
   </section><!-- /page:traffic -->
-  <section class="page" id="page-access" data-page="access" aria-label="Access and rules" hidden>
+  <section class="page" id="page-measurements" data-page="measurements" aria-label="Measurements" tabindex="-1" hidden>
+  <section class="card" aria-labelledby="measurement-title">
+    <div class="section-heading">
+      <div>
+        <h2 id="measurement-title">Measurements</h2>
+        <p>Compare the delay, jitter and loss a test device measured</p>
+      </div>
+    </div>
+    <div class="measurement-actions">
+      <label>Result files
+        <input id="measurement-files" type="file" accept=".json,application/json" multiple>
+      </label>
+      <button id="copy-measurements" type="button" disabled>Copy table as Markdown</button>
+      <button id="clear-measurements" type="button" disabled>Clear</button>
+    </div>
+    <div id="measurement-table" class="table-wrap">Add result files to compare runs.</div>
+    <canvas id="measurement-chart" width="900" height="240" role="img"
+      aria-label="Round-trip time of every reply in each run">
+      Round-trip chart of the added runs.</canvas>
+    <p class="traffic-note">On a device connected to the test Wi-Fi, run
+      <code>jittersim measure --label normal</code>, change the device's profile here, run it again
+      with another label, then add both files. Comparison files stay in this browser. Attaching them to a test session saves a copy on the Pi.</p>
+  </section>
+  </section><!-- /page:measurements -->
+  <section class="page" id="page-activity" data-page="activity" aria-label="Activity" tabindex="-1" hidden>
+  <section class="card activity-card" data-collapse="open">
+    <div class="section-heading">
+      <div>
+        <h2>Activity log</h2>
+        <p>The last 500 network events, newest first. Rerolls are left out.</p>
+      </div>
+      <div class="activity-actions">
+        <button type="button" id="activity-copy">Copy as Markdown</button>
+        <button type="button" id="activity-download">Download Markdown</button>
+        <button type="button" id="activity-clear">Clear all</button>
+      </div>
+    </div>
+    <div class="fields">
+      <label>Event type <select id="activity-kind">
+        <option value="">All events</option>
+        <option value="apply">Apply</option><option value="reset">Reset</option>
+        <option value="schedule">Schedule</option><option value="timer">Timer</option>
+        <option value="scenario">Scenario</option><option value="progression">Progression</option>
+        <option value="limit">Limit</option><option value="outage">Outage</option>
+        <option value="address">Address change</option>
+      </select></label>
+      <label>Search events <input id="activity-search" type="search" placeholder="Device, group or event text"></label>
+    </div>
+    <p id="activity-count" class="form-note"></p>
+    <ol id="activity-list" class="activity-list" tabindex="0"
+      aria-label="Activity log events"></ol>
+    <p id="activity-empty" class="form-note">Loading...</p>
+    <textarea id="activity-markdown" class="activity-markdown" readonly hidden
+      aria-label="Activity log as Markdown"></textarea>
+  </section>
+  </section><!-- /page:activity -->
+  <section class="page" id="page-access" data-page="access" aria-label="Access and rules" tabindex="-1" hidden>
     <section class="card" data-collapse="open">
       <h2>Network access rules</h2>
       <form id="policy-form">
@@ -1729,6 +2068,18 @@ DASHBOARD_HTML = """<!doctype html>
                   <option value="denylist">Block these MAC addresses</option>
                 </select>
               </label>
+              <div class="connected-picker">
+                <label>Connected device
+                  <select id="mac-picker">
+                    <option value="">Loading connected devices...</option>
+                  </select>
+                </label>
+                <button type="button" data-refresh-connected>Refresh</button>
+              </div>
+              <div class="picker-actions">
+                <button type="button" id="mac-add-allowed">Add to allow list</button>
+                <button type="button" id="mac-add-blocked">Add to block list</button>
+              </div>
               <label>Allowlist (comma separated)
                 <textarea id="mac-allowlist" placeholder="aa:bb:cc:dd:ee:ff"></textarea>
               </label>
@@ -1760,7 +2111,7 @@ DASHBOARD_HTML = """<!doctype html>
       </form>
     </section>
   </section><!-- /page:access -->
-  <section class="page" id="page-diagnostics" data-page="diagnostics" aria-label="Diagnostics" hidden>
+  <section class="page" id="page-diagnostics" data-page="diagnostics" aria-label="Diagnostics" tabindex="-1" hidden>
     <section class="card" data-collapse="closed">
       <div class="section-heading"><h2>Profiles</h2><p>Saved network behavior</p></div>
       <pre id="profiles">Enter the admin token and choose Check token to load.</pre>
@@ -1794,6 +2145,14 @@ DASHBOARD_HTML = """<!doctype html>
         <button id="download-backup" type="button">Download backup</button>
       </div>
       <pre id="action-history">Enter the admin token to view recent actions.</pre>
+      <div class="row-actions transfer-actions">
+        <button id="export-settings" type="button">Export settings</button>
+        <button id="import-settings-button" type="button">Import settings...</button>
+        <input id="import-settings" type="file" accept=".json,application/json" hidden>
+      </div>
+      <p class="form-note">A settings export holds profiles, devices, groups, schedules,
+        access rules and limits, without usage or DNS history. Importing one replaces all
+        of them.</p>
     </section>
   </section><!-- /page:diagnostics -->
   </div>
@@ -1801,6 +2160,7 @@ DASHBOARD_HTML = """<!doctype html>
   </div>
   <script>
     const element = (id) => document.getElementById(id);
+
     let pendingFormSubmitButton = null;
 
     function optionalNumber(id) {
@@ -1826,6 +2186,7 @@ DASHBOARD_HTML = """<!doctype html>
         delay_ms: Number(element(prefix + "-delay").value),
         jitter_ms: Number(element(prefix + "-jitter").value),
         loss_percent: Number(element(prefix + "-loss").value),
+        loss_burst_packets: Number(element(prefix + "-loss-burst").value),
         bandwidth_kbit: optionalNumber(prefix + "-bandwidth"),
         reorder_percent: Number(element(prefix + "-reorder").value),
         duplicate_percent: Number(element(prefix + "-duplicate").value),
@@ -1863,6 +2224,7 @@ DASHBOARD_HTML = """<!doctype html>
         syncScheduleDays();
       });
     });
+
     syncScheduleDays();
 
     async function request(path, method, body) {
@@ -1881,6 +2243,10 @@ DASHBOARD_HTML = """<!doctype html>
       if (token) headers.Authorization = "Bearer " + token;
       if (body !== undefined) headers["Content-Type"] = "application/json";
       const submitButton = pendingFormSubmitButton;
+      const submitForm = submitButton && submitButton.form;
+      // The workflow helpers live in a separate file that the server adds to the page.
+      const drafts = typeof formDrafts === "undefined" ? null : formDrafts;
+      const submittedDraft = submitForm && drafts ? drafts.get(submitForm.id) : null;
       pendingFormSubmitButton = null;
       try {
         const response = await fetch(path, {
@@ -1903,7 +2269,18 @@ DASHBOARD_HTML = """<!doctype html>
           error.status = response.status;
           throw error;
         }
+        if (submitForm && drafts && drafts.get(submitForm.id) === submittedDraft) {
+          drafts.delete(submitForm.id);
+          const formNote = submitForm.querySelector(".form-error");
+          if (formNote) formNote.remove();
+          if (typeof renderDraftNotice === "function") renderDraftNotice();
+        }
+        if (method === "GET" && typeof recordRead === "function") recordRead(path, null);
         return data;
+      } catch (error) {
+        if (method === "GET" && typeof recordRead === "function") recordRead(path, error);
+        if (typeof formError === "function") formError(submitForm, error.message);
+        throw error;
       } finally {
         if (submitButton) setButtonBusy(submitButton, false);
       }
@@ -1915,18 +2292,19 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     const adminTokenHelp = element("admin-token-help");
+
     adminTokenHelp.textContent =
-      "On your Mac, run this command:\\n" +
+      "On your Mac, run this command:\n" +
       "ssh -t -i ~/.ssh/jittersim_ed25519 jittersim@" + window.location.hostname +
-      " \\\"sudo sed -n 's/^JITTERSIM_ADMIN_TOKEN=//p' /etc/jittersim/control.env\\\"\\n" +
+      " \"sudo sed -n 's/^JITTERSIM_ADMIN_TOKEN=//p' /etc/jittersim/control.env\"\n" +
       "Copy the output into this field. Keep the token private.";
 
     const privateDataPanelIds = [
       "profiles", "devices", "plan", "state", "policies",
       "connected-devices", "unaffected-devices", "uplink-details", "general-profile-status",
-      "saved-profiles"
+      "saved-profiles", "device-table"
     ];
-    // Functions that clear private form state whenever the private panels are locked.
+
     const privateDataLockHooks = [];
 
     function setDashboardUnlocked(allowed) {
@@ -2021,27 +2399,49 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     let helperConfigured = false;
+
     let adminTokenVerified = false;
+
     let adminTokenRevision = 0;
+
     let adminTokenChecking = false;
+
     let adminTokenRejected = false;
+
     let adminTokenRefused = false;
+
     let routerPasswordRevision = 0;
+
     let routerPasswordVerified = false;
+
     let routerPasswordRejected = false;
+
     let routerPasswordChecking = false;
+
     let routerActionPending = false;
+
     let routerCopyPending = false;
+
     let routerWifiEnabled = null;
+
     let routerWifiCheckedAt = null;
+
     let routerWifiPolling = false;
+
     let routerWifiTimer = null;
+
     let routerWifiRemoteBusy = false;
+
     let routerWifiRemoteChanging = false;
+
     let routerWifiError = "";
+
     let routerWifiMinimumCheck = 0;
+
     let credentialOpener = null;
+
     const REMEMBER_MS = 24 * 60 * 60 * 1000;
+
     const REMEMBERED = {
       admin: {
         key: "jittersim.remembered.admin-token", box: "remember-admin-token",
@@ -2052,9 +2452,11 @@ DASHBOARD_HTML = """<!doctype html>
         note: "remember-router-password-note", input: "router-admin-password", noun: "password"
       }
     };
+
     const expiredNotice = { admin: false, router: false };
-    // The value this tab last saved or restored, so it never deletes another tab's entry.
+
     const ownedRemembered = { admin: null, router: null };
+
     let rememberedCredentialsReady = false;
 
     function updateCredentialStatus() {
@@ -2118,23 +2520,28 @@ DASHBOARD_HTML = """<!doctype html>
     ["open-admin-credentials", "open-router-credentials", "open-router-credentials-inline"].forEach((id) => {
       element(id).addEventListener("click", (event) => openCredentials(id.includes("router") ? "router" : "admin", event.currentTarget));
     });
+
     element("close-credentials").addEventListener("click", closeCredentials);
+
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && !element("credentials-panel").hidden) {
         event.preventDefault();
         closeCredentials();
       }
     });
+
     element("clear-admin-token").addEventListener("click", () => {
       element("admin-token").value = "";
       element("admin-token").dispatchEvent(new Event("input"));
       element("admin-token").focus({preventScroll: true});
     });
+
     element("clear-router-password").addEventListener("click", () => {
       element("router-admin-password").value = "";
       element("router-admin-password").dispatchEvent(new Event("input"));
       element("router-admin-password").focus({preventScroll: true});
     });
+
     element("router-admin-password").addEventListener("input", () => {
       routerPasswordRevision += 1;
       routerWifiEnabled = null;
@@ -2145,13 +2552,14 @@ DASHBOARD_HTML = """<!doctype html>
       routerPasswordRejected = false;
       updateCredentialStatus();
     });
+
     window.addEventListener("resize", updateCredentialViewport);
+
     if (window.visualViewport) {
       window.visualViewport.addEventListener("resize", updateCredentialViewport);
       window.visualViewport.addEventListener("scroll", updateCredentialViewport);
     }
-    updateCredentialViewport();
-    updateCredentialStatus();
+
     function savedCredential(kind) {
       try {
         const saved = JSON.parse(window.localStorage.getItem(REMEMBERED[kind].key));
@@ -2266,6 +2674,7 @@ DASHBOARD_HTML = """<!doctype html>
         updateCredentialStatus();
       });
     });
+
     window.addEventListener("storage", (event) => {
       let changed = false;
       for (const kind of Object.keys(REMEMBERED)) {
@@ -2280,45 +2689,73 @@ DASHBOARD_HTML = """<!doctype html>
       }
       if (changed) updateCredentialStatus();
     });
+
     window.setInterval(syncRememberedCredentials, 60000);
+
     let profiles = [];
+
     let generalProfileState = null;
-    // Each input of the sidebar block counts as loaded once it is not null.
-    // The profiles and the service lists start empty so they have a flag.
+
     let lastRuntimeState = null;
+
     let serviceListsState = [];
+
     let serviceListsLoaded = false;
+
     let profilesLoaded = false;
+
     let savedProfileBusy = null;
+
     let networkActionBusy = false;
-    // Counts the network actions started. A state answer that was asked for before an
-    // action started describes the old network so loadState drops it.
+
     let networkActionRevision = 0;
+
     let groups = [];
+
     let savedDevices = [];
+
     let connectedClients = [];
+
     let lastConnectedData = null;
+
     let connectedClientsAvailable = false;
+
     const connectedDrafts = new Map();
+
     const clearConnectedDrafts = new Set();
+
     let observedDomainsByDevice = {};
+
     let observedNames = new Set();
-    // Keys of the open Traffic discovery groups. They survive the dashboard refresh.
+
     const openObservationGroups = new Set();
-    // The profile picked in each Traffic discovery card. It survives the dashboard refresh.
+
     const observationProfileChoice = new Map();
+
     let randomWebsiteAnalyticsRequestVersion = 0;
+
     let connectedDevicesRequestInFlight = false;
+
     let observationRequestInFlight = false;
+
     const TRAFFIC_POLL_INTERVAL_MS = 2000;
+
     const TRAFFIC_MAX_POINTS = 30;
+
     const TRAFFIC_WINDOW_MS = 60000;
+
     let trafficPollTimer = null;
+
     let trafficRequestInFlight = false;
+
     let trafficSamplingAllowed = false;
+
     let previousTrafficSample = null;
+
     let trafficSamples = [];
+
     let currentIspTrafficLimits = { upload_kbit: null, download_kbit: 100000 };
+
     let latestTrafficReferences = {
       isp_upload: null,
       isp_download: 100,
@@ -2340,8 +2777,14 @@ DASHBOARD_HTML = """<!doctype html>
     function resetTrafficHistory() {
       previousTrafficSample = null;
       trafficSamples = [];
-      ["traffic-upload-rate", "traffic-download-rate", "traffic-upload-packets", "traffic-download-packets"]
-        .forEach((id) => { element(id).textContent = "—"; });
+      [
+        "traffic-upload-rate",
+        "traffic-download-rate",
+        "traffic-upload-packets",
+        "traffic-download-packets",
+        "traffic-drop-rate",
+        "traffic-queued"
+      ].forEach((id) => { element(id).textContent = "—"; });
       drawTrafficChart();
     }
 
@@ -2404,8 +2847,11 @@ DASHBOARD_HTML = """<!doctype html>
 
     function selectedTrafficTotals(deviceCounters) {
       const selectedDevice = element("traffic-device").value;
-      const counters = selectedDevice === "all"
-        ? Object.values(deviceCounters)
+      // "All assigned devices" means the saved devices; everyone else is its own choice.
+      const counters = selectedDevice === "@all"
+        ? Object.keys(deviceCounters)
+          .filter((id) => id !== EVERYONE_ELSE_TRAFFIC)
+          .map((id) => deviceCounters[id])
         : deviceCounters[selectedDevice] ? [deviceCounters[selectedDevice]] : [];
       if (!counters.length) return null;
       return counters.reduce((totals, current) => {
@@ -2432,7 +2878,7 @@ DASHBOARD_HTML = """<!doctype html>
       const selected = select.value;
       select.replaceChildren();
       const allOption = document.createElement("option");
-      allOption.value = "all";
+      allOption.value = "@all";
       const generalActive = generalProfileState && generalProfileState.active;
       allOption.textContent = generalActive ? "All affected devices (shared)" : "All assigned devices";
       select.appendChild(allOption);
@@ -2442,9 +2888,16 @@ DASHBOARD_HTML = """<!doctype html>
         option.textContent = devicePickerLabel(device);
         select.appendChild(option);
       });
-      select.value = Array.from(select.options).some((option) => option.value === selected)
-        ? selected
-        : "all";
+      if (!generalActive && everyoneElseInLiveTraffic()) {
+        const option = document.createElement("option");
+        option.value = EVERYONE_ELSE_TRAFFIC;
+        option.textContent = "Everyone else";
+        select.appendChild(option);
+      }
+      const kept = Array.from(select.options).some((option) => option.value === selected);
+      select.value = kept ? selected : "@all";
+      // The last sample belongs to the choice that went, so start a fresh graph.
+      if (!kept && selected) resetTrafficHistory();
     }
 
     function drawTrafficChart() {
@@ -2462,13 +2915,10 @@ DASHBOARD_HTML = """<!doctype html>
       if (!context) return;
       context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
       context.clearRect(0, 0, bounds.width, bounds.height);
-      const plot = { left: 62, right: bounds.width - 14, top: 16, bottom: bounds.height - 34 };
-      const plotWidth = plot.right - plot.left;
-      const plotHeight = plot.bottom - plot.top;
       const now = performance.now();
       const visibleSamples = trafficSamples.filter((sample) => now - sample.time <= TRAFFIC_WINDOW_MS);
       const selectedDevice = element("traffic-device").value;
-      const profileSelected = selectedDevice !== "all";
+      const profileSelected = selectedDevice !== "@all";
       element("traffic-profile-upload-legend").hidden = !profileSelected;
       element("traffic-profile-download-legend").hidden = !profileSelected;
       const referenceFields = ["isp_upload", "isp_download", "profile_upload", "profile_download"];
@@ -2481,6 +2931,17 @@ DASHBOARD_HTML = """<!doctype html>
       const maxRate = Math.max(0.1, ...graphValues);
       const scaleMax = Math.pow(10, Math.ceil(Math.log10(maxRate)));
       context.font = "12px system-ui, sans-serif";
+      const tickLabels = [0, 1, 2, 3, 4].map((tick) => formatTrafficRate(scaleMax * tick / 4));
+      // Leave room for the widest axis label, such as "100.00 Mbit/s".
+      const labelWidth = Math.max(...tickLabels.map((label) => context.measureText(label).width));
+      const plot = {
+        left: Math.max(62, Math.ceil(labelWidth) + 16),
+        right: bounds.width - 14,
+        top: 16,
+        bottom: bounds.height - 34
+      };
+      const plotWidth = plot.right - plot.left;
+      const plotHeight = plot.bottom - plot.top;
       context.textBaseline = "middle";
       for (let tick = 0; tick <= 4; tick += 1) {
         const y = plot.bottom - plotHeight * tick / 4;
@@ -2492,7 +2953,7 @@ DASHBOARD_HTML = """<!doctype html>
         context.stroke();
         context.fillStyle = "#91a8c1";
         context.textAlign = "right";
-        context.fillText(formatTrafficRate(scaleMax * tick / 4), plot.left - 8, y);
+        context.fillText(tickLabels[tick], plot.left - 8, y);
       }
       [0, 0.5, 1].forEach((fraction) => {
         const x = plot.left + plotWidth * fraction;
@@ -2582,7 +3043,7 @@ DASHBOARD_HTML = """<!doctype html>
         };
       }
       const selectedDevice = element("traffic-device").value;
-      if (data.general_profile_limits && selectedDevice === "all") {
+      if (data.general_profile_limits && selectedDevice === "@all") {
         element("traffic-profile-status").textContent =
           "Shared profile limit and traffic for affected devices only. Protected traffic is excluded.";
         return {
@@ -2592,12 +3053,15 @@ DASHBOARD_HTML = """<!doctype html>
           profile_download: trafficRateMbit(data.general_profile_limits.download_kbit)
         };
       }
-      const deviceLimits = selectedDevice === "all" || !data.profile_limits_available
+      const limitKey = selectedDevice === EVERYONE_ELSE_TRAFFIC
+        ? EVERYONE_ELSE_QUEUE_ID
+        : selectedDevice;
+      const deviceLimits = selectedDevice === "@all" || !data.profile_limits_available
         ? null
-        : (data.profile_limits || {})[selectedDevice];
-      const profileAvailable = selectedDevice !== "all" &&
+        : (data.profile_limits || {})[limitKey];
+      const profileAvailable = selectedDevice !== "@all" &&
         data.profile_limits_available === true && deviceLimits !== undefined;
-      element("traffic-profile-status").textContent = selectedDevice === "all"
+      element("traffic-profile-status").textContent = selectedDevice === "@all"
         ? "Select one device to see its applied default queue limit. Service-specific limits are not shown."
         : !data.profile_limits_available
           ? "No applied plan is available. Apply the configuration to see current default queue limits."
@@ -2625,7 +3089,9 @@ DASHBOARD_HTML = """<!doctype html>
           return;
         }
         latestTrafficReferences = trafficReferencesFromResponse(data);
-        const totals = selectedTrafficTotals(data.devices || {});
+        const counters = mergedTrafficCounters(data);
+        const totals = selectedTrafficTotals(counters.devices);
+        const queueTotals = selectedQueueTotals(counters.queues);
         if (!totals) {
           resetTrafficHistory();
           element("traffic-status").textContent = "No counters yet. Assign a profile and apply the configuration.";
@@ -2657,12 +3123,16 @@ DASHBOARD_HTML = """<!doctype html>
             element("traffic-download-rate").textContent = formatTrafficRate(download);
             element("traffic-upload-packets").textContent = formatPacketRate(uploadPackets);
             element("traffic-download-packets").textContent = formatPacketRate(downloadPackets);
+            // Drops restart from zero when a plan is applied.
+            const dropped = Math.max(0, queueTotals.dropped - previousTrafficSample.queues.dropped);
+            element("traffic-drop-rate").textContent = formatPacketRate(dropped / elapsedSeconds);
+            element("traffic-queued").textContent = queueTotals.queued + " packets";
             element("traffic-status").textContent = "Sampling live traffic every 2 seconds.";
           }
         } else {
           element("traffic-status").textContent = "Collecting the first sample...";
         }
-        previousTrafficSample = { time: sampledAt, totals: totals };
+        previousTrafficSample = { time: sampledAt, totals: totals, queues: queueTotals };
         drawTrafficChart();
       } catch (error) {
         if (!trafficSamplingAllowed) return;
@@ -2782,10 +3252,6 @@ DASHBOARD_HTML = """<!doctype html>
       renderSavedProfiles();
     }
 
-    // Works out the sidebar lines from data the page already holds.
-    // A saved change sets the observed state to "unknown" and the running scheduler turns
-    // it back to "applied" within about a second. So "unknown" while running still means
-    // that devices are affected and a saved general profile is taking effect.
     function sidebarStatus(input) {
       const visible = !!input.adminTokenVerified;
       const loaded = input.loaded || {};
@@ -2878,8 +3344,6 @@ DASHBOARD_HTML = """<!doctype html>
       };
     }
 
-    // Forgets everything the block was built from so that a new check of the token cannot
-    // show data from before.
     function clearSidebarInputs() {
       lastRuntimeState = null;
       generalProfileState = null;
@@ -2972,7 +3436,9 @@ DASHBOARD_HTML = """<!doctype html>
         error: "The last network action failed"
       };
       const summary = element("runtime-summary");
-      summary.textContent = labels[state.observed_state] || "Runtime state unavailable";
+      summary.textContent = state.observed_state === "unknown" && state.last_action
+        ? "Settings changed since the last network action"
+        : labels[state.observed_state] || "Runtime state unavailable";
       summary.className = "runtime-summary " + state.observed_state;
       renderSidebarStatus();
     }
@@ -2998,7 +3464,14 @@ DASHBOARD_HTML = """<!doctype html>
       };
     }
 
+    let lastConnectedDevices = null;
+
+    const connectedRenderHooks = [];
+
+    const connectedRowHooks = [];
+
     function renderConnectedDevices(data) {
+      lastConnectedDevices = data;
       const container = element("connected-devices");
       const count = element("connected-count");
       const expandedLabels = new Set(
@@ -3092,6 +3565,7 @@ DASHBOARD_HTML = """<!doctype html>
           "Base profile: " + (device.assigned_profile_id || "Unassigned") +
           (device.group_name ? " · Group: " + device.group_name + (device.group_profile_id ? " (override: " + device.group_profile_id + ")" : "") : "");
         details.append(address, metadata, deviceType, assignmentInfo);
+        connectedRowHooks.forEach((hook) => hook(device, details));
         if (device.hostname) {
           const hostname = document.createElement("p");
           hostname.className = "connected-meta";
@@ -3259,6 +3733,7 @@ DASHBOARD_HTML = """<!doctype html>
         new Set(devices.map((device) => device.mac_address)),
         deviceTypeNames
       );
+      connectedRenderHooks.forEach((hook) => hook(data));
     }
 
     function renderSavedConnectedDeviceLabels(container, labels, connectedMacAddresses, typeNames) {
@@ -3487,6 +3962,7 @@ DASHBOARD_HTML = """<!doctype html>
             message: connectedResult.reason.message
           };
         } else {
+          connectedDataHooks.forEach((hook) => hook(connectedResult.value));
           data = { ...connectedResult.value, saved_labels: savedLabels };
         }
         renderConnectedDevices(data);
@@ -3501,6 +3977,8 @@ DASHBOARD_HTML = """<!doctype html>
         : "Could not update: " + (data.message || "connected-client information is unavailable");
       return data;
     }
+
+    const connectedDataHooks = [];
 
     async function checkForDevices() {
       const button = element("check-devices");
@@ -3538,7 +4016,7 @@ DASHBOARD_HTML = """<!doctype html>
       try {
         renderUplink(await request("/api/uplink", "GET"));
       } catch (error) {
-        renderUplink({ available: false, message: error.message });
+        recordRead("/api/uplink", error);
       }
     }
 
@@ -3587,7 +4065,6 @@ DASHBOARD_HTML = """<!doctype html>
       return { label: label, disabled: disabled, ariaLabel: label + " " + domain };
     }
 
-    // What the dashboard says after a change to the block list. The scheduler applies it.
     const ENFORCE_NOTE = "It applies on its own while JitterSim is running. " +
       "After Reset or Panic choose Apply current configuration.";
 
@@ -3595,10 +4072,8 @@ DASHBOARD_HTML = """<!doctype html>
       return count + (count === 1 ? " query" : " queries");
     }
 
-    // A group action sends its names in one call and the server accepts this many.
     const GROUP_ACTION_MAX_NAMES = 64;
 
-    // Blocking every name of a group of these kinds could cut a device off the internet.
     const RISKY_BLOCK_NOTE = "Blocking a whole group of system or content delivery names could cut " +
       "the device off the internet. Block single names instead.";
 
@@ -3656,7 +4131,6 @@ DASHBOARD_HTML = """<!doctype html>
       return action;
     }
 
-    // The way back for a risky group that is only partly blocked. Block remaining is off there.
     function groupUnblockAction(group) {
       if (!isRiskyGroupKind(group.kind)) return null;
       const blocked = group.names
@@ -3705,14 +4179,11 @@ DASHBOARD_HTML = """<!doctype html>
       };
     }
 
-    // True when every row of the group has the same category so the group header says it all.
     function groupCategoriesUniform(group) {
       const category = (observation) => (observation.label && observation.label.category) || "";
       return group.names.every((observation) => category(observation) === category(group.names[0]));
     }
 
-    // What a row shows in its label line. A row in a group skips a name that only repeats the
-    // group name and skips the category when the whole group has the same one.
     function rowLabelParts(parts, groupName, categoriesUniform) {
       const repeated = Boolean(groupName) && parts.labelName === groupName;
       return {
@@ -3771,7 +4242,6 @@ DASHBOARD_HTML = """<!doctype html>
       return address + "|" + groupKey;
     }
 
-    // An id that is unique for one device and group and holds no spaces so aria-controls works.
     function observationGroupDomId(address, groupKey) {
       const encoded = Array.from(observationGroupOpenKey(address, groupKey)).map((character) =>
         /[A-Za-z0-9-]/.test(character) ? character : "_" + character.codePointAt(0).toString(16) + "_"
@@ -4233,7 +4703,7 @@ DASHBOARD_HTML = """<!doctype html>
           .map((value) => value.trim())
           .filter(Boolean)
           .map((value) => {
-            const match = /^(\\d{1,2}):(\\d{2})$/.exec(value);
+            const match = /^(\d{1,2}):(\d{2})$/.exec(value);
             if (!match || Number(match[1]) > 23 || Number(match[2]) > 59) {
               throw new Error("Reset times must use HH:MM format.");
             }
@@ -4304,7 +4774,22 @@ DASHBOARD_HTML = """<!doctype html>
       resetButton.type = "button";
       resetButton.textContent = "Reset usage";
       resetButton.addEventListener("click", () => resetQuota(quota, service, resetButton));
-      actions.append(editButton, resetButton);
+      const deleteButton = document.createElement("button");
+      deleteButton.type = "button";
+      deleteButton.textContent = "Delete";
+      deleteButton.addEventListener("click", () => {
+        if (service === "group") {
+          deleteItem("/api/group-data-limits/delete", { group_id: quota.group_id },
+            "Shared limit deleted.", deleteButton);
+        } else if (service) {
+          deleteItem("/api/service-quotas/delete", { id: quota.id },
+            "Service limit deleted.", deleteButton);
+        } else {
+          deleteItem("/api/data-limits/delete", { device_id: quota.device_id },
+            "Device limit deleted.", deleteButton);
+        }
+      });
+      actions.append(editButton, resetButton, deleteButton);
       if (service) {
         const domains = document.createElement("span");
         domains.textContent = "Domains: " + quota.domains.join(", ");
@@ -4492,7 +4977,7 @@ DASHBOARD_HTML = """<!doctype html>
       element("service-list-id").value = serviceList.id;
       element("service-list-name").value = serviceList.name;
       element("service-list-profile").value = serviceList.profile_id;
-      element("service-list-hostnames").value = serviceList.hostnames.join("\\n");
+      element("service-list-hostnames").value = serviceList.hostnames.join("\n");
       element("service-list-enabled").checked = serviceList.enabled;
       element("service-list-catalogue").querySelectorAll("input").forEach((input) => {
         input.checked = serviceList.services.includes(input.value);
@@ -4550,11 +5035,12 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     function editServiceAssignment(assignment) {
+      if (typeof guardDraft === "function" && guardDraft("service-assignment-form", () => editServiceAssignment(assignment))) return;
       element("service-assignment-id").value = assignment.id;
       element("service-assignment-name").value = assignment.name;
       element("service-assignment-device").value = assignment.device_id;
       element("service-assignment-profile").value = assignment.profile_id;
-      element("service-assignment-domains").value = assignment.domains.join("\\n");
+      element("service-assignment-domains").value = assignment.domains.join("\n");
       element("service-assignment-enabled").checked = assignment.enabled;
       revealElement(element("service-assignment-form"));
     }
@@ -4600,6 +5086,7 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     function editDataLimit(quota) {
+      if (typeof guardDraft === "function" && guardDraft("data-limit-form", () => editDataLimit(quota))) return;
       element("data-limit-device").value = quota.device_id;
       element("data-limit-profile").value = quota.profile_id;
       setQuotaAmount("data-limit", quota.limit_bytes);
@@ -4614,7 +5101,9 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     function editGroup(group) {
+      if (typeof guardDraft === "function" && guardDraft("group-form", () => editGroup(group))) return;
       element("group-id").value = group.id;
+      element("group-id").dataset.typed = "true";
       element("group-name").value = group.name;
       element("group-profile").value = group.profile_id || "";
       Array.from(element("group-devices").options).forEach((option) => {
@@ -4623,20 +5112,12 @@ DASHBOARD_HTML = """<!doctype html>
       revealElement(element("group-form"));
     }
 
-    async function deleteGroup(group, button) {
-      setButtonBusy(button, true);
-      showMessage("Deleting the device group...", "working");
-      try {
-        await request("/api/groups/delete", "POST", { id: group.id });
-        refreshAfterSuccess("Device group deleted.");
-      } catch (error) {
-        showMessage(error.message, "error");
-      } finally {
-        setButtonBusy(button, false);
-      }
+    function deleteGroup(group, button) {
+      deleteItem("/api/groups/delete", { id: group.id }, "Device group deleted.", button);
     }
 
     function editGroupDataLimit(quota) {
+      if (typeof guardDraft === "function" && guardDraft("group-data-limit-form", () => editGroupDataLimit(quota))) return;
       element("group-data-limit-group").value = quota.group_id;
       element("group-data-limit-profile").value = quota.profile_id;
       setQuotaAmount("group-data-limit", quota.limit_bytes);
@@ -4652,7 +5133,9 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     function editServiceQuota(quota) {
+      if (typeof guardDraft === "function" && guardDraft("service-quota-form", () => editServiceQuota(quota))) return;
       element("service-quota-id").value = quota.id;
+      element("service-quota-id").dataset.typed = "true";
       element("service-quota-name").value = quota.name;
       element("service-quota-device").value = quota.device_id;
       element("service-quota-profile").value = quota.profile_id;
@@ -4676,7 +5159,9 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     function editTimeQuota(quota) {
+      if (typeof guardDraft === "function" && guardDraft("time-quota-form", () => editTimeQuota(quota))) return;
       element("time-quota-id").value = quota.id;
+      element("time-quota-id").dataset.typed = "true";
       element("time-quota-name").value = quota.name;
       element("time-quota-device").value = quota.device_id;
       element("time-quota-profile").value = quota.profile_id;
@@ -4763,9 +5248,15 @@ DASHBOARD_HTML = """<!doctype html>
       resetButton.type = "button";
       resetButton.textContent = "Reset usage";
       resetButton.addEventListener("click", () => resetTimeQuota(quota, resetButton));
+      const deleteButton = document.createElement("button");
+      deleteButton.type = "button";
+      deleteButton.textContent = "Delete";
+      deleteButton.addEventListener("click", () => deleteItem(
+        "/api/time-quotas/delete", { id: quota.id }, "Time limit deleted.", deleteButton
+      ));
       const domains = document.createElement("span");
       domains.textContent = "Domains: " + quota.domains.join(", ");
-      actions.append(editButton, timerButton, resetButton, domains);
+      actions.append(editButton, timerButton, resetButton, deleteButton, domains);
       row.append(heading, detail, meter, actions);
       return row;
     }
@@ -4803,10 +5294,7 @@ DASHBOARD_HTML = """<!doctype html>
         renderServiceQuotas(serviceQuotas);
         renderTimeQuotas(timeQuotas);
       } catch (error) {
-        renderDataLimits({ data_limits: [], error: "Enter the admin token to view device limits." });
-        renderGroupDataLimits({ group_data_limits: [], error: "Enter the admin token to view group limits." });
-        renderServiceQuotas({ service_quotas: [], error: "Enter the admin token to view service limits." });
-        renderTimeQuotas({ time_quotas: [], error: "Enter the admin token to view time limits." });
+        recordRead("/api/data-limits", error);
       }
     }
 
@@ -4814,7 +5302,7 @@ DASHBOARD_HTML = """<!doctype html>
       try {
         renderServiceAssignments(await request("/api/service-assignments", "GET"));
       } catch (error) {
-        renderServiceAssignments({ service_assignments: [], error: error.message });
+        recordRead("/api/service-assignments", error);
       }
     }
 
@@ -4855,7 +5343,9 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     async function loadHealth() {
-      renderMode(await request("/api/health", "GET"));
+      const data = await request("/api/health", "GET");
+      renderMode(data);
+      renderSystemHealth(data);
     }
 
     async function loadProfiles() {
@@ -4864,6 +5354,11 @@ DASHBOARD_HTML = """<!doctype html>
       profilesLoaded = true;
       renderSidebarStatus();
       element("profiles").textContent = JSON.stringify(profiles, null, 2);
+      const emptyLabels = {
+        "group-profile": "Use each device profile",
+        "general-profile-select": "Choose a saved profile",
+        "everyone-else-profile": "None: normal connection"
+      };
       [
         "schedule-profile",
         "timer-profile",
@@ -4876,15 +5371,16 @@ DASHBOARD_HTML = """<!doctype html>
         "time-quota-profile",
         "group-profile",
         "group-data-limit-profile",
-        "general-profile-select"
+        "general-profile-select",
+        "everyone-else-profile"
       ].forEach((selectId) => {
         const profileSelect = element(selectId);
         const previousSelection = profileSelect.value;
         profileSelect.replaceChildren();
-        if (selectId === "group-profile" || selectId === "general-profile-select") {
+        if (emptyLabels[selectId]) {
           const option = document.createElement("option");
           option.value = "";
-          option.textContent = selectId === "group-profile" ? "Use each device profile" : "Choose a saved profile";
+          option.textContent = emptyLabels[selectId];
           profileSelect.appendChild(option);
         }
         profiles.forEach((profile) => {
@@ -4893,13 +5389,17 @@ DASHBOARD_HTML = """<!doctype html>
           option.textContent = profile.name + " (" + profile.id + ")";
           profileSelect.appendChild(option);
         });
-        if (selectId === "general-profile-select") {
-          profileSelect.value = profiles.some((profile) => profile.id === previousSelection)
-            ? previousSelection : "";
-        }
+        // Rebuilding the menu must not change a choice being edited.
+        const known = profiles.some((profile) => profile.id === previousSelection) ||
+          (previousSelection === "" && emptyLabels[selectId] !== undefined);
+        if (known) profileSelect.value = previousSelection;
+        else if (selectId === "general-profile-select") profileSelect.value = "";
       });
+      profilesLoadedHooks.forEach((hook) => hook());
       updateGeneralProfileControls();
     }
+
+    const profilesLoadedHooks = [];
 
     async function loadGeneralProfile() {
       const data = await request("/api/general-profile", "GET");
@@ -4925,7 +5425,6 @@ DASHBOARD_HTML = """<!doctype html>
       savedDevices = data.devices;
       updateGroupMemberOptions();
       [
-        "schedule-device",
         "timer-device",
         "progression-device",
         "data-limit-device",
@@ -4934,23 +5433,29 @@ DASHBOARD_HTML = """<!doctype html>
         "time-quota-device"
       ].forEach((selectId) => {
         const deviceSelect = element(selectId);
+        const selected = new Set(Array.from(deviceSelect.selectedOptions || [], (option) => option.value));
         deviceSelect.replaceChildren();
-      data.devices.forEach((device) => {
+        data.devices.forEach((device) => {
           const option = document.createElement("option");
           option.value = device.id;
           option.textContent = devicePickerLabel(device);
           deviceSelect.appendChild(option);
+          if (selected.size || deviceSelect.multiple) option.selected = selected.has(device.id);
         });
       });
+      savedDevicesHooks.forEach((hook) => hook(data.devices));
       updateTrafficDeviceOptions(data.devices);
       populateServiceQuotaDomains();
       populateTimeQuotaDomains();
     }
 
+    const savedDevicesHooks = [];
+
     async function loadGroups() {
       try {
         const data = await request("/api/groups", "GET");
         renderGroups(data);
+        groupsLoadedHooks.forEach((hook) => hook());
         if (lastConnectedData && !element("connected-devices").contains(document.activeElement)) renderConnectedDevices(lastConnectedData);
         const groupSelect = element("group-data-limit-group");
         const selectedGroup = groupSelect.value;
@@ -4968,6 +5473,8 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    const groupsLoadedHooks = [];
+
     function renderSchedules(schedules) {
       const container = element("schedule-list");
       container.replaceChildren();
@@ -4978,22 +5485,41 @@ DASHBOARD_HTML = """<!doctype html>
       schedules.forEach((schedule) => {
         const row = document.createElement("div");
         row.className = "schedule-row";
+        const text = document.createElement("div");
         const name = document.createElement("span");
-        name.textContent = schedule.id + " · " + schedule.device_id + " → " + schedule.profile_id;
-        const time = document.createElement("span");
-        time.textContent = schedule.days_of_week.join(",") + " · " +
-          String(Math.floor(schedule.start_minute / 60)).padStart(2, "0") + ":" +
-          String(schedule.start_minute % 60).padStart(2, "0") + "–" +
-          String(Math.floor(schedule.end_minute / 60)).padStart(2, "0") + ":" +
-          String(schedule.end_minute % 60).padStart(2, "0");
-        row.append(name, time);
+        name.textContent =
+          scheduleTargetName(schedule) + " → " + profileName(schedule.profile_id);
+        const time = document.createElement("small");
+        time.textContent = formatDays(schedule.days_of_week) + " · " +
+          formatMinute(schedule.start_minute) + "–" + formatMinute(schedule.end_minute) +
+          " · " + schedule.id + " · " + (schedule.enabled ? "Enabled" : "Disabled");
+        text.append(name, time);
+        const actions = document.createElement("div");
+        actions.className = "row-actions";
+        const editButton = document.createElement("button");
+        editButton.type = "button";
+        editButton.textContent = "Edit";
+        editButton.addEventListener("click", () => editSchedule(schedule));
+        const deleteButton = document.createElement("button");
+        deleteButton.type = "button";
+        deleteButton.textContent = "Delete";
+        deleteButton.addEventListener("click", () => deleteItem(
+          "/api/schedules/delete", { id: schedule.id }, "Schedule deleted.", deleteButton
+        ));
+        actions.append(editButton, deleteButton);
+        row.append(text, actions);
         container.appendChild(row);
       });
     }
 
     async function loadSchedules() {
       const data = await request("/api/schedules", "GET");
+      savedSchedules = data.schedules;
+      element("schedule-clock").textContent = "Schedule times use the Pi clock: " +
+        data.local_time.replace("T", " ") + " (" + data.time_zone + ").";
       renderSchedules(data.schedules);
+      // An everyone-else schedule adds Everyone else to Live traffic.
+      updateTrafficDeviceOptions(devices);
     }
 
     function formatTimerRemaining(seconds) {
@@ -5037,7 +5563,7 @@ DASHBOARD_HTML = """<!doctype html>
       try {
         renderTimers(await request("/api/timers", "GET"));
       } catch (error) {
-        renderTimers({ timers: [] });
+        recordRead("/api/timers", error);
       }
     }
 
@@ -5103,7 +5629,7 @@ DASHBOARD_HTML = """<!doctype html>
       try {
         renderProgressions(await request("/api/progressions", "GET"));
       } catch (error) {
-        renderProgressions({ progressions: [] });
+        recordRead("/api/progressions", error);
       }
     }
 
@@ -5136,12 +5662,16 @@ DASHBOARD_HTML = """<!doctype html>
     async function loadPolicies() {
       const data = await request("/api/policies", "GET");
       element("policies").textContent = JSON.stringify(data, null, 2);
+      if (!formDrafts.has("policy-form")) {
       element("mac-mode").value = data.mac.mode;
       element("mac-allowlist").value = data.mac.allowlist.join(", ");
       element("mac-denylist").value = data.mac.denylist.join(", ");
       element("website-mode").value = data.websites.mode;
       element("website-allowlist").value = data.websites.allowed_domains.join(", ");
       element("website-blocklist").value = data.websites.blocked_domains.join(", ");
+      }
+      updateAccessForms(data);
+      await loadAccessStatus();
     }
 
     async function loadState() {
@@ -5150,7 +5680,10 @@ DASHBOARD_HTML = """<!doctype html>
       if (revision !== networkActionRevision) return;
       element("state").textContent = JSON.stringify(data.state, null, 2);
       renderRuntimeSummary(data.state);
+      runtimeStateHooks.forEach((hook) => hook(data.state));
     }
+
+    const runtimeStateHooks = [];
 
     function formatUtcDay(timestamp) {
       return new Date(timestamp * 1000).toLocaleDateString(undefined, {
@@ -5267,7 +5800,7 @@ DASHBOARD_HTML = """<!doctype html>
         const data = await request("/api/action-history", "GET");
         element("action-history").textContent = data.actions.length
           ? data.actions.map((action) => new Date(action.happened_at * 1000).toLocaleString() +
-              " — " + action.action + " — " + action.status_code).join("\\n")
+              " — " + action.action + " — " + action.status_code).join("\n")
           : "No admin actions have been recorded.";
       } catch (error) {
         element("action-history").textContent = error.message;
@@ -5360,29 +5893,20 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     async function refresh() {
-      await loadPrivateDataPanel("profiles", loadProfiles);
-      await loadHealth();
-      await loadObservations();
-      await Promise.all([
-        loadPrivateDataPanel("devices", () => show("/api/devices", "devices", "devices")),
-        loadPrivateDataPanel("plan", () => show("/api/plan", "plan", "plan")),
-        loadPrivateDataPanel("state", loadState),
-        loadPrivateDataPanel("general-profile-status", loadGeneralProfile),
-        loadDevicesForSchedule(),
-        loadGroups(),
-        loadSchedules(),
-        loadTimers(),
-        loadProgressions(),
-        loadPrivateDataPanel("policies", loadPolicies),
-        loadConnectedDevices(),
-        loadUnaffectedDevices(),
-        loadUplink(),
-        loadQuotas(),
-        loadServiceAssignments(),
-        loadServiceLists(),
-        loadAdminTools(),
-        loadDashboardAccessList()
-      ]);
+      refreshAgain = true;
+      if (dashboardRefresh) return dashboardRefresh;
+      dashboardRefresh = (async () => {
+        if (dashboardPoll) await dashboardPoll;
+        do {
+          refreshAgain = false;
+          try { await refreshDashboard(); } finally { restoreDrafts(); }
+        } while (refreshAgain);
+      })();
+      try {
+        await dashboardRefresh;
+      } finally {
+        dashboardRefresh = null;
+      }
     }
 
     function setActionBusy(busy, path) {
@@ -5467,7 +5991,9 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     element("general-profile-select").addEventListener("change", updateGeneralProfileControls);
+
     element("general-profile-apply").addEventListener("click", () => runGeneralProfileAction(false));
+
     element("general-profile-stop").addEventListener("click", () => runGeneralProfileAction(true));
 
     element("scan-observations").addEventListener("click", scanObservations);
@@ -5521,6 +6047,7 @@ DASHBOARD_HTML = """<!doctype html>
         set(prefix + "-delay", direction.delay_ms);
         set(prefix + "-jitter", direction.jitter_ms);
         set(prefix + "-loss", direction.loss_percent);
+        set(prefix + "-loss-burst", direction.loss_burst_packets || 0);
         set(prefix + "-bandwidth", direction.bandwidth_kbit);
         set(prefix + "-reorder", direction.reorder_percent);
         set(prefix + "-duplicate", direction.duplicate_percent);
@@ -5533,8 +6060,6 @@ DASHBOARD_HTML = """<!doctype html>
       });
     }
 
-    // The form has no inputs for some randomness details. A profile being edited keeps its own
-    // values for them so that saving never resets them. A new profile gets the defaults.
     function profileFormPayload(base) {
       const keep = (field) => base
         ? Object.assign({}, base[field])
@@ -5590,8 +6115,8 @@ DASHBOARD_HTML = """<!doctype html>
 
     let profileEditRequest = 0;
 
-    // Edit reloads the list first so a profile changed elsewhere is never saved back stale.
     async function editSavedProfile(profileId) {
+      if (typeof guardDraft === "function" && guardDraft("profile-form", () => editSavedProfile(profileId))) return;
       const thisRequest = ++profileEditRequest;
       try {
         await loadProfiles();
@@ -5696,9 +6221,25 @@ DASHBOARD_HTML = """<!doctype html>
         if (savedProfileBusy && savedProfileBusy.id === profile.id && savedProfileBusy.stop === stopping) {
           apply.setAttribute("aria-busy", "true");
         }
+        const duplicate = document.createElement("button");
+        duplicate.type = "button";
+        duplicate.textContent = "Duplicate";
+        duplicate.dataset.profileId = profile.id;
+        duplicate.dataset.action = "duplicate";
+        duplicate.setAttribute("aria-label", "Duplicate " + profile.name);
+        duplicate.addEventListener("click", () => duplicateProfile(profile));
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.textContent = "Delete";
+        remove.dataset.profileId = profile.id;
+        remove.dataset.action = "delete";
+        remove.setAttribute("aria-label", "Delete " + profile.name);
+        remove.addEventListener("click", () => deleteProfile(profile, remove));
         buttons.set(profile.id + "|edit", edit);
         buttons.set(profile.id + "|general", apply);
-        actions.append(edit, apply);
+        buttons.set(profile.id + "|duplicate", duplicate);
+        buttons.set(profile.id + "|delete", remove);
+        actions.append(edit, apply, duplicate, remove);
         row.append(text, actions);
         return row;
       }));
@@ -5736,8 +6277,10 @@ DASHBOARD_HTML = """<!doctype html>
           name: element("device-name").value,
           ipv4_address: element("device-ip").value,
           profile_id: element("device-profile").value,
-          mac_address: element("device-mac").value.trim() || null
+          mac_address: element("device-mac").value.trim() || null,
+          ...(editingDeviceSnapshot ? { expected: editingDeviceSnapshot } : {})
         });
+        if (!formDrafts.has("device-form")) stopEditing("device");
         refreshAfterSuccess("Device saved.");
       } catch (error) {
         showMessage(error.message, "error");
@@ -5783,6 +6326,12 @@ DASHBOARD_HTML = """<!doctype html>
       event.preventDefault();
       try {
         await request("/api/policies", "POST", {
+          version: policyVersion,
+          options: {
+            enabled: element("access-enabled").checked,
+            reject_wifi_joins: element("access-admission").checked,
+            dns_failure_percent: element("dns-failure-percent").valueAsNumber
+          },
           mac: {
             mode: element("mac-mode").value,
             allowlist: commaList("mac-allowlist"),
@@ -5794,7 +6343,7 @@ DASHBOARD_HTML = """<!doctype html>
             blocked_domains: commaList("website-blocklist")
           }
         });
-        refreshAfterSuccess("Access rules saved. Apply the configuration to enforce them.");
+        refreshAfterSuccess("Access rules saved. Choose Apply access rules to enforce them.");
       } catch (error) {
         showMessage(error.message, "error");
       }
@@ -5808,18 +6357,33 @@ DASHBOARD_HTML = """<!doctype html>
         return;
       }
       try {
-        await request("/api/schedules", "POST", {
+        const payload = {
           id: element("schedule-id").value,
-          device_id: element("schedule-device").value,
+          ...scheduleTargetFields(element("schedule-device").value),
           profile_id: element("schedule-profile").value,
           days_of_week: days,
           start_minute: timeToMinute("schedule-start"),
           end_minute: timeToMinute("schedule-end"),
-          enabled: true
-        });
-        refreshAfterSuccess("Schedule saved. Apply the configuration to start it.");
+          enabled: element("schedule-enabled").checked
+        };
+        const submitter = pendingFormSubmitButton;
+        const previewedDraft = formDrafts.get("schedule-form");
+        pendingFormSubmitButton = null;
+        const preview = await request("/api/schedules/preview", "POST", payload);
+        if (preview.overlaps.length && !await confirmWorkflow("Overlapping schedules: " + preview.overlaps.join(", ") + ". " + preview.message + " Save anyway?")) {
+          if (submitter) setButtonBusy(submitter, false);
+          return;
+        }
+        if (formDrafts.get("schedule-form") !== previewedDraft) throw new Error("The form changed during the preview. Review it and save again.");
+        pendingFormSubmitButton = submitter;
+        await request("/api/schedules", "POST", payload);
+        refreshAfterSuccess(element("schedule-enabled").checked
+          ? "Schedule saved. It follows the Pi clock while the configuration is applied."
+          : "Schedule saved as disabled.");
       } catch (error) {
         showMessage(error.message, "error");
+      } finally {
+        if (event.submitter) setButtonBusy(event.submitter, false);
       }
     });
 
@@ -5834,7 +6398,7 @@ DASHBOARD_HTML = """<!doctype html>
         refreshAfterSuccess(
           result.live_applied
             ? "Timer started and the profile is active now."
-            : "Timer saved. Apply the configuration in hardware mode to start it.",
+            : "Timer saved. Apply the configuration to start it.",
         );
       } catch (error) {
         showMessage(error.message, "error");
@@ -5842,6 +6406,7 @@ DASHBOARD_HTML = """<!doctype html>
     });
 
     element("progression-mode").addEventListener("change", syncProgressionMode);
+
     syncProgressionMode();
 
     element("progression-form").addEventListener("submit", async (event) => {
@@ -5865,7 +6430,7 @@ DASHBOARD_HTML = """<!doctype html>
         refreshAfterSuccess(
           result.live_applied
             ? "Progression started and is active now."
-            : "Progression saved. Apply the configuration in hardware mode to start it.",
+            : "Progression saved. Apply the configuration to start it.",
         );
       } catch (error) {
         showMessage(error.message, "error");
@@ -5873,12 +6438,19 @@ DASHBOARD_HTML = """<!doctype html>
     });
 
     element("data-limit-reset-mode").addEventListener("change", () => syncQuotaReset("data-limit"));
+
     element("group-data-limit-reset-mode").addEventListener("change", () => syncQuotaReset("group-data-limit"));
+
     element("service-quota-reset-mode").addEventListener("change", () => syncQuotaReset("service-quota"));
+
     element("time-quota-reset-mode").addEventListener("change", () => syncQuotaReset("time-quota"));
+
     element("service-quota-device").addEventListener("change", () => populateServiceQuotaDomains());
+
     element("time-quota-device").addEventListener("change", () => populateTimeQuotaDomains());
+
     element("check-admin-token").addEventListener("click", checkAdminToken);
+
     element("traffic-rate-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       const button = event.currentTarget.querySelector("button[type='submit']");
@@ -5901,6 +6473,7 @@ DASHBOARD_HTML = """<!doctype html>
         button.disabled = false;
       }
     });
+
     element("admin-token").addEventListener("input", () => {
       adminTokenRevision += 1;
       adminTokenChecking = false;
@@ -5915,12 +6488,14 @@ DASHBOARD_HTML = """<!doctype html>
       element("token-check-status").textContent = "Token changed. Choose Check token to load diagnostics.";
       element("token-check-status").className = "token-check-status";
     });
+
     element("traffic-device").addEventListener("change", () => {
       if (!trafficSamplingAllowed) return;
       resetTrafficHistory();
       element("traffic-status").textContent = "Changing the device view...";
       pollTraffic();
     });
+
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) {
         if (trafficPollTimer !== null) {
@@ -5941,8 +6516,11 @@ DASHBOARD_HTML = """<!doctype html>
       }
       drawTrafficChart();
     });
+
     window.addEventListener("resize", drawTrafficChart);
+
     element("toast-dismiss").addEventListener("click", dismissToast);
+
     element("refresh-diagnostics").addEventListener("click", async (event) => {
       const button = event.currentTarget;
       const tokenRevision = adminTokenRevision;
@@ -5973,6 +6551,7 @@ DASHBOARD_HTML = """<!doctype html>
         button.textContent = "Refresh";
       }
     });
+
     element("download-backup").addEventListener("click", async (event) => {
       const button = event.currentTarget;
       const token = element("admin-token").value.trim();
@@ -6008,9 +6587,13 @@ DASHBOARD_HTML = """<!doctype html>
         button.textContent = "Download backup";
       }
     });
+
     syncQuotaReset("data-limit");
+
     syncQuotaReset("group-data-limit");
+
     syncQuotaReset("service-quota");
+
     syncQuotaReset("time-quota");
 
     element("data-limit-form").addEventListener("submit", async (event) => {
@@ -6053,8 +6636,8 @@ DASHBOARD_HTML = """<!doctype html>
       const name = element("service-list-observed").value;
       if (!name) return;
       const field = element("service-list-hostnames");
-      const present = field.value.split(/[\\s,]+/).filter(Boolean);
-      if (!present.includes(name)) field.value = present.concat(name).join("\\n");
+      const present = field.value.split(/[\s,]+/).filter(Boolean);
+      if (!present.includes(name)) field.value = present.concat(name).join("\n");
     });
 
     element("service-list-form").addEventListener("submit", async (event) => {
@@ -6063,7 +6646,7 @@ DASHBOARD_HTML = """<!doctype html>
         const services = Array.from(
           element("service-list-catalogue").querySelectorAll("input:checked")
         ).map((input) => input.value);
-        const hostnames = element("service-list-hostnames").value.split(/[\\s,]+/).filter(Boolean);
+        const hostnames = element("service-list-hostnames").value.split(/[\s,]+/).filter(Boolean);
         if (!services.length && !hostnames.length) {
           throw new Error("Choose at least one service or enter a hostname.");
         }
@@ -6084,7 +6667,7 @@ DASHBOARD_HTML = """<!doctype html>
     element("service-assignment-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
-        const domains = element("service-assignment-domains").value.split(/[\\s,]+/).filter(Boolean);
+        const domains = element("service-assignment-domains").value.split(/[\s,]+/).filter(Boolean);
         if (!domains.length) throw new Error("Enter at least one HTTPS hostname.");
         const result = await request("/api/service-assignments", "POST", {
           id: element("service-assignment-id").value,
@@ -6189,8 +6772,6 @@ DASHBOARD_HTML = """<!doctype html>
       }
     });
 
-    // Put text on the clipboard. The text may still be on its way: the browser write starts now
-    // because Safari only allows a clipboard write inside the click that asked for it.
     async function copyText(textOrPromise, env) {
       const scope = env || {
         navigator: typeof navigator === "undefined" ? undefined : navigator,
@@ -6544,7 +7125,9 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     element("check-router-password").addEventListener("click", checkRouterPassword);
+
     element("copy-wifi-name").addEventListener("click", () => copyRouterWifi("name"));
+
     element("copy-wifi-password").addEventListener("click", () => copyRouterWifi("password"));
 
     element("sync-router-ap").addEventListener("click", (event) => {
@@ -6558,13 +7141,16 @@ DASHBOARD_HTML = """<!doctype html>
       routerAction("/api/router/wifi", {enabled, confirm_disable: !enabled},
         enabled ? "Turning on router Wi-Fi..." : "Turning off router Wi-Fi...", event.currentTarget);
     });
+
     document.addEventListener("visibilitychange", () => {
       renderRouterWifi();
       scheduleRouterWifiPoll();
     });
 
     element("random-website-device").addEventListener("change", loadRandomWebsiteAnalytics);
+
     element("random-website-days").addEventListener("change", loadRandomWebsiteAnalytics);
+
     element("random-website-refresh").addEventListener("click", loadRandomWebsiteAnalytics);
 
     function pollLiveStatus() {
@@ -6574,19 +7160,1937 @@ DASHBOARD_HTML = """<!doctype html>
       // Another tab or the command line can reset the network so the state is read again.
       if (!document.hidden) loadPrivateDataPanel("state", loadState);
     }
-    window.setInterval(pollLiveStatus, 5000);
-    window.setInterval(() => { if (adminTokenVerified) loadTimers(); }, 5000);
-    window.setInterval(() => { if (adminTokenVerified) loadProgressions(); }, 5000);
-    window.setInterval(() => { if (adminTokenVerified) loadQuotas(); }, 5000);
-    window.setInterval(() => { if (adminTokenVerified) loadObservations(); }, 15000);
 
-    loadHealth().catch((error) => {
-      showMessage(error.message, "error");
+    window.setInterval(pollLiveStatus, 5000);
+
+    function slugify(value) {
+      return value.toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+/, "")
+        .slice(0, 64)
+        .replace(/-+$/, "");
+    }
+
+    function bindAutoId(nameId, idId) {
+      const nameInput = element(nameId);
+      const idInput = element(idId);
+      idInput.addEventListener("input", () => {
+        idInput.dataset.typed = idInput.value ? "true" : "";
+      });
+      nameInput.addEventListener("input", () => {
+        if (idInput.readOnly || idInput.dataset.typed === "true") return;
+        idInput.value = slugify(nameInput.value);
+      });
+    }
+
+    const IMPAIRMENT_FEATURES = [
+      "delay", "jitter", "loss", "bandwidth", "reorder", "duplicate", "corrupt"
+    ];
+
+    const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+    function formatBandwidth(kbit) {
+      if (kbit < 1000) return kbit + " kbit/s";
+      return (kbit / 1000).toFixed(kbit % 1000 ? 1 : 0) + " Mbit/s";
+    }
+
+    function describeImpairment(values) {
+      const parts = [];
+      if (values.delay_ms || values.jitter_ms) {
+        const jitter = values.jitter_ms ? " ± " + values.jitter_ms + " ms" : "";
+        parts.push(values.delay_ms + " ms" + jitter);
+      }
+      if (values.loss_percent) {
+        const bursts = values.loss_burst_packets > 1
+          ? " in bursts of " + values.loss_burst_packets
+          : "";
+        parts.push(values.loss_percent + "% loss" + bursts);
+      }
+      if (values.bandwidth_kbit !== null) parts.push(formatBandwidth(values.bandwidth_kbit));
+      if (values.reorder_percent) parts.push(values.reorder_percent + "% reorder");
+      if (values.duplicate_percent) parts.push(values.duplicate_percent + "% duplicate");
+      if (values.corrupt_percent) parts.push(values.corrupt_percent + "% corrupt");
+      return parts.length ? parts.join(" · ") : "Unchanged";
+    }
+
+    function describeExtras(profile) {
+      const parts = [];
+      if (profile.reroll_interval_seconds) {
+        parts.push("rerolls every " + profile.reroll_interval_seconds + " s");
+      }
+      if (profile.outage_probability) {
+        parts.push(
+          profile.outage_probability + "% outage chance, " +
+          profile.outage_duration_seconds + " s long"
+        );
+      }
+      if (profile.website_mode === "allow_only") parts.push("allows only listed sites");
+      return parts.length ? parts.join(" · ") : "—";
+    }
+
+    function hasAdvancedSettings(profile) {
+      const advancedImpairment = (values) => Boolean(
+        values.reorder_percent || values.duplicate_percent || values.corrupt_percent ||
+        IMPAIRMENT_FEATURES.some((feature) => {
+          const randomness = values[feature + "_randomness"];
+          return randomness.variation_percent !== 0 || randomness.enabled_probability !== 100;
+        })
+      );
+      return Boolean(
+        profile.reroll_interval_seconds || profile.outage_probability ||
+        profile.random_seed !== null || profile.website_mode !== "unrestricted" ||
+        profile.website_domains.length ||
+        advancedImpairment(profile.upload) || advancedImpairment(profile.download)
+      );
+    }
+
+    function tableCell(value) {
+      const cell = document.createElement("td");
+      if (Array.isArray(value)) {
+        const primary = document.createElement("strong");
+        primary.textContent = value[0];
+        const secondary = document.createElement("small");
+        secondary.textContent = value[1];
+        cell.append(primary, secondary);
+      } else {
+        cell.textContent = value;
+      }
+      return cell;
+    }
+
+    function renderTable(containerId, emptyText, headings, rows) {
+      const container = element(containerId);
+      container.replaceChildren();
+      if (!rows.length) {
+        container.textContent = emptyText;
+        return;
+      }
+      const table = document.createElement("table");
+      table.className = "data-table";
+      const headRow = document.createElement("tr");
+      headings.concat([""]).forEach((heading) => {
+        const cell = document.createElement("th");
+        cell.scope = "col";
+        cell.textContent = heading;
+        headRow.appendChild(cell);
+      });
+      const head = document.createElement("thead");
+      head.appendChild(headRow);
+      const body = document.createElement("tbody");
+      rows.forEach(({ cells, actions }) => {
+        const row = document.createElement("tr");
+        cells.forEach((value) => row.appendChild(tableCell(value)));
+        const actionCell = document.createElement("td");
+        const actionGroup = document.createElement("div");
+        actionGroup.className = "row-actions";
+        actions.forEach(([label, onClick]) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = label;
+          button.addEventListener("click", () => onClick(button));
+          actionGroup.appendChild(button);
+        });
+        actionCell.appendChild(actionGroup);
+        row.appendChild(actionCell);
+        body.appendChild(row);
+      });
+      table.append(head, body);
+      container.appendChild(table);
+    }
+
+    function profileName(profileId) {
+      const profile = profiles.find((candidate) => candidate.id === profileId);
+      return profile ? profile.name : profileId;
+    }
+
+    function deviceName(deviceId) {
+      const device = devices.find((candidate) => candidate.id === deviceId);
+      return device ? device.name : deviceId;
+    }
+
+    function scheduleTargetFields(value) {
+      if (value === "everyone-else") {
+        return { device_id: null, group_id: null, everyone_else: true };
+      }
+      const separator = value.indexOf(":");
+      const kind = value.slice(0, separator);
+      const id = value.slice(separator + 1);
+      return {
+        device_id: kind === "device" ? id : null,
+        group_id: kind === "group" ? id : null,
+        everyone_else: false
+      };
+    }
+
+    function scheduleTargetValue(target) {
+      if (target.everyone_else) return "everyone-else";
+      return target.group_id ? "group:" + target.group_id : "device:" + target.device_id;
+    }
+
+    function scheduleTargetName(target) {
+      if (target.everyone_else) return "Everyone else";
+      if (target.group_id) {
+        const group = groups.find((candidate) => candidate.id === target.group_id);
+        return "Group " + (group ? group.name : target.group_id);
+      }
+      return deviceName(target.device_id);
+    }
+
+    function scheduleTargetOptions() {
+      return devices.map((device) => ({
+        group: "Devices",
+        value: "device:" + device.id,
+        label: devicePickerLabel(device)
+      })).concat(
+        groups.map((group) => ({ group: "Groups", value: "group:" + group.id, label: group.name })),
+        [{ group: null, value: "everyone-else", label: "Everyone else" }]
+      );
+    }
+
+    function renderTargetMenus() {
+      ["schedule-device", "scenario-start-target"].forEach((selectId) => {
+        const select = element(selectId);
+        const selected = select.value;
+        const optionGroups = {};
+        select.replaceChildren();
+        scheduleTargetOptions().forEach((choice) => {
+          const option = document.createElement("option");
+          option.value = choice.value;
+          option.textContent = choice.label;
+          if (choice.group && !optionGroups[choice.group]) {
+            optionGroups[choice.group] = document.createElement("optgroup");
+            optionGroups[choice.group].label = choice.group;
+            select.appendChild(optionGroups[choice.group]);
+          }
+          (choice.group ? optionGroups[choice.group] : select).appendChild(option);
+        });
+        // Rebuilding the menu must not change a choice being edited.
+        if (Array.from(select.options).some((option) => option.value === selected)) {
+          select.value = selected;
+        }
+      });
+    }
+
+    function followEveryoneElseProfile(data) {
+      // A schedule can change everyone else's profile at any minute, and the
+      // connected-client list brings the current one with every poll.
+      if ("everyone_else_profile_id" in data) {
+        everyoneElse = { ...everyoneElse, active_profile_id: data.everyone_else_profile_id };
+      }
+    }
+
+    function everyoneElseAssigned() {
+      return Boolean(everyoneElse.profile_id) ||
+        savedSchedules.some((schedule) => schedule.everyone_else && schedule.enabled);
+    }
+
+    function everyoneElseInLiveTraffic() {
+      // A running scenario shapes everyone else too, but only while it runs,
+      // so Getting started leaves it out.
+      return everyoneElseAssigned() || runningScenarios.some((run) => run.everyone_else);
+    }
+
+    function renderProfileTable() {
+      renderTable(
+        "profile-table",
+        "No profiles saved yet.",
+        ["Profile", "Upload", "Download", "Extras"],
+        profiles.map((profile) => ({
+          cells: [
+            [profile.name, profile.id],
+            describeImpairment(profile.upload),
+            describeImpairment(profile.download),
+            describeExtras(profile)
+          ],
+          actions: [
+            ["Edit", () => fillProfileForm(profile)],
+            ["Duplicate", () => duplicateProfile(profile)],
+            ["Delete", (button) => deleteProfile(profile, button)]
+          ]
+        }))
+      );
+    }
+
+    const CONDITION_LABELS = { normal: "Normal", degraded: "Degraded", offline: "Offline" };
+
+    function conditionCell(state) {
+      if (!state) return "—";
+      const reasons = Array.isArray(state.reasons) ? state.reasons : [];
+      const label = CONDITION_LABELS[state.condition] || "—";
+      return [label, reasons.join("; ") || "No network effects"];
+    }
+
+    function deviceConditionCell(deviceId) {
+      // Own keys only: a device may be called "constructor".
+      const known = Object.prototype.hasOwnProperty.call(deviceConditions.devices, deviceId);
+      return conditionCell(known ? deviceConditions.devices[deviceId] : null);
+    }
+
+    function appliedProfileCell(savedProfile, state) {
+      if (!deviceConditions.applied || !state || !state.source) {
+        return [savedProfile, "Saved profile"];
+      }
+      const source = state.source;
+      const names = {
+        profile: "Device profile", "group-profile": "Group profile",
+        schedule: "Schedule", timer: "Timer", scenario: "Scenario",
+        progression: "Progression", "data-limit": "Data limit",
+        "group-data-limit": "Shared data limit", none: "Normal connection"
+      };
+      const details = [names[source.kind] || source.kind, source.label, source.step]
+        .filter(Boolean).join(" · ");
+      const next = state.next_change_at
+        ? " · Next planned change: " + new Date(state.next_change_at).toLocaleString()
+        : "";
+      return [source.profile || source.label || "Normal connection", details + next];
+    }
+
+    function everyoneElseRow() {
+      const condition = deviceConditions.everyone_else || null;
+      if (!everyoneElse.profile_id && !condition) return null;
+      return {
+        cells: [
+          ["Everyone else", "Test Wi-Fi clients that aren't saved or unaffected"],
+          ["Any address", everyoneElse.unaffected_devices.length + " unaffected"],
+          appliedProfileCell(
+            everyoneElse.profile_id ? profileName(everyoneElse.profile_id) : "None", condition
+          ),
+          conditionCell(condition)
+        ],
+        actions: []
+      };
+    }
+
+    function renderDeviceTable() {
+      const rows = devices.map((device) => ({
+        cells: [
+          [device.name, device.id],
+          [device.ipv4_address, device.mac_address || "No MAC address"],
+          appliedProfileCell(profileName(device.profile_id),
+            Object.prototype.hasOwnProperty.call(deviceConditions.devices, device.id)
+              ? deviceConditions.devices[device.id] : null),
+          deviceConditionCell(device.id)
+        ],
+        actions: [
+          ["Open controls", () => openDevice(device.id)],
+          ["Edit", () => fillDeviceForm(device)],
+          ["Delete", (button) => deleteDevice(device, button)]
+        ]
+      }));
+      const others = everyoneElseRow();
+      if (others) rows.push(others);
+      renderTable(
+        "device-table",
+        "No devices assigned yet.",
+        ["Device", "Address", "Profile", "Condition"],
+        rows
+      );
+      renderDeviceCards();
+    }
+
+    function fillImpairment(prefix, values) {
+      element(prefix + "-delay").value = values.delay_ms;
+      element(prefix + "-jitter").value = values.jitter_ms;
+      element(prefix + "-loss").value = values.loss_percent;
+      element(prefix + "-loss-burst").value = values.loss_burst_packets || 0;
+      element(prefix + "-bandwidth").value =
+        values.bandwidth_kbit === null ? "" : values.bandwidth_kbit;
+      element(prefix + "-reorder").value = values.reorder_percent;
+      element(prefix + "-duplicate").value = values.duplicate_percent;
+      element(prefix + "-corrupt").value = values.corrupt_percent;
+      IMPAIRMENT_FEATURES.forEach((feature) => {
+        const randomness = values[feature + "_randomness"];
+        element(prefix + "-" + feature + "-random-variation").value = randomness.variation_percent;
+        element(prefix + "-" + feature + "-random-enabled").value = randomness.enabled_probability;
+      });
+    }
+
+    const DEFAULT_PROFILE_RANDOMNESS = {
+      reroll_interval_randomness: { variation_percent: 0, enabled_probability: 100 },
+      outage_duration_randomness: { variation_percent: 0, enabled_probability: 100 },
+      outage_interval_randomness: { variation_percent: 0, enabled_probability: 100 },
+      website_randomness: { variation_percent: 0, enabled_probability: 100 }
+    };
+
+    let savedProfileRandomness = DEFAULT_PROFILE_RANDOMNESS;
+
+    function fillProfileValues(profile) {
+      savedProfileRandomness = {
+        reroll_interval_randomness: profile.reroll_interval_randomness,
+        outage_duration_randomness: profile.outage_duration_randomness,
+        outage_interval_randomness: profile.outage_interval_randomness,
+        website_randomness: profile.website_randomness
+      };
+      fillImpairment("upload", profile.upload);
+      fillImpairment("download", profile.download);
+      element("profile-seed").value = profile.random_seed === null ? "" : profile.random_seed;
+      element("profile-reroll").value = profile.reroll_interval_seconds;
+      element("profile-reroll-variation").value =
+        profile.reroll_interval_randomness.variation_percent;
+      element("profile-outage-probability").value = profile.outage_probability;
+      element("profile-outage-duration").value = profile.outage_duration_seconds;
+      element("profile-outage-interval").value = profile.outage_interval_seconds;
+      element("profile-website-mode").value = profile.website_mode;
+      element("profile-website-domains").value = profile.website_domains.join(", ");
+      element("profile-website-enabled").value = profile.website_randomness.enabled_probability;
+      element("profile-form").querySelector("details").open = hasAdvancedSettings(profile);
+    }
+
+    const PROFILE_PRESETS = [
+      {
+        name: "Good 4G",
+        upload: { delay_ms: 25, jitter_ms: 5, bandwidth_kbit: 10000 },
+        download: { delay_ms: 25, jitter_ms: 5, bandwidth_kbit: 30000 }
+      },
+      {
+        name: "Congested 4G",
+        upload: { delay_ms: 70, jitter_ms: 40, loss_percent: 1, bandwidth_kbit: 1000 },
+        download: { delay_ms: 70, jitter_ms: 40, loss_percent: 1, bandwidth_kbit: 3000 }
+      },
+      {
+        name: "3G",
+        upload: { delay_ms: 100, jitter_ms: 20, bandwidth_kbit: 330 },
+        download: { delay_ms: 100, jitter_ms: 20, bandwidth_kbit: 780 }
+      },
+      {
+        name: "EDGE (2G)",
+        upload: { delay_ms: 440, jitter_ms: 60, loss_percent: 1, bandwidth_kbit: 200 },
+        download: { delay_ms: 400, jitter_ms: 60, loss_percent: 1, bandwidth_kbit: 240 }
+      },
+      {
+        name: "Satellite",
+        upload: {
+          delay_ms: 300, jitter_ms: 20, loss_percent: 1, loss_burst_packets: 3,
+          bandwidth_kbit: 2000
+        },
+        download: {
+          delay_ms: 300, jitter_ms: 20, loss_percent: 1, loss_burst_packets: 3,
+          bandwidth_kbit: 10000
+        }
+      },
+      {
+        name: "Lossy Wi-Fi",
+        upload: { delay_ms: 5, jitter_ms: 15, loss_percent: 5, loss_burst_packets: 3 },
+        download: { delay_ms: 5, jitter_ms: 15, loss_percent: 5, loss_burst_packets: 3 }
+      },
+      {
+        name: "Train tunnel",
+        upload: {
+          delay_ms: 200, jitter_ms: 80, loss_percent: 3, loss_burst_packets: 5, bandwidth_kbit: 500
+        },
+        download: {
+          delay_ms: 200, jitter_ms: 80, loss_percent: 3, loss_burst_packets: 5, bandwidth_kbit: 1000
+        },
+        outage_probability: 30,
+        outage_duration_seconds: 10,
+        outage_interval_seconds: 60
+      },
+      {
+        name: "Very bad network",
+        upload: {
+          delay_ms: 500, jitter_ms: 100, loss_percent: 10, loss_burst_packets: 2,
+          bandwidth_kbit: 1000
+        },
+        download: {
+          delay_ms: 500, jitter_ms: 100, loss_percent: 10, loss_burst_packets: 2,
+          bandwidth_kbit: 1000
+        }
+      },
+      {
+        name: "Offline",
+        upload: { loss_percent: 100 },
+        download: { loss_percent: 100 }
+      }
+    ];
+
+    function presetImpairment(values) {
+      const impairment = Object.assign({
+        delay_ms: 0,
+        jitter_ms: 0,
+        loss_percent: 0,
+        loss_burst_packets: 0,
+        bandwidth_kbit: null,
+        reorder_percent: 0,
+        duplicate_percent: 0,
+        corrupt_percent: 0
+      }, values);
+      IMPAIRMENT_FEATURES.forEach((feature) => {
+        impairment[feature + "_randomness"] = { variation_percent: 0, enabled_probability: 100 };
+      });
+      return impairment;
+    }
+
+    function applyPreset(preset) {
+      fillProfileValues({
+        ...DEFAULT_PROFILE_RANDOMNESS,
+        upload: presetImpairment(preset.upload),
+        download: presetImpairment(preset.download),
+        random_seed: null,
+        reroll_interval_seconds: 0,
+        outage_probability: preset.outage_probability || 0,
+        outage_duration_seconds: preset.outage_duration_seconds || 0,
+        outage_interval_seconds: preset.outage_interval_seconds || 0,
+        website_mode: "unrestricted",
+        website_domains: []
+      });
+      // Keep the name of a profile that is being edited.
+      if (!element("profile-id").readOnly) {
+        element("profile-name").value = preset.name;
+        element("profile-name").dispatchEvent(new Event("input"));
+      }
+      showMessage(preset.name + " loaded. Adjust it if needed, then save the profile.", "success");
+    }
+
+    function fillDeviceForm(device) {
+      if (guardDraft("device-form", () => fillDeviceForm(device))) return;
+      stopEditing("device");
+      editingDeviceSnapshot = { ...device };
+      element("device-id").value = device.id;
+      element("device-name").value = device.name;
+      element("device-ip").value = device.ipv4_address;
+      element("device-profile").value = device.profile_id;
+      element("device-mac").value = device.mac_address || "";
+      startEditing("device", device.name);
+    }
+
+    async function deleteItem(path, body, successMessage, button) {
+      setButtonBusy(button, true);
+      showMessage("Deleting...", "working");
+      try {
+        await request(path, "POST", body);
+        refreshAfterSuccess(successMessage);
+      } catch (error) {
+        showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
+      }
+    }
+
+    function deleteProfile(profile, button) {
+      if (!window.confirm("Delete the profile " + profile.name + "?")) return;
+      deleteItem("/api/profiles/delete", { id: profile.id }, "Profile deleted.", button);
+    }
+
+    function deleteDevice(device, button) {
+      const question = "Delete " + device.name + "? Its schedules, timers, progressions, " +
+        "limits and browser service profiles are deleted too, and so is a group it is the " +
+        "only member of.";
+      if (!window.confirm(question)) return;
+      deleteItem("/api/devices/delete", { id: device.id }, "Device deleted.", button);
+    }
+
+    function formatMinute(minute) {
+      const hours = String(Math.floor(minute / 60)).padStart(2, "0");
+      return hours + ":" + String(minute % 60).padStart(2, "0");
+    }
+
+    function formatDays(days) {
+      const sorted = [...days].sort((first, second) => first - second);
+      if (sorted.length === 7) return "Every day";
+      const ranges = [];
+      sorted.forEach((day) => {
+        const last = ranges[ranges.length - 1];
+        if (last && day === last[1] + 1) last[1] = day;
+        else ranges.push([day, day]);
+      });
+      return ranges.map(([start, end]) => {
+        if (start === end) return DAY_NAMES[start];
+        return DAY_NAMES[start] + (end === start + 1 ? ", " : "–") + DAY_NAMES[end];
+      }).join(", ");
+    }
+
+    function editSchedule(schedule) {
+      if (guardDraft("schedule-form", () => editSchedule(schedule))) return;
+      element("schedule-id").value = schedule.id;
+      element("schedule-device").value = scheduleTargetValue(schedule);
+      element("schedule-profile").value = schedule.profile_id;
+      document.querySelectorAll(".day-toggle").forEach((button) => {
+        const selected = schedule.days_of_week.includes(Number(button.dataset.day));
+        button.setAttribute("aria-pressed", String(selected));
+      });
+      syncScheduleDays();
+      element("schedule-start").value = formatMinute(schedule.start_minute);
+      element("schedule-end").value = formatMinute(schedule.end_minute);
+      element("schedule-enabled").checked = schedule.enabled;
+      element("schedule-form").scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+
+    let gatewayPersistenceSaved = false;
+
+    let gatewayPersistenceDirty = false;
+
+    let gatewayPersistenceBusy = false;
+
+    let devices = [];
+
+    let editingDeviceSnapshot = null;
+
+    let deviceConditions = { applied: false, devices: {} };
+
+    let everyoneElse = { profile_id: null, unaffected_devices: [] };
+
+    let savedSchedules = [];
+
+    let savedScenarios = [];
+
+    let runningScenarios = [];
+
+    const ACTIVITY_EMPTY_TEXT = "No events yet. Network changes appear here as they happen.";
+
+    let latestActivity = [];
+
+    let activityKey = null;
+
+    let scenarioRunKey = "";
+
+    let scenarioListKey = "";
+
+    let dashboardLoaded = false;
+
+    let gettingStartedKey = "";
+
+    const EVERYONE_ELSE_TRAFFIC = "__everyone_else__";
+
+    const EVERYONE_ELSE_QUEUE_ID = "rule:everyone-else";
+
+    function selectedQueueTotals(queues) {
+      const selectedDevice = element("traffic-device").value;
+      const figures = selectedDevice === "@all"
+        ? Object.keys(queues).filter((id) => id !== EVERYONE_ELSE_TRAFFIC).map((id) => queues[id])
+        : queues[selectedDevice] ? [queues[selectedDevice]] : [];
+      return figures.reduce((totals, current) => ({
+        dropped: totals.dropped + current.upload_dropped + current.download_dropped,
+        queued: totals.queued + current.upload_queued + current.download_queued
+      }), { dropped: 0, queued: 0 });
+    }
+
+    let measurementRuns = [];
+
+    const MEASUREMENT_COLUMNS = [
+      "Run", "Target", "Sent", "Loss", "RTT avg", "RTT p95", "Jitter", "Reordered", "Download"
+    ];
+
+    const MEASUREMENT_COLORS = ["#70b7ff", "#ffa76c", "#70d7a9", "#edc36a", "#c58cff", "#ff8fa3"];
+
+    const ESCAPED_PIPE = "\x5c|";
+
+    function measurementMilliseconds(value) {
+      return value === null || value === undefined ? "—" : value.toFixed(2) + " ms";
+    }
+
+    function measurementRow(run) {
+      const summary = run.summary;
+      return [
+        String(run.label ?? ""),
+        String(run.target ?? ""),
+        String(summary.sent ?? ""),
+        (summary.loss_percent ?? 0).toFixed(1) + "%",
+        measurementMilliseconds(summary.rtt_avg_ms),
+        measurementMilliseconds(summary.rtt_p95_ms),
+        measurementMilliseconds(summary.jitter_ms),
+        String(summary.reordered ?? 0),
+        run.download ? run.download.mbit_per_s.toFixed(2) + " Mbit/s" : "—"
+      ];
+    }
+
+    function measurementMarkdown(runs) {
+      const line = (cells) => "| " + cells.join(" | ") + " |";
+      return [
+        line(MEASUREMENT_COLUMNS),
+        line(MEASUREMENT_COLUMNS.map(() => "---")),
+        ...runs.map((run) => line(
+          measurementRow(run).map((cell) => cell.split("|").join(ESCAPED_PIPE))
+        ))
+      ].join("\n") + "\n";
+    }
+
+    function validMeasurement(run) {
+      const isNumber = (value) => typeof value === "number" && Number.isFinite(value);
+      const isCount = (value) => Number.isInteger(value) && value >= 0;
+      if (
+        !run || typeof run !== "object" || run.format !== "jittersim-measurement" ||
+        run.version !== 1 || typeof run.label !== "string" || typeof run.target !== "string"
+      ) {
+        return false;
+      }
+      const summary = run.summary;
+      if (
+        !summary || typeof summary !== "object" || !isCount(summary.sent) ||
+        !isNumber(summary.loss_percent) || !isCount(summary.reordered ?? 0) ||
+        ["rtt_avg_ms", "rtt_p95_ms", "jitter_ms"].some(
+          (key) => summary[key] !== null && summary[key] !== undefined && !isNumber(summary[key])
+        )
+      ) {
+        return false;
+      }
+      const samples = run.samples ?? [];
+      if (
+        !Array.isArray(samples) ||
+        samples.some((sample) => !sample || typeof sample !== "object" || !isNumber(sample.rtt_ms))
+      ) {
+        return false;
+      }
+      const download = run.download;
+      return download === undefined || download === null ||
+        (typeof download === "object" && isNumber(download.mbit_per_s));
+    }
+
+    function drawMeasurementChart() {
+      const canvas = element("measurement-chart");
+      const bounds = canvas.getBoundingClientRect();
+      if (!bounds.width || !bounds.height) return;
+      const pixelRatio = window.devicePixelRatio || 1;
+      canvas.width = Math.round(bounds.width * pixelRatio);
+      canvas.height = Math.round(bounds.height * pixelRatio);
+      const context = canvas.getContext("2d");
+      if (!context) return;
+      context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+      context.clearRect(0, 0, bounds.width, bounds.height);
+      context.font = "12px system-ui, sans-serif";
+      context.fillStyle = "#91a8c1";
+      const rtts = measurementRuns.flatMap(
+        (run) => (run.samples || []).map((sample) => sample.rtt_ms)
+      );
+      if (!rtts.length) {
+        context.textAlign = "center";
+        context.textBaseline = "middle";
+        const message = measurementRuns.length
+          ? "No replies to draw: every ping was lost."
+          : "Add result files to draw their round trips.";
+        context.fillText(message, bounds.width / 2, bounds.height / 2);
+        return;
+      }
+      const scaleMax = Math.max(...rtts) * 1.1;
+      // Enough decimals that the five labels differ, even below a millisecond.
+      const decimals = Math.max(0, Math.ceil(-Math.log10(scaleMax / 4)));
+      const labels = [0, 1, 2, 3, 4].map((tick) => (scaleMax * tick / 4).toFixed(decimals) + " ms");
+      const labelWidth = Math.max(...labels.map((label) => context.measureText(label).width));
+      const plot = {
+        left: Math.ceil(labelWidth) + 16,
+        right: bounds.width - 14,
+        top: 16,
+        bottom: bounds.height - 30
+      };
+      context.textBaseline = "middle";
+      labels.forEach((label, tick) => {
+        const y = plot.bottom - (plot.bottom - plot.top) * tick / 4;
+        context.strokeStyle = "#263c56";
+        context.lineWidth = 1;
+        context.beginPath();
+        context.moveTo(plot.left, y);
+        context.lineTo(plot.right, y);
+        context.stroke();
+        context.textAlign = "right";
+        context.fillText(label, plot.left - 8, y);
+      });
+      const longest = Math.max(2, ...measurementRuns.map((run) => (run.samples || []).length));
+      measurementRuns.forEach((run, index) => {
+        const color = MEASUREMENT_COLORS[index % MEASUREMENT_COLORS.length];
+        const points = (run.samples || []).map((sample, position) => [
+          plot.left + (plot.right - plot.left) * position / (longest - 1),
+          plot.bottom - (plot.bottom - plot.top) * sample.rtt_ms / scaleMax
+        ]);
+        context.strokeStyle = color;
+        context.lineWidth = 2;
+        context.beginPath();
+        points.forEach(([x, y], position) => {
+          if (position === 0) context.moveTo(x, y);
+          else context.lineTo(x, y);
+        });
+        context.stroke();
+        // A dot for every reply, so a run with a single reply still shows.
+        context.fillStyle = color;
+        points.forEach(([x, y]) => {
+          context.beginPath();
+          context.arc(x, y, 2, 0, 2 * Math.PI);
+          context.fill();
+        });
+      });
+      context.fillStyle = "#91a8c1";
+      context.textAlign = "center";
+      context.textBaseline = "alphabetic";
+      context.fillText(
+        "Replies in the order they arrived", (plot.left + plot.right) / 2, bounds.height - 8
+      );
+    }
+
+    function renderMeasurements() {
+      const container = element("measurement-table");
+      container.replaceChildren();
+      element("copy-measurements").disabled = !measurementRuns.length;
+      element("clear-measurements").disabled = !measurementRuns.length;
+      if (!measurementRuns.length) {
+        container.textContent = "Add result files to compare runs.";
+      } else {
+        const table = document.createElement("table");
+        table.className = "data-table";
+        const headRow = document.createElement("tr");
+        MEASUREMENT_COLUMNS.forEach((heading) => {
+          const cell = document.createElement("th");
+          cell.scope = "col";
+          cell.textContent = heading;
+          headRow.appendChild(cell);
+        });
+        const head = document.createElement("thead");
+        head.appendChild(headRow);
+        const body = document.createElement("tbody");
+        measurementRuns.forEach((run, index) => {
+          const row = document.createElement("tr");
+          measurementRow(run).forEach((value, column) => {
+            const cell = document.createElement("td");
+            if (column === 0) {
+              // The run's color in the chart.
+              const key = document.createElement("i");
+              key.className = "measurement-key";
+              key.style.background = MEASUREMENT_COLORS[index % MEASUREMENT_COLORS.length];
+              cell.appendChild(key);
+            }
+            cell.append(value);
+            row.appendChild(cell);
+          });
+          body.appendChild(row);
+        });
+        table.append(head, body);
+        container.appendChild(table);
+      }
+      drawMeasurementChart();
+    }
+
+    async function loadMeasurementFiles(files) {
+      const loaded = [];
+      for (const file of files) {
+        let run;
+        try {
+          run = JSON.parse(await file.text());
+        } catch (error) {
+          showMessage(file.name + " is not valid JSON.", "error");
+          return;
+        }
+        if (!validMeasurement(run)) {
+          showMessage(file.name + " is not a JitterSim measurement.", "error");
+          return;
+        }
+        loaded.push(run);
+      }
+      measurementRuns = measurementRuns.concat(loaded);
+      renderMeasurements();
+      const added = loaded.length + (loaded.length === 1 ? " run added." : " runs added.");
+      showMessage(added, "success");
+    }
+
+    function mergedTrafficCounters(data) {
+      // Everyone else is one more choice in the menu, under a reserved key.
+      const devices = Object.assign({}, data.devices || {});
+      const queues = Object.assign({}, data.queues || {});
+      if (data.everyone_else) devices[EVERYONE_ELSE_TRAFFIC] = data.everyone_else;
+      if (data.everyone_else_queue) queues[EVERYONE_ELSE_TRAFFIC] = data.everyone_else_queue;
+      return { devices: devices, queues: queues };
+    }
+
+    function gettingStartedSteps(state) {
+      const assigned = state.devices > 0 || Boolean(state.everyoneElseProfile);
+      const steps = [
+        {
+          text: "Create a profile, or start from a preset",
+          tab: "profiles",
+          done: state.profiles > 0
+        },
+        {
+          text: "Connect a device to the test Wi-Fi",
+          tab: null,
+          // Saved settings count too, so the list doesn't return when clients leave.
+          done: state.connected > 0 || assigned
+        },
+        {
+          text: "Give it a profile, or choose one for everyone else",
+          tab: "devices",
+          done: assigned
+        }
+      ];
+      // Configuration-only mode can't apply anything. Any network action counts,
+      // so a later Reset doesn't bring the list back.
+      if (state.canApply) {
+        steps.push({ text: "Apply the configuration", tab: null, done: Boolean(state.lastAction) });
+      }
+      return steps;
+    }
+
+    function renderGettingStarted() {
+      // Before everything has loaded, saved settings would look missing.
+      if (!dashboardLoaded) return;
+      const connected = lastConnectedDevices && Array.isArray(lastConnectedDevices.devices)
+        ? lastConnectedDevices.devices.length
+        : 0;
+      const steps = gettingStartedSteps({
+        profiles: profiles.length,
+        devices: devices.length,
+        connected: connected,
+        everyoneElseProfile: everyoneElseAssigned(),
+        lastAction: lastRuntimeState ? lastRuntimeState.last_action : null,
+        canApply: helperConfigured
+      });
+      element("getting-started").hidden = steps.every((step) => step.done);
+      const list = element("getting-started-steps");
+      const key = JSON.stringify(steps.map((step) => [step.text, step.done]));
+      // Rebuilding on every poll would take keyboard focus away from a link.
+      if (key === gettingStartedKey || list.contains(document.activeElement)) return;
+      gettingStartedKey = key;
+      list.replaceChildren();
+      steps.forEach((step, index) => {
+        const item = document.createElement("li");
+        if (step.done) item.className = "done";
+        const mark = document.createElement("span");
+        mark.className = "step-mark";
+        mark.textContent = step.done ? "✓" : String(index + 1);
+        item.appendChild(mark);
+        if (step.tab && !step.done) {
+          const link = document.createElement("a");
+          link.href = "#" + step.tab;
+          link.textContent = step.text;
+          link.addEventListener("click", (event) => {
+            // The list is out of sight once the tab changes, so focus moves with it.
+            if (followTabLink(event, step.tab)) tabPanel(step.tab).focus();
+          });
+          item.appendChild(link);
+        } else {
+          item.appendChild(document.createTextNode(step.text));
+        }
+        list.appendChild(item);
+      });
+    }
+
+    const CONNECTED_PICKERS = ["unaffected-picker", "device-picker", "mac-picker"];
+
+    function connectedDeviceOptions(devices) {
+      return (devices || [])
+        .filter((device) => device.mac_address)
+        .map((device) => ({
+          value: device.mac_address,
+          label: [
+            device.display_name || "Unnamed client",
+            device.ipv4_address || "no IP address yet",
+            device.mac_address
+          ].join(" · ")
+        }));
+    }
+
+    function pickedDeviceFields(device) {
+      const name = device.saved_display_name || device.hostname ||
+        "Client " + (device.ipv4_address || device.mac_address);
+      return {
+        name: name,
+        ipv4_address: device.ipv4_address || "",
+        mac_address: device.mac_address
+      };
+    }
+
+    function addMacToList(listText, macAddress) {
+      const entries = listText.split(",").map((value) => value.trim()).filter(Boolean);
+      const listed = entries.some((entry) => entry.toLowerCase() === macAddress.toLowerCase());
+      return (listed ? entries : entries.concat([macAddress])).join(", ");
+    }
+
+    function renderConnectedPickers() {
+      const data = lastConnectedDevices || { available: false, devices: [] };
+      const options = connectedDeviceOptions(data.available ? data.devices : []);
+      CONNECTED_PICKERS.forEach((pickerId) => {
+        const picker = element(pickerId);
+        // Rebuilding an open menu would close it under the pointer.
+        if (document.activeElement === picker) return;
+        const selected = picker.value;
+        picker.replaceChildren();
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        if (!data.available) placeholder.textContent = "Connected devices are unavailable";
+        else if (!options.length) placeholder.textContent = "No devices are connected";
+        else placeholder.textContent = "Choose a connected device...";
+        picker.appendChild(placeholder);
+        options.forEach((choice) => {
+          const option = document.createElement("option");
+          option.value = choice.value;
+          option.textContent = choice.label;
+          picker.appendChild(option);
+        });
+        picker.value = options.some((choice) => choice.value === selected) ? selected : "";
+      });
+    }
+
+    function pickedConnectedDevice(pickerId) {
+      const devices = (lastConnectedDevices && lastConnectedDevices.devices) || [];
+      return devices.find((device) => device.mac_address === element(pickerId).value) || null;
+    }
+
+    function fillUnaffectedFromPicker() {
+      const device = pickedConnectedDevice("unaffected-picker");
+      if (!device) return;
+      element("unaffected-mac").value = device.mac_address;
+      element("unaffected-name").value = device.saved_display_name || device.hostname || "";
+    }
+
+    function fillDeviceFromPicker() {
+      const device = pickedConnectedDevice("device-picker");
+      if (!device) return;
+      const fields = pickedDeviceFields(device);
+      element("device-name").value = fields.name;
+      // The ID follows the name unless it was typed by hand or is being edited.
+      element("device-name").dispatchEvent(new Event("input"));
+      element("device-ip").value = fields.ipv4_address;
+      element("device-mac").value = fields.mac_address;
+    }
+
+    function addPickedMac(listId) {
+      const device = pickedConnectedDevice("mac-picker");
+      if (!device) {
+        const available = Boolean(lastConnectedDevices && lastConnectedDevices.available);
+        showMessage(available
+          ? "Choose a connected device first."
+          : "Connected devices are unavailable, so type the address in the list.", "error");
+        return;
+      }
+      element(listId).value = addMacToList(element(listId).value, device.mac_address);
+    }
+
+    function connectedTreatment(device) {
+      const id = device.assigned_device_id;
+      if (typeof deviceConditions !== "undefined" && deviceConditions.applied && id && Object.prototype.hasOwnProperty.call(deviceConditions.devices, id)) {
+        return "Active: " + appliedProfileCell(profileName(device.assigned_profile_id), deviceConditions.devices[id]).join(" · ");
+      }
+      if (device.assigned_profile_id) {
+        const saved = "Saved device: " + profileName(device.assigned_profile_id);
+        // A saved device keeps its own profile even when its address is listed.
+        return device.unaffected ? saved + " (also on the unaffected list)" : saved;
+      }
+      if (device.unaffected) return "Unaffected";
+      // The profile everyone else gets this minute, which a schedule can set.
+      if (everyoneElse.active_profile_id) {
+        return "Everyone else: " + profileName(everyoneElse.active_profile_id);
+      }
+      return "Normal connection";
+    }
+
+    function savedChangeMessage(message, result) {
+      if (result.live_applied !== false) return message;
+      return helperConfigured
+        ? message + " The network is reset, so apply the configuration to use it."
+        : message + " It takes effect when the dashboard runs in hardware mode.";
+    }
+
+    async function keepUnaffected(macAddress, name, button) {
+      if (button) setButtonBusy(button, true);
+      showMessage("Adding " + macAddress + " to the unaffected list...", "working");
+      try {
+        const result = await request("/api/unaffected-devices", "POST", {
+          mac_address: macAddress,
+          name: name
+        });
+        refreshAfterSuccess(savedChangeMessage(
+          "Added " + result.unaffected_device.name + " to the unaffected list.", result
+        ));
+        return true;
+      } catch (error) {
+        showMessage(error.message, "error");
+        return false;
+      } finally {
+        if (button) setButtonBusy(button, false);
+      }
+    }
+
+    function removeUnaffected(macAddress, button) {
+      deleteItem(
+        "/api/unaffected-devices/delete",
+        { mac_address: macAddress },
+        "Removed from the unaffected list.",
+        button
+      );
+    }
+
+    function rerenderConnectedDevices() {
+      // Client labels name the everyone-else profile. Leave an open editor alone.
+      const container = element("connected-devices");
+      const activeElement = document.activeElement;
+      const editing = activeElement && container.contains(activeElement) &&
+        activeElement.matches("input, select");
+      if (lastConnectedDevices && !editing) renderConnectedDevices(lastConnectedDevices);
+    }
+
+    async function loadEveryoneElse() {
+      everyoneElse = await request("/api/everyone-else", "GET");
+      element("everyone-else-profile").value = everyoneElse.profile_id || "";
+      renderDeviceTable();
+      rerenderConnectedDevices();
+      updateTrafficDeviceOptions(devices);
+    }
+
+    function renderGatewayPersistence(data) {
+      const toggle = element("gateway-persistence-toggle");
+      const saveButton = element("gateway-persistence-save");
+      const status = element("gateway-persistence-state");
+      gatewayPersistenceSaved = data.persistence_enabled === true;
+      if (gatewayPersistenceDirty && toggle.checked === gatewayPersistenceSaved) {
+        gatewayPersistenceDirty = false;
+      }
+      if (!gatewayPersistenceDirty) toggle.checked = gatewayPersistenceSaved;
+      saveButton.disabled = gatewayPersistenceBusy || toggle.checked === gatewayPersistenceSaved;
+      status.className = "token-check-status";
+      if (data.state_error) {
+        status.textContent = "The networking helper could not confirm a safe gateway state. Check its service logs.";
+        status.classList.add("error");
+      } else if (data.outage_stop_latched) {
+        status.textContent = "Profiles are stopped after a router outage. Choose Apply after the router is reachable to start them again.";
+      } else if (data.recovery_pending) {
+        status.textContent = "The router is back. The active profiles are being restored.";
+      } else if (data.gateway_state === "unavailable" && data.mode_enabled === true) {
+        status.textContent = "The router is unreachable. Active profiles are being kept in place.";
+      } else if (data.gateway_state === "unavailable") {
+        status.textContent = "The router is unreachable. The helper is applying the saved outage behavior.";
+      } else if (data.gateway_state === "available") {
+        status.textContent = "Router reachable. Saved mode: " + (gatewayPersistenceSaved ? "on" : "off") + ".";
+      } else {
+        status.textContent = data.helper_available === false
+          ? "Gateway checks are available in hardware mode. The saved choice will be used when hardware mode runs."
+          : "Router reachability is unknown. The Pi needs a default gateway before it can check.";
+      }
+      if (data.helper_synced === false && data.helper_available === true && !data.state_error) {
+        status.textContent += " The saved choice has not reached the helper yet.";
+      }
+    }
+
+    async function loadGatewayPersistence() {
+      try {
+        renderGatewayPersistence(await request("/api/gateway-persistence", "GET"));
+      } catch (error) {
+        const status = element("gateway-persistence-state");
+        status.textContent = "Gateway persistence status is unavailable: " + error.message;
+        status.className = "token-check-status error";
+      }
+    }
+
+    async function saveGatewayPersistence() {
+      const toggle = element("gateway-persistence-toggle");
+      const button = element("gateway-persistence-save");
+      const status = element("gateway-persistence-state");
+      gatewayPersistenceBusy = true;
+      setButtonBusy(button, true);
+      toggle.disabled = true;
+      status.textContent = "Saving router outage behavior...";
+      status.className = "token-check-status";
+      try {
+        const result = await request("/api/gateway-persistence", "POST", {
+          persistence_enabled: toggle.checked
+        });
+        gatewayPersistenceDirty = false;
+        renderGatewayPersistence(result);
+        status.textContent = result.message;
+        status.className = "token-check-status " + (result.helper_synced ? "success" : "error");
+        showMessage(result.message, result.helper_synced ? "success" : "error");
+      } catch (error) {
+        status.textContent = error.message;
+        status.className = "token-check-status error";
+        showMessage(error.message, "error");
+      } finally {
+        gatewayPersistenceBusy = false;
+        toggle.disabled = false;
+        setButtonBusy(button, false);
+        button.disabled = !gatewayPersistenceDirty && toggle.checked === gatewayPersistenceSaved;
+      }
+    }
+
+    function formatDuration(seconds) {
+      const hours = Math.floor(seconds / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+      const rest = seconds % 60;
+      return [
+        hours ? hours + " h" : "",
+        minutes ? minutes + " min" : "",
+        rest ? rest + " s" : ""
+      ].filter(Boolean).join(" ") || "0 s";
+    }
+
+    function scenarioSummary(scenario) {
+      const steps = scenario.steps.map((step) =>
+        profileName(step.profile_id) + " " + formatDuration(step.duration_seconds)
+      ).join(" → ");
+      return scenario.loop ? steps + ", repeating" : steps;
+    }
+
+    function scenarioRunText(run) {
+      const ending = run.loop
+        ? "; repeats until stopped"
+        : "; ends in " + formatDuration(run.total_remaining_seconds);
+      return {
+        title: run.target_name + " · " + run.scenario_name,
+        detail: "Step " + (run.step_index + 1) + " of " + run.step_count + ": " +
+          run.profile_name + ", " + formatDuration(run.step_remaining_seconds) +
+          " left in this step" + ending
+      };
+    }
+
+    function scenarioStepRow(step) {
+      const row = document.createElement("div");
+      row.className = "scenario-step";
+      const profileLabel = document.createElement("label");
+      profileLabel.textContent = "Profile";
+      const profileSelect = document.createElement("select");
+      profileSelect.className = "scenario-step-profile";
+      profileSelect.required = true;
+      profiles.forEach((profile) => {
+        const option = document.createElement("option");
+        option.value = profile.id;
+        option.textContent = profile.name + " (" + profile.id + ")";
+        profileSelect.appendChild(option);
+      });
+      if (step.profile_id) profileSelect.value = step.profile_id;
+      profileLabel.appendChild(profileSelect);
+      const fields = [
+        ["Minutes", "minutes", 1440, Math.floor(step.duration_seconds / 60)],
+        ["Seconds", "seconds", 59, step.duration_seconds % 60]
+      ].map(([text, kind, max, value]) => {
+        const label = document.createElement("label");
+        label.textContent = text;
+        const input = document.createElement("input");
+        input.className = "scenario-step-" + kind;
+        input.type = "number";
+        input.min = "0";
+        input.max = String(max);
+        input.value = String(value);
+        label.appendChild(input);
+        return label;
+      });
+      const removeButton = document.createElement("button");
+      removeButton.type = "button";
+      removeButton.textContent = "Remove step";
+      removeButton.addEventListener("click", () => {
+        // A scenario needs at least one step.
+        if (element("scenario-steps").children.length < 2) return;
+        row.remove();
+        renumberScenarioSteps();
+        element("scenario-add-step").focus();
+      });
+      const actions = document.createElement("div");
+      actions.className = "scenario-step-actions";
+      [["up", "Move up"], ["down", "Move down"], ["duplicate", "Duplicate"]].forEach(([action, label]) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.stepAction = action;
+        button.textContent = label;
+        button.addEventListener("click", () => {
+          const container = element("scenario-steps");
+          if (action === "up" && row.previousElementSibling) container.insertBefore(row, row.previousElementSibling);
+          if (action === "down" && row.nextElementSibling) container.insertBefore(row.nextElementSibling, row);
+          if (action === "duplicate" && container.children.length < 20) {
+            const index = Array.from(container.children).indexOf(row);
+            const copy = scenarioStepRow(scenarioStepsFromForm()[index]);
+            row.after(copy);
+            copy.querySelector("select").focus();
+          }
+          renumberScenarioSteps();
+        });
+        actions.appendChild(button);
+      });
+      removeButton.dataset.stepAction = "remove";
+      actions.appendChild(removeButton);
+      row.append(profileLabel, ...fields, actions);
+      return row;
+    }
+
+    function renumberScenarioSteps() {
+      // Every row repeats the same labels, so name each field after its step.
+      Array.from(element("scenario-steps").children).forEach((row, index) => {
+        const step = "Step " + (index + 1);
+        const [profileLabel, minutesLabel, secondsLabel] = row.children;
+        profileLabel.children[0].setAttribute("aria-label", step + " profile");
+        minutesLabel.children[0].setAttribute("aria-label", step + " minutes");
+        secondsLabel.children[0].setAttribute("aria-label", step + " seconds");
+        row.querySelectorAll("[data-step-action]").forEach((button) => {
+          const action = button.dataset.stepAction;
+          button.setAttribute("aria-label", (action === "remove" ? "Remove" : button.textContent) + " step " + (index + 1));
+          const count = element("scenario-steps").children.length;
+          button.disabled = (action === "up" && index === 0) ||
+            (action === "down" && index === count - 1) ||
+            (action === "remove" && count === 1) || (action === "duplicate" && count >= 20);
+        });
+      });
+      element("scenario-add-step").disabled = element("scenario-steps").children.length >= 20;
+      updateScenarioDuration();
+    }
+
+    function updateScenarioDuration() {
+      const steps = scenarioStepsFromForm();
+      const total = steps.reduce((seconds, step) => seconds + step.duration_seconds, 0);
+      element("scenario-duration").textContent = steps.length + (steps.length === 1 ? " step · " : " steps · ") +
+        (Number.isFinite(total) ? formatDuration(total) : "Check step durations") +
+        (element("scenario-loop").checked ? " per repeat" : " total");
+    }
+
+    function renderScenarioSteps(steps) {
+      element("scenario-steps").replaceChildren(...steps.map(scenarioStepRow));
+      renumberScenarioSteps();
+    }
+
+    function scenarioStepsFromForm() {
+      const rows = element("scenario-steps").querySelectorAll(".scenario-step");
+      return Array.from(rows).map((row) => ({
+        profile_id: row.querySelector(".scenario-step-profile").value,
+        duration_seconds: Number(row.querySelector(".scenario-step-minutes").value || 0) * 60 +
+          Number(row.querySelector(".scenario-step-seconds").value || 0)
+      }));
+    }
+
+    function editScenario(scenario) {
+      if (guardDraft("scenario-form", () => editScenario(scenario))) return;
+      element("scenario-id").value = scenario.id;
+      element("scenario-name").value = scenario.name;
+      element("scenario-loop").checked = scenario.loop;
+      renderScenarioSteps(scenario.steps);
+      element("scenario-form").scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+
+    function renderScenarioRuns(runs) {
+      const list = element("scenario-run-list");
+      const key = runs.map((run) => run.id).join(",");
+      element("scenario-count").textContent = runs.length
+        ? runs.length + " running"
+        : "None running";
+      if (key && key === scenarioRunKey) {
+        // Update the text in place, so a focused Stop button keeps its focus.
+        runs.forEach((run, index) => {
+          const text = scenarioRunText(run);
+          const row = list.children[index];
+          row.querySelector(".timer-details strong").textContent = text.title;
+          row.querySelector(".timer-details span").textContent = text.detail;
+        });
+        return;
+      }
+      scenarioRunKey = key;
+      list.replaceChildren();
+      if (!runs.length) {
+        list.textContent = "No running scenarios.";
+        return;
+      }
+      runs.forEach((run) => {
+        const text = scenarioRunText(run);
+        const row = document.createElement("div");
+        row.className = "timer-row";
+        const details = document.createElement("div");
+        details.className = "timer-details";
+        const title = document.createElement("strong");
+        title.textContent = text.title;
+        const detail = document.createElement("span");
+        detail.textContent = text.detail;
+        details.append(title, detail);
+        const stopButton = document.createElement("button");
+        stopButton.type = "button";
+        stopButton.textContent = "Stop";
+        stopButton.addEventListener("click", () => stopScenario(run.id, stopButton));
+        row.append(details, stopButton);
+        list.appendChild(row);
+      });
+    }
+
+    function renderSavedScenarios() {
+      // Polls with the same scenarios leave the list and the open menu alone.
+      const key = JSON.stringify([savedScenarios, profiles.map((profile) => profile.name)]);
+      if (key === scenarioListKey) return;
+      scenarioListKey = key;
+      const list = element("scenario-list");
+      list.replaceChildren();
+      if (!savedScenarios.length) list.textContent = "No scenarios yet.";
+      savedScenarios.forEach((scenario) => {
+        const row = document.createElement("div");
+        row.className = "schedule-row";
+        const text = document.createElement("div");
+        const name = document.createElement("span");
+        name.textContent = scenario.name;
+        const summary = document.createElement("small");
+        summary.textContent = scenarioSummary(scenario) + " · " + scenario.id;
+        text.append(name, summary);
+        const actions = document.createElement("div");
+        actions.className = "row-actions";
+        const editButton = document.createElement("button");
+        editButton.type = "button";
+        editButton.textContent = "Edit";
+        editButton.addEventListener("click", () => editScenario(scenario));
+        const deleteButton = document.createElement("button");
+        deleteButton.type = "button";
+        deleteButton.textContent = "Delete";
+        deleteButton.addEventListener("click", () => deleteItem(
+          "/api/scenarios/delete", { id: scenario.id }, "Scenario deleted.", deleteButton
+        ));
+        actions.append(editButton, deleteButton);
+        row.append(text, actions);
+        list.appendChild(row);
+      });
+      const select = element("scenario-start-scenario");
+      const selected = select.value;
+      select.replaceChildren();
+      savedScenarios.forEach((scenario) => {
+        const option = document.createElement("option");
+        option.value = scenario.id;
+        option.textContent = scenario.name;
+        select.appendChild(option);
+      });
+      if (savedScenarios.some((scenario) => scenario.id === selected)) select.value = selected;
+    }
+
+    async function loadScenarios() {
+      try {
+        const data = await request("/api/scenarios", "GET");
+        const hadEveryoneElse = runningScenarios.some((run) => run.everyone_else);
+        savedScenarios = data.scenarios;
+        runningScenarios = data.runs;
+        renderSavedScenarios();
+        renderScenarioRuns(data.runs);
+        // Live traffic offers Everyone else while its scenario runs.
+        if (runningScenarios.some((run) => run.everyone_else) !== hadEveryoneElse) {
+          updateTrafficDeviceOptions(devices);
+        }
+      } catch (error) {
+        recordRead("/api/scenarios", error);
+      }
+    }
+
+    async function stopScenario(runId, button) {
+      setButtonBusy(button, true);
+      showMessage("Stopping the scenario...", "working");
+      try {
+        const result = await request("/api/scenarios/stop", "POST", { id: runId });
+        refreshAfterSuccess(savedChangeMessage("Scenario stopped.", result));
+      } catch (error) {
+        showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
+      }
+    }
+
+    function formatActivityTime(seconds) {
+      const moment = new Date(seconds * 1000);
+      const pad = (value) => String(value).padStart(2, "0");
+      return moment.getFullYear() + "-" + pad(moment.getMonth() + 1) + "-" +
+        pad(moment.getDate()) + " " + pad(moment.getHours()) + ":" +
+        pad(moment.getMinutes()) + ":" + pad(moment.getSeconds());
+    }
+
+    function activityMarkdown(events) {
+      // Oldest first, as a report reads. A cell can't hold a line break, and a
+      // device name must not format the report: backslashes are escaped first,
+      // so they can't undo the escapes after them.
+      const backslash = String.fromCharCode(92);
+      const cell = (text) => ["|", "*", "_", "`", "~", "<", ">", "[", "]"].reduce(
+        (escaped, mark) => escaped.split(mark).join(backslash + mark),
+        text.split(backslash).join(backslash + backslash)
+      ).replace(/\s+/g, " ");
+      const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || "local time";
+      const rows = events.slice().reverse().map((event) => "| " +
+        formatActivityTime(event.happened_at) + " | " + cell(event.message) + " |");
+      return ["| Time (" + zone + ") | Event |", "| --- | --- |"].concat(rows).join("\n");
+    }
+
+    function filteredActivity() {
+      const kind = element("activity-kind").value;
+      const search = element("activity-search").value.trim().toLocaleLowerCase();
+      return latestActivity.filter((event) => (!kind || event.kind === kind) &&
+        (!search || event.message.toLocaleLowerCase().includes(search)));
+    }
+
+    function renderActivity(events) {
+      latestActivity = events;
+      events = filteredActivity();
+      element("activity-count").textContent = events.length + " of " + latestActivity.length + " events";
+      const empty = element("activity-empty");
+      empty.textContent = latestActivity.length ? "No events match these filters." : ACTIVITY_EMPTY_TEXT;
+      empty.hidden = events.length > 0;
+      const list = element("activity-list");
+      list.replaceChildren();
+      events.forEach((event) => {
+        const item = document.createElement("li");
+        const time = document.createElement("time");
+        time.dateTime = new Date(event.happened_at * 1000).toISOString();
+        time.textContent = formatActivityTime(event.happened_at);
+        const message = document.createElement("span");
+        message.textContent = event.message;
+        item.append(time, message);
+        (event.device_ids || []).forEach(id => {
+          const device = devices.find(candidate => candidate.id === id);
+          if (device) item.append(actionButton("Open " + device.name, () => openDevice(id)));
+        });
+        list.appendChild(item);
+      });
+    }
+
+    async function loadActivity() {
+      try {
+        const latest = await request("/api/activity/latest", "GET");
+        const key = latest.newest_id + ":" + latest.count;
+        // Polls without a new event, or a clear, leave the list and where it is
+        // scrolled alone, and skip downloading it again.
+        if (key === activityKey) return;
+        renderActivity((await request("/api/activity", "GET")).events);
+        activityKey = key;
+      } catch (error) {
+        recordRead("/api/activity/latest", error);
+      }
+    }
+
+    async function copyActivity() {
+      const markdown = activityMarkdown(filteredActivity());
+      const box = element("activity-markdown");
+      try {
+        await navigator.clipboard.writeText(markdown);
+        box.hidden = true;
+        showMessage("Copied the activity log as Markdown.", "success");
+      } catch (error) {
+        // Browsers open the clipboard only to secure pages, so offer the text.
+        box.value = markdown;
+        box.hidden = false;
+        box.focus();
+        box.select();
+        showMessage("The Markdown is selected below. Copy it with Ctrl+C or ⌘C.", "success");
+      }
+    }
+
+    function downloadActivity() {
+      const url = URL.createObjectURL(new Blob([activityMarkdown(filteredActivity())], { type: "text/markdown;charset=utf-8" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "jittersim-activity.md";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    async function clearActivity(button) {
+      if (!window.confirm("Clear every event, including those hidden by filters? This can't be undone.")) return;
+      setButtonBusy(button, true);
+      try {
+        await request("/api/activity/clear", "POST", {});
+        element("activity-markdown").hidden = true;
+        await loadActivity();
+        showMessage("Activity log cleared.", "success");
+      } catch (error) {
+        showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
+      }
+    }
+
+    async function loadConditions() {
+      try {
+        deviceConditions = await request("/api/conditions", "GET");
+        element("device-conditions-note").textContent = deviceConditions.applied
+          ? "Profiles and conditions show what the network applies now. Planned times use your browser clock. Traffic limits and outages may change conditions sooner."
+          : "Conditions show the saved settings. The network does not apply them yet.";
+      } catch (error) {
+        recordRead("/api/conditions", error);
+        element("device-conditions-note").textContent = "Out of date: " + error.message;
+      }
+      renderDeviceTable();
+      refreshConnectedTreatments();
+    }
+
+    let dashboardRefresh = null;
+
+    let dashboardPoll = null;
+
+    let refreshAgain = false;
+
+    const TAB_PAGES = {
+      overview: "devices",
+      devices: "devices",
+      profiles: "profiles",
+      rules: "schedules",
+      measurements: "measurements",
+      setup: "router",
+      diagnostics: "diagnostics"
+    };
+
+    function tabPanel(name) {
+      return element("page-" + (TAB_PAGES[name] || name));
+    }
+
+    function currentPage() {
+      return document.body.dataset.section || "devices";
+    }
+
+    function showTab(name) {
+      const page = TAB_PAGES[name] || name;
+      showPage(page, true);
+      if (window.location.hash !== "#" + page) window.history.replaceState(null, "", "#" + page);
+    }
+
+    function showRuleSection(name) {
+      showTab(name === "access" ? "access" : "rules");
+    }
+
+    function followTabLink(event, name) {
+      // A modified click opens the page in a new browser tab instead.
+      if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey ||
+          event.altKey) {
+        return false;
+      }
+      event.preventDefault();
+      const page = TAB_PAGES[name] || name;
+      // pushState keeps Back working without jumping to an element with that ID.
+      if (window.location.hash !== "#" + page) window.history.pushState(null, "", "#" + page);
+      showPage(page, true);
+      return true;
+    }
+
+    function noticeAnchor() {
+      return element("mode-notice");
+    }
+
+    async function refreshDashboard() {
+      await loadPrivateDataPanel("profiles", loadProfiles);
+      await loadHealth();
+      await loadObservations();
+      // Device and group names are needed by the schedule list and the device table.
+      await loadDevicesForSchedule();
+      const results = await Promise.allSettled([
+        loadPrivateDataPanel("devices", () => show("/api/devices", "devices", "devices")),
+        loadPrivateDataPanel("plan", () => show("/api/plan", "plan", "plan")),
+        loadPrivateDataPanel("state", loadState),
+        loadPrivateDataPanel("general-profile-status", loadGeneralProfile),
+        loadGroups(),
+        loadSchedules(),
+        loadTimers(),
+        loadScenarios(),
+        loadActivity(),
+        loadProgressions(),
+        loadPrivateDataPanel("policies", loadPolicies),
+        loadConnectedDevices(),
+        loadUnaffectedDevices(),
+        loadUplink(),
+        loadGatewayPersistence(),
+        loadQuotas(),
+        loadServiceAssignments(),
+        loadServiceLists(),
+        loadConditions(),
+        loadEveryoneElse(),
+        loadAdminTools(),
+        loadDashboardAccessList(),
+        loadTestSessions(),
+        loadSettingsHistory()
+      ]);
+      const failed = results.find((result) => result.status === "rejected");
+      if (failed) throw failed.reason;
+      // The saved update preference is read once the token has opened the page.
+      if (!dashboardLoaded) await loadUpdateCheckPreference();
+      dashboardLoaded = true;
+      renderGettingStarted();
+      populateWorkflowMenus();
+      populateAccessTargets();
+      await loadWorkspace();
+    }
+
+    function startEditing(prefix, label) {
+      element(prefix + "-id").readOnly = true;
+      const status = element(prefix + "-edit-status");
+      if (status) status.textContent = "Editing " + label + ". Save to update it.";
+      const editBar = element(prefix + "-edit-bar");
+      if (editBar) editBar.hidden = false;
+      revealElement(element(prefix + "-form"));
+    }
+
+    function stopEditing(prefix) {
+      formDrafts.delete(prefix + "-form");
+      renderDraftNotice();
+      if (prefix === "device") editingDeviceSnapshot = null;
+      element(prefix + "-form").reset();
+      if (prefix === "profile") resetProfileEditing();
+      else element(prefix + "-id").readOnly = false;
+      element(prefix + "-id").dataset.typed = "";
+      const editBar = element(prefix + "-edit-bar");
+      if (editBar) editBar.hidden = true;
+    }
+
+    function describeConnectedRow(device, details) {
+      // The device controls and the treatment line from main join the row.
+      if (device.assigned_device_id) {
+        const open = document.createElement("button");
+        open.type = "button";
+        open.textContent = "Open device controls";
+        open.addEventListener("click", () => openDevice(device.assigned_device_id));
+        details.appendChild(open);
+      }
+      const treatment = document.createElement("p");
+      treatment.className = "connected-meta connected-treatment";
+      treatment.dataset.mac = device.mac_address;
+      treatment.textContent = connectedTreatment(device);
+      details.appendChild(treatment);
+    }
+
+    function followProfileMenus() {
+      // Rebuilding a menu drops its choice, and saving None would clear the profile.
+      element("everyone-else-profile").value = everyoneElse.profile_id || "";
+      // The step menus list the profiles too; keep the steps being edited.
+      const steps = scenarioStepsFromForm();
+      renderScenarioSteps(steps.length ? steps : [{ profile_id: "", duration_seconds: 60 }]);
+    }
+
+    function followSavedDevices(list) {
+      devices = list;
+      renderDeviceTable();
+      renderTargetMenus();
+    }
+
+    async function pollDashboard() {
+      if (document.hidden || !adminTokenVerified || !dashboardLoaded || dashboardRefresh || dashboardPoll) return;
+      dashboardPoll = (async () => {
+        // Only read changing data on the visible page. Do not overwrite forms.
+        const page = currentPage();
+        const jobs = [loadHealth];
+        if (page === "devices") jobs.push(loadDevicesForSchedule, loadConditions, loadWorkspace, loadAccessStatus);
+        if (page === "schedules") jobs.push(loadTimers, loadScenarios, loadProgressions, loadSchedules, loadQuotas);
+        if (page === "traffic") jobs.push(loadObservations);
+        if (page === "access") jobs.push(loadObservations, loadAccessStatus);
+        if (page === "activity") jobs.push(loadActivity);
+        if (page === "measurements") jobs.push(loadTestSessions);
+        if (page === "router") jobs.push(loadUplink, loadGatewayPersistence, pollReleaseProgress);
+        const results = await Promise.allSettled(jobs.map((job) => job()));
+        if (results.some((result) => result.status === "rejected")) {
+          element("runtime-summary").textContent = "Some status updates could not load. Retrying shortly.";
+        }
+      })();
+      try {
+        await dashboardPoll;
+      } finally {
+        dashboardPoll = null;
+      }
+    }
+
+    async function startDashboard() {
+      // The admin token gates everything else, so only the public health check
+      // and remembered credentials run before Check token.
+      updateCredentialViewport();
+      updateCredentialStatus();
+      try {
+        await loadHealth();
+      } catch (error) {
+        showMessage(error.message, "error");
+      }
+      await restoreRememberedCredentials();
+    }
+
+    [
+      ["profile-name", "profile-id"],
+      ["device-name", "device-id"],
+      ["group-name", "group-id"],
+      ["service-quota-name", "service-quota-id"],
+      ["time-quota-name", "time-quota-id"]
+    ].forEach(([nameId, idId]) => bindAutoId(nameId, idId));
+
+    PROFILE_PRESETS.forEach((preset, index) => {
+      const option = document.createElement("option");
+      option.value = String(index);
+      option.textContent = preset.name;
+      element("profile-preset").appendChild(option);
     });
-    restoreRememberedCredentials();
+
+    element("profile-preset").addEventListener("change", (event) => {
+      const preset = PROFILE_PRESETS[Number(event.target.value)];
+      event.target.value = "";
+      if (preset) applyPreset(preset);
+    });
+
+    element("everyone-else-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const profileId = element("everyone-else-profile").value || null;
+      try {
+        const result = await request("/api/everyone-else", "POST", { profile_id: profileId });
+        refreshAfterSuccess(savedChangeMessage(
+          profileId
+            ? "Everyone else now gets " + profileName(profileId) + "."
+            : "Everyone else now gets a normal connection.",
+          result
+        ));
+      } catch (error) {
+        showMessage(error.message, "error");
+      }
+    });
+
+    element("activity-copy").addEventListener("click", copyActivity);
+
+    element("activity-clear").addEventListener("click", (event) => {
+      clearActivity(event.currentTarget);
+    });
+
+    element("activity-kind").addEventListener("change", () => renderActivity(latestActivity));
+
+    element("activity-search").addEventListener("input", () => renderActivity(latestActivity));
+
+    element("activity-download").addEventListener("click", downloadActivity);
+
+    element("scenario-steps").addEventListener("input", updateScenarioDuration);
+
+    element("scenario-loop").addEventListener("change", updateScenarioDuration);
+
+    element("scenario-add-step").addEventListener("click", () => {
+      if (element("scenario-steps").children.length >= 20) return;
+      element("scenario-steps").appendChild(
+        scenarioStepRow({ profile_id: "", duration_seconds: 60 })
+      );
+      renumberScenarioSteps();
+    });
+
+    element("scenario-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const result = await request("/api/scenarios", "POST", {
+          id: element("scenario-id").value,
+          name: element("scenario-name").value,
+          steps: scenarioStepsFromForm(),
+          loop: element("scenario-loop").checked
+        });
+        refreshAfterSuccess(savedChangeMessage("Scenario saved.", result));
+      } catch (error) {
+        showMessage(error.message, "error");
+      }
+    });
+
+    element("scenario-start-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        const result = await request("/api/scenarios/start", "POST", {
+          scenario_id: element("scenario-start-scenario").value,
+          ...scheduleTargetFields(element("scenario-start-target").value)
+        });
+        refreshAfterSuccess(savedChangeMessage("Scenario started.", result));
+      } catch (error) {
+        showMessage(error.message, "error");
+      }
+    });
+
+    element("profile-form").addEventListener("reset", () => {
+      savedProfileRandomness = DEFAULT_PROFILE_RANDOMNESS;
+    });
+
+    element("device-cancel-edit").addEventListener("click", () => stopEditing("device"));
+
+    element("export-settings").addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      setButtonBusy(button, true);
+      showMessage("Preparing the settings export...", "working");
+      try {
+        const settings = await request("/api/export", "GET");
+        const file = new Blob(
+          [JSON.stringify(settings, null, 2) + "\n"], { type: "application/json" }
+        );
+        const url = URL.createObjectURL(file);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "jittersim-settings.json";
+        link.click();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+        showMessage("Settings exported.", "success");
+      } catch (error) {
+        showMessage(error.message, "error");
+      } finally {
+        setButtonBusy(button, false);
+      }
+    });
+
+    element("import-settings-button").addEventListener("click", () => {
+      element("import-settings").click();
+    });
+
+    element("measurement-files").addEventListener("change", async (event) => {
+      const input = event.currentTarget;
+      const files = Array.from(input.files);
+      input.value = "";
+      if (files.length) await loadMeasurementFiles(files);
+    });
+
+    element("copy-measurements").addEventListener("click", () => {
+      copyReport(measurementMarkdown(measurementRuns), "Measurement table");
+    });
+
+    element("clear-measurements").addEventListener("click", () => {
+      measurementRuns = [];
+      renderMeasurements();
+    });
+
+    window.addEventListener("resize", drawMeasurementChart);
+
+    renderMeasurements();
+
+    element("import-settings").addEventListener("change", async (event) => {
+      const input = event.currentTarget;
+      const file = input.files[0];
+      input.value = "";
+      if (!file) return;
+      const question = "Replace every profile, device, group, schedule, access rule and limit " +
+        "with the settings in " + file.name + "?";
+      if (!window.confirm(question)) return;
+      showMessage("Importing settings...", "working");
+      let settings;
+      try {
+        settings = JSON.parse(await file.text());
+      } catch (error) {
+        showMessage(file.name + " is not a JSON settings export.", "error");
+        return;
+      }
+      try {
+        const result = await request("/api/import", "POST", settings);
+        refreshAfterSuccess(
+          result.live_applied ? "Settings imported and applied." : "Settings imported."
+        );
+      } catch (error) {
+        showMessage(error.message, "error");
+      }
+    });
+
+    element("gateway-persistence-toggle").addEventListener("change", (event) => {
+      gatewayPersistenceDirty = event.currentTarget.checked !== gatewayPersistenceSaved;
+      element("gateway-persistence-save").disabled = !gatewayPersistenceDirty || gatewayPersistenceBusy;
+    });
+
+    element("gateway-persistence-save").addEventListener("click", saveGatewayPersistence);
+
+    window.setInterval(pollDashboard, 5000);
+
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) pollDashboard(); });
+
+    element("unaffected-picker").addEventListener("change", fillUnaffectedFromPicker);
+
+    element("device-picker").addEventListener("change", fillDeviceFromPicker);
+
+    element("mac-add-allowed").addEventListener("click", () => addPickedMac("mac-allowlist"));
+
+    element("mac-add-blocked").addEventListener("click", () => addPickedMac("mac-denylist"));
+
+    document.querySelectorAll("[data-refresh-connected]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        setButtonBusy(button, true);
+        try {
+          await loadConnectedDevices();
+        } finally {
+          setButtonBusy(button, false);
+        }
+      });
+    });
+
+    connectedRowHooks.push(describeConnectedRow);
+
+    connectedRenderHooks.push(() => { renderGettingStarted(); renderConnectedPickers(); });
+
+    connectedDataHooks.push(followEveryoneElseProfile);
+
+    profilesLoadedHooks.push(followProfileMenus);
+
+    runtimeStateHooks.push(() => renderGettingStarted());
+
+    savedDevicesHooks.push(followSavedDevices);
+
+    groupsLoadedHooks.push(renderTargetMenus);
+
+    startDashboard();
   </script>
   <script>
-    const PAGES = ["devices", "profiles", "schedules", "router", "traffic", "access", "diagnostics"];
+    const PAGES = [
+      "devices", "profiles", "schedules", "router", "traffic", "measurements", "activity",
+      "access", "diagnostics"
+    ];
 
     function pageFromHash(hash) {
       const id = String(hash || "").replace(/^#/, "");
@@ -6609,7 +9113,10 @@ DASHBOARD_HTML = """<!doctype html>
       });
       document.body.dataset.section = id;
       if (userInitiated) window.scrollTo(0, 0);
+      // A chart drawn while its page was hidden has no size, so draw it again.
       if (id === "traffic" && typeof drawTrafficChart === "function") drawTrafficChart();
+      if (id === "measurements" && typeof drawMeasurementChart === "function") drawMeasurementChart();
+      if (userInitiated && typeof pollDashboard === "function") pollDashboard();
     }
 
     function storedCardState(key) {
@@ -6683,6 +9190,38 @@ DASHBOARD_HTML = """<!doctype html>
 """
 
 
+DASHBOARD_HTML = DASHBOARD_HTML.replace("</style>", Path(__file__).with_name("workflows.css").read_text(encoding="utf-8") + "</style>", 1)
+DASHBOARD_HTML = DASHBOARD_HTML.replace("    startDashboard();", Path(__file__).with_name("workflows.js").read_text(encoding="utf-8") + "\n    startDashboard();")
+DASHBOARD_HTML = DASHBOARD_HTML.replace("</style>", Path(__file__).with_name("access.css").read_text(encoding="utf-8") + "</style>", 1)
+DASHBOARD_HTML = DASHBOARD_HTML.replace("    startDashboard();", Path(__file__).with_name("access.js").read_text(encoding="utf-8") + "\n    startDashboard();")
+
+
+def _inline_source_hashes(tag: str, page: str = DASHBOARD_HTML) -> str:
+    """Hash every inline <tag> block so the policy allows each of them."""
+
+    hashes = []
+    for content in re.findall(rf"<{tag}>(.*?)</{tag}>", page, re.DOTALL):
+        digest = hashlib.sha256(content.encode("utf-8")).digest()
+        hashes.append("'sha256-" + base64.b64encode(digest).decode("ascii") + "'")
+    return " ".join(hashes)
+
+
+# The dashboard may run only its own inline script and style, and talk only
+# to this server.
+DASHBOARD_CONTENT_SECURITY_POLICY = "; ".join(
+    (
+        "default-src 'none'",
+        f"script-src {_inline_source_hashes('script')}",
+        f"style-src {_inline_source_hashes('style')}",
+        "connect-src 'self'",
+        "img-src 'self' data:",
+        "base-uri 'none'",
+        "form-action 'self'",
+        "frame-ancestors 'none'",
+    )
+)
+
+
 def _impairment_payload(impairment: Impairment) -> Dict[str, Any]:
     return asdict(impairment)
 
@@ -6753,6 +9292,7 @@ def _connected_device_payload(
     *,
     assignments_by_address: Dict[str, Device],
     labels_by_mac: Dict[str, Dict[str, str]],
+    unaffected_macs: frozenset = frozenset(),
 ) -> Dict[str, Any]:
     """Add saved display details and any matching profile to one station."""
 
@@ -6785,6 +9325,7 @@ def _connected_device_payload(
         "assigned_device_id": assignment.id if assignment is not None else None,
         "assigned_device_name": assignment.name if assignment is not None else None,
         "assigned_profile_id": assignment.profile_id if assignment is not None else None,
+        "unaffected": mac_address in unaffected_macs,
     }
 
 
@@ -6818,6 +9359,47 @@ def _schedule_payload(schedule: Schedule) -> Dict[str, Any]:
 
 def _timer_payload(timer: Timer) -> Dict[str, Any]:
     return asdict(timer)
+
+
+def _scenario_payload(scenario: Scenario) -> Dict[str, Any]:
+    return {
+        "id": scenario.id,
+        "name": scenario.name,
+        "steps": [
+            {"profile_id": step.profile_id, "duration_seconds": step.duration_seconds}
+            for step in scenario.steps
+        ],
+        "loop": scenario.loop,
+        "total_seconds": scenario.total_seconds,
+    }
+
+
+def _scenario_run_payload(
+    run: ScenarioRun, scenario: Scenario, position: Any, *, repository: ConfigRepository
+) -> Dict[str, Any]:
+    """Describe one running scenario, its current step and the time left."""
+
+    if run.device_id is not None:
+        device = repository.get_device(run.device_id)
+        target_name = device.name if device is not None else run.device_id
+    elif run.group_id is not None:
+        group = repository.get_device_group(run.group_id)
+        target_name = "Group " + (group.name if group is not None else run.group_id)
+    else:
+        target_name = "Everyone else"
+    profile = repository.get_profile(position.profile_id)
+    return {
+        **asdict(run),
+        "scenario_name": scenario.name,
+        "target_name": target_name,
+        "loop": scenario.loop,
+        "step_index": position.step_index,
+        "step_count": len(scenario.steps),
+        "profile_id": position.profile_id,
+        "profile_name": profile.name if profile is not None else position.profile_id,
+        "step_remaining_seconds": position.step_remaining_seconds,
+        "total_remaining_seconds": position.total_remaining_seconds,
+    }
 
 
 def _data_limit_payload(
@@ -6992,6 +9574,42 @@ def _policies_payload(repository: ConfigRepository) -> Dict[str, Any]:
     return {
         "mac": asdict(mac_policy),
         "websites": asdict(website_policy),
+        "options": asdict(repository.get_access_options()),
+        "site_blocks": [asdict(rule) for rule in repository.list_site_blocks()],
+        "version": repository.get_runtime_state().configuration_version,
+    }
+
+
+def _everyone_else_now(repository: ConfigRepository) -> Tuple[Optional[str], Optional[str]]:
+    """Return the profile everyone else gets now and the schedule giving it, if any.
+
+    This is the settings' answer in the Pi's local time; the scheduler applies
+    it while the network runs. A running scenario wins over schedules.
+    """
+
+    for run, _, position in active_scenario_runs(repository, now=time.time()):
+        if run.everyone_else:
+            return position.profile_id, None
+    schedule = active_schedule(
+        schedules=repository.list_schedules(),
+        everyone_else=True,
+        moment=datetime.fromtimestamp(time.time()),
+    )
+    if schedule is not None:
+        return schedule.profile_id, schedule.id
+    return repository.get_everyone_else_profile_id(), None
+
+
+def _everyone_else_payload(repository: ConfigRepository) -> Dict[str, Any]:
+    active_profile_id, active_schedule_id = _everyone_else_now(repository)
+    return {
+        "profile_id": repository.get_everyone_else_profile_id(),
+        "active_profile_id": active_profile_id,
+        "active_schedule_id": active_schedule_id,
+        "unaffected_devices": [
+            {"mac_address": device.mac_address, "name": device.name}
+            for device in repository.list_unaffected_devices()
+        ],
     }
 
 
@@ -7100,6 +9718,12 @@ class ControlServer(HTTPServer):
     """Serve configuration and plan data from one repository."""
 
     allow_reuse_address = True
+    # The server handles one connection at a time, so bound how long an idle or
+    # slow client (such as a browser preconnect) can hold it.
+    request_timeout_seconds = 5.0
+    # After a reboot the dashboard can start before the helper's socket exists.
+    helper_startup_wait_seconds = 30.0
+    helper_poll_seconds = 0.5
 
     def __init__(
         self,
@@ -7124,6 +9748,7 @@ class ControlServer(HTTPServer):
         if tls_context is None and bind_host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValueError("TLS is required when the dashboard listens beyond this device")
         self.repository = repository
+        WorkflowStore(repository).checkpoint("Initial settings")
         self.admin_token = admin_token
         self.helper_client = helper_client
         self.scheduler = scheduler
@@ -7297,6 +9922,12 @@ class ControlServer(HTTPServer):
     def response_for(self, path: str, query: str = "") -> Tuple[int, str, bytes]:
         """Build the response body for a supported GET path."""
 
+        access_response = read_access_api(self, path)
+        if access_response is not None:
+            return access_response
+        workflow = read_workflow(self, path)
+        if workflow is not None:
+            return workflow
         if path == "/":
             return HTTPStatus.OK, "text/html; charset=utf-8", DASHBOARD_HTML.encode("utf-8")
         if path == "/api/health":
@@ -7312,6 +9943,7 @@ class ControlServer(HTTPServer):
                     "mode": "hardware" if self.helper_client is not None else "configuration-only",
                     "helper_configured": self.helper_client is not None,
                     "helper_reachable": helper_reachable,
+                    "system": machine_health(),
                 }
             )
         if path == "/api/profiles":
@@ -7342,7 +9974,35 @@ class ControlServer(HTTPServer):
             return HTTPStatus.OK, "application/json", _json_bytes({"groups": groups})
         if path == "/api/schedules":
             schedules = [_schedule_payload(schedule) for schedule in self.repository.list_schedules()]
-            return HTTPStatus.OK, "application/json", _json_bytes({"schedules": schedules})
+            return HTTPStatus.OK, "application/json", _json_bytes({
+                "schedules": schedules,
+                "local_time": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "time_zone": time.strftime("%Z"),
+            })
+        if path == "/api/activity":
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {"events": list(self.repository.list_activity())}
+            )
+        if path == "/api/activity/latest":
+            # The dashboard polls this and fetches the whole log only when it changed.
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                self.repository.activity_summary()
+            )
+        if path == "/api/scenarios":
+            runs = [
+                _scenario_run_payload(run, scenario, position, repository=self.repository)
+                for run, scenario, position in active_scenario_runs(
+                    self.repository, now=time.time()
+                )
+            ]
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {
+                    "scenarios": [
+                        _scenario_payload(scenario) for scenario in self.repository.list_scenarios()
+                    ],
+                    "runs": runs,
+                }
+            )
         if path == "/api/timers":
             now = int(time.time())
             timers = []
@@ -7448,6 +10108,10 @@ class ControlServer(HTTPServer):
             return HTTPStatus.OK, "application/json", _json_bytes(
                 _policies_payload(self.repository)
             )
+        if path == "/api/everyone-else":
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                _everyone_else_payload(self.repository)
+            )
         if path == "/api/router":
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {
@@ -7525,6 +10189,7 @@ class ControlServer(HTTPServer):
             }
             labels_by_mac = self.repository.list_connected_device_labels()
             protected = {item.mac_address for item in self.repository.list_unaffected_devices()}
+            unaffected_macs = frozenset(protected)
             general_status = self._general_profile_status()
             groups_by_device = {
                 device_id: group
@@ -7536,6 +10201,7 @@ class ControlServer(HTTPServer):
                     device,
                     assignments_by_address=assignments_by_address,
                     labels_by_mac=labels_by_mac,
+                    unaffected_macs=unaffected_macs,
                 )
                 for device in devices
             ]
@@ -7555,6 +10221,8 @@ class ControlServer(HTTPServer):
                         "available": True,
                         "association_status_available": snapshot["association_status_available"],
                         "devices": devices,
+                        # The list polls every 5 seconds, so its labels follow schedules.
+                        "everyone_else_profile_id": _everyone_else_now(self.repository)[0],
                     }
                 ),
             )
@@ -7631,6 +10299,48 @@ class ControlServer(HTTPServer):
                 )
             )
             return HTTPStatus.OK, "application/json", _json_bytes({"plan": plan_to_payload(plan)})
+        if path == "/api/conditions":
+            operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
+            with operation:
+                plan = self.scheduler.applied_plan() if self.scheduler is not None else None
+                sources = self.scheduler.applied_target_states() if self.scheduler is not None else None
+            applied = plan is not None
+
+            def described_condition(state, target_id):
+                payload = {"condition": state.condition, "reasons": list(state.reasons)}
+                target = (sources or {}).get(target_id)
+                if applied and target is not None:
+                    payload["source"] = asdict(target.source)
+                    payload["next_change_at"] = (
+                        datetime.fromtimestamp(target.next_change_at).astimezone().isoformat()
+                        if target.next_change_at is not None else None
+                    )
+                return payload
+            if plan is None:
+                # Nothing runs on the network, so describe the saved settings.
+                # The scheduler's runtime plan would advance its rerolls.
+                plan = compile_stored_plan(repository=self.repository)
+            everyone_else = everyone_else_condition(plan)
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {
+                    "applied": applied,
+                    "everyone_else": (
+                        None
+                        if everyone_else is None
+                        else described_condition(everyone_else, EVERYONE_ELSE_QUEUE_ID)
+                    ),
+                    "devices": {
+                        device_id: described_condition(state, device_id)
+                        for device_id, state in device_conditions(
+                            plan,
+                            mac_addresses={
+                                device.id: device.mac_address
+                                for device in self.repository.list_devices()
+                            },
+                        ).items()
+                    },
+                }
+            )
         if path == "/api/state":
             return (
                 HTTPStatus.OK,
@@ -7688,10 +10398,49 @@ class ControlServer(HTTPServer):
             return HTTPStatus.OK, "application/json", _json_bytes(report)
         if path == "/api/backup":
             return HTTPStatus.OK, "application/vnd.sqlite3", self.repository.backup_bytes()
+        if path == "/api/export":
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                settings_to_payload(
+                    self.repository.saved_settings(), exported_at=int(time.time())
+                )
+            )
         if path == "/api/traffic-settings":
             return HTTPStatus.OK, "application/json", _json_bytes(
                 self.repository.get_traffic_rate_settings()
             )
+        if path == "/api/gateway-persistence":
+            saved_mode = self.repository.get_persist_profiles_after_gateway_outage()
+            state = {
+                "persistence_enabled": saved_mode,
+                "mode_enabled": saved_mode,
+                "gateway_state": "unknown",
+                "outage_stop_latched": False,
+                "recovery_pending": False,
+                "state_error": False,
+                "helper_available": self.helper_client is not None,
+                "helper_synced": self.helper_client is None,
+            }
+            if self.helper_client is not None:
+                try:
+                    helper_state = self.helper_client.gateway_status()
+                    # Reading must not change network state. Only a restarted
+                    # helper, which has no outage to act on yet, gets the mode.
+                    if (
+                        helper_state.get("mode_initialized") is False
+                        and not helper_state["state_error"]
+                    ):
+                        helper_state = self.helper_client.set_gateway_persistence(
+                            enabled=saved_mode
+                        )
+                    state.update(helper_state)
+                    state["helper_synced"] = (
+                        state["mode_enabled"] == saved_mode
+                        and state["state_error"] is False
+                    )
+                except HelperClientError:
+                    state["state_error"] = True
+                    state["helper_synced"] = False
+            return HTTPStatus.OK, "application/json", _json_bytes(state)
         if path == "/api/traffic":
             isp_limits = self.repository.get_traffic_rate_settings()
             reset = self.repository.get_runtime_state().observed_state == "reset"
@@ -7723,6 +10472,10 @@ class ControlServer(HTTPServer):
                 return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
                     {"error": "live traffic directions are unavailable"}
                 )
+            queues = counters.get("queues")
+            device_queues = queues.get("devices") if isinstance(queues, dict) else None
+            everyone_else = counters.get("everyone_else")
+            everyone_else_queue = queues.get("everyone_else") if isinstance(queues, dict) else None
             profile_limits = (
                 self.scheduler.applied_queue_bandwidth_limits()
                 if self.scheduler is not None
@@ -7733,6 +10486,11 @@ class ControlServer(HTTPServer):
                     "available": True,
                     "sampled_at": time.time(),
                     "devices": device_counters,
+                    "queues": device_queues if isinstance(device_queues, dict) else {},
+                    "everyone_else": everyone_else if isinstance(everyone_else, dict) else None,
+                    "everyone_else_queue": (
+                        everyone_else_queue if isinstance(everyone_else_queue, dict) else None
+                    ),
                     "isp_limits": isp_limits,
                     "profile_limits_available": profile_limits is not None,
                     "profile_limits": profile_limits or {},
@@ -7773,8 +10531,152 @@ class ControlServer(HTTPServer):
         return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
 
     def write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
+        operation = self.scheduler.exclusive() if self.scheduler is not None and path not in ACTION_PATHS else nullcontext()
+        with operation:
+            before = self.repository.get_runtime_state().configuration_version
+            try:
+                access_response = write_access_api(self, path, payload)
+                if access_response is not None:
+                    return access_response
+                workflow = write_workflow(self, path, payload, _settings_from_payload)
+                return workflow if workflow is not None else self._write_response_for(path, payload)
+            finally:
+                if self.repository.get_runtime_state().configuration_version != before:
+                    WorkflowStore(self.repository).checkpoint(path.removeprefix("/api/").replace("/", " "))
+
+    def _write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
         """Handle one supported configuration or network action request."""
 
+        if path == "/api/gateway-persistence":
+            enabled = payload.get("persistence_enabled")
+            if not isinstance(enabled, bool):
+                return _bad_request(
+                    "invalid gateway persistence setting",
+                    ValueError("persistence_enabled must be true or false"),
+                )
+            try:
+                version = self.repository.set_persist_profiles_after_gateway_outage(
+                    enabled,
+                    expected_version=payload.get("version"),
+                )
+            except DeviceConflictError as error:
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
+            except StorageError as error:
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes({"error": str(error)})
+            helper_status = None
+            helper_synced = self.helper_client is None
+            if self.helper_client is not None:
+                try:
+                    helper_status = self.helper_client.set_gateway_persistence(enabled=enabled)
+                    helper_synced = helper_status.get("state_error") is False
+                except HelperClientError:
+                    LOGGER.exception("saved gateway persistence setting did not reach the helper")
+            response = {
+                "persistence_enabled": enabled,
+                "version": version,
+                "saved": True,
+                "helper_synced": helper_synced,
+                "message": (
+                    "Saved for use when hardware mode runs."
+                    if self.helper_client is None
+                    else (
+                        "Saved and applied to the networking helper."
+                        if helper_synced
+                        else "Saved, but the networking helper could not confirm its outage state. Check its service logs."
+                    )
+                ),
+                "helper_available": self.helper_client is not None,
+            }
+            if helper_status is not None:
+                response.update(helper_status)
+            else:
+                response.update(
+                    {
+                        "gateway_state": "unknown",
+                        "outage_stop_latched": False,
+                        "recovery_pending": False,
+                        "state_error": self.helper_client is not None,
+                    }
+                )
+            return HTTPStatus.OK, "application/json", _json_bytes(response)
+
+        if path == "/api/import":
+            try:
+                settings = _settings_from_payload(payload)
+                check_settings(
+                    settings,
+                    max_traffic_classes=MAX_SHAPED_MARKS_PER_PLAN,
+                    max_service_domains=MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN,
+                )
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid settings import", error)
+            self.repository.replace_settings(self._with_counter_baselines(settings))
+            self._sync_gateway_persistence()
+            return self._apply_saved_change(
+                "imported",
+                {
+                    "profiles": len(settings.profiles),
+                    "devices": len(settings.devices),
+                    "schedules": len(settings.schedules),
+                },
+            )
+
+        if path == "/api/profiles/delete":
+            try:
+                profile_id = _required_text(payload, "id")
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid profile delete request", error)
+            if self.repository.get_profile(profile_id) is None:
+                return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                    {"error": "profile does not exist"}
+                )
+            references = self.repository.profile_references(profile_id, now=int(time.time()))
+            if references:
+                # Deleting would silently remove the rules that use the profile.
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+                    {
+                        "error": "profile is in use by " + ", ".join(references),
+                        "references": list(references),
+                    }
+                )
+            self.repository.delete_profile(profile_id)
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {"profile": {"id": profile_id, "deleted": True}}
+            )
+
+        deletes = {
+            "/api/devices/delete": ("id", "device", self.repository.delete_device),
+            "/api/schedules/delete": ("id", "schedule", self.repository.delete_schedule),
+            "/api/scenarios/delete": ("id", "scenario", self.repository.delete_scenario),
+            "/api/data-limits/delete": (
+                "device_id",
+                "data_limit",
+                self.repository.delete_data_limit,
+            ),
+            "/api/group-data-limits/delete": (
+                "group_id",
+                "group_data_limit",
+                self.repository.delete_group_data_limit,
+            ),
+            "/api/service-quotas/delete": (
+                "id",
+                "service_quota",
+                self.repository.delete_service_quota,
+            ),
+            "/api/time-quotas/delete": ("id", "time_quota", self.repository.delete_time_quota),
+        }
+        if path in deletes:
+            key, kind, delete = deletes[path]
+            label = kind.replace("_", " ")
+            try:
+                identifier = _required_text(payload, key)
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request(f"invalid {label} delete request", error)
+            if not delete(identifier):
+                return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                    {"error": f"{label} does not exist"}
+                )
+            return self._apply_saved_change(kind, {key: identifier, "deleted": True})
         if path == "/api/traffic-settings":
             try:
                 if "upload_kbit" not in payload or "download_kbit" not in payload:
@@ -7818,10 +10720,8 @@ class ControlServer(HTTPServer):
         if path == "/api/profiles":
             try:
                 profile = _profile_from_payload(payload)
-            except (KeyError, TypeError, ValueError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid profile configuration"}
-                )
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid profile configuration", error)
             self.repository.save_profile(profile)
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {"profile": _profile_payload(profile)}
@@ -7830,11 +10730,25 @@ class ControlServer(HTTPServer):
         if path == "/api/devices":
             try:
                 device = _device_from_payload(payload)
-            except (KeyError, TypeError, ValueError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid device configuration"}
+                expected = (
+                    _device_from_payload(payload["expected"])
+                    if "expected" in payload else None
                 )
-            self.repository.save_device(device)
+                if expected is not None and expected.id != device.id:
+                    raise ValueError("the original device ID must match")
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid device configuration", error)
+            conflict = self._unaffected_conflict(device.mac_address)
+            if conflict is not None:
+                return conflict
+            if self.repository.get_device(device.id) is None:
+                capacity_error = self._capacity_error(adding=1)
+                if capacity_error is not None:
+                    return capacity_error
+            try:
+                self.repository.save_device(device, expected=expected)
+            except DeviceConflictError as error:
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
             labels_by_mac = self.repository.list_connected_device_labels()
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {"device": _device_payload(device, labels_by_mac=labels_by_mac)}
@@ -7858,19 +10772,41 @@ class ControlServer(HTTPServer):
                     return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
                         {"error": "device group does not exist"}
                     )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid device group delete request"}
-                )
-            return self._apply_quota_change("group", {"id": group_id, "deleted": True})
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid device group delete request", error)
+            return self._apply_saved_change("group", {"id": group_id, "deleted": True})
+
+        if path == "/api/schedules/preview":
+            try:
+                schedule = _schedule_from_payload(payload)
+                return HTTPStatus.OK, "application/json", _json_bytes({
+                    "overlaps": overlapping_schedules(schedule, self.repository.list_schedules()),
+                    "message": "For the same target, the active schedule with the first ID alphabetically wins.",
+                })
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid schedule configuration", error)
 
         if path == "/api/schedules":
             try:
                 schedule = _schedule_from_payload(payload)
-            except (KeyError, TypeError, ValueError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid schedule configuration"}
-                )
+                if (
+                    schedule.device_id is not None
+                    and self.repository.get_device(schedule.device_id) is None
+                ):
+                    raise ValueError("device does not exist")
+                if (
+                    schedule.group_id is not None
+                    and self.repository.get_device_group(schedule.group_id) is None
+                ):
+                    raise ValueError("group does not exist")
+                if self.repository.get_profile(schedule.profile_id) is None:
+                    raise ValueError("profile does not exist")
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid schedule configuration", error)
+            if schedule.everyone_else and schedule.enabled and not self._everyone_else_counted():
+                capacity_error = self._capacity_error(adding=1)
+                if capacity_error is not None:
+                    return capacity_error
             self.repository.save_schedule(schedule)
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {"schedule": _schedule_payload(schedule)}
@@ -7884,10 +10820,8 @@ class ControlServer(HTTPServer):
                 if self.repository.get_profile(timer.profile_id) is None:
                     raise ValueError("profile does not exist")
                 self.repository.save_timer(timer)
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid timer configuration"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid timer configuration", error)
             if self.helper_client is None:
                 return HTTPStatus.OK, "application/json", _json_bytes(
                     {
@@ -7896,11 +10830,38 @@ class ControlServer(HTTPServer):
                         "message": "timer saved; apply the configuration in hardware mode to start it",
                     }
                 )
-            status, content_type, body = self._apply_configuration()
+            status, content_type, body = self._apply_after_change()
             response = json.loads(body.decode("utf-8"))
             response["timer"] = _timer_payload(timer)
-            response["live_applied"] = status == HTTPStatus.OK
+            response.setdefault("live_applied", status == HTTPStatus.OK)
             return status, content_type, _json_bytes(response)
+
+        if path == "/api/scenarios":
+            try:
+                scenario = _scenario_from_payload(payload)
+                for step in scenario.steps:
+                    if self.repository.get_profile(step.profile_id) is None:
+                        raise ValueError(f"profile {step.profile_id} does not exist")
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid scenario", error)
+            self.repository.save_scenario(scenario)
+            return self._apply_saved_change("scenario", _scenario_payload(scenario))
+
+        if path == "/api/scenarios/start":
+            operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
+            with operation:
+                return self._start_scenario(payload)
+
+        if path == "/api/scenarios/stop":
+            try:
+                run_id = _required_text(payload, "id")
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid scenario stop", error)
+            if not self.repository.stop_scenario_run(run_id):
+                return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                    {"error": "scenario run does not exist or has already stopped"}
+                )
+            return self._apply_saved_change("run_id", run_id)
 
         if path == "/api/timers/cancel":
             try:
@@ -7911,18 +10872,16 @@ class ControlServer(HTTPServer):
                     return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
                         {"error": "timer does not exist or is already inactive"}
                     )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid timer cancellation"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid timer cancellation", error)
             if self.helper_client is None:
                 return HTTPStatus.OK, "application/json", _json_bytes(
                     {"timer_id": timer_id, "live_applied": False}
                 )
-            status, content_type, body = self._apply_configuration()
+            status, content_type, body = self._apply_after_change()
             response = json.loads(body.decode("utf-8"))
             response["timer_id"] = timer_id
-            response["live_applied"] = status == HTTPStatus.OK
+            response.setdefault("live_applied", status == HTTPStatus.OK)
             return status, content_type, _json_bytes(response)
 
         if path == "/api/progressions":
@@ -7935,10 +10894,8 @@ class ControlServer(HTTPServer):
                 if self.repository.get_profile(progression.end_profile_id) is None:
                     raise ValueError("end profile does not exist")
                 self.repository.save_progression(progression)
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid progression configuration"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid progression configuration", error)
             if self.helper_client is None:
                 return HTTPStatus.OK, "application/json", _json_bytes(
                     {
@@ -7951,14 +10908,14 @@ class ControlServer(HTTPServer):
                         "message": "progression saved; apply the configuration in hardware mode to start it",
                     }
                 )
-            status, content_type, body = self._apply_configuration()
+            status, content_type, body = self._apply_after_change()
             response = json.loads(body.decode("utf-8"))
             response["progression"] = _progression_payload(
                 progression,
                 repository=self.repository,
                 now=int(time.time()),
             )
-            response["live_applied"] = status == HTTPStatus.OK
+            response.setdefault("live_applied", status == HTTPStatus.OK)
             return status, content_type, _json_bytes(response)
 
         if path == "/api/progressions/stop":
@@ -7970,18 +10927,16 @@ class ControlServer(HTTPServer):
                     return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
                         {"error": "progression does not exist or is already inactive"}
                     )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid progression stop request"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid progression stop request", error)
             if self.helper_client is None:
                 return HTTPStatus.OK, "application/json", _json_bytes(
                     {"progression_id": progression_id, "live_applied": False}
                 )
-            status, content_type, body = self._apply_configuration()
+            status, content_type, body = self._apply_after_change()
             response = json.loads(body.decode("utf-8"))
             response["progression_id"] = progression_id
-            response["live_applied"] = status == HTTPStatus.OK
+            response.setdefault("live_applied", status == HTTPStatus.OK)
             return status, content_type, _json_bytes(response)
 
         if path == "/api/data-limits":
@@ -7991,12 +10946,17 @@ class ControlServer(HTTPServer):
                     raise ValueError("device does not exist")
                 if self.repository.get_profile(data_limit.profile_id) is None:
                     raise ValueError("profile does not exist")
+                existing = self.repository.get_data_limit(data_limit.device_id)
+                if data_limit.enabled and not (existing is not None and existing.enabled):
+                    # The device counter already holds traffic from before the limit.
+                    data_limit = replace(
+                        data_limit,
+                        counter_bytes=self._quota_counter("devices", data_limit.device_id) or 0,
+                    )
                 self.repository.save_data_limit(data_limit)
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid data limit configuration"}
-                )
-            return self._apply_quota_change(
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid data limit configuration", error)
+            return self._apply_saved_change(
                 "data_limit",
                 _data_limit_payload(data_limit, repository=self.repository),
             )
@@ -8016,12 +10976,10 @@ class ControlServer(HTTPServer):
                     counter_bytes=self._quota_counter("devices", device_id),
                     reset_at=int(time.time()),
                 )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid data limit reset request"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid data limit reset request", error)
             refreshed = self.repository.get_data_limit(device_id)
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "data_limit",
                 _data_limit_payload(refreshed, repository=self.repository),
             )
@@ -8036,12 +10994,17 @@ class ControlServer(HTTPServer):
                     raise ValueError("device group does not exist")
                 if self.repository.get_profile(data_limit.profile_id) is None:
                     raise ValueError("profile does not exist")
+                existing = self.repository.get_group_data_limit(data_limit.group_id)
+                if data_limit.enabled and not (existing is not None and existing.enabled):
+                    # The device counters already hold traffic from before the limit.
+                    data_limit = replace(
+                        data_limit,
+                        counter_bytes=self._group_quota_counter(data_limit.group_id) or 0,
+                    )
                 self.repository.save_group_data_limit(data_limit)
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid group data limit configuration"}
-                )
-            return self._apply_quota_change(
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid group data limit configuration", error)
+            return self._apply_saved_change(
                 "group_data_limit",
                 _group_data_limit_payload(data_limit, repository=self.repository),
             )
@@ -8061,12 +11024,10 @@ class ControlServer(HTTPServer):
                     counter_bytes=self._group_quota_counter(group_id),
                     reset_at=int(time.time()),
                 )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid group data limit reset request"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid group data limit reset request", error)
             refreshed = self.repository.get_group_data_limit(group_id)
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "group_data_limit",
                 _group_data_limit_payload(refreshed, repository=self.repository),
             )
@@ -8078,12 +11039,15 @@ class ControlServer(HTTPServer):
                     raise ValueError("device does not exist")
                 if self.repository.get_profile(quota.profile_id) is None:
                     raise ValueError("profile does not exist")
+                existing = self.repository.get_service_quota(quota.id)
+                if quota.enabled and not (existing is not None and existing.enabled):
+                    capacity_error = self._capacity_error(adding=1)
+                    if capacity_error is not None:
+                        return capacity_error
                 self.repository.save_service_quota(quota)
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid service quota configuration"}
-                )
-            return self._apply_quota_change(
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid service quota configuration", error)
+            return self._apply_saved_change(
                 "service_quota",
                 _service_quota_payload(quota, repository=self.repository),
             )
@@ -8114,15 +11078,14 @@ class ControlServer(HTTPServer):
                         > MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN
                     ):
                         raise ValueError("too many browser service domains")
-                    enabled_assignments = len(other_assignments)
-                    configured_rules = (
-                        len(self.repository.list_devices())
-                        + sum(quota.enabled for quota in self.repository.list_service_quotas())
-                        + sum(quota.enabled for quota in self.repository.list_time_quotas())
-                        + enabled_assignments + 1
+                    already_enabled = any(
+                        current.id == assignment.id and current.enabled
+                        for current in self.repository.list_service_assignments()
                     )
-                    if configured_rules > 15:
-                        raise ValueError("too many combined device and service rules")
+                    if not already_enabled:
+                        capacity_error = self._capacity_error(adding=1)
+                        if capacity_error is not None:
+                            return capacity_error
                     existing = (
                         current for current in other_assignments
                         if current.device_id == assignment.device_id
@@ -8136,11 +11099,9 @@ class ControlServer(HTTPServer):
                     ):
                         raise ValueError("service assignment domains overlap")
                 self.repository.save_service_assignment(assignment)
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid service assignment configuration"}
-                )
-            return self._apply_quota_change(
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid service assignment configuration", error)
+            return self._apply_saved_change(
                 "service_assignment",
                 _service_assignment_payload(assignment, repository=self.repository),
             )
@@ -8155,7 +11116,7 @@ class ControlServer(HTTPServer):
                 return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
                     {"error": "service assignment does not exist"}
                 )
-            return self._apply_quota_change("deleted_id", assignment_id)
+            return self._apply_saved_change("deleted_id", assignment_id)
 
         if path == "/api/service-lists":
             return self._save_service_list(payload)
@@ -8178,12 +11139,10 @@ class ControlServer(HTTPServer):
                     counter_bytes=self._quota_counter("services", quota_id),
                     reset_at=int(time.time()),
                 )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid service quota reset request"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid service quota reset request", error)
             refreshed = self.repository.get_service_quota(quota_id)
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "service_quota",
                 _service_quota_payload(refreshed, repository=self.repository),
             )
@@ -8195,12 +11154,15 @@ class ControlServer(HTTPServer):
                     raise ValueError("device does not exist")
                 if self.repository.get_profile(quota.profile_id) is None:
                     raise ValueError("profile does not exist")
+                existing = self.repository.get_time_quota(quota.id)
+                if quota.enabled and not (existing is not None and existing.enabled):
+                    capacity_error = self._capacity_error(adding=1)
+                    if capacity_error is not None:
+                        return capacity_error
                 self.repository.save_time_quota(quota)
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid time quota configuration"}
-                )
-            return self._apply_quota_change(
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid time quota configuration", error)
+            return self._apply_saved_change(
                 "time_quota",
                 _time_quota_payload(quota, repository=self.repository),
             )
@@ -8228,11 +11190,9 @@ class ControlServer(HTTPServer):
                     return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
                         {"error": "time quota does not exist"}
                     )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid time quota start request"}
-                )
-            return self._apply_quota_change(
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid time quota start request", error)
+            return self._apply_saved_change(
                 "time_quota",
                 _time_quota_payload(refreshed, repository=self.repository),
             )
@@ -8246,12 +11206,10 @@ class ControlServer(HTTPServer):
                     return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
                         {"error": "time quota does not exist"}
                     )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid time quota stop request"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid time quota stop request", error)
             refreshed = self.repository.get_time_quota(quota_id)
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "time_quota",
                 _time_quota_payload(refreshed, repository=self.repository),
             )
@@ -8273,25 +11231,52 @@ class ControlServer(HTTPServer):
                     ),
                     reset_at=int(time.time()),
                 )
-            except (KeyError, TypeError, ValueError, StorageError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid time quota reset request"}
-                )
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return _bad_request("invalid time quota reset request", error)
             refreshed = self.repository.get_time_quota(quota_id)
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "time_quota",
                 _time_quota_payload(refreshed, repository=self.repository),
+            )
+
+        if path == "/api/everyone-else":
+            if "profile_id" not in payload:
+                return _bad_request(
+                    "invalid everyone-else profile", KeyError("profile_id is required")
+                )
+            profile_id = payload["profile_id"]
+            if profile_id is not None and (
+                not isinstance(profile_id, str) or self.repository.get_profile(profile_id) is None
+            ):
+                return _bad_request(
+                    "invalid everyone-else profile", ValueError("profile does not exist")
+                )
+            if profile_id is not None and not self._everyone_else_counted():
+                capacity_error = self._capacity_error(adding=1)
+                if capacity_error is not None:
+                    return capacity_error
+            self.repository.save_everyone_else_profile_id(profile_id)
+            return self._apply_saved_change(
+                "everyone_else", _everyone_else_payload(self.repository)
             )
 
         if path == "/api/policies":
             try:
                 mac_policy, website_policy = _policies_from_payload(payload)
-            except (KeyError, TypeError, ValueError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid network policy configuration"}
+                blocks = payload.get("site_blocks")
+                if blocks is not None:
+                    if not isinstance(blocks, list) or len(blocks) > 32:
+                        raise ValueError("site_blocks must be a list of at most 32 rules")
+                    blocks = tuple(SiteBlock(**rule) for rule in blocks)
+                options = AccessOptions(**payload["options"]) if "options" in payload else None
+                self.repository.save_access_policies(
+                    mac_policy, website_policy, blocks=blocks, options=options,
+                    expected_version=payload.get("version"),
                 )
-            self.repository.save_mac_policy(mac_policy)
-            self.repository.save_website_policy(website_policy)
+            except DeviceConflictError as error:
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid network policy configuration", error)
             return HTTPStatus.OK, "application/json", _json_bytes(
                 _policies_payload(self.repository)
             )
@@ -8329,10 +11314,8 @@ class ControlServer(HTTPServer):
                     ssid=payload["ssid"],
                     password=payload["password"],
                 )
-            except (KeyError, TypeError, ValueError):
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "invalid access point settings"}
-                )
+            except (KeyError, TypeError, ValueError) as error:
+                return _bad_request("invalid access point settings", error)
             except HelperClientError:
                 LOGGER.exception("access point configuration failed")
                 return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
@@ -8358,11 +11341,23 @@ class ControlServer(HTTPServer):
         if path == "/api/observations/remove-global-block":
             return self._remove_observation_from_global_block(payload)
 
+        if path == "/api/activity/clear":
+            self.repository.clear_activity()
+            return HTTPStatus.OK, "application/json", _json_bytes({"cleared": True})
+
+        # Saved changes apply the plan too, but only these buttons count as
+        # an Apply or a Reset in the activity log.
         if path == "/api/apply":
-            return self._apply_configuration()
+            status, content_type, body = self._apply_configuration(explicit_apply=True)
+            if status == HTTPStatus.OK:
+                self._record_activity("apply", "Configuration applied")
+            return status, content_type, body
 
         if path == "/api/reset":
-            return self._reset_network()
+            status, content_type, body = self._reset_network()
+            if status == HTTPStatus.OK:
+                self._record_activity("reset", "Network reset")
+            return status, content_type, body
 
         return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
 
@@ -8623,10 +11618,8 @@ class ControlServer(HTTPServer):
                 )
             updated = replace(profile, website_mode="allow_only", website_domains=listed)
             self.repository.save_profile(updated)
-        except (KeyError, TypeError, ValueError, StorageError):
-            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                {"error": "could not add domain to profile"}
-            )
+        except (KeyError, TypeError, ValueError, StorageError) as error:
+            return _bad_request("could not add domain to profile", error)
         return HTTPStatus.OK, "application/json", _json_bytes(
             {"profile": _profile_payload(updated)}
         )
@@ -8647,10 +11640,8 @@ class ControlServer(HTTPServer):
                 )
             updated = replace(policy, blocked_domains=listed)
             self.repository.save_website_policy(updated)
-        except (KeyError, TypeError, ValueError, StorageError):
-            return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                {"error": "could not add domain to global block list"}
-            )
+        except (KeyError, TypeError, ValueError, StorageError) as error:
+            return _bad_request("could not add domain to global block list", error)
         return HTTPStatus.OK, "application/json", _json_bytes(
             {"policies": _policies_payload(self.repository)}
         )
@@ -8673,7 +11664,7 @@ class ControlServer(HTTPServer):
         )
 
     def _save_service_list(self, payload: dict):
-        operation = self.scheduler.control_operation() if self.scheduler else nullcontext()
+        operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
         with operation:
             try:
                 service_list = ServiceList(
@@ -8705,13 +11696,13 @@ class ControlServer(HTTPServer):
                 return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
                     {"error": "invalid service list configuration"}
                 )
-            return self._apply_quota_change(
+            return self._apply_saved_change(
                 "service_list",
                 _service_list_payload(service_list, repository=self.repository),
             )
 
     def _delete_service_list(self, payload: dict):
-        operation = self.scheduler.control_operation() if self.scheduler else nullcontext()
+        operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
         with operation:
             list_id = payload.get("id")
             if not isinstance(list_id, str):
@@ -8722,7 +11713,7 @@ class ControlServer(HTTPServer):
                 return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
                     {"error": "service list does not exist"}
                 )
-            return self._apply_quota_change("deleted_id", list_id)
+            return self._apply_saved_change("deleted_id", list_id)
 
     def _validate_saved_plan(self) -> None:
         if self.repository.get_general_profile() is not None:
@@ -8769,6 +11760,19 @@ class ControlServer(HTTPServer):
                     }
                 ),
             )
+        if self.repository.get_runtime_state().last_action == "reset":
+            # Only an explicit Apply may undo a Reset.
+            return (
+                HTTPStatus.OK,
+                "application/json",
+                _json_bytes(
+                    {
+                        **fields,
+                        "live_applied": False,
+                        "message": "Saved. The network is reset, so apply the configuration to use it.",
+                    }
+                ),
+            )
         status, content_type, body = self._apply_configuration_locked(
             connected_snapshot=snapshot, sample_usage=False
         )
@@ -8783,7 +11787,7 @@ class ControlServer(HTTPServer):
         return status, content_type, _json_bytes(response)
 
     def _general_profile_status(self) -> dict:
-        operation = self.scheduler.control_operation() if self.scheduler else nullcontext()
+        operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
         with operation:
             return self._general_profile_status_locked()
 
@@ -8805,7 +11809,7 @@ class ControlServer(HTTPServer):
             return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
                 {"error": "Connect the Pi networking helper to apply a general profile"}
             )
-        operation = self.scheduler.control_operation() if self.scheduler else nullcontext()
+        operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
         with operation:
             try:
                 if set(payload) != (set() if stop else {"profile_id"}):
@@ -8837,7 +11841,7 @@ class ControlServer(HTTPServer):
             return status, content_type, _json_bytes(response)
 
     def _change_unaffected_device(self, payload: dict, *, remove: bool):
-        operation = self.scheduler.control_operation() if self.scheduler else nullcontext()
+        operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
         with operation:
             try:
                 item = UnaffectedDevice(
@@ -8859,7 +11863,10 @@ class ControlServer(HTTPServer):
                     self.scheduler.sample_before_control_change(repository=self.repository)
                 with self.repository.transaction():
                     if remove:
-                        self.repository.delete_unaffected_device(item.mac_address)
+                        if not self.repository.delete_unaffected_device(item.mac_address):
+                            return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
+                                {"error": f"{item.mac_address} is not on the unaffected list"}
+                            )
                     else:
                         self.repository.save_unaffected_device(item)
                         self.repository.delete_domain_observations(purge, [item.mac_address])
@@ -8875,7 +11882,7 @@ class ControlServer(HTTPServer):
             )
 
     def _save_connected_group(self, payload: dict, *, existing: bool):
-        operation = self.scheduler.control_operation() if self.scheduler else nullcontext()
+        operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
         with operation:
             try:
                 if existing:
@@ -8910,13 +11917,15 @@ class ControlServer(HTTPServer):
                             raise ValueError(
                                 "Choose a group profile before adding an unassigned client"
                             )
-                        device = _connected_device_from_payload(
+                        device, saved_row = _connected_device_from_payload(
                             {**client, "profile_id": base_profile},
                             self.repository,
                             hostname=_snapshot_hostname(snapshot, client["mac_address"]),
                         )
                         self._verify_selected_client(device, snapshot)
-                        self.repository.save_device(device)
+                        self.repository.save_device(
+                            device, expected=saved_row, create_only=saved_row is None
+                        )
                         if device.id not in device_ids:
                             device_ids.append(device.id)
                     group = DeviceGroup(
@@ -9009,11 +12018,11 @@ class ControlServer(HTTPServer):
                 "application/json",
                 _json_bytes({"error": "network helper is not configured"}),
             )
-        operation = self.scheduler.control_operation() if self.scheduler else nullcontext()
+        operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
         with operation:
             try:
                 snapshot = station_snapshot(self.helper_client)
-                device = _connected_device_from_payload(
+                device, existing = _connected_device_from_payload(
                     payload,
                     self.repository,
                     hostname=_snapshot_hostname(snapshot, payload.get("mac_address")),
@@ -9028,7 +12037,9 @@ class ControlServer(HTTPServer):
                 if self.scheduler:
                     self.scheduler.sample_before_control_change(repository=self.repository)
                 with self.repository.transaction():
-                    self.repository.save_device(device)
+                    self.repository.save_device(
+                        device, expected=existing, create_only=existing is None
+                    )
                     self._validate_saved_plan()
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
@@ -9058,6 +12069,47 @@ class ControlServer(HTTPServer):
         values = counters.get(kind, {})
         value = values.get(identifier) if isinstance(values, dict) else None
         return value if isinstance(value, int) and value >= 0 else None
+
+    def _with_counter_baselines(self, settings: SavedSettings) -> SavedSettings:
+        """Count imported limits from the helper's current counters, not from zero."""
+
+        traffic_counters = getattr(self.helper_client, "traffic_counters", None)
+        if traffic_counters is None:
+            return settings
+        try:
+            counters = traffic_counters()
+        except HelperClientError:
+            LOGGER.warning("could not read quota counters before an import", exc_info=True)
+            return settings
+        devices = counters.get("devices", {})
+        services = counters.get("services", {})
+        members = {group.id: group.device_ids for group in settings.groups}
+
+        def counter(values: Any, key: str) -> int:
+            value = values.get(key) if isinstance(values, dict) else None
+            return value if isinstance(value, int) and value >= 0 else 0
+
+        return replace(
+            settings,
+            data_limits=tuple(
+                replace(limit, counter_bytes=counter(devices, limit.device_id))
+                for limit in settings.data_limits
+            ),
+            group_data_limits=tuple(
+                replace(
+                    limit,
+                    counter_bytes=sum(
+                        counter(devices, device_id)
+                        for device_id in members.get(limit.group_id, ())
+                    ),
+                )
+                for limit in settings.group_data_limits
+            ),
+            service_quotas=tuple(
+                replace(quota, counter_bytes=counter(services, quota.id))
+                for quota in settings.service_quotas
+            ),
+        )
 
     def _group_quota_counter(self, group_id: str) -> Optional[int]:
         """Return the current aggregate device counter for one group."""
@@ -9095,12 +12147,67 @@ class ControlServer(HTTPServer):
             sum(values) if all(isinstance(value, int) and value >= 0 for value in values) else None
         )
 
-    def _apply_quota_change(
+    def _start_scenario(self, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
+        """Start playback only when the network is already applied."""
+
+        try:
+            scenario = self.repository.get_scenario(_required_text(payload, "scenario_id"))
+            if scenario is None:
+                raise ValueError("scenario does not exist")
+            run = ScenarioRun(
+                id=f"run-{time.time_ns()}",
+                scenario_id=scenario.id,
+                started_at=int(time.time()),
+                device_id=payload.get("device_id"),
+                group_id=payload.get("group_id"),
+                everyone_else=payload.get("everyone_else", False),
+            )
+            if run.device_id is not None and self.repository.get_device(run.device_id) is None:
+                raise ValueError("device does not exist")
+            if (
+                run.group_id is not None
+                and self.repository.get_device_group(run.group_id) is None
+            ):
+                raise ValueError("group does not exist")
+        except (KeyError, TypeError, ValueError) as error:
+            return _bad_request("invalid scenario start", error)
+        if self.helper_client is None or self.scheduler is None:
+            return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                {"error": "Starting a scenario requires hardware mode."}
+            )
+        if (
+            self.repository.get_runtime_state().last_action == "reset"
+            or self.scheduler.applied_plan() is None
+        ):
+            return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+                {"error": "Apply the configuration before starting a scenario."}
+            )
+        if run.everyone_else and not self._everyone_else_counted():
+            capacity_error = self._capacity_error(adding=1)
+            if capacity_error is not None:
+                return capacity_error
+        self.repository.start_scenario_run(run)
+        status, content_type, body = self._apply_after_change()
+        response = json.loads(body)
+        if status != HTTPStatus.OK or response.get("live_applied") is False:
+            # Do not let a failed Start count down or resume during recovery.
+            self.repository.stop_scenario_run(run.id)
+            response["live_applied"] = False
+            response["message"] = "Scenario did not start. Apply the configuration then start it again."
+            if status == HTTPStatus.OK:
+                status = HTTPStatus.CONFLICT
+                response["error"] = "Apply the configuration before starting a scenario."
+        else:
+            response["run"] = asdict(run)
+            response["live_applied"] = True
+        return status, content_type, _json_bytes(response)
+
+    def _apply_saved_change(
         self,
         key: str,
         value: Any,
     ) -> Tuple[int, str, bytes]:
-        """Return saved settings and apply them when hardware is available."""
+        """Return a saved change and apply it immediately when hardware is available."""
 
         if self.helper_client is None:
             return (
@@ -9114,21 +12221,101 @@ class ControlServer(HTTPServer):
                     }
                 ),
             )
-        status, content_type, body = self._apply_configuration()
+        status, content_type, body = self._apply_after_change()
         response = json.loads(body.decode("utf-8"))
         response[key] = value
-        response["live_applied"] = status == HTTPStatus.OK
+        response.setdefault("live_applied", status == HTTPStatus.OK)
         return status, content_type, _json_bytes(response)
 
-    def _apply_configuration(self) -> Tuple[int, str, bytes]:
-        operation = (
-            self.scheduler.control_operation() if self.scheduler is not None else nullcontext()
+    def _unaffected_conflict(
+        self, mac_address: Optional[str]
+    ) -> Optional[Tuple[int, str, bytes]]:
+        """Refuse to save a device whose MAC address is on the unaffected list."""
+
+        listed = {device.mac_address for device in self.repository.list_unaffected_devices()}
+        if mac_address is None or mac_address not in listed:
+            return None
+        return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+            {"error": f"{mac_address} is on the unaffected list; remove it there first"}
         )
+
+    def _everyone_else_counted(self) -> bool:
+        """Return whether everyone else already holds a traffic class."""
+
+        # One class serves the saved profile, every schedule and a running
+        # scenario, whichever applies.
+        return (
+            self.repository.get_everyone_else_profile_id() is not None
+            or any(
+                schedule.everyone_else and schedule.enabled
+                for schedule in self.repository.list_schedules()
+            )
+            or any(
+                run.everyone_else
+                for run, _, _ in active_scenario_runs(self.repository, now=time.time())
+            )
+        )
+
+    def _capacity_error(self, *, adding: int) -> Optional[Tuple[int, str, bytes]]:
+        """Refuse a change that needs more traffic classes than the kernel allows."""
+
+        in_use = (
+            len(self.repository.list_devices())
+            + sum(quota.enabled for quota in self.repository.list_service_quotas())
+            + sum(quota.enabled for quota in self.repository.list_time_quotas())
+            + sum(assignment.enabled for assignment in self.repository.list_service_assignments())
+            + self._everyone_else_counted()
+        )
+        if in_use + adding <= MAX_SHAPED_MARKS_PER_PLAN:
+            return None
+        return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+            {
+                "error": (
+                    f"JitterSim can shape at most {MAX_SHAPED_MARKS_PER_PLAN} devices and "
+                    "service rules together; delete one first"
+                )
+            }
+        )
+
+    def _apply_after_change(self) -> Tuple[int, str, bytes]:
+        """Re-apply the plan for a saved change unless the network was reset."""
+
+        if self.repository.get_runtime_state().last_action == "reset":
+            # Only an explicit Apply may undo a Reset.
+            return HTTPStatus.OK, "application/json", _json_bytes(
+                {
+                    "live_applied": False,
+                    "message": "saved; the network is reset, so apply the configuration to use it",
+                }
+            )
+        if self.helper_client is not None:
+            try:
+                gateway_status = self.helper_client.gateway_status()
+            except HelperClientError:
+                gateway_status = None
+            if gateway_status and (
+                gateway_status.get("outage_stop_latched") is True
+                or gateway_status.get("state_error") is True
+            ):
+                return HTTPStatus.OK, "application/json", _json_bytes(
+                    {
+                        "live_applied": False,
+                        "message": (
+                            "saved; automatic recovery is paused. Check gateway status "
+                            "then Apply the configuration when it is safe"
+                        ),
+                    }
+                )
+        return self._apply_configuration()
+
+    def _apply_configuration(self, *, explicit_apply: bool = False) -> Tuple[int, str, bytes]:
+        # Scheduled applies, manual applies and resets never interleave.
+        operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
         with operation:
-            return self._apply_configuration_locked()
+            return self._apply_configuration_locked(explicit_apply=explicit_apply)
 
     def _apply_configuration_locked(
-        self, connected_snapshot=None, *, sample_usage=True
+        self, connected_snapshot=None, *, sample_usage=True, explicit_apply: bool = False
     ) -> Tuple[int, str, bytes]:
         if self.helper_client is None:
             return (
@@ -9136,14 +12323,16 @@ class ControlServer(HTTPServer):
                 "application/json",
                 _json_bytes({"error": "network helper is not configured"}),
             )
-        if self.scheduler and sample_usage:
-            self.scheduler.sample_before_control_change(repository=self.repository)
         try:
-            plan = (
-                self.scheduler.build_plan(
+            prepared = (
+                self.scheduler.prepare_plan(
                     repository=self.repository, connected_snapshot=connected_snapshot
                 )
-                if self.scheduler is not None
+                if self.scheduler is not None else None
+            )
+            plan = (
+                prepared.plan
+                if prepared is not None
                 else compile_stored_plan(
                     repository=self.repository,
                     connected_snapshot=(
@@ -9165,10 +12354,18 @@ class ControlServer(HTTPServer):
             last_result=None,
             last_error=None,
         )
+        if self.scheduler is not None and sample_usage:
+            # Applying recreates the helper counters, so record their traffic first.
+            self.scheduler.sample_usage(repository=self.repository)
         try:
-            result = self.helper_client.apply(plan=plan)
+            if explicit_apply:
+                result = self.helper_client.apply(plan=plan, explicit_apply=True)
+            else:
+                result = self.helper_client.apply(plan=plan)
         except HelperClientError as error:
             LOGGER.error("network helper apply failed: %s", error)
+            if self.scheduler is not None:
+                self.scheduler.invalidate_applied_plan()
             state = self.repository.update_runtime_state(
                 observed_state="error",
                 last_action="apply",
@@ -9198,7 +12395,7 @@ class ControlServer(HTTPServer):
             last_error=None,
         )
         if self.scheduler is not None:
-            self.scheduler.activate(applied_payload=plan_to_payload(plan))
+            self.scheduler.activate_plan(repository=self.repository, prepared=prepared)
         return (
             HTTPStatus.OK,
             "application/json",
@@ -9218,9 +12415,7 @@ class ControlServer(HTTPServer):
         )
 
     def _reset_network(self) -> Tuple[int, str, bytes]:
-        operation = (
-            self.scheduler.control_operation() if self.scheduler is not None else nullcontext()
-        )
+        operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
         with operation:
             return self._reset_network_locked()
 
@@ -9232,6 +12427,8 @@ class ControlServer(HTTPServer):
                 _json_bytes({"error": "network helper is not configured"}),
             )
         if self.scheduler is not None:
+            # Resetting removes the helper counters, so record their traffic first.
+            self.scheduler.sample_usage(repository=self.repository)
             self.scheduler.pause()
         self.repository.update_runtime_state(
             observed_state="resetting",
@@ -9275,21 +12472,79 @@ class ControlServer(HTTPServer):
 
         if self.helper_client is None:
             return
+        if not self._wait_for_helper():
+            LOGGER.error("network helper did not answer, so network state was not recovered")
+            return
+        if not self._sync_gateway_persistence():
+            return
+        try:
+            gateway_status = self.helper_client.gateway_status()
+        except HelperClientError:
+            LOGGER.error("gateway recovery state was unavailable during dashboard startup")
+            return
+        if (gateway_status.get("outage_stop_latched") is True
+                or gateway_status.get("state_error") is True):
+            if self.scheduler is not None:
+                self.scheduler.pause()
+            self._record_activity(
+                "outage",
+                "Profiles remain stopped after a router gateway outage",
+            )
+            return
         state = self.repository.get_runtime_state()
+        if state.last_action not in {"reset", "apply", "schedule"}:
+            return
         if state.last_action == "reset":
             status, _, _ = self._reset_network()
-        elif state.last_action in {"apply", "schedule"}:
-            status, _, _ = self._apply_configuration()
+            kind, message = "reset", "Network reset again after the dashboard restarted"
         else:
-            return
+            status, _, _ = self._apply_configuration()
+            kind, message = "apply", "Configuration applied again after the dashboard restarted"
         if status != HTTPStatus.OK:
             LOGGER.error("network state recovery did not complete successfully")
+        else:
+            self._record_activity(kind, message)
+
+    def _sync_gateway_persistence(self) -> bool:
+        """Give the helper the saved gateway persistence preference."""
+
+        if self.helper_client is None:
+            return False
+        try:
+            self.helper_client.set_gateway_persistence(
+                enabled=self.repository.get_persist_profiles_after_gateway_outage()
+            )
+        except HelperClientError:
+            LOGGER.error("gateway persistence setting did not reach the networking helper")
+            return False
+        return True
+
+    def _record_activity(self, kind: str, message: str) -> None:
+        try:
+            self.repository.record_activity(kind=kind, message=message, now=time.time())
+        except StorageError:
+            LOGGER.warning("could not record activity", exc_info=True)
+
+    def _wait_for_helper(self) -> bool:
+        """Return whether the helper answers before the startup wait ends."""
+
+        deadline = time.monotonic() + self.helper_startup_wait_seconds
+        while True:
+            try:
+                self.helper_client.ping()
+                return True
+            except HelperClientError:
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(self.helper_poll_seconds)
 
 
 class ControlRequestHandler(BaseHTTPRequestHandler):
     """Handle the control-plane routes."""
 
     server: ControlServer
+    # A neutral name: response headers do not advertise the product or Python.
+    server_version = "server"
     rbufsize = 0
 
     def setup(self) -> None:
@@ -9304,6 +12559,9 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         except (ConnectionError, ssl.SSLError):
             self.close_connection = True
             LOGGER.info("dashboard client disconnected")
+
+    def version_string(self) -> str:
+        return self.server_version
 
     def do_GET(self) -> None:
         parsed_path = urlsplit(self.path)
@@ -9341,9 +12599,20 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             status = HTTPStatus.INTERNAL_SERVER_ERROR
             content_type = "application/json"
             body = _json_bytes({"error": "stored configuration could not be read"})
+        except (ConnectionError, socket.timeout, ssl.SSLError):
+            raise
+        except Exception:
+            LOGGER.exception("control-plane response for %s failed", path)
+            status = HTTPStatus.INTERNAL_SERVER_ERROR
+            content_type = "application/json"
+            body = _json_bytes({"error": "request could not be processed"})
+        downloads = {
+            "/api/backup": "jittersim-backup.db",
+            "/api/export": "jittersim-settings.json",
+        }
         headers = (
-            {"Content-Disposition": 'attachment; filename="jittersim-backup.db"'}
-            if path == "/api/backup"
+            {"Content-Disposition": f'attachment; filename="{downloads[path]}"'}
+            if path in downloads and status == HTTPStatus.OK
             else None
         )
         self._send_response(status=status, content_type=content_type, body=body, headers=headers)
@@ -9362,11 +12631,19 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         )
 
     def log_request(self, code: Any = "-", size: Any = "-") -> None:
+        # Addresses and request lines stay out of the journal. Routine polling
+        # is kept quiet while changes and every refused request are recorded.
         try:
             status = int(code)
         except (TypeError, ValueError):
             status = 0
-        LOGGER.info("dashboard response status=%s", status)
+        if status >= 400:
+            level = logging.WARNING
+        elif getattr(self, "command", None) == "GET":
+            level = logging.DEBUG
+        else:
+            level = logging.INFO
+        LOGGER.log(level, "dashboard response status=%s", status)
 
     def log_error(self, format_string: str, *args: Any) -> None:
         LOGGER.warning("dashboard request rejected or timed out")
@@ -9376,13 +12653,8 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_write(self) -> None:
         path = urlsplit(self.path).path
-        if path not in WRITE_PATHS:
-            self._send_response(
-                status=HTTPStatus.NOT_FOUND,
-                content_type="application/json",
-                body=_json_bytes({"error": "not found"}),
-            )
-            return
+        # Check the token before the route, so that the answers don't reveal which
+        # routes exist to someone without it.
         if self.server.admin_token is None:
             self._send_response(
                 status=HTTPStatus.SERVICE_UNAVAILABLE,
@@ -9396,6 +12668,13 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 content_type="application/json",
                 body=_json_bytes({"error": "valid bearer authentication is required"}),
                 headers={"WWW-Authenticate": "Bearer"},
+            )
+            return
+        if path not in WRITE_PATHS:
+            self._send_response(
+                status=HTTPStatus.NOT_FOUND,
+                content_type="application/json",
+                body=_json_bytes({"error": "not found"}),
             )
             return
         if path != "/api/dashboard-access/register-self" and not self._check_device_access():
@@ -9415,7 +12694,14 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             )
             return
         try:
-            payload = self._read_json_body(required=path not in ACTION_PATHS)
+            payload = self._read_json_body(
+                required=path not in ACTION_PATHS,
+                max_bytes=(
+                    MAX_IMPORT_BODY_BYTES
+                    if path in ("/api/import", "/api/test-sessions/save")
+                    else MAX_JSON_BODY_BYTES
+                ),
+            )
             if path.startswith("/api/dashboard-access/"):
                 register = path.endswith("/register-self")
                 if set(payload) - ({"name"} if register else {"mac_address"}):
@@ -9437,6 +12723,13 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             status = HTTPStatus.CONFLICT
             content_type = "application/json"
             body = _json_bytes({"error": "configuration could not be saved"})
+        except (ConnectionError, socket.timeout, ssl.SSLError):
+            raise
+        except Exception:
+            LOGGER.exception("control-plane request for %s failed", path)
+            status = HTTPStatus.INTERNAL_SERVER_ERROR
+            content_type = "application/json"
+            body = _json_bytes({"error": "request could not be processed"})
         try:
             if path not in ("/api/router/status", "/api/router/operation") and status != HTTPStatus.ACCEPTED:
                 self.server.repository.record_action(action=path, status_code=int(status))
@@ -9457,7 +12750,9 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                                                   "registration_required": True}))
         return allowed
 
-    def _read_json_body(self, *, required: bool = True) -> Dict[str, Any]:
+    def _read_json_body(
+        self, *, required: bool = True, max_bytes: int = MAX_JSON_BODY_BYTES
+    ) -> Dict[str, Any]:
         length_header = self.headers.get("Content-Length")
         if length_header is None:
             if not required:
@@ -9467,7 +12762,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             length = int(length_header)
         except ValueError as error:
             raise RequestError("request body length is invalid") from error
-        if length < 0 or length > MAX_JSON_BODY_BYTES:
+        if length < 0 or length > max_bytes:
             raise RequestError("request body is too large")
         if length == 0 and not required:
             return {}
@@ -9476,7 +12771,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             raise RequestError("request body is incomplete")
         try:
             payload = json.loads(raw_body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
             raise RequestError("request body must be valid JSON") from error
         if not isinstance(payload, dict):
             raise RequestError("request body must contain a JSON object")
@@ -9499,6 +12794,10 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        if content_type.startswith("text/html"):
+            self.send_header("Content-Security-Policy", DASHBOARD_CONTENT_SECURITY_POLICY)
         for name, value in (headers or {}).items():
             self.send_header(name, value)
         self.end_headers()
@@ -9517,6 +12816,38 @@ def _safe_wifi_copy_message(error: HelperClientError) -> str:
     if str(error) == WIFI_DETAILS_MISSING_MESSAGE:
         return WIFI_DETAILS_MISSING_MESSAGE
     return safe_router_check_message(str(error))
+
+
+def _bad_request(message: str, error: Exception) -> Tuple[int, str, bytes]:
+    """Reject a request, adding the validation reason when there is one."""
+
+    if isinstance(error, KeyError) and error.args:
+        message = f"{message}: missing {error.args[0]}"
+    elif isinstance(error, ValueError) and str(error):
+        message = f"{message}: {error}"
+    return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes({"error": message})
+
+
+def _required_text(payload: Dict[str, Any], key: str) -> str:
+    """Read one required non-empty string field."""
+
+    value = payload[key]
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{key} must be a non-empty string")
+    return value
+
+
+def _list_field(payload: Dict[str, Any], key: str, *, required: bool = False) -> tuple:
+    """Read a JSON list; tuple() alone would split a string into characters."""
+
+    if key not in payload:
+        if required:
+            raise KeyError(key)
+        return ()
+    value = payload[key]
+    if not isinstance(value, list):
+        raise ValueError(f"{key} must be a list")
+    return tuple(value)
 
 
 def _impairment_from_payload(payload: Any) -> Impairment:
@@ -9569,7 +12900,7 @@ def _profile_from_payload(payload: Dict[str, Any]) -> Profile:
             payload.get("outage_interval_randomness")
         ),
         website_mode=payload.get("website_mode", "unrestricted"),
-        website_domains=tuple(payload.get("website_domains", ())),
+        website_domains=_list_field(payload, "website_domains"),
         website_randomness=_randomness_from_payload(payload.get("website_randomness")),
     )
 
@@ -9587,12 +12918,39 @@ def _device_from_payload(payload: Dict[str, Any]) -> Device:
 def _schedule_from_payload(payload: Dict[str, Any]) -> Schedule:
     return Schedule(
         id=payload["id"],
-        device_id=payload["device_id"],
+        device_id=payload.get("device_id"),
         profile_id=payload["profile_id"],
-        days_of_week=tuple(payload["days_of_week"]),
+        days_of_week=_list_field(payload, "days_of_week", required=True),
         start_minute=payload["start_minute"],
         end_minute=payload["end_minute"],
         enabled=payload.get("enabled", True),
+        group_id=payload.get("group_id"),
+        everyone_else=payload.get("everyone_else", False),
+    )
+
+
+def _scenario_from_payload(payload: Dict[str, Any]) -> Scenario:
+    values = payload["steps"]
+    if not isinstance(values, list):
+        raise ValueError("steps must be a list")
+    steps = []
+    for number, step in enumerate(values, start=1):
+        # Name the step, so a long scenario says which one to fix.
+        try:
+            steps.append(
+                ScenarioStep(
+                    profile_id=step["profile_id"], duration_seconds=step["duration_seconds"]
+                )
+            )
+        except KeyError as error:
+            raise ValueError(f"step {number} is missing {error.args[0]}") from error
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"step {number}: {error}") from error
+    return Scenario(
+        id=payload["id"],
+        name=payload["name"],
+        steps=tuple(steps),
+        loop=payload.get("loop", False),
     )
 
 
@@ -9617,7 +12975,7 @@ def _quota_schedule_from_payload(payload: Dict[str, Any]) -> Tuple[str, int, Tup
 
     reset_mode = payload.get("reset_mode", "manual")
     reset_interval_seconds = payload.get("reset_interval_seconds", 0)
-    reset_times = tuple(payload.get("reset_times", ()))
+    reset_times = _list_field(payload, "reset_times")
     return reset_mode, reset_interval_seconds, reset_times
 
 
@@ -9651,7 +13009,7 @@ def _device_group_from_payload(payload: Dict[str, Any]) -> DeviceGroup:
     return DeviceGroup(
         id=payload.get("id", f"group-{time.time_ns()}"),
         name=payload["name"],
-        device_ids=tuple(payload["device_ids"]),
+        device_ids=_list_field(payload, "device_ids", required=True),
         profile_id=payload.get("profile_id") or None,
     )
 
@@ -9689,7 +13047,9 @@ def _service_quota_from_payload(
 
     quota_id = payload.get("id", f"service-{time.time_ns()}")
     existing = repository.get_service_quota(quota_id)
-    normalized_domains = tuple(normalize_domain(domain) for domain in payload["domains"])
+    normalized_domains = tuple(
+        normalize_domain(domain) for domain in _list_field(payload, "domains", required=True)
+    )
     device = repository.get_device(payload["device_id"])
     if device is not None:
         observed_domains = {
@@ -9734,7 +13094,9 @@ def _time_quota_from_payload(
 
     quota_id = payload.get("id", f"time-{time.time_ns()}")
     existing = repository.get_time_quota(quota_id)
-    normalized_domains = tuple(normalize_domain(domain) for domain in payload["domains"])
+    normalized_domains = tuple(
+        normalize_domain(domain) for domain in _list_field(payload, "domains", required=True)
+    )
     device = repository.get_device(payload["device_id"])
     if device is not None:
         observed_domains = {
@@ -9802,7 +13164,7 @@ def _progression_from_payload(
         traffic_target_queries=traffic_target_queries,
         traffic_baseline_queries=repository.total_domain_queries(str(device.ipv4_address)),
         traffic_target_bytes=traffic_target_bytes,
-        website_domains=tuple(payload.get("website_domains", ())),
+        website_domains=_list_field(payload, "website_domains"),
     )
 
 
@@ -9814,14 +13176,162 @@ def _policies_from_payload(payload: Dict[str, Any]) -> Tuple[MacPolicy, WebsiteP
     return (
         MacPolicy(
             mode=mac_payload.get("mode", "disabled"),
-            allowlist=tuple(mac_payload.get("allowlist", ())),
-            denylist=tuple(mac_payload.get("denylist", ())),
+            allowlist=_list_field(mac_payload, "allowlist"),
+            denylist=_list_field(mac_payload, "denylist"),
         ),
         WebsitePolicy(
             mode=website_payload.get("mode", "unrestricted"),
-            allowed_domains=tuple(website_payload.get("allowed_domains", ())),
-            blocked_domains=tuple(website_payload.get("blocked_domains", ())),
+            allowed_domains=_list_field(website_payload, "allowed_domains"),
+            blocked_domains=_list_field(website_payload, "blocked_domains"),
         ),
+    )
+
+
+def _imported_reset_fields(value: Dict[str, Any]) -> Dict[str, Any]:
+    reset_mode, reset_interval_seconds, reset_times = _quota_schedule_from_payload(value)
+    return {
+        "reset_mode": reset_mode,
+        "reset_interval_seconds": reset_interval_seconds,
+        "reset_times": reset_times,
+        "enabled": value.get("enabled", True),
+    }
+
+
+def _unaffected_label(value: Dict[str, Any]) -> str:
+    """Read the optional label of an exported unaffected device.
+
+    Exports name the field "name" and fall back to the address, so an address
+    read back as a label is treated as no label.
+    """
+
+    label = value.get("display_name") or value.get("name") or ""
+    if isinstance(label, str) and label.lower() == str(value.get("mac_address", "")).lower():
+        return ""
+    return label
+
+
+def _settings_from_payload(payload: Dict[str, Any]) -> SavedSettings:
+    """Read a settings export, naming the first item that is wrong."""
+
+    if (payload.get("format") != SETTINGS_FORMAT or type(payload.get("version")) is not int
+            or payload.get("version") not in (1, 2, SETTINGS_VERSION)):
+        raise ValueError("the file is not a JitterSim settings export this version can read")
+    persistence = payload.get("persist_profiles_after_gateway_outage", False)
+    if not isinstance(persistence, bool):
+        raise ValueError("persist_profiles_after_gateway_outage must be true or false")
+    now = int(time.time())
+
+    def parse_items(label: str, values: Any, parse: Any) -> tuple:
+        if not isinstance(values, list):
+            raise ValueError(f"{label} must be a list")
+        parsed = []
+        for index, value in enumerate(values):
+            try:
+                if not isinstance(value, dict):
+                    raise ValueError("must be an object")
+                parsed.append(parse(value))
+            except KeyError as error:
+                raise ValueError(f"{label}[{index}] is missing {error.args[0]}") from error
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"{label}[{index}]: {error}") from error
+        return tuple(parsed)
+
+    def items(key: str, parse: Any) -> tuple:
+        return parse_items(key, payload.get(key, []), parse)
+
+    policies = payload.get("policies", {})
+    if not isinstance(policies, dict):
+        raise ValueError("policies must be an object")
+    mac_policy, website_policy = _policies_from_payload(policies)
+    # Exports from before the everyone-else profile have no such section.
+    everyone_else = payload.get("everyone_else", {})
+    if not isinstance(everyone_else, dict):
+        raise ValueError("everyone_else must be an object")
+    everyone_else_profile_id = everyone_else.get("profile_id")
+    if everyone_else_profile_id is not None and not isinstance(everyone_else_profile_id, str):
+        raise ValueError("everyone_else.profile_id must be a profile ID or null")
+    unaffected_devices = parse_items(
+        "everyone_else.unaffected_devices",
+        everyone_else.get("unaffected_devices", []),
+        lambda value: UnaffectedDevice(
+            mac_address=value["mac_address"], display_name=_unaffected_label(value)
+        ),
+    )
+    # Usage starts again from zero on the new installation.
+    return SavedSettings(
+        profiles=items("profiles", _profile_from_payload),
+        devices=items("devices", _device_from_payload),
+        groups=items("groups", _device_group_from_payload),
+        schedules=items("schedules", _schedule_from_payload),
+        # Exports from before scenarios have none.
+        scenarios=items("scenarios", _scenario_from_payload),
+        mac_policy=mac_policy,
+        website_policy=website_policy,
+        site_blocks=parse_items("policies.site_blocks", policies.get("site_blocks", []),
+                                lambda value: SiteBlock(**value)),
+        access_options=AccessOptions(**policies.get("options", {})),
+        persist_profiles_after_gateway_outage=persistence,
+        data_limits=items(
+            "data_limits",
+            lambda value: DataLimit(
+                device_id=value["device_id"],
+                profile_id=value["profile_id"],
+                limit_bytes=value["limit_bytes"],
+                last_reset_at=now,
+                **_imported_reset_fields(value),
+            ),
+        ),
+        group_data_limits=items(
+            "group_data_limits",
+            lambda value: GroupDataLimit(
+                group_id=value["group_id"],
+                profile_id=value["profile_id"],
+                limit_bytes=value["limit_bytes"],
+                last_reset_at=now,
+                **_imported_reset_fields(value),
+            ),
+        ),
+        service_quotas=items(
+            "service_quotas",
+            lambda value: ServiceQuota(
+                id=value["id"],
+                device_id=value["device_id"],
+                name=value["name"],
+                domains=_list_field(value, "domains", required=True),
+                profile_id=value["profile_id"],
+                limit_bytes=value["limit_bytes"],
+                weight_percent=value.get("weight_percent", 100),
+                last_reset_at=now,
+                **_imported_reset_fields(value),
+            ),
+        ),
+        time_quotas=items(
+            "time_quotas",
+            lambda value: TimeQuota(
+                id=value["id"],
+                device_id=value["device_id"],
+                name=value["name"],
+                domains=_list_field(value, "domains", required=True),
+                profile_id=value["profile_id"],
+                limit_seconds=value["limit_seconds"],
+                window_duration_seconds=value.get("window_duration_seconds", 43_200),
+                last_reset_at=now,
+                **_imported_reset_fields(value),
+            ),
+        ),
+        service_assignments=items(
+            "service_assignments",
+            lambda value: ServiceAssignment(
+                id=value["id"],
+                device_id=value["device_id"],
+                name=value["name"],
+                domains=_list_field(value, "domains", required=True),
+                profile_id=value["profile_id"],
+                enabled=value.get("enabled", True),
+            ),
+        ),
+        everyone_else_profile_id=everyone_else_profile_id,
+        unaffected_devices=unaffected_devices,
     )
 
 
@@ -9856,11 +13366,12 @@ def _new_client_name(label: Optional[str], hostname: Optional[str], ipv4_address
 
 def _connected_device_from_payload(
     payload: Dict[str, Any], repository: ConfigRepository, *, hostname: Optional[str] = None
-) -> Device:
+) -> Tuple[Device, Optional[Device]]:
     """Build an assignment for a visible client while preserving existing names and IDs.
 
     A client saved for the first time takes its saved label or else the hostname
-    it announced. An existing assignment keeps its name.
+    it announced. An existing assignment keeps its name. The saved row that was
+    read comes back too, so the save can refuse a row changed meanwhile.
     """
 
     ipv4_address = payload["ipv4_address"]
@@ -9874,6 +13385,7 @@ def _connected_device_from_payload(
         name="Connected client",
         ipv4_address=ipv4_address,
         profile_id=profile_id,
+        mac_address=mac_address,
     )
     existing = repository.get_device_by_mac_address(mac_address)
     occupant = repository.get_device_by_ipv4_address(str(address_only.ipv4_address))
@@ -9888,7 +13400,7 @@ def _connected_device_from_payload(
     if existing is None and repository.get_device(generated_id) is not None:
         raise ValueError("The detected client ID conflicts with another saved assignment")
     label = repository.list_connected_device_labels().get(mac_address, {}).get("display_name")
-    return Device(
+    device = Device(
         id=existing.id if existing else generated_id,
         name=(
             existing.name
@@ -9899,6 +13411,7 @@ def _connected_device_from_payload(
         profile_id=profile_id,
         mac_address=mac_address,
     )
+    return device, existing
 
 
 def _authorization_matches(
@@ -9907,10 +13420,11 @@ def _authorization_matches(
     if expected_token is None or authorization_header is None:
         return False
     scheme, separator, token = authorization_header.partition(" ")
+    # Compare bytes: compare_digest rejects str values with non-ASCII characters.
     return (
         separator == " "
         and scheme.lower() == "bearer"
-        and hmac.compare_digest(token, expected_token)
+        and hmac.compare_digest(token.encode("utf-8"), expected_token.encode("utf-8"))
     )
 
 
@@ -9968,6 +13482,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--helper-timeout-seconds", type=float, default=8.0)
     parser.add_argument("--tls-cert", type=Path)
     parser.add_argument("--tls-key", type=Path)
+    parser.add_argument(
+        "--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO"
+    )
     return parser
 
 
@@ -9975,6 +13492,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     """Parse server options and start the dashboard."""
 
     arguments = _build_parser().parse_args(argv)
+    logging.basicConfig(
+        level=getattr(logging, arguments.log_level),
+        format="%(levelname)s %(name)s: %(message)s",
+    )
     run_server(
         database_path=arguments.database,
         host=arguments.host,

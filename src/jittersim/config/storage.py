@@ -7,7 +7,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Sequence, Union
+from typing import Dict, Iterable, Optional, Sequence, Tuple, Union
 
 from .device_labels import (
     MAX_SAVED_CONNECTED_DEVICE_LABELS,
@@ -17,6 +17,7 @@ from .device_labels import (
 )
 from .exemptions import MAX_UNAFFECTED_DEVICES, UnaffectedDevice, normalize_exempt_mac
 from .models import (
+    AccessOptions,
     DataLimit,
     Device,
     DeviceGroup,
@@ -29,10 +30,15 @@ from .models import (
     Randomness,
     RandomWebsiteOutcome,
     RuntimeState,
+    SavedSettings,
+    Scenario,
+    ScenarioRun,
+    ScenarioStep,
     Schedule,
     ServiceAssignment,
     ServiceList,
     ServiceQuota,
+    SiteBlock,
     TimeQuota,
     Timer,
     ValidationError,
@@ -42,6 +48,10 @@ from .models import (
 
 class StorageError(RuntimeError):
     """Raised when stored configuration cannot be read or written safely."""
+
+
+class DeviceConflictError(StorageError):
+    """Raised when an assignment would overwrite a changed or conflicting device."""
 
 
 class TrafficRateSettingsError(StorageError):
@@ -61,6 +71,30 @@ MIN_TRAFFIC_RATE_KBIT = 100
 MAX_TRAFFIC_RATE_KBIT = 1_000_000
 TRAFFIC_RATE_STEP_KBIT = 100
 DEFAULT_ISP_DOWNLOAD_KBIT = 100_000
+# The activity log keeps this many of the newest network events.
+MAX_ACTIVITY_EVENTS = 500
+ACTIVITY_KINDS = frozenset(
+    (
+        "apply", "reset", "outage", "schedule", "timer", "scenario", "progression", "limit",
+        "address", "access",
+    )
+)
+# A schedule targets exactly one device, group or everyone else. Older
+# databases get this table through _upgrade_schedules_table.
+_SCHEDULES_TABLE_SQL = """
+    CREATE TABLE IF NOT EXISTS {name} (
+        id TEXT PRIMARY KEY,
+        device_id TEXT REFERENCES devices(id) ON DELETE CASCADE,
+        group_id TEXT REFERENCES device_groups(id) ON DELETE CASCADE,
+        everyone_else INTEGER NOT NULL DEFAULT 0,
+        profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+        days_json TEXT NOT NULL,
+        start_minute INTEGER NOT NULL,
+        end_minute INTEGER NOT NULL,
+        enabled INTEGER NOT NULL,
+        CHECK ((device_id IS NOT NULL) + (group_id IS NOT NULL) + (everyone_else = 1) = 1)
+    )
+"""
 
 
 def _serialize_impairment(impairment: Impairment) -> str:
@@ -174,6 +208,39 @@ class ConfigRepository:
     def _initialize_schema(self) -> None:
         self._connection.executescript(
             """
+            CREATE TABLE IF NOT EXISTS settings_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                happened_at INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                digest TEXT NOT NULL,
+                settings_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS settings_history_status (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                warning TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS test_sessions (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                target TEXT NOT NULL,
+                notes TEXT NOT NULL,
+                started_at INTEGER NOT NULL,
+                ended_at INTEGER,
+                settings_json TEXT NOT NULL,
+                measurements_json TEXT NOT NULL DEFAULT '[]',
+                events_truncated INTEGER NOT NULL DEFAULT 0,
+                revision INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS one_active_test_session
+                ON test_sessions ((1)) WHERE ended_at IS NULL;
+            CREATE TABLE IF NOT EXISTS test_session_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL REFERENCES test_sessions(id) ON DELETE CASCADE,
+                happened_at INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                message TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS session_event_order ON test_session_events (session_id, id);
             CREATE TABLE IF NOT EXISTS profiles (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -232,14 +299,21 @@ class ConfigRepository:
                 group_id TEXT NOT NULL REFERENCES device_groups(id) ON DELETE CASCADE,
                 device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE
             );
-            CREATE TABLE IF NOT EXISTS schedules (
+            CREATE TABLE IF NOT EXISTS scenarios (
                 id TEXT PRIMARY KEY,
-                device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
-                profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
-                days_json TEXT NOT NULL,
-                start_minute INTEGER NOT NULL,
-                end_minute INTEGER NOT NULL,
-                enabled INTEGER NOT NULL
+                name TEXT NOT NULL,
+                steps_json TEXT NOT NULL,
+                loop INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS scenario_runs (
+                id TEXT PRIMARY KEY,
+                scenario_id TEXT NOT NULL REFERENCES scenarios(id) ON DELETE CASCADE,
+                device_id TEXT REFERENCES devices(id) ON DELETE CASCADE,
+                group_id TEXT REFERENCES device_groups(id) ON DELETE CASCADE,
+                everyone_else INTEGER NOT NULL DEFAULT 0,
+                started_at INTEGER NOT NULL,
+                enabled INTEGER NOT NULL,
+                CHECK ((device_id IS NOT NULL) + (group_id IS NOT NULL) + (everyone_else = 1) = 1)
             );
             CREATE TABLE IF NOT EXISTS timers (
                 id TEXT PRIMARY KEY,
@@ -348,6 +422,26 @@ class ConfigRepository:
                 website_allowed_json TEXT NOT NULL,
                 website_blocked_json TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS experiment_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                persist_profiles_after_gateway_outage INTEGER NOT NULL DEFAULT 0
+                    CHECK (persist_profiles_after_gateway_outage IN (0, 1))
+            );
+            CREATE TABLE IF NOT EXISTS dashboard_preferences (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                check_staged_updates_on_open INTEGER NOT NULL DEFAULT 1
+                    CHECK (check_staged_updates_on_open IN (0, 1))
+            );
+            CREATE TABLE IF NOT EXISTS everyone_else_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                -- The API refuses to delete this profile. Older versions don't
+                -- know about everyone else, so a delete there clears the choice.
+                profile_id TEXT REFERENCES profiles(id) ON DELETE SET NULL
+            );
+            CREATE TABLE IF NOT EXISTS unaffected_devices (
+                mac_address TEXT PRIMARY KEY,
+                name TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS runtime_state (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 configuration_version INTEGER NOT NULL,
@@ -355,6 +449,12 @@ class ConfigRepository:
                 last_action TEXT,
                 last_result TEXT,
                 last_error TEXT
+            );
+            CREATE TABLE IF NOT EXISTS activity_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                happened_at INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                message TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS action_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -386,6 +486,17 @@ class ConfigRepository:
                 ON random_website_analytics (device_id, event_day_utc);
             CREATE INDEX IF NOT EXISTS random_website_analytics_event_day_idx
                 ON random_website_analytics (event_day_utc);
+            -- Running query totals per client. Pruning old observations must
+            -- not lower them, because DNS-driven progressions measure from them.
+            CREATE TABLE IF NOT EXISTS domain_query_totals (
+                ipv4_address TEXT PRIMARY KEY,
+                query_count INTEGER NOT NULL
+            );
+            INSERT OR IGNORE INTO domain_query_totals (ipv4_address, query_count)
+                SELECT ipv4_address, SUM(query_count)
+                FROM domain_observations
+                WHERE NOT EXISTS (SELECT 1 FROM domain_query_totals)
+                GROUP BY ipv4_address;
             INSERT OR IGNORE INTO runtime_state (
                 id, configuration_version, observed_state
             ) VALUES (1, 0, 'unknown');
@@ -396,9 +507,33 @@ class ConfigRepository:
                 id, mac_mode, mac_allowlist_json, mac_denylist_json,
                 website_mode, website_allowed_json, website_blocked_json
             ) VALUES (1, 'disabled', '[]', '[]', 'unrestricted', '[]', '[]');
+            INSERT OR IGNORE INTO experiment_settings (
+                id, persist_profiles_after_gateway_outage
+            ) VALUES (1, 0);
+            INSERT OR IGNORE INTO dashboard_preferences (
+                id, check_staged_updates_on_open
+            ) VALUES (1, 1);
+            INSERT OR IGNORE INTO everyone_else_settings (id, profile_id) VALUES (1, NULL);
             """
         )
         self._migrate_unaffected_devices()
+        self._connection.execute(_SCHEDULES_TABLE_SQL.format(name="schedules"))
+        self._upgrade_schedules_table()
+        self._connection.execute("""
+            CREATE TABLE IF NOT EXISTS site_blocks (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                domains_json TEXT NOT NULL,
+                device_id TEXT REFERENCES devices(id) ON DELETE RESTRICT,
+                group_id TEXT REFERENCES device_groups(id) ON DELETE RESTRICT,
+                enabled INTEGER NOT NULL,
+                CHECK (device_id IS NULL OR group_id IS NULL)
+            )
+        """)
+        self._add_column_if_missing("network_policies", "access_options_json", "TEXT NOT NULL DEFAULT '{}'")
+        self._add_column_if_missing("test_sessions", "captures_json", "TEXT NOT NULL DEFAULT '[]'")
+        self._add_column_if_missing("test_sessions", "captures_truncated", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_missing("activity_log", "device_ids_json", "TEXT NOT NULL DEFAULT '[]'")
         self._add_column_if_missing("profiles", "settings_json", "TEXT NOT NULL DEFAULT '{}'")
         self._add_column_if_missing("devices", "mac_address", "TEXT")
         self._connection.execute(
@@ -409,11 +544,55 @@ class ConfigRepository:
         )
         self._add_column_if_missing("progressions", "traffic_baseline_bytes", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing("service_quotas", "weight_percent", "INTEGER NOT NULL DEFAULT 100")
+        for table in ("timers", "progressions", "scenario_runs"):
+            self._connection.execute(
+                f"CREATE INDEX IF NOT EXISTS {table}_history_idx "
+                f"ON {table}(enabled, started_at DESC, id DESC)"
+            )
+        self._prune_run_history()
         self._commit()
         self._migrate_domain_observations()
         self._commit()
         self._prune_random_website_analytics(now=int(time.time()))
         self._commit()
+
+    def _upgrade_schedules_table(self) -> None:
+        """Let older schedules tables hold group and everyone-else schedules."""
+
+        def upgraded() -> bool:
+            columns = self._connection.execute("PRAGMA table_info(schedules)").fetchall()
+            return any(column["name"] == "group_id" for column in columns)
+
+        if upgraded():
+            return
+        # SQLite can't drop NOT NULL from device_id, so the rows move to a new
+        # table. No other table refers to schedules.
+        try:
+            self._connection.commit()
+            # The write lock comes first, and the check again under it, so two
+            # processes that open an old database at once don't both copy it.
+            self._connection.execute("BEGIN IMMEDIATE")
+            if not upgraded():
+                self._connection.execute(_SCHEDULES_TABLE_SQL.format(name="schedules_upgrade"))
+                # A schedule whose device or profile is gone applies to nothing,
+                # and copying it would fail the foreign keys.
+                self._connection.execute(
+                    """
+                    INSERT INTO schedules_upgrade (
+                        id, device_id, profile_id, days_json, start_minute, end_minute, enabled
+                    )
+                    SELECT id, device_id, profile_id, days_json, start_minute, end_minute, enabled
+                    FROM schedules
+                    WHERE device_id IN (SELECT id FROM devices)
+                      AND profile_id IN (SELECT id FROM profiles)
+                    """
+                )
+                self._connection.execute("DROP TABLE schedules")
+                self._connection.execute("ALTER TABLE schedules_upgrade RENAME TO schedules")
+            self._connection.commit()
+        except sqlite3.Error as error:
+            self._connection.rollback()
+            raise StorageError("could not upgrade the saved schedules") from error
 
     def _migrate_domain_observations(self) -> None:
         """Add the hardware address column and drop rows that can no longer be attributed.
@@ -549,37 +728,63 @@ class ConfigRepository:
         self._bump_configuration_version()
         self._commit()
 
-    def save_device(self, device: Device) -> None:
-        """Insert or update one validated device assignment."""
+    def save_device(
+        self, device: Device, *, expected: Optional[Device] = None, create_only: bool = False
+    ) -> None:
+        """Save an assignment without duplicating a MAC or overwriting a stale edit."""
 
+        values = (device.id, device.name, str(device.ipv4_address), device.profile_id, device.mac_address)
         try:
-            if device.mac_address is not None:
-                existing = self.get_device_by_mac_address(device.mac_address)
-                if existing is not None and existing.id != device.id:
-                    raise StorageError("This MAC address already has a saved assignment")
-            self._connection.execute(
-                """
-                INSERT INTO devices (id, name, ipv4_address, profile_id, mac_address)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    name = excluded.name,
-                    ipv4_address = excluded.ipv4_address,
-                    profile_id = excluded.profile_id,
-                    mac_address = excluded.mac_address
-                """,
-                (
-                    device.id,
-                    device.name,
-                    str(device.ipv4_address),
-                    device.profile_id,
-                    device.mac_address,
-                ),
-            )
+            if expected is None:
+                cursor = self._connection.execute(
+                    """
+                    INSERT INTO devices (id, name, ipv4_address, profile_id, mac_address)
+                    SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS (
+                        SELECT 1 FROM devices WHERE mac_address = ? AND id != ?
+                    )
+                    ON CONFLICT(id) DO UPDATE SET
+                        name = excluded.name,
+                        ipv4_address = excluded.ipv4_address,
+                        profile_id = excluded.profile_id,
+                        mac_address = excluded.mac_address
+                    WHERE ? = 0
+                    """,
+                    values + (device.mac_address, device.id, int(create_only)),
+                )
+                message = (
+                    "Saved device identity changed. Refresh connected clients before assigning a profile."
+                    if create_only else "Another saved device already uses this MAC address."
+                )
+            else:
+                cursor = self._connection.execute(
+                    """
+                    UPDATE devices SET name = ?, ipv4_address = ?, profile_id = ?, mac_address = ?
+                    WHERE id = ? AND id = ? AND name = ? AND ipv4_address = ?
+                        AND profile_id = ? AND mac_address IS ?
+                        AND NOT EXISTS (
+                            SELECT 1 FROM devices WHERE mac_address = ? AND id != ?
+                        )
+                    """,
+                    values[1:] + (device.id, expected.id, expected.name, str(expected.ipv4_address),
+                                  expected.profile_id, expected.mac_address,
+                                  device.mac_address, device.id),
+                )
+                message = (
+                    "Device changed or its MAC belongs to another saved device. "
+                    "Reload the device before saving."
+                )
+            if not cursor.rowcount:
+                raise DeviceConflictError(message)
             self._bump_configuration_version()
             self._commit()
+        except DeviceConflictError:
+            self._rollback()
+            raise
         except sqlite3.IntegrityError as error:
             self._rollback()
-            raise StorageError(f"could not save device {device.id}") from error
+            raise DeviceConflictError(
+                f"could not save device {device.id}: check its profile and address"
+            ) from error
 
     def get_runtime_state(self) -> RuntimeState:
         """Return the desired-configuration version and observed helper state."""
@@ -684,6 +889,86 @@ class ConfigRepository:
         except sqlite3.Error as error:
             raise StorageError("could not read action history") from error
 
+    def record_activity(self, *, kind: str, message: str, now: float) -> None:
+        """Add one network event to the activity log, keeping the newest ones."""
+
+        self.record_activities(((kind, message),), now=now)
+
+    def record_activities(self, events: Sequence[Tuple[str, str]], *, now: float, device_ids=None) -> None:
+        """Add (kind, message) events in one transaction, keeping the newest ones."""
+
+        for kind, message in events:
+            if kind not in ACTIVITY_KINDS:
+                raise StorageError("activity kind is invalid")
+            if not isinstance(message, str) or not message or len(message) > 500:
+                raise StorageError("activity message is invalid")
+        device_ids = device_ids if device_ids is not None else [()] * len(events)
+        if len(device_ids) != len(events) or any(
+            len(targets) > 256 or any(not isinstance(target, str) or len(target) > 64 for target in targets)
+            for targets in device_ids
+        ):
+            raise StorageError("activity targets are invalid")
+        try:
+            session = self._connection.execute(
+                "SELECT id FROM test_sessions WHERE ended_at IS NULL"
+            ).fetchone()
+            if session is not None:
+                count = self._connection.execute(
+                    "SELECT COUNT(*) FROM test_session_events WHERE session_id = ?", (session[0],)
+                ).fetchone()[0]
+                available = max(0, 500 - count)
+                self._connection.executemany(
+                    "INSERT INTO test_session_events (session_id, happened_at, kind, message) "
+                    "VALUES (?, ?, ?, ?)",
+                    [(session[0], int(now), kind, message) for kind, message in events[:available]],
+                )
+                if len(events) > available:
+                    self._connection.execute(
+                        "UPDATE test_sessions SET events_truncated = 1 WHERE id = ?", (session[0],)
+                    )
+            self._connection.executemany(
+                "INSERT INTO activity_log (happened_at, kind, message, device_ids_json) VALUES (?, ?, ?, ?)",
+                [(int(now), kind, message, json.dumps(targets)) for (kind, message), targets in zip(events, device_ids)],
+            )
+            self._connection.execute(
+                "DELETE FROM activity_log WHERE id NOT IN "
+                "(SELECT id FROM activity_log ORDER BY id DESC LIMIT ?)",
+                (MAX_ACTIVITY_EVENTS,),
+            )
+            self._commit()
+        except sqlite3.Error as error:
+            self._rollback()
+            raise StorageError("could not record activity") from error
+
+    def list_activity(self) -> tuple:
+        """Return the activity log, newest first."""
+
+        rows = self._connection.execute(
+            "SELECT id, happened_at, kind, message, device_ids_json FROM activity_log ORDER BY id DESC"
+        ).fetchall()
+        result = []
+        for row in rows:
+            event = dict(row)
+            targets = json.loads(event.pop("device_ids_json"))
+            if targets:
+                event["device_ids"] = targets
+            result.append(event)
+        return tuple(result)
+
+    def activity_summary(self) -> Dict[str, int]:
+        """Return the newest event's ID and how many events the log holds."""
+
+        row = self._connection.execute(
+            "SELECT COALESCE(MAX(id), 0) AS newest_id, COUNT(*) AS count FROM activity_log"
+        ).fetchone()
+        return {"newest_id": row["newest_id"], "count": row["count"]}
+
+    def clear_activity(self) -> None:
+        """Empty the activity log, for example before a demonstration."""
+
+        self._connection.execute("DELETE FROM activity_log")
+        self._commit()
+
     def backup_bytes(self) -> bytes:
         """Create a consistent SQLite snapshot for an administrator download."""
 
@@ -709,6 +994,27 @@ class ConfigRepository:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
 
+    def record_schedule_result(self, *, success: bool) -> bool:
+        """Record a scheduled apply, unless a reset was recorded meanwhile.
+
+        The check and the write are one statement, so a reset made from
+        another process, such as `jittersim reset`, is never overwritten.
+        """
+
+        cursor = self._connection.execute(
+            """
+            UPDATE runtime_state
+            SET observed_state = ?, last_action = 'schedule', last_result = ?, last_error = ?
+            WHERE id = 1 AND (last_action IS NULL OR last_action != 'reset')
+            """,
+            (
+                "applied" if success else "error",
+                "success" if success else "failure",
+                None if success else "scheduled network plan failed",
+            ),
+        )
+        self._commit()
+        return bool(cursor.rowcount)
     def get_traffic_rate_settings(self) -> dict:
         """Return the saved ISP rate references in integer kbit/s."""
 
@@ -762,14 +1068,13 @@ class ConfigRepository:
         }
 
     def _bump_configuration_version(self) -> None:
+        # Keep the last network action: startup recovery uses it to re-apply
+        # a plan or keep an explicit reset after later settings changes.
         self._connection.execute(
             """
             UPDATE runtime_state
             SET configuration_version = configuration_version + 1,
-                observed_state = 'unknown',
-                last_action = NULL,
-                last_result = NULL,
-                last_error = NULL
+                observed_state = 'unknown'
             WHERE id = 1
             """
         )
@@ -811,6 +1116,8 @@ class ConfigRepository:
         return self._device_from_row(row)
 
     def get_device_by_mac_address(self, mac_address: str) -> Optional[Device]:
+        """Return the device assignment saved with one MAC address or `None`."""
+
         rows = self._connection.execute(
             "SELECT id, name, ipv4_address, profile_id, mac_address FROM devices "
             "WHERE lower(mac_address) = ? LIMIT 2",
@@ -820,6 +1127,27 @@ class ConfigRepository:
             raise StorageError("Multiple saved assignments use this MAC address")
         return None if not rows else self._device_from_row(rows[0])
 
+    def get_everyone_else_profile_id(self) -> Optional[str]:
+        """Return the profile for test Wi-Fi clients that aren't saved or unaffected."""
+
+        row = self._connection.execute(
+            "SELECT profile_id FROM everyone_else_settings WHERE id = 1"
+        ).fetchone()
+        return None if row is None else row["profile_id"]
+
+    def save_everyone_else_profile_id(self, profile_id: Optional[str]) -> None:
+        """Choose the everyone-else profile, or None for a normal connection."""
+
+        try:
+            self._connection.execute(
+                "UPDATE everyone_else_settings SET profile_id = ? WHERE id = 1", (profile_id,)
+            )
+            self._bump_configuration_version()
+            self._commit()
+        except sqlite3.IntegrityError as error:
+            self._rollback()
+            raise StorageError(f"profile {profile_id} does not exist") from error
+
     def list_unaffected_devices(self) -> tuple:
         rows = self._connection.execute(
             "SELECT mac_address, display_name, created_at FROM unaffected_devices "
@@ -828,7 +1156,10 @@ class ConfigRepository:
         ).fetchall()
         if len(rows) > MAX_UNAFFECTED_DEVICES:
             raise StorageError("The unaffected-device list exceeds its limit")
-        return tuple(UnaffectedDevice(**dict(row)) for row in rows)
+        try:
+            return tuple(UnaffectedDevice(**dict(row)) for row in rows)
+        except (TypeError, ValueError) as error:
+            raise StorageError("stored unaffected device is invalid") from error
 
     def save_unaffected_device(self, device: UnaffectedDevice) -> None:
         with self.transaction():
@@ -964,6 +1295,323 @@ class ConfigRepository:
         ).fetchall()
         return tuple(self._device_from_row(row) for row in rows)
 
+    def profile_references(self, profile_id: str, *, now: int) -> tuple:
+        """Describe every device, rule and limit that still uses one profile."""
+
+        device_names = {device.id: device.name for device in self.list_devices()}
+        groups = self.list_device_groups()
+        group_names = {group.id: group.name for group in groups}
+        references = [
+            f"device {device.name}"
+            for device in self.list_devices()
+            if device.profile_id == profile_id
+        ]
+        references.extend(
+            f"group {group.name}" for group in groups if group.profile_id == profile_id
+        )
+        references.extend(
+            f"schedule {schedule.id}"
+            for schedule in self.list_schedules()
+            if schedule.profile_id == profile_id
+        )
+        references.extend(
+            f"timer for {device_names.get(timer.device_id, timer.device_id)}"
+            for timer in self.list_active_timers(now=now)
+            if timer.profile_id == profile_id
+        )
+        references.extend(
+            f"progression for {device_names.get(progression.device_id, progression.device_id)}"
+            for progression in self.list_active_progressions(now=now)
+            if profile_id in (progression.start_profile_id, progression.end_profile_id)
+        )
+        references.extend(
+            f"data limit for {device_names.get(limit.device_id, limit.device_id)}"
+            for limit in self.list_data_limits()
+            if limit.profile_id == profile_id
+        )
+        references.extend(
+            f"shared limit for {group_names.get(limit.group_id, limit.group_id)}"
+            for limit in self.list_group_data_limits()
+            if limit.profile_id == profile_id
+        )
+        references.extend(
+            f"browser service profile {assignment.name}"
+            for assignment in self.list_service_assignments()
+            if assignment.profile_id == profile_id
+        )
+        references.extend(
+            f"service limit {quota.name}"
+            for quota in self.list_service_quotas()
+            if quota.profile_id == profile_id
+        )
+        references.extend(
+            f"time limit {quota.name}"
+            for quota in self.list_time_quotas()
+            if quota.profile_id == profile_id
+        )
+        references.extend(
+            f"scenario {scenario.name}"
+            for scenario in self.list_scenarios()
+            if any(step.profile_id == profile_id for step in scenario.steps)
+        )
+        if self.get_everyone_else_profile_id() == profile_id:
+            references.append("everyone else")
+        return tuple(references)
+
+    def delete_profile(self, profile_id: str) -> bool:
+        """Delete one profile that no device uses. Check profile_references first."""
+
+        try:
+            return self._delete_row("profiles", "id", profile_id)
+        except sqlite3.IntegrityError as error:
+            self._rollback()
+            raise StorageError(f"profile {profile_id} is still in use") from error
+
+    def delete_device(self, device_id: str) -> bool:
+        """Delete one device with its schedules, timers, progressions and limits.
+
+        A group left without devices is deleted too, with its shared limit,
+        because a group must contain at least one device.
+        """
+
+        try:
+            cursor = self._connection.execute("DELETE FROM devices WHERE id = ?", (device_id,))
+            if not cursor.rowcount:
+                self._commit()
+                return False
+            self._connection.execute(
+                "DELETE FROM device_groups WHERE id NOT IN (SELECT group_id FROM device_group_members)"
+            )
+            self._bump_configuration_version()
+            self._commit()
+            return True
+        except sqlite3.IntegrityError as error:
+            self._rollback()
+            raise StorageError("remove site rules for this device or its last group before deleting it") from error
+
+    def access_settings(self) -> SavedSettings:
+        """Read only the settings needed by persistent access controls."""
+        return SavedSettings(
+            devices=self.list_devices(), groups=self.list_device_groups(),
+            mac_policy=self.get_mac_policy(), website_policy=self.get_website_policy(),
+            site_blocks=self.list_site_blocks(), access_options=self.get_access_options(),
+        )
+
+    def saved_settings(self) -> SavedSettings:
+        """Return every setting that an export includes."""
+
+        return SavedSettings(
+            profiles=self.list_profiles(),
+            devices=self.list_devices(),
+            groups=self.list_device_groups(),
+            schedules=self.list_schedules(),
+            mac_policy=self.get_mac_policy(),
+            website_policy=self.get_website_policy(),
+            data_limits=self.list_data_limits(),
+            group_data_limits=self.list_group_data_limits(),
+            service_quotas=self.list_service_quotas(),
+            time_quotas=self.list_time_quotas(),
+            service_assignments=self.list_service_assignments(),
+            everyone_else_profile_id=self.get_everyone_else_profile_id(),
+            unaffected_devices=self.list_unaffected_devices(),
+            scenarios=self.list_scenarios(),
+            site_blocks=self.list_site_blocks(),
+            access_options=self.get_access_options(),
+            persist_profiles_after_gateway_outage=(
+                self.get_persist_profiles_after_gateway_outage()
+            ),
+            general_profile_id=self._general_profile_id(),
+            service_lists=self.list_service_lists(),
+        )
+
+    def _general_profile_id(self) -> Optional[str]:
+        row = self._connection.execute(
+            "SELECT profile_id FROM general_profile_setting WHERE id = 1"
+        ).fetchone()
+        return None if row is None else row["profile_id"]
+
+    def get_check_staged_updates_on_open(self) -> bool:
+        """Return whether the dashboard checks for a staged release on open."""
+
+        row = self._connection.execute(
+            "SELECT check_staged_updates_on_open FROM dashboard_preferences WHERE id = 1"
+        ).fetchone()
+        if row is None or type(row[0]) is not int or row[0] not in (0, 1):
+            raise StorageError("dashboard update preference is malformed")
+        return bool(row[0])
+
+    def set_check_staged_updates_on_open(self, enabled: bool) -> None:
+        """Save the dashboard's automatic staged-release check preference."""
+
+        if not isinstance(enabled, bool):
+            raise StorageError("automatic update checking must be true or false")
+        try:
+            cursor = self._connection.execute(
+                "UPDATE dashboard_preferences SET check_staged_updates_on_open = ? WHERE id = 1",
+                (int(enabled),),
+            )
+            if cursor.rowcount != 1:
+                self._rollback()
+                raise StorageError("dashboard update preference is unavailable")
+            self._commit()
+        except sqlite3.Error as error:
+            self._rollback()
+            raise StorageError("could not save dashboard update preference") from error
+
+    def get_persist_profiles_after_gateway_outage(self) -> bool:
+        """Return whether active experiment plans resume after a gateway outage."""
+
+        row = self._connection.execute(
+            "SELECT persist_profiles_after_gateway_outage FROM experiment_settings WHERE id = 1"
+        ).fetchone()
+        if row is None or row[0] not in (0, 1):
+            raise StorageError("gateway-outage persistence setting is malformed")
+        return bool(row[0])
+
+    def set_persist_profiles_after_gateway_outage(
+        self, enabled: bool, *, expected_version: Optional[int] = None
+    ) -> int:
+        """Save the gateway-outage preference and return its settings version."""
+
+        if not isinstance(enabled, bool):
+            raise StorageError("gateway-outage persistence must be true or false")
+        try:
+            with self.transaction():
+                if expected_version is not None and (
+                    isinstance(expected_version, bool)
+                    or not isinstance(expected_version, int)
+                    or self.get_runtime_state().configuration_version != expected_version
+                ):
+                    raise DeviceConflictError("settings changed since this form was loaded")
+                current = self.get_persist_profiles_after_gateway_outage()
+                if current != enabled:
+                    self._connection.execute(
+                        "UPDATE experiment_settings "
+                        "SET persist_profiles_after_gateway_outage = ? WHERE id = 1",
+                        (int(enabled),),
+                    )
+                    self._bump_configuration_version()
+        except sqlite3.Error as error:
+            raise StorageError("could not save gateway-outage persistence") from error
+        return self.get_runtime_state().configuration_version
+
+    def replace_settings(
+        self,
+        settings: SavedSettings,
+        *,
+        expected_version: Optional[int] = None,
+        preserve_usage: bool = False,
+    ) -> None:
+        """Replace every saved setting at once. On failure nothing changes.
+
+        DNS observations, action history and the runtime state stay. Timers,
+        progressions and scenario runs are removed because they belong to the
+        replaced devices, groups and scenarios.
+        """
+
+        try:
+            with self.transaction():
+                if (
+                    expected_version is not None
+                    and self.get_runtime_state().configuration_version != expected_version
+                ):
+                    raise StorageError("settings changed since the preview")
+                usage = {}
+                if preserve_usage:
+                    for table, key, columns in (
+                        ("data_limits", ("device_id",),
+                         ("used_bytes", "counter_bytes", "last_reset_at")),
+                        ("group_data_limits", ("group_id",),
+                         ("used_bytes", "counter_bytes", "last_reset_at")),
+                        ("service_quotas", ("id", "device_id"),
+                         ("used_bytes", "counter_bytes", "last_reset_at")),
+                        ("time_quotas", ("id", "device_id"),
+                         ("used_seconds", "counter_bytes", "last_reset_at", "last_sample_at",
+                          "started_at", "expires_at")),
+                    ):
+                        usage[table] = (key, columns, self._connection.execute(
+                            "SELECT " + ", ".join(key + columns) + " FROM " + table
+                        ).fetchall())
+                # The everyone-else and general profiles refer to profiles replaced below.
+                self._connection.execute("UPDATE everyone_else_settings SET profile_id = NULL")
+                self._connection.execute("UPDATE general_profile_setting SET profile_id = NULL")
+                for table in (
+                    "site_blocks",
+                    "scenario_runs",
+                    "scenarios",
+                    "unaffected_devices",
+                    "service_lists",
+                    "service_assignments",
+                    "time_quotas",
+                    "service_quotas",
+                    "group_data_limits",
+                    "data_limits",
+                    "schedules",
+                    "timers",
+                    "progressions",
+                    "device_groups",
+                    "devices",
+                    "profiles",
+                ):
+                    self._connection.execute(f"DELETE FROM {table}")
+                for profile in settings.profiles:
+                    self.save_profile(profile)
+                for device in settings.devices:
+                    self.save_device(device)
+                for group in settings.groups:
+                    self.save_device_group(group)
+                for schedule in settings.schedules:
+                    self.save_schedule(schedule)
+                for scenario in settings.scenarios:
+                    self.save_scenario(scenario)
+                self.save_mac_policy(settings.mac_policy)
+                self.save_website_policy(settings.website_policy)
+                self._write_site_blocks(settings.site_blocks)
+                self._connection.execute(
+                    "UPDATE network_policies SET access_options_json = ? WHERE id = 1",
+                    (json.dumps(asdict(settings.access_options)),),
+                )
+                self._connection.execute(
+                    "UPDATE experiment_settings "
+                    "SET persist_profiles_after_gateway_outage = ? WHERE id = 1",
+                    (int(settings.persist_profiles_after_gateway_outage),),
+                )
+                for data_limit in settings.data_limits:
+                    self.save_data_limit(data_limit)
+                for group_data_limit in settings.group_data_limits:
+                    self.save_group_data_limit(group_data_limit)
+                for service_quota in settings.service_quotas:
+                    self.save_service_quota(service_quota)
+                for time_quota in settings.time_quotas:
+                    self.save_time_quota(time_quota)
+                for assignment in settings.service_assignments:
+                    self.save_service_assignment(assignment)
+                for service_list in settings.service_lists:
+                    self.save_service_list(service_list)
+                for unaffected in settings.unaffected_devices:
+                    self.save_unaffected_device(unaffected)
+                self.save_everyone_else_profile_id(settings.everyone_else_profile_id)
+                self.save_general_profile(settings.general_profile_id)
+                for table, (key, columns, rows) in usage.items():
+                    for row in rows:
+                        self._connection.execute(
+                            "UPDATE " + table + " SET "
+                            + ", ".join(column + " = ?" for column in columns)
+                            + " WHERE " + " AND ".join(column + " = ?" for column in key),
+                            tuple(row[column] for column in columns + key),
+                        )
+        except sqlite3.Error as error:
+            raise StorageError("could not replace the saved settings") from error
+
+    def _delete_row(self, table: str, key_column: str, key: str) -> bool:
+        cursor = self._connection.execute(f"DELETE FROM {table} WHERE {key_column} = ?", (key,))
+        if not cursor.rowcount:
+            self._commit()
+            return False
+        self._bump_configuration_version()
+        self._commit()
+        return True
+
     def get_device_group(self, group_id: str) -> Optional[DeviceGroup]:
         """Return one device group or `None` when it is not stored."""
 
@@ -1033,12 +1681,11 @@ class ConfigRepository:
     def delete_device_group(self, group_id: str) -> bool:
         """Delete one group and release its device members."""
 
-        cursor = self._connection.execute("DELETE FROM device_groups WHERE id = ?", (group_id,))
-        if cursor.rowcount:
-            self._bump_configuration_version()
-            self._commit()
-            return True
-        return False
+        try:
+            return self._delete_row("device_groups", "id", group_id)
+        except sqlite3.IntegrityError as error:
+            self._rollback()
+            raise StorageError("remove site rules for this group before deleting it") from error
 
     def save_schedule(self, schedule: Schedule) -> None:
         """Insert or update one repeating schedule."""
@@ -1047,10 +1694,13 @@ class ConfigRepository:
             self._connection.execute(
                 """
                 INSERT INTO schedules (
-                    id, device_id, profile_id, days_json, start_minute, end_minute, enabled
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    id, device_id, group_id, everyone_else, profile_id, days_json,
+                    start_minute, end_minute, enabled
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     device_id = excluded.device_id,
+                    group_id = excluded.group_id,
+                    everyone_else = excluded.everyone_else,
                     profile_id = excluded.profile_id,
                     days_json = excluded.days_json,
                     start_minute = excluded.start_minute,
@@ -1060,6 +1710,8 @@ class ConfigRepository:
                 (
                     schedule.id,
                     schedule.device_id,
+                    schedule.group_id,
+                    int(schedule.everyone_else),
                     schedule.profile_id,
                     json.dumps(list(schedule.days_of_week)),
                     schedule.start_minute,
@@ -1073,31 +1725,47 @@ class ConfigRepository:
             self._rollback()
             raise StorageError(f"could not save schedule {schedule.id}") from error
 
-    def delete_schedule(self, schedule_id: str) -> None:
+    def delete_schedule(self, schedule_id: str) -> bool:
         """Delete one schedule when it exists."""
 
-        cursor = self._connection.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
-        if cursor.rowcount:
-            self._bump_configuration_version()
-            self._commit()
+        return self._delete_row("schedules", "id", schedule_id)
 
     def list_schedules(self) -> tuple:
         """Return all schedules in stable identifier order."""
 
         rows = self._connection.execute(
             """
-            SELECT id, device_id, profile_id, days_json, start_minute, end_minute, enabled
+            SELECT id, device_id, group_id, everyone_else, profile_id, days_json,
+                   start_minute, end_minute, enabled
             FROM schedules ORDER BY id
             """
         ).fetchall()
         return tuple(self._schedule_from_row(row) for row in rows)
 
+    def _prune_run_history(self) -> None:
+        """Keep 500 inactive runs per type with at most 1000 deletions each."""
+
+        for table in ("timers", "progressions", "scenario_runs"):
+            self._connection.execute(
+                f"DELETE FROM {table} WHERE id IN ("
+                f"SELECT id FROM {table} WHERE enabled = 0 "
+                "ORDER BY started_at DESC, id DESC LIMIT 1000 OFFSET 500)"
+            )
+
     def save_timer(self, timer: Timer) -> None:
-        """Persist one temporary profile override."""
+        """Persist one timer and replace other active overrides for its device."""
 
         try:
             self._connection.execute(
                 "UPDATE timers SET enabled = 0 WHERE device_id = ? AND enabled = 1",
+                (timer.device_id,),
+            )
+            self._connection.execute(
+                "UPDATE scenario_runs SET enabled = 0 WHERE device_id = ? AND enabled = 1",
+                (timer.device_id,),
+            )
+            self._connection.execute(
+                "UPDATE progressions SET enabled = 0 WHERE device_id = ? AND enabled = 1",
                 (timer.device_id,),
             )
             self._connection.execute(
@@ -1122,10 +1790,158 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
+            self._prune_run_history()
             self._commit()
         except sqlite3.IntegrityError as error:
             self._rollback()
             raise StorageError(f"could not save timer {timer.id}") from error
+
+    def save_scenario(self, scenario: Scenario, *, now: Optional[float] = None) -> None:
+        """Insert or update one scenario. Its running copies follow the new steps.
+
+        Runs that already finished stay finished, even when the steps get
+        longer or start repeating.
+        """
+
+        steps = [
+            {"profile_id": step.profile_id, "duration_seconds": step.duration_seconds}
+            for step in scenario.steps
+        ]
+        previous = self.get_scenario(scenario.id)
+        try:
+            if previous is not None and not previous.loop:
+                self._connection.execute(
+                    """
+                    UPDATE scenario_runs SET enabled = 0
+                    WHERE scenario_id = ? AND enabled = 1 AND started_at + ? <= ?
+                    """,
+                    (scenario.id, previous.total_seconds, time.time() if now is None else now),
+                )
+            self._connection.execute(
+                """
+                INSERT INTO scenarios (id, name, steps_json, loop) VALUES (?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    steps_json = excluded.steps_json,
+                    loop = excluded.loop
+                """,
+                (scenario.id, scenario.name, json.dumps(steps), int(scenario.loop)),
+            )
+            self._bump_configuration_version()
+            self._prune_run_history()
+            self._commit()
+        except sqlite3.IntegrityError as error:
+            self._rollback()
+            raise StorageError(f"could not save scenario {scenario.id}") from error
+
+    def get_scenario(self, scenario_id: str) -> Optional[Scenario]:
+        """Return one scenario or `None` when it is not stored."""
+
+        row = self._connection.execute(
+            "SELECT id, name, steps_json, loop FROM scenarios WHERE id = ?", (scenario_id,)
+        ).fetchone()
+        return None if row is None else self._scenario_from_row(row)
+
+    def list_scenarios(self) -> tuple:
+        """Return scenarios in stable identifier order."""
+
+        rows = self._connection.execute(
+            "SELECT id, name, steps_json, loop FROM scenarios ORDER BY id"
+        ).fetchall()
+        return tuple(self._scenario_from_row(row) for row in rows)
+
+    def delete_scenario(self, scenario_id: str) -> bool:
+        """Delete one scenario, which also ends its runs."""
+
+        return self._delete_row("scenarios", "id", scenario_id)
+
+    def start_scenario_run(self, run: ScenarioRun) -> None:
+        """Start one run, replacing the other run for its target.
+
+        For a device it also replaces the device's timer and progression, as a
+        timer does.
+        """
+
+        try:
+            if run.device_id is not None:
+                target = ("device_id = ?", (run.device_id,))
+                for table in ("timers", "progressions"):
+                    self._connection.execute(
+                        f"UPDATE {table} SET enabled = 0 WHERE device_id = ? AND enabled = 1",
+                        (run.device_id,),
+                    )
+            elif run.group_id is not None:
+                target = ("group_id = ?", (run.group_id,))
+            else:
+                target = ("everyone_else = 1", ())
+            self._connection.execute(
+                f"UPDATE scenario_runs SET enabled = 0 WHERE {target[0]} AND enabled = 1",
+                target[1],
+            )
+            self._connection.execute(
+                """
+                INSERT INTO scenario_runs (
+                    id, scenario_id, device_id, group_id, everyone_else, started_at, enabled
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run.id,
+                    run.scenario_id,
+                    run.device_id,
+                    run.group_id,
+                    int(run.everyone_else),
+                    run.started_at,
+                    int(run.enabled),
+                ),
+            )
+            self._bump_configuration_version()
+            self._prune_run_history()
+            self._commit()
+        except sqlite3.IntegrityError as error:
+            self._rollback()
+            raise StorageError(f"could not start scenario run {run.id}") from error
+
+    def stop_scenario_run(self, run_id: str) -> bool:
+        """Stop one running scenario when it is still enabled."""
+
+        cursor = self._connection.execute(
+            "UPDATE scenario_runs SET enabled = 0 WHERE id = ? AND enabled = 1", (run_id,)
+        )
+        if cursor.rowcount:
+            self._bump_configuration_version()
+            self._prune_run_history()
+            self._commit()
+            return True
+        return False
+
+    def list_scenario_runs(self) -> tuple:
+        """Return (run, scenario) for enabled runs, newest first, finished or not."""
+
+        rows = self._connection.execute(
+            """
+            SELECT scenario_runs.id AS run_id, scenario_id, device_id, group_id,
+                   everyone_else, started_at, enabled,
+                   scenarios.id, scenarios.name, scenarios.steps_json, scenarios.loop
+            FROM scenario_runs JOIN scenarios ON scenarios.id = scenario_runs.scenario_id
+            WHERE enabled = 1
+            ORDER BY started_at DESC, run_id DESC
+            """
+        ).fetchall()
+        runs = []
+        for row in rows:
+            try:
+                run = ScenarioRun(
+                    id=row["run_id"],
+                    scenario_id=row["scenario_id"],
+                    started_at=row["started_at"],
+                    device_id=row["device_id"],
+                    group_id=row["group_id"],
+                    everyone_else=bool(row["everyone_else"]),
+                )
+            except ValidationError as error:
+                raise StorageError("stored scenario run is malformed") from error
+            runs.append((run, self._scenario_from_row(row)))
+        return tuple(runs)
 
     def delete_timer(self, timer_id: str) -> bool:
         """Disable one temporary profile override when it exists."""
@@ -1136,6 +1952,7 @@ class ConfigRepository:
         )
         if cursor.rowcount:
             self._bump_configuration_version()
+            self._prune_run_history()
             self._commit()
             return True
         return False
@@ -1178,6 +1995,10 @@ class ConfigRepository:
                 (progression.device_id,),
             )
             self._connection.execute(
+                "UPDATE scenario_runs SET enabled = 0 WHERE device_id = ? AND enabled = 1",
+                (progression.device_id,),
+            )
+            self._connection.execute(
                 """
                 INSERT INTO progressions (
                     id, device_id, start_profile_id, end_profile_id, started_at,
@@ -1216,6 +2037,7 @@ class ConfigRepository:
                 ),
             )
             self._bump_configuration_version()
+            self._prune_run_history()
             self._commit()
         except sqlite3.IntegrityError as error:
             self._rollback()
@@ -1230,6 +2052,7 @@ class ConfigRepository:
         )
         if cursor.rowcount:
             self._bump_configuration_version()
+            self._prune_run_history()
             self._commit()
             return True
         return False
@@ -1266,17 +2089,58 @@ class ConfigRepository:
         ).fetchall()
         return tuple(self._progression_from_row(row) for row in rows)
 
+    def move_device_addresses(self, moves: Dict[str, Tuple[str, str]]) -> bool:
+        """Move saved devices from one address to another, all at once.
+
+        Returns False and changes nothing when any device no longer has the
+        address the caller read, for example because it was edited meanwhile.
+        DNS queries are counted by address, so a traffic progression's baseline
+        moves with its device and keeps the progress made.
+        """
+
+        try:
+            # Park each device on a unique placeholder first: addresses are
+            # unique, and devices that swap or pass addresses on would collide.
+            for device_id, (old_address, _) in moves.items():
+                cursor = self._connection.execute(
+                    "UPDATE devices SET ipv4_address = ? WHERE id = ? AND ipv4_address = ?",
+                    (f"moving:{device_id}", device_id, old_address),
+                )
+                if cursor.rowcount != 1:
+                    self._rollback()
+                    return False
+            for device_id, (old_address, new_address) in moves.items():
+                self._connection.execute(
+                    "UPDATE devices SET ipv4_address = ? WHERE id = ?",
+                    (new_address, device_id),
+                )
+                self._connection.execute(
+                    """
+                    UPDATE progressions
+                    SET traffic_baseline_queries = traffic_baseline_queries + ?
+                    WHERE device_id = ? AND mode = 'traffic' AND enabled = 1
+                    """,
+                    (
+                        self.total_domain_queries(new_address)
+                        - self.total_domain_queries(old_address),
+                        device_id,
+                    ),
+                )
+            self._bump_configuration_version()
+            self._commit()
+            return True
+        except sqlite3.Error as error:
+            self._rollback()
+            raise StorageError("could not move saved devices to their new addresses") from error
+
     def total_domain_queries(self, ipv4_address: str) -> int:
-        """Return the bounded DNS query total for one observed client."""
+        """Return the running DNS query total for one observed client."""
 
         row = self._connection.execute(
-            """
-            SELECT COALESCE(SUM(query_count), 0) AS total
-            FROM domain_observations WHERE ipv4_address = ?
-            """,
+            "SELECT query_count FROM domain_query_totals WHERE ipv4_address = ?",
             (ipv4_address,),
         ).fetchone()
-        return int(row["total"] if row is not None else 0)
+        return int(row["query_count"]) if row is not None else 0
 
     def get_data_limit(self, device_id: str) -> Optional[DataLimit]:
         """Return one device quota or `None` when it is not stored."""
@@ -1345,6 +2209,33 @@ class ConfigRepository:
         except sqlite3.IntegrityError as error:
             self._rollback()
             raise StorageError(f"could not save data limit for {data_limit.device_id}") from error
+
+    def restart_usage_counters(self) -> None:
+        """Record that every helper traffic counter restarted at zero."""
+
+        for table in ("data_limits", "group_data_limits", "service_quotas", "time_quotas"):
+            self._connection.execute(f"UPDATE {table} SET counter_bytes = 0")
+        self._commit()
+
+    def delete_data_limit(self, device_id: str) -> bool:
+        """Delete one device quota when it exists."""
+
+        return self._delete_row("data_limits", "device_id", device_id)
+
+    def delete_group_data_limit(self, group_id: str) -> bool:
+        """Delete one shared group quota when it exists."""
+
+        return self._delete_row("group_data_limits", "group_id", group_id)
+
+    def delete_service_quota(self, quota_id: str) -> bool:
+        """Delete one service quota when it exists."""
+
+        return self._delete_row("service_quotas", "id", quota_id)
+
+    def delete_time_quota(self, quota_id: str) -> bool:
+        """Delete one timed service quota when it exists."""
+
+        return self._delete_row("time_quotas", "id", quota_id)
 
     def reset_data_limit_usage(
         self,
@@ -1500,6 +2391,17 @@ class ConfigRepository:
             self._commit()
             return True
         return False
+
+    def rebaseline_group_data_usage(self, group_id: str, counter_bytes: int) -> None:
+        """Start counting a group's traffic from a new aggregate without charging it."""
+
+        if not isinstance(counter_bytes, int) or counter_bytes < 0:
+            raise StorageError("group traffic counter is invalid")
+        self._connection.execute(
+            "UPDATE group_data_limits SET counter_bytes = ? WHERE group_id = ?",
+            (counter_bytes, group_id),
+        )
+        self._commit()
 
     def record_group_data_usage(
         self,
@@ -1661,6 +2563,7 @@ class ConfigRepository:
             "DELETE FROM service_assignments WHERE id = ?", (assignment_id,)
         )
         if not cursor.rowcount:
+            self._commit()
             return False
         self._bump_configuration_version()
         self._commit()
@@ -2023,6 +2926,55 @@ class ConfigRepository:
             enabled=quota.enabled,
         )
 
+    def list_site_blocks(self) -> Tuple[SiteBlock, ...]:
+        try:
+            return tuple(SiteBlock(
+                row["id"], row["name"], tuple(json.loads(row["domains_json"])),
+                row["device_id"], row["group_id"], bool(row["enabled"]),
+            ) for row in self._connection.execute("SELECT * FROM site_blocks ORDER BY id"))
+        except (ValueError, TypeError) as error:
+            raise StorageError("stored site rules are malformed") from error
+
+    def get_access_options(self) -> AccessOptions:
+        row = self._connection.execute(
+            "SELECT access_options_json FROM network_policies WHERE id = 1"
+        ).fetchone()
+        try:
+            return AccessOptions(**json.loads(row[0]))
+        except (ValueError, TypeError) as error:
+            raise StorageError("stored access options are malformed") from error
+
+    def _write_site_blocks(self, blocks: Sequence[SiteBlock]) -> None:
+        from jittersim.engine.access import validate_blocks
+
+        validate_blocks(blocks, {d.id for d in self.list_devices()},
+                        {g.id for g in self.list_device_groups()})
+        self._connection.execute("DELETE FROM site_blocks")
+        self._connection.executemany(
+            "INSERT INTO site_blocks VALUES (?, ?, ?, ?, ?, ?)",
+            ((r.id, r.name, json.dumps(r.domains), r.device_id, r.group_id, int(r.enabled))
+             for r in blocks),
+        )
+
+    def save_access_policies(self, mac: MacPolicy, websites: WebsitePolicy, *,
+                             blocks=None, options=None, expected_version=None) -> None:
+        """Replace all access rules together and reject an obsolete browser edit."""
+        with self.transaction():
+            if expected_version is not None and (
+                isinstance(expected_version, bool) or not isinstance(expected_version, int)
+                or self.get_runtime_state().configuration_version != expected_version
+            ):
+                raise DeviceConflictError("settings changed since this form was loaded")
+            self.save_mac_policy(mac)
+            self.save_website_policy(websites)
+            if blocks is not None:
+                self._write_site_blocks(blocks)
+            if options is not None:
+                self._connection.execute(
+                    "UPDATE network_policies SET access_options_json = ? WHERE id = 1",
+                    (json.dumps(asdict(options)),),
+                )
+
     def get_mac_policy(self) -> MacPolicy:
         """Return the saved MAC filtering policy."""
 
@@ -2136,6 +3088,18 @@ class ConfigRepository:
                         1_000_000_000,
                     ),
                 )
+                self._connection.execute(
+                    """
+                    INSERT INTO domain_query_totals (ipv4_address, query_count)
+                    VALUES (?, ?)
+                    ON CONFLICT(ipv4_address) DO UPDATE SET
+                        query_count = MIN(
+                            domain_query_totals.query_count + excluded.query_count,
+                            ?
+                        )
+                    """,
+                    (str(observation.ipv4_address), observation.query_count, 2**62),
+                )
             self._prune_domain_observations(now=current_time)
             self._commit()
         except (sqlite3.IntegrityError, sqlite3.OperationalError) as error:
@@ -2164,6 +3128,13 @@ class ConfigRepository:
                 + ")",
                 addresses + macs,
             )
+            if addresses:
+                self._connection.execute(
+                    "DELETE FROM domain_query_totals WHERE ipv4_address IN ("
+                    + ",".join("?" for _ in addresses)
+                    + ")",
+                    addresses,
+                )
             self._commit()
         except (sqlite3.IntegrityError, sqlite3.OperationalError) as error:
             self._rollback()
@@ -2422,6 +3393,26 @@ class ConfigRepository:
             raise StorageError("stored device group is malformed") from error
 
     @staticmethod
+    def _scenario_from_row(row: sqlite3.Row) -> Scenario:
+        try:
+            steps = json.loads(row["steps_json"])
+            if not isinstance(steps, list):
+                raise ValueError("scenario steps must be a list")
+            return Scenario(
+                id=row["id"],
+                name=row["name"],
+                steps=tuple(
+                    ScenarioStep(
+                        profile_id=step["profile_id"], duration_seconds=step["duration_seconds"]
+                    )
+                    for step in steps
+                ),
+                loop=bool(row["loop"]),
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
+            raise StorageError("stored scenario is malformed") from error
+
+    @staticmethod
     def _schedule_from_row(row: sqlite3.Row) -> Schedule:
         try:
             days = json.loads(row["days_json"])
@@ -2435,6 +3426,8 @@ class ConfigRepository:
                 start_minute=row["start_minute"],
                 end_minute=row["end_minute"],
                 enabled=bool(row["enabled"]),
+                group_id=row["group_id"],
+                everyone_else=bool(row["everyone_else"]),
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError, ValidationError) as error:
             raise StorageError("stored schedule is malformed") from error

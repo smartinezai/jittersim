@@ -69,7 +69,7 @@ Goal: apply a plan through a controlled adapter and recover from failure.
 - [x] Add explicit simulation mode.
 - [x] Add bounded command timeouts.
 - [x] Add apply and reset operations.
-- [ ] Prove repeated apply operations are idempotent on Linux.
+- [x] Prove repeated apply operations are idempotent on Linux.
 - [x] Record command output and failures.
 - [x] Add a global reset operation that removes only project-owned state.
 
@@ -91,8 +91,8 @@ Goal: persist configuration without requiring a cloud service.
 - [x] Store desired state separately from observed state.
 - [x] Add configuration versioning.
 - [x] Download a protected SQLite backup of settings and local observations.
-- [ ] Add import and export of non-secret JSON configuration.
-- [ ] Reject malformed imported configuration before persistence.
+- [x] Add import and export of non-secret JSON configuration.
+- [x] Reject malformed imported configuration before persistence.
 
 Suggested commits:
 
@@ -118,7 +118,11 @@ Goal: control the emulator from a Mac without a screen or keyboard attached to t
 - [x] Keep Apply and Reset feedback in a sticky action area.
 - [x] Add a bounded history of admin actions without request contents.
 - [x] Protect the deployed dashboard with HTTPS.
-- [ ] Keep the dashboard exempt from impairment.
+- [x] Keep the dashboard exempt from impairment.
+- [x] Show anyone without the admin token only a neutral sign-in page and keep
+  signed-in browsers signed in for 7 days.
+- [x] Split the dashboard into tabs, fit it on a phone and guide a first setup.
+- [x] Offer the connected devices in forms instead of typed addresses.
 
 Suggested commits:
 
@@ -134,16 +138,19 @@ Suggested commits:
 
 Goal: create realistic changing conditions without making tests irreproducible.
 
-- [ ] Define normal, degraded and offline states.
+- [x] Define normal, degraded and offline states.
 - [x] Add fixed-duration outages.
 - [x] Add repeating schedules.
+- [x] Let schedules apply to a group or to everyone else.
+- [x] Add timed scenarios for a device, a group or everyone else.
+- [x] Move saved devices to the address their MAC address uses.
 - [x] Add seeded random choices.
 - [x] Reroll values and feature enablement at separate intervals.
 - [x] Vary reroll timing and outage timing.
 - [x] Add time-based and DNS-query-based progression sessions.
 - [x] Stage per-device website blocking during progression sessions.
-- [ ] Add burst loss and correlated impairment presets.
-- [ ] Ensure only one scheduler owns transitions.
+- [x] Add burst loss and correlated impairment presets.
+- [x] Ensure only one scheduler owns transitions.
 - [x] Stop schedules cleanly during reset and shutdown.
 
 Suggested commits:
@@ -180,14 +187,16 @@ Suggested commits:
 
 Goal: produce evidence that the selected profile changes observed network behavior.
 
-- [ ] Add counters for packets, bytes, drops and active state.
+- [x] Add counters for packets, bytes, drops and active state.
 - [x] Show per-device upload and download rates in a live dashboard graph.
-- [ ] Add a latency measurement page.
-- [ ] Add a small scripted test client.
-- [ ] Compare normal and impaired runs.
-- [ ] Capture screenshots or tables for the class report.
+- [x] Show everyone else in the live graph.
+- [x] Keep an activity log of network events that copies as Markdown.
+- [x] Add a latency measurement page.
+- [x] Add a small scripted test client.
+- [x] Compare normal and impaired runs.
+- [x] Capture screenshots or tables for the class report.
 - [x] Document packet-level limits and IPv4 profile matching.
-- [ ] Test that the reset path works after a failed apply.
+- [x] Test that the reset path works after a failed apply.
 
 Suggested commits:
 
@@ -228,6 +237,7 @@ another location without exposing the dashboard publicly.
 - [x] Serialize apply and reset, enforce the Linux queue limit and preserve
   foreign root queues.
 - [x] Provision the test AP and document Mac browser setup.
+- [x] Isolate test Wi-Fi clients from each other.
 - [x] Document opt-in Tailscale Serve, access rules and removal.
 - [ ] Verify network queues, Mac browser isolation, the AP and remote control
   on the actual Pi from another location.
@@ -245,6 +255,8 @@ verified on the target Pi under normal household load.
 
 - [x] Keep unconfigured clients out of device-specific profile rules.
 - [x] Give ordinary traffic a fair queue while selected devices are shaped.
+- [x] Give everyone else one shared profile, except devices on an unaffected
+  list.
 - [x] Check Ethernet routing, AP interface and subnet compatibility before
   changing services during installation.
 - [x] Avoid restarting an active AP during a routine software update.
@@ -262,6 +274,52 @@ verified on the target Pi under normal household load.
   changes, helper restarts, dashboard restarts and a Pi reboot.
 
 See the [household plan](docs/implementation-plan-household-access-point-2026-09.md).
+
+## Milestone 12: device workflows and repeatable tests
+
+- [x] Preserve unfinished forms across Apply, saves and background updates.
+- [x] Add phone device cards and controls shared by Overview and activity events.
+- [x] Preview upcoming rules with the scheduler's precedence and warn about overlaps.
+- [x] Retain stale readings with clear connection and Pi health information.
+- [x] Keep bounded settings history with preview and concurrent-edit protection.
+- [x] Record named test sessions with settings, events, notes and measurement reports.
+- [x] Duplicate profiles and provide manual copying when clipboard access fails.
+- [x] Read router Wi-Fi state before presenting one verified switch.
+- [x] Install administrator-approved releases with progress, health checks and recovery.
+- [x] Exercise complete browser journeys in CI against an installed package.
+- [ ] Verify radio changes, release installation and recovery on the actual Pi.
+- [ ] Design a separate client measurement page if phone setup needs to be simpler.
+
+The dashboard remains inaccessible from the test Wi-Fi. Release delivery uses
+locally staged bundles without storing GitHub credentials on the Pi.
+
+## Milestone 13: DNS failures and headless operations
+
+- [x] Add a 0–100% DNS failure chance for test Wi-Fi with a safe 0% default.
+- [x] Return prompt UDP and TCP network errors without changing the client's
+  Unbound view or affecting management DNS.
+- [x] Show the saved and applied chance in the dashboard and require a clear
+  confirmation before applying 100%.
+- [x] Add headless access, diagnostics, bounded logs and staged update commands.
+- [x] Document caches, bypass paths and recovery commands.
+- [ ] Confirm error behavior, DNS policy and service recovery on the target Pi.
+- [ ] Find a trusted online source if the Pi should check for private releases.
+- [ ] Explore a separate browser feature for returning to a site's home page or
+  a chosen destination. DNS cannot see a page path or browsing history.
+
+## Milestone 14: router outage persistence
+
+- [x] Save one global setting for keeping active profiles through a router
+  outage, defaulting to off.
+- [x] Check the configured gateway with a bounded probe and require repeated
+  failures before stopping profiles.
+- [x] Keep OFF-mode stops in place after recovery until the owner applies again.
+- [x] Show the saved mode and gateway state in the dashboard and terminal.
+- [x] Include the preference in settings export and import.
+- [x] Keep Pi restart behavior unchanged in this first version.
+- [ ] Confirm ICMP behavior and router restart recovery on the target Pi.
+- [ ] Decide whether a later version should stop profiles from resuming after
+  a Pi restart.
 
 ## Deliberate non-goals
 

@@ -46,7 +46,16 @@ class GeneralHelper:
         if not self.supported:
             raise HelperClientError("Update the Pi helper before applying a general profile")
 
-    def apply(self, *, plan):
+    def ping(self):
+        return {"ok": True}
+
+    def gateway_status(self):
+        return {"outage_stop_latched": False, "state_error": False}
+
+    def set_gateway_persistence(self, *, enabled):
+        return {"ok": True, "mode_enabled": enabled}
+
+    def apply(self, *, plan, explicit_apply=False):
         if self.fail_apply:
             raise HelperClientError("apply failed")
         self.plans.append(plan)

@@ -8,10 +8,12 @@ from dataclasses import replace
 from ipaddress import IPv4Address
 from pathlib import Path
 
-from jittersim.config.models import Device, Impairment, MacPolicy, Profile
+from jittersim.config.models import Device, Impairment, MacPolicy, Profile, SiteBlock
+from jittersim.engine.access import AccessPlan
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import compile_plan
 from jittersim.engine.plan import GeneralProfileRule, ServiceAssignmentRule, WebsiteFilter
+from jittersim.networking.access import atomic_write
 from jittersim.networking.browser_proxy import (
     BrowserProxyServer,
     ProxyError,
@@ -169,6 +171,32 @@ class BrowserProxyTests(unittest.TestCase):
         self.assertFalse(destination_allowed(plan, device.ipv4_address, "1.1.1.1"))
         self.assertTrue(destination_allowed(plan, device.ipv4_address, "9.9.9.9"))
 
+    def test_blocked_sites_without_an_allowlist_keep_other_sites_reachable(self) -> None:
+        device = Device("alice", "Alice", "192.168.50.10", "normal")
+
+        def plan_with(allowed_addresses):
+            return compile_plan(
+                devices=(device,),
+                profiles={"normal": Profile(id="normal", name="Normal")},
+                website_filters=(
+                    WebsiteFilter(
+                        device_ip=device.ipv4_address,
+                        allowed_addresses=allowed_addresses,
+                        blocked_addresses=(IPv4Address("203.0.113.9"),),
+                    ),
+                ),
+            )
+
+        no_allowlist = plan_with(None)
+        empty_allowlist = plan_with(())
+
+        self.assertFalse(destination_allowed(no_allowlist, device.ipv4_address, "203.0.113.9"))
+        self.assertTrue(destination_allowed(no_allowlist, device.ipv4_address, "198.51.100.7"))
+        # An allowlist whose domains resolved to nothing still allows nothing.
+        self.assertFalse(
+            destination_allowed(empty_allowlist, device.ipv4_address, "198.51.100.7")
+        )
+
     def test_hostnames_on_the_same_address_get_different_marks(self) -> None:
         device = Device("alice", "Alice", "192.168.50.10", "normal")
         plan = compile_plan(
@@ -198,6 +226,8 @@ class BrowserProxyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             plan_path = Path(directory) / "active-plan.json"
             plan_path.write_text(json.dumps(plan_to_payload(plan)))
+            access_path = Path(directory) / "access-policy.json"
+            atomic_write(access_path, json.dumps(AccessPlan().payload()))
             echo = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _EchoHandler)
             echo.daemon_threads = True
             echo_thread = threading.Thread(target=echo.serve_forever, daemon=True)
@@ -206,6 +236,7 @@ class BrowserProxyTests(unittest.TestCase):
             proxy = BrowserProxyServer(
                 ("127.0.0.1", 0),
                 active_plan_path=plan_path,
+                require_access_policy=True,
                 client_network="127.0.0.0/8",
                 mark_socket=lambda _connection, mark: marks.append(mark),
                 identify_client=lambda _address: device.ipv4_address,
@@ -235,6 +266,21 @@ class BrowserProxyTests(unittest.TestCase):
                     replacement.replace(plan_path)
                     client.sendall(b"stale-tunnel")
                     self.assertEqual(client.recv(4096), b"")
+                with socket.create_connection(proxy.server_address, timeout=3) as client:
+                    client.sendall(b"CONNECT other.example:443 HTTP/1.1\r\n\r\n")
+                    self.assertIn(b"200 Connection Established", client.recv(4096))
+                    blocked = AccessPlan(blocks=(SiteBlock("blocked", "Blocked", ("other.example",)),))
+                    atomic_write(access_path, json.dumps(blocked.payload()))
+                    client.sendall(b"access-changed")
+                    self.assertEqual(client.recv(4096), b"")
+                for host in ("other.example", "cdn.other.example"):
+                    with socket.create_connection(proxy.server_address, timeout=3) as client:
+                        client.sendall(f"CONNECT {host}:443 HTTP/1.1\r\n\r\n".encode())
+                        self.assertIn(b"503", client.recv(4096))
+                access_path.unlink()
+                with socket.create_connection(proxy.server_address, timeout=3) as client:
+                    client.sendall(b"CONNECT missing-policy.example:443 HTTP/1.1\r\n\r\n")
+                    self.assertIn(b"503", client.recv(4096))
             finally:
                 proxy.shutdown()
                 proxy.server_close()

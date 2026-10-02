@@ -19,7 +19,15 @@ services = load_script("retire-services.py")
 release = load_script("replace-source.py")
 
 
-def test_retirement_preserves_current_services_and_running_wifi(tmp_path):
+RETIRED = ("jittersim-ap.service", "old-example.service")
+
+
+def test_this_release_retires_nothing():
+    assert services.OBSOLETE_SERVICES == ()
+
+
+def test_retirement_preserves_current_services_and_running_wifi(tmp_path, monkeypatch):
+    monkeypatch.setattr(services, "OBSOLETE_SERVICES", RETIRED)
     units = tmp_path / "units"
     units.mkdir()
     backup = tmp_path / "private-backup"
@@ -41,7 +49,8 @@ def test_retirement_preserves_current_services_and_running_wifi(tmp_path):
     assert calls.count(["disable", "jittersim-ap.service"]) == 1
 
 
-def test_a_failed_retirement_keeps_the_service_and_recovery_copy(tmp_path):
+def test_a_failed_retirement_keeps_the_service_and_recovery_copy(tmp_path, monkeypatch):
+    monkeypatch.setattr(services, "OBSOLETE_SERVICES", RETIRED)
     units = tmp_path / "units"
     units.mkdir()
     name = services.OBSOLETE_SERVICES[0]

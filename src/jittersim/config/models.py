@@ -6,7 +6,7 @@ from hashlib import sha256
 from ipaddress import AddressValueError, IPv4Address, IPv4Network, ip_address
 from typing import Optional, Tuple, Union
 
-from .exemptions import normalize_exempt_mac
+from .exemptions import MAX_UNAFFECTED_DEVICES, UnaffectedDevice, normalize_exempt_mac
 
 
 class ValidationError(ValueError):
@@ -163,6 +163,8 @@ class Impairment:
     reorder_randomness: Randomness = Randomness()
     duplicate_randomness: Randomness = Randomness()
     corrupt_randomness: Randomness = Randomness()
+    # Average length of a run of lost packets. 0 or 1 loses packets independently.
+    loss_burst_packets: int = 0
 
     def __post_init__(self) -> None:
         _validate_number(self.delay_ms, "delay_ms", 0, 60_000)
@@ -171,6 +173,7 @@ class Impairment:
         _validate_percent(self.reorder_percent, "reorder_percent")
         _validate_percent(self.duplicate_percent, "duplicate_percent")
         _validate_percent(self.corrupt_percent, "corrupt_percent")
+        _validate_number(self.loss_burst_packets, "loss_burst_packets", 0, 100)
         if self.bandwidth_kbit is not None:
             _validate_number(self.bandwidth_kbit, "bandwidth_kbit", 1, 1_000_000)
         for value, field_name in (
@@ -251,6 +254,11 @@ class Device:
             object.__setattr__(self, "mac_address", normalize_mac_address(self.mac_address))
 
 
+# The unaffected (protected) device list lives in exemptions.py and is shared by
+# the general profile, everyone else and the privacy rules.
+__all_unaffected__ = (MAX_UNAFFECTED_DEVICES, UnaffectedDevice)
+
+
 @dataclass(frozen=True)
 class DeviceGroup:
     """A named set of devices that can share a profile and quota."""
@@ -303,6 +311,21 @@ class DomainObservation:
             raise ValidationError("first_seen must not be later than last_seen")
 
 
+def _validate_target(
+    device_id: Optional[str], group_id: Optional[str], everyone_else: bool, owner: str
+) -> None:
+    """Check that exactly one of a device, a group or everyone else is named."""
+
+    if device_id is not None:
+        _validate_identifier(device_id, "device_id")
+    if group_id is not None:
+        _validate_identifier(group_id, "group_id")
+    if not isinstance(everyone_else, bool):
+        raise ValidationError("everyone_else must be a boolean")
+    if (device_id is not None) + (group_id is not None) + everyone_else != 1:
+        raise ValidationError(f"a {owner} needs exactly one of a device, a group or everyone else")
+
+
 @dataclass(frozen=True)
 class RandomWebsiteOutcome:
     """One generated keep-or-remove choice for a configured website."""
@@ -322,19 +345,21 @@ class RandomWebsiteOutcome:
 
 @dataclass(frozen=True)
 class Schedule:
-    """One repeating daily or weekly window for a device profile."""
+    """One repeating daily or weekly window for a device, a group or everyone else."""
 
     id: str
-    device_id: str
+    device_id: Optional[str]
     profile_id: str
     days_of_week: Tuple[int, ...]
     start_minute: int
     end_minute: int
     enabled: bool = True
+    group_id: Optional[str] = None
+    everyone_else: bool = False
 
     def __post_init__(self) -> None:
         _validate_identifier(self.id, "id")
-        _validate_identifier(self.device_id, "device_id")
+        _validate_target(self.device_id, self.group_id, self.everyone_else, "schedule")
         _validate_identifier(self.profile_id, "profile_id")
         if not isinstance(self.days_of_week, (list, tuple)) or not self.days_of_week:
             raise ValidationError("days_of_week must contain at least one day")
@@ -367,6 +392,79 @@ class Timer:
         _validate_number(self.expires_at, "expires_at", 1, 2**63 - 1)
         if self.expires_at <= self.started_at:
             raise ValidationError("expires_at must be later than started_at")
+        if not isinstance(self.enabled, bool):
+            raise ValidationError("enabled must be a boolean")
+
+
+MAX_SCENARIO_STEPS = 20
+MIN_SCENARIO_STEP_SECONDS = 10
+MAX_SCENARIO_STEP_SECONDS = 86_400
+
+
+@dataclass(frozen=True)
+class ScenarioStep:
+    """One profile a scenario uses for a while."""
+
+    profile_id: str
+    duration_seconds: int
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.profile_id, "profile_id")
+        duration = self.duration_seconds
+        if (
+            isinstance(duration, bool)
+            or not isinstance(duration, int)
+            or not MIN_SCENARIO_STEP_SECONDS <= duration <= MAX_SCENARIO_STEP_SECONDS
+        ):
+            raise ValidationError("a step must last 10 seconds to 24 hours")
+
+
+@dataclass(frozen=True)
+class Scenario:
+    """A named list of profiles used one after another, optionally repeating."""
+
+    id: str
+    name: str
+    steps: Tuple[ScenarioStep, ...]
+    loop: bool = False
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.id, "scenario id")
+        object.__setattr__(self, "name", _validate_name(self.name, "scenario name"))
+        if not isinstance(self.steps, (list, tuple)) or not self.steps:
+            raise ValidationError("a scenario needs at least one step")
+        if len(self.steps) > MAX_SCENARIO_STEPS:
+            raise ValidationError(f"a scenario can have at most {MAX_SCENARIO_STEPS} steps")
+        if not all(isinstance(step, ScenarioStep) for step in self.steps):
+            raise ValidationError("each step must be a ScenarioStep")
+        object.__setattr__(self, "steps", tuple(self.steps))
+        if not isinstance(self.loop, bool):
+            raise ValidationError("loop must be a boolean")
+
+    @property
+    def total_seconds(self) -> int:
+        """Return how long one pass through the steps takes."""
+
+        return sum(step.duration_seconds for step in self.steps)
+
+
+@dataclass(frozen=True)
+class ScenarioRun:
+    """One scenario running for a device, a group or everyone else."""
+
+    id: str
+    scenario_id: str
+    started_at: int
+    device_id: Optional[str] = None
+    group_id: Optional[str] = None
+    everyone_else: bool = False
+    enabled: bool = True
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.id, "run id")
+        _validate_identifier(self.scenario_id, "scenario_id")
+        _validate_number(self.started_at, "started_at", 0, 2**63 - 1)
+        _validate_target(self.device_id, self.group_id, self.everyone_else, "scenario run")
         if not isinstance(self.enabled, bool):
             raise ValidationError("enabled must be a boolean")
 
@@ -404,10 +502,12 @@ class Progression:
             0,
             1_000_000_000,
         )
+        # Below zero after a device moves to an address with fewer recorded
+        # queries, so the progress made so far still counts.
         _validate_number(
             self.traffic_baseline_queries,
             "traffic_baseline_queries",
-            0,
+            -1_000_000_000_000,
             1_000_000_000_000,
         )
         if self.mode == "traffic" and self.traffic_target_queries < 1:
@@ -778,6 +878,58 @@ class WebsitePolicy:
 
 _OBSERVED_STATES = frozenset(("unknown", "applying", "resetting", "applied", "reset", "error"))
 
+MAX_SITE_BLOCKS = 32
+MAX_BLOCK_DOMAINS = 512
+
+
+@dataclass(frozen=True)
+class SiteBlock:
+    """One named set of domains blocked independently of traffic profiles."""
+
+    id: str
+    name: str
+    domains: Tuple[str, ...]
+    device_id: Optional[str] = None
+    group_id: Optional[str] = None
+    enabled: bool = True
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.id, "site block id")
+        object.__setattr__(self, "name", _validate_name(self.name, "site block name"))
+        if any(ord(character) < 32 for character in self.name):
+            raise ValidationError("site block name contains a control character")
+        if not isinstance(self.enabled, bool):
+            raise ValidationError("site block enabled must be true or false")
+        if self.device_id is not None:
+            _validate_identifier(self.device_id, "site block device")
+        if self.group_id is not None:
+            _validate_identifier(self.group_id, "site block group")
+        if self.device_id is not None and self.group_id is not None:
+            raise ValidationError("choose a device, a group or everyone for a site block")
+        values = _normalize_domain_list(self.domains, "blocked domains")
+        if not values or len(values) > 64:
+            raise ValidationError("a site block needs between 1 and 64 domains")
+        object.__setattr__(self, "domains", tuple(normalize_service_hostname(d) for d in values))
+
+
+@dataclass(frozen=True)
+class AccessOptions:
+    """Explicit controls for persistent household restrictions."""
+
+    enabled: bool = True
+    reject_wifi_joins: bool = False
+    dns_failure_percent: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool) or not isinstance(self.reject_wifi_joins, bool):
+            raise ValidationError("access options must be true or false")
+        if (
+            isinstance(self.dns_failure_percent, bool)
+            or not isinstance(self.dns_failure_percent, int)
+            or not 0 <= self.dns_failure_percent <= 100
+        ):
+            raise ValidationError("DNS failure chance must be a whole number from 0 to 100")
+
 
 @dataclass(frozen=True)
 class RuntimeState:
@@ -800,3 +952,34 @@ class RuntimeState:
         ):
             if value is not None and (not isinstance(value, str) or len(value) > 500):
                 raise ValidationError(f"{field_name} must be no more than 500 characters")
+
+
+@dataclass(frozen=True)
+class SavedSettings:
+    """Every saved setting that can move between installations, without usage."""
+
+    profiles: Tuple[Profile, ...] = ()
+    devices: Tuple[Device, ...] = ()
+    groups: Tuple[DeviceGroup, ...] = ()
+    schedules: Tuple[Schedule, ...] = ()
+    mac_policy: MacPolicy = MacPolicy()
+    website_policy: WebsitePolicy = WebsitePolicy()
+    data_limits: Tuple[DataLimit, ...] = ()
+    group_data_limits: Tuple[GroupDataLimit, ...] = ()
+    service_quotas: Tuple[ServiceQuota, ...] = ()
+    time_quotas: Tuple[TimeQuota, ...] = ()
+    service_assignments: Tuple[ServiceAssignment, ...] = ()
+    everyone_else_profile_id: Optional[str] = None
+    unaffected_devices: Tuple[UnaffectedDevice, ...] = ()
+    scenarios: Tuple[Scenario, ...] = ()
+    site_blocks: Tuple[SiteBlock, ...] = ()
+    access_options: AccessOptions = AccessOptions()
+    persist_profiles_after_gateway_outage: bool = False
+    general_profile_id: Optional[str] = None
+    service_lists: Tuple[ServiceList, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.persist_profiles_after_gateway_outage, bool):
+            raise ValidationError("gateway-outage persistence must be true or false")
+        if self.general_profile_id is not None:
+            _validate_identifier(self.general_profile_id, "general_profile_id")

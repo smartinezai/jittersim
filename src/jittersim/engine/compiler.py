@@ -1,6 +1,7 @@
 """Compile validated configuration into a deterministic network plan."""
 
 import re
+from dataclasses import replace
 from ipaddress import IPv4Address
 from typing import Mapping, Optional, Sequence
 
@@ -13,9 +14,12 @@ from jittersim.config.models import (
     normalize_service_hostname,
 )
 
+from .access import AccessPlan
 from .plan import (
+    EVERYONE_ELSE_QUEUE_ID,
     GENERAL_QUEUE_ID,
     Direction,
+    EveryoneElseRule,
     GeneralProfileRule,
     MarkRule,
     NetworkPlan,
@@ -36,6 +40,8 @@ class PlanError(ValueError):
 
 MAX_DEVICES_PER_PLAN = 15
 MAX_SERVICE_QUOTAS_PER_PLAN = 15
+# The kernel's prio qdisc supports at most 16 bands and band 0 carries unmarked
+# traffic, so devices and service rules share 15 marks.
 MAX_SHAPED_MARKS_PER_PLAN = 15
 MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN = 200
 MAX_SERVICE_LIST_DOMAINS_PER_PLAN = 400
@@ -56,8 +62,13 @@ def compile_plan(
     service_assignment_rules: Sequence[ServiceAssignmentRule] = (),
     general_profile: Optional[GeneralProfileRule] = None,
     service_list_rules: Sequence[ServiceListRule] = (),
+    everyone_else: Optional[EveryoneElseRule] = None,
+    access: Optional[AccessPlan] = None,
 ) -> NetworkPlan:
     """Compile device assignments into deterministic marks and directional queues."""
+
+    if general_profile is not None and everyone_else is not None:
+        raise PlanError("a general profile already covers everyone else")
 
     if len(protected_mac_addresses) > MAX_UNAFFECTED_DEVICES:
         raise PlanError("a plan cannot contain more than 256 protected MAC addresses")
@@ -162,6 +173,7 @@ def compile_plan(
         + len(service_assignment_rules)
         + len(service_list_rules)
         + (1 if general_profile is not None else 0)
+        + (1 if everyone_else is not None else 0)
         > MAX_SHAPED_MARKS_PER_PLAN
     ):
         raise PlanError(
@@ -286,6 +298,42 @@ def compile_plan(
             )
         )
 
+    normalized_everyone_else = None
+    everyone_else_queues = ()
+    if everyone_else is not None:
+        try:
+            unaffected_macs = tuple(
+                sorted(
+                    dict.fromkeys(
+                        normalize_exempt_mac(value) for value in everyone_else.unaffected_macs
+                    )
+                )
+            )
+        except ValueError as error:
+            raise PlanError("everyone else has an invalid unaffected MAC address") from error
+        if len(unaffected_macs) > MAX_UNAFFECTED_DEVICES:
+            raise PlanError(
+                f"a plan cannot list more than {MAX_UNAFFECTED_DEVICES} unaffected devices"
+            )
+        mark = len(mark_rules) + len(service_quota_rules) + len(service_assignment_rules) + 1
+        normalized_everyone_else = replace(
+            everyone_else, mark=mark, unaffected_macs=unaffected_macs
+        )
+        everyone_else_queues = (
+            QueueSpec(
+                device_id=EVERYONE_ELSE_QUEUE_ID,
+                direction=Direction.UPLOAD,
+                mark=mark,
+                impairment=everyone_else.upload_impairment,
+            ),
+            QueueSpec(
+                device_id=EVERYONE_ELSE_QUEUE_ID,
+                direction=Direction.DOWNLOAD,
+                mark=mark,
+                impairment=everyone_else.download_impairment,
+            ),
+        )
+
     list_queues = []
     normalized_lists = []
     list_domains = []
@@ -294,6 +342,7 @@ def compile_plan(
         + len(service_quota_rules)
         + len(service_assignment_rules)
         + (1 if general_profile is not None else 0)
+        + (1 if everyone_else is not None else 0)
         + 1
     )
     if sum(len(rule.domains) for rule in service_list_rules) > MAX_SERVICE_LIST_DOMAINS_PER_PLAN:
@@ -365,7 +414,13 @@ def compile_plan(
         protected_mac_addresses=protected_macs,
         unverified_device_ids=tuple(unverified_device_ids),
         mark_rules=tuple(mark_rules),
-        queues=tuple(queues) + tuple(service_queues) + tuple(assignment_queues) + tuple(list_queues),
+        queues=(
+            tuple(queues)
+            + tuple(service_queues)
+            + tuple(assignment_queues)
+            + everyone_else_queues
+            + tuple(list_queues)
+        ),
         mac_policy=mac_policy,
         global_allowed_addresses=None
         if global_allowed_addresses is None
@@ -377,4 +432,6 @@ def compile_plan(
         service_assignment_rules=tuple(normalized_assignments),
         general_profile=general_profile,
         service_list_rules=tuple(normalized_lists),
+        everyone_else=normalized_everyone_else,
+        access=access,
     )

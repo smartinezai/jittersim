@@ -3,9 +3,10 @@
 import logging
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Sequence, Union
+from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
 from jittersim.config.models import (
     DataLimit,
@@ -16,6 +17,7 @@ from jittersim.config.models import (
     RandomWebsiteOutcome,
     ServiceQuota,
     TimeQuota,
+    ValidationError,
     time_quota_counter_id,
 )
 from jittersim.config.protection import (
@@ -32,13 +34,20 @@ from jittersim.config.storage import (
 )
 from jittersim.networking.helper import HelperClient, HelperClientError
 
-from .codec import plan_to_payload
+from .access import build_access_plan
+from .activity import Source, TargetState, activity_records
+from .codec import PlanCodecError, plan_from_payload, plan_to_payload
 from .compiler import PlanError, compile_plan
 from .eligibility import eligible_clients, station_snapshot
 from .general import compile_general_plan
-from .plan import GENERAL_QUEUE_ID, NetworkPlan, ServiceAssignmentRule, ServiceQuotaRule
-from .service_lists import build_service_list_rules
-from .service_resolver import ServiceAddressRefresher
+from .plan import (
+    EVERYONE_ELSE_QUEUE_ID,
+    GENERAL_QUEUE_ID,
+    EveryoneElseRule,
+    NetworkPlan,
+    ServiceAssignmentRule,
+    ServiceQuotaRule,
+)
 from .progression import interpolate_profile, progression_factor
 from .randomizer import (
     outage_duration_seconds,
@@ -48,10 +57,69 @@ from .randomizer import (
     reroll_profile,
     seeded_generator,
 )
-from .schedules import active_schedule
+from .scenarios import active_scenario_runs
+from .schedules import active_schedule, next_schedule_change
+from .selection import choose_automation, reached_limit
+from .service_lists import build_service_list_rules
+from .service_resolver import ServiceAddressRefresher
 from .website import build_website_filters, resolve_domains
 
 LOGGER = logging.getLogger(__name__)
+
+
+def plan_address_moves(
+    devices: Sequence[Device], seen: Mapping[str, str]
+) -> Tuple[Dict[str, Tuple[str, str]], Dict[str, Tuple[str, str]]]:
+    """Choose which saved devices move to the address their MAC address uses now.
+
+    `seen` maps MAC addresses to confirmed client addresses. Returns the moves
+    as device ID to (old, new) address, and the blocked moves as device ID to
+    (address, the device that keeps it). A device moves only when no saved
+    device keeps that address, so devices that swap or pass addresses on move
+    together.
+    """
+
+    current = {device.id: str(device.ipv4_address) for device in devices}
+    wanted = {}
+    for device in devices:
+        address = seen.get(device.mac_address) if device.mac_address else None
+        if address is None or address == current[device.id]:
+            continue
+        try:
+            replace(device, ipv4_address=address)
+        except ValidationError:
+            # For example a link-local address, which a saved device can't use.
+            continue
+        wanted[device.id] = address
+    blocked = {}
+    while True:
+        claims: Dict[str, list] = {}
+        for device_id, address in current.items():
+            claims.setdefault(wanted.get(device_id, address), []).append(device_id)
+        stopped = False
+        for address, claimants in claims.items():
+            if len(claimants) < 2:
+                continue
+            keepers = [device_id for device_id in claimants if device_id not in wanted]
+            for device_id in claimants:
+                if device_id in wanted:
+                    others = keepers or [other for other in claimants if other != device_id]
+                    blocked[device_id] = (address, others[0])
+                    del wanted[device_id]
+                    stopped = True
+        # A stopped device keeps its old address, which another move may want.
+        if not stopped:
+            break
+    moves = {device_id: (current[device_id], address) for device_id, address in wanted.items()}
+    return moves, blocked
+
+
+@dataclass(frozen=True)
+class PreparedRuntimePlan:
+    """Network rules and their source descriptions from one evaluation."""
+
+    plan: NetworkPlan
+    states: Dict[str, TargetState]
 
 
 @dataclass
@@ -59,16 +127,21 @@ class _DeviceRollState:
     """Mutable scheduler state for one device between ticks."""
 
     profile_id: str
-    source_configuration: object
+    # The profile values this state was built from, so edits start a fresh roll.
+    source_profiles: object
     runtime_profile: Profile
     roll_number: int
     next_roll_at: float
     next_outage_check_at: float
     outage_until: float
+    outage_check_number: int = 0
 
 
 class RuntimeScheduler:
     """Apply only changed scheduled plans while the dashboard is running."""
+
+    # How often saved devices are matched to the addresses their MAC addresses use.
+    address_check_seconds = 30.0
 
     def __init__(
         self,
@@ -84,15 +157,27 @@ class RuntimeScheduler:
         self._current_payload = None
         self._paused = True
         self._lock = threading.RLock()
+        # Held while a plan is built and applied, so pause() and manual applies
+        # never interleave with a scheduled apply.
+        self._apply_lock = threading.RLock()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_traffic_sample_at = 0.0
         self._last_traffic_sample_error: Optional[str] = None
+        self._last_address_check_at = 0.0
+        # Blocked moves already logged, so each is logged once.
+        self._blocked_moves: Dict[str, Tuple[str, str]] = {}
+        # What applied to each device and to everyone else at the last applied
+        # plan, for the activity log. None until a plan applies after a reset.
+        self._applied_states: Optional[Dict[str, TargetState]] = None
+        self._schedule_hint_settings = None
+        self._schedule_hints = {}
         self._last_quota_sample_at = 0.0
         self._last_analytics_cleanup_at = 0.0
         self._analytics_batch_overflowed = False
         self._last_device_counters: Dict[str, int] = {}
         self._device_traffic_bytes: Dict[str, int] = {}
+        self._group_members: Dict[str, frozenset] = {}
         self._service_addresses = (
             None
             if helper_client is None
@@ -140,8 +225,25 @@ class RuntimeScheduler:
         with self._lock:
             self._current_payload = applied_payload
             self._paused = False
-            self._last_device_counters.clear()
+            # The apply recreated the helper counters, so keep the device
+            # totals and count on from zero.
+            self._last_device_counters = dict.fromkeys(self._last_device_counters, 0)
         self.start()
+
+    def invalidate_applied_plan(self) -> None:
+        """Forget a plan the helper may have removed while handling a failure."""
+
+        with self._lock:
+            self._current_payload = None
+
+    def activate_plan(
+        self, *, repository: ConfigRepository, prepared: PreparedRuntimePlan
+    ) -> None:
+        """Record a successful manual apply before starting background work."""
+
+        with self._apply_lock:
+            self._record_activity(repository=repository, states=prepared.states, now=time.time())
+            self.activate(applied_payload=plan_to_payload(prepared.plan))
 
     def build_plan(
         self,
@@ -149,19 +251,47 @@ class RuntimeScheduler:
         repository: ConfigRepository,
         now: Optional[float] = None,
         connected_snapshot: Optional[dict] = None,
-    ):
-        """Build the current runtime plan, including timers and schedules."""
+    ) -> NetworkPlan:
+        """Preview the current runtime plan without advancing rerolls or outages.
+
+        The scheduler and `prepare_plan` own the roll state. A preview copies it
+        so that reading the plan never changes what the next tick applies.
+        """
 
         current_time = time.time() if now is None else now
-        with self._lock:
+        with self._apply_lock, self._lock:
             previous_rolls = self._rolls
-            self._rolls = {device_id: replace(roll) for device_id, roll in previous_rolls.items()}
+            self._rolls = {key: replace(roll) for key, roll in previous_rolls.items()}
             try:
-                return self._build_plan(
+                plan, _ = self._build_plan(
                     repository=repository, now=current_time, connected_snapshot=connected_snapshot
                 )
+                return plan
             finally:
                 self._rolls = previous_rolls
+
+    def prepare_plan(
+        self,
+        *,
+        repository: ConfigRepository,
+        now: Optional[float] = None,
+        connected_snapshot: Optional[dict] = None,
+    ) -> PreparedRuntimePlan:
+        """Keep source descriptions paired with the exact plan being applied."""
+
+        current_time = time.time() if now is None else now
+        with self._apply_lock:
+            plan, states = self._build_plan(
+                repository=repository, now=current_time, connected_snapshot=connected_snapshot
+            )
+            return PreparedRuntimePlan(plan=plan, states=states)
+
+    @contextmanager
+    def exclusive(self) -> Iterator[None]:
+        """Hold off scheduled applies while a manual apply runs."""
+
+        with self._apply_lock:
+            yield
 
     @property
     def is_active(self) -> bool:
@@ -176,18 +306,73 @@ class RuntimeScheduler:
     def pause(self) -> None:
         """Pause scheduled reapplication after a manual network reset."""
 
-        with self._lock:
+        # Wait for an in-flight scheduled apply so a reset cannot be undone by it.
+        with self._apply_lock, self._lock:
             self._paused = True
             self._rolls.clear()
             self._current_payload = None
             self._last_device_counters.clear()
             self._device_traffic_bytes.clear()
+            self._group_members.clear()
+            self._blocked_moves.clear()
+            self._applied_states = None
+
+    def sample_usage(self, *, repository: ConfigRepository) -> None:
+        """Record quota and device traffic before the helper counters restart."""
+
+        with self._apply_lock:
+            self._sample_quota_usage(repository=repository, now=time.time())
+
+    def sample_before_control_change(self, *, repository: ConfigRepository) -> None:
+        """Record usage before an Apply or Reset replaces the helper counters."""
+
+        with self._lock:
+            self._last_quota_sample_at = 0
+        self.sample_usage(repository=repository)
 
     def device_traffic_bytes(self, *, device_id: str) -> int:
         """Return cumulative device bytes observed by the active scheduler."""
 
         with self._lock:
             return self._device_traffic_bytes.get(device_id, 0)
+
+    def applied_plan(self) -> Optional[NetworkPlan]:
+        """Return the plan this scheduler last applied, if the network runs one."""
+
+        with self._lock:
+            payload = self._current_payload
+        if payload is None:
+            return None
+        try:
+            return plan_from_payload(payload)
+        except PlanCodecError:
+            LOGGER.warning("the applied plan could not be read back", exc_info=True)
+            return None
+
+    def applied_target_states(self) -> Optional[Dict[str, TargetState]]:
+        """Return confirmed source descriptions without rebuilding a plan."""
+
+        with self._lock:
+            if self._current_payload is None or self._applied_states is None:
+                return None
+            return dict(self._applied_states)
+
+    def _next_schedule_change(self, schedules, now, **target) -> Optional[float]:
+        settings = (schedules, time.tzname, time.timezone, time.altzone)
+        if settings != self._schedule_hint_settings:
+            self._schedule_hint_settings = settings
+            self._schedule_hints.clear()
+        key = tuple(sorted(target.items()))
+        cached = self._schedule_hints.get(key)
+        if cached is not None:
+            checked_at, next_at = cached
+            if now >= checked_at and (next_at is None or now < next_at):
+                return next_at
+        next_at = next_schedule_change(schedules=schedules, now=now, **target)
+        if len(self._schedule_hints) >= 64:
+            self._schedule_hints.clear()
+        self._schedule_hints[key] = (now, next_at)
+        return next_at
 
     def applied_queue_bandwidth_limits(
         self,
@@ -232,11 +417,6 @@ class RuntimeScheduler:
                 device_limits[field] = rate
             return limits
 
-    def control_operation(self):
-        """Share one lock with manual apply and reset operations."""
-
-        return self._lock
-
     def tick(
         self,
         *,
@@ -245,21 +425,41 @@ class RuntimeScheduler:
     ) -> bool:
         """Recompute and apply a changed runtime plan once."""
 
-        with self._lock:
-            return self._tick_under_lock(repository=repository, now=now)
+        with self._apply_lock:
+            with self._lock:
+                if self._paused or self._helper_client is None:
+                    return False
+            return self._tick(repository=repository, now=now)
 
-    def _tick_under_lock(
-        self,
-        *,
-        repository: Optional[ConfigRepository] = None,
-        now: Optional[float] = None,
-    ) -> bool:
-        if self._paused or self._helper_client is None:
-            return False
+    def _tick(self, *, repository: Optional[ConfigRepository], now: Optional[float]) -> bool:
         current_time = time.time() if now is None else now
         owned_repository = repository is None
         active_repository = repository or ConfigRepository(self._database_path)
         try:
+            read_gateway_status = getattr(self._helper_client, "gateway_status", None)
+            try:
+                gateway_status = read_gateway_status() if read_gateway_status is not None else {}
+            except HelperClientError:
+                # The helper may be restarting. Try again on the next tick.
+                LOGGER.warning("could not read the gateway state", exc_info=True)
+                return False
+            if (gateway_status.get("outage_stop_latched") is True
+                    or gateway_status.get("state_error") is True):
+                self.pause()
+                self._record(
+                    active_repository,
+                    [("outage", "Automatic profile recovery paused by gateway state")],
+                    current_time,
+                )
+                return False
+            recovery_pending = (
+                gateway_status.get("recovery_pending") is True
+                and gateway_status.get("gateway_state") == "available"
+            )
+            if active_repository.get_runtime_state().last_action == "reset":
+                self._honor_external_reset(repository=active_repository, now=current_time)
+                return False
+            self._follow_device_addresses(repository=active_repository, now=current_time)
             self._sample_traffic_if_needed(repository=active_repository, now=current_time)
             self._sample_quota_usage_if_needed(repository=active_repository, now=current_time)
             if current_time - self._last_analytics_cleanup_at >= 24 * 60 * 60:
@@ -275,7 +475,7 @@ class RuntimeScheduler:
                 self._last_analytics_cleanup_at = current_time
             random_website_outcomes: List[RandomWebsiteOutcome] = []
             self._analytics_batch_overflowed = False
-            plan = self._build_plan(
+            plan, states = self._build_plan(
                 repository=active_repository,
                 now=current_time,
                 random_website_outcomes=random_website_outcomes,
@@ -296,34 +496,161 @@ class RuntimeScheduler:
                     "randomized website history omitted choices because the tick reached its limit"
                 )
             payload = plan_to_payload(plan)
-            if payload == self._current_payload:
+            with self._lock:
+                unchanged = payload == self._current_payload and not recovery_pending
+            if unchanged:
+                # The network already runs this plan, for example one the
+                # dashboard applied after a saved change.
+                self._record_activity(repository=active_repository, states=states, now=current_time)
                 return False
-            self._helper_client.apply(plan=plan)
+            # Applying recreates the helper's counters at zero, so record the
+            # traffic they hold first.
+            self._sample_quota_usage(repository=active_repository, now=current_time)
+            try:
+                apply = getattr(self._helper_client, "apply_experiment", self._helper_client.apply)
+                apply(plan=plan)
+            except HelperClientError:
+                # Cleanup may have removed the previous rules too. An active
+                # scheduler must retry even if the desired plan is unchanged.
+                self.invalidate_applied_plan()
+                raise
             active_repository.rebase_quota_counters(now=int(current_time))
-            self._last_device_counters.clear()
-            self._current_payload = payload
-            active_repository.update_runtime_state(
-                observed_state="applied",
-                last_action="schedule",
-                last_result="success",
-                last_error=None,
-            )
+            with self._lock:
+                self._current_payload = payload
+                self._last_device_counters = dict.fromkeys(self._last_device_counters, 0)
+            if not active_repository.record_schedule_result(success=True):
+                # A reset was recorded while this plan was being applied.
+                self._honor_external_reset(repository=active_repository, now=current_time)
+                return False
+            self._record_activity(repository=active_repository, states=states, now=current_time)
             return True
         except (HelperClientError, PlanError, StorageError, OSError):
             LOGGER.exception("scheduled network plan failed")
             try:
-                active_repository.update_runtime_state(
-                    observed_state="error",
-                    last_action="schedule",
-                    last_result="failure",
-                    last_error="scheduled network plan failed",
-                )
+                active_repository.record_schedule_result(success=False)
             except StorageError:
                 LOGGER.exception("could not record scheduled network failure")
             return False
         finally:
             if owned_repository:
                 active_repository.close()
+
+    def _follow_device_addresses(self, *, repository: ConfigRepository, now: float) -> None:
+        """Move saved devices to the addresses their MAC addresses use now.
+
+        DHCP can hand a device a new address, and a saved device is matched by
+        its address, so its profile would silently stop applying.
+        """
+
+        if now - self._last_address_check_at < self.address_check_seconds:
+            return
+        self._last_address_check_at = now
+        read_clients = getattr(self._helper_client, "connected_device_snapshot", None)
+        if read_clients is None:
+            return
+        try:
+            snapshot = read_clients()
+        except HelperClientError:
+            LOGGER.warning("could not check which addresses saved devices use", exc_info=True)
+            return
+        if not snapshot.get("association_status_available"):
+            return
+        # Only a reachable neighbour entry confirms an address. Otherwise the
+        # helper falls back to a DHCP lease or an old neighbour entry, which
+        # can be stale and would move a device back and forth.
+        seen = {
+            client["mac_address"]: client["ipv4_address"]
+            for client in snapshot.get("devices", [])
+            if client.get("association_verified")
+            and client.get("neighbor_state") == "reachable"
+            and client.get("mac_address")
+            and client.get("ipv4_address")
+        }
+        devices = {device.id: device for device in repository.list_devices()}
+        moves, blocked = plan_address_moves(tuple(devices.values()), seen)
+        for device_id, (address, holder) in blocked.items():
+            if self._blocked_moves.get(device_id) != (address, holder):
+                LOGGER.warning(
+                    "device %s now uses %s, which saved device %s keeps; not moving it",
+                    device_id,
+                    address,
+                    holder,
+                )
+                device = devices[device_id]
+                keeper = devices[holder].name if holder in devices else holder
+                self._record(
+                    repository,
+                    [(
+                        "address",
+                        f"{device.name} now uses {address}, which {keeper} keeps, "
+                        f"so it stays at {device.ipv4_address}",
+                    )],
+                    now,
+                )
+        # An idle device drops out of the confirmed clients for a while; it keeps
+        # its entry until it is seen again, so its blocked move is logged once.
+        unconfirmed = {
+            device_id: entry
+            for device_id, entry in self._blocked_moves.items()
+            if device_id in devices and devices[device_id].mac_address not in seen
+        }
+        self._blocked_moves = {**unconfirmed, **blocked}
+        if not moves:
+            return
+        if not repository.move_device_addresses(moves):
+            LOGGER.warning("saved devices changed during the address check; checking again later")
+            return
+        for device_id, (old_address, new_address) in moves.items():
+            LOGGER.info("device %s moved from %s to %s", device_id, old_address, new_address)
+            self._record(
+                repository,
+                [(
+                    "address",
+                    f"{devices[device_id].name} moved from {old_address} to {new_address}",
+                )],
+                now,
+                device_ids=[(device_id,)],
+            )
+
+    def _record_activity(
+        self, *, repository: ConfigRepository, states: Dict[str, TargetState], now: float
+    ) -> None:
+        """Record what changed on the network since the last applied plan."""
+
+        with self._lock:
+            previous = self._applied_states
+            self._applied_states = states
+        # The first successful plan after a reset or restart is the starting point.
+        if previous is None:
+            return
+        records = activity_records(previous, states)
+        self._record(repository, [(kind, message) for kind, message, _ in records], now,
+                     device_ids=[targets for _, _, targets in records])
+
+    @staticmethod
+    def _record(
+        repository: ConfigRepository, events: Sequence[Tuple[str, str]], now: float, *, device_ids=None
+    ) -> None:
+        if not events:
+            return
+        try:
+            repository.record_activities(events, now=now, device_ids=device_ids)
+        except StorageError:
+            LOGGER.warning("could not record activity", exc_info=True)
+
+    def _honor_external_reset(self, *, repository: ConfigRepository, now: float) -> None:
+        # Someone reset the network outside the dashboard, for example with
+        # `jittersim reset`. Stop applying, and reset once more in case a
+        # scheduled apply raced that reset.
+        self.pause()
+        try:
+            self._helper_client.reset()
+        except HelperClientError:
+            LOGGER.warning("could not repeat an external network reset", exc_info=True)
+            message = "Network reset requested outside the dashboard; repeating it failed"
+        else:
+            message = "Network reset outside the dashboard"
+        self._record(repository, [("reset", message)], now)
 
     def _build_plan(
         self,
@@ -332,7 +659,9 @@ class RuntimeScheduler:
         now: float,
         random_website_outcomes: Optional[List[RandomWebsiteOutcome]] = None,
         connected_snapshot: Optional[dict] = None,
-    ):
+    ) -> Tuple[NetworkPlan, Dict[str, TargetState]]:
+        """Build the runtime plan and what applies to each target, for the activity log."""
+
         general_profile = repository.get_general_profile()
         if general_profile is not None:
             return self._build_general_plan(repository=repository, profile=general_profile, now=now)
@@ -348,9 +677,22 @@ class RuntimeScheduler:
         active_timers = {}
         for timer in repository.list_active_timers(now=int(now)):
             active_timers.setdefault(timer.device_id, timer)
+        # Newest first, so the newest run wins if a target somehow has two.
+        device_runs = {}
+        group_runs = {}
+        everyone_else_run = None
+        for running in active_scenario_runs(repository, now=now):
+            run = running[0]
+            if run.device_id is not None:
+                device_runs.setdefault(run.device_id, running)
+            elif run.group_id is not None:
+                group_runs.setdefault(run.group_id, running)
+            elif everyone_else_run is None:
+                everyone_else_run = running
         moment = datetime.fromtimestamp(now).replace(second=0, microsecond=0)
         runtime_devices = []
         runtime_profiles = {}
+        states: Dict[str, TargetState] = {}
         blocked_addresses = []
         blocked_domains_by_device = {}
         active_device_ids = set()
@@ -370,20 +712,31 @@ class RuntimeScheduler:
 
         for device in clients.devices:
             group = groups_by_device.get(device.id)
-            progression = active_progressions.get(device.id)
-            timer = None if progression is not None else active_timers.get(device.id)
-            schedule = None if timer is not None or progression is not None else active_schedule(
-                schedules=schedules,
-                device_id=device.id,
-                moment=moment,
+            progression, timer, running, schedule = choose_automation(
+                device, group, moment, active_progressions, active_timers,
+                device_runs, group_runs, schedules,
             )
             group_profile_id = group.profile_id if group is not None else None
+            # How the activity log tells this device's source apart and names it:
+            # kind, identity, label, step and, for a group's source, the group.
+            if schedule is not None:
+                described = (
+                    "schedule", f"schedule:{schedule.id}", schedule.id, "",
+                    group.name if schedule.group_id is not None else "",
+                )
+            elif group_profile_id is not None:
+                described = (
+                    "group-profile", f"group-profile:{group.id}", group.name, "", group.name
+                )
+            else:
+                described = ("profile", "profile", "", "", "")
             source_profile_id = (
                 group_profile_id or device.profile_id
                 if schedule is None
                 else schedule.profile_id
             )
             selected_profile = profiles.get(source_profile_id)
+            source_profiles = selected_profile
             source_key = (
                 f"group-profile:{group.id}"
                 if group is not None and group_profile_id is not None and schedule is None
@@ -392,7 +745,25 @@ class RuntimeScheduler:
             if timer is not None:
                 source_profile_id = timer.profile_id
                 selected_profile = profiles.get(source_profile_id)
+                source_profiles = selected_profile
                 source_key = f"timer:{timer.id}"
+                described = ("timer", f"timer:{timer.id}", "", "", "")
+            elif running is not None:
+                run, scenario, position = running
+                source_profile_id = position.profile_id
+                selected_profile = profiles.get(source_profile_id)
+                if selected_profile is None:
+                    raise PlanError(f"scenario {scenario.id} references a missing profile")
+                source_profiles = selected_profile
+                # Each step starts a fresh roll, even when a loop returns to it.
+                source_key = f"scenario:{run.id}:{position.step_index}"
+                described = (
+                    "scenario",
+                    source_key,
+                    scenario.name,
+                    f"step {position.step_index + 1} of {len(scenario.steps)}",
+                    group.name if run.group_id is not None else "",
+                )
             elif progression is not None:
                 start_profile = profiles.get(progression.start_profile_id)
                 end_profile = profiles.get(progression.end_profile_id)
@@ -412,136 +783,154 @@ class RuntimeScheduler:
                     end=end_profile,
                     factor=factor,
                 )
+                # The interpolated profile changes as the progression advances,
+                # so only edits to its start or end profile restart the roll.
+                source_profiles = (progression, start_profile, end_profile)
                 source_key = f"progression:{progression.id}"
+                described = (
+                    "progression", source_key,
+                    f"from {start_profile.name} to {end_profile.name}", "", "",
+                )
                 domain_count = int(len(progression.website_domains) * factor)
                 if domain_count:
                     blocked_domains_by_device[device.id] = progression.website_domains[:domain_count]
             data_limit = data_limits.get(device.id)
-            if data_limit is not None and data_limit.enabled and data_limit.used_bytes >= data_limit.limit_bytes:
+            if reached_limit(data_limit):
                 fallback_profile = profiles.get(data_limit.profile_id)
                 if fallback_profile is None:
                     raise PlanError(
                         f"data limit for device {device.id} references a missing profile"
                     )
                 selected_profile = fallback_profile
+                source_profiles = fallback_profile
                 source_key = f"data-limit:{device.id}"
+                described = ("data-limit", "data-limit", "", "", "")
             elif group is not None:
                 group_data_limit = group_data_limits.get(group.id)
-                if (
-                    group_data_limit is not None
-                    and group_data_limit.enabled
-                    and group_data_limit.used_bytes >= group_data_limit.limit_bytes
-                ):
+                if reached_limit(group_data_limit):
                     fallback_profile = profiles.get(group_data_limit.profile_id)
                     if fallback_profile is None:
                         raise PlanError(
                             f"group data limit for {group.id} references a missing profile"
                         )
                     selected_profile = fallback_profile
+                    source_profiles = fallback_profile
                     source_key = f"group-data-limit:{group.id}"
+                    described = ("group-data-limit", source_key, group.name, "", group.name)
             if selected_profile is None:
                 raise PlanError(f"device {device.id} references missing profile {source_profile_id}")
             active_device_ids.add(device.id)
-            source_configuration = (
-                (progression, start_profile, end_profile)
-                if source_key.startswith("progression:")
-                else selected_profile
+            roll = self._roll(
+                key=device.id,
+                selected_profile=selected_profile,
+                source_key=source_key,
+                source_profiles=source_profiles,
+                now=now,
+                reroll_each_tick=progression is not None,
+                random_website_outcomes=(
+                    random_website_outcomes
+                    if progression is None and selected_profile.website_mode == "allow_only"
+                    else None
+                ),
             )
-            roll = self._rolls.get(device.id)
-            if (
-                roll is None
-                or roll.profile_id != source_key
-                or roll.source_configuration != source_configuration
-            ):
-                roll = _DeviceRollState(
-                    profile_id=source_key,
-                    source_configuration=source_configuration,
-                    runtime_profile=selected_profile,
-                    roll_number=0,
-                    next_roll_at=now + max(1, selected_profile.reroll_interval_seconds),
-                    next_outage_check_at=now
-                    + max(
-                        1,
-                        selected_profile.outage_interval_seconds
-                        or selected_profile.reroll_interval_seconds,
-                    ),
-                    outage_until=0,
-                )
-                self._rolls[device.id] = roll
-
-            if progression is not None:
-                generator = seeded_generator(
-                    profile=selected_profile,
-                    device_id=device.id,
-                    roll_number=roll.roll_number,
-                )
-                roll.runtime_profile = reroll_profile(
-                    profile=selected_profile,
-                    generator=generator,
-                )
-
-            if selected_profile.reroll_interval_seconds and now >= roll.next_roll_at:
-                generator = seeded_generator(
-                    profile=selected_profile,
-                    device_id=device.id,
-                    roll_number=roll.roll_number,
-                )
-                website_choices = []
-                track_website_choices = (
-                    random_website_outcomes is not None
-                    and progression is None
-                    and selected_profile.website_mode == "allow_only"
-                )
-                roll.runtime_profile = reroll_profile(
-                    profile=selected_profile,
-                    generator=generator,
-                    website_outcomes=website_choices if track_website_choices else None,
-                )
-                if track_website_choices:
-                    if (
-                        len(random_website_outcomes) + len(website_choices)
-                        <= MAX_RANDOM_WEBSITE_ANALYTICS_BATCH
-                    ):
-                        random_website_outcomes.extend(
-                            RandomWebsiteOutcome(
-                                device_id=device.id,
-                                domain=domain,
-                                kept=kept,
-                                happened_at=int(now),
-                            )
-                            for domain, kept in website_choices
-                        )
-                    else:
-                        self._analytics_batch_overflowed = True
-                roll.roll_number += 1
-                roll.next_roll_at = now + max(
-                    1,
-                    reroll_interval_seconds(profile=selected_profile, generator=generator),
-                )
-
-            outage_interval = selected_profile.outage_interval_seconds or selected_profile.reroll_interval_seconds
-            if outage_interval and now >= roll.next_outage_check_at:
-                generator = seeded_generator(
-                    profile=selected_profile,
-                    device_id=device.id,
-                    roll_number=100_000 + roll.roll_number,
-                )
-                if outage_is_selected(profile=selected_profile, generator=generator):
-                    duration = outage_duration_seconds(
-                        profile=selected_profile,
-                        generator=generator,
-                    )
-                    roll.outage_until = now + duration if duration else now
-                roll.next_outage_check_at = now + max(
-                    1,
-                    outage_interval_seconds(profile=selected_profile, generator=generator),
-                )
             if roll.outage_until > now:
                 blocked_addresses.append(device.ipv4_address)
+            kind, identity, label, step, group_name = described
+            # A progression's profile changes as it goes, so its name is left out.
+            profile_name = "" if kind == "progression" else selected_profile.name
+            next_change = None
+            if kind == "timer":
+                next_change = timer.expires_at
+            elif kind == "scenario":
+                next_change = int(now) + position.step_remaining_seconds
+            elif kind == "progression" and progression.mode == "time":
+                next_change = progression.started_at + progression.duration_seconds
+            elif kind in ("profile", "group-profile", "schedule"):
+                next_change = self._next_schedule_change(
+                    schedules, now, device_id=device.id,
+                    group_id=group.id if group is not None else None,
+                )
+            states[device.id] = TargetState(
+                name=device.name,
+                next_change_at=next_change,
+                source=Source(kind, identity, label, step, profile_name, group_name),
+                outage=roll.outage_until > now,
+            )
 
-            runtime_profile_id = f"runtime-{device.id}"
+            # Device ids may already use the full identifier length, so number
+            # the runtime profiles instead of prefixing the device id.
+            runtime_profile_id = f"runtime-{len(runtime_devices) + 1}"
             runtime_profiles[runtime_profile_id] = roll.runtime_profile
             runtime_devices.append(replace(device, profile_id=runtime_profile_id))
+
+        everyone_else = None
+        everyone_else_key = None
+        everyone_else_described = ("profile", "profile", "", "")
+        if everyone_else_run is not None:
+            run, scenario, position = everyone_else_run
+            everyone_else_profile_id = position.profile_id
+            everyone_else_key = f"scenario:{run.id}:{position.step_index}"
+            everyone_else_described = (
+                "scenario",
+                everyone_else_key,
+                scenario.name,
+                f"step {position.step_index + 1} of {len(scenario.steps)}",
+            )
+        else:
+            everyone_else_schedule = active_schedule(
+                schedules=schedules, everyone_else=True, moment=moment
+            )
+            # A schedule or scenario can give everyone else a profile even when
+            # none is saved.
+            everyone_else_profile_id = (
+                everyone_else_schedule.profile_id
+                if everyone_else_schedule is not None
+                else repository.get_everyone_else_profile_id()
+            )
+            if everyone_else_schedule is not None:
+                everyone_else_described = (
+                    "schedule",
+                    f"schedule:{everyone_else_schedule.id}",
+                    everyone_else_schedule.id,
+                    "",
+                )
+        if everyone_else_profile_id is not None:
+            profile = profiles.get(everyone_else_profile_id)
+            if profile is None:
+                raise PlanError(
+                    f"everyone else references missing profile {everyone_else_profile_id}"
+                )
+            active_device_ids.add(EVERYONE_ELSE_QUEUE_ID)
+            roll = self._roll(
+                key=EVERYONE_ELSE_QUEUE_ID,
+                selected_profile=profile,
+                source_key=everyone_else_key or profile.id,
+                source_profiles=profile,
+                now=now,
+            )
+            everyone_else = EveryoneElseRule(
+                mark=0,
+                upload_impairment=roll.runtime_profile.upload,
+                download_impairment=roll.runtime_profile.download,
+                unaffected_macs=clients.protected_macs,
+                blocked=roll.outage_until > now,
+            )
+            kind, identity, label, step = everyone_else_described
+            next_change = (
+                int(now) + position.step_remaining_seconds if everyone_else_run is not None
+                else self._next_schedule_change(schedules, now, everyone_else=True)
+            )
+            states[EVERYONE_ELSE_QUEUE_ID] = TargetState(
+                name="Everyone else",
+                next_change_at=next_change,
+                source=Source(kind, identity, label, step, profile.name),
+                outage=roll.outage_until > now,
+            )
+        else:
+            states[EVERYONE_ELSE_QUEUE_ID] = TargetState(
+                name="Everyone else", source=Source("none", "none"),
+                next_change_at=self._next_schedule_change(schedules, now, everyone_else=True),
+            )
 
         self._rolls = {
             device_id: roll
@@ -561,6 +950,20 @@ class RuntimeScheduler:
             profiles=profiles,
             now=now,
         )
+        # Limits are told apart by ID, so a renamed limit is the same limit.
+        limit_labels = {
+            quota.id: f"service limit {quota.name}" for quota in repository.list_service_quotas()
+        }
+        limit_labels.update(
+            (time_quota_counter_id(quota.id), f"time limit {quota.name}")
+            for quota in repository.list_time_quotas()
+        )
+        for rule in service_quota_rules:
+            if rule.active and rule.device_id in states:
+                state = states[rule.device_id]
+                label = limit_labels.get(rule.quota_id, rule.quota_id)
+                reached = state.limits + ((rule.quota_id, label),)
+                states[rule.device_id] = replace(state, limits=tuple(sorted(reached)))
         service_assignment_rules = []
         devices_by_id = {device.id: device for device in runtime_devices}
         for assignment in repository.list_service_assignments():
@@ -581,12 +984,13 @@ class RuntimeScheduler:
                     download_impairment=profile.download,
                 )
             )
-        return compile_plan(
+        plan = compile_plan(
             devices=runtime_devices,
             profiles=runtime_profiles,
             protected_mac_addresses=clients.protected_macs,
             unverified_device_ids=clients.unverified_ids,
             mac_policy=repository.get_mac_policy(),
+            access=build_access_plan(repository.access_settings()),
             global_blocked_addresses=global_blocked,
             global_allowed_addresses=resolve_domains(domains=website_policy.allowed_domains)
             if website_policy.mode == "allow_only"
@@ -596,51 +1000,145 @@ class RuntimeScheduler:
             service_quota_rules=service_quota_rules,
             service_assignment_rules=service_assignment_rules,
             service_list_rules=build_service_list_rules(repository, profiles),
+            everyone_else=everyone_else,
         )
+        return plan, states
 
     def _build_general_plan(
         self, *, repository: ConfigRepository, profile: Profile, now: float
-    ) -> NetworkPlan:
+    ) -> Tuple[NetworkPlan, Dict[str, TargetState]]:
+        """Build the shared plan. Device rolls are dropped while it is active."""
+
         key = "@general"
-        roll = self._rolls.get(key)
-        if roll is None or roll.source_configuration != profile:
-            roll = _DeviceRollState(
-                profile_id=profile.id,
-                source_configuration=profile,
-                runtime_profile=profile,
-                roll_number=0,
-                next_roll_at=now + max(1, profile.reroll_interval_seconds),
-                next_outage_check_at=now + max(
-                    1, profile.outage_interval_seconds or profile.reroll_interval_seconds
-                ),
-                outage_until=0,
-            )
+        roll = self._roll(
+            key=key,
+            selected_profile=profile,
+            source_key=profile.id,
+            source_profiles=profile,
+            now=now,
+            generator_key=GENERAL_QUEUE_ID,
+        )
         self._rolls = {key: roll}
-        if profile.reroll_interval_seconds and now >= roll.next_roll_at:
-            generator = seeded_generator(
-                profile=profile, device_id=GENERAL_QUEUE_ID, roll_number=roll.roll_number
-            )
-            roll.runtime_profile = reroll_profile(profile=profile, generator=generator)
-            roll.roll_number += 1
-            roll.next_roll_at = now + max(
-                1, reroll_interval_seconds(profile=profile, generator=generator)
-            )
-        outage_interval = profile.outage_interval_seconds or profile.reroll_interval_seconds
-        if outage_interval and now >= roll.next_outage_check_at:
-            generator = seeded_generator(
-                profile=profile, device_id=GENERAL_QUEUE_ID, roll_number=100_000 + roll.roll_number
-            )
-            if outage_is_selected(profile=profile, generator=generator):
-                duration = outage_duration_seconds(profile=profile, generator=generator)
-                roll.outage_until = now + duration
-            roll.next_outage_check_at = now + max(
-                1, outage_interval_seconds(profile=profile, generator=generator)
-            )
-        return compile_general_plan(
+        plan = compile_general_plan(
             repository=repository,
             profile=roll.runtime_profile,
             outage_active=roll.outage_until > now,
         )
+        # The activity log describes saved devices. The general profile covers
+        # every unprotected client, so it has no per-device sources to compare.
+        return plan, {}
+
+    def _roll(
+        self,
+        *,
+        key: str,
+        selected_profile: Profile,
+        source_key: str,
+        source_profiles: object,
+        now: float,
+        reroll_each_tick: bool = False,
+        random_website_outcomes: Optional[List[RandomWebsiteOutcome]] = None,
+        generator_key: Optional[str] = None,
+    ) -> _DeviceRollState:
+        """Advance the rerolls and outage checks kept under one key.
+
+        `random_website_outcomes` collects the kept and removed website choices
+        of a scheduled reroll for the daily analytics.
+        """
+
+        generator_key = key if generator_key is None else generator_key
+        roll = self._rolls.get(key)
+        if (
+            roll is None
+            or roll.profile_id != source_key
+            or roll.source_profiles != source_profiles
+        ):
+            roll = _DeviceRollState(
+                profile_id=source_key,
+                source_profiles=source_profiles,
+                runtime_profile=selected_profile,
+                roll_number=0,
+                next_roll_at=now + max(1, selected_profile.reroll_interval_seconds),
+                next_outage_check_at=now
+                + max(
+                    1,
+                    selected_profile.outage_interval_seconds
+                    or selected_profile.reroll_interval_seconds,
+                ),
+                outage_until=0,
+            )
+            self._rolls[key] = roll
+
+        if reroll_each_tick:
+            generator = seeded_generator(
+                profile=selected_profile,
+                device_id=generator_key,
+                roll_number=roll.roll_number,
+            )
+            roll.runtime_profile = reroll_profile(
+                profile=selected_profile,
+                generator=generator,
+            )
+
+        if selected_profile.reroll_interval_seconds and now >= roll.next_roll_at:
+            generator = seeded_generator(
+                profile=selected_profile,
+                device_id=generator_key,
+                roll_number=roll.roll_number,
+            )
+            website_choices: List[Tuple[str, bool]] = []
+            roll.runtime_profile = reroll_profile(
+                profile=selected_profile,
+                generator=generator,
+                website_outcomes=(
+                    website_choices if random_website_outcomes is not None else None
+                ),
+            )
+            if random_website_outcomes is not None:
+                if (
+                    len(random_website_outcomes) + len(website_choices)
+                    <= MAX_RANDOM_WEBSITE_ANALYTICS_BATCH
+                ):
+                    random_website_outcomes.extend(
+                        RandomWebsiteOutcome(
+                            device_id=key,
+                            domain=domain,
+                            kept=kept,
+                            happened_at=int(now),
+                        )
+                        for domain, kept in website_choices
+                    )
+                else:
+                    self._analytics_batch_overflowed = True
+            roll.roll_number += 1
+            roll.next_roll_at = now + max(
+                1,
+                reroll_interval_seconds(profile=selected_profile, generator=generator),
+            )
+
+        outage_interval = (
+            selected_profile.outage_interval_seconds or selected_profile.reroll_interval_seconds
+        )
+        if outage_interval and now >= roll.next_outage_check_at:
+            # Count outage checks separately: the reroll number stays at 0
+            # when rerolls are off, which would repeat the same outcome.
+            generator = seeded_generator(
+                profile=selected_profile,
+                device_id=generator_key,
+                roll_number=100_000 + roll.outage_check_number,
+            )
+            roll.outage_check_number += 1
+            if outage_is_selected(profile=selected_profile, generator=generator):
+                duration = outage_duration_seconds(
+                    profile=selected_profile,
+                    generator=generator,
+                )
+                roll.outage_until = now + duration if duration else now
+            roll.next_outage_check_at = now + max(
+                1,
+                outage_interval_seconds(profile=selected_profile, generator=generator),
+            )
+        return roll
 
     def _build_service_quota_rules(
         self,
@@ -788,11 +1286,6 @@ class RuntimeScheduler:
         snapshot = station_snapshot(self._helper_client) if protected else None
         return {device.id for device in eligible_clients(repository, snapshot).devices}
 
-    def sample_before_control_change(self, *, repository: ConfigRepository) -> None:
-        with self._lock:
-            self._last_quota_sample_at = 0
-            self._sample_quota_usage_if_needed(repository=repository, now=time.time())
-
     def _sample_quota_usage_if_needed(
         self,
         *,
@@ -803,6 +1296,9 @@ class RuntimeScheduler:
 
         if now - self._last_quota_sample_at < 5:
             return
+        self._sample_quota_usage(repository=repository, now=now)
+
+    def _sample_quota_usage(self, *, repository: ConfigRepository, now: float) -> None:
         data_limits = tuple(
             data_limit
             for data_limit in repository.list_data_limits()
@@ -887,6 +1383,14 @@ class RuntimeScheduler:
                 aggregate_counter = sum(
                     device_counters[device_id] for device_id in group_members[group.id]
                 )
+                members = frozenset(group.device_ids)
+                previous_members = self._group_members.get(data_limit.group_id)
+                self._group_members[data_limit.group_id] = members
+                if previous_members is not None and previous_members != members:
+                    # New or removed members change the summed counter without
+                    # any new group traffic, so count on from the new sum.
+                    repository.rebaseline_group_data_usage(data_limit.group_id, aggregate_counter)
+                    continue
                 repository.record_group_data_usage(data_limit.group_id, aggregate_counter)
             for quota in service_quotas:
                 counter = service_counters.get(quota.id)
@@ -983,4 +1487,9 @@ class RuntimeScheduler:
 
     def _run(self) -> None:
         while not self._stop_event.wait(self._poll_seconds):
-            self.tick()
+            try:
+                self.tick()
+            except Exception:
+                # Keep schedules, timers, outages and quotas running; the next
+                # tick retries with fresh state.
+                LOGGER.exception("scheduler tick failed unexpectedly")

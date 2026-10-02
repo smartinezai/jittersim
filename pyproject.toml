@@ -23,7 +23,8 @@ jittersim-dashboard = "jittersim.api.server:main"
 jittersim-helper = "jittersim.networking.helper:main"
 jittersim-browser-proxy = "jittersim.networking.browser_proxy:main"
 jittersim-service-watch = "jittersim.networking.dns_watch:main"
-jittersim-reset = "jittersim.networking.reset:main"
+jittersim-reset = "jittersim.cli:reset_main"
+jittersim-access-restore = "jittersim.networking.access:main"
 
 [project.optional-dependencies]
 dev = [
@@ -44,3 +45,6 @@ target-version = "py39"
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
+
+[tool.setuptools.package-data]
+"jittersim.api" = ["*.js", "*.css"]

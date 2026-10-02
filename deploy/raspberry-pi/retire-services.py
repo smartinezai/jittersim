@@ -6,12 +6,9 @@ import shutil
 import subprocess
 from pathlib import Path
 
-OBSOLETE_SERVICES = (
-    "jittersim-access-boot.service",
-    "jittersim-dns.service",
-    "jittersim-update.service",
-    "jittersim-ap.service",
-)
+# Every unit this release ships is current. The list stays for the next release
+# that drops one.
+OBSOLETE_SERVICES = ()
 
 
 def command(arguments):

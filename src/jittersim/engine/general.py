@@ -3,6 +3,7 @@
 from jittersim.config.models import Profile
 from jittersim.config.storage import ConfigRepository
 
+from .access import build_access_plan
 from .compiler import compile_plan
 from .plan import GeneralProfileRule, NetworkPlan
 from .service_lists import build_service_list_rules
@@ -34,4 +35,5 @@ def compile_general_plan(
             outage_active=outage_active,
         ),
         service_list_rules=build_service_list_rules(repository),
+        access=build_access_plan(repository.access_settings()),
     )

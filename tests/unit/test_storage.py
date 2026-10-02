@@ -1,8 +1,10 @@
 import sqlite3
 import tempfile
 import unittest
+from pathlib import Path
 
 from jittersim.config.models import (
+    MAX_UNAFFECTED_DEVICES,
     DataLimit,
     Device,
     DeviceGroup,
@@ -14,14 +16,20 @@ from jittersim.config.models import (
     Progression,
     Randomness,
     RandomWebsiteOutcome,
+    SavedSettings,
+    Scenario,
+    ScenarioRun,
+    ScenarioStep,
     Schedule,
     ServiceAssignment,
     ServiceQuota,
     TimeQuota,
     Timer,
+    UnaffectedDevice,
     WebsitePolicy,
 )
-from jittersim.config.storage import ConfigRepository, StorageError
+from jittersim.config.storage import ConfigRepository, DeviceConflictError, StorageError
+from jittersim.engine.scenarios import active_scenario_runs
 
 
 class ConfigRepositoryTests(unittest.TestCase):
@@ -125,6 +133,78 @@ class ConfigRepositoryTests(unittest.TestCase):
                         upload_kbit=invalid,
                         download_kbit=100_000,
                     )
+
+    def test_gateway_persistence_is_versioned_and_saved_idempotently(self) -> None:
+        before = self.repository.get_runtime_state().configuration_version
+        self.assertFalse(self.repository.get_persist_profiles_after_gateway_outage())
+
+        version = self.repository.set_persist_profiles_after_gateway_outage(
+            True, expected_version=before
+        )
+
+        self.assertTrue(self.repository.saved_settings().persist_profiles_after_gateway_outage)
+        self.assertEqual(version, before + 1)
+        self.assertEqual(
+            self.repository.set_persist_profiles_after_gateway_outage(
+                True, expected_version=version
+            ),
+            version,
+        )
+        with self.assertRaises(DeviceConflictError):
+            self.repository.set_persist_profiles_after_gateway_outage(
+                False, expected_version=before
+            )
+        self.assertTrue(self.repository.get_persist_profiles_after_gateway_outage())
+
+    def test_gateway_persistence_migration_defaults_existing_database_to_off(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "settings.db"
+            original = ConfigRepository(database)
+            original.save_profile(Profile(id="slow", name="Slow"))
+            original._connection.execute("DROP TABLE experiment_settings")
+            original._connection.commit()
+            original.close()
+
+            upgraded = ConfigRepository(database)
+            try:
+                self.assertFalse(upgraded.get_persist_profiles_after_gateway_outage())
+                self.assertEqual(upgraded.get_profile("slow"), Profile("slow", "Slow"))
+            finally:
+                upgraded.close()
+
+    def test_dashboard_update_preference_defaults_on_and_preserves_network_version(self) -> None:
+        version_before = self.repository.get_runtime_state().configuration_version
+        self.assertTrue(self.repository.get_check_staged_updates_on_open())
+
+        self.repository.set_check_staged_updates_on_open(False)
+
+        self.assertFalse(self.repository.get_check_staged_updates_on_open())
+        self.assertEqual(self.repository.get_runtime_state().configuration_version, version_before)
+        self.repository.set_check_staged_updates_on_open(True)
+        self.assertTrue(self.repository.get_check_staged_updates_on_open())
+
+    def test_dashboard_update_preference_migration_defaults_existing_database_to_on(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "settings.db"
+            original = ConfigRepository(database)
+            original.save_profile(Profile(id="slow", name="Slow"))
+            original.set_check_staged_updates_on_open(False)
+            original._connection.execute("DROP TABLE dashboard_preferences")
+            original._connection.commit()
+            original.close()
+
+            upgraded = ConfigRepository(database)
+            try:
+                self.assertTrue(upgraded.get_check_staged_updates_on_open())
+                self.assertEqual(upgraded.get_profile("slow"), Profile("slow", "Slow"))
+            finally:
+                upgraded.close()
+
+    def test_dashboard_update_preference_rejects_non_boolean_values(self) -> None:
+        for invalid in (0, 1, None, "on"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(StorageError):
+                    self.repository.set_check_staged_updates_on_open(invalid)
 
     def test_connected_device_labels_persist_without_changing_network_version(self) -> None:
         version_before = self.repository.get_runtime_state().configuration_version
@@ -293,6 +373,334 @@ class ConfigRepositoryTests(unittest.TestCase):
         self.assertEqual(self.repository.total_domain_queries("192.168.50.10"), 7)
         self.assertTrue(self.repository.delete_progression(progression.id))
         self.assertEqual(self.repository.list_active_progressions(now=200), ())
+
+    def test_devices_move_together_and_swap_addresses(self) -> None:
+        self.repository.save_profile(Profile(id="slow", name="Slow"))
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "slow"))
+        self.repository.save_device(Device("bob", "Bob", "192.168.50.11", "slow"))
+
+        moved = self.repository.move_device_addresses(
+            {"alice": ("192.168.50.10", "192.168.50.11"), "bob": ("192.168.50.11", "192.168.50.10")}
+        )
+
+        self.assertTrue(moved)
+        self.assertEqual(str(self.repository.get_device("alice").ipv4_address), "192.168.50.11")
+        self.assertEqual(str(self.repository.get_device("bob").ipv4_address), "192.168.50.10")
+
+    def test_a_device_changed_since_the_check_does_not_move(self) -> None:
+        self.repository.save_profile(Profile(id="slow", name="Slow"))
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "slow"))
+        self.repository.save_device(Device("bob", "Bob", "192.168.50.11", "slow"))
+
+        # Someone saved alice at .12 after the check read .10.
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.12", "slow"))
+        moved = self.repository.move_device_addresses(
+            {"bob": ("192.168.50.11", "192.168.50.30"), "alice": ("192.168.50.10", "192.168.50.20")}
+        )
+
+        self.assertFalse(moved)
+        self.assertEqual(str(self.repository.get_device("alice").ipv4_address), "192.168.50.12")
+        self.assertEqual(str(self.repository.get_device("bob").ipv4_address), "192.168.50.11")
+        self.assertIsNone(self.repository.get_device("ghost"))
+        self.assertFalse(
+            self.repository.move_device_addresses({"ghost": ("192.168.50.40", "192.168.50.41")})
+        )
+
+    def test_a_move_keeps_a_traffic_progression_going(self) -> None:
+        self.repository.save_profile(Profile(id="normal", name="Normal"))
+        self.repository.save_profile(Profile(id="slow", name="Slow"))
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        observations = tuple(
+            DomainObservation(
+                ipv4_address=address, domain="example.com", query_count=count,
+                first_seen=100, last_seen=100,
+            )
+            for address, count in (("192.168.50.10", 500), ("192.168.50.23", 30))
+        )
+        self.repository.save_domain_observations(observations, now=100)
+        self.repository.save_progression(
+            Progression(
+                id="degrade", device_id="alice", start_profile_id="normal",
+                end_profile_id="slow", started_at=100, duration_seconds=600, mode="traffic",
+                traffic_target_queries=200, traffic_baseline_queries=400,
+            )
+        )
+
+        self.repository.move_device_addresses({"alice": ("192.168.50.10", "192.168.50.23")})
+
+        progression = self.repository.list_active_progressions(now=200)[0]
+        # 100 queries counted before the move are still counted after it.
+        self.assertEqual(progression.traffic_baseline_queries, -70)
+        self.assertEqual(
+            self.repository.total_domain_queries("192.168.50.23")
+            - progression.traffic_baseline_queries,
+            100,
+        )
+
+    def test_timer_and_progression_replace_each_other_for_a_device(self) -> None:
+        self.repository.save_profile(Profile(id="normal", name="Normal"))
+        self.repository.save_profile(Profile(id="slow", name="Slow"))
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        progression = Progression(
+            id="degrade",
+            device_id="alice",
+            start_profile_id="normal",
+            end_profile_id="slow",
+            started_at=100,
+            duration_seconds=600,
+        )
+        timer = Timer(
+            id="offline",
+            device_id="alice",
+            profile_id="slow",
+            started_at=200,
+            expires_at=800,
+        )
+
+        self.repository.save_progression(progression)
+        self.repository.save_timer(timer)
+
+        # The newest override wins, so the timer listed as active is the one applied.
+        self.assertEqual(self.repository.list_active_progressions(now=300), ())
+        self.assertEqual(self.repository.list_active_timers(now=300), (timer,))
+
+        self.repository.save_progression(progression)
+
+        self.assertEqual(self.repository.list_active_progressions(now=300), (progression,))
+        self.assertEqual(self.repository.list_active_timers(now=300), ())
+
+    def test_query_totals_keep_counting_after_old_observations_are_pruned(self) -> None:
+        day = 24 * 60 * 60
+        self.repository.save_domain_observations(
+            (DomainObservation("192.168.50.10", "old.example", 7, 100, 100),),
+            now=100,
+        )
+        # Saving 31 days later prunes the first row.
+        later = 100 + 31 * day
+        self.repository.save_domain_observations(
+            (DomainObservation("192.168.50.10", "new.example", 3, later, later),),
+            now=later,
+        )
+
+        self.assertEqual(
+            [observation.domain for observation in self.repository.list_domain_observations()],
+            ["new.example"],
+        )
+        self.assertEqual(self.repository.total_domain_queries("192.168.50.10"), 10)
+
+    def test_query_totals_start_from_existing_observations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = f"{directory}/jittersim.db"
+            with ConfigRepository(path) as repository:
+                repository.save_domain_observations(
+                    (DomainObservation("192.168.50.10", "example.com", 7, 100, 100),),
+                    now=100,
+                )
+                # Simulate a database written before running totals existed.
+                repository._connection.execute("DROP TABLE domain_query_totals")
+                repository._connection.commit()
+
+            with ConfigRepository(path) as repository:
+                self.assertEqual(repository.total_domain_queries("192.168.50.10"), 7)
+
+    def _save_lab(self) -> None:
+        for profile in (
+            Profile(id="normal", name="Normal"),
+            Profile(id="slow", name="Slow"),
+            Profile(id="unused", name="Unused"),
+        ):
+            self.repository.save_profile(profile)
+        self.repository.save_device(Device("alice", "Alice's laptop", "192.168.50.10", "normal"))
+        self.repository.save_device(Device("bob", "Bob's phone", "192.168.50.11", "normal"))
+        self.repository.save_device_group(
+            DeviceGroup(id="family", name="Family", device_ids=("alice", "bob"))
+        )
+        self.repository.save_schedule(
+            Schedule(
+                id="work-hours",
+                device_id="alice",
+                profile_id="slow",
+                days_of_week=(0,),
+                start_minute=540,
+                end_minute=1_020,
+            )
+        )
+        self.repository.save_data_limit(
+            DataLimit(device_id="alice", profile_id="slow", limit_bytes=500, last_reset_at=100)
+        )
+        self.repository.save_group_data_limit(
+            GroupDataLimit(group_id="family", profile_id="slow", limit_bytes=500, last_reset_at=100)
+        )
+        self.repository.save_service_quota(
+            ServiceQuota(
+                id="alice-video",
+                device_id="alice",
+                name="Video",
+                domains=("netflix.com",),
+                profile_id="slow",
+                limit_bytes=500,
+                last_reset_at=100,
+            )
+        )
+        self.repository.save_time_quota(
+            TimeQuota(
+                id="alice-video-time",
+                device_id="alice",
+                name="Video time",
+                domains=("netflix.com",),
+                profile_id="slow",
+                limit_seconds=300,
+                window_duration_seconds=3_600,
+                last_reset_at=100,
+            )
+        )
+
+    def test_profile_references_name_everything_that_uses_a_profile(self) -> None:
+        self._save_lab()
+
+        self.assertEqual(
+            self.repository.profile_references("slow", now=200),
+            (
+                "schedule work-hours",
+                "data limit for Alice's laptop",
+                "shared limit for Family",
+                "service limit Video",
+                "time limit Video time",
+            ),
+        )
+        self.assertEqual(
+            self.repository.profile_references("normal", now=200),
+            ("device Alice's laptop", "device Bob's phone"),
+        )
+        self.assertEqual(self.repository.profile_references("unused", now=200), ())
+
+    def test_deleting_a_device_removes_its_rules(self) -> None:
+        self._save_lab()
+
+        self.assertTrue(self.repository.delete_device("alice"))
+
+        self.assertIsNone(self.repository.get_device("alice"))
+        self.assertEqual(self.repository.list_schedules(), ())
+        self.assertIsNone(self.repository.get_data_limit("alice"))
+        self.assertEqual(self.repository.list_service_quotas(), ())
+        self.assertEqual(self.repository.list_time_quotas(), ())
+        self.assertEqual(self.repository.get_device_group("family").device_ids, ("bob",))
+        self.assertFalse(self.repository.delete_device("alice"))
+
+    def test_deleting_a_groups_last_device_removes_the_group(self) -> None:
+        self._save_lab()
+        self.repository.save_device(Device("carol", "Carol", "192.168.50.12", "normal"))
+        self.repository.save_device_group(
+            DeviceGroup(id="solo", name="Solo", device_ids=("carol",))
+        )
+        self.repository.save_group_data_limit(
+            GroupDataLimit(group_id="solo", profile_id="slow", limit_bytes=500, last_reset_at=100)
+        )
+
+        self.repository.delete_device("carol")
+
+        # A group cannot be empty, so reading it back would fail.
+        self.assertEqual(
+            [group.id for group in self.repository.list_device_groups()], ["family"]
+        )
+        self.assertIsNone(self.repository.get_group_data_limit("solo"))
+        self.assertIsNotNone(self.repository.get_group_data_limit("family"))
+
+    def test_deletes_report_whether_something_was_removed(self) -> None:
+        self._save_lab()
+
+        deletes = (
+            (self.repository.delete_schedule, "work-hours"),
+            (self.repository.delete_data_limit, "alice"),
+            (self.repository.delete_group_data_limit, "family"),
+            (self.repository.delete_service_quota, "alice-video"),
+            (self.repository.delete_time_quota, "alice-video-time"),
+            (self.repository.delete_profile, "slow"),
+            (self.repository.delete_profile, "unused"),
+        )
+        for delete, identifier in deletes:
+            with self.subTest(delete=delete.__name__, identifier=identifier):
+                self.assertTrue(delete(identifier))
+                self.assertFalse(delete(identifier))
+        self.assertEqual(self.repository.profile_references("normal", now=200), (
+            "device Alice's laptop",
+            "device Bob's phone",
+        ))
+        self.assertEqual(
+            [profile.id for profile in self.repository.list_profiles()], ["normal"]
+        )
+
+    def test_round_trips_burst_loss_and_loads_older_profiles(self) -> None:
+        profile = Profile(
+            id="bursty",
+            name="Bursty",
+            upload=Impairment(loss_percent=10, loss_burst_packets=4),
+        )
+        self.repository.save_profile(profile)
+        # A profile saved before burst loss existed has no such key.
+        self.repository._connection.execute(
+            "UPDATE profiles SET download_json = ? WHERE id = ?",
+            ('{"delay_ms": 20}', "bursty"),
+        )
+        self.repository._connection.commit()
+
+        stored = self.repository.get_profile("bursty")
+
+        self.assertEqual(stored.upload.loss_burst_packets, 4)
+        self.assertEqual(stored.download, Impairment(delay_ms=20))
+
+    def test_replacing_settings_swaps_every_saved_setting(self) -> None:
+        self._save_lab()
+        self.repository.save_domain_observations(
+            (DomainObservation("192.168.50.10", "example.com", 3, 10, 10),), now=10
+        )
+        replacement = SavedSettings(
+            profiles=(Profile(id="fast", name="Fast"),),
+            devices=(Device("carol", "Carol", "192.168.50.20", "fast"),),
+            mac_policy=MacPolicy(mode="denylist", denylist=("aa:bb:cc:dd:ee:ff",)),
+        )
+
+        self.repository.replace_settings(replacement)
+
+        saved = self.repository.saved_settings()
+        self.assertEqual(saved.profiles, replacement.profiles)
+        self.assertEqual(saved.devices, replacement.devices)
+        self.assertEqual(saved.groups, ())
+        self.assertEqual(saved.schedules, ())
+        self.assertEqual(saved.data_limits, ())
+        self.assertEqual(saved.service_quotas, ())
+        self.assertEqual(saved.mac_policy, replacement.mac_policy)
+        # DNS history is not a setting and stays.
+        self.assertEqual(len(self.repository.list_domain_observations()), 1)
+
+    def test_replacing_settings_changes_nothing_when_it_fails(self) -> None:
+        self._save_lab()
+        before = self.repository.saved_settings()
+        broken = SavedSettings(
+            profiles=(Profile(id="fast", name="Fast"),),
+            devices=(Device("carol", "Carol", "192.168.50.20", "missing-profile"),),
+        )
+
+        with self.assertRaises(StorageError):
+            self.repository.replace_settings(broken)
+
+        self.assertEqual(self.repository.saved_settings(), before)
+
+    def test_replacing_settings_changes_nothing_after_an_unexpected_error(self) -> None:
+        self._save_lab()
+        before = self.repository.saved_settings()
+
+        def interrupted(policy):
+            raise RuntimeError("interrupted")
+
+        self.repository.save_website_policy = interrupted
+        with self.assertRaises(RuntimeError):
+            self.repository.replace_settings(
+                SavedSettings(profiles=(Profile(id="fast", name="Fast"),))
+            )
+        del self.repository.save_website_policy
+
+        self.assertEqual(self.repository.saved_settings(), before)
 
     def test_round_trips_byte_progression_targets(self) -> None:
         self.repository.save_profile(Profile(id="normal", name="Normal"))
@@ -506,7 +914,8 @@ class ConfigRepositoryTests(unittest.TestCase):
         updated = self.repository.get_runtime_state()
         self.assertEqual(updated.configuration_version, 2)
         self.assertEqual(updated.observed_state, "unknown")
-        self.assertIsNone(updated.last_action)
+        # Startup recovery relies on the last explicit network action.
+        self.assertEqual(updated.last_action, "apply")
 
     def test_merges_and_lists_domain_observations_without_bumping_configuration(self) -> None:
         self.repository.save_domain_observations(
@@ -744,6 +1153,420 @@ class ConfigRepositoryTests(unittest.TestCase):
         self.assertEqual(profile, ("Normal",))
         self.assertEqual(label, ("Family MacBook", "laptop"))
         self.assertEqual(traffic_rates, (None, 150_000))
+
+
+class EveryoneElseStorageTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.repository = ConfigRepository(":memory:")
+        self.addCleanup(self.repository.close)
+        self.repository.save_profile(Profile(id="slow", name="Slow"))
+
+    def test_the_everyone_else_profile_round_trips_and_keeps_its_profile(self) -> None:
+        self.assertIsNone(self.repository.get_everyone_else_profile_id())
+
+        self.repository.save_everyone_else_profile_id("slow")
+
+        self.assertEqual(self.repository.get_everyone_else_profile_id(), "slow")
+        self.assertIn("everyone else", self.repository.profile_references("slow", now=0))
+        self.repository.save_everyone_else_profile_id(None)
+        self.assertIsNone(self.repository.get_everyone_else_profile_id())
+
+    def test_deleting_the_profile_row_clears_everyone_else(self) -> None:
+        # The API refuses this delete, but an older version doesn't know about
+        # everyone else and must still be able to delete or replace profiles.
+        self.repository.save_everyone_else_profile_id("slow")
+
+        self.repository.delete_profile("slow")
+
+        self.assertIsNone(self.repository.get_everyone_else_profile_id())
+
+    def test_a_malformed_unaffected_device_is_a_storage_error(self) -> None:
+        self.repository._connection.execute(
+            "INSERT INTO unaffected_devices (mac_address, display_name, created_at) "
+            "VALUES ('not-a-mac', 'Bad', 0)"
+        )
+
+        with self.assertRaises(StorageError):
+            self.repository.list_unaffected_devices()
+
+    def test_a_missing_everyone_else_profile_is_refused(self) -> None:
+        with self.assertRaises(StorageError):
+            self.repository.save_everyone_else_profile_id("missing")
+
+        self.assertIsNone(self.repository.get_everyone_else_profile_id())
+
+    def test_unaffected_devices_round_trip_in_address_order(self) -> None:
+        self.repository.save_unaffected_device(UnaffectedDevice("ba:bb:bb:bb:bb:bb", "Phone"))
+        self.repository.save_unaffected_device(UnaffectedDevice("aa:aa:aa:aa:aa:aa"))
+        self.repository.save_unaffected_device(UnaffectedDevice("ba:bb:bb:bb:bb:bb", "My phone"))
+
+        self.assertEqual(
+            self.repository.list_unaffected_devices(),
+            (
+                UnaffectedDevice("aa:aa:aa:aa:aa:aa"),
+                UnaffectedDevice("ba:bb:bb:bb:bb:bb", "My phone"),
+            ),
+        )
+        self.assertTrue(self.repository.delete_unaffected_device("aa:aa:aa:aa:aa:aa"))
+        self.assertFalse(self.repository.delete_unaffected_device("aa:aa:aa:aa:aa:aa"))
+
+    def test_the_unaffected_list_holds_at_most_256_devices(self) -> None:
+        for index in range(MAX_UNAFFECTED_DEVICES):
+            self.repository.save_unaffected_device(
+                UnaffectedDevice(f"02:00:00:00:{index // 256:02x}:{index % 256:02x}")
+            )
+
+        with self.assertRaises(StorageError):
+            self.repository.save_unaffected_device(UnaffectedDevice("02:00:00:01:00:00"))
+        # A listed device can still be renamed.
+        self.repository.save_unaffected_device(UnaffectedDevice("02:00:00:00:00:00", "Renamed"))
+
+    def test_replacing_settings_carries_the_everyone_else_settings(self) -> None:
+        # The old everyone-else profile is replaced, so it must not block the replace.
+        self.repository.save_everyone_else_profile_id("slow")
+        settings = SavedSettings(
+            profiles=(Profile(id="fast", name="Fast"),),
+            everyone_else_profile_id="fast",
+            unaffected_devices=(UnaffectedDevice("aa:aa:aa:aa:aa:aa", "Laptop"),),
+        )
+
+        self.repository.replace_settings(settings)
+
+        self.assertEqual(self.repository.saved_settings(), settings)
+
+    def test_existing_databases_gain_the_everyone_else_tables(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "jittersim.db"
+            ConfigRepository(path).close()
+            connection = sqlite3.connect(path)
+            connection.executescript(
+                "DROP TABLE everyone_else_settings; DROP TABLE unaffected_devices;"
+            )
+            connection.close()
+
+            with ConfigRepository(path) as repository:
+                self.assertIsNone(repository.get_everyone_else_profile_id())
+                self.assertEqual(repository.list_unaffected_devices(), ())
+
+    def test_finds_a_device_by_its_mac_address(self) -> None:
+        self.repository.save_device(
+            Device("alice", "Alice", "192.168.50.10", "slow", "AA:AA:AA:AA:AA:AA")
+        )
+
+        self.assertEqual(
+            self.repository.get_device_by_mac_address("aa:aa:aa:aa:aa:aa").id, "alice"
+        )
+        self.assertIsNone(self.repository.get_device_by_mac_address("ba:bb:bb:bb:bb:bb"))
+
+
+class TargetScheduleStorageTests(unittest.TestCase):
+    WINDOW = {
+        "profile_id": "slow", "days_of_week": (0, 1), "start_minute": 540, "end_minute": 1_020
+    }
+    OLD_SCHEDULES_TABLE = """
+        DROP TABLE schedules;
+        CREATE TABLE schedules (
+            id TEXT PRIMARY KEY,
+            device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+            profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+            days_json TEXT NOT NULL,
+            start_minute INTEGER NOT NULL,
+            end_minute INTEGER NOT NULL,
+            enabled INTEGER NOT NULL
+        );
+        INSERT INTO schedules VALUES ('work-hours', 'alice', 'slow', '[0, 1]', 540, 1020, 1);
+    """
+
+    def setUp(self) -> None:
+        self.repository = ConfigRepository(":memory:")
+        self._save_family(self.repository)
+
+    def tearDown(self) -> None:
+        self.repository.close()
+
+    @staticmethod
+    def _save_family(repository: ConfigRepository) -> None:
+        repository.save_profile(Profile(id="slow", name="Slow"))
+        repository.save_device(Device("alice", "Alice", "192.168.50.10", "slow"))
+        repository.save_device_group(DeviceGroup("family", "Family", ("alice",)))
+
+    def test_round_trips_group_and_everyone_else_schedules(self) -> None:
+        device = Schedule(id="device-evening", device_id="alice", **self.WINDOW)
+        everyone = Schedule(
+            id="everyone-evening", device_id=None, everyone_else=True, **self.WINDOW
+        )
+        group = Schedule(id="group-evening", device_id=None, group_id="family", **self.WINDOW)
+        for schedule in (group, everyone, device):
+            self.repository.save_schedule(schedule)
+
+        self.assertEqual(self.repository.list_schedules(), (device, everyone, group))
+
+    def test_deleting_a_group_removes_its_schedules(self) -> None:
+        self.repository.save_schedule(
+            Schedule(id="group-evening", device_id=None, group_id="family", **self.WINDOW)
+        )
+        self.repository.save_schedule(
+            Schedule(id="everyone-evening", device_id=None, everyone_else=True, **self.WINDOW)
+        )
+
+        self.assertTrue(self.repository.delete_device_group("family"))
+
+        self.assertEqual(
+            [schedule.id for schedule in self.repository.list_schedules()], ["everyone-evening"]
+        )
+
+    def test_a_schedule_for_a_missing_group_is_refused(self) -> None:
+        with self.assertRaises(StorageError):
+            self.repository.save_schedule(
+                Schedule(id="nobody", device_id=None, group_id="nobody", **self.WINDOW)
+            )
+
+    def test_the_database_requires_exactly_one_target(self) -> None:
+        for schedule_id, device_id, group_id, everyone_else in (
+            ("none", None, None, 0),
+            ("two", "alice", "family", 0),
+            ("three", "alice", None, 1),
+        ):
+            with self.subTest(schedule_id=schedule_id):
+                with self.assertRaises(sqlite3.IntegrityError):
+                    self.repository._connection.execute(
+                        "INSERT INTO schedules (id, device_id, group_id, everyone_else, "
+                        "profile_id, days_json, start_minute, end_minute, enabled) "
+                        "VALUES (?, ?, ?, ?, 'slow', '[0]', 0, 60, 1)",
+                        (schedule_id, device_id, group_id, everyone_else),
+                    )
+
+    def test_a_schedule_can_switch_targets(self) -> None:
+        self.repository.save_schedule(Schedule(id="evening", device_id="alice", **self.WINDOW))
+        switched = Schedule(id="evening", device_id=None, group_id="family", **self.WINDOW)
+
+        self.repository.save_schedule(switched)
+
+        self.assertEqual(self.repository.list_schedules(), (switched,))
+
+    def test_profiles_group_and_everyone_else_schedules_use_are_named(self) -> None:
+        self.repository.save_schedule(
+            Schedule(id="group-evening", device_id=None, group_id="family", **self.WINDOW)
+        )
+        self.repository.save_schedule(
+            Schedule(id="everyone-evening", device_id=None, everyone_else=True, **self.WINDOW)
+        )
+
+        references = self.repository.profile_references("slow", now=0)
+
+        self.assertIn("schedule group-evening", references)
+        self.assertIn("schedule everyone-evening", references)
+
+    def test_the_upgrade_drops_schedules_whose_device_or_profile_is_gone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "jittersim.db"
+            with ConfigRepository(path) as repository:
+                self._save_family(repository)
+            connection = sqlite3.connect(path)
+            # The sqlite3 shell leaves foreign keys off, so such rows can exist.
+            connection.executescript(
+                self.OLD_SCHEDULES_TABLE
+                + "INSERT INTO schedules VALUES ('orphan', 'ghost', 'slow', '[0]', 0, 60, 1);"
+                + "INSERT INTO schedules VALUES ('lost', 'alice', 'gone', '[0]', 0, 60, 1);"
+            )
+            connection.close()
+
+            with ConfigRepository(path) as repository:
+                self.assertEqual(
+                    [schedule.id for schedule in repository.list_schedules()], ["work-hours"]
+                )
+
+    def test_existing_schedules_survive_the_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "jittersim.db"
+            with ConfigRepository(path) as repository:
+                self._save_family(repository)
+            connection = sqlite3.connect(path)
+            connection.executescript(self.OLD_SCHEDULES_TABLE)
+            connection.close()
+
+            with ConfigRepository(path) as repository:
+                self.assertEqual(
+                    repository.list_schedules(),
+                    (
+                        Schedule(
+                            id="work-hours", device_id="alice", profile_id="slow",
+                            days_of_week=(0, 1), start_minute=540, end_minute=1_020,
+                        ),
+                    ),
+                )
+                repository.save_schedule(
+                    Schedule(id="group-evening", device_id=None, group_id="family", **self.WINDOW)
+                )
+                self.assertEqual(
+                    repository._connection.execute("PRAGMA foreign_keys").fetchone()[0], 1
+                )
+            # Opening an upgraded database changes nothing.
+            with ConfigRepository(path) as repository:
+                self.assertEqual(len(repository.list_schedules()), 2)
+                # Deleting the only member deletes the group, and both cascades still work.
+                self.assertTrue(repository.delete_device("alice"))
+                self.assertEqual(repository.list_schedules(), ())
+
+
+class ScenarioStorageTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.repository = ConfigRepository(":memory:")
+        self.addCleanup(self.repository.close)
+        for profile_id in ("normal", "3g", "slow"):
+            self.repository.save_profile(Profile(id=profile_id, name=profile_id))
+        self.repository.save_device(Device("alice", "Alice", "192.168.50.10", "normal"))
+        self.repository.save_device(Device("bob", "Bob", "192.168.50.11", "normal"))
+        self.repository.save_device_group(DeviceGroup("family", "Family", ("alice", "bob")))
+        self.scenario = Scenario(
+            id="commute", name="Commute", steps=(ScenarioStep("3g", 60), ScenarioStep("slow", 30))
+        )
+        self.repository.save_scenario(self.scenario)
+
+    def start(self, run_id: str, started_at: int = 100, **target) -> None:
+        self.repository.start_scenario_run(
+            ScenarioRun(id=run_id, scenario_id="commute", started_at=started_at, **target)
+        )
+
+    def active(self, now: int = 110) -> list:
+        return [run.id for run, _, _ in active_scenario_runs(self.repository, now=now)]
+
+    def timer(self, timer_id: str) -> None:
+        self.repository.save_timer(
+            Timer(id=timer_id, device_id="alice", profile_id="slow", started_at=100, expires_at=700)
+        )
+
+    def test_round_trips_scenarios(self) -> None:
+        looping = Scenario(id="a-loop", name="Loop", steps=(ScenarioStep("slow", 10),), loop=True)
+        self.repository.save_scenario(looping)
+
+        self.assertEqual(self.repository.list_scenarios(), (looping, self.scenario))
+        self.assertEqual(self.repository.get_scenario("commute"), self.scenario)
+        self.assertIsNone(self.repository.get_scenario("ghost"))
+
+    def test_a_run_replaces_the_other_run_for_its_target(self) -> None:
+        self.start("run-1", device_id="alice")
+        self.start("run-2", group_id="family")
+        self.start("run-3", device_id="alice")
+
+        self.assertEqual(self.active(), ["run-3", "run-2"])
+
+    def test_a_device_run_and_its_timer_or_progression_replace_each_other(self) -> None:
+        self.timer("t1")
+        self.start("run-1", device_id="alice")
+        timers_after_run = self.repository.list_active_timers(now=110)
+        self.timer("t2")
+        runs_after_timer = self.active()
+        self.start("run-2", device_id="alice")
+        self.repository.save_progression(
+            Progression(
+                id="p1", device_id="alice", start_profile_id="normal", end_profile_id="slow",
+                started_at=100, duration_seconds=600,
+            )
+        )
+        runs_after_progression = self.active()
+        # A group's run leaves its members' own timers alone.
+        self.timer("t3")
+        self.start("run-3", group_id="family")
+
+        self.assertEqual(timers_after_run, ())
+        self.assertEqual(runs_after_timer, [])
+        self.assertEqual(runs_after_progression, [])
+        self.assertEqual(
+            [timer.id for timer in self.repository.list_active_timers(now=110)], ["t3"]
+        )
+
+    def test_editing_a_scenario_never_restarts_a_finished_run(self) -> None:
+        self.start("finished", device_id="alice")
+        self.start("running", started_at=250, device_id="bob")
+
+        # At 300 the first run has passed its 90 seconds; the second hasn't.
+        self.repository.save_scenario(
+            Scenario(
+                id="commute", name="Commute", steps=(ScenarioStep("3g", 600),), loop=True
+            ),
+            now=300,
+        )
+
+        self.assertEqual(self.active(now=300), ["running"])
+        self.assertEqual(self.active(now=10_000), ["running"])
+
+    def test_stopped_and_finished_runs_are_not_active(self) -> None:
+        self.start("run-1", device_id="alice")
+        self.start("run-2", device_id="bob")
+
+        self.assertTrue(self.repository.stop_scenario_run("run-2"))
+        self.assertFalse(self.repository.stop_scenario_run("run-2"))
+        self.assertEqual(self.active(now=150), ["run-1"])
+        run, scenario, position = active_scenario_runs(self.repository, now=170)[0]
+        self.assertEqual((run.id, scenario.id, position.step_index), ("run-1", "commute", 1))
+        # The two steps take 90 seconds.
+        self.assertEqual(self.active(now=190), [])
+
+    def test_deleting_a_scenario_group_or_device_ends_its_runs(self) -> None:
+        self.start("run-1", device_id="alice")
+        self.start("run-2", group_id="family")
+        self.start("run-3", everyone_else=True)
+
+        self.assertTrue(self.repository.delete_device_group("family"))
+        self.assertTrue(self.repository.delete_device("alice"))
+        self.assertEqual(self.active(), ["run-3"])
+        self.assertTrue(self.repository.delete_scenario("commute"))
+        self.assertEqual(self.active(), [])
+
+    def test_profiles_a_scenario_uses_are_named(self) -> None:
+        self.assertIn("scenario Commute", self.repository.profile_references("slow", now=110))
+        self.assertNotIn("scenario Commute", self.repository.profile_references("normal", now=110))
+
+    def test_settings_carry_scenarios_but_not_runs(self) -> None:
+        self.start("run-1", everyone_else=True)
+        settings = self.repository.saved_settings()
+
+        self.repository.replace_settings(settings)
+
+        self.assertEqual(settings.scenarios, (self.scenario,))
+        self.assertEqual(self.repository.list_scenarios(), (self.scenario,))
+        self.assertEqual(self.active(), [])
+
+
+class ActivityLogStorageTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.repository = ConfigRepository(":memory:")
+        self.addCleanup(self.repository.close)
+
+    def test_records_events_newest_first(self) -> None:
+        self.repository.record_activity(kind="apply", message="Configuration applied", now=100)
+        self.repository.record_activity(kind="outage", message="Alice: outage started", now=160)
+
+        events = self.repository.list_activity()
+
+        self.assertEqual(
+            [(event["happened_at"], event["kind"], event["message"]) for event in events],
+            [(160, "outage", "Alice: outage started"), (100, "apply", "Configuration applied")],
+        )
+        self.assertGreater(events[0]["id"], events[1]["id"])
+
+    def test_keeps_the_newest_500_events(self) -> None:
+        for index in range(505):
+            self.repository.record_activity(kind="outage", message=f"event {index}", now=index)
+
+        events = self.repository.list_activity()
+
+        self.assertEqual(len(events), 500)
+        self.assertEqual((events[0]["message"], events[-1]["message"]), ("event 504", "event 5"))
+
+    def test_refuses_unknown_kinds_and_bad_messages(self) -> None:
+        for kind, message in (("reroll", "x"), ("apply", ""), ("apply", "x" * 501), ("apply", 5)):
+            with self.subTest(kind=kind, message=str(message)[:10]):
+                with self.assertRaises(StorageError):
+                    self.repository.record_activity(kind=kind, message=message, now=1)
+
+    def test_clearing_empties_the_log(self) -> None:
+        self.repository.record_activity(kind="reset", message="Network reset", now=1)
+
+        self.repository.clear_activity()
+
+        self.assertEqual(self.repository.list_activity(), ())
 
 
 if __name__ == "__main__":

@@ -298,6 +298,7 @@ def every_field_set_profile(profile_id="every-field", name="Every field", other=
             "delay_ms": 20 + offset,
             "jitter_ms": 3 + offset,
             "loss_percent": 4 + offset,
+            "loss_burst_packets": 8 + offset,
             "bandwidth_kbit": bandwidth,
             "reorder_percent": 5 + offset,
             "duplicate_percent": 6 + offset,
@@ -468,6 +469,9 @@ def row(id_, name, summary, badge, *buttons):
 EDIT = button("Edit")
 APPLY = button("Apply to all")
 STOP = button("Stop")
+# Duplicate and delete arrived with main's device workflows.
+DUPLICATE = button("Duplicate")
+DELETE = button("Delete")
 
 
 @NEEDS_NODE
@@ -478,8 +482,8 @@ def test_an_empty_list_says_so():
 @NEEDS_NODE
 def test_each_row_has_name_summary_edit_and_apply_to_all():
     assert draw({"profiles": [SLOW, FAST]}) == [
-        row("slow", "Slow", "↕ 50 ms", None, EDIT, APPLY),
-        row("fast", "Fast", "↕ no impairment", None, EDIT, APPLY),
+        row("slow", "Slow", "↕ 50 ms", None, EDIT, APPLY, DUPLICATE, DELETE),
+        row("fast", "Fast", "↕ no impairment", None, EDIT, APPLY, DUPLICATE, DELETE),
     ]
 
 
@@ -492,8 +496,8 @@ def test_the_active_general_profile_has_a_badge_and_a_stop_button():
         },
     }
     assert draw(state) == [
-        row("slow", "Slow", "↕ 50 ms", "General · active", EDIT, STOP),
-        row("fast", "Fast", "↕ no impairment", None, EDIT, APPLY),
+        row("slow", "Slow", "↕ 50 ms", "General · active", EDIT, STOP, DUPLICATE, DELETE),
+        row("fast", "Fast", "↕ no impairment", None, EDIT, APPLY, DUPLICATE, DELETE),
     ]
 
 
@@ -516,22 +520,22 @@ def test_an_inactive_general_profile_is_paused_only_after_a_reset(observed, badg
         },
     }
     assert draw(state) == [
-        row("slow", "Slow", "↕ 50 ms", badge, EDIT, APPLY),
-        row("fast", "Fast", "↕ no impairment", None, EDIT, APPLY),
+        row("slow", "Slow", "↕ 50 ms", badge, EDIT, APPLY, DUPLICATE, DELETE),
+        row("fast", "Fast", "↕ no impairment", None, EDIT, APPLY, DUPLICATE, DELETE),
     ]
 
 
 @NEEDS_NODE
 def test_an_inactive_general_profile_without_a_runtime_state_is_saved_not_paused():
     state = {"profiles": [SLOW], "generalProfileState": {"profile": SLOW, "active": False}}
-    assert draw(state) == [row("slow", "Slow", "↕ 50 ms", "General · saved", EDIT, APPLY)]
+    assert draw(state) == [row("slow", "Slow", "↕ 50 ms", "General · saved", EDIT, APPLY, DUPLICATE, DELETE)]
 
 
 @NEEDS_NODE
 def test_apply_to_all_stays_focusable_but_unavailable_while_a_network_action_runs():
     drawn = draw({"profiles": [SLOW], "networkActionBusy": True})
     assert drawn == [
-        row("slow", "Slow", "↕ 50 ms", None, EDIT, button("Apply to all", aria_disabled=True))
+        row("slow", "Slow", "↕ 50 ms", None, EDIT, button("Apply to all", aria_disabled=True), DUPLICATE, DELETE)
     ]
 
 
@@ -539,7 +543,7 @@ def test_apply_to_all_stays_focusable_but_unavailable_while_a_network_action_run
 def test_apply_to_all_is_disabled_without_the_network_helper():
     drawn = draw({"profiles": [SLOW], "helperConfigured": False})
     assert drawn == [
-        row("slow", "Slow", "↕ 50 ms", None, EDIT, button("Apply to all", disabled=True))
+        row("slow", "Slow", "↕ 50 ms", None, EDIT, button("Apply to all", disabled=True), DUPLICATE, DELETE)
     ]
 
 
@@ -550,10 +554,10 @@ def test_the_row_whose_action_is_running_shows_a_busy_button_that_can_keep_focus
         "savedProfileBusy": {"id": "fast", "stop": False},
     }
     assert draw(state) == [
-        row("slow", "Slow", "↕ 50 ms", None, EDIT, button("Apply to all", aria_disabled=True)),
+        row("slow", "Slow", "↕ 50 ms", None, EDIT, button("Apply to all", aria_disabled=True), DUPLICATE, DELETE),
         row(
             "fast", "Fast", "↕ no impairment", None, EDIT,
-            button("Apply to all", aria_disabled=True, busy="true"),
+            button("Apply to all", aria_disabled=True, busy="true"), DUPLICATE, DELETE,
         ),
     ]
 

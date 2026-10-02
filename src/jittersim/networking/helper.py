@@ -14,16 +14,20 @@ import threading
 import time
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from jittersim.config.exemptions import normalize_exempt_mac
 from jittersim.config.models import ValidationError, normalize_domain
+from jittersim.engine.access import AccessPlan, access_from_payload
 from jittersim.engine.codec import PlanCodecError, plan_from_payload, plan_to_payload
-from jittersim.engine.plan import NetworkPlan
+from jittersim.engine.plan import EVERYONE_ELSE_QUEUE_ID, NetworkPlan
+from jittersim.updates import UpdateError, request_update, update_status
 
+from .access import AccessManager
 from .applier import MAX_PROTECTED_MACS, ApplyError, NetworkApplier
 from .dashboard_access import ACCESS_FILE, AccessError, AccessStore, identify_peer
 from .executor import CommandExecutionError, SubprocessExecutor
+from .renderer import queue_parent
 from .router import (
     ROUTER_CHECK_MESSAGES,
     ROUTER_IMPORT_MESSAGES,
@@ -59,6 +63,11 @@ MAX_CONNECTED_CLIENTS = 256
 MAX_SERVICE_ADDRESS_LISTS = 15
 MAX_SERVICE_ADDRESSES_PER_LIST = 1024
 _SERVICE_LIST_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+GATEWAY_CHECK_INTERVAL_SECONDS = 5.0
+GATEWAY_FAILURES_TO_DOWN = 3
+GATEWAY_SUCCESSES_TO_UP = 2
+GATEWAY_RESET_RETRY_SECONDS = 30.0
+MAX_GATEWAY_STATE_BYTES = 4096
 _MAC_ADDRESS_PATTERN = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 _STATION_HEADER_PATTERN = re.compile(
     r"^Station\s+(?P<mac>(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})\b"
@@ -73,6 +82,10 @@ _DNS_QUERY_PATTERN = re.compile(
 _TRAFFIC_COUNTER_COMMENT_PATTERN = re.compile(
     r"^usage-(?P<kind>device|service) (?P<identifier>[a-z0-9][a-z0-9_-]{0,63}) "
     r"(?P<direction>upload|download)$"
+)
+_EVERYONE_ELSE_COMMENT_PATTERN = re.compile(r"^everyone else (?P<direction>upload|download)$")
+_SERVICE_QUOTA_MARK_COMMENT_PATTERN = re.compile(
+    r"^apply-service-quota [a-z0-9][a-z0-9_-]{0,63} (?P<direction>upload|download)$"
 )
 _PRIVATE_NETWORKS = (
     IPv4Network("10.0.0.0/8"),
@@ -110,18 +123,36 @@ class HelperService:
         active_plan_path: Optional[Path] = None,
         access_store: Optional[AccessStore] = None,
         service_address_clock: Callable[[], float] = time.monotonic,
+        gateway_state_path: Optional[Path] = None,
+        access_manager: Optional[AccessManager] = None,
     ) -> None:
         self._applier = applier
         self._active_plan_path = active_plan_path
         self._active_plan: Optional[NetworkPlan] = None
         self._service_addresses = ServiceAddressBook(clock=service_address_clock)
         self._list_domains: Dict[str, tuple] = {}
+        # Reentrant: normal access resets under the lock and the gateway
+        # monitor retries a reset while it holds it.
         self._network_lock = threading.Lock()
         self._wifi_lock = threading.Lock()
         self._router_lock = threading.Lock()
         self._access_store = access_store
         self._access_lock = threading.Lock()
         self._peer_cache: Dict[str, Any] = {}
+        self._gateway_state_path = gateway_state_path
+        self._access_manager = access_manager
+        self._persistence_enabled = False
+        self._persistence_mode_initialized = False
+        self._gateway_state = "unknown"
+        self._outage_observed = False
+        self._outage_stop_latched = False
+        self._reset_pending = False
+        self._recovery_pending = False
+        self._consecutive_failures = 0
+        self._consecutive_successes = 0
+        self._next_reset_retry_at = 0.0
+        self._gateway_state_error = False
+        self._load_gateway_state()
         self._router_factory = router_factory or (
             lambda address, password: TG3442DERouter(address=address, password=password)
         )
@@ -144,6 +175,39 @@ class HelperService:
         if not isinstance(payload, dict):
             return {"ok": False, "error": "request must be an object"}
         action = payload.get("action")
+        if action == "normal-access":
+            with self._network_lock:
+                reset = self._handle_reset()
+                access_ok = False
+                try:
+                    if self._access_manager is None:
+                        raise ValueError("persistent access controls are unavailable")
+                    self._access_manager.disable()
+                    access_ok = True
+                except (OSError, ValueError, CommandExecutionError):
+                    LOGGER.exception("could not disable household restrictions")
+            if not reset["ok"] or not access_ok:
+                return {"ok": False, "error": "normal access was not fully restored",
+                        "experiments_stopped": reset["ok"], "access_disabled": access_ok}
+            return {"ok": True, "action": action, "experiments_stopped": True, "access_disabled": True}
+        if action in ("access-status", "access-apply"):
+            if self._access_manager is None:
+                return {"ok": False, "error": "persistent access controls are unavailable"}
+            try:
+                result = (self._access_manager.status() if action == "access-status" else
+                          self._access_manager.apply(access_from_payload(payload.get("policy"))))
+                return {"ok": True, **result}
+            except (OSError, ValueError, CommandExecutionError):
+                LOGGER.exception("persistent access operation failed")
+                return {"ok": False, "error": "access rules could not be applied"}
+        if action in ("update-status", "update-install", "update-rollback"):
+            try:
+                if action != "update-status":
+                    request_update(payload.get("version"), rollback=action == "update-rollback")
+                return {"ok": True, **update_status()}
+            except (OSError, ValueError, UpdateError):
+                LOGGER.exception("release operation failed")
+                return {"ok": False, "error": "release operation could not be completed"}
         if action == "ping":
             return {"ok": True, "action": "ping"}
         if action == "capabilities":
@@ -152,6 +216,10 @@ class HelperService:
                 "general_profile": True,
                 "service_lists": True,
                 "protected_dns_capture": True,
+                "everyone_else": True,
+                "access_controls": self._access_manager is not None,
+                "gateway_persistence": True,
+                "queue_stats": True,
             }
         if action == "dashboard-access":
             if not self._access_lock.acquire(blocking=False):
@@ -161,15 +229,28 @@ class HelperService:
                 return self._handle_dashboard_access(payload)
             finally:
                 self._access_lock.release()
-        if action in ("apply", "reset"):
+        if action in ("apply", "apply-experiment", "reset"):
+            explicit_apply = payload.get("explicit_apply", False)
+            if not isinstance(explicit_apply, bool):
+                return {"ok": False, "error": "explicit_apply must be true or false"}
             if not self._network_lock.acquire(blocking=False):
                 return {"ok": False, "error": "Pi networking is busy. Try again later.",
                         "reason": "helper-busy"}
             try:
-                return (self._handle_reset() if action == "reset"
-                        else self._handle_apply(payload.get("plan")))
+                if action == "reset":
+                    return self._handle_reset()
+                return self._handle_apply(
+                    payload.get("plan"),
+                    update_access=action == "apply",
+                    explicit_apply=explicit_apply,
+                )
             finally:
                 self._network_lock.release()
+        if action == "gateway-status":
+            with self._network_lock:
+                return {"ok": True, "action": action, **self._gateway_status()}
+        if action == "gateway-persistence":
+            return self._handle_gateway_persistence(payload)
         if action == "service-addresses":
             return self._handle_service_addresses(payload.get("addresses"))
         if action == "clients":
@@ -305,6 +386,211 @@ class HelperService:
             return {"ok": False, "error": "upstream connection inspection failed"}
         return {"ok": True, "action": "uplink-info", "uplink": uplink}
 
+    def _load_gateway_state(self) -> None:
+        path = self._gateway_state_path
+        if path is None or not path.exists():
+            return
+        try:
+            with path.open("rb") as state_file:
+                contents = state_file.read(MAX_GATEWAY_STATE_BYTES + 1)
+            if len(contents) > MAX_GATEWAY_STATE_BYTES:
+                raise ValueError("gateway state is too large")
+            state = json.loads(contents.decode("utf-8"))
+            if not isinstance(state, dict) or state.get("version") != 1:
+                raise ValueError("gateway state has an unsupported format")
+            if not isinstance(state.get("persistence_enabled"), bool):
+                raise ValueError("gateway persistence setting is invalid")
+            if state.get("gateway_state") not in ("unknown", "available", "unavailable"):
+                raise ValueError("gateway health state is invalid")
+            for field in (
+                "outage_observed",
+                "outage_stop_latched",
+                "reset_pending",
+                "recovery_pending",
+            ):
+                if not isinstance(state.get(field), bool):
+                    raise ValueError("gateway recovery state is invalid")
+            failures = state.get("consecutive_failures")
+            successes = state.get("consecutive_successes")
+            if (
+                type(failures) is not int
+                or not 0 <= failures <= GATEWAY_FAILURES_TO_DOWN
+                or type(successes) is not int
+                or not 0 <= successes <= GATEWAY_SUCCESSES_TO_UP
+            ):
+                raise ValueError("gateway probe count is invalid")
+            self._persistence_enabled = state["persistence_enabled"]
+            self._persistence_mode_initialized = True
+            self._gateway_state = state["gateway_state"]
+            self._outage_observed = state["outage_observed"]
+            self._outage_stop_latched = state["outage_stop_latched"]
+            self._reset_pending = state["reset_pending"]
+            self._recovery_pending = state["recovery_pending"]
+            self._consecutive_failures = failures
+            self._consecutive_successes = successes
+            active_plan_needs_cleanup = (
+                self._outage_stop_latched
+                and self._active_plan_path is not None
+                and self._active_plan_path.is_file()
+            )
+            if active_plan_needs_cleanup:
+                self._reset_pending = True
+                self._next_reset_retry_at = 0.0
+            elif self._reset_pending:
+                self._next_reset_retry_at = time.monotonic() + GATEWAY_RESET_RETRY_SECONDS
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            LOGGER.exception("gateway persistence state could not be read")
+            self._gateway_state = "unknown"
+            self._persistence_mode_initialized = True
+            self._outage_stop_latched = True
+            self._reset_pending = True
+            self._gateway_state_error = True
+
+    def _gateway_status(self) -> Dict[str, Any]:
+        return {
+            "mode_enabled": self._persistence_enabled,
+            "mode_initialized": self._persistence_mode_initialized,
+            "gateway_state": self._gateway_state,
+            "outage_observed": self._outage_observed,
+            "outage_stop_latched": self._outage_stop_latched,
+            "reset_pending": self._reset_pending,
+            "recovery_pending": self._recovery_pending,
+            "state_error": self._gateway_state_error,
+        }
+
+    def _write_gateway_state(self) -> None:
+        path = self._gateway_state_path
+        if path is None:
+            return
+        state = {
+            "version": 1,
+            "persistence_enabled": self._persistence_enabled,
+            "gateway_state": self._gateway_state,
+            "outage_observed": self._outage_observed,
+            "outage_stop_latched": self._outage_stop_latched,
+            "reset_pending": self._reset_pending,
+            "recovery_pending": self._recovery_pending,
+            "consecutive_failures": self._consecutive_failures,
+            "consecutive_successes": self._consecutive_successes,
+        }
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}")
+        try:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+                json.dump(state, output, sort_keys=True)
+                output.write("\n")
+            os.replace(temporary, path)
+            self._gateway_state_error = False
+        except OSError:
+            self._gateway_state_error = True
+            LOGGER.exception("gateway persistence state could not be saved")
+        finally:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+
+    def _handle_gateway_persistence(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        enabled = payload.get("enabled")
+        if not isinstance(enabled, bool):
+            return {"ok": False, "error": "gateway persistence must be true or false"}
+        with self._network_lock:
+            changed = self._persistence_enabled != enabled
+            self._persistence_enabled = enabled
+            self._persistence_mode_initialized = True
+            if (
+                changed
+                and not enabled
+                and (self._gateway_state == "unavailable" or self._outage_observed)
+                and not self._outage_stop_latched
+            ):
+                self._stop_for_gateway_outage()
+            self._write_gateway_state()
+            return {"ok": True, "action": "gateway-persistence", **self._gateway_status()}
+
+    def monitor_gateway_once(self) -> None:
+        """Update bounded gateway state and perform any required transition."""
+
+        with self._network_lock:
+            if not self._persistence_mode_initialized:
+                return
+
+        try:
+            reachable = self._applier.probe_default_gateway()
+        except CommandExecutionError:
+            LOGGER.warning("configured router gateway probe is unavailable")
+            reachable = None
+        with self._network_lock:
+            if reachable is None and self._gateway_state != "unknown":
+                # A router restart drops the Ethernet link and the default
+                # route with it. Once the gateway answered, losing it counts.
+                reachable = False
+            if reachable is None:
+                self._gateway_state = "unknown"
+                self._consecutive_failures = 0
+                self._consecutive_successes = 0
+                if not self._persistence_enabled and self._outage_observed:
+                    self._stop_for_gateway_outage()
+            elif reachable:
+                self._consecutive_failures = 0
+                self._consecutive_successes = min(
+                    GATEWAY_SUCCESSES_TO_UP,
+                    self._consecutive_successes + 1,
+                )
+                if self._consecutive_successes >= GATEWAY_SUCCESSES_TO_UP:
+                    was_unavailable = self._gateway_state == "unavailable"
+                    self._gateway_state = "available"
+                    if was_unavailable or self._outage_observed:
+                        self._outage_observed = False
+                        if self._persistence_enabled and not self._outage_stop_latched:
+                            self._recovery_pending = self._has_active_plan()
+            else:
+                self._consecutive_successes = 0
+                self._consecutive_failures = min(
+                    GATEWAY_FAILURES_TO_DOWN,
+                    self._consecutive_failures + 1,
+                )
+                if self._consecutive_failures >= GATEWAY_FAILURES_TO_DOWN:
+                    newly_unavailable = self._gateway_state != "unavailable"
+                    self._gateway_state = "unavailable"
+                    self._outage_observed = True
+                    if newly_unavailable:
+                        LOGGER.warning("configured router gateway is unreachable")
+                    if not self._persistence_enabled and not self._outage_stop_latched:
+                        self._stop_for_gateway_outage()
+            if self._reset_pending and time.monotonic() >= self._next_reset_retry_at:
+                self._attempt_gateway_reset()
+            self._write_gateway_state()
+
+    def _has_active_plan(self) -> bool:
+        path = self._active_plan_path
+        return path is not None and path.is_file()
+
+    def _stop_for_gateway_outage(self) -> None:
+        self._outage_stop_latched = True
+        self._recovery_pending = False
+        self._reset_pending = True
+        self._next_reset_retry_at = 0.0
+        self._write_gateway_state()
+        self._attempt_gateway_reset()
+
+    def _attempt_gateway_reset(self) -> None:
+        if not self._reset_pending:
+            return
+        try:
+            self._applier.reset()
+            if self._active_plan_path is not None:
+                self._active_plan_path.unlink(missing_ok=True)
+        except (CommandExecutionError, OSError):
+            LOGGER.exception("network reset after a router outage failed")
+            self._next_reset_retry_at = time.monotonic() + GATEWAY_RESET_RETRY_SECONDS
+            self._write_gateway_state()
+            return
+        self._reset_pending = False
+        self._next_reset_retry_at = 0.0
+        LOGGER.warning("active experiment stopped after a router gateway outage")
+        self._write_gateway_state()
+
     def _handle_dns_observation(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         raw = payload.get("excluded_macs", [])
         try:
@@ -332,13 +618,55 @@ class HelperService:
         except (CommandExecutionError, ValueError):
             LOGGER.exception("traffic counter inspection failed")
             return {"ok": False, "error": "traffic counter inspection failed"}
+        marks = counters.pop("marks")
+        try:
+            counters["queues"] = _parse_queue_statistics(
+                self._applier.queue_statistics(), marks=marks
+            )
+        except (CommandExecutionError, ValueError):
+            # The byte counters are still useful without queue figures.
+            LOGGER.warning("queue statistics inspection failed", exc_info=True)
+            counters["queues"] = {"devices": {}}
         return {"ok": True, "action": "traffic-counters", "counters": counters}
 
-    def _handle_apply(self, payload: Any) -> Dict[str, Any]:
+    def _handle_apply(
+        self,
+        payload: Any,
+        *,
+        update_access: bool = True,
+        explicit_apply: bool = False,
+    ) -> Dict[str, Any]:
         try:
             plan = plan_from_payload(payload)
         except PlanCodecError:
             return {"ok": False, "error": "invalid network plan"}
+        if self._outage_stop_latched:
+            if not explicit_apply:
+                return {
+                    "ok": False,
+                    "error": (
+                        "profiles stopped after a gateway outage; use Apply after "
+                        "the gateway recovers"
+                    ),
+                }
+            if self._gateway_state != "available":
+                return {
+                    "ok": False,
+                    "error": "the router gateway must be reachable before applying profiles",
+                }
+        elif not self._persistence_enabled and self._gateway_state == "unavailable":
+            return {
+                "ok": False,
+                "error": "the router gateway is unavailable; profiles cannot start in this mode",
+            }
+        if plan.access is not None and update_access:
+            if self._access_manager is None:
+                return {"ok": False, "error": "persistent access controls are unavailable"}
+            try:
+                self._access_manager.apply(plan.access)
+            except (OSError, ValueError, CommandExecutionError):
+                LOGGER.exception("persistent access apply failed")
+                return {"ok": False, "error": "access rules could not be applied"}
         try:
             self._forget_changed_lists(plan)
             self._service_addresses.expire()
@@ -395,6 +723,19 @@ class HelperService:
                 return {"ok": False, "error": "network plan state could not be published"}
         self._active_plan = plan
         self._list_domains = {rule.list_id: rule.domains for rule in plan.service_list_rules}
+        if explicit_apply:
+            self._outage_stop_latched = False
+            self._reset_pending = False
+            self._outage_observed = False
+            self._gateway_state_error = False
+        self._recovery_pending = False
+        self._write_gateway_state()
+        if self._gateway_state_error and explicit_apply:
+            self._outage_stop_latched = True
+            self._reset_pending = True
+            self._next_reset_retry_at = 0.0
+            self._attempt_gateway_reset()
+            return {"ok": False, "error": "gateway recovery state could not be saved safely"}
         return {"ok": True, "action": "apply", "commands_run": report.commands_run}
 
     def _write_active_plan(self, plan: NetworkPlan) -> None:
@@ -500,11 +841,11 @@ class HelperService:
             "commands_run": commands_run,
         }
 
-    def _handle_router_wifi(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _handle_router_wifi(self, payload: Dict[str, Any], *, read_only: bool = False) -> Dict[str, Any]:
         router = None
         try:
             admin_password = payload["admin_password"]
-            enabled = payload["enabled"]
+            enabled = False if read_only else payload["enabled"]
             if not isinstance(admin_password, str) or not admin_password:
                 raise ValueError("router admin password is invalid")
             if not isinstance(enabled, bool):
@@ -514,7 +855,7 @@ class HelperService:
                 raise RouterError("the router gateway could not be determined")
             router = self._router_factory(gateway, admin_password)
             router.login()
-            settings = router.set_wifi_enabled(enabled=enabled)
+            settings = router.read_wifi_settings() if read_only else router.set_wifi_enabled(enabled=enabled)
         except (KeyError, TypeError, ValueError):
             return {"ok": False, "error": "invalid router Wi-Fi request"}
         except RouterError as error:
@@ -632,6 +973,9 @@ class HelperService:
         except (CommandExecutionError, OSError):
             LOGGER.exception("network reset failed")
             return {"ok": False, "error": "network reset failed"}
+        self._recovery_pending = False
+        self._outage_observed = False
+        self._write_gateway_state()
         return {"ok": True, "action": "reset", "commands_run": commands_run}
 
     def _forget_changed_lists(self, plan: NetworkPlan) -> None:
@@ -848,6 +1192,52 @@ class UnixHelperServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServe
             pass
 
 
+def _validated_flows(raw_flows: Any) -> Dict[str, int]:
+    """Check one set of directional byte and packet counts from a helper response."""
+
+    if not isinstance(raw_flows, dict):
+        raise HelperClientError("helper returned invalid traffic directions")
+    flows: Dict[str, int] = {}
+    for field in ("upload_bytes", "download_bytes", "upload_packets", "download_packets"):
+        value = raw_flows.get(field)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+            or value > 2**63 - 1
+        ):
+            raise HelperClientError("helper returned invalid traffic directions")
+        flows[field] = value
+    return flows
+
+
+def _validated_queues(raw_queues: Any) -> Dict[str, Any]:
+    """Keep only well-formed per-device queue figures from a helper response."""
+
+    queues: Dict[str, Any] = {"devices": {}}
+    everyone_else = raw_queues.get("everyone_else") if isinstance(raw_queues, dict) else None
+    if isinstance(everyone_else, dict):
+        queues["everyone_else"] = {
+            field: _queue_counter(everyone_else.get(field))
+            for field in ("upload_dropped", "download_dropped", "upload_queued", "download_queued")
+        }
+    devices = raw_queues.get("devices") if isinstance(raw_queues, dict) else None
+    if not isinstance(devices, dict):
+        return queues
+    for identifier, values in devices.items():
+        if (
+            not isinstance(identifier, str)
+            or not re.fullmatch(r"^[a-z0-9][a-z0-9_-]{0,63}$", identifier)
+            or not isinstance(values, dict)
+        ):
+            raise HelperClientError("helper returned invalid queue statistics")
+        queues["devices"][identifier] = {
+            field: _queue_counter(values.get(field))
+            for field in ("upload_dropped", "download_dropped", "upload_queued", "download_queued")
+        }
+    return queues
+
+
 class HelperClient:
     """Send bounded requests to a local privileged helper."""
 
@@ -868,14 +1258,55 @@ class HelperClient:
         return self._request({"action": "dashboard-access", "operation": operation,
                               "peer": peer, "mac_address": mac_address, "name": name})
 
-    def apply(self, *, plan: NetworkPlan) -> Dict[str, Any]:
-        """Ask the helper to apply one validated network plan."""
-
+    def _check_plan_support(self, plan: NetworkPlan) -> None:
         if plan.general_profile is not None:
             self.check_general_profile_support()
         if plan.service_list_rules:
             self.check_service_list_support()
-        return self._request({"action": "apply", "plan": plan_to_payload(plan)})
+
+    def apply(self, *, plan: NetworkPlan, explicit_apply: bool = False) -> Dict[str, Any]:
+        """Ask the helper to apply one validated network plan."""
+
+        self._check_plan_support(plan)
+        # Applying waits for the kernel and the access policy, so allow longer.
+        return self._request(
+            {
+                "action": "apply",
+                "plan": plan_to_payload(plan),
+                "explicit_apply": explicit_apply,
+            },
+            timeout_seconds=60,
+        )
+
+    def gateway_status(self) -> Dict[str, Any]:
+        """Read the helper's bounded gateway and persistence state."""
+
+        result = self._request({"action": "gateway-status"})
+        if result.get("gateway_state") not in ("unknown", "available", "unavailable"):
+            raise HelperClientError("helper returned invalid gateway health")
+        for field in (
+            "mode_enabled",
+            "outage_observed",
+            "outage_stop_latched",
+            "reset_pending",
+            "recovery_pending",
+            "state_error",
+        ):
+            if not isinstance(result.get(field), bool):
+                raise HelperClientError("helper returned invalid gateway persistence state")
+        return result
+
+    def set_gateway_persistence(self, *, enabled: bool) -> Dict[str, Any]:
+        """Set whether active experiment plans resume after gateway recovery."""
+
+        if not isinstance(enabled, bool):
+            raise HelperClientError("gateway persistence must be true or false")
+        result = self._request({"action": "gateway-persistence", "enabled": enabled})
+        if result.get("mode_enabled") is not enabled:
+            raise HelperClientError("helper did not save gateway persistence state")
+        if result.get("state_error") is True:
+            raise HelperClientError("helper could not save gateway recovery state safely")
+        return result
 
     def check_service_list_support(self) -> None:
         """Reject an older running helper before applying service lists."""
@@ -935,6 +1366,26 @@ class HelperClient:
 
         return self._request({"action": "reset"})
 
+    def apply_experiment(self, *, plan: NetworkPlan) -> Dict[str, Any]:
+        """Change scheduled effects without activating pending access-rule edits."""
+
+        self._check_plan_support(plan)
+        return self._request(
+            {"action": "apply-experiment", "plan": plan_to_payload(plan)}, timeout_seconds=60
+        )
+
+    def normal_access(self) -> Dict[str, Any]:
+        client = HelperClient(socket_path=self.socket_path, timeout_seconds=60)
+        return client._request({"action": "normal-access"})
+
+    def access_status(self) -> Dict[str, Any]:
+        return self._request({"action": "access-status"})
+
+    def apply_access(self, policy: AccessPlan) -> Dict[str, Any]:
+        # DNS restart and recovery can take longer than a status read.
+        client = HelperClient(socket_path=self.socket_path, timeout_seconds=60)
+        return client._request({"action": "access-apply", "policy": policy.payload()})
+
     def configure_access_point(self, *, ssid: str, password: str) -> Dict[str, Any]:
         """Set the local test AP credentials through the privileged helper."""
 
@@ -946,6 +1397,7 @@ class HelperClient:
     def reset_wifi_name(self) -> Dict[str, Any]:
         """Reset only the Pi Wi-Fi name without dashboard or router credentials."""
 
+        # Live security checks and one restoration can take up to 75 seconds.
         client = HelperClient(socket_path=self.socket_path, timeout_seconds=90)
         return client._request({"action": "wifi-reset"})
 
@@ -963,6 +1415,12 @@ class HelperClient:
              "expected_fingerprint": expected_fingerprint, "confirm_legacy": confirm_legacy},
             timeout_seconds=180.0,
         )
+
+    def release_status(self) -> Dict[str, Any]:
+        return self._request({"action": "update-status"})
+
+    def install_release(self, *, version: str, rollback: bool = False) -> Dict[str, Any]:
+        return self._request({"action": "update-rollback" if rollback else "update-install", "version": version})
 
     def set_router_wifi(self, *, admin_password: str, enabled: bool) -> Dict[str, Any]:
         """Enable or disable the upstream router's primary Wi-Fi radios."""
@@ -1158,6 +1616,12 @@ class HelperClient:
                         raise HelperClientError("helper returned invalid traffic directions")
                     directions[kind][identifier][field] = value
         result["directions"] = directions
+        # Helpers from before everyone else existed don't send it.
+        raw_everyone_else = counters.get("everyone_else")
+        result["everyone_else"] = (
+            None if raw_everyone_else is None else _validated_flows(raw_everyone_else)
+        )
+        result["queues"] = _validated_queues(counters.get("queues"))
         return result
 
     def _request(
@@ -1212,17 +1676,60 @@ def run_helper(
         applier.recover_wifi()
     except (WifiError, CommandExecutionError):
         LOGGER.warning("Pending Wi-Fi recovery failed. Repair jittersim-ap through management access.")
+    gateway_state_path = socket_path.parent / "gateway-state.json"
+    access = AccessManager(executor=SubprocessExecutor(timeout_seconds=20), topology=topology,
+                           runtime_path=socket_path.parent / "access-policy.json")
+    access.restore()
     service = HelperService(
         applier,
         router_factory=router_factory,
         active_plan_path=active_plan_path,
         access_store=AccessStore(ACCESS_FILE, group_id=grp.getgrnam("jittersim").gr_gid),
+        gateway_state_path=gateway_state_path,
+        access_manager=access,
     )
+    stopped = threading.Event()
+
+    def maintain_access():
+        while not stopped.wait(15):
+            try:
+                access.check_health()
+                if access.applied is not None and access.applied.has_dns_rules:
+                    clients = service._handle_clients()
+                    if clients.get("ok"):
+                        access.refresh_addresses(clients["devices"])
+            except Exception:
+                LOGGER.exception("could not refresh access device addresses")
+
+    worker = threading.Thread(target=maintain_access, daemon=True, name="access-addresses")
+    worker.start()
+
+    def monitor_gateway():
+        while not stopped.is_set():
+            started_at = time.monotonic()
+            service.monitor_gateway_once()
+            remaining = max(
+                0.0,
+                GATEWAY_CHECK_INTERVAL_SECONDS - (time.monotonic() - started_at),
+            )
+            if stopped.wait(remaining):
+                break
+
+    gateway_worker = threading.Thread(
+        target=monitor_gateway,
+        daemon=True,
+        name="gateway-persistence",
+    )
+    gateway_worker.start()
     with UnixHelperServer(socket_path, service) as server:
         try:
             server.serve_forever()
         except KeyboardInterrupt:
             pass
+        finally:
+            stopped.set()
+            worker.join(timeout=5)
+            gateway_worker.join(timeout=5)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -1239,6 +1746,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     """Parse helper options and start the explicit hardware process."""
 
     arguments = _build_parser().parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     run_helper(
         socket_path=arguments.socket,
         topology=Topology(
@@ -1479,6 +1987,120 @@ def _parse_dns_query_output(output: str, *, observed_at: int) -> List[Dict[str, 
     ]
 
 
+def _rule_marks(rule: Dict[str, Any]) -> Set[int]:
+    """Return the packet marks an nftables rule sets or matches."""
+
+    marks = set()
+    for expression in rule.get("expr", []):
+        if not isinstance(expression, dict):
+            continue
+        mangle = expression.get("mangle")
+        match = expression.get("match")
+        if isinstance(mangle, dict) and mangle.get("key") == {"meta": {"key": "mark"}}:
+            value = mangle.get("value")
+        elif (
+            isinstance(match, dict)
+            and match.get("op") == "=="
+            and match.get("left") == {"meta": {"key": "mark"}}
+        ):
+            value = match.get("right")
+        else:
+            continue
+        if isinstance(value, int) and not isinstance(value, bool) and 0 < value < 2**32:
+            marks.add(value)
+    return marks
+
+
+def _rule_address(rule: Dict[str, Any], field: str) -> Optional[str]:
+    """Return the single IPv4 address an nftables rule matches in one field."""
+
+    for expression in rule.get("expr", []):
+        match = expression.get("match") if isinstance(expression, dict) else None
+        if (
+            isinstance(match, dict)
+            and match.get("op") == "=="
+            and match.get("left") == {"payload": {"protocol": "ip", "field": field}}
+            and isinstance(match.get("right"), str)
+        ):
+            return match["right"]
+    return None
+
+
+def _queue_counter(value: Any) -> int:
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 2**63 - 1:
+        return value
+    return 0
+
+
+def _parse_queue_statistics(
+    outputs: Dict[str, str], *, marks: Dict[str, Set[int]]
+) -> Dict[str, Any]:
+    """Report what each device's queues dropped or hold, by direction."""
+
+    # A device's traffic can use its own band and its browser service profiles' bands.
+    devices_by_class = {
+        queue_parent(mark): device_id
+        for device_id, device_marks in marks.items()
+        for mark in device_marks
+    }
+    devices: Dict[str, Dict[str, int]] = {}
+    for direction, output in outputs.items():
+        try:
+            qdiscs = json.loads(output)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ValueError("tc statistics output is not valid JSON") from error
+        if not isinstance(qdiscs, list):
+            raise ValueError("tc statistics output has an invalid shape")
+        for qdisc in qdiscs:
+            if not isinstance(qdisc, dict):
+                continue
+            # A device's queue is the child of its band, netem or fq_codel.
+            device_id = devices_by_class.get(qdisc.get("parent"))
+            if device_id is None:
+                continue
+            statistics = devices.setdefault(
+                device_id,
+                {
+                    "upload_dropped": 0,
+                    "download_dropped": 0,
+                    "upload_queued": 0,
+                    "download_queued": 0,
+                },
+            )
+            statistics[f"{direction}_dropped"] += _queue_counter(qdisc.get("drops"))
+            statistics[f"{direction}_queued"] += _queue_counter(qdisc.get("qlen"))
+    queues: Dict[str, Any] = {"devices": devices}
+    everyone_else = devices.pop(EVERYONE_ELSE_QUEUE_ID, None)
+    if everyone_else is not None:
+        queues["everyone_else"] = everyone_else
+    return queues
+
+
+def _rule_counter(rule: Dict[str, Any]) -> Optional[Tuple[int, int]]:
+    """Return a rule's byte and packet counts, when it has a valid counter."""
+
+    for expression in rule.get("expr", []):
+        if not isinstance(expression, dict) or not isinstance(expression.get("counter"), dict):
+            continue
+        counter = expression["counter"]
+        candidate_bytes = counter.get("bytes")
+        candidate_packets = counter.get("packets")
+        if (
+            isinstance(candidate_bytes, int)
+            and not isinstance(candidate_bytes, bool)
+            and 0 <= candidate_bytes <= 2**63 - 1
+        ):
+            packets = (
+                candidate_packets
+                if isinstance(candidate_packets, int)
+                and not isinstance(candidate_packets, bool)
+                and 0 <= candidate_packets <= 2**63 - 1
+                else 0
+            )
+            return candidate_bytes, packets
+    return None
+
+
 def _parse_traffic_counter_output(output: str) -> Dict[str, Any]:
     """Extract project-owned byte and packet counters from nftables JSON."""
 
@@ -1493,42 +2115,55 @@ def _parse_traffic_counter_output(output: str) -> Dict[str, Any]:
         "devices": {},
         "services": {},
         "directions": {"devices": {}, "services": {}},
+        "marks": {},
     }
+    device_addresses: Dict[str, str] = {}
+    service_quota_marks = []
     for item in payload["nftables"]:
         if not isinstance(item, dict) or not isinstance(item.get("rule"), dict):
             continue
         rule = item["rule"]
         comment = rule.get("comment")
+        quota = _SERVICE_QUOTA_MARK_COMMENT_PATTERN.fullmatch(comment or "")
+        if quota is not None:
+            # An active service limit's rule matches its device by address.
+            field = "saddr" if quota.group("direction") == "upload" else "daddr"
+            service_quota_marks.append((_rule_address(rule, field), _rule_marks(rule)))
+            continue
+        everyone_else = _EVERYONE_ELSE_COMMENT_PATTERN.fullmatch(comment or "")
+        if everyone_else is not None:
+            # Queue figures find everyone else's band by its mark, like a device's.
+            counters["marks"].setdefault(EVERYONE_ELSE_QUEUE_ID, set()).update(_rule_marks(rule))
+            counts = _rule_counter(rule)
+            if counts is not None:
+                totals = counters.setdefault(
+                    "everyone_else",
+                    {
+                        "upload_bytes": 0,
+                        "download_bytes": 0,
+                        "upload_packets": 0,
+                        "download_packets": 0,
+                    },
+                )
+                direction = everyone_else.group("direction")
+                totals[f"{direction}_bytes"] += counts[0]
+                totals[f"{direction}_packets"] += counts[1]
+            continue
         match = _TRAFFIC_COUNTER_COMMENT_PATTERN.fullmatch(comment or "")
         if match is None:
             continue
-        byte_count = None
-        packet_count = None
-        for expression in rule.get("expr", []):
-            if not isinstance(expression, dict) or not isinstance(expression.get("counter"), dict):
-                continue
-            counter = expression["counter"]
-            candidate_bytes = counter.get("bytes")
-            candidate_packets = counter.get("packets")
-            if (
-                isinstance(candidate_bytes, int)
-                and not isinstance(candidate_bytes, bool)
-                and 0 <= candidate_bytes <= 2**63 - 1
-            ):
-                byte_count = candidate_bytes
-                packet_count = (
-                    candidate_packets
-                    if isinstance(candidate_packets, int)
-                    and not isinstance(candidate_packets, bool)
-                    and 0 <= candidate_packets <= 2**63 - 1
-                    else 0
-                )
-                break
-        if byte_count is None or packet_count is None:
+        counts = _rule_counter(rule)
+        if counts is None:
             continue
+        byte_count, packet_count = counts
         kind = "devices" if match.group("kind") == "device" else "services"
         identifier = match.group("identifier")
         direction = match.group("direction")
+        if kind == "devices":
+            counters["marks"].setdefault(identifier, set()).update(_rule_marks(rule))
+            address = _rule_address(rule, "saddr" if direction == "upload" else "daddr")
+            if address is not None:
+                device_addresses[address] = identifier
         counters[kind][identifier] = counters[kind].get(identifier, 0) + byte_count
         directional = counters["directions"][kind].setdefault(
             identifier,
@@ -1541,6 +2176,10 @@ def _parse_traffic_counter_output(output: str) -> Dict[str, Any]:
         )
         directional[f"{direction}_bytes"] += byte_count
         directional[f"{direction}_packets"] += packet_count
+    for address, marks in service_quota_marks:
+        device_id = device_addresses.get(address)
+        if device_id is not None:
+            counters["marks"].setdefault(device_id, set()).update(marks)
     return counters
 
 

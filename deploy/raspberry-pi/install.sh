@@ -35,7 +35,19 @@ python3 "$SOURCE_DIR/deploy/raspberry-pi/preflight.py" \
     --uplink "$JITTERSIM_UPLINK" --test-interface "$JITTERSIM_TEST_INTERFACE"
 python3 "$SOURCE_DIR/deploy/raspberry-pi/retire-services.py" --check
 
-apt-get install -y dnsmasq-base iw wpasupplicant nftables openssl python3-venv tcpdump
+existing_unbound=no
+if dpkg-query -W -f='${Status}' unbound 2>/dev/null | grep -q 'install ok installed'; then
+    existing_unbound=yes
+fi
+existing_hostapd=no
+if dpkg-query -W -f='${Status}' hostapd 2>/dev/null | grep -q 'install ok installed'; then
+    existing_hostapd=yes
+fi
+apt-get update
+apt-get install -y dnsmasq-base iputils-ping iw wpasupplicant nftables openssl python3-venv tcpdump unbound dnsutils hostapd conntrack
+# New package defaults must not take over existing DNS or Wi-Fi services.
+if [ "$existing_unbound" = no ]; then systemctl disable --now unbound.service; fi
+if [ "$existing_hostapd" = no ]; then systemctl disable --now hostapd.service; fi
 
 # Verify the actual kernel hook before replacing live profile rules.
 python3 "$SOURCE_DIR/deploy/raspberry-pi/check-egress-hook.py" "$JITTERSIM_TEST_INTERFACE"
@@ -49,12 +61,14 @@ python3 "$SOURCE_DIR/deploy/raspberry-pi/replace-source.py" "$SOURCE_DIR" "$INST
 
 python3 -m venv "$INSTALL_DIR/.venv"
 "$INSTALL_DIR/.venv/bin/pip" install "$INSTALL_DIR"
+# jittersim-helper runs as root from this directory, so only root may change it.
 chown -R root:root "$INSTALL_DIR"
 chmod -R go-w "$INSTALL_DIR"
 runuser -u jittersim -- "$INSTALL_DIR/.venv/bin/python" -I -c \
-    'import jittersim.api.server, jittersim.networking.helper, jittersim.networking.browser_proxy, jittersim.networking.dns_watch, jittersim.dashboard_access_cli'
+    'import jittersim.api.server, jittersim.networking.helper, jittersim.networking.browser_proxy, jittersim.networking.dns_watch, jittersim.networking.access, jittersim.dashboard_access_cli'
 "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/deploy/raspberry-pi/bootstrap-dashboard-access.py"
-ln -sfn "$INSTALL_DIR/.venv/bin/jittersim" /usr/local/bin/jittersim
+# `sudo jittersim normal-access` and `sudo jittersim wifi reset` work when the dashboard is down.
+ln -sf "$INSTALL_DIR/.venv/bin/jittersim" /usr/local/bin/jittersim
 python3 "$INSTALL_DIR/deploy/raspberry-pi/retire-services.py"
 
 if [ ! -s "$CONFIG_DIR/control.env" ]; then
@@ -87,6 +101,13 @@ chown root:root "$CONFIG_DIR/runtime.env"
 chmod 0600 "$CONFIG_DIR/runtime.env"
 
 . "$CONFIG_DIR/ap.env"
+# Test Wi-Fi clients can't reach each other unless ap.env sets
+# JITTERSIM_AP_ISOLATION=no.
+ap_isolation="${JITTERSIM_AP_ISOLATION:-yes}"
+case "$ap_isolation" in
+    yes|no) ;;
+    *) echo "JITTERSIM_AP_ISOLATION must be yes or no" >&2; exit 1 ;;
+esac
 ap_active_connection=$(nmcli -g GENERAL.CONNECTION device show "$JITTERSIM_TEST_INTERFACE")
 ap_settings_before=
 if ! nmcli connection show jittersim-ap >/dev/null 2>&1; then
@@ -101,42 +122,50 @@ if ! nmcli connection show jittersim-ap >/dev/null 2>&1; then
         802-11-wireless-security.psk "$JITTERSIM_AP_PASSWORD"
 else
     ap_settings_before=$(nmcli -g \
-        connection.interface-name,connection.autoconnect,802-11-wireless.mode,ipv4.method,ipv4.addresses,ipv4.shared-dhcp-range,ipv6.method,802-11-wireless-security.key-mgmt,802-11-wireless-security.proto,802-11-wireless-security.pairwise,802-11-wireless-security.group,802-11-wireless-security.pmf \
+        connection.interface-name,connection.autoconnect,802-11-wireless.mode,802-11-wireless.ap-isolation,ipv4.method,ipv4.addresses,ipv4.shared-dhcp-range,ipv6.method,802-11-wireless-security.key-mgmt,802-11-wireless-security.proto,802-11-wireless-security.pairwise,802-11-wireless-security.group,802-11-wireless-security.pmf \
         connection show jittersim-ap)
 fi
 if ! nmcli -g ipv4.shared-dhcp-range connection show jittersim-ap >/dev/null 2>&1; then
     echo "NetworkManager 1.50 or newer is required for an isolated DHCP range" >&2
     exit 1
 fi
+# Security settings are set when the connection is created and kept on upgrades.
 nmcli connection modify jittersim-ap \
     connection.interface-name "$JITTERSIM_TEST_INTERFACE" \
-    connection.autoconnect yes \
+    connection.autoconnect no \
     802-11-wireless.mode ap \
+    802-11-wireless.ap-isolation "$ap_isolation" \
     ipv4.method shared \
     ipv4.addresses 192.168.50.1/24 \
     ipv4.shared-dhcp-range 192.168.50.100,192.168.50.199 \
     ipv6.method disabled
 ap_settings_after=$(nmcli -g \
-    connection.interface-name,connection.autoconnect,802-11-wireless.mode,ipv4.method,ipv4.addresses,ipv4.shared-dhcp-range,ipv6.method,802-11-wireless-security.key-mgmt,802-11-wireless-security.proto,802-11-wireless-security.pairwise,802-11-wireless-security.group,802-11-wireless-security.pmf \
+    connection.interface-name,connection.autoconnect,802-11-wireless.mode,802-11-wireless.ap-isolation,ipv4.method,ipv4.addresses,ipv4.shared-dhcp-range,ipv6.method,802-11-wireless-security.key-mgmt,802-11-wireless-security.proto,802-11-wireless-security.pairwise,802-11-wireless-security.group,802-11-wireless-security.pmf \
     connection show jittersim-ap)
 
 dashboard_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (p = 1; p <= NF; p++) if ($p == "src") {print $(p + 1); exit}}' || true)
 if [ -z "$dashboard_ip" ]; then
     dashboard_ip=127.0.0.1
 fi
-dashboard_cert_matches_ip=false
-if [ -s "$CONFIG_DIR/dashboard.crt" ] && [ -s "$CONFIG_DIR/dashboard.key" ] \
-    && openssl x509 -in "$CONFIG_DIR/dashboard.crt" -noout -text 2>/dev/null \
-        | grep -Fq "IP Address:$dashboard_ip"; then
-    dashboard_cert_matches_ip=true
+# The certificate is named after the Pi and also covers the jittersim.local
+# name that the Avahi publisher announces on the management network.
+dashboard_host="$(hostname -s).local"
+dashboard_cert_matches=false
+if [ -s "$CONFIG_DIR/dashboard.crt" ] && [ -s "$CONFIG_DIR/dashboard.key" ]; then
+    dashboard_cert_text=$(openssl x509 -in "$CONFIG_DIR/dashboard.crt" -noout -text 2>/dev/null || true)
+    if printf '%s\n' "$dashboard_cert_text" | grep -Fq "IP Address:$dashboard_ip" \
+        && printf '%s\n' "$dashboard_cert_text" | grep -Fq "DNS:$dashboard_host" \
+        && printf '%s\n' "$dashboard_cert_text" | grep -Fq "DNS:jittersim.local"; then
+        dashboard_cert_matches=true
+    fi
 fi
-if [ "$dashboard_cert_matches_ip" = false ]; then
+if [ "$dashboard_cert_matches" = false ]; then
     umask 077
     openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 825 \
         -keyout "$CONFIG_DIR/dashboard.key" \
         -out "$CONFIG_DIR/dashboard.crt" \
-        -subj "/CN=jittersim.local" \
-        -addext "subjectAltName=DNS:jittersim.local,IP:$dashboard_ip" \
+        -subj "/CN=$dashboard_host" \
+        -addext "subjectAltName=DNS:$dashboard_host,DNS:jittersim.local,IP:$dashboard_ip" \
         -addext "extendedKeyUsage=serverAuth"
 fi
 chown root:jittersim "$CONFIG_DIR/dashboard.key"
@@ -167,7 +196,23 @@ install -m 0644 -o root -g root \
     "$SOURCE_DIR/deploy/raspberry-pi/jittersim-service-watch.service" \
     /etc/systemd/system/jittersim-service-watch.service
 
+install -m 0644 -o root -g root \
+    "$SOURCE_DIR/deploy/raspberry-pi/jittersim-update.service" \
+    /etc/systemd/system/jittersim-update.service
+
+# Recovery must run even if an interrupted package install damages the venv.
+install -d -m 0755 -o root -g root /usr/local/lib
+install -m 0644 -o root -g root "$SOURCE_DIR/src/jittersim/updates.py" /usr/local/lib/jittersim-update.py
+systemctl enable jittersim-update.service
+
+for access_service in jittersim-dns jittersim-access-boot jittersim-ap; do
+    install -m 0644 -o root -g root "$SOURCE_DIR/deploy/raspberry-pi/$access_service.service" \
+        "/etc/systemd/system/$access_service.service"
+done
+install -d -m 0750 -o root -g jittersim /var/lib/jittersim-access
 systemctl daemon-reload
+systemctl enable jittersim-access-boot.service jittersim-ap.service
+systemctl restart jittersim-access-boot.service
 systemctl enable jittersim-control-firewall.service
 systemctl restart jittersim-control-firewall.service
 systemctl enable jittersim-helper.service jittersim-dashboard.service jittersim-browser-proxy.service jittersim-service-watch.service
@@ -175,16 +220,15 @@ systemctl restart jittersim-helper.service
 if [ "$ap_active_connection" = jittersim-ap ]; then
     if [ "$ap_settings_before" != "$ap_settings_after" ]; then
         echo "AP settings were saved but the active Wi-Fi was not restarted." >&2
-        echo "Restart jittersim-ap during a planned maintenance window." >&2
+        echo "To use them now, run: sudo nmcli connection up jittersim-ap" >&2
+        echo "Test Wi-Fi devices reconnect after a few seconds. A reboot also works." >&2
     fi
 else
-    nmcli connection up jittersim-ap
+    systemctl start jittersim-ap.service
 fi
 systemctl restart jittersim-browser-proxy.service
 systemctl restart jittersim-service-watch.service
 systemctl restart jittersim-dashboard.service
-# Remove obsolete DNS access rules even when an older database has no saved action.
-"$INSTALL_DIR/.venv/bin/python" -m jittersim.networking.legacy
 
 setup_dashboard_name_service() {
     apt-get install -y avahi-daemon avahi-utils || return 1

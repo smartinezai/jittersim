@@ -10,23 +10,28 @@ import pytest
 
 from jittersim.api.server import DASHBOARD_HTML
 
-PAGES = ("devices", "profiles", "schedules", "router", "traffic", "access", "diagnostics")
+PAGES = (
+    "devices", "profiles", "schedules", "router", "traffic", "measurements", "activity", "access",
+    "diagnostics",
+)
 OLD_IDS = Path(__file__).with_name("dashboard_ids.txt").read_text().split()
 HTML = DASHBOARD_HTML.split("<script>")[0]
 
 CARD_PAGES = {
-    "General profile": "devices", "Connected clients": "devices",
-    "Unaffected by profiles": "devices",
+    "Getting started": "devices", "General profile": "devices", "Connected clients": "devices",
+    "Saved devices": "devices", "Everyone else": "devices", "Unaffected by profiles": "devices",
     "Saved profiles": "profiles", "Save profile": "profiles",
     "Assign a device": "profiles", "Group devices": "profiles",
-    "Schedule a profile": "schedules", "Run a profile timer": "schedules",
+    "Schedule a profile": "schedules", "Run a profile timer": "schedules", "Scenarios": "schedules",
     "Progression mode": "schedules", "Device data limit": "schedules",
     "Shared group data limit": "schedules", "Service lists": "schedules",
     "Browser service profile": "schedules",
     "Service data limit": "schedules", "Service time limit": "schedules",
-    "Upstream router connection": "router", "Manual Pi access-point fallback": "router",
+    "Upstream router connection": "router", "Router outage behavior": "router",
+    "Manual Pi access-point fallback": "router",
     "Live traffic": "traffic", "Traffic discovery": "traffic",
     "Random website choices": "traffic",
+    "Measurements": "measurements", "Activity log": "activity",
     "Network access rules": "access",
     "Profiles": "diagnostics", "Devices": "diagnostics", "Compiled plan": "diagnostics",
     "Runtime state": "diagnostics", "Access rules": "diagnostics", "Diagnostics": "diagnostics",
@@ -51,7 +56,7 @@ def test_every_previous_id_survives_exactly_once():
         assert HTML.count(f' id="{element_id}"') == 1, element_id
 
 
-def test_sidebar_links_follow_the_seven_pages_in_order():
+def test_sidebar_links_follow_the_nine_pages_in_order():
     assert re.findall(r'href="#(\w+)"', sidebar_html()) == list(PAGES)
     for page in PAGES:
         page_html(page)
@@ -83,7 +88,8 @@ def test_floating_dock_and_sticky_bar_are_gone():
             r"([^{}]+)\{([^{}]*position:\s*(?:fixed|sticky)[^{}]*)\}", css
         )
     }
-    assert pinned <= {".sidebar", ".toast", ".credentials-panel", ".help-icon::after"}, pinned
+    # .field-tooltip is the help bubble that follows its button.
+    assert pinned <= {".sidebar", ".toast", ".credentials-panel", ".help-icon::after", ".field-tooltip"}, pinned
 
 
 SECOND_SCRIPT = (
