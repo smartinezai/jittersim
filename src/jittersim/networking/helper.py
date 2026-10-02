@@ -23,7 +23,7 @@ from jittersim.config.models import ValidationError, normalize_domain
 from jittersim.engine.access import AccessPlan, access_from_payload
 from jittersim.engine.codec import PlanCodecError, plan_from_payload, plan_to_payload
 from jittersim.engine.plan import EVERYONE_ELSE_QUEUE_ID, NetworkPlan
-from jittersim.updates import UpdateError, request_update, update_status
+from jittersim.updates import UpdateError, request_update, stage_upload, update_status
 
 from .access import AccessManager
 from .applier import MAX_PROTECTED_MACS, ApplyError, NetworkApplier
@@ -241,6 +241,19 @@ class HelperService:
             except (OSError, ValueError, UpdateError):
                 LOGGER.exception("release operation failed")
                 return {"ok": False, "error": "release operation could not be completed"}
+        if action == "update-stage-upload":
+            # The dashboard has streamed an uploaded release into its spool folder. This
+            # root helper copies it away, checks the signature and stages it. The refusal
+            # text is one of the update manager's plain sentences, never a path or a trace.
+            try:
+                record = stage_upload()
+                return {"ok": True, "staged_version": record["version"], **update_status()}
+            except UpdateError as error:
+                LOGGER.warning("uploaded release refused: %s", error)
+                return {"ok": False, "error": str(error), "reason": "release-refused"}
+            except (OSError, ValueError):
+                LOGGER.exception("uploaded release could not be staged")
+                return {"ok": False, "error": "the uploaded release could not be staged"}
         if action == "ping":
             return {"ok": True, "action": "ping"}
         if action == "capabilities":
@@ -1540,6 +1553,10 @@ class HelperClient:
     def release_status(self) -> Dict[str, Any]:
         return self._request({"action": "update-status"})
 
+    def stage_uploaded_release(self) -> Dict[str, Any]:
+        """Ask the root helper to check and stage the release the dashboard just received."""
+        return self._request({"action": "update-stage-upload"}, timeout_seconds=120.0)
+
     def install_release(self, *, version: str, rollback: bool = False) -> Dict[str, Any]:
         return self._request({"action": "update-rollback" if rollback else "update-install", "version": version})
 
@@ -1817,7 +1834,7 @@ class HelperClient:
         if not decoded.get("ok", False):
             reason = decoded.get("reason")
             if reason not in ("wifi-busy", "helper-busy", "wifi-failed",
-                              "wifi-restored", "wifi-restore-failed"):
+                              "wifi-restored", "wifi-restore-failed", "release-refused"):
                 reason = None
             raise HelperClientError(str(decoded.get("error", "helper request failed")), reason=reason)
         return decoded

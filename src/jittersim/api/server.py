@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Collection, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, urlsplit
 
+from jittersim import updates
 from jittersim.api.access import ACCESS_WRITES, read_access_api, write_access_api
 from jittersim.api.workflows import WORKFLOW_WRITES, machine_health, read_workflow, write_workflow
 from jittersim.config.device_labels import (
@@ -210,7 +211,14 @@ WRITE_PATHS = frozenset(
         "/api/dashboard-access/remove",
     )
 )
-WRITE_PATHS = WRITE_PATHS | WORKFLOW_WRITES | ACCESS_WRITES | {"/api/schedules/preview"}
+# A signed release sent over HTTPS when the Mac cannot use SSH (see handle_release_upload).
+RELEASE_UPLOAD_PATH = "/api/updates/upload"
+RELEASE_UPLOAD_HEADER = "X-Jittersim-Archive-Bytes"
+# The whole upload (headers, archive and signature) must arrive within this many seconds. The
+# dashboard serves one request at a time so a slow sender cannot hold it for longer.
+RELEASE_UPLOAD_SECONDS = 120.0
+WRITE_PATHS = (WRITE_PATHS | WORKFLOW_WRITES | ACCESS_WRITES | {"/api/schedules/preview"}
+               | {RELEASE_UPLOAD_PATH})
 ACTION_PATHS = frozenset(
     ("/api/apply", "/api/reset", "/api/observations/scan", "/api/update-preferences",
      "/api/access-point/reset-name")
@@ -10432,6 +10440,10 @@ class _DeadlineReader(io.RawIOBase):
             return count
         return self._source.readinto(buffer)
 
+    def extend_to(self, deadline: float) -> None:
+        """Give a long upload its own, later deadline once its request was accepted."""
+        self._deadline = deadline
+
     def close(self) -> None:
         try:
             self._source.close()
@@ -10455,6 +10467,9 @@ class ControlServer(HTTPServer):
     # The server handles one connection at a time, so bound how long an idle or
     # slow client (such as a browser preconnect) can hold it.
     request_timeout_seconds = 5.0
+    # Where an uploaded release waits for the root helper (see jittersim.updates.stage_upload).
+    release_spool = updates.UPLOAD_SPOOL
+    release_upload_seconds = RELEASE_UPLOAD_SECONDS
     # After a reboot the dashboard can start before the helper's socket exists.
     helper_startup_wait_seconds = 30.0
     helper_poll_seconds = 0.5
@@ -13556,6 +13571,9 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             return
         if path != "/api/dashboard-access/register-self" and not self._check_device_access():
             return
+        if path == RELEASE_UPLOAD_PATH:
+            handle_release_upload(self)
+            return
 
         origin = self.headers.get("Origin")
         host = self.headers.get("Host", "")
@@ -13683,6 +13701,144 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
 
 class RequestError(ValueError):
     """Raised when an HTTP request body cannot be safely decoded."""
+
+
+def handle_release_upload(handler: "ControlRequestHandler") -> None:
+    """Receive a signed release archive and its signature, then stage them through the helper.
+
+    Both files come in one body: the archive bytes, then the signature bytes. The header
+    X-Jittersim-Archive-Bytes says where the archive ends. Content-Length is required so a
+    request is refused before it is read. Nothing here decides whether the release is good:
+    the root update manager verifies the signature of a trusted key and the release order
+    so the admin token alone can only stage a release the owner signed.
+    """
+
+    server = handler.server
+
+    def refuse(status: int, message: str) -> None:
+        # The unread body must not be taken for the next request.
+        handler.close_connection = True
+        handler._send_response(
+            status=status, content_type="application/json", body=_json_bytes({"error": message}),
+            headers={"Connection": "close"},
+        )
+
+    if server.helper_client is None:
+        refuse(HTTPStatus.SERVICE_UNAVAILABLE, "Release controls require the Pi network helper.")
+        return
+    if handler.headers.get("Transfer-Encoding") is not None:
+        refuse(HTTPStatus.LENGTH_REQUIRED, "Send the release with a Content-Length.")
+        return
+    length_header = handler.headers.get("Content-Length")
+    archive_header = handler.headers.get(RELEASE_UPLOAD_HEADER)
+    if length_header is None:
+        refuse(HTTPStatus.LENGTH_REQUIRED, "Send the release with a Content-Length.")
+        return
+    try:
+        if not (length_header.isascii() and length_header.isdigit()
+                and archive_header is not None and archive_header.isascii()
+                and archive_header.isdigit()):
+            raise ValueError
+        total = int(length_header)
+        archive_size = int(archive_header)
+    except ValueError:
+        refuse(HTTPStatus.BAD_REQUEST,
+               "Send the size of the archive in " + RELEASE_UPLOAD_HEADER + ".")
+        return
+    signature_size = total - archive_size
+    if archive_size < 1 or signature_size < 1:
+        refuse(HTTPStatus.BAD_REQUEST, "The upload needs an archive and its signature.")
+        return
+    if archive_size > updates.MAX_ARCHIVE:
+        refuse(HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+               "The release archive is larger than the 25 MiB limit.")
+        return
+    if signature_size > updates.MAX_SIGNATURE:
+        refuse(HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+               "The release signature is larger than the 16 KiB limit.")
+        return
+
+    spool = Path(server.release_spool)
+    try:
+        spool.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if spool.is_symlink():
+            raise OSError("spool is a link")
+        spool.chmod(0o700)
+        for name in (updates.UPLOAD_ARCHIVE, updates.UPLOAD_SIGNATURE):
+            try:
+                (spool / name).unlink()
+            except FileNotFoundError:
+                pass
+    except OSError:
+        LOGGER.exception("could not prepare the release upload folder")
+        refuse(HTTPStatus.INTERNAL_SERVER_ERROR, "The Pi could not prepare a place for the upload.")
+        return
+    reader = handler.rfile.raw if hasattr(handler.rfile, "raw") else None
+    deadline = time.monotonic() + server.release_upload_seconds
+    if isinstance(reader, _DeadlineReader):
+        reader.extend_to(deadline)
+    problem: Optional[Tuple[int, str]] = None
+    try:
+        for name, size in ((updates.UPLOAD_ARCHIVE, archive_size),
+                           (updates.UPLOAD_SIGNATURE, signature_size)):
+            descriptor = os.open(
+                str(spool / name),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            with os.fdopen(descriptor, "wb") as output:
+                remaining = size
+                while remaining:
+                    if time.monotonic() > deadline:
+                        raise TimeoutError("release upload took too long")
+                    block = handler.rfile.read(min(65536, remaining))
+                    if not block:
+                        problem = (HTTPStatus.BAD_REQUEST,
+                                   "The upload ended before all of the release arrived.")
+                        break
+                    output.write(block)
+                    remaining -= len(block)
+                output.flush()
+                os.fsync(output.fileno())
+            if problem:
+                break
+    except (TimeoutError, socket.timeout):
+        problem = (HTTPStatus.REQUEST_TIMEOUT,
+                   "The upload was too slow. It must finish within "
+                   + str(int(server.release_upload_seconds)) + " seconds.")
+    except (ConnectionError, ssl.SSLError):
+        _clear_spool(spool)
+        handler.close_connection = True
+        raise
+    except OSError:
+        LOGGER.exception("could not write the uploaded release")
+        problem = (HTTPStatus.INTERNAL_SERVER_ERROR, "The Pi could not store the upload.")
+    if problem:
+        _clear_spool(spool)
+        refuse(*problem)
+        return
+    try:
+        result = server.helper_client.stage_uploaded_release()
+        status, body = HTTPStatus.OK, {"uploaded": True, **result}
+        body.pop("ok", None)
+    except HelperClientError as error:
+        status = (HTTPStatus.UNPROCESSABLE_ENTITY if error.reason == "release-refused"
+                  else HTTPStatus.SERVICE_UNAVAILABLE)
+        body = {"error": str(error)}
+    finally:
+        _clear_spool(spool)
+    try:
+        server.repository.record_action(action=RELEASE_UPLOAD_PATH, status_code=int(status))
+    except StorageError:
+        LOGGER.exception("could not record action history for the release upload")
+    handler._send_response(
+        status=status, content_type="application/json", body=_json_bytes(body))
+
+
+def _clear_spool(spool: Path) -> None:
+    for name in (updates.UPLOAD_ARCHIVE, updates.UPLOAD_SIGNATURE):
+        try:
+            (spool / name).unlink()
+        except OSError:
+            pass
 
 
 def _safe_wifi_copy_message(error: HelperClientError) -> str:

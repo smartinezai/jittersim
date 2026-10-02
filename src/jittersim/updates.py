@@ -57,6 +57,13 @@ INCOMING_ARCHIVE = "/home/jittersim/incoming/jittersim-release.tar.gz"
 # top-level name so they can still install the first signed release.
 MANIFEST = "deploy/RELEASE"
 MAX_SIGNATURE = 16 * 1024
+# A release uploaded over the dashboard's HTTPS API waits here. The dashboard process
+# (user jittersim) streams the two files into this folder and nothing else. The root helper
+# then copies them into the root-only INCOMING_FOLDER of the update root before it checks them.
+UPLOAD_SPOOL = Path("/var/lib/jittersim/incoming-release")
+UPLOAD_ARCHIVE = "jittersim-release.tar.gz"
+UPLOAD_SIGNATURE = UPLOAD_ARCHIVE + ".sig"
+INCOMING_FOLDER = "incoming"
 MAX_KEY_FILE = 16 * 1024
 MAX_MANIFEST = 4096
 MAX_KEYS = 16
@@ -769,6 +776,59 @@ def stage_release(path, *, signature=None, root=UPDATE_ROOT, code=CODE_ROOT,
             },
         )
     return record
+
+
+def _remove_quietly(path):
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
+def stage_upload(*, spool=UPLOAD_SPOOL, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT):
+    """Stage the release the dashboard received over HTTPS.
+
+    The spool belongs to the dashboard's user so nothing in it is trusted. Both files are
+    copied into a folder only root may enter and are removed from the spool at once. Then
+    stage_release does the real work: a trusted key must have signed exactly these bytes
+    and the release must be newer than every release installed before. So the admin token
+    alone can stage only a release the owner signed.
+    """
+
+    spool = Path(spool)
+    try:
+        folder_info = spool.lstat()
+    except OSError as error:
+        raise UpdateError("no uploaded release is waiting") from error
+    if not stat.S_ISDIR(folder_info.st_mode):
+        raise UpdateError("the upload folder is not a plain folder")
+    incoming = root / INCOMING_FOLDER
+    try:
+        incoming.mkdir(mode=0o700, parents=True, exist_ok=True)
+        info = incoming.lstat()
+        if not stat.S_ISDIR(info.st_mode) or (
+            hasattr(os, "geteuid") and info.st_uid != os.geteuid()
+        ):
+            raise UpdateError("the incoming folder is not safe to use")
+        incoming.chmod(0o700)
+    except OSError as error:
+        raise UpdateError("the incoming folder could not be prepared") from error
+    archive = incoming / UPLOAD_ARCHIVE
+    signature = incoming / UPLOAD_SIGNATURE
+    for old in (archive, signature):
+        _remove_quietly(old)
+    try:
+        try:
+            copy_bounded(spool / UPLOAD_ARCHIVE, archive, MAX_ARCHIVE, "uploaded release archive")
+            copy_bounded(spool / UPLOAD_SIGNATURE, signature, MAX_SIGNATURE,
+                         "uploaded release signature")
+        finally:
+            for name in (UPLOAD_ARCHIVE, UPLOAD_SIGNATURE):
+                _remove_quietly(spool / name)
+        return stage_release(archive, signature=signature, root=root, code=code, config=config)
+    finally:
+        for leftover in (archive, signature):
+            _remove_quietly(leftover)
 
 
 def update_status(*, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT):
