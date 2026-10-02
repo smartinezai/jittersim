@@ -55,9 +55,18 @@ def save_controls(page, percent, *, enabled=True):
         page.locator("#save-policies").click()
     response = pending.value
     assert response.ok, (response.status, response.text())
-    assert response.json()["options"]["dns_failure_percent"] == percent
-    assert response.json()["options"]["enabled"] is enabled
+    saved = response.json()
+    assert saved["options"]["dns_failure_percent"] == percent
+    assert saved["options"]["enabled"] is enabled
     expect(page.locator("#draft-notice")).to_be_hidden()
+    # The save response arrives before the dashboard finishes its status refresh.
+    page.wait_for_function(
+        "expected => accessState?.version === expected.version && "
+        "accessState?.saved_policy?.options?.dns_failure_percent === expected.percent && "
+        "accessState?.saved_policy?.options?.enabled === expected.enabled",
+        arg={"version": saved["version"], "percent": percent, "enabled": enabled},
+        timeout=REQUEST_TIMEOUT,
+    )
 
 
 def apply_controls(page, percent, *, enabled=True, expected_status=200):
