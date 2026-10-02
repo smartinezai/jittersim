@@ -1989,7 +1989,7 @@ class QueueReadAndWriteTests(unittest.TestCase):
             answer, thread = self.in_thread(read)
             thread.join(5)
             self.assertEqual(answer["error"].reason, "helper-busy")
-            self.assertLess(answer["seconds"], 1.0)
+            self.assertLess(answer["seconds"], 0.25)
         self.executor.release.set()
         writer_thread.join(5)
         self.assertEqual(writer["result"]["action"], "apply")
