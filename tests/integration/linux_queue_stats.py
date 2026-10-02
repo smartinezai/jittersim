@@ -86,7 +86,7 @@ def send_frames(sender, receiver, packet):
 def project_queue(stats, interface, mark):
     """Return the one kernel queue the project installed for this mark."""
 
-    handle, parent = f"{mark + 10}:", f"10:{mark + 1}"
+    handle, parent = queue_handle(mark), queue_parent(mark)
     matches = [
         item
         for item in stats[interface]
