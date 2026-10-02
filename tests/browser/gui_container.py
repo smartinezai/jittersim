@@ -6,6 +6,7 @@ import importlib.metadata
 import json
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -361,6 +362,14 @@ def verify_cached_install(package_path, server_path, tests_path, fixture_path, w
 
 def cached_runtime_main(wheel):
     """Executed only inside the coordinator's disposable Linux container."""
+    Path("/artifacts").mkdir(exist_ok=True)
+    inputs = Path("/jittersim-gui-baseline")
+    for folder in (inputs / "tests", inputs / "wheels"):
+        for path in sorted(folder.rglob("*"), reverse=True):
+            if path.is_symlink():
+                raise RuntimeError("Copied input contains an unexpected symlink")
+            path.chmod(0o555 if path.is_dir() else 0o444)
+        folder.chmod(0o555)
     if platform.system() != "Linux" or sys.version_info[:2] != (3, 13):
         raise RuntimeError("Cached runtime must use Linux and Python 3.13")
     if importlib.metadata.version("playwright") != "1.63.0":
@@ -371,9 +380,9 @@ def cached_runtime_main(wheel):
         chromium = Path(browser_tool.chromium.executable_path)
         if not chromium.is_file():
             raise RuntimeError("Cached Chromium is missing")
-    wheel_directory = Path("/jittersim-gui-wheels")
+    wheel_directory = Path("/jittersim-gui-baseline/wheels")
     if wheel_identity(wheel_directory) != wheel:
-        raise RuntimeError("Mounted wheel identity does not match")
+        raise RuntimeError("Copied wheel identity does not match")
     subprocess.run(
         [sys.executable, "-m", "pip", "install", "--no-index", "--no-deps", "--force-reinstall",
          str(wheel_directory / wheel["file"])], check=True, timeout=120,
@@ -392,11 +401,71 @@ def cached_runtime_main(wheel):
                     for name in ("jittersim", "playwright", "requests", "pycryptodome")}
     runtime = {"verification_mode": "cached-runtime", "system": "Linux",
                "python": platform.python_version(), "dependencies": dependencies,
-               "chromium_present": True, "tests_location": "isolated-read-only-mount",
+               "chromium_present": True, "tests_location": "isolated-copied-inputs", "input_permissions": "read-only",
                "package_location": "site-packages", "verified_runtime_files": len(wheel["runtime_files_sha256"]),
                "wheel": wheel}
     Path("/artifacts/cached-runtime.json").write_text(json.dumps(runtime, indent=2), encoding="utf-8")
     exec(CONTAINER_SCRIPT, {"__name__": "__main__"})
+
+
+MAX_RETURN_BYTES = 201 * 1024 * 1024
+MAX_RETURN_ENTRIES = 5000
+
+
+def copy_container_artifacts(container_name, directory):
+    """Stream bounded artifacts back without letting Docker write unchecked paths."""
+    process = subprocess.Popen(
+        ["docker", "cp", container_name + ":/artifacts/.", "-"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    try:
+        with deadline(60), tarfile.open(fileobj=process.stdout, mode="r|") as archive:
+            total = 0
+            count = 0
+            seen = set()
+            for member in archive:
+                count += 1
+                if count > MAX_RETURN_ENTRIES:
+                    raise RuntimeError("Returned artifacts exceed their file limit")
+                parts = PurePosixPath(member.name)
+                if parts.is_absolute() or ".." in parts.parts or not (member.isfile() or member.isdir()):
+                    raise RuntimeError("Returned artifacts contain an unsafe entry")
+                names = parts.parts
+                if names and names[0] == "artifacts":
+                    names = names[1:]
+                if not names and member.isdir():
+                    continue
+                if (not names or names[0] not in ("screenshots", "axe", "cached-runtime.json")
+                        or names in seen):
+                    raise RuntimeError("Returned artifact path is unexpected")
+                seen.add(names)
+                if member.size < 0 or member.size > MAX_RETURN_BYTES - total:
+                    raise RuntimeError("Returned artifacts exceed their byte limit")
+                total += member.size
+                destination = directory.joinpath(*names)
+                if destination.is_symlink() or not destination.resolve().is_relative_to(directory.resolve()):
+                    raise RuntimeError("Returned artifact destination is unsafe")
+                if member.isdir():
+                    destination.mkdir(parents=True, exist_ok=True)
+                    continue
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                content = archive.extractfile(member)
+                written = 0
+                with content, destination.open("wb") as output:
+                    while True:
+                        chunk = content.read(min(65536, member.size - written + 1))
+                        if not chunk:
+                            break
+                        if written + len(chunk) > member.size:
+                            raise RuntimeError("Returned artifact exceeds its declared size")
+                        output.write(chunk)
+                        written += len(chunk)
+                if written != member.size:
+                    raise RuntimeError("Returned artifacts are truncated")
+            if process.wait(timeout=5) != 0:
+                raise RuntimeError("Docker artifact copy failed")
+    finally:
+        stop_fixture(process)
 
 
 def run_cached(reference, repo_root):
@@ -414,7 +483,9 @@ def run_cached(reference, repo_root):
     report = {"status": "running", "complete": False, "source_commit": commit,
               "source_dirty": False, "cached_browser_image": reference, "runtime_image_id": image_id,
               "container_name": container_name, "stage": "prepare",
-              "verification_mode": "cached-runtime", "build_context": "tracked-commit-archive"}
+              "verification_mode": "cached-runtime", "build_context": "tracked-commit-archive",
+              "input_delivery": "docker-copy", "artifact_copy": {"status": "not-attempted"},
+              "artifact_limits": {"bytes": MAX_RETURN_BYTES, "entries": MAX_RETURN_ENTRIES, "seconds": 60}}
     write_report(directory, report)
     container_started = False
     try:
@@ -425,19 +496,60 @@ def run_cached(reference, repo_root):
             report["wheel"] = wheel
             report["stage"] = "run"
             write_report(directory, report)
+            bundle = context.parent / "cached-inputs"
+            with deadline(30):
+                bundle.mkdir()
+                shutil.copytree(context / "tests", bundle / "tests")
+                shutil.copytree(wheels, bundle / "wheels")
+            if wheel_identity(bundle / "wheels") != wheel:
+                raise RuntimeError("Copied wheel identity changed")
             script = "from tests.browser.gui_container import cached_runtime_main; cached_runtime_main(" + repr(wheel) + ")"
             command = [
-                "docker", "run", "--pull=never", "--rm", "--name", container_name,
+                "docker", "create", "--pull=never", "--name", container_name,
                 "--shm-size", "1g", "--workdir", "/jittersim-gui-baseline", "--entrypoint", "python",
-                "--env", "PYTHONPATH=", "--env", f"JITTERSIM_GUI_SOURCE_COMMIT={commit}",
-                "--env", "JITTERSIM_GUI_SOURCE_DIRTY=0",
-                "--volume", f"{context / 'tests'}:/jittersim-gui-baseline/tests:ro",
-                "--volume", f"{wheels}:/jittersim-gui-wheels:ro",
-                "--volume", f"{directory}:/artifacts", image_id, "-c", script,
+                "--env", "PYTHONPATH=", "--env", "PYTHONDONTWRITEBYTECODE=1",
+                "--env", f"JITTERSIM_GUI_SOURCE_COMMIT={commit}",
+                "--env", "JITTERSIM_GUI_SOURCE_DIRTY=0", image_id, "-c", script,
             ]
+            report["stage"] = "create"
             container_started = True
             subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           timeout=1500, check=True)
+                           timeout=30, check=True)
+            report["stage"] = "copy-inputs"
+            subprocess.run(
+                ["docker", "cp", str(bundle) + "/.", container_name + ":/jittersim-gui-baseline"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60, check=True,
+            )
+            report["stage"] = "start"
+            write_report(directory, report)
+            try:
+                subprocess.run(["docker", "start", "--attach", container_name],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               timeout=1500, check=True)
+            except BaseException:
+                stopped = False
+                try:
+                    stopped = subprocess.run(["docker", "stop", "--time", "5", container_name],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   timeout=15, check=False).returncode == 0
+                except (OSError, subprocess.TimeoutExpired):
+                    report["stop_after_failure"] = "unconfirmed"
+                if stopped:
+                    try:
+                        copy_container_artifacts(container_name, directory)
+                        report["artifact_copy"] = {"status": "copied-partial"}
+                    except Exception as error:
+                        report["artifact_copy"] = {"status": "failed", "failure_type": type(error).__name__}
+                else:
+                    report["artifact_copy"] = {"status": "not-copied-stop-unconfirmed"}
+                raise
+            report["stage"] = "copy-artifacts"
+            try:
+                copy_container_artifacts(container_name, directory)
+                report["artifact_copy"] = {"status": "copied"}
+            except Exception as error:
+                report["artifact_copy"] = {"status": "failed", "failure_type": type(error).__name__}
+                raise
             report["stage"] = "verify"
             for runner in ("screenshots", "axe"):
                 verify_runner_manifest(directory / runner / "manifest.json", commit,

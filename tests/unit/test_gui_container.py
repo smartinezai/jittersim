@@ -272,48 +272,124 @@ def test_cached_identity_rejects_old_source_tests_and_helper_mismatch(tmp_path, 
         gui_container.verify_cached_install(package, server, tests, fixture, identity)
 
 
-def test_cached_timeout_never_builds_pulls_or_removes_cached_image(tmp_path, monkeypatch):
+def cached_preparation(tmp_path, monkeypatch):
+    context_path = tmp_path / "context"
+    (context_path / "tests/browser").mkdir(parents=True)
+    (context_path / "tests/__init__.py").write_text("")
+    (context_path / "tests/browser/gui_container.py").write_text("current tests")
+    captured = {}
+
     @contextmanager
     def context(*_args):
-        yield tmp_path / "context"
+        yield context_path
 
+    def wheel(_context, directory):
+        portable_wheel(directory)
+        captured["wheel"] = gui_container.wheel_identity(directory)
+        return captured["wheel"]
+
+    monkeypatch.setattr(gui_container, "clean_source", lambda *_args: (tmp_path, COMMIT))
+    monkeypatch.setattr(gui_container, "source_context", context)
+    monkeypatch.setattr(gui_container, "build_host_wheel", wheel)
+    return captured
+
+
+@pytest.mark.parametrize("failure", ["copy-inputs", "start", "copy-artifacts"])
+def test_cached_failures_cleanup_without_binds_or_cached_image_mutation(tmp_path, monkeypatch, failure):
+    captured = cached_preparation(tmp_path, monkeypatch)
     calls = []
 
     def execute(command, **kwargs):
         calls.append(command)
         if command[:3] == ["docker", "image", "inspect"]:
             return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "c" * 64 + "\n")
-        if command[:2] == ["docker", "run"]:
+        if command[:2] == ["docker", "cp"] and failure == "copy-inputs":
+            raise subprocess.CalledProcessError(1, command, output="secret value")
+        if command[:2] == ["docker", "start"] and failure == "start":
             raise subprocess.TimeoutExpired(command, kwargs["timeout"], output="secret value")
         return subprocess.CompletedProcess(command, 0)
 
-    wheel = {"file": "jittersim-0.1.0-py3-none-any.whl", "bytes": 100,
-             "sha256": "f" * 64, "server_source_sha256": "b" * 64,
-             "runtime_files_sha256": {"jittersim/api/server.py": "b" * 64}}
-    monkeypatch.setattr(gui_container, "clean_source", lambda *_args: (tmp_path, COMMIT))
-    monkeypatch.setattr(gui_container, "source_context", context)
-    monkeypatch.setattr(gui_container, "build_host_wheel", lambda *_args: wheel)
+    def copy_out(command, **_kwargs):
+        calls.append(command)
+        if failure == "copy-artifacts":
+            raise OSError("secret copy error")
+        return archive_process([("cached-runtime.json", b"{}", tarfile.REGTYPE)])
+
     monkeypatch.setattr(gui_container.subprocess, "run", execute)
-    with pytest.raises(subprocess.TimeoutExpired):
+    monkeypatch.setattr(gui_container.subprocess, "Popen", copy_out)
+    expected = {"copy-inputs": subprocess.CalledProcessError, "start": subprocess.TimeoutExpired,
+                "copy-artifacts": OSError}[failure]
+    with pytest.raises(expected):
         gui_container.run(None, tmp_path, CACHED)
     directory = next((tmp_path / "test-results").iterdir())
     text = (directory / "container-report.json").read_text()
     report = json.loads(text)
     assert report["verification_mode"] == "cached-runtime"
     assert report["complete"] is False
-    assert report["stage"] == "run"
-    assert report["wheel"] == wheel
-    assert "secret value" not in text
+    assert report["stage"] == failure
+    assert report["wheel"] == captured["wheel"]
+    assert "secret value" not in text and "secret copy error" not in text
     assert calls[0][-1] == CACHED
     assert all(command[:2] not in (["docker", "build"], ["docker", "pull"]) for command in calls)
     assert calls[-1] == ["docker", "rm", "--force", report["container_name"]]
-    runtime = next(command for command in calls if command[:2] == ["docker", "run"])
-    assert "--pull=never" in runtime
-    assert runtime[runtime.index("--workdir") + 1] == "/jittersim-gui-baseline"
-    assert "PYTHONPATH=" in runtime
-    mounts = [runtime[index + 1] for index, value in enumerate(runtime) if value == "--volume"]
-    assert sum(value.endswith(":ro") for value in mounts) == 2
+    create = next(command for command in calls if command[:2] == ["docker", "create"])
+    assert "--pull=never" in create and "--rm" not in create
+    assert create[create.index("--workdir") + 1] == "/jittersim-gui-baseline"
+    assert "PYTHONPATH=" in create and "PYTHONDONTWRITEBYTECODE=1" in create
+    assert "--volume" not in create and "--mount" not in create
     assert all(command[:3] != ["docker", "image", "rm"] for command in calls)
+    if failure == "start":
+        assert report["artifact_copy"]["status"] == "copied-partial"
+        assert (directory / "cached-runtime.json").exists()
+
+
+def test_cached_success_copies_complete_evidence_before_cleanup(tmp_path, monkeypatch):
+    captured = cached_preparation(tmp_path, monkeypatch)
+    calls = []
+
+    def execute(command, **_kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "c" * 64 + "\n")
+
+    def copy_out(command, **_kwargs):
+        calls.append(command)
+        wheel = captured["wheel"]
+        manifest = {"status": "complete", "complete": True, "commit": COMMIT,
+                    "source_dirty": False, "expected_states": 40,
+                    "runtime_package": {"location_kind": "installed", "server_source_sha256":
+                                        wheel["server_source_sha256"]},
+                    "states": [{"id": state["id"], "status": "complete"} for state in STATES]}
+        return archive_process([
+            ("screenshots/manifest.json", json.dumps(manifest).encode(), tarfile.REGTYPE),
+            ("axe/manifest.json", json.dumps(manifest).encode(), tarfile.REGTYPE),
+            ("cached-runtime.json", json.dumps({"wheel": wheel, "verification_mode": "cached-runtime"}).encode(), tarfile.REGTYPE),
+        ])
+
+    monkeypatch.setattr(gui_container.subprocess, "run", execute)
+    monkeypatch.setattr(gui_container.subprocess, "Popen", copy_out)
+    directory = gui_container.run(None, tmp_path, CACHED)
+    report = json.loads((directory / "container-report.json").read_text())
+    assert report["complete"] is True and report["artifact_copy"]["status"] == "copied"
+    assert (directory / "axe/manifest.json").exists()
+    assert calls[-2][:2] == ["docker", "cp"]
+    assert calls[-1] == ["docker", "rm", "--force", report["container_name"]]
+
+
+@pytest.mark.parametrize("name,kind", [("../outside", tarfile.REGTYPE), ("screenshots/link", tarfile.SYMTYPE)])
+def test_copy_out_rejects_unsafe_entries(tmp_path, monkeypatch, name, kind):
+    monkeypatch.setattr(gui_container.subprocess, "Popen", lambda *_args, **_kwargs:
+                        archive_process([(name, b"", kind)]))
+    with pytest.raises(RuntimeError, match="unsafe entry"):
+        gui_container.copy_container_artifacts("owned-container", tmp_path)
+
+
+def test_copy_out_byte_limit_checked_before_writing(tmp_path, monkeypatch):
+    monkeypatch.setattr(gui_container, "MAX_RETURN_BYTES", 10)
+    monkeypatch.setattr(gui_container.subprocess, "Popen", lambda *_args, **_kwargs:
+                        archive_process([("screenshots/large.png", b"x" * 11, tarfile.REGTYPE)]))
+    with pytest.raises(RuntimeError, match="byte limit"):
+        gui_container.copy_container_artifacts("owned-container", tmp_path)
+    assert not (tmp_path / "screenshots/large.png").exists()
 
 
 def test_cached_reference_and_exclusive_modes_reject_before_inspection(tmp_path, monkeypatch):

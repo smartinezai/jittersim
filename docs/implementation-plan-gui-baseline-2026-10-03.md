@@ -75,7 +75,9 @@ Registry DNS also prevents fetching a new Python base image. Add an optional
 cached-browser verification path using a locally present image fixed by its
 digest. Build a portable dashboard wheel on the host from the recorded Git
 archive. Install it without downloads into a disposable container with a fresh
-working directory and tracked tests mounted read-only. Verify actual Python,
+working directory and copied tracked tests with read-only file permissions.
+Use bounded Docker copies so the daemon need not share host temporary paths.
+Verify actual Python,
 Playwright and dependency versions. Record the wheel hash and image identity.
 Disable pulls and preserve the cached image. The existing fresh-build path
 keeps its original contract. Container execution remains with the release

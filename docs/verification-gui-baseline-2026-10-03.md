@@ -17,7 +17,7 @@ with Chromium 153.0.8010.12 were used on macOS. The manifests distinguish the
 installed package from checkout source and record the actual served HTML hash.
 
 - Existing unit suite: 2,833 passed.
-- Final focused report, failure and container checks: 55 passed with warnings
+- Final focused report, failure and container checks: 61 passed with warnings
   treated as errors.
 - Existing browser journeys: passed against the installed wheel.
 - Screenshot matrix: all 40 states completed with 40 PNGs and 40 statistics files.
@@ -81,6 +81,10 @@ wheel offline in an owned container and checks every app file hash plus the
 import locations of the app and current tests. The report distinguishes this
 cached runtime check from a fresh image build. Actual cached Linux execution
 is the next verification step.
+An initial cached attempt stopped before importing tests because Colima could
+not see host temporary bind paths. No baseline was accepted. The owned
+containers were cleaned up. The cached path now copies tracked inputs into
+the container and copies reports back after execution.
 The final combined release needs another baseline after chart, router-copy,
 polling and sign-in work is integrated by their current owners.
 

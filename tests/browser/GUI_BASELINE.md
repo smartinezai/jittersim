@@ -102,9 +102,10 @@ This path requires Linux, Python 3.13, Playwright 1.63.0 and its cached
 Chromium. It builds a portable dashboard wheel from the clean tracked source
 on the host. Wheel building is limited to two minutes. The disposable
 container installs that wheel with package downloads disabled and verifies
-every app source and asset hash. Current tests are mounted read-only in an
-isolated directory. The old app and test checkout in the image cannot supply
-the inspected imports. Docker pulls are disabled.
+every app source and asset hash. Tracked tests and the wheel are copied into an
+isolated directory then given read-only file permissions. This avoids relying
+on Docker sharing host temporary paths. The old app and test checkout in the
+image cannot supply the inspected imports. Docker pulls are disabled.
 
 The report labels this check `cached-runtime` and records the image ID, wheel
 hash, installed file hashes and runtime versions. The cached image remains
@@ -112,3 +113,8 @@ unchanged. Cleanup removes only this invocation's container. This verifies
 the current wheel on the cached Linux browser environment. It does not verify
 fresh Docker dependency resolution or replace a clean image build or actual
 green CI on the final combined source.
+Container creation is limited to 30 seconds and each input or artifact copy to
+60 seconds. Failed browser runs attempt to preserve their partial reports
+before the owned container is removed.
+Returned artifacts are limited to 201 MB and 5,000 archive entries. Unsafe
+paths, links and unexpected top-level files fail before they can be written.
