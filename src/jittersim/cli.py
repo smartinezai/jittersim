@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import shlex
 import sqlite3
 import subprocess
@@ -38,6 +39,18 @@ LOG_SERVICES = {
 MAX_LOG_LINES = 200
 MAX_LOG_OUTPUT_CHARS = 32_000
 REMOTE_COMMANDS = ("connect", "profiles", "traffic", "impact")
+# `jittersim update` commands that the root update manager runs in this process.
+LOCAL_UPDATE_COMMANDS = {
+    "stage": "verify a signed release archive and stage it (root)",
+    "trust-key": "trust one ed25519 release signing key (root)",
+    "untrust-key": "stop trusting a release signing key (root)",
+    "list-keys": "show the trusted release signing keys",
+    "enable-passwordless-staging": "let the jittersim login stage signed releases "
+                                   "without a password (root)",
+    "disable-passwordless-staging": "ask for the sudo password again (root)",
+}
+UPDATE_SERVICE = "jittersim-update.service"
+UPDATE_WAIT_SECONDS = 20 * 60
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -126,7 +139,7 @@ def _build_operations_parser() -> argparse.ArgumentParser:
     )
     _add_local_options(set_chance)
 
-    updates = commands.add_parser("update", help="check and manage verified staged releases")
+    updates = commands.add_parser("update", help="check and manage signed staged releases")
     update_commands = updates.add_subparsers(dest="update_command", required=True)
     for name in ("check", "install", "rollback"):
         command = update_commands.add_parser(name)
@@ -134,7 +147,15 @@ def _build_operations_parser() -> argparse.ArgumentParser:
             command.add_argument(
                 "--yes", action="store_true", help="confirm without an interactive prompt"
             )
+        if name == "install":
+            command.add_argument(
+                "--wait", action="store_true",
+                help="as root: wait until the update service installed and checked the release",
+            )
         _add_local_options(command)
+    # Listed for --help only: main() hands these to the update manager before parsing.
+    for name, text in LOCAL_UPDATE_COMMANDS.items():
+        update_commands.add_parser(name, help=text, add_help=False)
 
     persistence = commands.add_parser(
         "persistence", help="show or change profile recovery after gateway outages"
@@ -495,7 +516,31 @@ def _release_status(arguments):
     return client.release_status()
 
 
+def _wait_for_update() -> int:
+    """Join the queued run of the one-shot update service and report how it ended."""
+    from jittersim.updates import update_status
+
+    print("Waiting for the update service to install and check the release.", flush=True)
+    try:
+        subprocess.run(
+            ["systemctl", "start", UPDATE_SERVICE], check=False, timeout=UPDATE_WAIT_SECONDS,
+            stdin=subprocess.DEVNULL,
+        )
+        final = update_status()
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        print(f"Could not follow the update: {error}. Check 'jittersim update check'.",
+              file=sys.stderr)
+        return 1
+    print(f"Installed: {final.get('installed', 'unknown')}")
+    print(f"Update state: {final.get('message', 'unknown')}")
+    return 0 if final.get("phase") == "complete" else 1
+
+
 def _update_command(arguments) -> int:
+    if arguments.update_command == "install" and arguments.wait and os.geteuid() != 0:
+        print("--wait needs root: run 'sudo jittersim update install --yes --wait'.",
+              file=sys.stderr)
+        return 1
     try:
         status = _release_status(arguments)
     except HelperClientError as error:
@@ -504,9 +549,18 @@ def _update_command(arguments) -> int:
     if arguments.update_command == "check":
         print(f"Installed: {status.get('installed', 'unknown')}")
         print(f"Staged: {status.get('available') or 'none'}")
+        if status.get("available"):
+            print(f"Signed by: {status.get('signed_by') or 'nobody'}")
+            if status.get("installable"):
+                print("Ready to install: yes")
+            else:
+                print(f"Ready to install: no. {status.get('reason') or ''}".rstrip())
+        if "trusted_keys" in status:
+            print(f"Trusted signing keys: {status['trusted_keys']}")
+        print(f"Update phase: {status.get('phase', 'unknown')}")
         print(f"Update state: {status.get('message', 'unknown')}")
         print(
-            "This checks verified releases staged on the Pi. "
+            "This checks signed releases staged on the Pi. "
             "It does not check the private repository online."
         )
         return 0
@@ -514,6 +568,10 @@ def _update_command(arguments) -> int:
         version = status.get("available")
         if not version or version == status.get("installed"):
             print("No newer staged release is ready to install.", file=sys.stderr)
+            return 1
+        if status.get("installable") is False:
+            print(f"The staged release {version} cannot be installed: "
+                  f"{status.get('reason') or 'stage a signed release'}", file=sys.stderr)
             return 1
         confirmed = _confirm(
             f"Install {version}? The dashboard and test network will pause briefly.",
@@ -530,6 +588,8 @@ def _update_command(arguments) -> int:
         except HelperClientError as error:
             print(f"Install request failed: {error}", file=sys.stderr)
             return 1
+        if arguments.wait:
+            return _wait_for_update()
         print(f"Installation of {version} was queued. Check with 'jittersim update check'.")
         return 0
     if not status.get("rollback_available"):
@@ -697,6 +757,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         arguments = _build_control_parser(command).parse_args(raw_arguments[1:])
         return (_reset(arguments, all_restrictions=command == "normal-access")
                 if command != "status" else _status(arguments))
+    if raw_arguments[:1] == ["update"] and raw_arguments[1:2] and (
+        raw_arguments[1] in LOCAL_UPDATE_COMMANDS
+    ):
+        from jittersim.updates import main as manager_main
+
+        return manager_main(raw_arguments[1:], prog="jittersim update")
     if raw_arguments and raw_arguments[0] in (
         "access", "update", "persistence", "diagnostics", "logs"
     ):
@@ -706,7 +772,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.epilog = (
             "Headless commands on the Pi: access status, access apply, access dns-failure, "
             "persistence show, persistence set on/off, diagnostics, logs, "
-            "update check, update install, update rollback and wifi reset. "
+            "update check, update install, update rollback, update stage, update trust-key "
+            "and wifi reset. "
             "Commands for your Mac through the Pi's HTTPS dashboard: connect, status, "
             "profiles list/apply-all/stop-all, traffic, wifi show and impact. "
             "Run one with --help for details."

@@ -559,11 +559,16 @@ async function loadReleaseStatus({force = false} = {}) {
   releaseStatusRequest = (async () => {
     try {
       releaseState = await request('/api/updates', 'GET');
+      // Only a release staged with a valid signature of a trusted key can be installed.
       const stagedReleaseReady = Boolean(
-        releaseState.available && releaseState.available !== releaseState.installed
+        releaseState.available && releaseState.available !== releaseState.installed &&
+        releaseState.installable === true
       );
+      const signer = releaseState.available && releaseState.signed_by ? ' (signed by ' + releaseState.signed_by + ')' : '';
+      const blocked = releaseState.available && releaseState.installable === false && releaseState.reason;
       element('release-status').textContent = 'Installed: ' + (releaseState.installed || 'Unknown') +
-        ' · Available: ' + (releaseState.available || 'None staged') + ' · ' + releaseState.message;
+        ' · Available: ' + (releaseState.available ? releaseState.available + signer : 'None staged') +
+        ' · ' + (blocked ? releaseState.reason : releaseState.message);
       showStagedReleaseBadge(stagedReleaseReady);
       const busy = releaseOperationBusy();
       element('release-install').disabled = busy || !stagedReleaseReady;
@@ -642,12 +647,12 @@ function installUpdateCheckPreference() {
 }
 function installReleaseControls() {
   workflowCard('release-controls', 'Updates and recovery', 'setup', `
-    <p>Install a verified release staged by an administrator. An update briefly interrupts the dashboard and test network. The previous installation and settings are backed up before installation.</p>
+    <p>Install a signed release staged on this Pi. An update briefly interrupts the dashboard and test network. The previous installation and settings are backed up before installation.</p>
     <label class="update-auto-check"><input id="check-staged-updates-on-open" type="checkbox" disabled><span>Check for staged updates when the dashboard opens</span></label>
     <p class="form-note">Checks only for a verified release already staged on this Pi. Downloads and installation stay manual.</p>
     <p id="update-preference-status" class="form-note update-preference-status" role="status" aria-live="polite">Loading the saved preference…</p>
     <p id="release-status" role="status">Check for an approved release on this Pi.</p><div id="release-actions"></div>
-    <details><summary>How releases reach this private Pi</summary><p>An administrator downloads a tagged release bundle and checks its SHA-256 checksum before staging it over SSH. GitHub credentials are not stored on the Pi. See the deployment guide for the staging command.</p></details>`);
+    <details><summary>How releases reach this private Pi</summary><p>The owner builds and signs a release on the Mac and deploy-from-mac.sh stages it over SSH. The Pi stages only a release signed by a key it trusts and newer than the one it runs. The admin token cannot stage a release: it can only install the one already staged. See Signed releases in the deployment guide.</p></details>`);
   const install = actionButton('Install staged release', async () => {
     if (!releaseState || !await confirmWorkflow('Install release ' + releaseState.available + '? The network will be interrupted briefly. Keep Ethernet or SSH available for recovery.')) return;
     await request('/api/updates/install','POST',{version:releaseState.available,confirm:true});

@@ -134,6 +134,10 @@ class DashboardHelperService(HelperService):
                 "installed": "test-release",
                 "available": "candidate-release",
                 "rollback_available": False,
+                "installable": True,
+                "signed_by": "owner-mac",
+                "reason": None,
+                "trusted_keys": 1,
                 "message": "A verified release is staged and ready.",
             }
         return super()._handle_payload(payload)

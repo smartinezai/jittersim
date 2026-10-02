@@ -52,6 +52,13 @@ Checking does not download or install a release. The **Router and Wi-Fi** page s
 when the staged and installed release labels differ. The terminal command
 `sudo jittersim update check` shows the same status.
 
+The Pi stages and installs only releases signed by a release signing key you
+trust on it and newer than the one it runs. The admin token can only install
+the release already staged. See
+[Signed releases](deploy/raspberry-pi/README.md#signed-releases) for the
+one-time setup, passwordless deploys and what a leaked token or a stolen key
+can do.
+
 ## What you can try
 
 - Slow down a test device, add delays, drop some data or simulate short
@@ -160,9 +167,11 @@ and `sudo jittersim wifi reset` still runs there.
 To put a new release on the Pi from the Mac, run
 `deploy/raspberry-pi/deploy-from-mac.sh` in a checkout. It runs on the Mac and
 needs only git, ssh, scp, tar and shasum. It builds the release archive of a
-commit, copies it to the Pi with your SSH key and stages it for the verified
-update service. `--install` also installs it and shows the release the Pi now
-runs. The Pi asks for its `sudo` password in your terminal. Deploying needs a
+commit, signs it with your release signing key, copies it to the Pi with your
+SSH key and stages it for the verified update service. `--install` also
+installs it and shows the release the Pi now runs. The Pi asks for its `sudo`
+password in your terminal unless passwordless staging is on (see
+[Signed releases](deploy/raspberry-pi/README.md#signed-releases)). Deploying needs a
 connection to the Pi's router network (Ethernet or the router's Wi-Fi): a Mac on
 the Pi's test Wi-Fi cannot reach the Pi over SSH. See
 [Deploy from a Mac](deploy/raspberry-pi/README.md#deploy-from-a-mac).

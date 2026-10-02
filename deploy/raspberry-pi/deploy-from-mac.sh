@@ -3,14 +3,23 @@
 # verified update service. With --install it also installs it and shows the release the Pi
 # runs afterwards. Only git, ssh, scp, tar and shasum are needed: not the Python package.
 # The script never reads, stores or passes a password. The steps that need root run in one
-# `ssh -t` session so the Pi asks for its sudo password in this terminal.
+# `ssh -t` session so the Pi asks for its sudo password in this terminal. A Pi with signed
+# releases and passwordless staging runs them without a password: it installs only archives
+# signed by the owner's release signing key.
 # It is plain POSIX sh so it runs with the bash 3.2 that macOS ships and with dash.
 set -eu
 
 DEFAULT_HOST=jittersim@192.168.0.17
 DEFAULT_KEY="$HOME/.ssh/jittersim_ed25519"
+DEFAULT_SIGNING_KEY="$HOME/.ssh/jittersim_release_ed25519"
 # The update service's own copy of src/jittersim/updates.py. It runs with the system Python.
 MANAGER=/usr/local/lib/jittersim-update.py
+# Signed releases: the trusted keys on the Pi, the one archive path passwordless staging
+# accepts (in the jittersim login's home) and the commands that stage and install it.
+SIGNERS=/etc/jittersim/release-signers
+INCOMING=incoming/jittersim-release.tar.gz
+INCOMING_PATH=/home/jittersim/$INCOMING
+COMMAND=/usr/local/bin/jittersim
 # Every ssh and scp call: a short connection timeout and a dead connection noticed within
 # 45 seconds. Host keys come from the user's known_hosts as they are.
 CONNECTION_OPTIONS="-o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
@@ -19,25 +28,33 @@ CONNECTION_OPTIONS="-o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliv
 CHECK_SECONDS=60
 COPY_SECONDS=600
 UNPACK_SECONDS=180
+# Passwordless staging and the install that waits for the update service (15 minutes at
+# most) run without a terminal so they get a limit too.
+STAGE_SECONDS=300
+INSTALL_SECONDS=1500
 NETWORK_HINT="Deploying needs a connection to the Pi's router network: Ethernet or the \
 router's Wi-Fi. A Mac on the Pi's test Wi-Fi cannot reach the Pi over SSH."
 
 usage() {
     cat <<EOF
-usage: deploy-from-mac.sh [--ref REF] [--host USER@HOST] [--key PATH] [--install]
-                          [--use-installer] [--dry-run]
+usage: deploy-from-mac.sh [--ref REF] [--host USER@HOST] [--key PATH] [--signing-key PATH]
+                          [--install] [--use-installer] [--dry-run]
 
 Runs on your Mac in a JitterSim checkout. It builds the release archive of REF with
-build-release.sh, copies it to the Pi over SSH and stages it for the verified update
-service. Staging checks the checksum and every file of the archive. Then 'sudo jittersim
-update install' or the dashboard's Install staged release installs it. Staging needs root
-on the Pi so the Pi asks for its sudo password in this terminal.
+build-release.sh, signs it, copies it to the Pi over SSH and stages it for the verified
+update service. Staging checks the signature, the release order and every file of the
+archive. Then 'sudo jittersim update install' or the dashboard's Install staged release
+installs it. Staging needs root on the Pi so the Pi asks for its sudo password in this
+terminal unless passwordless staging is on.
 
   --ref REF          tag, branch or commit to release (default: HEAD). The archive is built
                      from the commit so uncommitted changes are left out.
   --host USER@HOST   the Pi's SSH login on its router network address
                      (default: $DEFAULT_HOST)
   --key PATH         the SSH key for that login (default: ~/.ssh/jittersim_ed25519)
+  --signing-key PATH the release signing key (default: ~/.ssh/jittersim_release_ed25519).
+                     make-release-key.sh creates it. Without it the archive is not signed
+                     and only a Pi without signed releases or --use-installer accepts it.
   --install          install the staged release too and show the release the Pi runs.
                      It runs in the same sudo session as the staging.
   --use-installer    unpack the archive on the Pi and use its full installer instead of the
@@ -156,17 +173,19 @@ run_limited() {
 ref=HEAD
 host=$DEFAULT_HOST
 key=$DEFAULT_KEY
+signing_key=$DEFAULT_SIGNING_KEY
 install=no
 use_installer=no
 dry_run=no
 while [ "$#" -gt 0 ]; do
     case $1 in
-        --ref|--host|--key)
+        --ref|--host|--key|--signing-key)
             [ "$#" -ge 2 ] || fail "$1 needs a value" 2
             case $1 in
                 --ref) ref=$2 ;;
                 --host) host=$2 ;;
                 --key) key=$2 ;;
+                --signing-key) signing_key=$2 ;;
             esac
             shift 2
             ;;
@@ -195,6 +214,9 @@ case $key in
     ''|-*) fail "refusing key path '$key'" 2 ;;
 esac
 [ -f "$key" ] || fail "the SSH key $key does not exist" 2
+case $signing_key in
+    ''|-*) fail "refusing signing key path '$signing_key'" 2 ;;
+esac
 case $ref in
     ''|-*) fail "refusing ref '$ref'" 2 ;;
 esac
@@ -259,11 +281,19 @@ esac
 archive="$work/$remote_archive"
 
 # build-release.sh reads the paths relative to the checkout so it runs from its top. It
-# prints the archive's SHA-256 checksum and this script checks that value with shasum.
-printf '+ %s\n' "$(words sh deploy/raspberry-pi/build-release.sh "$commit" "$archive")"
+# prints the archive's SHA-256 checksum and this script checks that value with shasum. With
+# the signing key it also writes ARCHIVE.sig (sign-release.sh refuses a key others can read).
+if [ -f "$signing_key" ]; then
+    signed=yes
+    set -- "$commit" "$archive" "$signing_key"
+else
+    signed=no
+    set -- "$commit" "$archive"
+fi
+printf '+ %s\n' "$(words sh deploy/raspberry-pi/build-release.sh "$@")"
 if [ "$dry_run" = no ]; then
-    built=$(cd "$repo" && sh deploy/raspberry-pi/build-release.sh "$commit" "$archive") \
-        || fail "building the release archive failed"
+    built=$(cd "$repo" && sh deploy/raspberry-pi/build-release.sh "$@") \
+        || fail "building or signing the release archive failed"
     reported=$(printf '%s\n' "$built" | tail -n 1 | cut -d ' ' -f 1)
     if command -v shasum >/dev/null 2>&1; then
         sha=$(shasum -a 256 "$archive" | cut -d ' ' -f 1)
@@ -279,14 +309,26 @@ if [ "$dry_run" = no ]; then
 fi
 printf 'Archive: %s\nSHA-256: %s\n' "$remote_archive" "$sha"
 
-# One look at the Pi before copying: can it be reached, does it have the update service and
-# which release does it run? `jittersim update check` needs no sudo.
+# One look at the Pi before copying: can it be reached, does it have the update service, does
+# it install only signed releases, does it trust a key, may this login stage without a
+# password and which release does it run? None of it needs a password: `sudo -n -l` only
+# asks sudo whether the exact staging command is allowed.
 printf 'Connecting to %s with the key %s.\n' "$host" "$key"
 probe="if $(words test -f "$MANAGER"); then echo update-service; fi; \
+if $(words grep -q '^SIGNED_RELEASES = True' "$MANAGER") 2>/dev/null; then echo signed-updates; fi; \
+if $(words grep -q '^jittersim-release ' "$SIGNERS") 2>/dev/null; then echo trusted-key; fi; \
+if $(words sudo -n -l "$COMMAND" update stage "$INCOMING_PATH") >/dev/null 2>&1; then \
+echo passwordless; fi; $(words mkdir -p -m 700 incoming) 2>/dev/null; \
 $(words jittersim update check) 2>/dev/null || true"
 show_ssh_batch "$probe"
 if [ "$dry_run" = yes ]; then
+    # A dry run cannot ask the Pi. It shows the signed path when there is a signing key.
     answer=update-service
+    if [ "$signed" = yes ]; then
+        answer="update-service
+signed-updates
+trusted-key"
+    fi
 else
     set +e
     answer=$(ssh_batch_answer "$CHECK_SECONDS" "$probe")
@@ -308,16 +350,35 @@ elif [ "$running" = "$short" ]; then
     printf 'The Pi already runs release %s. The installer runs again.\n' "$short"
 fi
 
-set +e
+# One line of the probe's answer, matched as a whole so a status message cannot fake it.
+marker() {
+    printf '%s\n' "$answer" | grep -qx "$1"
+}
+pi_signed=no
+if [ "$use_installer" = no ] && marker signed-updates; then
+    pi_signed=yes
+    [ "$signed" = yes ] || fail "the Pi installs only signed releases and there is no signing key at $signing_key. Create one with deploy/raspberry-pi/make-release-key.sh and run the command it prints on the Pi."
+    marker trusted-key || fail "the Pi trusts no release signing key yet. Run deploy/raspberry-pi/make-release-key.sh and the one command it prints on the Pi."
+fi
+
 # shellcheck disable=SC2086
-run_limited "$COPY_SECONDS" scp -o BatchMode=yes $CONNECTION_OPTIONS -i "$key" -- \
-    "$archive" "$host:$remote_archive"
-status=$?
-set -e
-if [ "$status" -eq 124 ]; then
-    unreachable 124 "Copying the archive" "$COPY_SECONDS"
-elif [ "$status" -ne 0 ]; then
-    fail "copying the archive to the Pi failed (exit $status). $NETWORK_HINT"
+copy() {
+    set +e
+    run_limited "$COPY_SECONDS" scp -o BatchMode=yes $CONNECTION_OPTIONS -i "$key" -- \
+        "$1" "$host:$2"
+    status=$?
+    set -e
+    if [ "$status" -eq 124 ]; then
+        unreachable 124 "Copying the archive" "$COPY_SECONDS"
+    elif [ "$status" -ne 0 ]; then
+        fail "copying the archive to the Pi failed (exit $status). $NETWORK_HINT"
+    fi
+}
+if [ "$pi_signed" = yes ]; then
+    copy "$archive" "$INCOMING"
+    copy "$archive.sig" "$INCOMING.sig"
+else
+    copy "$archive" "$remote_archive"
 fi
 
 # Read the release label the Pi reports and compare it with this commit. The helper may still
@@ -383,6 +444,49 @@ if [ "$use_installer" = yes ]; then
     fi
     ssh_terminal "$install_command" || fail "the installer on the Pi failed. Read its messages above."
     check_release "Read the installer messages above."
+    finish_dry_run
+    exit 0
+fi
+
+if [ "$pi_signed" = yes ]; then
+    # The Pi stages only an archive signed by a key it trusts and newer than what it ran
+    # before. It checks the signature of its own copy so the passwordless rule alone installs
+    # nothing. `install --wait` joins the update service run and fails when the update fails.
+    cleanup=$(words rm -f "$INCOMING" "$INCOMING.sig")
+    if marker passwordless; then
+        printf 'Passwordless staging is on: no sudo password is needed.\n'
+        stage="$(words sudo -n "$COMMAND" update stage "$INCOMING_PATH") && $cleanup"
+        install_step=$(words sudo -n "$COMMAND" update install --yes --wait)
+    else
+        stage="$(words sudo "$COMMAND" update stage "$INCOMING") && $cleanup"
+        install_step=$(words sudo "$COMMAND" update install --yes --wait)
+    fi
+    limit=$STAGE_SECONDS
+    if [ "$install" = yes ]; then
+        stage="$stage && $install_step"
+        limit=$INSTALL_SECONDS
+    fi
+    failed="staging or installing on the Pi failed. Read the messages above. On the Pi check: jittersim update check and sudo journalctl -u jittersim-update.service -n 80 --no-pager"
+    if marker passwordless; then
+        set +e
+        ssh_batch "$limit" "$stage"
+        status=$?
+        set -e
+        if [ "$status" -eq 124 ]; then
+            unreachable 124 "Staging on the Pi" "$limit"
+        fi
+        [ "$status" -eq 0 ] || fail "$failed"
+    else
+        ssh_terminal "$stage" || fail "$failed"
+    fi
+    if [ "$install" = no ]; then
+        finish_dry_run
+        printf 'Staged release %s on the Pi. Install it with:\n  %s\n' "$short" \
+            "$(words ssh -t -i "$key" -- "$host" "$install_step")"
+        printf 'or choose Check for updates and then Install staged release in the dashboard.\n'
+        exit 0
+    fi
+    check_release "Check: sudo journalctl -u jittersim-update.service -n 80 --no-pager"
     finish_dry_run
     exit 0
 fi

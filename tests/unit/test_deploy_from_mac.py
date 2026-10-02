@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import signal
 import stat
@@ -15,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from jittersim import updates
+from tests.release_support import have_ssh_keygen, make_key, sign
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "deploy" / "raspberry-pi" / "deploy-from-mac.sh"
@@ -28,6 +30,12 @@ CONNECTION = ["-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o",
 BATCH_OPTIONS = ["-o", "BatchMode=yes", *CONNECTION]
 TERMINAL_OPTIONS = ["-t", *CONNECTION]
 PROBE = (f"if test -f {MANAGER}; then echo update-service; fi; "
+         f"if grep -q '^SIGNED_RELEASES = True' {MANAGER} 2>/dev/null; then echo signed-updates; fi; "
+         "if grep -q '^jittersim-release ' /etc/jittersim/release-signers 2>/dev/null; "
+         "then echo trusted-key; fi; "
+         "if sudo -n -l /usr/local/bin/jittersim update stage "
+         "/home/jittersim/incoming/jittersim-release.tar.gz >/dev/null 2>&1; "
+         "then echo passwordless; fi; mkdir -p -m 700 incoming 2>/dev/null; "
          "jittersim update check 2>/dev/null || true")
 WAIT = "echo 'Waiting for the update service to install and check the release.'"
 NETWORK_HINT = "Deploying needs a connection to the Pi's router network"
@@ -62,6 +70,11 @@ if remote.startswith("if test -f "):
         sys.exit(int(os.environ["FAKE_PROBE_EXIT"]))
     if not os.environ.get("FAKE_NO_SERVICE"):
         print("update-service")
+    for marker in ("signed-updates", "trusted-key", "passwordless"):
+        if marker in os.environ.get("FAKE_MARKERS", "").split():
+            print(marker)
+    if os.environ.get("FAKE_PROBE_EXTRA"):
+        print(os.environ["FAKE_PROBE_EXTRA"])
     if os.environ.get("FAKE_RUNNING"):
         print("Installed: " + os.environ["FAKE_RUNNING"])
         print("Staged: none")
@@ -84,6 +97,10 @@ sys.exit(int(os.environ.get("FAKE_TERMINAL_EXIT", "0")))
 
 @pytest.fixture
 def fakes(tmp_path):
+    return make_fakes(tmp_path)
+
+
+def make_fakes(tmp_path):
     bin_directory = tmp_path / "bin"
     bin_directory.mkdir()
     for name in ("ssh", "scp", "sleep"):
@@ -97,14 +114,17 @@ def fakes(tmp_path):
     copies.mkdir()
     temporary = tmp_path / "tmp"
     temporary.mkdir()
+    # A home folder of its own: the tests never read a real release signing key.
+    home = tmp_path / "home"
+    home.mkdir()
     return {"bin": bin_directory, "key": key, "log": tmp_path / "calls.log", "copies": copies,
-            "tmp": temporary}
+            "tmp": temporary, "home": home}
 
 
 def deploy(fakes, *arguments, shell="/bin/sh", script=SCRIPT, **environment):
     env = {
         "PATH": f"{fakes['bin']}:{os.environ['PATH']}",
-        "HOME": os.environ.get("HOME", "/tmp"),
+        "HOME": str(fakes["home"]),
         "TMPDIR": str(fakes["tmp"]),
         "FAKE_LOG": str(fakes["log"]),
         "FAKE_COPIES": str(fakes["copies"]),
@@ -166,7 +186,7 @@ def test_dry_run_prints_every_command_and_runs_none(fakes):
     printed = [line for line in result.stdout.splitlines() if line.startswith("+ ")]
     assert printed[0].startswith("+ sh deploy/raspberry-pi/build-release.sh ")
     assert printed[1].startswith("+ ssh -o BatchMode=yes -o ConnectTimeout=10")
-    assert printed[1].endswith(f"'{PROBE}'")
+    assert shlex.split(printed[1][2:])[-1] == PROBE
     assert printed[2].startswith("+ scp -o BatchMode=yes -o ConnectTimeout=10")
     assert printed[3].startswith("+ ssh -t -o ConnectTimeout=10 -o ServerAliveInterval=15")
     assert " stage " in printed[3] and "&& sudo jittersim update install --yes" in printed[3]
@@ -205,12 +225,24 @@ def test_stage_only_copies_the_verified_archive_and_prints_the_install_command(f
     assert leftovers(fakes) == []
     archive = fakes["copies"] / archive_name
     assert hashlib.sha256(archive.read_bytes()).hexdigest() == sha
-    # the update flow accepts it exactly as the Pi's root-only staging step does
-    root = tmp_path / "updates"
-    root.mkdir(mode=0o700)
-    updates.stage_release(archive, sha, short, root=root)
-    assert json.loads((root / "staged" / ".jittersim-release.json").read_text()) == {
-        "version": short, "sha256": sha}
+    # An update manager from before signed releases accepts only these top-level names.
+    with tarfile.open(archive) as bundle:
+        assert {Path(name).parts[0] for name in bundle.getnames()} <= {
+            "src", "deploy", "README.md", "pyproject.toml"}
+    # the update flow accepts it exactly as the Pi's root-only staging step does once it is
+    # signed by a trusted key
+    if not have_ssh_keygen():
+        pytest.skip("ssh-keygen signs the release")
+    root, config = tmp_path / "updates", tmp_path / "config"
+    config.mkdir(mode=0o755)
+    private, public = make_key(tmp_path / "throwaway")
+    updates.trust_key(public, config=config, root=root)
+    sign(archive, private)
+    updates.stage_release(archive, root=root, code=tmp_path / "code", config=config, sha256=sha,
+                          version=short)
+    record = json.loads((root / "staged" / ".jittersim-release.json").read_text())
+    assert record["version"] == short and record["sha256"] == sha
+    assert record["commit"].startswith(short) and record["sequence"] > 1_700_000_000
     assert (root / "staged" / "src" / "jittersim" / "updates.py").is_file()
 
 
@@ -334,7 +366,7 @@ def test_ctrl_c_also_stops_a_running_call(fakes, tmp_path, shell):
     """Background calls ignore Ctrl-C: the script stops them itself."""
 
     pid_file = tmp_path / "ssh.pid"
-    env = {"PATH": f"{fakes['bin']}:{os.environ['PATH']}", "HOME": os.environ.get("HOME", "/tmp"),
+    env = {"PATH": f"{fakes['bin']}:{os.environ['PATH']}", "HOME": str(fakes["home"]),
            "TMPDIR": str(fakes["tmp"]), "FAKE_LOG": str(fakes["log"]),
            "FAKE_HANG": "probe", "FAKE_PID_FILE": str(pid_file)}
     process = subprocess.Popen([shell, str(SCRIPT), "--key", str(fakes["key"])], env=env,

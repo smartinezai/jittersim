@@ -69,6 +69,16 @@ Please check `git branch -r` and the open pull requests before starting an item.
 - **Branch:** `feat/token-remember-refresh`.
 - **What:** the remembered token (and router password) gets a fresh 24 hours when the owner enters it again. Restoring it automatically on page load does not extend it.
 
+### 8. Signed releases and deploys without the sudo password
+
+- **Branch:** `feat/signed-releases` (draft pull request "Install only signed releases and let the Pi fetch them").
+- **Why:** the owner does not want to type the `sudo` password for every deploy and does not want a stranger or a leaked admin token to get root.
+- **What:** the Pi's root update manager stages and installs only archives signed by a release signing key the owner trusts on the Pi (`ssh-keygen -Y` signatures, no new dependency). Every release carries a signed sequence and the Pi refuses older releases except through its own rollback. `make-release-key.sh` makes the key on the Mac and prints the one `sudo jittersim update trust-key` command for the Pi. An optional sudoers rule lets the `jittersim` login stage and install signed releases without a password. Key rotation and removal use `trust-key` and `untrust-key`.
+- **Notes:**
+  - The threat table and the one-time steps are in the deployment guide under "Signed releases".
+  - On the Pi: check that `ssh-keygen -Y verify` of Pi OS accepts the signatures (OpenSSH 8.2 or newer) and that `sudo -n -l` reports the rule.
+  - Next step, not built yet: the Pi finds and stages the newest signed release on GitHub itself with a read-only token. See `docs/implementation-plan-online-release-source-2026-10-03.md`.
+
 ## Ideas that look useful
 
 These come from reviews of the recent work. Nobody has asked for them yet.
