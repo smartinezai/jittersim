@@ -2233,6 +2233,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     const element = (id) => document.getElementById(id);
 
     let pendingFormSubmitButton = null;
+    let messageSerial = 0;
 
     function optionalNumber(id) {
       const value = element(id).value.trim();
@@ -2851,6 +2852,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     };
 
     function showMessage(message, kind) {
+      messageSerial += 1;
       const messageElement = element("message");
       messageElement.textContent = message;
       messageElement.className = "action-message " + (kind || "");
@@ -6512,6 +6514,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       button.textContent = "Checking...";
       status.textContent = "Checking the token and loading diagnostics...";
       showMessage("Checking the admin token...", "working");
+      const checkingMessageSerial = messageSerial;
       try {
         const access = await loadDashboardAccess();
         if (tokenRevision !== adminTokenRevision) return;
@@ -6552,7 +6555,12 @@ DASHBOARD_HTML = r"""<!doctype html>
         }
         status.textContent = result.ok ? result.message : "Token check failed: " + result.message;
         status.className = "token-check-status " + (result.ok ? "success" : "error");
-        showMessage(status.textContent, result.ok ? "success" : "error");
+        // The dashboard unlocks while the check is still loading, so the person can save
+        // something before it ends. A success text must not replace that newer message.
+        // The token status above always shows the result, and a failure always shows.
+        if (!result.ok || messageSerial === checkingMessageSerial) {
+          showMessage(status.textContent, result.ok ? "success" : "error");
+        }
       } catch (error) {
         if (tokenRevision !== adminTokenRevision) return;
         adminTokenVerified = false;
