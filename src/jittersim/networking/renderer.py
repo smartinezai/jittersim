@@ -433,6 +433,20 @@ def _render_nft_script(
     for list_rule in plan.service_list_rules:
         set_name = service_list_set_name(list_rule)
         download_mark = SERVICE_DOWNLOAD_MARK_BASE + list_rule.mark
+        if list_rule.outage_active:
+            # A random outage of the list cuts its services for every affected
+            # client. Protected clients already returned above in the forward
+            # and download hooks. The input hook is left alone so the Pi's DNS,
+            # DHCP and dashboard keep working. The output rule catches browser
+            # proxy sockets that carry the list's mark, over IPv4 and IPv6.
+            lines.extend((
+                f'add rule inet {PROJECT_TABLE} forward iifname "{test_interface}" '
+                f'ip daddr @{set_name} drop comment "service list outage"',
+                f"add rule netdev {DOWNLOAD_TABLE} download meta mark {download_mark} "
+                'drop comment "service list outage"',
+                f'add rule inet {PROJECT_TABLE} output oifname "{topology.uplink_interface}" '
+                f'meta mark {list_rule.mark} drop comment "service list outage"',
+            ))
         lines.extend((
             f'add rule inet {PROJECT_TABLE} forward iifname "{test_interface}" '
             f"ip daddr @{set_name} meta mark set {list_rule.mark} counter "

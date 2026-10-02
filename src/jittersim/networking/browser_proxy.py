@@ -7,15 +7,16 @@ import os
 import socket
 import socketserver
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import CancelledError, Future
 from concurrent.futures import TimeoutError as FutureTimeout
 from ipaddress import IPv4Address, ip_address, ip_network
 from pathlib import Path
-from typing import Callable, Optional, Sequence, Tuple
+from typing import Callable, Optional, Sequence, Set, Tuple
 
 from jittersim.config.exemptions import normalize_exempt_mac
 from jittersim.config.models import MacPolicy, ValidationError, normalize_domain
 from jittersim.engine.codec import PlanCodecError, plan_from_payload
+from jittersim.engine.lookup_pool import BoundedLookupPool
 from jittersim.engine.plan import NetworkPlan
 
 from .access import read_access
@@ -27,6 +28,9 @@ CONNECT_TIMEOUT_SECONDS = 10
 RESOLVE_TIMEOUT_SECONDS = 5
 IDLE_TIMEOUT_SECONDS = 300
 COPY_BYTES = 64 * 1024
+
+# Server recreation must not multiply workers whose system lookup is still running.
+_lookup_pool = BoundedLookupPool(workers=8, name="proxy-dns")
 
 
 class ProxyError(RuntimeError):
@@ -94,8 +98,11 @@ def select_mark(
             return 0, "unaffected"
     # A listed service replaces whatever profile behavior the client would get,
     # including a random outage, exactly like the network rules for direct traffic.
+    # The list's own random outage cuts it for every affected client.
     for service_list in plan.service_list_rules:
         if any(host == domain or host.endswith("." + domain) for domain in service_list.domains):
+            if service_list.outage_active:
+                raise ProxyError("this service is in a random outage of its service list")
             return service_list.mark, f"service-list:{service_list.list_id}"
     if plan.general_profile is not None:
         if plan.general_profile.outage_active:
@@ -262,12 +269,7 @@ class _ProxyHandler(socketserver.BaseRequestHandler):
             mark, assignment_id = select_mark(
                 plan, client_ip=client_ip, host=host, client_mac=client_mac
             )
-            try:
-                addresses = self.server.resolver.submit(self.server.resolve_addresses, host).result(
-                    timeout=RESOLVE_TIMEOUT_SECONDS
-                )
-            except FutureTimeout as error:
-                raise ProxyError("destination lookup timed out") from error
+            addresses = self.server.resolve_host(host)
             if not addresses:
                 raise ProxyError("destination has no public address")
             upstream = None
@@ -374,7 +376,9 @@ class BrowserProxyServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         require_access_policy: bool = False,
     ) -> None:
         self.active_plan_path = active_plan_path
-        self.access_policy_path = access_policy_path or active_plan_path.with_name("access-policy.json")
+        self.access_policy_path = access_policy_path or active_plan_path.with_name(
+            "access-policy.json"
+        )
         self.require_access_policy = require_access_policy
         self.client_network = ip_network(client_network, strict=True)
         if self.client_network.version != 4:
@@ -385,7 +389,10 @@ class BrowserProxyServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.resolve_addresses = resolve_addresses
         self.identify_client = identify_client
         self.identify_mac = identify_mac or _live_client_mac
-        self.resolver = ThreadPoolExecutor(max_workers=8, thread_name_prefix="proxy-dns")
+        self.resolver = _lookup_pool
+        self._lookup_lock = threading.Lock()
+        self._lookups: Set[Future] = set()
+        self._lookup_closed = False
         self.connections = threading.BoundedSemaphore(32)
         super().__init__(address, _ProxyHandler)
 
@@ -405,9 +412,44 @@ class BrowserProxyServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         finally:
             self.connections.release()
 
+    def resolve_host(self, host: str) -> list:
+        """Admit bounded lookup work and cancel queued work after its request ends."""
+
+        with self._lookup_lock:
+            if self._lookup_closed:
+                raise ProxyError("browser proxy is stopping")
+            future = self.resolver.submit(self.resolve_addresses, host)
+            if future is None:
+                raise ProxyError("destination lookups are busy")
+            self._lookups.add(future)
+        # A completed or cancelled result can call back immediately.
+        future.add_done_callback(self._lookup_finished)
+        try:
+            addresses = future.result(timeout=RESOLVE_TIMEOUT_SECONDS)
+        except FutureTimeout as error:
+            raise ProxyError("destination lookup timed out") from error
+        except CancelledError as error:
+            raise ProxyError("destination lookup was cancelled") from error
+        finally:
+            # The shared pool keeps physical capacity until a worker consumes it.
+            future.cancel()
+        with self._lookup_lock:
+            if self._lookup_closed:
+                raise ProxyError("browser proxy is stopping")
+        return addresses
+
+    def _lookup_finished(self, future: Future) -> None:
+        with self._lookup_lock:
+            self._lookups.discard(future)
+
     def server_close(self) -> None:
+        with self._lookup_lock:
+            self._lookup_closed = True
+            pending = tuple(self._lookups)
+        # Cancellation callbacks acquire the tracking lock, so cancel outside it.
+        for future in pending:
+            future.cancel()
         super().server_close()
-        self.resolver.shutdown(wait=False, cancel_futures=True)
 
 
 def _live_client_mac(address: IPv4Address) -> Optional[str]:
