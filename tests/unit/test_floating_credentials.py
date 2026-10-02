@@ -635,6 +635,56 @@ CASES = {
       assert.deepEqual(savedEntry(ADMIN_KEY), {value: "fixture token", expires: clock + DAY});
       assert.equal(rememberNote("admin"), untilNote(clock + DAY));
     """,
+    "the_token_can_be_remembered_for_7_or_30_days_and_the_choice_stays_in_this_browser": r"""
+      const CHOICE_KEY = "jittersim.remembered.duration";
+      element("remember-admin-duration").value = "168";
+      element("remember-admin-duration").dispatchEvent(new Event("change"));
+      assert.equal(storage.get(CHOICE_KEY), "168");
+      assert.equal(storage.has(ADMIN_KEY), false);  // nothing is saved until a token is ticked
+      tick("remember-admin-token", true);
+      assert.match(element("remember-admin-token-note").textContent, /for 7 days once accepted/);
+      enter("admin-token", "fixture token");
+      await clickCheckToken();
+      assert.deepEqual(
+        savedEntry(ADMIN_KEY), {value: "fixture token", expires: clock + 7 * DAY, hours: 168});
+      // A remembered token starts its new time now when the choice changes.
+      clock += DAY;
+      element("remember-admin-duration").value = "720";
+      element("remember-admin-duration").dispatchEvent(new Event("change"));
+      assert.equal(storage.get(CHOICE_KEY), "720");
+      assert.deepEqual(
+        savedEntry(ADMIN_KEY), {value: "fixture token", expires: clock + 30 * DAY, hours: 720});
+      // Back to 24 hours: the entry has the shape every earlier version saved.
+      element("remember-admin-duration").value = "24";
+      element("remember-admin-duration").dispatchEvent(new Event("change"));
+      assert.deepEqual(savedEntry(ADMIN_KEY), {value: "fixture token", expires: clock + DAY});
+      // The router password stays at 24 hours whatever the token uses.
+      element("remember-admin-duration").value = "720";
+      tick("remember-router-password", true);
+      enter("router-admin-password", "fixture password");
+      network = async () => ({ok: true, json: async () => ({result: {ok: true}})});
+      await checkRouterPassword();
+      assert.deepEqual(savedEntry(ROUTER_KEY), {value: "fixture password", expires: clock + DAY});
+    """,
+    "a_page_start_shows_the_saved_hours_or_the_last_choice_and_the_note_names_them": r"""
+      const CHOICE_KEY = "jittersim.remembered.duration";
+      storage.set(CHOICE_KEY, "168");
+      await restoreRememberedCredentials();
+      assert.equal(element("remember-admin-duration").value, "168");
+      const ends = clock + 3 * DAY;
+      storage.set(ADMIN_KEY, JSON.stringify({value: "saved token", expires: ends, hours: 720}));
+      await restoreRememberedCredentials();
+      assert.equal(element("remember-admin-duration").value, "720");
+      assert.equal(rememberNote("admin"), untilNote(ends));
+      clock = ends;
+      syncRememberedCredentials();
+      assert.equal(storage.has(ADMIN_KEY), false);
+      assert.equal(rememberNote("admin"), "Forgot the saved token after 30 days.");
+      // A choice that is not on the list falls back to 24 hours.
+      element("remember-admin-duration").value = "9999";
+      tick("remember-admin-token", true);
+      assert.deepEqual(savedEntry(ADMIN_KEY), {value: "saved token", expires: clock + DAY});
+    """,
     "the_check_on_load_and_other_buttons_keep_the_end_time": r"""
       const ends = clock + 4 * HOUR;  // saved 20 hours ago
       storage.set(ADMIN_KEY, JSON.stringify({value: "saved token", expires: ends}));
@@ -824,13 +874,19 @@ def test_remember_choices_are_offered_for_both_credentials_and_start_off():
         box = re.search(rf'<input[^>]*id="remember-{name}"[^>]*>', panel).group(0)
         assert 'type="checkbox"' in box
         assert "checked" not in box
+        # The token offers 24 hours, 7 days and 30 days. The router password keeps 24 hours.
         assert re.search(
-            rf'<label[^>]*>\s*<input[^>]*id="remember-{name}"[^>]*>\s*Remember for 24 hours',
+            rf'<label[^>]*>\s*<input[^>]*id="remember-{name}"[^>]*>\s*Remember for'
+            + (r"\s*<select" if name == "admin-token" else " 24 hours"),
             panel,
         )
         note = re.search(rf'<p[^>]*id="remember-{name}-note"[^>]*>', panel).group(0)
         assert 'role="status"' in note
     assert "Kept in this page only unless you choose Remember" in panel
+    choice = re.search(r'<select[^>]*id="remember-admin-duration"[^>]*>(.*?)</select>', panel, re.DOTALL)
+    assert re.findall(r'<option value="(\d+)"( selected)?>([^<]*)</option>', choice.group(1)) == [
+        ("24", " selected", "24 hours"), ("168", "", "7 days"), ("720", "", "30 days")]
+    assert "Longer is less safe on a shared computer" in panel
 
 
 def test_remembered_credentials_are_restored_once_at_the_end_of_startup():

@@ -95,7 +95,7 @@ CASES = {
       assert.equal(refreshMessages.length, 1);
       assert.equal(
         refreshMessages[0],
-        "All profiles and household blocking are off. Choose Start with saved settings to run the profiles again. Turn blocking back on under Access rules."
+        "All profiles and household blocking are off. Choose Start to run the profiles again. Turn blocking back on under Access rules."
       );
       for (const id of ACTION_BUTTONS) assert.equal(element(id).disabled, false, id);
       assert.equal(element("panic-button").getAttribute("aria-busy"), "false");
@@ -114,7 +114,7 @@ CASES = {
         refreshMessages[0],
         "Started: 2 devices with a profile · 1 group · 1 protected device stays untouched."
       );
-      assert.equal(element("apply-button").textContent, "Re-apply saved settings");
+      assert.equal(element("apply-button").textContent, "Start");
     """,
     "apply_while_running_says_it_re_applied": r"""
       element("admin-token").value = "fixture token";
@@ -127,7 +127,7 @@ CASES = {
       await flush();
       assert.equal(
         refreshMessages[0],
-        'Re-applied: General profile "Office" for every unprotected device.'
+        'Started: Profile "Office" for every unprotected device.'
       );
     """,
     "apply_without_a_summary_still_confirms": r"""
@@ -153,7 +153,7 @@ CASES = {
         applied: {devices: 1, groups: 0, service_lists: 0, protected: 0, general_profile: null}
       })});
       await flush();
-      assert.equal(element("apply-button").textContent, "Re-apply saved settings");
+      assert.equal(element("apply-button").textContent, "Start");
       assert.equal(element("apply-button").getAttribute("aria-busy"), "false");
     """,
     "reset_and_panic_put_the_button_back_to_start": r"""
@@ -165,7 +165,7 @@ CASES = {
       press("reset-button");
       await flush();
       assert.equal(refreshMessages[0], "Network reset successfully.");
-      assert.equal(element("apply-button").textContent, "Start with saved settings");
+      assert.equal(element("apply-button").textContent, "Start");
     """,
     "apply_message_counts_the_service_lists_the_server_sent": r"""
       element("admin-token").value = "fixture token";
@@ -213,7 +213,7 @@ CASES = {
       assert.equal(element("apply-button").disabled, true);
       renderMode({helper_configured: true});
       assert.equal(
-        element("runtime-summary").textContent, "JitterSim is not running. Choose Start with saved settings."
+        element("runtime-summary").textContent, "Nothing is running. Choose Start."
       );
     """,
     "an_apply_with_nothing_to_shape_says_so_and_names_the_access_rules": r"""
@@ -232,13 +232,13 @@ CASES = {
       await flush();
       assert.equal(
         refreshMessages.at(-1),
-        "Re-applied. No device profiles or service lists are saved yet. Access rules apply."
+        "Started. No device profiles or service lists are saved yet. Access rules apply."
       );
       send({...none, protected: 1, access_rules: true});
       await flush();
       assert.equal(
         refreshMessages.at(-1),
-        "Re-applied. 1 protected device stays untouched. " +
+        "Started. 1 protected device stays untouched. " +
         "No device profiles or service lists are saved yet. Access rules apply."
       );
     """,

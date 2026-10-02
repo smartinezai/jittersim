@@ -220,6 +220,43 @@ ACTION_PATHS = frozenset(
      "/api/access-point/reset-name")
 )
 PUBLIC_READ_PATHS = frozenset(("/", "/api/health"))
+# The product name shown after the token is accepted. The public page never carries it.
+PRODUCT_NAME = "JitterSim"
+PRODUCT_COMMAND = "jittersim"
+DEFAULT_ACCESS_POINT_SSID = "JitterSim"
+
+
+def _neutral_icon() -> bytes:
+    """A 16 by 16 icon file with a plain dark square and a light dot and no name in it."""
+
+    import struct
+    import zlib
+
+    size = 16
+    rows = []
+    for y in range(size):
+        row = bytearray([0])
+        for x in range(size):
+            inside = (x - 7.5) ** 2 + (y - 7.5) ** 2 <= 22
+            row += bytes((112, 183, 255, 255) if inside else (11, 18, 32, 255))
+        rows.append(bytes(row))
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        body = kind + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(b"".join(rows)))
+        + chunk(b"IEND", b"")
+    )
+    directory = struct.pack("<HHH", 0, 1, 1)
+    entry = struct.pack("<BBBBHHII", size, size, 0, 0, 1, 32, len(png), 6 + 16)
+    return directory + entry + png
+
+
+NEUTRAL_ICON = _neutral_icon()
 
 
 # Raw string: JavaScript escapes such as "\n" must reach the browser unchanged.
@@ -228,7 +265,8 @@ DASHBOARD_HTML = r"""<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>jittersim</title>
+  <title>Sign in</title>
+  <link rel="icon" href="/favicon.ico" type="image/x-icon">
   <style>
     :root {
       color-scheme: dark;
@@ -347,8 +385,10 @@ DASHBOARD_HTML = r"""<!doctype html>
       grid-template-columns: auto minmax(0, 1fr) auto;
       align-items: center;
       gap: 0.75rem;
-      width: min(34rem, calc(100vw - 2rem));
-      padding: 0.85rem 1rem;
+      width: min(22rem, calc(100vw - 2rem));
+      max-height: 40vh;
+      overflow-y: auto;
+      padding: 0.7rem 0.85rem;
       border: 1px solid #46627f;
       border-left: 0.3rem solid #70b7ff;
       border-radius: 0.7rem;
@@ -730,7 +770,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     .credential-help pre { margin-top: 0.6rem; min-height: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
     .credential-note { margin: 0.65rem 0 0; color: #c7d7eb; font-size: 0.82rem; }
     .remember-choice { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.65rem; }
-    .remember-choice input { width: auto; margin: 0; padding: 0; }
+    .remember-choice input, .remember-choice select { width: auto; margin: 0; }
+    .remember-choice input { padding: 0; }
     .remember-note:empty { display: none; }
     :root { --sidebar-bg: #0e1a2b; --line: #263b55; --muted: #a8b8ce; --accent: #70b7ff; }
     .app { display: grid; grid-template-columns: 15.5rem minmax(0, 1fr); min-height: 100dvh; }
@@ -1011,14 +1052,20 @@ DASHBOARD_HTML = r"""<!doctype html>
       <input id="admin-token" type="password" autocomplete="off" aria-describedby="token-check-status">
     </label>
     <label class="remember-choice">
-      <input id="remember-admin-token" type="checkbox" autocomplete="off"> Remember for 24 hours
+      <input id="remember-admin-token" type="checkbox" autocomplete="off"> Remember for
+      <select id="remember-admin-duration" autocomplete="off" aria-label="How long to remember the token">
+        <option value="24" selected>24 hours</option>
+        <option value="168">7 days</option>
+        <option value="720">30 days</option>
+      </select>
     </label>
     <p id="remember-admin-token-note" class="credential-note remember-note" role="status"></p>
     <div class="credential-actions">
       <button id="check-admin-token" class="primary" type="button">Check token</button>
       <button id="clear-admin-token" type="button">Clear token</button>
     </div>
-    <p id="token-check-status" class="token-check-status" role="status" aria-live="polite">Enter the token and choose Check token to load diagnostics.</p>
+    <p id="token-check-status" class="token-check-status" aria-live="off">Enter the token and choose Check token to load diagnostics.</p>
+    <p id="remember-length-note" class="credential-note">Longer is less safe on a shared computer: anyone who can use this browser can open the dashboard until the time is up. Choose Clear token to forget it sooner.</p>
     <details class="credential-help">
       <summary>How to get the admin token</summary>
       <pre id="admin-token-help"></pre>
@@ -1043,9 +1090,9 @@ DASHBOARD_HTML = r"""<!doctype html>
     </div>
   </section>
   <div class="app">
-  <aside class="sidebar" aria-label="JitterSim">
+  <aside class="sidebar" id="brand-sidebar" aria-label="Network lab">
     <div class="sidebar-brand">
-      <h1>JitterSim</h1>
+      <h1 id="brand-title">Network lab</h1>
       <span id="mode-badge" class="badge pending">Checking mode...</span>
     </div>
     <nav class="sidebar-nav" aria-label="Sections">
@@ -1075,17 +1122,17 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div class="sidebar-operate">
         <div class="sidebar-actions">
           <div class="sidebar-action-row">
-            <button id="apply-button" class="primary" type="button">Start with saved settings</button>
-            <span class="help-icon" tabindex="0" role="img" aria-label="Start or re-apply saved settings help" data-help="Starts JitterSim with everything you saved: device and group profiles and schedules and limits and service lists and access rules. Then saved changes apply on their own within a few seconds. Reset or Panic stops the profiles. Protected devices stay untouched.">?</span>
+            <button id="apply-button" class="primary" type="button">Start</button>
+            <span class="help-icon" tabindex="0" role="img" aria-label="Start or re-apply saved settings help" data-help="Starts everything you saved: device and group profiles and schedules and limits and service lists and access rules. Then saved changes apply on their own within a few seconds. Reset or Panic stops the profiles. Protected devices stay untouched.">?</span>
           </div>
           <p id="apply-summary" class="apply-summary" aria-live="polite" hidden></p>
           <div class="sidebar-action-row">
             <button id="reset-button" class="danger" type="button">Reset network</button>
-            <span class="help-icon" tabindex="0" role="img" aria-label="Reset network help" data-help="Stops the profiles and removes their rules from the Pi so devices run normally. Household blocking of devices and sites stays on. Your saved settings are kept. Choose Start with saved settings to run them again.">?</span>
+            <span class="help-icon" tabindex="0" role="img" aria-label="Reset network help" data-help="Stops the profiles and removes their rules from the Pi so devices run normally. Household blocking of devices and sites stays on. Your saved settings are kept. Choose Start to run them again.">?</span>
           </div>
         </div>
         <p id="runtime-summary" class="runtime-summary unknown">Check the admin token to view the network state.</p>
-        <p id="message" class="action-message" role="status" aria-live="polite">Ready.</p>
+        <p id="message" class="action-message" aria-live="off" aria-hidden="true" hidden>Ready.</p>
         <button id="panic-button" class="danger panic-button" type="button"
           title="Turn off all profiles and household blocking now. Your saved settings are kept.">
           <span>Panic</span><span id="panic-state" class="credential-state">Turn profiles and blocking off</span>
@@ -1132,8 +1179,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     <ol id="getting-started-steps" class="getting-started-steps"></ol>
   </section>
   <section class="card" aria-labelledby="general-profile-title">
-    <h2 id="general-profile-title">General profile</h2>
-    <p>Apply a saved profile to every device on JitterSim Wi-Fi except those in Unaffected by profiles. New arrivals are included.</p>
+    <h2 id="general-profile-title">Everyone</h2>
+    <p>Apply a saved profile to every device on the test Wi-Fi except Protected devices. New arrivals are included.</p>
     <div class="fields">
       <label>Saved profile
         <select id="general-profile-select" aria-describedby="general-profile-note" disabled>
@@ -1143,9 +1190,9 @@ DASHBOARD_HTML = r"""<!doctype html>
     </div>
     <div class="action-buttons">
       <button id="general-profile-apply" class="primary" type="button" disabled>Apply to all</button>
-      <button id="general-profile-stop" type="button" disabled>Stop general profile</button>
+      <button id="general-profile-stop" type="button" disabled>Stop for everyone</button>
     </div>
-    <p id="general-profile-status" role="status" aria-live="polite">Check the admin token to view the general profile.</p>
+    <p id="general-profile-status" role="status" aria-live="polite">Check the admin token to view the profile for everyone.</p>
     <p id="general-profile-note" class="form-note">The speed limit is shared only by affected devices. Protected devices bypass it completely. Stopping this profile resumes saved device rules. Panic turns all profiles off.</p>
   </section>
   <section class="card connected-card">
@@ -1172,8 +1219,8 @@ DASHBOARD_HTML = r"""<!doctype html>
   <section class="card" data-collapse="open">
       <h2>Everyone else</h2>
       <p class="form-note">Choose a profile for every test Wi-Fi client that isn't a saved
-        device or on the unaffected list. They share one connection, so a speed limit in
-        this profile is shared by all of them. A general profile covers everyone else too,
+        device or on the protected list. They share one connection, so a speed limit in
+        this profile is shared by all of them. A profile set for Everyone covers these clients too,
         so the two cannot be used at the same time.</p>
       <form id="everyone-else-form">
         <div class="fields">
@@ -1189,7 +1236,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   <section class="card connected-card" data-collapse="closed" aria-labelledby="unaffected-title">
     <div class="section-heading">
       <div>
-        <h2 id="unaffected-title">Unaffected by profiles</h2>
+        <h2 id="unaffected-title">Protected devices</h2>
         <p>Saved protection stays active when a device disconnects or changes IP. Global access rules still apply.</p>
       </div>
     </div>
@@ -1212,7 +1259,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         <button type="submit">Save protection</button>
       </form>
     </details>
-    <p class="form-note">Use “Make unaffected” beside a connected device to add it without typing an address. If a device changes its private Wi-Fi MAC, add its new address.</p>
+    <p class="form-note">Use “Protect” beside a connected device to add it without typing an address. If a device changes its private Wi-Fi MAC, add its new address.</p>
   </section>
   </section><!-- /page:devices -->
   <section class="page" id="page-profiles" data-page="profiles" aria-label="Profiles" tabindex="-1" hidden>
@@ -1296,7 +1343,7 @@ DASHBOARD_HTML = r"""<!doctype html>
             <label><span class="field-label">Outage length (seconds)<span class="help-icon" tabindex="0" role="img" aria-label="Outage length help" data-help="How long a selected outage lasts before the device is allowed to use the network again.">?</span></span>
               <input id="profile-outage-duration" type="number" min="0" value="0">
             </label>
-            <label><span class="field-label">Outage check interval (seconds)<span class="help-icon" tabindex="0" role="img" aria-label="Outage interval help" data-help="How often JitterSim checks whether to start a new outage. Set this to 0 to use the reroll interval.">?</span></span>
+            <label><span class="field-label">Outage check interval (seconds)<span class="help-icon" tabindex="0" role="img" aria-label="Outage interval help" data-help="How often the Pi checks whether to start a new outage. Set this to 0 to use the reroll interval.">?</span></span>
               <input id="profile-outage-interval" type="number" min="0" value="0">
             </label>
             <label><span class="field-label">Random seed (optional)<span class="help-icon" tabindex="0" role="img" aria-label="Random seed help" data-help="Makes the random changes repeat exactly. The same seed gives a device the same values in the same order every time. Leaving it empty is the same as 0. Pick another number for a different pattern.">?</span></span>
@@ -1456,7 +1503,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           <label>Reserved IPv4 address
             <input id="device-ip" required placeholder="192.168.50.10">
           </label>
-          <label><span class="field-label">Profile ID<span class="help-icon" tabindex="0" role="img" aria-label="Device profile ID help" data-help="The ID of a profile you already saved. It is the code you typed as Profile ID when saving that profile. Profile menus show it in parentheses after the name.">?</span></span> <input id="device-profile" required></label>
+          <label><span class="field-label">Profile ID<span class="help-icon" tabindex="0" role="img" aria-label="Device profile ID help" data-help="The ID of a profile you already saved. It is the code you typed as Profile ID when saving that profile. Profile menus show the name, and add the code only when two profiles share a name.">?</span></span> <input id="device-profile" required></label>
           <label>MAC address (optional)
             <input id="device-mac" placeholder="aa:bb:cc:dd:ee:ff">
           </label>
@@ -1558,7 +1605,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         <label>Scenario <select id="scenario-start-scenario" required></select></label>
         <label>Applies to <select id="scenario-start-target" required></select></label>
       </div>
-      <p class="form-note">Choose Start with saved settings before starting a scenario. Its clock starts
+      <p class="form-note">Choose Start before starting a scenario. Its clock starts
         when you press Start. A running scenario takes over from schedules, as a timer does.
         For a device, starting a timer or a scenario replaces the other and a device's own
         timer or scenario wins over its group's. Data limits still win.</p>
@@ -1751,7 +1798,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         </label>
         <button type="button" id="service-list-add-observed">Add to hostnames</button>
       </div>
-      <p class="form-note">While a list is on, traffic to its services gets the list's profile instead of the device or general profile. Devices in Unaffected by profiles are not touched. Global access rules still apply. A hostname also matches its subdomains and can only be in one enabled list. Matching follows the DNS answers that devices receive from the Pi, so encrypted DNS, VPNs and apps that use fixed addresses are not covered. Other sites on the same server address are shaped the same way. Check the names a real session uses and add any that are missing. The profile's website list and random outages are not used for service lists.</p>
+      <p class="form-note">While a list is on, traffic to its services gets the list's profile instead of the device or general profile. Protected devices are not touched. Global access rules still apply. A hostname also matches its subdomains and can only be in one enabled list. Matching follows the DNS answers that devices receive from the Pi, so encrypted DNS, VPNs and apps that use fixed addresses are not covered. Other sites on the same server address are shaped the same way. Check the names a real session uses and add any that are missing. The profile's website list and random outages are not used for service lists.</p>
       <button class="primary" type="submit">Save service list</button>
     </form>
     <div id="service-list-list" class="quota-list" aria-live="polite">Enter the admin token to view service lists.</div>
@@ -1906,9 +1953,9 @@ DASHBOARD_HTML = r"""<!doctype html>
   <section class="page" id="page-router" data-page="router" aria-label="Router and Wi-Fi" tabindex="-1" hidden>
     <section class="card wifi-name-card">
     <h2>Wi-Fi name</h2>
-    <p>Restore the Pi's test network name to JitterSim. It keeps the password and security type. Test devices disconnect while Wi-Fi restarts. Use management access.</p>
+    <p>Restore the Pi's test network name to its default. It keeps the password and security type. Test devices disconnect while Wi-Fi restarts. Use management access.</p>
     <button id="reset-wifi-name" type="button" disabled aria-describedby="wifi-reset-status">
-      <span>Reset Wi-Fi name</span><span class="credential-state">Restore JitterSim</span>
+      <span>Reset Wi-Fi name</span><span class="credential-state">Restore default</span>
     </button>
     <p id="wifi-reset-status" class="credential-state" role="status" aria-live="polite">Keep password and security</p>
   </section>
@@ -1936,7 +1983,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     <form id="access-point-form">
       <div class="fields">
         <label>Test network name (SSID)
-          <input id="access-point-ssid" value="JitterSim" maxlength="32" required>
+          <input id="access-point-ssid" value="" maxlength="32" required>
         </label>
         <label>Test network password
           <input id="access-point-password" type="password" minlength="8" maxlength="63" autocomplete="new-password" required>
@@ -1945,7 +1992,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <p class="policy-note">These values configure the Pi with WPA3. To keep the router's security type use Copy router Wi-Fi to Pi. To join the copied network use the router's Wi-Fi password. The password is not saved in the dashboard database.</p>
       <button type="submit">Use these values on the Pi</button>
     </form>
-    <p class="policy-note">To restore the JitterSim name without changing the password, use Reset Wi-Fi name above.</p>
+    <p class="policy-note">To restore the default name without changing the password, use Reset Wi-Fi name above.</p>
   </section>
   <section class="card" data-collapse="open">
     <div class="section-heading">
@@ -1996,14 +2043,14 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div class="traffic-metric"><span>Upload packet rate</span><strong id="traffic-upload-packets">—</strong></div>
       <div class="traffic-metric"><span>Download packet rate</span><strong id="traffic-download-packets">—</strong></div>
       <div class="traffic-metric">
-        <span>Dropped by JitterSim</span><strong id="traffic-drop-rate">—</strong>
+        <span>Dropped by the Pi</span><strong id="traffic-drop-rate">—</strong>
       </div>
       <div class="traffic-metric">
-        <span>Waiting in JitterSim</span><strong id="traffic-queued">—</strong>
+        <span>Waiting on the Pi</span><strong id="traffic-queued">—</strong>
       </div>
     </div>
     <div class="traffic-chart-wrap">
-      <canvas id="traffic-chart" width="900" height="320" role="img" aria-label="Live upload and download rates at JitterSim with configured ISP and device queue limits over the last 60 seconds">Live traffic chart. Check the admin token to begin sampling.</canvas>
+      <canvas id="traffic-chart" width="900" height="320" role="img" aria-label="Live upload and download rates at the Pi with configured ISP and device queue limits over the last 60 seconds">Live traffic chart. Check the admin token to begin sampling.</canvas>
       <div class="traffic-legend" aria-label="Graph legend">
         <span><i class="traffic-key"></i>Upload rate at Pi</span>
         <span><i class="traffic-key download"></i>Download rate at Pi</span>
@@ -2014,9 +2061,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       </div>
     </div>
     <p id="traffic-profile-status" class="traffic-profile-status" role="status" aria-live="polite">Select one device to show its applied default queue limits.</p>
-    <p class="traffic-note">Dropped and waiting show packets JitterSim itself discarded or is still
+    <p class="traffic-note">Dropped and waiting show packets the Pi itself discarded or is still
       delaying, in both directions.</p>
-    <p class="traffic-note">Traffic lines count bytes at JitterSim before its queues. They do not show the speed a device receives. Dashed lines show configured limits. The ISP plan line is shared with household traffic and is not a live measurement of spare capacity. Service-specific queues may use different limits. Only assigned devices are included. Check the admin token to start; sampling pauses when this tab is hidden.</p>
+    <p class="traffic-note">Traffic lines count bytes at the Pi before its queues. They do not show the speed a device receives. Dashed lines show configured limits. The ISP plan line is shared with household traffic and is not a live measurement of spare capacity. Service-specific queues may use different limits. Only assigned devices are included. Check the admin token to start; sampling pauses when this tab is hidden.</p>
   </section>
   <section class="card observations-card" data-collapse="closed">
     <div class="section-heading">
@@ -2078,7 +2125,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       aria-label="Round-trip time of every reply in each run">
       Round-trip chart of the added runs.</canvas>
     <p class="traffic-note">On a device connected to the test Wi-Fi, run
-      <code>jittersim measure --label normal</code>, change the device's profile here, run it again
+      <code id="measure-command">the measure command</code>, change the device's profile here, run it again
       with another label, then add both files. Comparison files stay in this browser. Attaching them to a test session saves a copy on the Pi.</p>
   </section>
   </section><!-- /page:measurements -->
@@ -2365,11 +2412,39 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     const adminTokenHelp = element("admin-token-help");
 
+    // Nothing here may name the product: this text shows before anyone has signed in. The setup
+    // notes hold the exact command.
     adminTokenHelp.textContent =
-      "On your Mac, run this command:\n" +
-      "ssh -t -i ~/.ssh/jittersim_ed25519 jittersim@" + window.location.hostname +
-      " \"sudo sed -n 's/^JITTERSIM_ADMIN_TOKEN=//p' /etc/jittersim/control.env\"\n" +
+      "The token is stored on the Pi. The setup notes show the ssh command that prints it for " +
+      window.location.hostname + ".\n" +
       "Copy the output into this field. Keep the token private.";
+
+    // The product name, the command name and the default Wi-Fi name come from a private route
+    // after the token is accepted. Until then the page stays neutral.
+    let brandInfo = null;
+
+    function applyBrand(signedIn) {
+      const name = signedIn && brandInfo ? brandInfo.name : "";
+      document.title = name || "Sign in";
+      element("brand-title").textContent = name || "Network lab";
+      element("brand-sidebar").setAttribute("aria-label", name || "Network lab");
+      if (!brandInfo) return;
+      element("measure-command").textContent = signedIn
+        ? brandInfo.command + " measure --label normal" : "the measure command";
+      const ssid = element("access-point-ssid");
+      if (signedIn && !ssid.value && document.activeElement !== ssid) ssid.value = brandInfo.default_ssid;
+      // Signed out again: the default name must not stay in a field of the page.
+      if (!signedIn && ssid.value === brandInfo.default_ssid) ssid.value = "";
+    }
+
+    async function loadBrand() {
+      try {
+        brandInfo = await request("/api/brand", "GET");
+        applyBrand(adminTokenVerified);
+      } catch (error) {
+        brandInfo = null;
+      }
+    }
 
     const privateDataPanelIds = [
       "profiles", "devices", "plan", "state", "policies",
@@ -2382,6 +2457,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     function setDashboardUnlocked(allowed) {
       element("private-dashboard").hidden = !allowed;
       element("dashboard-access-list").hidden = !allowed;
+      if (typeof applyBrand === "function") applyBrand(allowed);
       document.body.classList.toggle("dashboard-locked", !allowed);
     }
 
@@ -2516,7 +2592,12 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     let credentialOpener = null;
 
-    const REMEMBER_MS = 24 * 60 * 60 * 1000;
+    const REMEMBER_HOUR_MS = 60 * 60 * 1000;
+
+    // The hours a token can be remembered for. The router password always keeps 24 hours.
+    const REMEMBER_CHOICES = { 24: "24 hours", 168: "7 days", 720: "30 days" };
+
+    const REMEMBER_CHOICE_KEY = "jittersim.remembered.duration";
 
     const REMEMBERED = {
       admin: {
@@ -2649,12 +2730,25 @@ DASHBOARD_HTML = r"""<!doctype html>
       return null;
     }
 
+    // The hours a person chose to remember the token for. Anything else means 24.
+    function rememberHours(kind) {
+      if (kind !== "admin") return 24;
+      const hours = Number(element("remember-admin-duration").value);
+      return REMEMBER_CHOICES[hours] ? hours : 24;
+    }
+
+    // An entry for 24 hours keeps the shape it always had. A longer one adds its hours so the
+    // note that says when it ended can name them.
+    function savedHours(saved) {
+      return saved && REMEMBER_CHOICES[saved.hours] ? saved.hours : 24;
+    }
+
     function saveCredential(kind, value) {
       try {
-        window.localStorage.setItem(
-          REMEMBERED[kind].key,
-          JSON.stringify({ value: value, expires: Date.now() + REMEMBER_MS })
-        );
+        const hours = rememberHours(kind);
+        const entry = { value: value, expires: Date.now() + hours * REMEMBER_HOUR_MS };
+        if (hours !== 24) entry.hours = hours;
+        window.localStorage.setItem(REMEMBERED[kind].key, JSON.stringify(entry));
         return true;
       } catch (error) {
         return false;
@@ -2689,11 +2783,11 @@ DASHBOARD_HTML = r"""<!doctype html>
         let saved = savedCredential(kind);
         let note = "";
         if (saved && saved.expires <= Date.now()) {
+          expiredNotice[kind] = REMEMBER_CHOICES[savedHours(saved)];
           forgetCredential(kind);
           saved = null;
           ownedRemembered[kind] = null;
           box.checked = false;
-          expiredNotice[kind] = true;
         } else if (!box.checked || !value) {
           if (saved && saved.value === ownedRemembered[kind]) {
             forgetCredential(kind);
@@ -2716,11 +2810,11 @@ DASHBOARD_HTML = r"""<!doctype html>
           }
         }
         if (!note && !box.checked && expiredNotice[kind]) {
-          note = "Forgot the saved " + config.noun + " after 24 hours.";
+          note = "Forgot the saved " + config.noun + " after " + expiredNotice[kind] + ".";
         } else if (!note && box.checked) {
           note = saved && saved.value === value
             ? "Remembered until " + rememberedUntil(saved.expires) + "."
-            : "Will be remembered for 24 hours once accepted.";
+            : "Will be remembered for " + REMEMBER_CHOICES[rememberHours(kind)] + " once accepted.";
         }
         element(config.note).textContent = note;
       }
@@ -2728,12 +2822,20 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     function restoreRememberedCredentials() {
       let restoredAdmin = false;
+      // The last choice made in this browser. A saved token below shows its own hours instead.
+      try {
+        const choice = Number(window.localStorage.getItem(REMEMBER_CHOICE_KEY));
+        if (REMEMBER_CHOICES[choice]) element("remember-admin-duration").value = String(choice);
+      } catch (error) {
+        // Storage is blocked, so the default of 24 hours stays.
+      }
       for (const kind of Object.keys(REMEMBERED)) {
         const config = REMEMBERED[kind];
         const saved = savedCredential(kind);
         if (saved && saved.expires > Date.now()) {
           element(config.input).value = saved.value;
           element(config.box).checked = true;
+          if (kind === "admin") element("remember-admin-duration").value = String(savedHours(saved));
           ownedRemembered[kind] = saved.value;
           if (kind === "admin") restoredAdmin = true;
         } else if (!saved) {
@@ -2751,6 +2853,17 @@ DASHBOARD_HTML = r"""<!doctype html>
         expiredNotice[kind] = false;
         updateCredentialStatus();
       });
+    });
+
+    // The choice belongs to this browser. A token that is remembered already starts its new time now.
+    element("remember-admin-duration").addEventListener("change", () => {
+      try {
+        window.localStorage.setItem(REMEMBER_CHOICE_KEY, String(rememberHours("admin")));
+      } catch (error) {
+        // The choice is used for this visit only.
+      }
+      expiredNotice.admin = false;
+      syncRememberedCredentials("admin");
     });
 
     window.addEventListener("storage", (event) => {
@@ -2860,7 +2973,9 @@ DASHBOARD_HTML = r"""<!doctype html>
         setButtonBusy(pendingFormSubmitButton, false);
         pendingFormSubmitButton = null;
       }
-      if (kind) showToast(message, kind);
+      // The toast is the one place a result shows and the one place a screen reader announces it.
+      // The message line above stays only as the last text for scripts and tests.
+      showToast(message, kind || "info");
     }
 
     function resetTrafficHistory() {
@@ -3162,7 +3277,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       element("traffic-profile-status").textContent = selectedDevice === "@all"
         ? "Select one device to see its applied default queue limit. Service-specific limits are not shown."
         : !data.profile_limits_available
-          ? "No plan is running yet. Choose Start with saved settings to see current default queue limits."
+          ? "No plan is running yet. Choose Start to see current default queue limits."
           : !profileAvailable
             ? "The selected device has no applied default queue limits available."
             : deviceLimits.upload_kbit === null && deviceLimits.download_kbit === null
@@ -3192,7 +3307,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         const queueTotals = selectedQueueTotals(counters.queues);
         if (!totals) {
           resetTrafficHistory();
-          element("traffic-status").textContent = "No counters yet. Assign a profile and choose Start with saved settings.";
+          element("traffic-status").textContent = "No counters yet. Assign a profile and choose Start.";
           return;
         }
         const sampledAt = performance.now();
@@ -3294,11 +3409,13 @@ DASHBOARD_HTML = r"""<!doctype html>
       toast.setAttribute("aria-live", kind === "error" ? "assertive" : "polite");
       icon.textContent = kind === "success" ? "✓" : kind === "error" ? "!" : "";
       toast.hidden = false;
-      if (kind === "success") {
+      // Results leave on their own so they never sit on the row buttons. A problem stays longer
+      // and the working message waits for its result.
+      if (kind !== "working") {
         toastTimer = window.setTimeout(() => {
           toast.hidden = true;
           toastTimer = null;
-        }, 6000);
+        }, kind === "error" ? 15000 : 6000);
       }
     }
 
@@ -3782,12 +3899,12 @@ DASHBOARD_HTML = r"""<!doctype html>
         (generalState.active === true || state === "unknown");
       const generalName = generalProfile ? generalProfile.name || generalProfile.id : "";
 
-      let general = {text: "General profile: none", tone: "muted"};
+      let general = {text: "Everyone: none", tone: "muted"};
       if (generalProfile) {
         general = generalInEffect
-          ? {text: "General profile: " + generalName + " · active", tone: "on"}
+          ? {text: "Everyone: " + generalName + " · active", tone: "on"}
           : {
-              text: "General profile: " + generalName + " · " +
+              text: "Everyone: " + generalName + " · " +
                 (state === "reset" ? "paused" : "saved, not applied"),
               tone: "muted"
             };
@@ -3945,7 +4062,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       const parts = [];
       if (input.generalProfileName) {
         // The server runs the enabled service lists together with the general profile.
-        parts.push('General profile "' + input.generalProfileName + '" for every unprotected device');
+        parts.push('Profile "' + input.generalProfileName + '" for every unprotected device');
       } else {
         if (input.devices > 0) {
           parts.push(count(input.devices, "device", "devices") + " with a profile");
@@ -3978,7 +4095,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function startedText(input, wasRunning) {
-      const lead = wasRunning ? "Re-applied" : "Started";
+      const lead = "Started";
       if (hasProfilesOrLists(input)) return lead + ": " + applySummary(input) + ".";
       const sentences = [lead + "."];
       if (input.protected > 0) sentences.push(protectedDevicesText(input.protected) + ".");
@@ -4010,7 +4127,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           return {text: "Off. No traffic shaping is running.", tone: "muted"};
         }
         if (state === "unknown") {
-          return {text: "JitterSim is not running. Choose Start with saved settings.", tone: "pending"};
+          return {text: "Nothing is running. Choose Start.", tone: "pending"};
         }
         if (state === "error") {
           return options.lastAction === "reset"
@@ -4027,10 +4144,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       return {text: "State unknown.", tone: "muted"};
     }
 
+    // One word for one idea: Start both begins the saved settings and applies them again.
     function applyButtonLabel(state, running) {
-      const keepsRunning = state === "applied" || state === "unknown" || state === "error" ||
-        state === "applying" || state === "resetting";
-      return running === true && keepsRunning ? "Re-apply saved settings" : "Start with saved settings";
+      return "Start";
     }
 
     function currentApplyLabel() {
@@ -4121,7 +4237,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         disableApply,
         disableGroupSelect,
         disableGroupButton,
-        protectionLabel: protectedRow ? "Remove protection" : "Make unaffected"
+        protectionLabel: protectedRow ? "Stop protecting" : "Protect"
       };
     }
 
@@ -4204,7 +4320,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         const details = document.createElement("div");
         const address = document.createElement("p");
         address.className = "connected-address";
-        address.textContent = device.display_name || "Unnamed client";
+        address.textContent = device.display_name || device.ipv4_address || device.mac_address;
         const metadata = document.createElement("p");
         metadata.className = "connected-meta";
         const metadataParts = [device.ipv4_address || "IP address pending", device.mac_address];
@@ -4220,11 +4336,15 @@ DASHBOARD_HTML = r"""<!doctype html>
         );
         const assignmentInfo = document.createElement("p");
         assignmentInfo.className = "connected-meta";
-        assignmentInfo.textContent = device.unaffected ? "Unaffected by all profiles and quotas · Traffic is not monitored" :
-          device.general_profile_name ? "General profile: " + device.general_profile_name +
-            " · Shared speed limit · Saved device rules paused" :
-          "Base profile: " + (device.assigned_profile_id || "Unassigned") +
-          (device.group_name ? " · Group: " + device.group_name + (device.group_profile_id ? " (override: " + device.group_profile_id + ")" : "") : "");
+        const savedProfileName = (id) => {
+          const found = profiles.find((candidate) => candidate.id === id);
+          return found ? found.name : id;
+        };
+        assignmentInfo.textContent = device.unaffected ? "Protected from all profiles and quotas · Traffic is not monitored" :
+          device.general_profile_name ? "Same as everyone: " + device.general_profile_name +
+            " · Shared speed limit" :
+          "Profile: " + (device.assigned_profile_id ? savedProfileName(device.assigned_profile_id) : "None") +
+          (device.group_name ? " · Group: " + device.group_name + (device.group_profile_id ? " (override: " + savedProfileName(device.group_profile_id) + ")" : "") : "");
         details.append(address, metadata, deviceType, assignmentInfo);
         connectedRowHooks.forEach((hook) => hook(device, details));
         if (device.hostname) {
@@ -4303,7 +4423,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         profiles.forEach((profile) => {
           const option = document.createElement("option");
           option.value = profile.id;
-          option.textContent = profile.name + " (" + profile.id + ")";
+          option.textContent = profiles.filter((other) => other.name === profile.name).length > 1 ? profile.name + " (" + profile.id + ")" : profile.name;
           option.selected = profile.id === device.assigned_profile_id;
           profileSelect.appendChild(option);
         });
@@ -4372,7 +4492,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         protectionButton.addEventListener("click", () => connectedControlAction(
           device.unaffected ? "/api/unaffected-devices/delete" : "/api/unaffected-devices",
           {mac_address: device.mac_address, display_name: device.display_name || ""}, protectionButton,
-          device.unaffected ? "Protection removed. Saved profiles can apply again." : "Protection saved and applied. This device is unaffected by profiles."
+          device.unaffected ? "Stopped protecting this device. Saved profiles can apply again." : "Protected. Profiles no longer affect this device."
         ));
         controls.append(profileSelect, applyButton, groupSelect, groupButton, protectionButton);
         if (rowState.protectedRow) {
@@ -4416,7 +4536,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         const details = document.createElement("div");
         const name = document.createElement("p");
         name.className = "connected-address";
-        name.textContent = label.display_name || "Unnamed client";
+        name.textContent = label.display_name || label.mac_address;
         const mac = document.createElement("p");
         mac.className = "connected-meta";
         mac.textContent = label.mac_address;
@@ -4519,7 +4639,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           profile_id: profileId
         });
         clearConnectedDrafts.add(device.mac_address);
-        refreshAfterSuccess((result.message || "Base profile saved and applied.") + (result.warning ? " " + result.warning : ""));
+        refreshAfterSuccess((result.message || "Profile saved and applied.") + (result.warning ? " " + result.warning : ""));
       } catch (error) {
         showMessage(error.message, "error");
         await loadConnectedDevices();
@@ -4552,7 +4672,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         renderApplySummary();
         container.replaceChildren();
         if (!data.devices.length) {
-          container.textContent = "No devices are protected. Choose Make unaffected beside a connected client.";
+          container.textContent = "No devices are protected. Choose Protect beside a connected client.";
         }
         data.devices.forEach((device) => {
           const row = document.createElement("div");
@@ -4560,16 +4680,16 @@ DASHBOARD_HTML = r"""<!doctype html>
           const name = document.createElement("div");
           const title = document.createElement("p");
           title.className = "connected-address";
-          title.textContent = device.display_name || "Unnamed device";
+          title.textContent = device.display_name || device.mac_address;
           const mac = document.createElement("p");
           mac.className = "connected-meta";
           mac.textContent = device.mac_address;
           name.append(title, mac);
           const button = document.createElement("button");
           button.type = "button";
-          button.textContent = "Remove protection";
-          button.setAttribute("aria-label", "Remove protection for " + (device.display_name || device.mac_address));
-          button.addEventListener("click", () => connectedControlAction("/api/unaffected-devices/delete", {mac_address: device.mac_address}, button, "Protection removed. Saved profiles can apply again."));
+          button.textContent = "Stop protecting";
+          button.setAttribute("aria-label", "Stop protecting for " + (device.display_name || device.mac_address));
+          button.addEventListener("click", () => connectedControlAction("/api/unaffected-devices/delete", {mac_address: device.mac_address}, button, "Stopped protecting this device. Saved profiles can apply again."));
           row.append(name, button);
           container.appendChild(row);
         });
@@ -4728,8 +4848,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       return { label: label, disabled: disabled, ariaLabel: label + " " + domain };
     }
 
-    const ENFORCE_NOTE = "It applies on its own while JitterSim is running. " +
-      "After Reset or Panic choose Start with saved settings. After Panic also turn household blocking back on.";
+    const ENFORCE_NOTE = "It applies on its own while profiles are running. " +
+      "After Reset or Panic choose Start. After Panic also turn household blocking back on.";
 
     function queryCountText(count) {
       return count + (count === 1 ? " query" : " queries");
@@ -6053,7 +6173,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         profiles.forEach((profile) => {
           const option = document.createElement("option");
           option.value = profile.id;
-          option.textContent = profile.name + " (" + profile.id + ")";
+          option.textContent = profiles.filter((other) => other.name === profile.name).length > 1 ? profile.name + " (" + profile.id + ")" : profile.name;
           profileSelect.appendChild(option);
         });
         // Rebuilding the menu must not change a choice being edited.
@@ -6078,9 +6198,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
       const status = element("general-profile-status");
       status.textContent = !data.profile
-        ? profiles.length ? "No general profile. Saved device rules apply when profiles are on." : "Create a saved profile on the Profiles page to use this control."
+        ? profiles.length ? "Nothing set for everyone. Saved device rules apply when profiles are on." : "Create a saved profile on the Profiles page to use this control."
         : data.active ? "Active: " + data.profile.name + ". Applies to every unprotected device."
-        : data.state.observed_state === "reset" ? "Paused: " + data.profile.name + ". Choose Apply to all or Start with saved settings to resume."
+        : data.state.observed_state === "reset" ? "Paused: " + data.profile.name + ". Choose Apply to all or Start to resume."
         : data.state.observed_state === "error" ? "Saved: " + data.profile.name + ". Network update failed. Retry Apply to all."
         : "Saved: " + data.profile.name + ". Apply to all to start.";
       updateTrafficDeviceOptions(savedDevices);
@@ -6372,7 +6492,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       (data.rows || []).forEach((item) => {
         const row = document.createElement("tr");
         const device = document.createElement("td");
-        device.textContent = (item.display_name || item.device_name) + " (" + item.device_id + ")";
+        device.textContent = item.display_name || item.device_name;
         const domain = document.createElement("td");
         domain.className = "analytics-domain";
         domain.textContent = item.domain;
@@ -6425,7 +6545,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         (deviceData.devices || []).forEach((device) => {
           const option = document.createElement("option");
           option.value = device.id;
-          option.textContent = deviceDisplayName(device) + " (" + device.id + ")";
+          option.textContent = deviceDisplayName(device);
           option.selected = device.id === selectedDevice;
           deviceSelect.appendChild(option);
         });
@@ -6547,6 +6667,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           await startTrafficSampling();
           if (tokenRevision !== adminTokenRevision) return;
           if (typeof syncImpact === "function") syncImpact();
+          if (typeof loadBrand === "function") loadBrand();
         } else {
           adminTokenVerified = false;
           adminTokenRejected = true;
@@ -6648,7 +6769,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     function appliedMessage(data, wasRunning) {
       const applied = data.applied;
       if (!applied) {
-        return wasRunning ? "Re-applied your saved settings." : "Started with your saved settings.";
+        return "Started with your saved settings.";
       }
       return startedText({
         devices: applied.devices,
@@ -6674,7 +6795,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     element("panic-button").addEventListener("click", () => {
       runAction(
         "/api/normal-access",
-        "All profiles and household blocking are off. Choose Start with saved settings to run the profiles again. Turn blocking back on under Access rules.",
+        "All profiles and household blocking are off. Choose Start to run the profiles again. Turn blocking back on under Access rules.",
         "Turning everything off..."
       );
     });
@@ -6686,12 +6807,12 @@ DASHBOARD_HTML = r"""<!doctype html>
       const path = stop ? "/api/general-profile/stop" : "/api/general-profile";
       savedProfileBusy = rowProfileId ? { id: rowProfileId, stop: stop } : null;
       setActionBusy(true, path);
-      showMessage(stop ? "Stopping the general profile..." : "Applying the profile to all unprotected devices...", "working");
+      showMessage(stop ? "Stopping the profile for everyone..." : "Applying the profile to all unprotected devices...", "working");
       try {
         await request(path, "POST", stop ? {} : {profile_id: profileId});
         refreshAfterSuccess(stop
-          ? "General profile stopped. Saved device rules resumed."
-          : "General profile applied. Protected devices remain unaffected.");
+          ? "Stopped the profile for everyone. Saved device rules resumed."
+          : "Profile applied for everyone. Protected devices keep normal access.");
       } catch (error) {
         showMessage(error.message, "error");
       } finally {
@@ -7109,7 +7230,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         refreshAfterSuccess(
           result.live_applied
             ? "Timer started and the profile is active now."
-            : "Timer saved. Choose Start with saved settings to start it.",
+            : "Timer saved. Choose Start to start it.",
         );
       } catch (error) {
         showMessage(error.message, "error");
@@ -7141,7 +7262,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         refreshAfterSuccess(
           result.live_applied
             ? "Progression started and is active now."
-            : "Progression saved. Choose Start with saved settings to start it.",
+            : "Progression saved. Choose Start to start it.",
         );
       } catch (error) {
         showMessage(error.message, "error");
@@ -7470,7 +7591,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     element("reset-wifi-name").addEventListener("click", async (event) => {
       if (wifiResetPending || !helperConfigured) return;
-      if (!window.confirm("Restore the Wi-Fi name to JitterSim? The password and security type stay the same. Test clients will disconnect while Wi-Fi restarts.")) return;
+      if (!window.confirm("Restore the default Wi-Fi name? The password and security type stay the same. Test clients will disconnect while Wi-Fi restarts.")) return;
       const button = event.currentTarget;
       const status = element("wifi-reset-status");
       wifiResetPending = true;
@@ -7482,7 +7603,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         // The restored name replaces what was typed. Without this the next refresh
         // puts the typed name back and a later save sends it to the access point.
         clearDraft("access-point-form");
-        status.textContent = "JitterSim restored using " + response.result.security + ". Password unchanged.";
+        status.textContent = "Default Wi-Fi name restored using " + response.result.security + ". Password unchanged.";
         showMessage(status.textContent, "success");
       } catch (error) {
         status.textContent = error.message;
@@ -8175,8 +8296,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       if (!everyoneElse.profile_id && !condition) return null;
       return {
         cells: [
-          ["Everyone else", "Test Wi-Fi clients that aren't saved or unaffected"],
-          ["Any address", everyoneElse.unaffected_devices.length + " unaffected"],
+          ["Everyone else", "Test Wi-Fi clients that aren't saved or protected"],
+          ["Any address", everyoneElse.unaffected_devices.length + " protected"],
           appliedProfileCell(
             everyoneElse.profile_id ? profileName(everyoneElse.profile_id) : "None", condition
           ),
@@ -8187,7 +8308,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     // A saved profile that is paused because the device is protected or cannot be
-    // checked against the Unaffected list is never shown as applied or degraded.
+    // checked against the Protected list is never shown as applied or degraded.
     function deviceIsPaused(device) {
       return !!device && (device.effective_state === "protected" || device.effective_state === "unverified");
     }
@@ -8201,11 +8322,11 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     function deviceStateCell(device) {
       if (device.effective_state === "protected") {
-        return ["Protected: profile paused", "Unaffected by profiles · Traffic is not monitored"];
+        return ["Protected: profile paused", "Protected from profiles · Traffic is not monitored"];
       }
       if (device.effective_state === "unverified") {
         return ["Profile paused", device.effective_note ||
-          "This saved device has no MAC address so JitterSim cannot check it against the Unaffected list."];
+          "This saved device has no MAC address so the Pi cannot check it against the Protected list."];
       }
       return deviceConditionCell(device.id);
     }
@@ -8490,7 +8611,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       element("schedule-start").value = formatMinute(schedule.start_minute);
       element("schedule-end").value = formatMinute(schedule.end_minute);
       element("schedule-enabled").checked = schedule.enabled;
-      element("schedule-form").scrollIntoView({ behavior: "smooth", block: "center" });
+      element("schedule-form").scrollIntoView({ behavior: (typeof window !== "undefined" && window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"), block: "center" });
     }
 
     let gatewayPersistenceSaved = false;
@@ -8745,7 +8866,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           return;
         }
         if (!validMeasurement(run)) {
-          showMessage(file.name + " is not a JitterSim measurement.", "error");
+          showMessage(file.name + " is not a measurement file.", "error");
           return;
         }
         loaded.push(run);
@@ -8788,7 +8909,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       // Configuration-only mode can't apply anything. Any network action counts,
       // so a later Reset doesn't bring the list back.
       if (state.canApply) {
-        steps.push({ text: "Start with saved settings", tab: null, done: Boolean(state.lastAction) });
+        steps.push({ text: "Start", tab: null, done: Boolean(state.lastAction) });
       }
       return steps;
     }
@@ -8845,7 +8966,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         .map((device) => ({
           value: device.mac_address,
           label: [
-            device.display_name || "Unnamed client",
+            device.display_name || device.ipv4_address || device.mac_address,
             device.ipv4_address || "no IP address yet",
             device.mac_address
           ].join(" · ")
@@ -8936,9 +9057,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       if (device.assigned_profile_id) {
         const saved = "Saved device: " + profileName(device.assigned_profile_id);
         // A saved device keeps its own profile even when its address is listed.
-        return device.unaffected ? saved + " (also on the unaffected list)" : saved;
+        return device.unaffected ? saved + " (also on the protected list)" : saved;
       }
-      if (device.unaffected) return "Unaffected";
+      if (device.unaffected) return "Protected";
       // The profile everyone else gets this minute, which a schedule can set.
       if (everyoneElse.active_profile_id) {
         return "Everyone else: " + profileName(everyoneElse.active_profile_id);
@@ -8949,20 +9070,20 @@ DASHBOARD_HTML = r"""<!doctype html>
     function savedChangeMessage(message, result) {
       if (result.live_applied !== false) return message;
       return helperConfigured
-        ? message + " The network is reset, so choose Start with saved settings to use it."
+        ? message + " The network is reset, so choose Start to use it."
         : message + " It takes effect when the dashboard runs in hardware mode.";
     }
 
     async function keepUnaffected(macAddress, name, button) {
       if (button) setButtonBusy(button, true);
-      showMessage("Adding " + macAddress + " to the unaffected list...", "working");
+      showMessage("Adding " + macAddress + " to the protected list...", "working");
       try {
         const result = await request("/api/unaffected-devices", "POST", {
           mac_address: macAddress,
           name: name
         });
         refreshAfterSuccess(savedChangeMessage(
-          "Added " + result.unaffected_device.name + " to the unaffected list.", result
+          "Added " + result.unaffected_device.name + " to the protected list.", result
         ));
         return true;
       } catch (error) {
@@ -8977,7 +9098,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       deleteItem(
         "/api/unaffected-devices/delete",
         { mac_address: macAddress },
-        "Removed from the unaffected list.",
+        "Removed from the protected list.",
         button
       );
     }
@@ -9114,7 +9235,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       profiles.forEach((profile) => {
         const option = document.createElement("option");
         option.value = profile.id;
-        option.textContent = profile.name + " (" + profile.id + ")";
+        option.textContent = profiles.filter((other) => other.name === profile.name).length > 1 ? profile.name + " (" + profile.id + ")" : profile.name;
         profileSelect.appendChild(option);
       });
       if (step.profile_id) profileSelect.value = step.profile_id;
@@ -9220,7 +9341,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       element("scenario-name").value = scenario.name;
       element("scenario-loop").checked = scenario.loop;
       renderScenarioSteps(scenario.steps);
-      element("scenario-form").scrollIntoView({ behavior: "smooth", block: "center" });
+      element("scenario-form").scrollIntoView({ behavior: (typeof window !== "undefined" && window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"), block: "center" });
     }
 
     function renderScenarioRuns(runs) {
@@ -9897,12 +10018,14 @@ DASHBOARD_HTML = r"""<!doctype html>
       if (typeof syncImpact === "function") syncImpact();
     }
 
+    // The page carries only the short card name. The browser storage key keeps its old prefix so
+    // saved open and closed cards stay as they were.
     function storedCardState(key) {
-      try { return window.localStorage.getItem(key); } catch (error) { return null; }
+      try { return window.localStorage.getItem("jittersim.card." + key); } catch (error) { return null; }
     }
 
     function storeCardState(key, open) {
-      try { window.localStorage.setItem(key, open ? "open" : "closed"); } catch (error) { /* private window */ }
+      try { window.localStorage.setItem("jittersim.card." + key, open ? "open" : "closed"); } catch (error) { /* private window */ }
     }
 
     function setCardOpen(card, open, remember) {
@@ -9932,7 +10055,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         toggle.setAttribute("aria-controls", body.id);
         while (title.firstChild) toggle.appendChild(title.firstChild);
         title.appendChild(toggle);
-        card.dataset.cardKey = "jittersim.card." + title.textContent.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
+        card.dataset.cardKey = title.textContent.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
         toggle.addEventListener("click", () => setCardOpen(card, body.hidden, true));
         setCardOpen(card, cardStartsOpen(storedCardState(card.dataset.cardKey), card.dataset.collapse), false);
       });
@@ -9949,6 +10072,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
       target.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "center" });
     }
+
 
     function syncDeviceChip() {
       const chip = document.getElementById("nav-devices-count");
@@ -10039,7 +10163,7 @@ def _device_title(
 
 
 IMPACT_NO_HELPER_MESSAGE = "Impact needs the Pi helper."
-IMPACT_RESET_MESSAGE = "Network is reset. Choose Start with saved settings to start impact checks."
+IMPACT_RESET_MESSAGE = "Network is reset. Choose Start to start impact checks."
 IMPACT_OUT_OF_DATE_MESSAGE = (
     "The networking helper is out of date. Update it to see the impact check."
 )
@@ -10056,7 +10180,7 @@ def _impact_queue_name(
     """Name one queue of the impact check and say what kind of queue it is."""
 
     if queue_id == GENERAL_QUEUE_ID:
-        return "General profile", "General profile"
+        return "Everyone", "Everyone"
     for prefix, label in (("quota:", "Service quota"), ("assignment:", "Browser service profile")):
         if queue_id.startswith(prefix):
             return f"{label} {queue_id[len(prefix):]}", label
@@ -10127,7 +10251,7 @@ def _connected_device_payload(
         "display_name": (
             saved_label["display_name"]
             if saved_label and saved_label["display_name"]
-            else hostname or "Unnamed client"
+            else hostname or device.get("ipv4_address") or mac_address
         ),
         "saved_display_name": saved_label["display_name"] if saved_label else "",
         "saved_device_type": saved_label["device_type"] if saved_label else "",
@@ -10780,6 +10904,14 @@ class ControlServer(HTTPServer):
             return workflow
         if path == "/":
             return HTTPStatus.OK, "text/html; charset=utf-8", DASHBOARD_HTML.encode("utf-8")
+        if path == "/favicon.ico":
+            return HTTPStatus.OK, "image/x-icon", NEUTRAL_ICON
+        if path == "/api/brand":
+            return HTTPStatus.OK, "application/json", _json_bytes({
+                "name": PRODUCT_NAME,
+                "command": PRODUCT_COMMAND,
+                "default_ssid": DEFAULT_ACCESS_POINT_SSID,
+            })
         if path == "/api/health":
             helper_reachable = False
             if self.helper_client is not None:
@@ -11313,7 +11445,7 @@ class ControlServer(HTTPServer):
                         "message": (
                             "Live traffic needs hardware mode."
                             if self.helper_client is None
-                            else "Network is reset. Choose Start with saved settings to start traffic measurements."
+                            else "Network is reset. Choose Start to start traffic measurements."
                         ),
                         "devices": {},
                         "isp_limits": isp_limits,
@@ -11373,7 +11505,7 @@ class ControlServer(HTTPServer):
                 "connected_clients": None,
                 "traffic_counters": None,
                 "traffic_counters_message": (
-                    "Network is reset. Choose Start with saved settings to start traffic measurements."
+                    "Network is reset. Choose Start to start traffic measurements."
                     if runtime.observed_state == "reset"
                     else None
                 ),
@@ -11696,7 +11828,7 @@ class ControlServer(HTTPServer):
                     {
                         "timer": _timer_payload(timer),
                         "live_applied": False,
-                        "message": "timer saved; choose Start with saved settings in hardware mode to start it",
+                        "message": "timer saved; choose Start in hardware mode to start it",
                     }
                 )
             status, content_type, body = self._apply_after_change()
@@ -11774,7 +11906,7 @@ class ControlServer(HTTPServer):
                             now=int(time.time()),
                         ),
                         "live_applied": False,
-                        "message": "progression saved; choose Start with saved settings in hardware mode to start it",
+                        "message": "progression saved; choose Start in hardware mode to start it",
                     }
                 )
             status, content_type, body = self._apply_after_change()
@@ -12430,7 +12562,7 @@ class ControlServer(HTTPServer):
                     "error": (
                         "Traffic can only be scanned while at most "
                         f"{MAX_PROTECTED_MACS} devices are protected. "
-                        "Remove some from the Unaffected list."
+                        "Remove some from the Protected list."
                     )
                 }
             )
@@ -12643,7 +12775,7 @@ class ControlServer(HTTPServer):
         ) + sum(item.enabled for item in self.repository.list_service_lists())
         if rules > 15:
             raise PlanError(
-                "At most 15 affected devices, service rules and service lists can be active. Remove one or keep the device unaffected."
+                "At most 15 affected devices, service rules and service lists can be active. Remove one or keep the device protected."
             )
         compile_stored_plan(repository=self.repository)
 
@@ -12680,7 +12812,7 @@ class ControlServer(HTTPServer):
                     {
                         **fields,
                         "live_applied": False,
-                        "message": "Saved. The network is reset, so choose Start with saved settings to use it.",
+                        "message": "Saved. The network is reset, so choose Start to use it.",
                     }
                 ),
             )
@@ -12853,7 +12985,7 @@ class ControlServer(HTTPServer):
                     if remove:
                         if not self.repository.delete_unaffected_device(item.mac_address):
                             return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
-                                {"error": f"{item.mac_address} is not on the unaffected list"}
+                                {"error": f"{item.mac_address} is not on the protected list"}
                             )
                     else:
                         self.repository.save_unaffected_device(item)
@@ -12897,7 +13029,7 @@ class ControlServer(HTTPServer):
                         mac = normalize_exempt_mac(client["mac_address"])
                         if mac in protected_macs:
                             raise ValueError(
-                                "This device is unaffected by profiles. Remove its protection before adding it to a group."
+                                "This device is protected from profiles. Stop protecting it before adding it to a group."
                             )
                         saved = self.repository.get_device_by_mac_address(mac)
                         base_profile = saved.profile_id if saved else profile_id
@@ -12943,11 +13075,13 @@ class ControlServer(HTTPServer):
             )
 
     def _base_profile_feedback(self, device: Device) -> str:
+        saved_profile = self.repository.get_profile(device.profile_id)
+        profile_label = saved_profile.name if saved_profile is not None else device.profile_id
         general = self.repository.get_general_profile()
         if general is not None:
             return (
-                f"Base profile {device.profile_id} saved. General profile {general.name} "
-                "takes priority when profiles are active. Stop it to resume saved device rules."
+                f"Profile {profile_label} saved for this device. Everyone uses {general.name}, which "
+                "takes priority while profiles are on. Stop it to use the saved device profile."
             )
         now = int(time.time())
         group = next(
@@ -12997,7 +13131,7 @@ class ControlServer(HTTPServer):
             current = f"Group {group.name} currently uses {group.profile_id}."
         else:
             current = "This is the current device profile."
-        return f"Base profile {device.profile_id} saved. " + current
+        return f"Profile {profile_label} saved for this device. " + current
 
     def _apply_profile_to_connected_device(self, payload: dict):
         if self.helper_client is None:
@@ -13019,7 +13153,7 @@ class ControlServer(HTTPServer):
                     item.mac_address for item in self.repository.list_unaffected_devices()
                 }:
                     raise ValueError(
-                        "This device is unaffected by profiles. Remove its protection before applying a profile."
+                        "This device is protected from profiles. Stop protecting it before applying a profile."
                     )
                 self._verify_selected_client(device, snapshot)
                 if self.scheduler:
@@ -13168,7 +13302,7 @@ class ControlServer(HTTPServer):
             or self.scheduler.applied_plan() is None
         ):
             return HTTPStatus.CONFLICT, "application/json", _json_bytes(
-                {"error": "Choose Start with saved settings before starting a scenario."}
+                {"error": "Choose Start before starting a scenario."}
             )
         if run.everyone_else and not self._everyone_else_counted():
             capacity_error = self._capacity_error(adding=1)
@@ -13181,10 +13315,10 @@ class ControlServer(HTTPServer):
             # Do not let a failed Start count down or resume during recovery.
             self.repository.stop_scenario_run(run.id)
             response["live_applied"] = False
-            response["message"] = "Scenario did not start. Choose Start with saved settings, then start it again."
+            response["message"] = "Scenario did not start. Choose Start, then start it again."
             if status == HTTPStatus.OK:
                 status = HTTPStatus.CONFLICT
-                response["error"] = "Choose Start with saved settings before starting a scenario."
+                response["error"] = "Choose Start before starting a scenario."
         else:
             response["run"] = asdict(run)
             response["live_applied"] = True
@@ -13205,7 +13339,7 @@ class ControlServer(HTTPServer):
                     {
                         key: value,
                         "live_applied": False,
-                        "message": "settings saved; choose Start with saved settings in hardware mode to start them",
+                        "message": "settings saved; choose Start in hardware mode to start them",
                     }
                 ),
             )
@@ -13280,7 +13414,7 @@ class ControlServer(HTTPServer):
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {
                     "live_applied": False,
-                    "message": "saved; the network is reset, so choose Start with saved settings to use it",
+                    "message": "saved; the network is reset, so choose Start to use it",
                 }
             )
         if self.helper_client is not None:
@@ -13297,7 +13431,7 @@ class ControlServer(HTTPServer):
                         "live_applied": False,
                         "message": (
                             "saved; automatic recovery is paused. Check gateway status "
-                            "then choose Start with saved settings when it is safe"
+                            "then choose Start when it is safe"
                         ),
                     }
                 )

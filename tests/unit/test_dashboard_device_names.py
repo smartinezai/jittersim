@@ -96,10 +96,10 @@ def test_the_groups_card_lists_display_names():
 
 def test_the_analytics_picker_and_table_row_use_the_display_name():
     assert (
-        'option.textContent = deviceDisplayName(device) + " (" + device.id + ")";'
+        'option.textContent = deviceDisplayName(device);'
         in function_body("loadRandomWebsiteAnalytics")
     )
     assert (
-        '(item.display_name || item.device_name) + " (" + item.device_id + ")"'
+        'device.textContent = item.display_name || item.device_name;'
         in function_body("renderRandomWebsiteAnalytics")
     )

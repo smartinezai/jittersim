@@ -120,7 +120,7 @@ def run():
                     page.unroute("**/api/general-profile/stop")
                     page.locator("#general-profile-stop").click()
                     expect(page.locator("#general-profile-status")).to_contain_text(
-                        "No general profile"
+                        "Nothing set for everyone"
                     )
                     expect(page.locator("#general-profile-stop")).to_be_disabled()
                     assert not errors, errors

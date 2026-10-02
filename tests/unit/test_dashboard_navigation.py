@@ -18,8 +18,8 @@ OLD_IDS = Path(__file__).with_name("dashboard_ids.txt").read_text().split()
 HTML = DASHBOARD_HTML.split("<script>")[0]
 
 CARD_PAGES = {
-    "Getting started": "devices", "General profile": "devices", "Connected clients": "devices",
-    "Saved devices": "devices", "Everyone else": "devices", "Unaffected by profiles": "devices",
+    "Getting started": "devices", "Everyone": "devices", "Connected clients": "devices",
+    "Saved devices": "devices", "Everyone else": "devices", "Protected devices": "devices",
     "Saved profiles": "profiles", "Save profile": "profiles",
     "Assign a device": "profiles", "Group devices": "profiles",
     "Schedule a profile": "schedules", "Run a profile timer": "schedules", "Scenarios": "schedules",

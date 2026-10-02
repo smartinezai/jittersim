@@ -1,12 +1,35 @@
 """Exercise first enrollment, failures and removal in the served dashboard."""
 
 import os
+import re
 import selectors
 import subprocess
 import sys
 from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
+
+
+NAME = re.compile("jitter\\s*sim", re.IGNORECASE)
+# Everything a person or a screen reader could meet: the title, the text and the attributes of the
+# whole page including the parts that stay hidden until sign-in, but not the script itself.
+MARKUP = """() => {
+  const copy = document.body.cloneNode(true);
+  copy.querySelectorAll('script,style').forEach((node) => node.remove());
+  return [document.title, copy.innerHTML, copy.textContent].join('\\n');
+}"""
+
+
+def check_neutral_before_sign_in(page, base):
+    expect(page).to_have_title("Sign in")
+    page.locator("#open-admin-credentials").click()
+    expect(page.locator("#admin-token-help")).not_to_be_empty()
+    assert not NAME.search(page.evaluate(MARKUP)), "the page names the product before sign-in"
+    assert not NAME.search(page.locator("body").inner_text())
+    page.locator("#close-credentials").click()
+    icon = page.request.get(base + "/favicon.ico")
+    assert icon.status == 200 and icon.headers["content-type"] == "image/x-icon"
+    assert not NAME.search(" ".join(f"{k}: {v}" for k, v in icon.headers.items()))
 
 
 def run():
@@ -31,7 +54,12 @@ def run():
                     requested = []
                     page.on("pageerror", lambda error: errors.append(str(error)))
                     page.on("request", lambda request: requested.append(request.url))
+                    failed = []
+                    page.on("response", lambda response: failed.append((response.status, response.url))
+                            if response.status >= 400 else None)
                     page.goto(f"http://127.0.0.1:{port}")
+                    check_neutral_before_sign_in(page, f"http://127.0.0.1:{port}")
+                    assert not failed, failed  # no 404 for the favicon or anything else
                     expect(page.locator("#private-dashboard")).to_be_hidden()
                     expect(page.locator("#open-router-credentials")).to_be_hidden()
                     page.locator("#open-admin-credentials").click()
@@ -57,6 +85,11 @@ def run():
                     expect(page.locator("#private-dashboard")).to_be_visible()
                     expect(page.locator("#dashboard-access-list")).to_contain_text("Browser Mac")
                     expect(page.locator("#admin-credential-state")).to_contain_text("Accepted")
+                    # After sign-in the page may use the real name and takes it from a private route.
+                    expect(page).to_have_title("JitterSim")
+                    expect(page.locator("#brand-title")).to_have_text("JitterSim")
+                    expect(page.locator("#measure-command")).to_have_text("jittersim measure --label normal")
+                    expect(page.locator("#access-point-ssid")).to_have_value("JitterSim")
                     page.locator("#open-admin-credentials").click()
                     page.locator("#remember-admin-token").check()
                     page.locator("#close-credentials").click()
@@ -70,6 +103,10 @@ def run():
                     page.locator("#dashboard-access-list button").click()
                     expect(page.locator("#private-dashboard")).to_be_hidden()
                     expect(page.locator("#token-check-status")).to_contain_text("Allow this device")
+                    # Signed out again, the name goes away again.
+                    expect(page).to_have_title("Sign in")
+                    expect(page.locator("#brand-title")).to_have_text("Network lab")
+                    assert not NAME.search(page.evaluate(MARKUP))
                     assert not errors, errors
                     context.close()
                 print("Dashboard access browser acceptance passed.")

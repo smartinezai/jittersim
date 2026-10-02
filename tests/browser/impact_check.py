@@ -20,7 +20,7 @@ MAC_ADDRESS = "02:00:00:00:00:01"
 IP_ADDRESS = "192.168.50.184"
 NAME = "Fixture phone"
 HEADERS = {"Authorization": "Bearer browser-test"}
-RESET_MESSAGE = "Network is reset. Choose Start with saved settings to start impact checks."
+RESET_MESSAGE = "Network is reset. Choose Start to start impact checks."
 LOSS_LINE = re.compile(r"Loss: set 10% · actual 9\.9% \((\d+) of (\d+) packets dropped\)")
 SPEED_LINE = re.compile(
     r"Speed: set 250 kbit/s · using \d+ kbit/s · peak \d+ kbit/s · cap reached"

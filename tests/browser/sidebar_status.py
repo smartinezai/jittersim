@@ -44,6 +44,29 @@ def wait_for_automatic_token_check(page):
     )
 
 
+def check_one_message(page, width, height):
+    """A result is said once: in the toast, which is small, in a corner and leaves on its own."""
+
+    toast = page.locator("#toast")
+    expect(toast).to_be_visible()
+    expect(toast).to_contain_text("Token accepted")
+    # The message line keeps the text for scripts but shows nothing and says nothing.
+    expect(page.locator("#message")).to_be_hidden()
+    assert page.locator("#message").get_attribute("aria-hidden") == "true"
+    announcing = page.evaluate(
+        """() => [...document.querySelectorAll(
+          '[role="status"], [role="alert"], [aria-live="polite"], [aria-live="assertive"]')]
+          .filter((node) => !node.closest('[hidden]') && node.getAttribute('aria-hidden') !== 'true'
+                  && node.textContent.includes('Token accepted')).map((node) => node.id)"""
+    )
+    assert announcing == ["toast"], announcing
+    box = toast.bounding_box()
+    assert box["width"] <= 22 * 16 + 1, box
+    assert width - (box["x"] + box["width"]) <= 17 and height - (box["y"] + box["height"]) <= 17, box
+    expect(toast.get_by_role("button", name="Dismiss message")).to_be_visible()
+    expect(toast).to_be_hidden(timeout=9000)
+
+
 def check_width(browser, width, height):
     # a fresh fixture for each width so that each run starts before the first Apply
     process, port = start_fixture()
@@ -89,10 +112,11 @@ def check_width(browser, width, height):
         )
         page.reload()
         wait_for_automatic_token_check(page)
+        check_one_message(page, width, height)
 
         # signed in with nothing applied yet
         expect(status).to_be_visible()
-        expect(page.locator("#status-general")).to_have_text("General profile: none")
+        expect(page.locator("#status-general")).to_have_text("Everyone: none")
         expect(devices_line(page)).to_have_text("Not running")
         expect(page.locator("#status-lists")).to_be_hidden()
         # nothing to open when there is no list of devices
@@ -105,7 +129,7 @@ def check_width(browser, width, height):
         page.locator("#general-profile-select").select_option("slow")
         page.locator("#general-profile-apply").click()
         expect(page.locator("#status-general")).to_have_text(
-            f"General profile: {PROFILE_NAME} · active"
+            f"Everyone: {PROFILE_NAME} · active"
         )
         expect(devices_line(page)).to_have_text("1 device affected")
         page.locator("#status-devices-summary").click()
@@ -155,7 +179,7 @@ def check_width(browser, width, height):
         wait_for_automatic_token_check(page)
         expect(page.locator("#general-profile-status")).to_contain_text("Saved: " + PROFILE_NAME)
         expect(page.locator("#status-general")).to_have_text(
-            f"General profile: {PROFILE_NAME} · active"
+            f"Everyone: {PROFILE_NAME} · active"
         )
         expect(devices_line(page)).to_have_text("1 device affected")
         page.unroute("**/api/state", state_route)
@@ -176,20 +200,20 @@ def check_width(browser, width, height):
         post("/api/reset", {})
         expect(devices_line(page)).to_have_text("Profiles off", timeout=9000)
         expect(page.locator("#status-general")).to_have_text(
-            f"General profile: {PROFILE_NAME} · paused"
+            f"Everyone: {PROFILE_NAME} · paused"
         )
         expect(page.locator("#status-lists")).to_be_hidden()
         post("/api/apply", {})
         expect(devices_line(page)).to_have_text("No connected device is affected", timeout=9000)
         expect(page.locator("#status-general")).to_have_text(
-            f"General profile: {PROFILE_NAME} · active"
+            f"Everyone: {PROFILE_NAME} · active"
         )
 
         # turning every profile off
         page.locator("#panic-button").click()
         expect(devices_line(page)).to_have_text("Profiles off")
         expect(page.locator("#status-general")).to_have_text(
-            f"General profile: {PROFILE_NAME} · paused"
+            f"Everyone: {PROFILE_NAME} · paused"
         )
         page.reload()
         wait_for_automatic_token_check(page)

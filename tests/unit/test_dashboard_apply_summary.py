@@ -59,7 +59,7 @@ STATUS = {
     (False, "applying"): ("Applying…", "working"),
     (False, "resetting"): ("Resetting…", "working"),
     (False, "reset"): ("Off. No traffic shaping is running.", "muted"),
-    (False, "unknown"): ("JitterSim is not running. Choose Start with saved settings.", "pending"),
+    (False, "unknown"): ("Nothing is running. Choose Start.", "pending"),
     (False, "error"): ("The last start failed. Check the Pi and try again.", "error"),
     (False, "applied"): ("Applied. Waiting for the scheduler.", "muted"),
 }
@@ -93,9 +93,9 @@ def test_a_missing_running_flag_counts_as_not_running():
     )
     assert result == [
         {"text": "Applied. Waiting for the scheduler.", "tone": "muted"},
-        {"text": "JitterSim is not running. Choose Start with saved settings.", "tone": "pending"},
-        {"text": "JitterSim is not running. Choose Start with saved settings.", "tone": "pending"},
-        "Start with saved settings",
+        {"text": "Nothing is running. Choose Start.", "tone": "pending"},
+        {"text": "Nothing is running. Choose Start.", "tone": "pending"},
+        "Start",
     ]
 
 
@@ -116,7 +116,7 @@ def test_a_failed_reset_does_not_say_that_the_start_failed():
         {"text": "The last start failed. Check the Pi and try again.", "tone": "error"}
     ] * 4
     # The button still offers the start because nothing is running.
-    assert evaluate('applyButtonLabel("error", false)') == "Start with saved settings"
+    assert evaluate('applyButtonLabel("error", false)') == "Start"
 
 
 @needs_node
@@ -134,7 +134,7 @@ def test_without_the_pi_helper_the_status_says_so(running, state):
 @pytest.mark.parametrize("context", ["{helperConfigured: true}", "{}", "undefined"])
 def test_a_helper_that_is_not_ruled_out_leaves_the_normal_text(context):
     result = evaluate('runtimeStatusText("unknown", false, %s)' % context)
-    assert result == {"text": "JitterSim is not running. Choose Start with saved settings.", "tone": "pending"}
+    assert result == {"text": "Nothing is running. Choose Start.", "tone": "pending"}
 
 
 @needs_node
@@ -143,9 +143,9 @@ def test_a_helper_that_is_not_ruled_out_leaves_the_normal_text(context):
 def test_the_button_says_re_apply_only_while_running(running, state):
     # While it runs the button keeps its name even in the second of an apply or a reset.
     expected = (
-        "Re-apply saved settings"
+        "Start"
         if running and state in ("applied", "unknown", "error", "applying", "resetting")
-        else "Start with saved settings"
+        else "Start"
     )
     assert status_table()[(running, state)]["label"] == expected
 
@@ -195,7 +195,7 @@ def test_the_summary_lists_only_what_is_saved(fields, text):
 
 @needs_node
 def test_a_general_profile_reads_as_a_saved_state_and_keeps_the_service_lists():
-    base = 'General profile "Office slow" for every unprotected device'
+    base = 'Profile "Office slow" for every unprotected device'
     # The server runs enabled service lists together with the general profile.
     assert summary(generalProfileName="Office slow", devices=3, groups=1) == base
     assert summary(generalProfileName="Office slow", serviceLists=1) == base + " · 1 service list"
@@ -217,7 +217,7 @@ def test_the_saved_line_says_saved_and_leaves_the_empty_case_alone():
         "Saved: 1 device with a profile",
         NOTHING,
         "Saved: 1 protected device stays untouched",
-        'Saved: General profile "G" for every unprotected device',
+        'Saved: Profile "G" for every unprotected device',
     ]
 
 
@@ -250,23 +250,23 @@ def started(wasRunning="false", **fields):
          "2 devices with a profile · 1 group · 1 service list"
          " · 1 protected device stays untouched."),
         ({"generalProfileName": "Office"}, "Started: ",
-         'General profile "Office" for every unprotected device.'),
+         'Profile "Office" for every unprotected device.'),
         # access rules alone do not change a message that lists what was started
         ({"devices": 1, "accessRules": True}, "Started: ", "1 device with a profile."),
     ],
 )
 def test_the_message_after_a_start_lists_what_started(fields, lead, rest):
     assert started(**fields) == lead + rest
-    assert started("true", **fields) == "Re-applied: " + rest
+    assert started("true", **fields) == "Started: " + rest
 
 
 @needs_node
 def test_a_start_with_nothing_to_shape_does_not_pretend_to_list_something():
     empty = "No device profiles or service lists are saved yet."
     assert started() == "Started. " + empty
-    assert started("true") == "Re-applied. " + empty
+    assert started("true") == "Started. " + empty
     assert started(accessRules=True) == "Started. " + empty + " Access rules apply."
-    assert started("true", accessRules=True) == "Re-applied. " + empty + " Access rules apply."
+    assert started("true", accessRules=True) == "Started. " + empty + " Access rules apply."
 
 
 @needs_node
@@ -274,7 +274,7 @@ def test_a_start_with_only_protected_devices_says_so_and_that_nothing_else_is_sa
     empty = "No device profiles or service lists are saved yet."
     assert started(protected=1) == "Started. 1 protected device stays untouched. " + empty
     assert started("true", protected=3) == (
-        "Re-applied. 3 protected devices stay untouched. " + empty
+        "Started. 3 protected devices stay untouched. " + empty
     )
     assert started(protected=2, accessRules=True) == (
         "Started. 2 protected devices stay untouched. " + empty + " Access rules apply."
@@ -406,7 +406,7 @@ def test_the_line_names_the_general_profile_as_plain_text_and_counts_the_lists()
         console.log(JSON.stringify(element("apply-summary").textContent));
         """
     )
-    assert out == 'Saved: General profile "<b>Slow</b>" for every unprotected device · 1 service list'
+    assert out == 'Saved: Profile "<b>Slow</b>" for every unprotected device · 1 service list'
 
 
 @needs_node
@@ -534,7 +534,7 @@ def test_a_saved_state_refreshes_the_line_and_the_button_through_the_sidebar_ren
           button: element("apply-button").textContent}));
         """
     )
-    assert out == {"text": "Saved: 1 device with a profile", "button": "Start with saved settings"}
+    assert out == {"text": "Saved: 1 device with a profile", "button": "Start"}
 
 
 def runtime_run(states):
@@ -572,37 +572,37 @@ def test_the_runtime_summary_uses_the_table_and_remembers_the_running_flag():
         {
             "text": "Running. Your saved settings are applied. New changes apply on their own.",
             "className": "runtime-summary applied tone-ok",
-            "button": "Re-apply saved settings",
+            "button": "Start",
             "stored": True,
         },
         {
             "text": "Applied. Waiting for the scheduler.",
             "className": "runtime-summary applied tone-muted",
-            "button": "Start with saved settings",
+            "button": "Start",
             "stored": True,
         },
         {
-            "text": "JitterSim is not running. Choose Start with saved settings.",
+            "text": "Nothing is running. Choose Start.",
             "className": "runtime-summary unknown tone-pending",
-            "button": "Start with saved settings",
+            "button": "Start",
             "stored": True,
         },
         {
             "text": "Off. No traffic shaping is running.",
             "className": "runtime-summary reset tone-muted",
-            "button": "Start with saved settings",
+            "button": "Start",
             "stored": True,
         },
         {
             "text": "The last apply failed. Check the Pi.",
             "className": "runtime-summary error tone-error",
-            "button": "Re-apply saved settings",
+            "button": "Start",
             "stored": True,
         },
         {
             "text": "Running. Your latest change applies on its own.",
             "className": "runtime-summary unknown tone-ok",
-            "button": "Re-apply saved settings",
+            "button": "Start",
             "stored": True,
         },
     ]
@@ -620,7 +620,7 @@ def test_the_runtime_summary_reads_the_last_action_of_the_state():
         "The last reset failed. The Pi may still be shaping. Check it.",
         "The last start failed. Check the Pi and try again.",
     ]
-    assert [row["button"] for row in out] == ["Start with saved settings"] * 2
+    assert [row["button"] for row in out] == ["Start"] * 2
     assert out[0]["className"] == "runtime-summary error tone-error"
 
 
@@ -651,7 +651,7 @@ def test_the_helper_is_not_ruled_out_before_the_health_check_answered():
         console.log(JSON.stringify(element("runtime-summary").textContent));
         """
     )
-    assert out == "JitterSim is not running. Choose Start with saved settings."
+    assert out == "Nothing is running. Choose Start."
 
 
 @needs_node
@@ -667,7 +667,7 @@ def test_the_button_keeps_its_busy_label_while_an_apply_runs():
         console.log(JSON.stringify({during, after: element("apply-button").textContent}));
         """
     )
-    assert out == {"during": "Applying…", "after": "Re-apply saved settings"}
+    assert out == {"during": "Applying…", "after": "Start"}
 
 
 @needs_node
@@ -681,7 +681,7 @@ def test_a_locked_dashboard_goes_back_to_the_start_wording():
         console.log(JSON.stringify({before, after: element("apply-button").textContent}));
         """
     )
-    assert out == {"before": "Re-apply saved settings", "after": "Start with saved settings"}
+    assert out == {"before": "Start", "after": "Start"}
 
 
 def test_the_summary_code_never_writes_html():
@@ -713,7 +713,7 @@ def sidebar_html():
 def test_the_page_starts_with_the_start_wording_and_a_line_for_the_summary():
     dock = sidebar_html()
     button = re.search(r'<button[^>]*id="apply-button"[^>]*>([^<]*)</button>', dock)
-    assert button.group(1) == "Start with saved settings"
+    assert button.group(1) == "Start"
     assert dock.count('id="apply-summary"') == 1
     assert re.search(r'<p id="apply-summary" class="apply-summary"[^>]*></p>', dock)
     assert dock.index('id="apply-button"') < dock.index('id="apply-summary"') < dock.index(
@@ -740,7 +740,7 @@ def test_the_apply_and_reset_buttons_each_have_a_help_icon():
     reset_help = by_label["Reset network help"]
     assert len(apply_help) <= 280
     for fact in (
-        "Starts JitterSim with everything you saved",
+        "Starts everything you saved",
         "device and group profiles",
         "schedules",
         "limits",
@@ -755,7 +755,7 @@ def test_the_apply_and_reset_buttons_each_have_a_help_icon():
         "Stops the profiles and removes their rules from the Pi so devices run normally."
         " Household blocking of devices and sites stays on."
         " Your saved settings are kept."
-        " Choose Start with saved settings to run them again."
+        " Choose Start to run them again."
     )
     # The icon sits right after its button so keyboard users reach it next.
     assert re.search(r'id="apply-button"[^>]*>[^<]*</button>\s*<span class="help-icon"', dock)
