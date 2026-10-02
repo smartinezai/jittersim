@@ -1,12 +1,18 @@
 [Unit]
 Description=JitterSim test Wi-Fi
-Requires=jittersim-access-boot.service jittersim-control-firewall.service
+# Ordering only. The Wi-Fi opens after the management firewall and the saved
+# access rules were tried and comes up even when restoring them failed. A failed
+# restore keeps test traffic closed behind its guard table. Restarting either
+# unit during an install or an update must never restart this one, so there is
+# no Requires= and no ExecStop= that would take the running Wi-Fi down.
+Wants=jittersim-access-boot.service jittersim-control-firewall.service
 After=NetworkManager.service jittersim-access-boot.service jittersim-control-firewall.service
 
 [Service]
 Type=oneshot
+# Never open the test Wi-Fi without the management firewall.
+ExecStartPre=/usr/sbin/nft list table inet jittersim_control
 ExecStart=/usr/bin/nmcli connection up jittersim-ap
-ExecStop=/usr/bin/nmcli connection down jittersim-ap
 RemainAfterExit=yes
 
 [Install]
