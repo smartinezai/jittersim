@@ -822,11 +822,11 @@ DASHBOARD_HTML = r"""<!doctype html>
       .sidebar .sidebar-action-row .help-icon::after { position: fixed; top: auto; bottom: 1rem; left: 16rem; right: auto; width: min(22rem, calc(100vw - 17rem)); }
     }
     /* A short window needs the room for the footer so that Panic and the router switch and the
-       copy buttons stay in view. The sidebar lists nine pages and on a laptop screen the list
-       would push them below the fold. Up to 900px of height the links share a compact row of
-       24px (the smallest comfortable target) and the footer uses tighter gaps. Wider Linux fonts
-       wrap the mode badge and the status lines so the copy buttons need this margin there. */
-    @media (min-width: 48.01rem) and (max-height: 900px) {
+       copy buttons stay in view. The sidebar lists nine pages and on a laptop or a full HD screen
+       the list would push them below the fold. Up to 1000px of height the links share a compact
+       row of 24px (the smallest comfortable target) and the footer uses tighter gaps. Wider Linux
+       fonts wrap the mode badge and the status lines so the footer needs this margin there. */
+    @media (min-width: 48.01rem) and (max-height: 1000px) {
       .sidebar { gap: 0.5rem; padding-block: 0.65rem; }
       .sidebar-brand h1 { font-size: 1.2rem; }
       .sidebar-brand .badge { padding: 0.2rem 0.45rem; font-size: 0.72rem; }
