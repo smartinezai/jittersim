@@ -384,6 +384,19 @@ DASHBOARD_HTML = """<!doctype html>
     }
     .saved-device-labels h3 { margin-top: 0; }
     .saved-device-label-row { grid-template-columns: minmax(0, 1fr) auto auto; }
+    .impact-card { position: relative; }
+    .impact-status { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
+    .impact-note { margin: 0 0 0.75rem; color: #a8b8ce; font-size: 0.82rem; }
+    .impact-list { display: grid; gap: 0.6rem; color: #c4d5e8; font-size: 0.9rem; }
+    .impact-row { padding: 0.75rem; border: 1px solid #2b435f; border-radius: 0.6rem; background: #0d1b2d; }
+    .impact-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.3rem 0.75rem; }
+    .impact-name { color: #edf5ff; font-weight: 700; overflow-wrap: anywhere; }
+    .impact-direction { color: #a8b8ce; font-size: 0.8rem; }
+    .impact-chip { margin-left: auto; padding: 0.1rem 0.6rem; border: 1px solid #46627f; border-radius: 999px; background: #142338; color: #c6dbf4; font-size: 0.75rem; font-weight: 700; white-space: nowrap; }
+    .impact-chip.affected { border-color: #a77b31; background: #3b2a12; color: #f5ca78; }
+    .impact-chip.idle, .impact-chip.too-few, .impact-chip.clean, .impact-chip.unmeasured, .impact-chip.collecting { border-color: #3a4656; background: #111b29; color: #b3c1d3; }
+    .impact-lines { display: grid; gap: 0.15rem; margin: 0.45rem 0 0; padding: 0; list-style: none; color: #c4d5e8; font-size: 0.85rem; }
+    .impact-protected { margin: 0.75rem 0 0; color: #9fb0c4; font-size: 0.8rem; overflow-wrap: anywhere; }
     .saved-profile-row {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
@@ -1791,6 +1804,16 @@ DASHBOARD_HTML = """<!doctype html>
     </section>
   </section><!-- /page:access -->
   <section class="page" id="page-diagnostics" data-page="diagnostics" aria-label="Diagnostics" hidden>
+    <section class="card impact-card" data-collapse="open" aria-labelledby="impact-title">
+      <div class="section-heading">
+        <div><h2 id="impact-title">Impact</h2><p>What the queues did in the last minute</p></div>
+        <span id="impact-state" class="count-badge">Check token</span>
+      </div>
+      <p id="impact-note" class="impact-note">Counts come from the Pi's queues. Delay, jitter, reorder, duplicate and corrupt are shown as configured because queue counters cannot measure them.</p>
+      <div id="impact-list" class="impact-list">Check the admin token to see the impact.</div>
+      <p id="impact-protected" class="impact-protected" hidden></p>
+      <p id="impact-status" class="impact-status" role="status"></p>
+    </section>
     <section class="card" data-collapse="closed">
       <div class="section-heading"><h2>Profiles</h2><p>Saved network behavior</p></div>
       <pre id="profiles">Enter the admin token and choose Check token to load.</pre>
@@ -2039,6 +2062,8 @@ DASHBOARD_HTML = """<!doctype html>
       element("uplink-state").textContent = state;
       element("runtime-summary").textContent = message;
       element("runtime-summary").className = "runtime-summary unknown";
+      // The panels go blank whenever the token is not trusted, so the impact card follows.
+      if (typeof syncImpact === "function") syncImpact();
       renderSidebarStatus();
     }
 
@@ -2820,6 +2845,401 @@ DASHBOARD_HTML = """<!doctype html>
         !generalProfileState || !generalProfileState.profile;
       renderSavedProfiles();
     }
+
+    const IMPACT_WINDOW_SECONDS = 60;
+    const IMPACT_MIN_PACKETS = 50;
+    const IMPACT_CAP_RATIO = 0.9;
+    const IMPACT_MAX_SAMPLES = 13;
+    const IMPACT_MIN_EXPECTED_DROPS = 3;
+    const IMPACT_MIN_QUEUE_WAIT_MS = 10;
+    const IMPACT_NOT_MEASURED = " · configured, not measured";
+
+    function impactSample(entry, nowSeconds) {
+      return {
+        t: nowSeconds,
+        packets: entry.packets,
+        drops: entry.drops,
+        bytes: entry.bytes,
+        overlimits: entry.overlimits,
+        backlog_bytes: entry.backlog_bytes,
+        qlen: entry.qlen || 0
+      };
+    }
+
+    // A queue is a new one when the helper applied another plan or the counters went down
+    // or the clock stepped back or the queue now belongs to another device or setting.
+    function impactQueueReplaced(previous, entry, sample) {
+      const last = previous.samples[previous.samples.length - 1];
+      return !last || sample.t <= last.t || sample.packets < last.packets ||
+        sample.drops < last.drops || sample.bytes < last.bytes ||
+        previous.latest.generation !== entry.generation ||
+        previous.latest.device_id !== entry.device_id ||
+        previous.latest.direction !== entry.direction ||
+        JSON.stringify(previous.latest.impairment) !== JSON.stringify(entry.impairment);
+    }
+
+    function recordImpactSample(history, response, nowSeconds) {
+      const next = {};
+      (response.queues || []).forEach((entry) => {
+        const key = entry.interface + "/" + entry.handle;
+        const sample = impactSample(entry, nowSeconds);
+        const previous = history[key];
+        const kept = previous && !impactQueueReplaced(previous, entry, sample)
+          ? previous.samples : [];
+        next[key] = {latest: entry, samples: kept.concat([sample]).slice(-IMPACT_MAX_SAMPLES)};
+      });
+      return next;
+    }
+
+    function impactHasNoImpairment(impairment) {
+      return !impairment.delay_ms && !impairment.jitter_ms && !impairment.loss_percent &&
+        !impairment.bandwidth_kbit && !impairment.reorder_percent &&
+        !impairment.duplicate_percent && !impairment.corrupt_percent;
+    }
+
+    function formatImpactRate(kbit) {
+      return kbit >= 1000 ? (Math.round(kbit / 10) / 100) + " Mbit/s" : kbit + " kbit/s";
+    }
+
+    // One figure per pair of neighbouring samples so a quiet stretch never averages away a
+    // fast one. A burst that starts and ends between two samples is only seen when it filled
+    // most of one interval or still left a backlog at a sample.
+    function impactIntervals(used) {
+      const intervals = [];
+      for (let index = 1; index < used.length; index += 1) {
+        const before = used[index - 1];
+        const after = used[index];
+        const seconds = after.t - before.t;
+        if (seconds <= 0) continue;
+        intervals.push({
+          offered: after.packets - before.packets + after.drops - before.drops,
+          kbit: (after.bytes - before.bytes) * 8 / 1000 / seconds
+        });
+      }
+      return intervals;
+    }
+
+    function impactVerdict(impairment, offered, packets, drops, capReached) {
+      if (drops > 0 || capReached) return "affected";
+      if (offered === 0 && packets === 0) return "idle";
+      const hasLoss = impairment.loss_percent > 0;
+      if (!hasLoss && !impairment.bandwidth_kbit) return "unmeasured";
+      if (offered < IMPACT_MIN_PACKETS ||
+          (hasLoss && offered * impairment.loss_percent / 100 < IMPACT_MIN_EXPECTED_DROPS)) {
+        return "too-few";
+      }
+      return "clean";
+    }
+
+    function impactLossLine(impairment, drops, offered, lossPercent) {
+      const head = impairment.loss_percent > 0
+        ? "Loss: set " + impairment.loss_percent + "%"
+        : impairment.bandwidth_kbit ? "Dropped (queue full at the speed cap)" : "Dropped (queue full)";
+      return head + " · actual " + lossPercent + "% (" + drops + " of " + offered +
+        " packets dropped)" + (impairment.duplicate_percent > 0
+          ? " (may read low because duplicated packets are counted)" : "");
+    }
+
+    function impactRow(key, entry) {
+      const latest = entry.latest;
+      const impairment = latest.impairment;
+      const row = {
+        key: key,
+        name: latest.name,
+        direction: latest.direction,
+        configured: impairment,
+        windowSeconds: 0,
+        offered: 0,
+        packets: 0,
+        drops: 0,
+        lossPercent: 0,
+        rateKbit: 0,
+        peakKbit: 0,
+        capReached: false,
+        queueWaitMs: null,
+        verdict: "collecting",
+        lines: ["Collecting…"]
+      };
+      const newest = entry.samples[entry.samples.length - 1];
+      const used = entry.samples.filter((sample) => newest.t - sample.t <= IMPACT_WINDOW_SECONDS);
+      const first = used[0];
+      const seconds = newest.t - first.t;
+      if (used.length < 2 || seconds <= 0) return row;
+      const packets = newest.packets - first.packets;
+      const drops = newest.drops - first.drops;
+      // Drops are counted when a packet arrives and packets when they leave. A packet that
+      // still waits in the queue has arrived so the queue length change is added.
+      const waiting = newest.qlen - first.qlen;
+      const offered = Math.max(0, packets + drops + waiting);
+      const intervals = impactIntervals(used);
+      const limit = impairment.bandwidth_kbit;
+      const noDelay = !impairment.delay_ms && !impairment.jitter_ms;
+      // Without a delay a backlog of at least 10 ms of cap time can only come from the cap.
+      const backlogSeen = !!limit && noDelay && used.some((sample) =>
+        Math.round(sample.backlog_bytes * 8 / limit) >= IMPACT_MIN_QUEUE_WAIT_MS);
+      const capReached = !!limit && (backlogSeen || intervals.some((interval) =>
+        interval.offered > 0 && Math.round(interval.kbit) >= IMPACT_CAP_RATIO * limit));
+      row.windowSeconds = seconds;
+      row.offered = offered;
+      row.packets = packets;
+      row.drops = drops;
+      row.lossPercent = offered ? Math.round(drops * 1000 / offered) / 10 : 0;
+      row.rateKbit = Math.round((newest.bytes - first.bytes) * 8 / 1000 / seconds);
+      row.peakKbit = Math.round(Math.max(0, ...intervals.map((interval) => interval.kbit)));
+      row.capReached = capReached;
+      row.queueWaitMs = limit && noDelay && capReached
+        ? Math.round(newest.backlog_bytes * 8 / limit) : null;
+      row.verdict = impactVerdict(impairment, offered, packets, drops, capReached);
+      row.lines = [];
+      if (row.verdict === "unmeasured") {
+        row.lines.push(packets + (packets === 1 ? " packet" : " packets") + " passed in the last minute");
+      }
+      if (impairment.loss_percent > 0 || drops > 0) {
+        row.lines.push(impactLossLine(impairment, drops, offered, row.lossPercent));
+      }
+      if (limit) {
+        row.lines.push("Speed: set " + formatImpactRate(limit) + " · using " +
+          formatImpactRate(row.rateKbit) + " · peak " + formatImpactRate(row.peakKbit) +
+          (capReached ? " · cap reached" : " · below the cap"));
+      }
+      if (row.queueWaitMs !== null && row.queueWaitMs >= IMPACT_MIN_QUEUE_WAIT_MS) {
+        row.lines.push("Queue wait now: about " + row.queueWaitMs + " ms");
+      }
+      if (impairment.delay_ms > 0 || impairment.jitter_ms > 0) {
+        row.lines.push("Delay: set " + impairment.delay_ms + " ms" +
+          (impairment.jitter_ms > 0 ? " ± " + impairment.jitter_ms : "") + IMPACT_NOT_MEASURED);
+      }
+      [["reorder_percent", "Reorder"], ["duplicate_percent", "Duplicate"],
+       ["corrupt_percent", "Corrupt"]].forEach((item) => {
+        if (impairment[item[0]] > 0) {
+          row.lines.push(item[1] + ": set " + impairment[item[0]] + "%" + IMPACT_NOT_MEASURED);
+        }
+      });
+      return row;
+    }
+
+    function impactRows(history) {
+      return Object.keys(history)
+        .filter((key) => !impactHasNoImpairment(history[key].latest.impairment))
+        .map((key) => impactRow(key, history[key]))
+        .sort((a, b) => a.name.localeCompare(b.name) ||
+          (a.direction === b.direction ? 0 : a.direction === "upload" ? -1 : 1));
+    }
+    // end of the impact functions
+
+    const IMPACT_POLL_INTERVAL_MS = 5000;
+    const IMPACT_UNREADABLE = "Impact could not be read right now.";
+    const IMPACT_VERDICT_LABELS = {
+      affected: "Affected in the last minute",
+      idle: "No traffic in the last minute",
+      "too-few": "Too few packets to judge",
+      clean: "No drops or cap hit seen",
+      unmeasured: "Effect not measured here",
+      collecting: "Collecting…"
+    };
+    let impactHistory = {};
+    let impactPollTimer = null;
+    let impactRequestInFlight = false;
+    let impactGeneration = 0;
+    let impactLastGoodAt = null;
+    let impactRowParts = new Map();
+    let impactVerdicts = {};
+    let impactShowsRows = false;
+
+    function impactVisible() {
+      return document.body.dataset.section === "diagnostics" && !document.hidden;
+    }
+
+    function setImpactText(node, text) {
+      if (node.textContent !== text) node.textContent = text;
+    }
+
+    // Screen readers hear one short line when something changes and nothing otherwise.
+    function announceImpact(text) {
+      element("impact-status").textContent = text;
+    }
+
+    function showImpactMessage(message, state) {
+      const list = element("impact-list");
+      if (impactShowsRows || list.textContent !== message) list.textContent = message;
+      impactShowsRows = false;
+      impactRowParts = new Map();
+      impactVerdicts = {};
+      setImpactText(element("impact-state"), state);
+      element("impact-note").hidden = true;
+      element("impact-protected").hidden = true;
+      if (element("impact-status").textContent !== message) announceImpact(message);
+    }
+
+    function stopImpact(message, state) {
+      if (impactPollTimer !== null) {
+        window.clearInterval(impactPollTimer);
+        impactPollTimer = null;
+      }
+      impactGeneration += 1;
+      impactHistory = {};
+      impactLastGoodAt = null;
+      showImpactMessage(message, state);
+    }
+
+    function createImpactRowParts() {
+      const item = document.createElement("div");
+      item.className = "impact-row";
+      const head = document.createElement("div");
+      head.className = "impact-head";
+      const name = document.createElement("span");
+      name.className = "impact-name";
+      const direction = document.createElement("span");
+      direction.className = "impact-direction";
+      const chip = document.createElement("span");
+      head.append(name, direction, chip);
+      const lines = document.createElement("ul");
+      lines.className = "impact-lines";
+      item.append(head, lines);
+      return {item: item, name: name, direction: direction, chip: chip, lines: lines};
+    }
+
+    function updateImpactRow(parts, row) {
+      setImpactText(parts.name, row.name);
+      setImpactText(parts.direction, row.direction === "upload" ? "Upload" : "Download");
+      const chipClass = "impact-chip " + row.verdict;
+      if (parts.chip.className !== chipClass) parts.chip.className = chipClass;
+      setImpactText(parts.chip, IMPACT_VERDICT_LABELS[row.verdict]);
+      const lines = row.verdict === "collecting" ? [] : row.lines;
+      lines.forEach((text, index) => {
+        if (!parts.lines.children[index]) parts.lines.appendChild(document.createElement("li"));
+        setImpactText(parts.lines.children[index], text);
+      });
+      while (parts.lines.children.length > lines.length) {
+        parts.lines.children[parts.lines.children.length - 1].remove();
+      }
+      parts.lines.hidden = lines.length === 0;
+    }
+
+    function impactAnnouncements(rows) {
+      const spoken = [];
+      rows.forEach((row) => {
+        const before = impactVerdicts[row.key];
+        if (before !== undefined && before !== row.verdict && row.verdict !== "collecting") {
+          spoken.push(row.name + " " + row.direction + ": " + IMPACT_VERDICT_LABELS[row.verdict]);
+        }
+      });
+      impactVerdicts = {};
+      rows.forEach((row) => { impactVerdicts[row.key] = row.verdict; });
+      return spoken;
+    }
+
+    function renderImpactRows(rows) {
+      const list = element("impact-list");
+      if (!impactShowsRows) {
+        list.textContent = "";
+        impactShowsRows = true;
+      }
+      const wanted = new Set(rows.map((row) => row.key));
+      impactRowParts.forEach((parts, key) => {
+        if (!wanted.has(key)) {
+          parts.item.remove();
+          impactRowParts.delete(key);
+        }
+      });
+      rows.forEach((row, index) => {
+        let parts = impactRowParts.get(row.key);
+        if (!parts) {
+          parts = createImpactRowParts();
+          impactRowParts.set(row.key, parts);
+        }
+        updateImpactRow(parts, row);
+        if (list.children[index] !== parts.item) {
+          list.insertBefore(parts.item, list.children[index] || null);
+        }
+      });
+    }
+
+    function renderImpact(protectedNames) {
+      const rows = impactRows(impactHistory);
+      if (rows.length) {
+        renderImpactRows(rows);
+        const spoken = impactAnnouncements(rows);
+        if (spoken.length) announceImpact(spoken.join(". "));
+      } else {
+        showImpactMessage(
+          "Nothing is slowed down right now. Apply a profile to a device to see its impact here.",
+          "Live");
+      }
+      setImpactText(element("impact-state"), "Live");
+      element("impact-note").hidden = false;
+      const protectedLine = element("impact-protected");
+      protectedLine.hidden = protectedNames.length === 0;
+      setImpactText(protectedLine, protectedNames.length
+        ? "Protected (not affected): " + protectedNames.join(", ") : "");
+    }
+
+    // A late answer keeps the rows for up to a minute and then they are too old to show.
+    function pauseImpact(message) {
+      const age = impactLastGoodAt === null ? Infinity : (Date.now() - impactLastGoodAt) / 1000;
+      if (age > IMPACT_WINDOW_SECONDS) {
+        impactHistory = {};
+        impactLastGoodAt = null;
+        showImpactMessage(message, "Update paused");
+        return;
+      }
+      setImpactText(element("impact-state"), "Update paused");
+    }
+
+    async function loadImpact() {
+      if (impactRequestInFlight || !adminTokenVerified || !impactVisible()) return;
+      impactRequestInFlight = true;
+      const generation = impactGeneration;
+      try {
+        const data = await request("/api/impact", "GET");
+        if (generation !== impactGeneration) return;
+        if (data.paused) {
+          pauseImpact(data.message || IMPACT_UNREADABLE);
+          return;
+        }
+        if (!data.available) {
+          impactHistory = {};
+          impactLastGoodAt = null;
+          showImpactMessage(data.message || "Impact is not available.", "Unavailable");
+          return;
+        }
+        impactHistory = recordImpactSample(impactHistory, data, data.sampled_at);
+        impactLastGoodAt = Date.now();
+        renderImpact(Array.isArray(data.protected) ? data.protected : []);
+      } catch (error) {
+        if (generation !== impactGeneration) return;
+        if (error.status === 401) {
+          stopImpact("Check the admin token to see the impact.", "Check token");
+        } else {
+          pauseImpact(IMPACT_UNREADABLE);
+        }
+      } finally {
+        impactRequestInFlight = false;
+      }
+    }
+
+    function syncImpact() {
+      if (!adminTokenVerified) {
+        stopImpact("Check the admin token to see the impact.", "Check token");
+        return;
+      }
+      if (!helperConfigured) {
+        stopImpact("Impact needs the Pi helper.", "Unavailable");
+        return;
+      }
+      if (!impactVisible()) {
+        if (impactPollTimer !== null) {
+          window.clearInterval(impactPollTimer);
+          impactPollTimer = null;
+        }
+        return;
+      }
+      if (impactPollTimer === null) {
+        impactPollTimer = window.setInterval(loadImpact, IMPACT_POLL_INTERVAL_MS);
+        loadImpact();
+      }
+    }
+    // end of the impact card
 
     // Works out the sidebar lines from data the page already holds.
     // A saved change sets the observed state to "unknown" and the running scheduler turns
@@ -5547,6 +5967,7 @@ DASHBOARD_HTML = """<!doctype html>
           if (tokenRevision !== adminTokenRevision) return;
           await startTrafficSampling();
           if (tokenRevision !== adminTokenRevision) return;
+          if (typeof syncImpact === "function") syncImpact();
         } else {
           adminTokenVerified = false;
           adminTokenRejected = true;
@@ -6178,6 +6599,7 @@ DASHBOARD_HTML = """<!doctype html>
       }
       drawTrafficChart();
     });
+    document.addEventListener("visibilitychange", syncImpact);
     window.addEventListener("resize", drawTrafficChart);
     element("toast-dismiss").addEventListener("click", dismissToast);
     element("refresh-diagnostics").addEventListener("click", async (event) => {
@@ -6847,6 +7269,7 @@ DASHBOARD_HTML = """<!doctype html>
       document.body.dataset.section = id;
       if (userInitiated) window.scrollTo(0, 0);
       if (id === "traffic" && typeof drawTrafficChart === "function") drawTrafficChart();
+      if (typeof syncImpact === "function") syncImpact();
     }
 
     function storedCardState(key) {
@@ -6954,6 +7377,37 @@ def _device_title(
     if name == UNKNOWN_DEVICE_NAME:
         return f"{UNKNOWN_DEVICE_NAME} ({device.ipv4_address})"
     return name
+
+
+IMPACT_NO_HELPER_MESSAGE = "Impact needs the Pi helper."
+IMPACT_RESET_MESSAGE = "Network is reset. Apply the configuration to start impact checks."
+IMPACT_OUT_OF_DATE_MESSAGE = (
+    "The networking helper is out of date. Update it to see the impact check."
+)
+IMPACT_UNREADABLE_MESSAGE = "Impact could not be read right now."
+
+
+def _impact_queue_name(
+    queue_id: str,
+    *,
+    devices_by_id: Dict[str, Device],
+    labels_by_mac: Dict[str, Dict[str, str]],
+    list_names: Dict[str, str],
+) -> Tuple[str, str]:
+    """Name one queue of the impact check and say what kind of queue it is."""
+
+    if queue_id == GENERAL_QUEUE_ID:
+        return "General profile", "General profile"
+    for prefix, label in (("quota:", "Service quota"), ("assignment:", "Browser service profile")):
+        if queue_id.startswith(prefix):
+            return f"{label} {queue_id[len(prefix):]}", label
+    if queue_id.startswith("servicelist:"):
+        list_id = queue_id[len("servicelist:"):]
+        return f"Service list {list_names.get(list_id, list_id)}", "Service list"
+    device = devices_by_id.get(queue_id)
+    if device is not None:
+        return _device_title(device, labels_by_mac, queue_id), "Device"
+    return queue_id, "Queue"
 
 
 def _device_payload(
@@ -8006,6 +8460,8 @@ class ControlServer(HTTPServer):
                     ),
                 }
             )
+        if path == "/api/impact":
+            return HTTPStatus.OK, "application/json", _json_bytes(self._impact_status())
         if path == "/api/diagnostics":
             runtime = self.repository.get_runtime_state()
             diagnostics = {
@@ -9045,6 +9501,68 @@ class ControlServer(HTTPServer):
                 + response.get("error", "")
             )
         return status, content_type, _json_bytes(response)
+
+    def _impact_status(self) -> Dict[str, Any]:
+        """Name what each applied queue did so far and list the protected devices."""
+
+        def unavailable(message: str, *, paused: bool = False) -> Dict[str, Any]:
+            # `paused` means the answer is only late: the page keeps what it shows.
+            return {
+                "available": False,
+                "paused": paused,
+                "message": message,
+                "sampled_at": time.time(),
+                "queues": [],
+                "protected": [],
+            }
+
+        if self.helper_client is None:
+            return unavailable(IMPACT_NO_HELPER_MESSAGE)
+        if self.repository.get_runtime_state().observed_state == "reset":
+            return unavailable(IMPACT_RESET_MESSAGE)
+        read_queues = getattr(self.helper_client, "queue_stats", None)
+        if read_queues is None:
+            return unavailable(IMPACT_OUT_OF_DATE_MESSAGE)
+        try:
+            queues = read_queues()
+        except HelperClientError as error:
+            # A helper from before this check answers that it does not know the action.
+            if str(error) == "unknown action":
+                return unavailable(IMPACT_OUT_OF_DATE_MESSAGE)
+            LOGGER.warning("could not read queue statistics for the impact check")
+            return unavailable(IMPACT_UNREADABLE_MESSAGE, paused=True)
+        # The page divides counter changes by the time between samples so the time is taken
+        # when the helper answers and not after the names are looked up.
+        sampled_at = time.time()
+        devices_by_id = {device.id: device for device in self.repository.list_devices()}
+        labels_by_mac = self.repository.list_connected_device_labels()
+        list_names = {item.id: item.name for item in self.repository.list_service_lists()}
+        protected = self.repository.list_unaffected_devices()
+        protected_hardware = {item.mac_address for item in protected}
+        entries = []
+        for queue in queues:
+            device = devices_by_id.get(queue["device_id"])
+            # A protected device has no queue. A stale plan must never put one on screen.
+            if device is not None and device.mac_address in protected_hardware:
+                continue
+            name, kind_label = _impact_queue_name(
+                queue["device_id"],
+                devices_by_id=devices_by_id,
+                labels_by_mac=labels_by_mac,
+                list_names=list_names,
+            )
+            entries.append({**queue, "name": name, "kind_label": kind_label})
+        return {
+            "available": True,
+            "paused": False,
+            "message": None,
+            "sampled_at": sampled_at,
+            "queues": entries,
+            "protected": sorted(
+                (item.display_name or item.mac_address for item in protected),
+                key=lambda name: (name.lower(), name),
+            ),
+        }
 
     def _general_profile_status(self) -> dict:
         operation = self.scheduler.control_operation() if self.scheduler else nullcontext()

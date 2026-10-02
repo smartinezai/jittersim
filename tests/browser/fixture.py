@@ -26,6 +26,10 @@ from tests.wifi_support import WifiExecutor
 
 
 class DashboardWifiExecutor(WifiExecutor):
+    def __init__(self):
+        super().__init__()
+        self.queue_reads = {}
+
     def run(self, command):
         if command.executable == "ip":
             if command.arguments[:4] == ("-4", "neigh", "show", "dev"):
@@ -46,6 +50,35 @@ class DashboardWifiExecutor(WifiExecutor):
         if command.executable == "nft":
             self.commands.append(command)
             return CommandResult(0, stdout='{"nftables":[]}')
+        if command.executable == "tc":
+            return self.run_tc(command)
+        return super().run(command)
+
+    def run_tc(self, command):
+        """Answer queue counter reads with numbers that grow on every read.
+
+        Every read adds 100 forwarded packets and 11 dropped ones to each project queue.
+        A new root queue or a removed one starts the counters again like the kernel does.
+        """
+
+        interface = command.arguments[-1] if command.arguments[:3] == ("-s", "-j", "qdisc") else None
+        if interface is not None:
+            self.commands.append(command)
+            reads = self.queue_reads[interface] = self.queue_reads.get(interface, 0) + 1
+            queues = [
+                {
+                    "kind": "netem", "handle": f"{mark + 10}:", "parent": f"10:{mark + 1}",
+                    "bytes": 150_000 * reads, "packets": 100 * reads, "drops": 11 * reads,
+                    "overlimits": 0, "requeues": 0, "backlog": 0, "qlen": 0,
+                }
+                for mark in range(1, 5)
+            ]
+            root = {"kind": "prio", "handle": "10:", "root": True, "bytes": 1, "packets": 1,
+                    "drops": 0, "overlimits": 0, "requeues": 0, "backlog": 0, "qlen": 0}
+            return CommandResult(0, stdout=json.dumps([root] + queues))
+        if command.arguments[:1] == ("qdisc",) and command.arguments[1] in ("replace", "del"):
+            if "root" in command.arguments:
+                self.queue_reads.pop(command.arguments[3], None)
         return super().run(command)
 
 
