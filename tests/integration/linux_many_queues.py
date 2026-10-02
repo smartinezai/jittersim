@@ -111,7 +111,7 @@ def check_plan_applied(count):
         if count >= 9:
             assert by_handle[queue_handle(9)]["parent"] == "10:a", by_handle[queue_handle(9)]
         if count == 15:
-            assert by_handle["25:"]["parent"] == "10:10", by_handle["25:"]
+            assert by_handle[queue_handle(15)]["parent"] == "10:10", by_handle[queue_handle(15)]
 
 
 def main():

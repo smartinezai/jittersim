@@ -52,7 +52,22 @@ def queue_parent(mark: int) -> str:
 
 # tc cannot change a netem into an fq_codel in place, so each kind of child
 # queue has its own handle range and a band that switches kind gets a new child.
-CHILD_HANDLE_BASES = {"netem": 0x40, "fq_codel": 0x60}
+# The kernel refuses a duplicating netem while any other netem exists on the
+# interface (check_netem_in_tree), so duplicating queues are a kind of their own.
+CHILD_HANDLE_BASES = {"netem": 0x40, "duplicate": 0x50, "fq_codel": 0x60}
+# Fair queues first (they remove the netems of bands that stop shaping), then
+# plain netems, then duplicating netems once no other netem is left.
+KIND_ORDER = ("fq_codel", "netem", "duplicate")
+
+
+def queue_kind(impairment: Impairment) -> str:
+    """Return the kind of child queue an impairment needs."""
+
+    if impairment == Impairment():
+        return "fq_codel"
+    if impairment.duplicate_percent:
+        return "duplicate"
+    return "netem"
 
 
 def queue_handle(mark: int, kind: str = "netem") -> str:
@@ -471,75 +486,79 @@ def _render_tc_commands(*, queues: Sequence[QueueSpec], interface: str) -> List[
         ),
     ]
     # "tc qdisc replace" changes a queue of the same kind in place, so the
-    # packets it holds survive a settings change.
+    # packets it holds survive a settings change. A netem that stops or starts
+    # duplicating is removed first: the kernel checks a duplicating netem against
+    # every other netem on the interface, whatever its own earlier settings were.
+    by_kind = {kind: [] for kind in KIND_ORDER}
     for queue in queues:
-        if queue.impairment != Impairment():
-            commands.append(
-                Command(
-                    executable="tc",
-                    arguments=(
-                        "qdisc",
-                        "replace",
-                        "dev",
-                        interface,
-                        "parent",
-                        queue_parent(queue.mark),
-                        "handle",
-                        queue_handle(queue.mark, "netem"),
-                        *_format_impairment_arguments(queue),
-                    ),
-                    purpose=(
-                        f"apply {queue.direction.value} impairment for "
-                        f"device {queue.device_id} on {interface}"
-                    ),
-                )
-            )
-        else:
-            commands.append(
-                Command(
-                    executable="tc",
-                    arguments=(
-                        "qdisc",
-                        "replace",
-                        "dev",
-                        interface,
-                        "parent",
-                        queue_parent(queue.mark),
-                        "handle",
-                        queue_handle(queue.mark, "fq_codel"),
-                        "fq_codel",
-                    ),
-                    purpose=(
-                        f"preserve fair queuing for device {queue.device_id} "
-                        f"on {interface}"
-                    ),
-                )
-            )
-        for protocol in ("ip", "ipv6"):
-            commands.append(
-                Command(
-                    executable="tc",
-                    arguments=(
-                        "filter",
-                        "replace",
-                        "dev",
-                        interface,
-                        "protocol",
-                        protocol,
-                        "parent",
-                        ROOT_HANDLE,
-                        "pref",
-                        str(queue.mark if protocol == "ip" else queue.mark + 100),
-                        "handle",
-                        str(queue.mark),
-                        "fw",
-                        "flowid",
-                        queue_parent(queue.mark),
-                    ),
-                    purpose=f"route {protocol} mark {queue.mark} on {interface}",
-                )
-            )
+        by_kind[queue_kind(queue.impairment)].append(queue)
+    for queue in by_kind["netem"]:
+        commands.append(_remove_child_queue(queue, interface, "duplicate"))
+    for kind in KIND_ORDER:
+        for queue in by_kind[kind]:
+            if kind == "duplicate":
+                commands.append(_remove_child_queue(queue, interface, "netem"))
+            commands.append(_child_queue_command(queue, interface, kind))
+            commands.extend(_filter_commands(queue, interface))
     return commands
+
+
+def _child_queue_command(queue: QueueSpec, interface: str, kind: str) -> Command:
+    if kind == "fq_codel":
+        settings = ("fq_codel",)
+        purpose = f"preserve fair queuing for device {queue.device_id} on {interface}"
+    else:
+        settings = tuple(_format_impairment_arguments(queue))
+        purpose = (
+            f"apply {queue.direction.value} impairment for "
+            f"device {queue.device_id} on {interface}"
+        )
+    return Command(
+        executable="tc",
+        arguments=(
+            "qdisc", "replace", "dev", interface,
+            "parent", queue_parent(queue.mark),
+            "handle", queue_handle(queue.mark, kind),
+            *settings,
+        ),
+        purpose=purpose,
+    )
+
+
+def _remove_child_queue(queue: QueueSpec, interface: str, kind: str) -> Command:
+    """Delete the child queue of another kind that a band may still hold."""
+
+    return Command(
+        executable="tc",
+        arguments=(
+            "qdisc", "del", "dev", interface,
+            "parent", queue_parent(queue.mark),
+            "handle", queue_handle(queue.mark, kind),
+        ),
+        purpose=(
+            f"remove the {kind} queue of device {queue.device_id} on {interface} "
+            "before its queue changes kind"
+        ),
+        ignore_failure=True,
+    )
+
+
+def _filter_commands(queue: QueueSpec, interface: str) -> List[Command]:
+    return [
+        Command(
+            executable="tc",
+            arguments=(
+                "filter", "replace", "dev", interface,
+                "protocol", protocol,
+                "parent", ROOT_HANDLE,
+                "pref", str(queue.mark if protocol == "ip" else queue.mark + 100),
+                "handle", str(queue.mark),
+                "fw", "flowid", queue_parent(queue.mark),
+            ),
+            purpose=f"route {protocol} mark {queue.mark} on {interface}",
+        )
+        for protocol in ("ip", "ipv6")
+    ]
 
 
 def render_command_plan(

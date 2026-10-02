@@ -27,6 +27,14 @@ def make_device(device_id: str, address: str, profile_id: str) -> Device:
 EIGHT_DEVICE_TC_COMMANDS = """\
 tc qdisc replace dev eth0 root handle 10: prio bands 9 priomap 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
 tc qdisc replace dev eth0 parent 10:1 handle 100: fq_codel
+tc qdisc del dev eth0 parent 10:2 handle 51:
+tc qdisc del dev eth0 parent 10:3 handle 52:
+tc qdisc del dev eth0 parent 10:4 handle 53:
+tc qdisc del dev eth0 parent 10:5 handle 54:
+tc qdisc del dev eth0 parent 10:6 handle 55:
+tc qdisc del dev eth0 parent 10:7 handle 56:
+tc qdisc del dev eth0 parent 10:8 handle 57:
+tc qdisc del dev eth0 parent 10:9 handle 58:
 tc qdisc replace dev eth0 parent 10:2 handle 41: netem delay 50ms corrupt 0% rate 0bit
 tc filter replace dev eth0 protocol ip parent 10: pref 1 handle 1 fw flowid 10:2
 tc filter replace dev eth0 protocol ipv6 parent 10: pref 101 handle 1 fw flowid 10:2
@@ -53,6 +61,14 @@ tc filter replace dev eth0 protocol ip parent 10: pref 8 handle 8 fw flowid 10:9
 tc filter replace dev eth0 protocol ipv6 parent 10: pref 108 handle 8 fw flowid 10:9
 tc qdisc replace dev wlan0 root handle 10: prio bands 9 priomap 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
 tc qdisc replace dev wlan0 parent 10:1 handle 100: fq_codel
+tc qdisc del dev wlan0 parent 10:2 handle 51:
+tc qdisc del dev wlan0 parent 10:3 handle 52:
+tc qdisc del dev wlan0 parent 10:4 handle 53:
+tc qdisc del dev wlan0 parent 10:5 handle 54:
+tc qdisc del dev wlan0 parent 10:6 handle 55:
+tc qdisc del dev wlan0 parent 10:7 handle 56:
+tc qdisc del dev wlan0 parent 10:8 handle 57:
+tc qdisc del dev wlan0 parent 10:9 handle 58:
 tc qdisc replace dev wlan0 parent 10:2 handle 41: netem delay 60ms corrupt 0% rate 0bit
 tc filter replace dev wlan0 protocol ip parent 10: pref 1 handle 1 fw flowid 10:2
 tc filter replace dev wlan0 protocol ipv6 parent 10: pref 101 handle 1 fw flowid 10:2
@@ -320,21 +336,34 @@ class RendererTests(unittest.TestCase):
                 profiles={profile.id: profile},
             )
             commands = render_command_plan(plan=plan, topology=topology)
-            self.assertFalse(any(command.argv[1:3] == ("qdisc", "del") for command in commands))
-            (argv,) = [
-                command.argv
+            on_band = [
+                command
                 for command in commands
                 if "eth0" in command.argv and "10:2" in command.argv and command.argv[1] == "qdisc"
             ]
-            return argv[argv.index("handle") + 1 :]
+            removed = [
+                command.argv[-1] for command in on_band if command.argv[2] == "del"
+            ]
+            self.assertTrue(all(command.ignore_failure for command in on_band if command.argv[2] == "del"))
+            (argv,) = [command.argv for command in on_band if command.argv[2] == "replace"]
+            return removed, argv[argv.index("handle") + 1 :]
 
         normal = child(Profile(id="normal", name="Normal"))
         slow = child(Profile(id="slow", name="Slow", upload=Impairment(delay_ms=50)))
+        doubled = child(
+            Profile(id="doubled", name="Doubled", upload=Impairment(duplicate_percent=10))
+        )
 
         # tc cannot change a netem into an fq_codel, so a band that switches kind
-        # gets a new child under another handle instead of a change.
-        self.assertEqual(normal, ("61:", "fq_codel"))
-        self.assertEqual(slow[:3], ("41:", "netem", "delay"))
+        # gets a new child under another handle instead of a change. A netem that
+        # starts or stops duplicating is removed first because the kernel checks a
+        # duplicating netem against every other netem on the interface.
+        self.assertEqual(normal, ([], ("61:", "fq_codel")))
+        self.assertEqual(slow[0], ["51:"])
+        self.assertEqual(slow[1][:3], ("41:", "netem", "delay"))
+        self.assertEqual(doubled[0], ["41:"])
+        self.assertEqual(doubled[1][:2], ("51:", "netem"))
+        self.assertIn("duplicate", doubled[1])
 
     def test_nftables_rules_are_replaced_in_one_transaction(self) -> None:
         plan = compile_plan(
@@ -556,7 +585,7 @@ class RendererTests(unittest.TestCase):
         netem = list(upload.argv[upload.argv.index("netem") :])
         self.assertEqual(netem, ["netem", "delay", "0ms", "50ms", "corrupt", "0%", "rate", "10gbit"])
 
-    def test_device_queues_are_replaced_in_place_under_kind_specific_handles(self) -> None:
+    def test_a_duplicating_queue_is_created_last_after_its_plain_netem_is_removed(self) -> None:
         plan = compile_plan(
             devices=(
                 make_device("alice", "192.168.50.10", "duplicate"),
@@ -587,20 +616,23 @@ class RendererTests(unittest.TestCase):
                 and "parent" in command.arguments
                 and command.arguments[command.arguments.index("parent") + 1] != "10:1"
             ]
-            # Nothing is deleted first: a replaced netem keeps the packets it holds and
-            # a band that changes kind gets a child under the other kind's handle.
+            # Bob's fair queue comes first (it removes any netem of his band), then
+            # Alice's plain netem is removed before her duplicating one is created:
+            # the kernel refuses a duplicating netem next to any other netem.
             self.assertEqual(
                 [command.arguments[1] for command in queue_commands],
-                ["replace", "replace"],
+                ["replace", "del", "replace"],
             )
             self.assertEqual(
                 [command.arguments[command.arguments.index("handle") + 1] for command in queue_commands],
-                ["41:", "62:"],
+                ["62:", "41:", "51:"],
             )
             self.assertEqual(
                 [command.arguments[command.arguments.index("parent") + 1] for command in queue_commands],
-                ["10:2", "10:3"],
+                ["10:3", "10:2", "10:2"],
             )
+            self.assertTrue(queue_commands[1].ignore_failure)
+            self.assertIn("duplicate", queue_commands[2].arguments)
 
     def test_reset_targets_only_project_owned_state(self) -> None:
         commands = render_reset_commands(
@@ -854,9 +886,18 @@ class QueueClassTests(unittest.TestCase):
             on_interface = [command for command in commands if command.arguments[3] == interface]
             roots = [command for command in on_interface if "prio" in command.arguments]
             self.assertEqual([argument_after(command, "bands") for command in roots], ["16"])
-            self.assertFalse(
-                any(command.arguments[:2] == ("qdisc", "del") for command in on_interface)
+            removals = [
+                command
+                for command in on_interface
+                if command.arguments[:2] == ("qdisc", "del")
+            ]
+            # A netem that duplicated before would refuse the new netems, so the
+            # duplicating handle of every band is cleared first (it may not exist).
+            self.assertEqual(
+                [argument_after(command, "handle") for command in removals],
+                [f"{0x50 + mark:x}:" for mark in range(1, 16)],
             )
+            self.assertTrue(all(command.ignore_failure for command in removals))
             netem = [
                 command
                 for command in on_interface
