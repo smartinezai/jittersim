@@ -504,13 +504,12 @@ DASHBOARD_HTML = r"""<!doctype html>
     .traffic-chart-wrap { margin-top: 1rem; padding: 0.65rem; border: 1px solid #2b435f; border-radius: 0.65rem; background: #0b1727; }
     #traffic-chart { display: block; width: 100%; height: 16rem; }
     .traffic-legend { display: flex; flex-wrap: wrap; gap: 0.8rem 1rem; margin-top: 0.65rem; color: #91a8c1; font-size: 0.78rem; }
-    .traffic-legend span { display: inline-flex; align-items: center; gap: 0.4rem; }
-    .traffic-key { width: 0.75rem; height: 0.2rem; border-radius: 1rem; background: #70b7ff; }
-    .traffic-key.download { background: #70d7a9; }
-    .traffic-key.isp-upload { height: 0; border-top: 2px dashed #75a9ff; background: transparent; }
-    .traffic-key.isp-download { height: 0; border-top: 2px dashed #75d7c2; background: transparent; }
-    .traffic-key.profile-upload { height: 0; border-top: 2px dotted #ffa76c; background: transparent; }
-    .traffic-key.profile-download { height: 0; border-top: 2px dotted #edc36a; background: transparent; }
+    .traffic-legend button { display: inline-flex; align-items: center; gap: 0.4rem; margin: 0; padding: 0.4rem; min-width: 0; max-width: 100%; text-align: left; color: #c7d7eb; background: transparent; border: 1px solid transparent; }
+    .traffic-legend button.traffic-highlighted { border-color: #91a8c1; color: #edf5ff; }
+    .traffic-legend button.traffic-dimmed { opacity: 0.5; }
+    .traffic-key { display: block; flex: 0 0 2.25rem; width: 2.25rem; height: 0.75rem; }
+    .traffic-chart-detail { margin: 0.65rem 0 0; min-height: 2.8em; color: #edf5ff; font-size: 0.82rem; overflow-wrap: anywhere; }
+    @media (pointer: coarse) { .traffic-legend button { min-height: 44px; } }
     .traffic-note { margin: 0.75rem 0 0; color: #91a8c1; font-size: 0.8rem; }
     .uplink-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.75rem; margin-top: 1rem; }
     .uplink-value { padding: 0.75rem; border: 1px solid #2b435f; border-radius: 0.6rem; background: #0d1b2d; }
@@ -2038,18 +2037,19 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="traffic-chart-wrap">
       <canvas id="traffic-chart" width="900" height="320" role="img" aria-label="Live upload and download rates at JitterSim with configured ISP and device queue limits over the last 60 seconds">Live traffic chart. Check the admin token to begin sampling.</canvas>
       <div class="traffic-legend" aria-label="Graph legend">
-        <span><i class="traffic-key"></i>Upload rate at Pi</span>
-        <span><i class="traffic-key download"></i>Download rate at Pi</span>
-        <span><i class="traffic-key isp-upload"></i>ISP upload plan</span>
-        <span><i class="traffic-key isp-download"></i>ISP download plan</span>
-        <span id="traffic-profile-upload-legend"><i class="traffic-key profile-upload"></i>Default queue upload limit</span>
-        <span id="traffic-profile-download-legend"><i class="traffic-key profile-download"></i>Default queue download limit</span>
+        <button type="button" data-traffic-series="upload" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
+        <button type="button" data-traffic-series="download" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
+        <button type="button" data-traffic-series="isp_upload" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
+        <button type="button" data-traffic-series="isp_download" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
+        <button type="button" id="traffic-profile-upload-legend" data-traffic-series="profile_upload" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
+        <button type="button" id="traffic-profile-download-legend" data-traffic-series="profile_download" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
       </div>
+      <p id="traffic-chart-detail" class="traffic-chart-detail">Hover a line or focus its legend label to inspect it. Click or tap a label to keep it highlighted. Escape clears the highlight.</p>
     </div>
     <p id="traffic-profile-status" class="traffic-profile-status" role="status" aria-live="polite">Select one device to show its applied default queue limits.</p>
     <p class="traffic-note">Dropped and waiting show packets JitterSim itself discarded or is still
       delaying, in both directions.</p>
-    <p class="traffic-note">Traffic lines count bytes at JitterSim before its queues. They do not show the speed a device receives. Dashed lines show configured limits. The ISP plan line is shared with household traffic and is not a live measurement of spare capacity. Service-specific queues may use different limits. Only assigned devices are included. Check the admin token to start; sampling pauses when this tab is hidden.</p>
+    <p class="traffic-note">Solid lines show traffic counted at JitterSim before its queues. They do not show the speed a device receives. Dashed lines show ISP plan references. Dotted lines show applied profile limits. Profile limits describe the default queue. Service-specific queues may use different limits. The ISP plan is shared with household traffic and is not a live measurement of spare capacity. Only assigned devices are included. Check the admin token to start. Sampling pauses when this tab is hidden.</p>
   </section>
   <section class="card observations-card" data-collapse="closed">
     <div class="section-heading">
@@ -2885,6 +2885,20 @@ DASHBOARD_HTML = r"""<!doctype html>
       profile_download: null
     };
 
+    const TRAFFIC_SERIES = [
+      { field: "isp_upload", label: "ISP upload plan", color: "#b8a0ff", dash: [8, 6], step: true },
+      { field: "isp_download", label: "ISP download plan", color: "#7bdce5", dash: [8, 6], step: true },
+      { field: "profile_upload", label: "Device upload limit", color: "#ffa76c", dash: [2, 5], step: true },
+      { field: "profile_download", label: "Device download limit", color: "#edc36a", dash: [2, 5], step: true },
+      { field: "upload", label: "Upload traffic", color: "#70b7ff", dash: [], step: false },
+      { field: "download", label: "Download traffic", color: "#70d7a9", dash: [], step: false }
+    ];
+    const TRAFFIC_INSPECTION_HELP = "Hover a line or focus its legend label to inspect it. Click or tap a label to keep it highlighted. Escape clears the highlight.";
+    let trafficProfileScope = null;
+    let trafficReferencesReadAt = null;
+    let trafficInspection = { pointer: null, legend: null, pinned: null };
+    let trafficChartRedraw = null;
+
     function showMessage(message, kind) {
       messageSerial += 1;
       const messageElement = element("message");
@@ -2900,6 +2914,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     function resetTrafficHistory() {
       previousTrafficSample = null;
       trafficSamples = [];
+      trafficInspection = { pointer: null, legend: null, pinned: null };
       [
         "traffic-upload-rate",
         "traffic-download-rate",
@@ -3029,7 +3044,184 @@ DASHBOARD_HTML = r"""<!doctype html>
       const kept = Array.from(select.options).some((option) => option.value === selected);
       select.value = kept ? selected : "@all";
       // The last sample belongs to the choice that went, so start a fresh graph.
-      if (!kept && selected) resetTrafficHistory();
+      if (!kept && selected) resetTrafficView();
+    }
+
+    function trafficSeriesName(series, scope) {
+      if (!series.field.startsWith("profile_")) return series.label;
+      const direction = series.field.endsWith("upload") ? "upload" : "download";
+      const prefix = scope === "shared" ? "Shared profile" : scope === "everyone" ? "Everyone else" : "Device";
+      return prefix + " " + direction + " limit";
+    }
+
+    function trafficSeriesGeometry(samples, references, plot, scaleMax, now, scope) {
+      return TRAFFIC_SERIES.map((definition) => {
+        const series = { ...definition, label: trafficSeriesName(definition, scope), points: [], segments: [] };
+        let previous = null;
+        samples.forEach((sample) => {
+          const value = sample[series.field];
+          if (!Number.isFinite(value)) {
+            previous = null;
+            return;
+          }
+          const point = {
+            x: plot.right - (plot.right - plot.left) * (now - sample.time) / TRAFFIC_WINDOW_MS,
+            y: plot.bottom - (plot.bottom - plot.top) * value / scaleMax,
+            value: value,
+            time: sample.time
+          };
+          series.points.push(point);
+          if (previous) {
+            if (series.step) {
+              const corner = { ...previous, x: point.x };
+              series.segments.push({ from: previous, to: corner });
+              series.segments.push({ from: corner, to: point });
+            } else {
+              series.segments.push({ from: previous, to: point });
+            }
+          }
+          previous = point;
+        });
+        if (!samples.length && series.step && Number.isFinite(references[series.field])) {
+          const value = references[series.field];
+          const y = plot.bottom - (plot.bottom - plot.top) * value / scaleMax;
+          const point = { x: plot.right, y: y, value: value, time: null };
+          series.points.push(point);
+          series.segments.push({ from: { ...point, x: plot.left }, to: point });
+        }
+        return series;
+      }).filter((series) => series.points.length);
+    }
+
+    function trafficSegmentDistance(pointer, segment) {
+      const dx = segment.to.x - segment.from.x;
+      const dy = segment.to.y - segment.from.y;
+      const length = dx * dx + dy * dy;
+      const fraction = length ? Math.max(0, Math.min(1,
+        ((pointer.x - segment.from.x) * dx + (pointer.y - segment.from.y) * dy) / length)) : 0;
+      const x = segment.from.x + fraction * dx;
+      const y = segment.from.y + fraction * dy;
+      return { distance: Math.hypot(pointer.x - x, pointer.y - y), fraction: fraction };
+    }
+
+    function trafficLineHits(series, pointer, plot) {
+      if (!pointer || pointer.x < plot.left || pointer.x > plot.right ||
+          pointer.y < plot.top - 8 || pointer.y > plot.bottom + 8) return [];
+      const hits = series.map((line) => {
+        let best = { field: line.field, distance: Infinity, point: null };
+        line.points.forEach((point) => {
+          const distance = Math.hypot(pointer.x - point.x, pointer.y - point.y);
+          if (distance < best.distance) best = { field: line.field, distance: distance, point: point };
+        });
+        line.segments.forEach((segment) => {
+          const hit = trafficSegmentDistance(pointer, segment);
+          if (hit.distance <= best.distance) {
+            best = { field: line.field, distance: hit.distance,
+              point: hit.fraction < 0.5 ? segment.from : segment.to };
+          }
+        });
+        return best;
+      });
+      const nearest = Math.min(...hits.map((hit) => hit.distance));
+      return hits.filter((hit) => hit.distance <= 8 && hit.distance <= nearest + 2);
+    }
+
+    function trafficAge(time, now) {
+      if (time === null) return "not checked yet";
+      const seconds = Math.max(0, Math.round((now - time) / 1000));
+      return seconds === 0 ? "less than 1 second ago" : seconds + (seconds === 1 ? " second ago" : " seconds ago");
+    }
+
+    function trafficLineDetail(series, point, now) {
+      const value = formatTrafficRate(point.value);
+      if (!series.step) return series.label + ": " + value + " · measured at the Pi over the interval ending " + trafficAge(point.time, now);
+      const kind = series.field.startsWith("isp_") ? "ISP plan reference" : "applied profile limit";
+      const age = point.time === null ? "last read " + trafficAge(trafficReferencesReadAt, now)
+        : "recorded " + trafficAge(point.time, now);
+      const current = Number.isFinite(latestTrafficReferences[series.field]) ? "" : " · no current limit";
+      return series.label + ": " + value + " · " + kind + " · " + age + current;
+    }
+
+    function drawTrafficKey(canvas, series, pixelRatio) {
+      const width = 36;
+      const height = 12;
+      const scaledWidth = Math.round(width * pixelRatio);
+      const scaledHeight = Math.round(height * pixelRatio);
+      if (canvas.width !== scaledWidth || canvas.height !== scaledHeight) {
+        canvas.width = scaledWidth;
+        canvas.height = scaledHeight;
+      }
+      const context = canvas.getContext("2d");
+      if (!context) return;
+      context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+      context.clearRect(0, 0, width, height);
+      context.strokeStyle = series.color;
+      context.lineWidth = 2.5;
+      context.lineCap = "round";
+      context.setLineDash(series.dash);
+      context.beginPath();
+      context.moveTo(2, height / 2);
+      context.lineTo(width - 2, height / 2);
+      context.stroke();
+    }
+
+    function requestTrafficChartDraw() {
+      if (trafficChartRedraw !== null) return;
+      trafficChartRedraw = window.requestAnimationFrame(() => {
+        trafficChartRedraw = null;
+        drawTrafficChart();
+      });
+    }
+
+    function setupTrafficChartInspection() {
+      element("traffic-chart").addEventListener("pointermove", (event) => {
+        if (event.pointerType === "touch") return;
+        trafficInspection.pointer = { clientX: event.clientX, clientY: event.clientY };
+        trafficInspection.legend = null;
+        requestTrafficChartDraw();
+      });
+      element("traffic-chart").addEventListener("pointerleave", () => {
+        trafficInspection.pointer = null;
+        requestTrafficChartDraw();
+      });
+      document.querySelectorAll(".traffic-legend button[data-traffic-series]").forEach((button) => {
+        const inspect = () => {
+          trafficInspection.legend = button.dataset.trafficSeries;
+          trafficInspection.pointer = null;
+          requestTrafficChartDraw();
+        };
+        button.addEventListener("pointerenter", (event) => { if (event.pointerType !== "touch") inspect(); });
+        button.addEventListener("focus", inspect);
+        button.addEventListener("pointerleave", () => {
+          if (document.activeElement !== button && trafficInspection.legend === button.dataset.trafficSeries) {
+            trafficInspection.legend = null;
+            requestTrafficChartDraw();
+          }
+        });
+        button.addEventListener("blur", () => {
+          if (trafficInspection.legend === button.dataset.trafficSeries) trafficInspection.legend = null;
+          requestTrafficChartDraw();
+        });
+        button.addEventListener("click", () => {
+          const field = button.dataset.trafficSeries;
+          trafficInspection.pinned = trafficInspection.pinned === field ? null : field;
+          trafficInspection.legend = null;
+          trafficInspection.pointer = null;
+          requestTrafficChartDraw();
+        });
+      });
+      document.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape" || element("page-traffic").hidden) return;
+        trafficInspection = { pointer: null, legend: null, pinned: null };
+        requestTrafficChartDraw();
+      });
+    }
+
+    function resetTrafficView() {
+      latestTrafficReferences.profile_upload = null;
+      latestTrafficReferences.profile_download = null;
+      trafficProfileScope = null;
+      resetTrafficHistory();
     }
 
     function drawTrafficChart() {
@@ -3049,29 +3241,15 @@ DASHBOARD_HTML = r"""<!doctype html>
       context.clearRect(0, 0, bounds.width, bounds.height);
       const now = performance.now();
       const visibleSamples = trafficSamples.filter((sample) => now - sample.time <= TRAFFIC_WINDOW_MS);
-      const selectedDevice = element("traffic-device").value;
-      const profileSelected = selectedDevice !== "@all";
-      element("traffic-profile-upload-legend").hidden = !profileSelected;
-      element("traffic-profile-download-legend").hidden = !profileSelected;
-      const referenceFields = ["isp_upload", "isp_download", "profile_upload", "profile_download"];
-      const graphValues = visibleSamples.flatMap((sample) => [
-        sample.upload,
-        sample.download,
-        ...referenceFields.map((field) => sample[field])
-      ]).filter((value) => Number.isFinite(value));
+      const graphValues = visibleSamples.flatMap((sample) => TRAFFIC_SERIES.map((series) => sample[series.field]))
+        .filter((value) => Number.isFinite(value));
       graphValues.push(...Object.values(latestTrafficReferences).filter((value) => Number.isFinite(value)));
-      const maxRate = Math.max(0.1, ...graphValues);
-      const scaleMax = Math.pow(10, Math.ceil(Math.log10(maxRate)));
+      const scaleMax = Math.pow(10, Math.ceil(Math.log10(Math.max(0.1, ...graphValues))));
       context.font = "12px system-ui, sans-serif";
       const tickLabels = [0, 1, 2, 3, 4].map((tick) => formatTrafficRate(scaleMax * tick / 4));
-      // Leave room for the widest axis label, such as "100.00 Mbit/s".
       const labelWidth = Math.max(...tickLabels.map((label) => context.measureText(label).width));
-      const plot = {
-        left: Math.max(62, Math.ceil(labelWidth) + 16),
-        right: bounds.width - 14,
-        top: 16,
-        bottom: bounds.height - 34
-      };
+      const plot = { left: Math.max(62, Math.ceil(labelWidth) + 16), right: bounds.width - 14,
+        top: 16, bottom: bounds.height - 34 };
       const plotWidth = plot.right - plot.left;
       const plotHeight = plot.bottom - plot.top;
       context.textBaseline = "middle";
@@ -3094,70 +3272,73 @@ DASHBOARD_HTML = r"""<!doctype html>
         context.textBaseline = "alphabetic";
         context.fillText(fraction === 1 ? "now" : "−" + Math.round((1 - fraction) * TRAFFIC_WINDOW_MS / 1000) + "s", x, bounds.height - 8);
       });
-
-      function drawSeries(series) {
-        context.strokeStyle = series.color;
-        context.lineWidth = series.step ? 1.8 : 2.5;
+      const series = trafficSeriesGeometry(visibleSamples, latestTrafficReferences, plot, scaleMax, now, trafficProfileScope);
+      const present = new Set(series.map((line) => line.field));
+      ["legend", "pinned"].forEach((key) => {
+        if (!present.has(trafficInspection[key])) trafficInspection[key] = null;
+      });
+      const pointer = trafficInspection.pointer ? {
+        x: trafficInspection.pointer.clientX - bounds.left,
+        y: trafficInspection.pointer.clientY - bounds.top
+      } : null;
+      const hits = trafficLineHits(series, pointer, plot);
+      const selected = trafficInspection.legend ? [trafficInspection.legend]
+        : hits.length ? hits.map((hit) => hit.field)
+        : trafficInspection.pinned ? [trafficInspection.pinned] : [];
+      document.querySelectorAll(".traffic-legend button[data-traffic-series]").forEach((button) => {
+        const line = series.find((item) => item.field === button.dataset.trafficSeries);
+        button.hidden = !line;
+        button.setAttribute("aria-pressed", String(trafficInspection.pinned === button.dataset.trafficSeries));
+        button.classList.toggle("traffic-highlighted", selected.includes(button.dataset.trafficSeries));
+        button.classList.toggle("traffic-dimmed", !!selected.length && !selected.includes(button.dataset.trafficSeries));
+        if (!line) return;
+        const label = button.querySelector("span");
+        if (label.textContent !== line.label) label.textContent = line.label;
+        const latest = line.points[line.points.length - 1];
+        button.setAttribute("aria-label", trafficLineDetail(line, latest, now) + ". Keep this line highlighted.");
+        drawTrafficKey(button.querySelector("canvas"), line, pixelRatio);
+      });
+      const detail = element("traffic-chart-detail");
+      if (selected.length > 1) {
+        detail.textContent = "Overlapping lines: " + selected.map((field) => {
+          const line = series.find((item) => item.field === field);
+          const point = hits.find((hit) => hit.field === field).point;
+          return trafficLineDetail(line, point, now);
+        }).join(" | ") + ". Choose a legend label to inspect one.";
+      } else if (selected.length) {
+        const line = series.find((item) => item.field === selected[0]);
+        const hit = !trafficInspection.legend && hits.find((item) => item.field === line.field);
+        detail.textContent = trafficLineDetail(line, hit ? hit.point : line.points[line.points.length - 1], now);
+      } else {
+        detail.textContent = TRAFFIC_INSPECTION_HELP;
+      }
+      const ordered = [...series.filter((line) => !selected.includes(line.field)),
+        ...series.filter((line) => selected.includes(line.field))];
+      ordered.forEach((line) => {
+        const highlighted = selected.includes(line.field);
+        context.strokeStyle = selected.length && !highlighted ? "#64748b" : line.color;
+        context.globalAlpha = selected.length && !highlighted ? 0.4 : 1;
+        context.lineWidth = highlighted ? 3.5 : line.step ? 1.8 : 2.5;
         context.lineJoin = "round";
         context.lineCap = "round";
-        context.setLineDash(series.dash || []);
+        context.setLineDash(line.dash);
         context.beginPath();
-        let started = false;
-        let previousY = 0;
-        visibleSamples.forEach((sample) => {
-          const rate = sample[series.field];
-          if (!Number.isFinite(rate)) {
-            if (series.step) started = false;
-            return;
-          }
-          const age = now - sample.time;
-          const x = plot.right - plotWidth * age / TRAFFIC_WINDOW_MS;
-          const y = plot.bottom - plotHeight * rate / scaleMax;
-          if (!started) {
-            context.moveTo(x, y);
-            started = true;
-          } else if (series.step) {
-            context.lineTo(x, previousY);
-            context.lineTo(x, y);
-          } else {
-            context.lineTo(x, y);
-          }
-          previousY = y;
+        line.segments.forEach((segment) => {
+          context.moveTo(segment.from.x, segment.from.y);
+          context.lineTo(segment.to.x, segment.to.y);
         });
-        if (started) context.stroke();
+        context.stroke();
         context.setLineDash([]);
-      }
-
-      [
-        { field: "isp_upload", color: "#75a9ff", dash: [8, 6], step: true },
-        { field: "isp_download", color: "#75d7c2", dash: [8, 6], step: true },
-        { field: "profile_upload", color: "#ffa76c", dash: [2, 5], step: true },
-        { field: "profile_download", color: "#edc36a", dash: [2, 5], step: true },
-        { field: "upload", color: "#70b7ff" },
-        { field: "download", color: "#70d7a9" }
-      ].forEach(drawSeries);
-
-      if (!visibleSamples.length) {
-        referenceFields.forEach((field) => {
-          const value = latestTrafficReferences[field];
-          if (!Number.isFinite(value)) return;
-          const colors = {
-            isp_upload: "#75a9ff",
-            isp_download: "#75d7c2",
-            profile_upload: "#ffa76c",
-            profile_download: "#edc36a"
-          };
-          context.strokeStyle = colors[field];
-          context.lineWidth = 1.8;
-          context.setLineDash(field.startsWith("isp_") ? [8, 6] : [2, 5]);
-          const y = plot.bottom - plotHeight * value / scaleMax;
+        line.points.forEach((point) => {
+          if (line.points.length !== 1 && line.segments.some((segment) => segment.from === point || segment.to === point)) return;
           context.beginPath();
-          context.moveTo(plot.left, y);
-          context.lineTo(plot.right, y);
-          context.stroke();
+          context.arc(point.x, point.y, highlighted ? 3 : 1.8, 0, Math.PI * 2);
+          context.fillStyle = context.strokeStyle;
+          context.fill();
         });
-        context.setLineDash([]);
-      }
+      });
+      context.globalAlpha = 1;
+      context.setLineDash([]);
       if (!visibleSamples.length) {
         context.fillStyle = "#91a8c1";
         context.textAlign = "center";
@@ -3220,6 +3401,12 @@ DASHBOARD_HTML = r"""<!doctype html>
           stopTrafficSampling(data.message || "Live traffic counters are unavailable in this mode.");
           return;
         }
+        const selectedDevice = element("traffic-device").value;
+        const scope = data.general_profile_limits && selectedDevice === "@all" ? "shared"
+          : selectedDevice === EVERYONE_ELSE_TRAFFIC ? "everyone" : "device";
+        if (trafficProfileScope !== null && trafficProfileScope !== scope) resetTrafficHistory();
+        trafficProfileScope = scope;
+        trafficReferencesReadAt = performance.now();
         latestTrafficReferences = trafficReferencesFromResponse(data);
         const counters = mergedTrafficCounters(data);
         const totals = selectedTrafficTotals(counters.devices);
@@ -7367,11 +7554,13 @@ DASHBOARD_HTML = r"""<!doctype html>
     });
 
     element("traffic-device").addEventListener("change", () => {
+      resetTrafficView();
       if (!trafficSamplingAllowed) return;
-      resetTrafficHistory();
       element("traffic-status").textContent = "Changing the device view...";
       pollTraffic();
     });
+
+    setupTrafficChartInspection();
 
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) {
