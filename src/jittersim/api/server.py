@@ -5983,6 +5983,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     async function loadHealth() {
       const data = await request("/api/health", "GET");
       renderMode(data);
+      // The system details need the admin token. The public check only has the mode.
+      if (adminTokenVerified) data.system = (await request("/api/system-health", "GET")).system;
       renderSystemHealth(data);
     }
 
@@ -10680,9 +10682,12 @@ class ControlServer(HTTPServer):
                     "mode": "hardware" if self.helper_client is not None else "configuration-only",
                     "helper_configured": self.helper_client is not None,
                     "helper_reachable": helper_reachable,
-                    "system": machine_health(),
                 }
             )
+        if path == "/api/system-health":
+            # The public health check carries only the mode like the Pi base. The
+            # version and free disk and temperature and uptime need the admin token.
+            return HTTPStatus.OK, "application/json", _json_bytes({"system": machine_health()})
         if path == "/api/profiles":
             profiles = [_profile_payload(profile) for profile in self.repository.list_profiles()]
             return HTTPStatus.OK, "application/json", _json_bytes({"profiles": profiles})

@@ -26,6 +26,7 @@ READ_PATHS = (
     "/api/access", "/api/history", "/api/test-sessions", "/api/updates",
     "/api/update-preferences", "/api/export", "/api/backup", "/api/general-profile",
     "/api/service-lists", "/api/unaffected-devices", "/api/traffic", "/api/observations",
+    "/api/system-health",
 )
 
 

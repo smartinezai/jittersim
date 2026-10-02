@@ -714,8 +714,9 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(content_type, "application/json")
+        # Only what the Pi base exposed: the page needs the mode before the token.
         self.assertEqual(
-            {key: value for key, value in json.loads(body).items() if key != "system"},
+            json.loads(body),
             {
                 "helper_configured": False,
                 "helper_reachable": False,
@@ -913,6 +914,7 @@ class ControlServerTests(unittest.TestCase):
             "/api/export",
             "/api/gateway-persistence",
             "/api/update-preferences",
+            "/api/system-health",
         ):
             with self.subTest(path=path):
                 self.assertEqual(get(path)["status"], 401)
@@ -2217,13 +2219,28 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(content_type, "application/json")
         self.assertEqual(
-            {key: value for key, value in json.loads(body).items() if key != "system"},
+            json.loads(body),
             {
                 "helper_configured": True,
                 "helper_reachable": True,
                 "mode": "hardware",
                 "status": "ok",
             },
+        )
+
+    def test_system_details_need_the_token_and_stay_out_of_the_public_health(self) -> None:
+        # Version and free disk and temperature and uptime help an attacker on the
+        # test Wi-Fi so they sit behind the admin token.
+        _, _, public = self.server.response_for("/api/health")
+        for detail in ("system", "version", "disk_free_bytes", "temperature_celsius", "uptime"):
+            self.assertNotIn(detail, public.decode())
+        status, content_type, body = self.server.response_for("/api/system-health")
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, "application/json")
+        system = json.loads(body)["system"]
+        self.assertEqual(
+            set(system),
+            {"version", "checked_at", "disk_free_bytes", "temperature_celsius", "uptime_seconds"},
         )
 
     def test_configuration_endpoints_serialize_validated_values(self) -> None:
