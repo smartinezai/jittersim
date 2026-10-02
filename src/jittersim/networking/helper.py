@@ -67,11 +67,12 @@ ROUTER_ACTIONS = (
     "router-status",
     "router-wifi-credentials",
     "window-login-save",
-    "window-login-clear",
-    "window-login-status",
     "window-copy",
     "window-router",
 )
+# These only read or remove the saved login file. They never wait for a router operation or the
+# plan lock so the dashboard can always ask whether a login is saved.
+WINDOW_LOGIN_FILE_ACTIONS = ("window-login-clear", "window-login-status")
 MAX_LOG_DETAIL_CHARS = 512
 MAX_CONNECTED_CLIENTS = 256
 MAX_SERVICE_ADDRESS_LISTS = 15
@@ -1278,7 +1279,8 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
             self._send_response({"ok": False, "error": "request must be valid JSON"})
             return
         action = payload.get("action") if isinstance(payload, dict) else None
-        if action in ("ping", "dashboard-access") or action in WIFI_ACTIONS or action in ROUTER_ACTIONS:
+        if (action in ("ping", "dashboard-access") or action in WIFI_ACTIONS or action in ROUTER_ACTIONS
+                or action in WINDOW_LOGIN_FILE_ACTIONS):
             self._send_response(self.server.service.handle_payload(payload))
             return
         # Apply and reset wait a moment for a read so a poll never refuses Panic. Every
