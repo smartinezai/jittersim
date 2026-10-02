@@ -14,7 +14,12 @@ from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.commands import CommandResult
 from jittersim.networking.dashboard_access import AccessStore
-from jittersim.networking.helper import HelperClient, HelperService, UnixHelperServer
+from jittersim.networking.helper import (
+    HelperClient,
+    HelperClientError,
+    HelperService,
+    UnixHelperServer,
+)
 from jittersim.networking.router import RouterWifiSettings
 from jittersim.networking.topology import Topology
 from tests.wifi_support import WifiExecutor
@@ -67,6 +72,29 @@ class DashboardRouter:
         pass
 
 
+BUSY_ATTEMPTS = 100
+BUSY_WAIT_SECONDS = 0.05
+
+
+class PatientHelperClient(HelperClient):
+    """Wait for the helper when it is busy instead of failing the journey.
+
+    The helper does one thing at a time and refuses a request that arrives while another
+    runs. The page polls the helper every few seconds so a button that a journey presses can
+    land in the middle of a poll. A person would press the button again. On the slower CI
+    machine this now and then failed a journey with a network update that failed.
+    """
+
+    def _request(self, payload, *, timeout_seconds=None):
+        for attempt in range(BUSY_ATTEMPTS):
+            try:
+                return super()._request(payload, timeout_seconds=timeout_seconds)
+            except HelperClientError as error:
+                if error.reason != "helper-busy" or attempt == BUSY_ATTEMPTS - 1:
+                    raise
+            time.sleep(BUSY_WAIT_SECONDS)
+
+
 class FixtureServer(ControlServer):
     def get_request(self):
         connection, address = super().get_request()
@@ -109,6 +137,25 @@ def seed_observations(repository):
     )
 
 
+def keep_helper_busy(helper_client):
+    """Ask the helper for the connected clients all the time when JITTERSIM_BROWSER_TEST_HELPER_NOISE
+    is 1. The helper does one thing at a time so this reproduces on a fast machine what a slow CI
+    machine does by chance when the page polls while a journey presses a button."""
+
+    if os.environ.get("JITTERSIM_BROWSER_TEST_HELPER_NOISE") != "1":
+        return
+
+    def ask():
+        while True:
+            try:
+                helper_client.connected_devices()
+            except Exception:  # a refused request is the point
+                pass
+            time.sleep(0.002)
+
+    threading.Thread(target=ask, daemon=True).start()
+
+
 def main():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -122,7 +169,8 @@ def main():
             try:
                 with ConfigRepository(root / "config.db") as repository:
                     seed_observations(repository)
-                    helper_client = HelperClient(socket_path=root / "wifi.sock")
+                    helper_client = PatientHelperClient(socket_path=root / "wifi.sock")
+                    keep_helper_busy(HelperClient(socket_path=root / "wifi.sock"))
                     scheduler = None
                     if os.environ.get("JITTERSIM_BROWSER_TEST_SCHEDULER") == "1":
                         # Like a real install: an Apply keeps the scheduler running.
