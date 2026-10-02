@@ -11,6 +11,7 @@ from jittersim.api.server import ControlServer
 from jittersim.config.models import Device, DomainObservation, Impairment, Profile, Scenario, ScenarioStep
 from jittersim.config.storage import ConfigRepository
 from jittersim.engine.runtime import RuntimeScheduler
+from jittersim.networking.access import AccessManager
 from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.commands import CommandResult
 from jittersim.networking.dashboard_access import AccessStore
@@ -36,6 +37,9 @@ class DashboardWifiExecutor(WifiExecutor):
             return CommandResult(0, stdout="default via 192.168.0.1 dev eth0\n")
         if command.executable == "iw":
             return CommandResult(0, stdout="Station 02:00:00:00:00:01 (on wlan0)\n")
+        if command.executable == "tc" and command.arguments[:2] == ("-s", "-j"):
+            # Queue statistics: no queues exist in the fixture.
+            return CommandResult(0, stdout="[]")
         if command.executable == "nmcli" and command.arguments[-1] == "eth0":
             return CommandResult(0, stdout="management\n")
         if command.executable == "nft":
@@ -67,8 +71,21 @@ class DashboardRouter:
         pass
 
 
+class FixtureAccessManager(AccessManager):
+    """Household access rules against simulated commands: the DNS probe always answers."""
+
+    def _probe(self, plan):
+        return True
+
+
 class DashboardHelperService(HelperService):
-    """The real helper, plus a staged release when the demo data is seeded."""
+    """The real helper, plus a staged release and a reachable router when seeded."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if seeded():
+            # Main's demo helper reported the router reachable; nothing probes it here.
+            self._gateway_state = "available"
 
     def _handle_payload(self, payload):
         if seeded() and isinstance(payload, dict) and payload.get("action") == "update-status":
@@ -145,10 +162,17 @@ def seed_observations(repository):
 def main():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        service = DashboardHelperService(NetworkApplier(executor=DashboardWifiExecutor(),
-                                                       topology=Topology("eth0", "wlan0")),
+        executor = DashboardWifiExecutor()
+        topology = Topology("eth0", "wlan0")
+        # Household access rules run against the same simulated commands.
+        access_manager = FixtureAccessManager(
+            executor=executor, topology=topology, directory=root / "access",
+            runtime_path=root / "access-policy.json", hostapd_path=root / "hostapd",
+        )
+        service = DashboardHelperService(NetworkApplier(executor=executor, topology=topology),
                                          router_factory=lambda *_: DashboardRouter(),
-                                         access_store=AccessStore(root / "access.json"))
+                                         access_store=AccessStore(root / "access.json"),
+                                         access_manager=access_manager)
         with UnixHelperServer(root / "wifi.sock", service) as helper:
             worker = threading.Thread(target=helper.serve_forever, daemon=True)
             worker.start()

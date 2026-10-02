@@ -364,8 +364,8 @@ EXPECTED_PAGE_HEADINGS = {
         "Browser service profile", "Service data limit", "Service time limit",
     ],
     "page-router": [
-        "Wi-Fi name", "Upstream router connection", "Router outage behavior",
-        "Manual Pi access-point fallback",
+        "Wi-Fi name", "Upstream router connection", "Manual Pi access-point fallback",
+        "Router outage behavior",
     ],
     "page-traffic": ["Live traffic", "Traffic discovery", "Random website choices"],
     "page-measurements": ["Measurements"],
@@ -3972,8 +3972,8 @@ class ControlServerTests(unittest.TestCase):
                 "Device data limit", "Service time limit",
             ],
             "router": [
-                "Upstream router connection", "Router outage behavior",
-                "Manual Pi access-point fallback",
+                "Upstream router connection", "Manual Pi access-point fallback",
+                "Router outage behavior",
             ],
             "traffic": ['id="traffic-chart"', "Traffic discovery"],
             "measurements": ['id="measurement-files"'],

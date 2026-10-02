@@ -838,7 +838,6 @@ DASHBOARD_HTML = r"""<!doctype html>
   
 
     /* Cards and controls that arrived with main's dashboard. */
-    /* Rules such as label { display: grid }
     .activity-card { margin-top: 1rem; }
     .activity-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
     .activity-actions button { margin-top: 0; }
@@ -928,7 +927,6 @@ DASHBOARD_HTML = r"""<!doctype html>
     .getting-started-steps li.done .step-mark { color: #8de2bc; }
     .connected-picker { display: flex; gap: 0.5rem; align-items: end; }
     .connected-picker label { flex: 1; min-width: 0; }
-    /* A long device name must not push the menu past the card. */
     .connected-picker select { width: 100%; min-width: 0; text-overflow: ellipsis; }
     .picker-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: end; }
     .update-badge {
@@ -1870,20 +1868,6 @@ DASHBOARD_HTML = r"""<!doctype html>
       <p id="router-action-message" class="policy-note" role="status" aria-live="polite">Keep the Pi connected to the router by Ethernet before changing the router Wi-Fi.</p>
     </div>
   </section>
-  <section class="card" data-collapse="open">
-    <div class="section-heading">
-      <div>
-        <h2>Router outage behavior</h2>
-        <p>Choose what happens when the Pi loses its router connection</p>
-      </div>
-    </div>
-    <p class="policy-note">When on, active profiles stay in place and return with the router. When off, a confirmed router outage stops profiles until you choose Apply. Saved profiles and schedules are kept. This setting does not change what happens after a Pi restart.</p>
-    <label class="quota-check"><input id="gateway-persistence-toggle" type="checkbox"> Keep active profiles through router outages</label>
-    <div class="action-buttons">
-      <button id="gateway-persistence-save" class="primary" type="button">Save outage behavior</button>
-    </div>
-    <p id="gateway-persistence-state" class="token-check-status" role="status" aria-live="polite">Checking the router connection...</p>
-  </section>
   <section class="card" data-collapse="closed">
     <h2>Manual Pi access-point fallback</h2>
     <form id="access-point-form">
@@ -1899,6 +1883,20 @@ DASHBOARD_HTML = r"""<!doctype html>
       <button type="submit">Use these values on the Pi</button>
     </form>
     <p class="policy-note">To restore the JitterSim name without changing the password, use Reset Wi-Fi name above.</p>
+  </section>
+  <section class="card" data-collapse="open">
+    <div class="section-heading">
+      <div>
+        <h2>Router outage behavior</h2>
+        <p>Choose what happens when the Pi loses its router connection</p>
+      </div>
+    </div>
+    <p class="policy-note">When on, active profiles stay in place and return with the router. When off, a confirmed router outage stops profiles until you choose Apply. Saved profiles and schedules are kept. This setting does not change what happens after a Pi restart.</p>
+    <label class="quota-check"><input id="gateway-persistence-toggle" type="checkbox"> Keep active profiles through router outages</label>
+    <div class="action-buttons">
+      <button id="gateway-persistence-save" class="primary" type="button">Save outage behavior</button>
+    </div>
+    <p id="gateway-persistence-state" class="token-check-status" role="status" aria-live="polite">Checking the router connection...</p>
   </section>
   </section><!-- /page:router -->
   <section class="page" id="page-traffic" data-page="traffic" aria-label="Traffic" tabindex="-1" hidden>
@@ -5859,6 +5857,13 @@ DASHBOARD_HTML = r"""<!doctype html>
           adminTokenVerified = true;
           await refresh();
           if (tokenRevision !== adminTokenRevision) return;
+          if (!adminTokenVerified) {
+            // A read during the refresh found this device's dashboard access gone.
+            const locked = new Error(element("dashboard-access-status").textContent ||
+              "Allow this device to use the dashboard.");
+            locked.status = 403;
+            throw locked;
+          }
           await loadTrafficSettings();
           if (tokenRevision !== adminTokenRevision) return;
           await startTrafficSampling();
@@ -8859,17 +8864,16 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
     }
 
-    async function startDashboard() {
+    function startDashboard() {
       // The admin token gates everything else, so only the public health check
-      // and remembered credentials run before Check token.
+      // and the remembered credentials run before Check token. The restore runs
+      // at once so that a token typed meanwhile is never touched.
       updateCredentialViewport();
       updateCredentialStatus();
-      try {
-        await loadHealth();
-      } catch (error) {
+      loadHealth().catch((error) => {
         showMessage(error.message, "error");
-      }
-      await restoreRememberedCredentials();
+      });
+      return restoreRememberedCredentials();
     }
 
     [

@@ -37,6 +37,10 @@ def profile_row(page, name):
 
 def check_wifi_recovery(page):
     page.get_by_role("link", name=ROUTER_LINK).click()
+    # The Pi line keeps the fallback card closed until it is opened.
+    fallback = page.get_by_role("button", name="Manual Pi access-point fallback")
+    if fallback.get_attribute("aria-expanded") == "false":
+        fallback.click()
     button = page.locator("#reset-wifi-name")
     expect(button).to_be_enabled()
     field = page.locator("#access-point-ssid")
@@ -201,7 +205,8 @@ def run():
         [sys.executable, "-m", "tests.browser.fixture"],
         stdout=subprocess.PIPE,
         text=True,
-        env={**os.environ, "JITTERSIM_BROWSER_TEST_SEED": "1"},
+        # Main's fixture always ran a scheduler; the Pi line's fixture makes it opt-in.
+        env={**os.environ, "JITTERSIM_BROWSER_TEST_SEED": "1", "JITTERSIM_BROWSER_TEST_SCHEDULER": "1"},
     )
     try:
         with selectors.DefaultSelector() as selector:
@@ -331,17 +336,19 @@ def run():
                 page.get_by_role("button", name="Stop timer", exact=True).click()
                 expect(page.locator("#workspace-state")).to_contain_text("Normal connection")
                 page.get_by_role("link", name="Profiles", exact=True).click()
+                # The Pi line's rows name their buttons after the profile.
                 profile_row(page, "Slow connection").get_by_role(
-                    "button", name="Duplicate", exact=True
+                    "button", name="Duplicate Slow connection", exact=True
                 ).click()
                 expect(page.locator("#download-delay")).to_have_value("300")
                 expect(page.locator("#profile-id")).to_have_value("slow-copy")
                 profile_row(page, "Slow connection").get_by_role(
-                    "button", name="Edit", exact=True
-                ).first.click()
+                    "button", name="Edit Slow connection", exact=True
+                ).click()
                 page.get_by_role("dialog").get_by_role("button", name="Cancel", exact=True).click()
                 expect(page.locator("#profile-id")).to_have_value("slow-copy")
-                page.get_by_role("button", name="Save profile", exact=True).click()
+                # The form's heading is a card toggle with the same name.
+                page.locator("#profile-form button[type='submit']").click()
                 expect(profile_row(page, "Slow connection copy")).to_contain_text("300 ms")
                 page.get_by_role("link", name="Access and rules", exact=True).click()
                 expect(draft).to_have_value("unsaved.example")

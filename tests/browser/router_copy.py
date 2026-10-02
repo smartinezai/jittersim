@@ -279,7 +279,9 @@ def run_width(browser, base, width, height):
         "JSON.stringify([Object.entries(localStorage), Object.entries(sessionStorage)])"
     )
     assert WIFI_PASSWORD not in stored
-    assert page.evaluate("document.querySelectorAll('textarea[readonly]').length") == 0
+    # Hidden copy helpers (the activity export and the report fallback) are readonly
+    # textareas by design; nothing visible may offer the password for copying.
+    assert page.evaluate("document.querySelectorAll('textarea[readonly]:not([hidden])').length") == 0
     assert all(WIFI_PASSWORD not in item["url"] for item in requests)
     assert all(WIFI_PASSWORD not in cookie["value"] for cookie in context.cookies())
     prove_the_scan_can_find_a_value(context, base)

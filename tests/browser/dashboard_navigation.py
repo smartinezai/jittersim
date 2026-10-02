@@ -84,7 +84,8 @@ def check_reveal(page):
     page.evaluate('revealElement(document.getElementById("time-quota-form"))')
     only_visible(page, "schedules")
     assert page.url.endswith("#schedules")
-    expect(page.get_by_role("button", name="Service time limit")).to_have_attribute(
+    # Field help icons are buttons too ("Service time limit ID help"), so match the card exactly.
+    expect(page.get_by_role("button", name="Service time limit", exact=True)).to_have_attribute(
         "aria-expanded", "true"
     )
     expect(page.locator("#time-quota-form")).to_be_visible()

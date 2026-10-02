@@ -238,6 +238,9 @@ def run():
                         page.wait_for_timeout(100)
                     assert len(held) == 1, "the save was not held"
                     other_row.locator('button[data-action="edit"]').click()
+                    # The edited fields are still a draft until the save answers, so the
+                    # draft guard asks before the form shows another profile.
+                    page.get_by_role("dialog").get_by_role("button", name="Continue", exact=True).click()
                     expect(page.locator("#profile-id")).to_have_value("other")
                     with page.expect_response(is_profile_save):
                         held[0].continue_()
