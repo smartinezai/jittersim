@@ -765,6 +765,8 @@ preserving household restrictions. Use the sidebar **Panic** button (the same
 as **Normal access** under Access rules) or `sudo jittersim normal-access` to
 disable both. They pause automatic changes,
 remove profiles and disable access rules without deleting the saved lists.
+Afterwards only the access table's drop of outside traffic to the private
+resolver port 5335 and an empty device table remain.
 DNS connection mappings are cleared so a reused resolver connection follows
 the new setting. The emergency action does not depend on restarting Unbound.
 Management authentication, the private management firewall and Wi-Fi client

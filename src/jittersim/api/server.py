@@ -2704,7 +2704,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       );
     }
 
-    function syncRememberedCredentials() {
+    // renew names the credential a person has just checked again. If it was accepted its
+    // 24 hours start again. Automatic checks never pass it so a remembered entry still ends.
+    function syncRememberedCredentials(renew) {
       if (!rememberedCredentialsReady) return;
       for (const kind of Object.keys(REMEMBERED)) {
         const config = REMEMBERED[kind];
@@ -2734,7 +2736,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           }
           ownedRemembered[kind] = null;
           note = "Not remembered: the " + config.noun + " was rejected.";
-        } else if (accepted && (!saved || saved.value !== value)) {
+        } else if (accepted && (!saved || saved.value !== value || renew === kind)) {
           if (saveCredential(kind, value)) {
             saved = savedCredential(kind);
             ownedRemembered[kind] = value;
@@ -6687,7 +6689,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     });
 
     // Panic is the full way back: it stops the profiles like Reset and turns
-    // household blocking off as well. Saved settings stay.
+    // household blocking off as well. Only the drop that keeps the private resolver
+    // port closed stays. Saved settings stay.
     element("panic-button").addEventListener("click", () => {
       runAction(
         "/api/normal-access",
@@ -7275,8 +7278,12 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     element("time-quota-device").addEventListener("change", () => populateTimeQuotaDomains());
 
-    element("check-admin-token").addEventListener("click", checkAdminToken);
-
+    // Only this button starts a new 24 hours for a remembered token. The check when the page
+    // restores a saved token and the other buttons call checkAdminToken directly.
+    element("check-admin-token").addEventListener("click", async () => {
+      await checkAdminToken();
+      syncRememberedCredentials("admin");
+    });
     element("traffic-rate-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       const button = event.currentTarget.querySelector("button[type='submit']");
@@ -7941,6 +7948,8 @@ DASHBOARD_HTML = r"""<!doctype html>
         await routerRequest("/api/router/check", { admin_password: password });
         if (passwordRevision !== routerPasswordRevision) return;
         routerPasswordVerified = true;
+        // Only Check password calls this so a remembered password gets a new 24 hours.
+        syncRememberedCredentials("router");
         status.textContent = "Router password accepted. Nothing on the router was changed.";
         showMessage(status.textContent, "success");
       } catch (error) {

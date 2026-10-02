@@ -184,3 +184,9 @@
   .safety-bar { gap: 0.4rem; padding-left: 0.6rem; }
   .safety-bar .panic-button { padding: 0 0.7rem; }
 }
+
+/* The random value cards need 15rem each: on a narrow phone with large text they must shrink to one column. */
+@media (max-width: 48rem) {
+  .randomness-fields { grid-template-columns: minmax(0, 1fr); }
+  .randomness-field { min-width: 0; }
+}

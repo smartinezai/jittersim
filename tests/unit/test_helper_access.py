@@ -56,6 +56,11 @@ class HelperAccessFailureTests(unittest.TestCase):
         self.assertFalse(answer["ok"])
         self.assertIn("filtered DNS service did not start", answer["error"])
         self.assertIn("Panic and Normal access still work", answer["error"])
+        # The way out when Unbound cannot run on this Pi.
+        self.assertIn(
+            "Turn household access rules off on the Access and rules page or check jittersim-dns",
+            answer["error"],
+        )
 
     def test_panic_still_works_after_the_dns_service_failed(self):
         self.executor.fail_restarts = 100

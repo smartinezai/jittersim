@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from jittersim.config.models import AccessOptions
 from jittersim.config.storage import ConfigRepository
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
@@ -76,6 +77,28 @@ class MergedUpgradeTests(unittest.TestCase):
             settings = repository.saved_settings()
             self.assertEqual(settings.general_profile_id, "slow")
             self.assertEqual([item.id for item in settings.service_lists], ["streaming"])
+
+    def test_a_pi_line_database_starts_with_household_access_rules_off(self) -> None:
+        # The Pi line never filtered DNS. Turning household rules on by itself would
+        # send all test-client DNS through Unbound on the first Start, block
+        # subdomains and move the MAC lists into the table that survives Reset.
+        with self.open_twice("pi-line-tip-settings.sql") as repository:
+            self.assertFalse(repository.get_access_options().enabled)
+
+    def test_main_databases_and_fresh_installs_keep_household_access_rules_on(self) -> None:
+        with self.open_twice("main-tip-settings.sql") as repository:
+            self.assertTrue(repository.get_access_options().enabled)
+        with tempfile.TemporaryDirectory() as directory:
+            with ConfigRepository(Path(directory) / "fresh.db") as repository:
+                self.assertTrue(repository.get_access_options().enabled)
+            # A choice the person made later survives the next start.
+            with ConfigRepository(Path(directory) / "fresh.db") as repository:
+                repository.save_access_policies(
+                    repository.get_mac_policy(), repository.get_website_policy(),
+                    options=AccessOptions(enabled=False),
+                )
+            with ConfigRepository(Path(directory) / "fresh.db") as repository:
+                self.assertFalse(repository.get_access_options().enabled)
 
     def test_saved_settings_from_either_line_survive_a_replace(self) -> None:
         for dump_name in ("main-tip-settings.sql", "pi-line-tip-settings.sql"):

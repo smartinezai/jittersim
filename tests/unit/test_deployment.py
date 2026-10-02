@@ -1,5 +1,7 @@
+import re
 import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -171,12 +173,51 @@ class AccessPointStartTests(unittest.TestCase):
             for name in ("Requires", "BindsTo", "PartOf", "Requisite", "Upholds"):
                 for line in self.directives(text, name):
                     self.assertNotIn("jittersim-ap.service", line, f"{path.name} {name}")
-        self.assertIn("ExecStart=/usr/bin/nmcli connection up jittersim-ap", self.unit)
         self.assertIn("RemainAfterExit=yes", self.unit)
         # The one safety check that stays: no test Wi-Fi without the management firewall.
         self.assertIn(
             "ExecStartPre=/usr/sbin/nft list table inet jittersim_control", self.unit
         )
+
+    def test_the_start_retries_a_bounded_number_of_times_and_never_takes_the_wifi_down(self):
+        # NetworkManager counts as started before wlan0 may be ready. Autoconnect is off
+        # so a single failed `nmcli connection up` would leave the Wi-Fi down until reboot.
+        start = [line for line in self.unit.splitlines() if line.startswith("ExecStart=")]
+        self.assertEqual(len(start), 1)
+        command = start[0]
+        self.assertIn("for try in 1 2 3 4 5 6 7 8 9 10; do", command)
+        self.assertIn("sleep 3", command)
+        # An active connection counts as success and is never brought up again.
+        self.assertLess(
+            command.index("GENERAL.STATE connection show jittersim-ap"),
+            command.index("connection up jittersim-ap"),
+        )
+        self.assertIn("= activated ] && exit 0", command)
+        self.assertIn("/usr/bin/nmcli --wait 10 connection up jittersim-ap && exit 0", command)
+        self.assertIn("did not start after 10 tries", command)
+        self.assertTrue(command.rstrip("'").endswith("exit 1"))
+        self.assertIn("TimeoutStartSec=180", self.unit)
+
+    def test_the_retry_loop_runs_and_stops_at_the_first_success(self):
+        command = [line for line in self.unit.splitlines() if line.startswith("ExecStart=")][0]
+        script = command.split("-c '", 1)[1].rsplit("'", 1)[0].replace("$$", "$")
+        with tempfile.TemporaryDirectory() as directory:
+            fake = Path(directory) / "nmcli"
+            log = Path(directory) / "calls"
+            # The third `connection up` succeeds.
+            fake.write_text(
+                "#!/bin/sh\necho \"$*\" >> %s\n"
+                "case \"$*\" in *GENERAL.STATE*) echo activating;; "
+                "*'connection up'*) [ $(grep -c 'connection up' %s) -ge 3 ];; esac\n" % (log, log)
+            )
+            fake.chmod(0o755)
+            result = subprocess.run(
+                ["sh", "-c", script.replace("/usr/bin/nmcli", str(fake)).replace("sleep 3", "sleep 0")],
+                capture_output=True, text=True, timeout=20,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(log.read_text().count("connection up"), 3)
+            self.assertNotIn("down", log.read_text())
 
     def test_the_installer_enables_the_unit_and_keeps_boot_activation_with_it(self):
         self.assertIn(
@@ -207,3 +248,84 @@ class AccessPointStartTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StaleAccessStateTests(unittest.TestCase):
+    """An upgrade never restores main-era access state and never aborts on a restore.
+
+    The owner's Pi once ran main's access recovery. A release without access rules
+    (the Pi line before the merge) never wrote /var/lib/jittersim-access, so state
+    found there on such an upgrade is stale and nothing in the database knows it.
+    """
+
+    INSTALLER = (REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "install.sh").read_text()
+
+    def function(self, name):
+        match = re.search(r"^" + name + r"\(\) \{\n.*?^\}\n", self.INSTALLER, re.DOTALL | re.MULTILINE)
+        self.assertIsNotNone(match, name)
+        return match.group(0)
+
+    def run_shell(self, script):
+        return subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=20)
+
+    def archive(self, root, previous):
+        body = self.function("archive_stale_access_state").replace(
+            "/var/lib/jittersim-access", str(root / "jittersim-access")
+        )
+        # Root owns the copy on the Pi. The test only records the call.
+        script = "set -eu\nchown() { echo chown \"$@\"; }\nprevious_access_release=%s\n%s\narchive_stale_access_state\n" % (previous, body)
+        return self.run_shell(script)
+
+    def test_state_from_a_release_without_access_rules_is_moved_aside_for_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "jittersim-access").mkdir()
+            (root / "jittersim-access" / "policy.json").write_text("{}")
+
+            result = self.archive(root, "no")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((root / "jittersim-access").exists())
+            backups = list(root.glob("jittersim-access-before-*"))
+            self.assertEqual(len(backups), 1)
+            self.assertTrue((backups[0] / "policy.json").exists())
+            self.assertEqual(oct(backups[0].stat().st_mode & 0o777), "0o700")
+            self.assertIn("chown -R root:root", result.stdout)
+            self.assertIn("not restored", result.stderr)
+
+    def test_state_of_a_release_with_access_rules_and_an_empty_folder_stay(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "jittersim-access").mkdir()
+            self.assertEqual(self.archive(root, "no").returncode, 0)
+            (root / "jittersim-access" / "policy.json").write_text("{}")
+            self.assertEqual(self.archive(root, "yes").returncode, 0)
+            self.assertTrue((root / "jittersim-access" / "policy.json").exists())
+            self.assertEqual(list(root.glob("jittersim-access-before-*")), [])
+
+    def test_a_failed_restore_warns_and_the_installer_carries_on(self):
+        body = self.function("restore_access_rules")
+        for code, warned in ((1, True), (0, False)):
+            with self.subTest(code=code):
+                result = self.run_shell(
+                    "set -eu\nsystemctl() { return %d; }\n%s\nrestore_access_rules\necho carried on\n"
+                    % (code, body)
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("carried on", result.stdout)
+                self.assertEqual("sudo jittersim normal-access" in result.stderr, warned)
+
+    def test_the_installer_reads_the_old_release_first_and_restores_only_through_the_guard(self):
+        text = self.INSTALLER
+        check = text.index('[ -x "$INSTALL_DIR/.venv/bin/jittersim-access-restore" ]')
+        self.assertLess(check, text.index("replace-source.py\" \"$SOURCE_DIR\" \"$INSTALL_DIR\""))
+        self.assertLess(check, text.index('"$INSTALL_DIR/.venv/bin/pip" install'))
+        archive = text.index("\narchive_stale_access_state\n")
+        self.assertLess(archive, text.index("install -d -m 0750 -o root -g jittersim /var/lib/jittersim-access"))
+        self.assertLess(archive, text.index("\nrestore_access_rules\n"))
+        # Every restart of the restore runs inside the warning so set -e never aborts.
+        bare = [
+            line for line in text.splitlines()
+            if "systemctl restart jittersim-access-boot.service" in line and "if !" not in line
+        ]
+        self.assertEqual(bare, [])
