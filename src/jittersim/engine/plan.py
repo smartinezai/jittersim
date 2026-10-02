@@ -103,6 +103,13 @@ class ServiceListRule:
     mark: int
     upload_impairment: Impairment
     download_impairment: Impairment
+    # True while a random outage of the list's profile cuts the listed services
+    # for every affected client.
+    outage_active: bool = False
+
+
+# Queue and roll key prefix of a service list. Device IDs can't contain a colon.
+SERVICE_LIST_QUEUE_PREFIX = "servicelist:"
 
 
 def service_list_set_name(rule: "ServiceListRule") -> str:

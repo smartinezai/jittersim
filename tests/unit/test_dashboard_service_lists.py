@@ -165,6 +165,22 @@ CASES = {
       assert.equal(element("service-list-list").textContent, "boom");
       assert.equal(element("service-list-count").textContent, "0 service lists");
     """,
+    "a_list_in_a_random_outage_says_so": r"""
+      serviceCatalogue = CATALOGUE;
+      renderServiceLists({service_lists: [
+        {id: "streaming", name: "Streaming", profile_name: "Flaky", services: ["netflix"],
+         hostnames: [], enabled: true, outage_now: true},
+        {id: "work", name: "Work", profile_name: "Choppy", services: ["claude"],
+         hostnames: [], enabled: true, outage_now: false},
+        {id: "older", name: "Older", profile_name: "Choppy", services: [],
+         hostnames: ["a.example"], enabled: false},
+      ]});
+      const details = element("service-list-list").children.map(
+        (row) => row.children[0].children[1].textContent);
+      assert.equal(details[0], "All affected devices → Flaky · random outage now");
+      assert.equal(details[1], "All affected devices → Choppy");
+      assert.equal(details[2], "All affected devices → Choppy · disabled");
+    """,
     "adding_an_observed_name_never_duplicates": r"""
       observedNames = new Set(["a.example"]);
       renderServiceListObserved();

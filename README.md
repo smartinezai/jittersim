@@ -374,12 +374,34 @@ list from the device's own profile does not cut a listed service. A device in
 a random outage still loses the Pi's DNS and browser proxy so it reaches a
 listed service only through addresses it already has.
 
-Only the profile's delay, jitter, loss, speed limit, reordering, duplication and
-corruption settings are used. Its website list and random outages are not. A
-service list uses the saved profile as it is, so random variation in that
-profile is not rerolled. All affected devices share one speed limit for each
-list in the same way the general profile shares its limit. Delay, jitter and
-loss apply to each packet.
+The list uses the profile's delay, jitter, loss, speed limit, reordering,
+duplication and corruption and also its random variation and random outages.
+Its website list is not used. All affected devices share one speed limit for
+each list in the same way the general profile shares its limit. Delay, jitter
+and loss apply to each packet.
+
+Random variation works for the whole list. With **Reroll every** set the list
+gets new values at that interval such as `200 ± 30%` and every affected device
+gets the same new values. The first start uses the saved values and the first
+new values come one interval later. The same **Random seed** gives the list the
+same values in the same order each time. Two lists with the same profile get
+different values. Editing the profile or choosing another one starts again
+from the saved values. So do **Reset network** and **Panic**.
+
+A random outage also works for the whole list. At each outage check the
+profile's **Outage chance** decides whether the listed services go away for
+the **Outage length**. During the outage every affected device loses them in
+both directions and the browser proxy refuses their hostnames. The Pi's DNS
+and the dashboard and all other sites keep working and devices in **Unaffected
+by profiles** still reach the listed services. Other sites on the same server
+address as a listed service go away too. The **Service lists** card shows
+`random outage now` for the list and the activity log records when an outage
+starts and ends. The **Impact** card shows no traffic for the list while the
+outage lasts.
+
+New values and the start and end of an outage reach the Pi like a saved change
+within a few seconds. Connections that are shaped carry on with the new values.
+Browser proxy tunnels close so the browser opens them again.
 
 Matching is by destination address. A small service on the Pi reads the DNS
 answers that leave the Pi towards the test Wi-Fi. When an answer names a listed

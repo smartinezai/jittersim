@@ -94,8 +94,11 @@ def select_mark(
             return 0, "unaffected"
     # A listed service replaces whatever profile behavior the client would get,
     # including a random outage, exactly like the network rules for direct traffic.
+    # The list's own random outage cuts it for every affected client.
     for service_list in plan.service_list_rules:
         if any(host == domain or host.endswith("." + domain) for domain in service_list.domains):
+            if service_list.outage_active:
+                raise ProxyError("this service is in a random outage of its service list")
             return service_list.mark, f"service-list:{service_list.list_id}"
     if plan.general_profile is not None:
         if plan.general_profile.outage_active:
