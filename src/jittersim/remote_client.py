@@ -1,7 +1,8 @@
 """Talk to the Pi's HTTPS dashboard from another computer such as a Mac.
 
 The client only uses a certificate-verified HTTPS connection to the address it was given.
-It never follows a redirect, reads at most a bounded answer and gives up after a timeout.
+It never follows a redirect and reads at most a bounded answer. It gives up when the
+dashboard does not answer within the timeout or keeps sending an answer for longer than that.
 The admin token comes from a hidden prompt every time or from JITTERSIM_ADMIN_TOKEN for
 scripts. It is never stored, printed or sent anywhere but the dashboard. The saved
 connection file holds only the dashboard address and the certificate path.
@@ -169,27 +170,35 @@ def read_config(path: Path) -> Dict[str, str]:
     may write it. A token found in it is never used.
     """
 
+    not_regular = f"{path} is not a regular file. Run 'jittersim connect' again."
     try:
-        info = path.lstat()
+        if not stat.S_ISREG(path.lstat().st_mode):
+            raise RemoteError(not_regular)
+        # The checks below look at the file that was opened, never at a name that a link
+        # could point somewhere else in between.
+        descriptor = os.open(
+            str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        )
     except FileNotFoundError:
         return {}
     except OSError as error:
         raise RemoteError(f"Could not read {path}.") from error
-    if not stat.S_ISREG(info.st_mode):
-        raise RemoteError(f"{path} is not a regular file. Run 'jittersim connect' again.")
-    if info.st_uid != os.geteuid() or info.st_mode & 0o022:
-        raise RemoteError(
-            f"{path} must belong to you and must not be writable by others. "
-            f"Run: chmod 600 {path}"
-        )
-    try:
-        with path.open("rb") as handle:
+    with os.fdopen(descriptor, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise RemoteError(not_regular)
+        if info.st_uid != os.geteuid() or info.st_mode & 0o022:
+            raise RemoteError(
+                f"{path} must belong to you and must not be writable by others. "
+                f"Run: chmod 600 {path}"
+            )
+        try:
             raw = handle.read(MAX_CONFIG_BYTES + 1)
-        if len(raw) > MAX_CONFIG_BYTES:
-            raise ValueError("too large")
-        data = json.loads(raw)
-    except (OSError, ValueError) as error:
-        raise RemoteError(f"{path} is not a valid JitterSim connection file.") from error
+            if len(raw) > MAX_CONFIG_BYTES:
+                raise ValueError("too large")
+            data = json.loads(raw)
+        except (OSError, ValueError, RecursionError) as error:
+            raise RemoteError(f"{path} is not a valid JitterSim connection file.") from error
     if not isinstance(data, dict):
         raise RemoteError(f"{path} is not a valid JitterSim connection file.")
     return {

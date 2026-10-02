@@ -105,6 +105,9 @@ def test_status_routing_between_the_dashboard_and_the_pi(tmp_path):
     config = tmp_path / "home" / ".config" / "jittersim" / "cli.json"
     assert remote_status_wanted([], {"HOME": str(tmp_path / "home")}) is False
     assert remote_status_wanted(["--json"], {"HOME": str(tmp_path / "home")}) is True
+    # help and unknown options go to the remote parser, which never repeats them
+    for argv in (["--help"], ["-h"], ["--tok=hunter2"], ["--whatever"]):
+        assert remote_status_wanted(argv, {"HOME": str(tmp_path / "home")}) is True, argv
     assert remote_status_wanted([], {"HOME": "/nowhere", "JITTERSIM_URL": "https://pi:8080"})
     config.parent.mkdir(parents=True)
     config.write_text("{}")

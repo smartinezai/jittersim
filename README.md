@@ -113,14 +113,17 @@ need no `sudo` and no SSH. Install the command once from a checkout:
 ```sh
 python3 -m venv ~/.jittersim-cli
 ~/.jittersim-cli/bin/pip install .
+echo 'export PATH="$HOME/.jittersim-cli/bin:$PATH"' >> ~/.zshrc
 ```
+
+Open a new terminal afterwards so `jittersim` is found.
 
 Copy `/etc/jittersim/dashboard.crt` from the Pi through a connection you
 already trust and compare its SHA-256 fingerprint with the one the installer
 printed. Then save the address and the certificate path once:
 
 ```sh
-~/.jittersim-cli/bin/jittersim connect --url https://192.168.0.17:8080 --ca-cert ~/jittersim-dashboard.crt
+jittersim connect --url https://192.168.0.17:8080 --ca-cert ~/jittersim-dashboard.crt
 ```
 
 `connect` checks that the dashboard presents exactly that certificate and saves
@@ -159,7 +162,9 @@ To put a new release on the Pi from the Mac, run
 needs only git, ssh, scp, tar and shasum. It builds the release archive of a
 commit, copies it to the Pi with your SSH key and stages it for the verified
 update service. `--install` also installs it and shows the release the Pi now
-runs. The Pi asks for its `sudo` password in your terminal. See
+runs. The Pi asks for its `sudo` password in your terminal. Deploying needs a
+connection to the Pi's router network (Ethernet or the router's Wi-Fi): a Mac on
+the Pi's test Wi-Fi cannot reach the Pi over SSH. See
 [Deploy from a Mac](deploy/raspberry-pi/README.md#deploy-from-a-mac).
 
 ## Features

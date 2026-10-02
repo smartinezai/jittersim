@@ -552,3 +552,19 @@ def test_pi_commands_still_reach_the_pi_cli(capsys):
 
     assert command_main(["--help"]) == 0
     assert "Headless commands on the Pi" in capsys.readouterr().out
+
+
+def test_an_unknown_status_option_is_never_repeated_even_without_a_connection(capsys):
+    with pytest.raises(SystemExit) as stop:
+        main(["status", "--tok=hunter2"])
+    output = capsys.readouterr()
+    assert stop.value.code == 2
+    assert "hunter2" not in output.out + output.err
+
+
+def test_status_help_on_a_mac_explains_both_ways(capsys):
+    with pytest.raises(SystemExit) as stop:
+        main(["status", "--help"])
+    text = " ".join(capsys.readouterr().out.split())
+    assert stop.value.code == 0
+    assert "Runs on your Mac" in text and "sudo jittersim status" in text

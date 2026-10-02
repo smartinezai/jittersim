@@ -230,8 +230,6 @@ def _connect(arguments: argparse.Namespace) -> int:
 # --- section: status ----------------------------------------------------------------------
 
 LOCAL_STATUS_OPTIONS = ("--database", "--helper-socket", "--timeout-seconds")
-REMOTE_STATUS_OPTIONS = ("--url", "--ca-cert", "--json")
-
 
 def remote_status_wanted(argv: Sequence[str], environ: Optional[Mapping[str, str]] = None) -> bool:
     """Decide whether `jittersim status` reads the dashboard or the local Pi helper.
@@ -244,10 +242,12 @@ def remote_status_wanted(argv: Sequence[str], environ: Optional[Mapping[str, str
     if _secret_argument(argv):
         # The remote command refuses it without repeating it. argparse would print it.
         return True
-    names = {argument.split("=", 1)[0] for argument in argv if argument.startswith("--")}
+    names = {argument.split("=", 1)[0] for argument in argv if argument.startswith("-")}
     if names & set(LOCAL_STATUS_OPTIONS):
         return False
-    if names & set(REMOTE_STATUS_OPTIONS):
+    if names:
+        # Remote options, --help and anything unknown go to the remote parser: it explains
+        # both ways and never repeats an option it does not know.
         return True
     return bool(environ.get(URL_ENV)) or config_path(environ).exists()
 
@@ -257,8 +257,9 @@ def _status_parser() -> argparse.ArgumentParser:
         "jittersim status",
         "Show the release the Pi runs, whether JitterSim is running, the general profile and "
         "the connected devices that are affected right now with the profile each one gets. "
-        "Protected devices are never listed. On the Pi without a saved connection 'sudo jittersim status' shows the local "
-        "helper status instead.",
+        "Protected devices are never listed. On the Pi without a saved connection "
+        "'sudo jittersim status' shows the local helper status instead (options --database, "
+        "--helper-socket and --timeout-seconds).",
     )
 
 
