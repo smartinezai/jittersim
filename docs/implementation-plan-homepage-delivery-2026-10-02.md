@@ -67,3 +67,8 @@ Integration advanced to `4065e72` before merge. Bring it into this branch and
 verify the combined partial-save behavior, dashboard messages and DNS journey.
 All nine checks on the earlier `fae24a6` source passed but the new combination
 needs its own clean CI before merge. Keep existing owner changes intact.
+
+Integration later advanced to `1044184` with the options-only and site-rule-only
+saved-version fix. Bring that forward too. The previous combined browser job
+was cancelled during a slow system dependency download before tests started.
+The latest combination needs all nine checks on its own published head.

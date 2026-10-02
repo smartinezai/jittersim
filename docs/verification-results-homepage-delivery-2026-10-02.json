@@ -1,7 +1,7 @@
 {
   "date": "2026-10-02",
   "scope": "Reference and DNS acceptance delivered onto current integration",
-  "integration_base": "4065e72c3daa6ade4fb33b3812de3994ad777217",
+  "integration_base": "1044184023007c9ebfbb08c6ed3f64aaae0e2430",
   "tested_source": "c10149af8b8b0c3070f1c8666d9bd926b178107f",
   "reviewed_source_commits": [
     "0541cc29255c0765533ce430c5f9bf018409d008",
@@ -83,8 +83,8 @@
   "validation_scope": "The full Python suite and DNS journey ran on the earlier stated source. After the control-only cleanup repair, all nine HTTP checks and all 32 extension checks passed again. Full checks run in CI on the published head before merge.",
   "original_integration_base": "a1da456ac2fa70462a063757d1e9707d3cf5ae69",
   "latest_combination": {
-    "source": "34b810843a2ca74dfed4607e323385aec0cbf257",
-    "focused_python": "passed",
+    "source": "8e159622ba5013d68a4f8aec02ad639cefcb1a1a",
+    "focused_python": "passed including saved-version and fixture regressions",
     "dns_dashboard": "passed at desktop and phone widths",
     "required_ruff": "passed",
     "full_ci": "Required on the published combined source before merge"
@@ -95,5 +95,12 @@
     "result": "passed",
     "tests_run": "https://github.com/smartinezai/jittersim/actions/runs/37060711817",
     "pi_run": "https://github.com/smartinezai/jittersim/actions/runs/37060711822"
+  },
+  "previous_combined_ci": {
+    "source": "bf011e2057bdca1ce64d48515978952e85fe550a",
+    "passed_checks": 8,
+    "remaining_check": "Browser journeys timed out while downloading system dependencies before tests ran",
+    "tests_run": "https://github.com/smartinezai/jittersim/actions/runs/37061616167",
+    "pi_run": "https://github.com/smartinezai/jittersim/actions/runs/37061616174"
   }
 }
