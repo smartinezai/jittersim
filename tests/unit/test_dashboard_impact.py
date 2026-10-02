@@ -399,6 +399,14 @@ def test_packets_that_only_wait_make_the_queue_busy_and_not_idle():
 
 
 @needs_node
+def test_a_queue_length_that_falls_further_than_packets_left_never_makes_offered_negative():
+    row = two({"loss_percent": 20}, "packets: 0, qlen: 0", first="packets: 0, qlen: 784")
+    assert row["offered"] == 0
+    assert row["lossPercent"] == 0
+    assert row["verdict"] == "idle"
+
+
+@needs_node
 def test_an_entry_without_a_queue_length_counts_as_zero():
     row = run(
         "(() => { const old = entry({impairment: {loss_percent: 20}, drops: 3, packets: 7});"
