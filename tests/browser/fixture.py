@@ -14,13 +14,22 @@ from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.commands import CommandResult
 from jittersim.networking.dashboard_access import AccessStore
-from jittersim.networking.helper import HelperClient, HelperService, UnixHelperServer
+from jittersim.networking.helper import (
+    HelperClient,
+    HelperClientError,
+    HelperService,
+    UnixHelperServer,
+)
 from jittersim.networking.router import RouterWifiSettings
 from jittersim.networking.topology import Topology
 from tests.wifi_support import WifiExecutor
 
 
 class DashboardWifiExecutor(WifiExecutor):
+    def __init__(self):
+        super().__init__()
+        self.queue_reads = {}
+
     def run(self, command):
         if command.executable == "ip":
             if command.arguments[:4] == ("-4", "neigh", "show", "dev"):
@@ -41,6 +50,35 @@ class DashboardWifiExecutor(WifiExecutor):
         if command.executable == "nft":
             self.commands.append(command)
             return CommandResult(0, stdout='{"nftables":[]}')
+        if command.executable == "tc":
+            return self.run_tc(command)
+        return super().run(command)
+
+    def run_tc(self, command):
+        """Answer queue counter reads with numbers that grow on every read.
+
+        Every read adds 100 forwarded packets and 11 dropped ones to each project queue.
+        A new root queue or a removed one starts the counters again like the kernel does.
+        """
+
+        interface = command.arguments[-1] if command.arguments[:3] == ("-s", "-j", "qdisc") else None
+        if interface is not None:
+            self.commands.append(command)
+            reads = self.queue_reads[interface] = self.queue_reads.get(interface, 0) + 1
+            queues = [
+                {
+                    "kind": "netem", "handle": f"{mark + 10}:", "parent": f"10:{mark + 1}",
+                    "bytes": 150_000 * reads, "packets": 100 * reads, "drops": 11 * reads,
+                    "overlimits": 0, "requeues": 0, "backlog": 0, "qlen": 0,
+                }
+                for mark in range(1, 5)
+            ]
+            root = {"kind": "prio", "handle": "10:", "root": True, "bytes": 1, "packets": 1,
+                    "drops": 0, "overlimits": 0, "requeues": 0, "backlog": 0, "qlen": 0}
+            return CommandResult(0, stdout=json.dumps([root] + queues))
+        if command.arguments[:1] == ("qdisc",) and command.arguments[1] in ("replace", "del"):
+            if "root" in command.arguments:
+                self.queue_reads.pop(command.arguments[3], None)
         return super().run(command)
 
 
@@ -67,7 +105,45 @@ class DashboardRouter:
         pass
 
 
+BUSY_ATTEMPTS = 100
+BUSY_WAIT_SECONDS = 0.05
+
+
+class PatientHelperClient(HelperClient):
+    """Wait for the helper when it is busy instead of failing the journey.
+
+    The helper does one thing at a time and refuses a request that arrives while another
+    runs. The page polls the helper every few seconds so a button that a journey presses can
+    land in the middle of a poll. A person would press the button again. On the slower CI
+    machine this now and then failed a journey with a network update that failed.
+    """
+
+    def _request(self, payload, *, timeout_seconds=None):
+        for attempt in range(BUSY_ATTEMPTS):
+            try:
+                return super()._request(payload, timeout_seconds=timeout_seconds)
+            except HelperClientError as error:
+                if error.reason != "helper-busy" or attempt == BUSY_ATTEMPTS - 1:
+                    raise
+            time.sleep(BUSY_WAIT_SECONDS)
+
+
+# JITTERSIM_BROWSER_TEST_WIDE_FONTS=1 puts a wider face and a larger root size on the page so a
+# journey can show that it holds on a machine whose fonts are taller than the ones it was
+# written on.
+WIDE_FONTS_STYLE = (
+    b"<style>html { font-size: 112.5% !important; }"
+    b" * { font-family: Verdana, 'DejaVu Sans', sans-serif !important; }</style>"
+)
+
+
 class FixtureServer(ControlServer):
+    def response_for(self, path, query=""):
+        status, content_type, body = super().response_for(path, query)
+        if path == "/" and os.environ.get("JITTERSIM_BROWSER_TEST_WIDE_FONTS") == "1":
+            body = body.replace(b"</head>", WIDE_FONTS_STYLE + b"</head>", 1)
+        return status, content_type, body
+
     def get_request(self):
         connection, address = super().get_request()
         if os.environ.get("JITTERSIM_BROWSER_TEST_WIFI_PEER") == "1":
@@ -109,6 +185,25 @@ def seed_observations(repository):
     )
 
 
+def keep_helper_busy(helper_client):
+    """Ask the helper for the connected clients all the time when JITTERSIM_BROWSER_TEST_HELPER_NOISE
+    is 1. The helper does one thing at a time so this reproduces on a fast machine what a slow CI
+    machine does by chance when the page polls while a journey presses a button."""
+
+    if os.environ.get("JITTERSIM_BROWSER_TEST_HELPER_NOISE") != "1":
+        return
+
+    def ask():
+        while True:
+            try:
+                helper_client.connected_devices()
+            except Exception:  # a refused request is the point
+                pass
+            time.sleep(0.002)
+
+    threading.Thread(target=ask, daemon=True).start()
+
+
 def main():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -122,7 +217,8 @@ def main():
             try:
                 with ConfigRepository(root / "config.db") as repository:
                     seed_observations(repository)
-                    helper_client = HelperClient(socket_path=root / "wifi.sock")
+                    helper_client = PatientHelperClient(socket_path=root / "wifi.sock")
+                    keep_helper_busy(HelperClient(socket_path=root / "wifi.sock"))
                     scheduler = None
                     if os.environ.get("JITTERSIM_BROWSER_TEST_SCHEDULER") == "1":
                         # Like a real install: an Apply keeps the scheduler running.

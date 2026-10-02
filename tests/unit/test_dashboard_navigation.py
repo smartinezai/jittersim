@@ -83,7 +83,10 @@ def test_floating_dock_and_sticky_bar_are_gone():
             r"([^{}]+)\{([^{}]*position:\s*(?:fixed|sticky)[^{}]*)\}", css
         )
     }
-    assert pinned <= {".sidebar", ".toast", ".credentials-panel", ".help-icon::after"}, pinned
+    # The sidebar scrolls so the tips of its buttons are fixed to the window instead.
+    allowed = {".sidebar", ".toast", ".credentials-panel", ".help-icon::after",
+               ".sidebar .sidebar-action-row .help-icon::after"}
+    assert pinned <= allowed, pinned
 
 
 SECOND_SCRIPT = (

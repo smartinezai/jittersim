@@ -33,6 +33,9 @@ const networkCalls = [];
 let helperConfigured = true;
 let profiles = [];
 let generalProfileState = null;
+let lastRuntimeState = null;
+let helperKnown = true;
+let applyBusy = false;
 let networkActionBusy = false;
 let networkActionRevision = 0;
 let wifiResetPending = false;
@@ -55,7 +58,7 @@ function element(id) {
 function showMessage(text, kind) {messages.push({text, kind})}
 function openCredentials(kind) {openedCredentials.push(kind)}
 function setButtonBusy(button, busy) {button.disabled = busy}
-function renderRuntimeSummary(state) {runtimeStates.push(state)}
+function renderRuntimeSummary(state) {runtimeStates.push(state); lastRuntimeState = state}
 function refreshAfterSuccess(message) {refreshMessages.push(message)}
 function renderSavedProfiles() {}
 const refreshedPanels = [];
@@ -89,10 +92,154 @@ CASES = {
       assert.equal(networkCalls[0].options.headers.Authorization, "Bearer fixture token");
       assert.equal(runtimeStates.length, 1);
       assert.equal(refreshMessages.length, 1);
-      assert.match(refreshMessages[0], /All profiles are off/);
-      assert.match(refreshMessages[0], /Apply current configuration/);
+      assert.equal(
+        refreshMessages[0],
+        "All profiles are off. Choose Start with saved settings to resume."
+      );
       for (const id of ACTION_BUTTONS) assert.equal(element(id).disabled, false, id);
       assert.equal(element("panic-button").getAttribute("aria-busy"), "false");
+    """,
+    "apply_says_it_started_the_saved_settings": r"""
+      element("admin-token").value = "fixture token";
+      network = async () => ({ok: true, json: async () => ({
+        state: {observed_state: "applied", running: true},
+        applied: {devices: 2, groups: 1, service_lists: 0, protected: 1, general_profile: null}
+      })});
+      press("apply-button");
+      await flush();
+      assert.equal(networkCalls.length, 1);
+      assert.equal(networkCalls[0].path, "/api/apply");
+      assert.equal(
+        refreshMessages[0],
+        "Started: 2 devices with a profile · 1 group · 1 protected device stays untouched."
+      );
+      assert.equal(element("apply-button").textContent, "Re-apply saved settings");
+    """,
+    "apply_while_running_says_it_re_applied": r"""
+      element("admin-token").value = "fixture token";
+      lastRuntimeState = {observed_state: "applied", running: true};
+      network = async () => ({ok: true, json: async () => ({
+        state: {observed_state: "applied", running: true},
+        applied: {devices: 0, groups: 0, service_lists: 0, protected: 0, general_profile: "Office"}
+      })});
+      press("apply-button");
+      await flush();
+      assert.equal(
+        refreshMessages[0],
+        'Re-applied: General profile "Office" for every unprotected device.'
+      );
+    """,
+    "apply_without_a_summary_still_confirms": r"""
+      element("admin-token").value = "fixture token";
+      network = async () => ({ok: true, json: async () => ({
+        state: {observed_state: "applied", running: true}
+      })});
+      press("apply-button");
+      await flush();
+      assert.equal(refreshMessages[0], "Started with your saved settings.");
+    """,
+    "the_apply_button_says_applying_until_the_request_ends": r"""
+      element("admin-token").value = "fixture token";
+      const pending = deferred();
+      network = () => pending.promise;
+      press("apply-button");
+      await flush();
+      assert.equal(element("apply-button").textContent, "Applying…");
+      assert.equal(element("apply-button").getAttribute("aria-busy"), "true");
+      assert.equal(messages.at(-1).text, "Applying your saved settings…");
+      pending.resolve({ok: true, json: async () => ({
+        state: {observed_state: "applied", running: true},
+        applied: {devices: 1, groups: 0, service_lists: 0, protected: 0, general_profile: null}
+      })});
+      await flush();
+      assert.equal(element("apply-button").textContent, "Re-apply saved settings");
+      assert.equal(element("apply-button").getAttribute("aria-busy"), "false");
+    """,
+    "reset_and_panic_put_the_button_back_to_start": r"""
+      element("admin-token").value = "fixture token";
+      lastRuntimeState = {observed_state: "applied", running: true};
+      network = async () => ({ok: true, json: async () => ({
+        state: {observed_state: "reset", running: false}
+      })});
+      press("reset-button");
+      await flush();
+      assert.equal(refreshMessages[0], "Network reset successfully.");
+      assert.equal(element("apply-button").textContent, "Start with saved settings");
+    """,
+    "apply_message_counts_the_service_lists_the_server_sent": r"""
+      element("admin-token").value = "fixture token";
+      network = async () => ({ok: true, json: async () => ({
+        state: {observed_state: "applied", running: true},
+        applied: {devices: 1, groups: 0, service_lists: 2, protected: 0, general_profile: null}
+      })});
+      press("apply-button");
+      await flush();
+      assert.equal(refreshMessages[0], "Started: 1 device with a profile · 2 service lists.");
+    """,
+    "a_warning_about_skipped_devices_follows_a_finished_sentence": r"""
+      element("admin-token").value = "fixture token";
+      network = async () => ({ok: true, json: async () => ({
+        state: {observed_state: "applied", running: true},
+        applied: {devices: 1, groups: 0, service_lists: 0, protected: 1, general_profile: null},
+        warning: "Profiles were skipped for devices whose current Wi-Fi identity could not be verified: tv."
+      })});
+      press("apply-button");
+      await flush();
+      assert.equal(
+        refreshMessages[0],
+        "Started: 1 device with a profile · 1 protected device stays untouched. " +
+        "Profiles were skipped for devices whose current Wi-Fi identity could not be verified: tv."
+      );
+    """,
+    "a_failed_apply_shows_the_server_error_and_no_summary": r"""
+      element("admin-token").value = "fixture token";
+      network = async () => ({
+        ok: false, status: 502, json: async () => ({
+          error: "network helper apply failed", applied: {devices: 9}
+        })
+      });
+      press("apply-button");
+      await flush();
+      assert.equal(messages.at(-1).kind, "error");
+      assert.equal(refreshMessages.length, 0);
+    """,
+    "without_the_helper_the_status_says_it_is_needed_as_soon_as_the_mode_is_known": r"""
+      lastRuntimeState = {observed_state: "unknown", running: false};
+      helperKnown = false;
+      helperConfigured = false;
+      renderMode({helper_configured: false});
+      assert.equal(element("runtime-summary").textContent, "Needs the Pi helper to run.");
+      assert.equal(element("apply-button").disabled, true);
+      renderMode({helper_configured: true});
+      assert.equal(
+        element("runtime-summary").textContent, "JitterSim is not running. Choose Start with saved settings."
+      );
+    """,
+    "an_apply_with_nothing_to_shape_says_so_and_names_the_access_rules": r"""
+      element("admin-token").value = "fixture token";
+      const send = (applied) => {
+        network = async () => ({ok: true, json: async () => ({
+          state: {observed_state: "applied", running: true}, applied
+        })});
+        press("apply-button");
+      };
+      const none = {devices: 0, groups: 0, service_lists: 0, protected: 0, general_profile: null};
+      send({...none, access_rules: false});
+      await flush();
+      assert.equal(refreshMessages.at(-1), "Started. No device profiles or service lists are saved yet.");
+      send({...none, access_rules: true});
+      await flush();
+      assert.equal(
+        refreshMessages.at(-1),
+        "Re-applied. No device profiles or service lists are saved yet. Access rules apply."
+      );
+      send({...none, protected: 1, access_rules: true});
+      await flush();
+      assert.equal(
+        refreshMessages.at(-1),
+        "Re-applied. 1 protected device stays untouched. " +
+        "No device profiles or service lists are saved yet. Access rules apply."
+      );
     """,
     "locks_every_action_while_running": r"""
       element("admin-token").value = "fixture token";

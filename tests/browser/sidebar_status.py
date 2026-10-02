@@ -85,7 +85,7 @@ def check_width(browser, width, height):
         # signed in with nothing applied yet
         expect(status).to_be_visible()
         expect(page.locator("#status-general")).to_have_text("General profile: none")
-        expect(devices_line(page)).to_have_text("Not started yet")
+        expect(devices_line(page)).to_have_text("Not running")
         expect(page.locator("#status-lists")).to_be_hidden()
         # nothing to open when there is no list of devices
         expect(page.locator("#status-devices")).to_be_hidden()
