@@ -25,6 +25,7 @@ from jittersim.engine.codec import PlanCodecError, plan_from_payload, plan_to_pa
 from jittersim.engine.plan import EVERYONE_ELSE_QUEUE_ID, NetworkPlan
 from jittersim.updates import UpdateError, request_update, update_status
 
+from ..config.router_login import RouterLoginStore
 from .access import AccessManager
 from .applier import MAX_PROTECTED_MACS, ApplyError, NetworkApplier
 from .dashboard_access import ACCESS_FILE, AccessError, AccessStore, identify_peer
@@ -57,7 +58,7 @@ MAX_HELPER_CONNECTIONS = 8
 # Apply access rules and the device quick action so a poll must not refuse it either.
 WRITE_ACTIONS = ("apply", "apply-experiment", "reset", "normal-access", "access-apply")
 WRITE_LOCK_WAIT_SECONDS = 3.0
-WIFI_ACTIONS = ("configure-ap", "router-sync-ap", "router-preview-ap", "wifi-reset")
+WIFI_ACTIONS = ("configure-ap", "router-sync-ap", "router-preview-ap", "wifi-reset", "window-copy")
 ROUTER_ACTIONS = (
     "router-sync-ap",
     "router-preview-ap",
@@ -65,6 +66,11 @@ ROUTER_ACTIONS = (
     "router-check",
     "router-status",
     "router-wifi-credentials",
+    "window-login-save",
+    "window-login-clear",
+    "window-login-status",
+    "window-copy",
+    "window-router",
 )
 MAX_LOG_DETAIL_CHARS = 512
 MAX_CONNECTED_CLIENTS = 256
@@ -149,8 +155,11 @@ class HelperService:
         service_address_clock: Callable[[], float] = time.monotonic,
         gateway_state_path: Optional[Path] = None,
         access_manager: Optional[AccessManager] = None,
+        router_login_path: Optional[Path] = None,
     ) -> None:
         self._applier = applier
+        # The router login for a forced window. Only this root service can read it.
+        self._router_login = RouterLoginStore(router_login_path) if router_login_path else None
         self._active_plan_path = active_plan_path
         self._active_plan: Optional[NetworkPlan] = None
         # A new boot nonce and a count of applied plans tell the dashboard when the
@@ -302,6 +311,8 @@ class HelperService:
             try:
                 if action in ("router-sync-ap", "router-preview-ap"):
                     return self._handle_router_sync_ap(payload)
+                if action == "window-copy":
+                    return self._handle_window_copy()
                 if not self._network_lock.acquire(blocking=False):
                     return {"ok": False, "error": "Pi networking is busy. Try again later.",
                             "reason": "helper-busy"}
@@ -321,6 +332,10 @@ class HelperService:
             return self._handle_router_status(payload)
         if action == "router-wifi-credentials":
             return self._handle_router_wifi_credentials(payload)
+        if action in ("window-login-save", "window-login-clear", "window-login-status"):
+            return self._handle_window_login(action, payload)
+        if action == "window-router":
+            return self._handle_window_router(payload)
         return {"ok": False, "error": "unknown action"}
 
     def _handle_dashboard_access(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1013,6 +1028,60 @@ class HelperService:
             if router is not None:
                 router.close()
 
+    def _window_password(self) -> Optional[str]:
+        return self._router_login.load() if self._router_login is not None else None
+
+    def _handle_window_login(self, action: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Keep the router login for forced windows. It is never sent back."""
+
+        if self._router_login is None:
+            return {"ok": False, "error": "Saving the router login is not set up on this Pi."}
+        if action == "window-login-status":
+            return {"ok": True, "action": action, "saved": self._window_password() is not None}
+        if action == "window-login-clear":
+            self._router_login.clear()
+            return {"ok": True, "action": action, "saved": False}
+        password = payload.get("admin_password")
+        if not isinstance(password, str) or not password or len(password) > 1024:
+            return {"ok": False, "error": "router admin password is invalid"}
+        # Only a login that works is saved.
+        checked = self._handle_router_check({"admin_password": password})
+        if not checked.get("ok"):
+            return checked
+        try:
+            self._router_login.save(password)
+        except (OSError, ValueError):
+            LOGGER.warning("could not save the router login")
+            return {"ok": False, "error": "The router login could not be saved on the Pi."}
+        return {"ok": True, "action": action, "saved": True}
+
+    def _handle_window_copy(self) -> Dict[str, Any]:
+        """Copy the router's Wi-Fi name and password to the Pi with the saved login."""
+
+        password = self._window_password()
+        if password is None:
+            return {"ok": False, "error": "No router login is saved on the Pi.", "reason": "no-login"}
+        preview = self._handle_router_sync_ap({"action": "router-preview-ap", "admin_password": password})
+        if not preview.get("ok"):
+            return preview
+        if preview.get("legacy"):
+            # Nobody is there to confirm an older security mode.
+            return {"ok": False, "error": "The router uses an older Wi-Fi security mode. Copy it by hand.",
+                    "reason": "legacy"}
+        return self._handle_router_sync_ap(
+            {"action": "router-sync-ap", "admin_password": password,
+             "expected_fingerprint": preview["fingerprint"]}
+        )
+
+    def _handle_window_router(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        enabled = payload.get("enabled")
+        if type(enabled) is not bool:
+            return {"ok": False, "error": "router Wi-Fi state is invalid"}
+        password = self._window_password()
+        if password is None:
+            return {"ok": False, "error": "No router login is saved on the Pi.", "reason": "no-login"}
+        return self._handle_router_wifi({"admin_password": password, "enabled": enabled})
+
     def _handle_router_wifi_credentials(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Read the router's own Wi-Fi name and optionally its password for one copy.
 
@@ -1557,6 +1626,28 @@ class HelperClient:
             timeout_seconds=150.0,
         )
 
+    def window_login_save(self, *, admin_password: str) -> Dict[str, Any]:
+        """Save the router login on the Pi for forced windows. The Pi never returns it."""
+
+        return self._request({"action": "window-login-save", "admin_password": admin_password},
+                             timeout_seconds=100.0)
+
+    def window_login_clear(self) -> Dict[str, Any]:
+        return self._request({"action": "window-login-clear"})
+
+    def window_login_status(self) -> Dict[str, Any]:
+        return self._request({"action": "window-login-status"})
+
+    def window_copy(self) -> Dict[str, Any]:
+        """Copy the router's Wi-Fi to the Pi with the saved login."""
+
+        return self._request({"action": "window-copy"}, timeout_seconds=200.0)
+
+    def window_router(self, *, enabled: bool) -> Dict[str, Any]:
+        """Turn the router's Wi-Fi on or off with the saved login."""
+
+        return self._request({"action": "window-router", "enabled": enabled}, timeout_seconds=150.0)
+
     def check_router_password(self, *, admin_password: str) -> Dict[str, Any]:
         """Sign in to the upstream router once and sign out again, changing nothing."""
 
@@ -1893,6 +1984,7 @@ def run_helper(
         access_store=AccessStore(ACCESS_FILE, group_id=grp.getgrnam("jittersim").gr_gid),
         gateway_state_path=gateway_state_path,
         access_manager=access,
+        router_login_path=Path("/etc/jittersim/router-login"),
     )
     stopped = threading.Event()
 
