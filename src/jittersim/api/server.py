@@ -2,6 +2,7 @@
 
 import argparse
 import base64
+import gzip
 import hashlib
 import hmac
 import io
@@ -9982,6 +9983,42 @@ DASHBOARD_HTML = DASHBOARD_HTML.replace("</style>", Path(__file__).with_name("ac
 DASHBOARD_HTML = DASHBOARD_HTML.replace("    startDashboard();", Path(__file__).with_name("access.js").read_text(encoding="utf-8") + "\n    startDashboard();")
 
 
+_DASHBOARD_PAGE_CACHE: Dict[str, Tuple[str, bytes, bytes, str]] = {}
+
+
+def _dashboard_page() -> Tuple[bytes, bytes, str]:
+    """Return the page bytes, a gzip copy and an ETag, made once for each page text."""
+
+    cached = _DASHBOARD_PAGE_CACHE.get("page")
+    if cached is None or cached[0] is not DASHBOARD_HTML:
+        raw = DASHBOARD_HTML.encode("utf-8")
+        etag = '"' + hashlib.sha256(raw).hexdigest()[:32] + '"'
+        cached = (DASHBOARD_HTML, raw, gzip.compress(raw, 6, mtime=0), etag)
+        _DASHBOARD_PAGE_CACHE["page"] = cached
+    return cached[1], cached[2], cached[3]
+
+
+def dashboard_page_bytes() -> bytes:
+    """The page as sent without compression. _send_response recognises this exact object."""
+
+    return _dashboard_page()[0]
+
+
+def _accepts_gzip(header: str) -> bool:
+    for part in header.lower().split(","):
+        name, _, parameters = part.strip().partition(";")
+        if name.strip() not in ("gzip", "*"):
+            continue
+        quality = parameters.strip()
+        if quality.startswith("q="):
+            try:
+                return float(quality[2:]) > 0
+            except ValueError:
+                return False
+        return True
+    return False
+
+
 def _inline_source_hashes(tag: str, page: str = DASHBOARD_HTML) -> str:
     """Hash every inline <tag> block so the policy allows each of them."""
 
@@ -10843,7 +10880,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         if workflow is not None:
             return workflow
         if path == "/":
-            return HTTPStatus.OK, "text/html; charset=utf-8", DASHBOARD_HTML.encode("utf-8")
+            return HTTPStatus.OK, "text/html; charset=utf-8", dashboard_page_bytes()
         if path == "/api/health":
             helper_reachable = False
             if self.helper_client is not None:
@@ -13906,10 +13943,28 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         body: bytes,
         headers: Optional[Dict[str, str]] = None,
     ) -> None:
+        cache_control = "no-store"
+        page_headers: Dict[str, str] = {}
+        raw_page, packed_page, page_etag = _dashboard_page()
+        if status == HTTPStatus.OK and body is raw_page:
+            # The page only changes with a new release: a reload asks with its ETag and an
+            # unchanged page answers 304. Browsers that accept gzip get about a fifth of it.
+            request_headers = getattr(self, "headers", None) or {}
+            cache_control = "no-cache"
+            page_headers = {"ETag": page_etag, "Vary": "Accept-Encoding"}
+            asked = [tag.strip() for tag in (request_headers.get("If-None-Match") or "").split(",")]
+            if page_etag in asked or "*" in asked:
+                status, body = HTTPStatus.NOT_MODIFIED, b""
+            elif _accepts_gzip(request_headers.get("Accept-Encoding") or ""):
+                body = packed_page
+                page_headers["Content-Encoding"] = "gzip"
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        if status != HTTPStatus.NOT_MODIFIED:
+            self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", cache_control)
+        for name, value in page_headers.items():
+            self.send_header(name, value)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
