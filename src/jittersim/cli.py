@@ -37,6 +37,7 @@ LOG_SERVICES = {
 }
 MAX_LOG_LINES = 200
 MAX_LOG_OUTPUT_CHARS = 32_000
+REMOTE_COMMANDS = ("connect",)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -679,6 +680,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     raw_arguments = list(sys.argv[1:] if argv is None else argv)
     if raw_arguments and raw_arguments[0] in MEASUREMENT_COMMANDS:
         return measure_main(raw_arguments)
+    if raw_arguments and raw_arguments[0] in REMOTE_COMMANDS:
+        from jittersim.remote_cli import main as remote_main
+
+        return remote_main(raw_arguments)
     if raw_arguments and raw_arguments[0] in CONTROL_COMMANDS:
         command = raw_arguments[0]
         arguments = _build_control_parser(command).parse_args(raw_arguments[1:])
