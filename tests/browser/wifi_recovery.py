@@ -152,7 +152,11 @@ def run():
                 expect(page.locator("#router-wifi-toggle")).to_be_enabled(timeout=10000)
                 page.screenshot(path="test-results/wifi-pi-desktop.png", animations="disabled")
                 page.set_viewport_size({"width": 1280, "height": 800})
-                expect(page.locator("#router-wifi-toggle")).to_be_in_viewport()
+                # Whole controls and not a sliver of them. The sidebar lists nine pages
+                # and a laptop screen must still show the router switch and Panic.
+                expect(page.locator("#router-wifi-toggle")).to_be_in_viewport(ratio=1)
+                expect(page.locator("#panic-button")).to_be_in_viewport(ratio=1)
+                expect(page.locator(".router-wifi-copy button").first).to_be_in_viewport()
                 sidebar = page.locator(".sidebar").bounding_box()
                 assert sidebar["x"] == 0 and sidebar["width"] < 300
                 page.screenshot(path="test-results/wifi-pi-laptop.png", animations="disabled")

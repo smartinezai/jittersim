@@ -821,10 +821,16 @@ DASHBOARD_HTML = r"""<!doctype html>
     @media (min-width: 701px) {
       .sidebar .sidebar-action-row .help-icon::after { position: fixed; top: auto; bottom: 1rem; left: 16rem; right: auto; width: min(22rem, calc(100vw - 17rem)); }
     }
-    /* A short window needs the room for the footer so that Panic stays in view. */
+    /* A short window needs the room for the footer so that Panic and the router switch stay in
+       view. The sidebar lists nine pages and on a laptop screen the list would push the router
+       switch and the copy buttons below the fold. Up to 900px of height the links share a
+       compact row of 24px (the smallest comfortable target) and do not scroll the footer away. */
     @media (min-width: 48.01rem) and (max-height: 800px) {
       .sidebar { gap: 0.6rem; }
-      .sidebar-nav a { padding-block: 0.25rem; }
+    }
+    @media (min-width: 48.01rem) and (max-height: 900px) {
+      .sidebar-nav ul { gap: 0; }
+      .sidebar-nav a { min-height: 1.5rem; padding-block: 0.22rem; font-size: 0.88rem; line-height: 1.2; }
     }
     /* The label wraps to two lines in the narrow sidebar. Both labels need the same room so the
        buttons below do not jump when it changes. */
