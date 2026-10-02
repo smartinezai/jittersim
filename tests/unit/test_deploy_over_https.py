@@ -316,3 +316,28 @@ def test_without_a_ssh_key_it_uses_https(lab):
                    script="deploy-from-mac.sh")
     assert result.returncode == 0, result.stdout + result.stderr
     assert "no SSH key" in result.stdout.replace("There is no SSH key", "no SSH key")
+
+
+def test_the_token_is_not_handed_to_the_build_or_any_other_child_process(lab):
+    # build-release.sh, git and ssh-keygen need no token. A token exported in the shell must
+    # not reach them through the environment.
+    folder = lab["repo"] / "deploy" / "raspberry-pi"
+    (folder / "build-release-real.sh").write_text((folder / "build-release.sh").read_text())
+    (folder / "build-release.sh").write_text(
+        '#!/bin/sh\nenv >> "$FAKE_ENV_LOG"\nexec sh "$(dirname -- "$0")/build-release-real.sh" "$@"\n')
+    seen = lab["tmp"] / "child-env.log"
+    result = https(lab, *base_arguments(lab), env={
+        "FAKE_ENV_LOG": str(seen), "JITTERSIM_ADMIN_TOKEN": TOKEN + "-other"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    children = seen.read_text()
+    assert "PATH=" in children, "the build stand-in must have run"
+    assert TOKEN not in children
+    assert "JITTERSIM_TOKEN" not in children and "JITTERSIM_ADMIN_TOKEN" not in children
+
+
+def test_a_token_with_a_line_break_is_refused_before_curl_is_started(lab):
+    result = https(lab, *base_arguments(lab), env={"JITTERSIM_TOKEN": TOKEN + "\nurl=http://x"})
+    assert result.returncode == 1
+    assert "cannot be right" in result.stderr
+    assert "curl " not in logged(lab)
+    assert TOKEN not in result.stdout + result.stderr

@@ -102,6 +102,7 @@ def test_a_missing_key_or_gh_failure_gives_a_plain_message(setup):
         private, _ = make_key(setup["tmp"] / "keys")
         failed = run(setup, "--signing-key", str(private), "HEAD", env={"FAKE_GH_EXIT": "1"})
         assert failed.returncode == 1 and "gh could not create the release" in failed.stderr
+        assert "pushed to GitHub" in failed.stderr, "the usual cause is a commit GitHub has not seen"
 
 
 def test_bad_arguments_are_refused(setup):

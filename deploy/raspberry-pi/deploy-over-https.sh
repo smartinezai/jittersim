@@ -133,16 +133,26 @@ printf '+ sh deploy/raspberry-pi/build-release.sh %s %s %s\n' "$commit" "$archiv
 
 token=
 if [ "$dry_run" = no ]; then
-    (cd "$repo" && sh deploy/raspberry-pi/build-release.sh "$commit" "$archive" "$signing_key" >/dev/null) \
-        || fail "building or signing the release failed"
+    # Take the token into a shell variable and drop it from the environment at once, so that
+    # git, ssh-keygen and the build never inherit it. Only curl's standard input gets it.
     token=${JITTERSIM_TOKEN:-${JITTERSIM_ADMIN_TOKEN:-}}
+    unset JITTERSIM_TOKEN JITTERSIM_ADMIN_TOKEN
     if [ -z "$token" ] && command -v security >/dev/null 2>&1; then
         token=$(security find-generic-password -s "$KEYCHAIN_ITEM" -w 2>/dev/null) || token=
     fi
     [ -n "$token" ] || fail "no admin token. Set JITTERSIM_TOKEN or store it once with: deploy/raspberry-pi/deploy-from-mac.sh --save-token"
-    if printf '%s' "$token" | LC_ALL=C grep -q '[^!-~]\|["\\]'; then
+    # No space, quote, backslash, control character or line break: one plain header value.
+    newline='
+'
+    case $token in
+        *"$newline"*) token_bad=yes ;;
+        *) token_bad=no ;;
+    esac
+    if [ "$token_bad" = yes ] || printf '%s' "$token" | LC_ALL=C grep -q '[^!-~]\|["\\]'; then
         fail "the admin token has characters that cannot be right. Store it again with --save-token"
     fi
+    (cd "$repo" && sh deploy/raspberry-pi/build-release.sh "$commit" "$archive" "$signing_key" >/dev/null) \
+        || fail "building or signing the release failed"
 fi
 
 # One call to the dashboard. The token goes to curl on its standard input as a header line so it

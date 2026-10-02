@@ -121,5 +121,5 @@ if [ "$dry_run" = yes ]; then
 fi
 (cd "$work" && gh release create "$tag" "$ASSET" "$ASSET.sig" --repo "$REPOSITORY" \
     --target "$commit" --title "JitterSim $short" --notes "Signed release of commit $short") \
-    || fail "gh could not create the release. Check: gh auth status"
+    || fail "gh could not create the release. Check: gh auth status, and that commit $short is pushed to GitHub (the release is made from that commit)."
 printf 'Published release %s with %s and %s.sig\n' "$tag" "$ASSET" "$ASSET"
