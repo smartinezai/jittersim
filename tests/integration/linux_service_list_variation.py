@@ -248,7 +248,12 @@ def main():
             with socket.socket(family, socket.SOCK_DGRAM) as sender:
                 if mark:
                     sender.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, mark)
-                sender.sendto(label.encode(), (target, 33000))
+                # A drop in the output hook makes the local send fail with EPERM.
+                # That is a dropped packet so it counts as not arriving.
+                try:
+                    sender.sendto(label.encode(), (target, 33000))
+                except PermissionError:
+                    return
 
         return arrives(receiver, send, label)
 
