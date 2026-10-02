@@ -6,13 +6,11 @@ Wi-Fi goes on after it. The state is stored after every step so a restart carrie
 Every step is safe to repeat.
 """
 
-import os
-import tempfile
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Callable, Optional
 
+from ..config.router_login import RouterLoginStore  # noqa: F401 (the store lives in config so the helper can use it)
 from ..config.forced_window import (
     ACTIVE,
     COPIED,
@@ -28,47 +26,6 @@ RETRY_SECONDS = 60.0
 
 class WindowActionError(Exception):
     """A step failed. The message is safe to show on the dashboard."""
-
-
-class RouterLoginStore:
-    """The router login for runs that nobody attends. Only its owner can read the file."""
-
-    def __init__(self, path) -> None:
-        self._path = Path(path)
-
-    def save(self, password: str) -> None:
-        if not isinstance(password, str) or not password or len(password) > 1024:
-            raise ValueError("router password is invalid")
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary = tempfile.mkstemp(dir=self._path.parent, prefix=".router-login-")
-        try:
-            os.fchmod(descriptor, 0o600)
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                handle.write(password)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, self._path)
-        except BaseException:
-            try:
-                os.unlink(temporary)
-            except OSError:
-                pass
-            raise
-
-    def load(self) -> Optional[str]:
-        try:
-            if self._path.stat().st_mode & 0o077:
-                # A file that others can read is not trusted.
-                return None
-            return self._path.read_text(encoding="utf-8") or None
-        except OSError:
-            return None
-
-    def clear(self) -> None:
-        try:
-            self._path.unlink()
-        except FileNotFoundError:
-            pass
 
 
 class ForcedWindowRunner:
@@ -236,3 +193,29 @@ class ForcedWindowRunner:
         return self._save(
             state.but(error=message, attempts=state.attempts + 1, next_attempt_at=now + RETRY_SECONDS)
         )
+
+
+class HelperWindowActions:
+    """The window steps as the networking helper runs them. The router login stays on the Pi.
+
+    client is a HelperClient. It raises an error with a message that is safe to show.
+    """
+
+    def __init__(self, client, error_type) -> None:
+        self._client = client
+        self._error_type = error_type
+
+    def _run(self, call):
+        try:
+            return call()
+        except self._error_type as error:
+            raise WindowActionError(str(error)) from error
+
+    def copy_router_wifi(self) -> None:
+        self._run(self._client.window_copy)
+
+    def set_router_wifi(self, enabled: bool) -> None:
+        self._run(lambda: self._client.window_router(enabled=enabled))
+
+    def reset_pi_wifi(self) -> None:
+        self._run(self._client.reset_wifi_name)
