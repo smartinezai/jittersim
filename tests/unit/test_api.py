@@ -4033,10 +4033,11 @@ class ControlServerTests(unittest.TestCase):
 
     def test_background_polling_pauses_and_never_overlaps_refresh(self) -> None:
         result = self._run_dashboard_functions(
-            ["pollDashboard", "refresh"],
+            ["pollDashboard", "pagePollJobs", "refresh"],
             "const document = {hidden: true}; const dashboardLoaded = true;\n"
             "let adminTokenVerified = true;\n"
-            "let dashboardPoll = null, dashboardRefresh = null, refreshAgain = false;\n"
+            "let dashboardPoll = null, dashboardRefresh = null, refreshAgain = false, refreshWanted;\n"
+            "const unansweredPaths = new Set();\n"
             "let page = 'activity'; function currentPage() { return page; }\n"
             "const seen = []; let release; let hold = new Promise(resolve => {release = resolve;});\n"
             "const loadActivity = async () => {seen.push('activity'); await hold;};\n"

@@ -20,7 +20,7 @@ def served_functions():
         + block("function setPrivateDataPanels(", "async function loadPrivateDataPanel(")
         + block("let helperConfigured =", "let profiles =")
         + block("async function request(", "const adminTokenHelp =")
-        + block("async function checkAdminToken()", "async function refresh()")
+        + block("async function checkAdminToken()", "async function refresh(")
         + block(
             'element("check-admin-token").addEventListener("click",',
             'element("traffic-rate-form").addEventListener("submit",',
