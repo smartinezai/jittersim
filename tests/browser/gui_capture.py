@@ -341,6 +341,20 @@ def current_commit():
     return value
 
 
+def source_identity():
+    """Use Git or explicitly supplied container identity without guessing cleanliness."""
+    commit = os.environ.get("JITTERSIM_GUI_SOURCE_COMMIT")
+    dirty = os.environ.get("JITTERSIM_GUI_SOURCE_DIRTY")
+    if commit is not None or dirty is not None:
+        if not commit or not re.fullmatch(r"[0-9a-f]{40}", commit) or dirty not in ("0", "1"):
+            raise RuntimeError("Container source identity requires a commit and explicit dirty flag")
+        return {"commit": commit, "source_dirty": dirty == "1", "source_identity_method": "supplied"}
+    commit = current_commit()
+    result = subprocess.run(["git", "status", "--porcelain"], capture_output=True,
+                            timeout=5, check=True)
+    return {"commit": commit, "source_dirty": bool(result.stdout), "source_identity_method": "git"}
+
+
 def run_matrix(output_dir, runner, run_name):
     store = ArtifactStore(output_dir)
     started = time.monotonic()
@@ -351,9 +365,7 @@ def run_matrix(output_dir, runner, run_name):
                 "limits": {"states": 40, "state_seconds": 30, "total_seconds": 720,
                            "artifact_bytes": store.max_bytes}}
     try:
-        manifest["commit"] = current_commit()
-        manifest["source_dirty"] = bool(subprocess.run(
-            ["git", "status", "--porcelain"], capture_output=True, timeout=5, check=True).stdout)
+        manifest.update(source_identity())
         import jittersim.api.server as server_module
         manifest["runtime_package"] = {
             "name": "jittersim", "version": importlib.metadata.version("jittersim"),

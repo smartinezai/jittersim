@@ -63,6 +63,8 @@ fixture children and browser contexts even after exceptions or cancellation.
 - Keep accessibility findings visible. The baseline is not WCAG certification.
 - Test-only assets remain outside the runtime wheel. No Pi deployment or
   database migration is needed. Revert the scoped test change for rollback.
+  Container checks use a resolved base-image digest, unique owned resources
+  and explicit host source identity because the browser image omits Git.
 
 ## Open environmental condition
 

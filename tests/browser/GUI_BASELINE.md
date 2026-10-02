@@ -10,7 +10,7 @@ an editable install:
 ```sh
 python -m pip install '.[dev]' 'playwright==1.63.0'
 python -m playwright install chromium
-python -m pytest tests/unit/test_gui_capture.py tests/unit/test_gui_axe_report.py
+python -m pytest tests/unit/test_gui_capture.py tests/unit/test_gui_axe_report.py tests/unit/test_gui_container.py
 python -m tests.browser.gui_baseline
 python -m tests.browser.a11y_axe
 ```
@@ -57,3 +57,32 @@ The separate GUI baseline CI job runs the report integrity tests and both
 browser runners. It uploads available artifacts even on failure and retains
 them for seven days. Review screenshots plus the accessibility JSON before
 accepting a baseline for the combined release.
+
+## Clean Linux container check
+
+Wait for the release coordinator's Docker lock. Keep other containers running.
+Use the existing browser Dockerfile with its Python 3.13 Debian Bookworm base,
+Playwright 1.63.0 and installed dashboard wheel. Resolve the base image's
+published digest before the check and pass the complete reference:
+
+```sh
+python -m tests.browser.gui_container \
+  --base-image 'python:3.13-slim-bookworm@sha256:REPLACE_WITH_VERIFIED_DIGEST'
+```
+
+The command requires a clean source checkout. It gives its image, container
+and output directory unique names. Build time is bounded at 15 minutes and
+the two-runner container at 25 minutes. Cleanup applies only to the named
+container and image tag created by this invocation. It does not prune shared
+images or stop another container. Keep the resulting report's base digest,
+built image ID and source commit with the verification evidence.
+The build context contains only required tracked files from the recorded
+commit. Ignored local files and later checkout edits cannot enter it.
+
+The browser image has no Git checkout. The command passes the inspected host
+commit and explicit dirty flag through `JITTERSIM_GUI_SOURCE_COMMIT` and
+`JITTERSIM_GUI_SOURCE_DIRTY`. Manifests label this identity as `supplied`.
+Malformed or incomplete metadata fails. Normal checkout and CI runs use Git
+directly. Actual installed source and served page hashes are recorded in
+either mode. This distinction prevents missing Git data from being reported
+as a verified clean checkout.

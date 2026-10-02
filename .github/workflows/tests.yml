@@ -81,7 +81,7 @@ jobs:
       # Keep test engines outside the installed dashboard wheel.
       - run: pip install '.[dev]' 'playwright==1.63.0'
       - run: python -m playwright install --with-deps chromium
-      - run: python -m pytest tests/unit/test_gui_capture.py tests/unit/test_gui_axe_report.py
+      - run: python -m pytest tests/unit/test_gui_capture.py tests/unit/test_gui_axe_report.py tests/unit/test_gui_container.py
       - run: python -m tests.browser.gui_baseline
       - run: python -m tests.browser.a11y_axe
       - uses: actions/upload-artifact@v5

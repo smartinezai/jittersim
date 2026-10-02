@@ -17,7 +17,8 @@ with Chromium 153.0.8010.12 were used on macOS. The manifests distinguish the
 installed package from checkout source and record the actual served HTML hash.
 
 - Existing unit suite: 2,833 passed.
-- Final focused report/failure checks: 28 passed with warnings treated as errors.
+- Final focused report, failure and container checks: 49 passed with warnings
+  treated as errors.
 - Existing browser journeys: passed against the installed wheel.
 - Screenshot matrix: all 40 states completed with 40 PNGs and 40 statistics files.
 - Accessibility matrix: all 40 scans completed with findings preserved.
@@ -29,7 +30,7 @@ installed package from checkout source and record the actual served HTML hash.
   whitespace checks passed.
   The unmodified upstream third-party license notice has a narrow exception
   for its two existing trailing spaces.
-- Independent review found a partial sign-in failure could be dismissed by a
+- Internal review found a partial sign-in failure could be dismissed by a
   broad success-text match. The capture now requires the exact successful
   token-check result even if its toast has already disappeared. A visible
   toast also requires the success class and exact message before dismissal.
@@ -64,8 +65,16 @@ credential token was present in saved JSON.
 
 ## Release gates and next work
 
-The first full matrices were run with uncommitted test changes. Repeat both
-runners after the local checkpoint so the manifests identify a clean commit.
+The full matrices were repeated on clean local checkpoint
+`44ff8650c41ed992d337461fc6e56d65902c8415`. Both manifests recorded a clean
+checkout and all 40 completed states. The screenshot run took 94.2 seconds
+and the accessibility run took 74.0 seconds.
+The container handoff then identified that the browser image has no Git
+checkout. Explicit supplied source metadata and a bounded container command
+were added to support that path. The command uses only tracked files from
+the recorded commit with a base image fixed by its digest and owns its temporary
+context, image tag and container. Actual clean Linux execution remains
+pending the shared Docker lock.
 The final combined release needs another baseline after chart, router-copy,
 polling and sign-in work is integrated by their current owners.
 

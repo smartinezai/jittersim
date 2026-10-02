@@ -168,3 +168,31 @@ def test_missing_or_changed_artifact_fails_completeness(tmp_path):
     (tmp_path / "report.json").write_text("different")
     with pytest.raises(gui_capture.CaptureLimitError, match="missing or changed"):
         store.check_limits()
+
+
+@pytest.mark.parametrize("commit,dirty", [
+    (None, "0"), ("a" * 40, None), ("", "0"), ("not-a-commit", "0"),
+    ("a" * 40, ""), ("a" * 40, "false"), ("a" * 40, "unknown"),
+])
+def test_container_identity_never_guesses_missing_or_invalid_metadata(monkeypatch, commit, dirty):
+    monkeypatch.delenv("JITTERSIM_GUI_SOURCE_COMMIT", raising=False)
+    monkeypatch.delenv("JITTERSIM_GUI_SOURCE_DIRTY", raising=False)
+    if commit is not None:
+        monkeypatch.setenv("JITTERSIM_GUI_SOURCE_COMMIT", commit)
+    if dirty is not None:
+        monkeypatch.setenv("JITTERSIM_GUI_SOURCE_DIRTY", dirty)
+    with pytest.raises(RuntimeError, match="explicit dirty flag"):
+        gui_capture.source_identity()
+
+
+@pytest.mark.parametrize("dirty", ["0", "1"])
+def test_container_identity_is_labelled_supplied_without_git(monkeypatch, dirty):
+    monkeypatch.setenv("JITTERSIM_GUI_SOURCE_COMMIT", "a" * 40)
+    monkeypatch.setenv("JITTERSIM_GUI_SOURCE_DIRTY", dirty)
+
+    def no_git(*_args, **_kwargs):
+        pytest.fail("Explicit container identity must not require a Git checkout")
+
+    monkeypatch.setattr(gui_capture.subprocess, "run", no_git)
+    assert gui_capture.source_identity() == {
+        "commit": "a" * 40, "source_dirty": dirty == "1", "source_identity_method": "supplied"}
