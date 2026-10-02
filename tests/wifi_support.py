@@ -10,7 +10,9 @@ class WifiExecutor(FakeExecutor):
         self.settings = {
             "connection.type": "802-11-wireless",
             "connection.interface-name": "wlan0",
-            "connection.autoconnect": "yes",
+            # The installer creates the access point without autoconnect:
+            # jittersim-ap.service starts it once the management firewall is up.
+            "connection.autoconnect": "no",
             "802-11-wireless.ssid": "Copied home network",
             "802-11-wireless-security.key-mgmt": "wpa-psk",
             "802-11-wireless-security.proto": "wpa,rsn",
