@@ -6650,7 +6650,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     });
 
     // Panic is the full way back: it stops the profiles like Reset and turns
-    // household blocking off as well. Saved settings stay.
+    // household blocking off as well. Only the drop that keeps the private resolver
+    // port closed stays. Saved settings stay.
     element("panic-button").addEventListener("click", () => {
       runAction(
         "/api/normal-access",

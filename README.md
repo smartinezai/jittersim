@@ -532,7 +532,8 @@ buttons. A group opened stays open when the page refreshes.
 - While household access rules are on a blocked name also blocks every name
   under it: the Pi's filtered DNS refuses `www.example.com` once `example.com`
   is blocked. The badge and **Unblock** belong to the exact name that was
-  blocked. **Unblock** removes it and the names under it resolve again. With
+  blocked. **Unblock** removes it and the names under it resolve again unless
+  one of them is listed on its own. With
   household access rules off only the addresses of each listed name are blocked
   while JitterSim runs.
 - **Add all to profile** adds every name of a group to the profile chosen on the

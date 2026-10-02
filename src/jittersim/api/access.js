@@ -278,7 +278,7 @@ function installFieldHelp() {
     'profile-website-mode':'Allow only listed domains limits a device while this profile runs. Household site blocks are separate and stay active after a profile changes.',
     'profile-website-domains':'These experimental profile rules use resolved server addresses. For persistent hostname and subdomain blocking, use Access rules.',
     'site-rule-domains':'A rule for example.com also blocks video.example.com. It does not block unrelated-example.com. Enter names without https:// or a page path.',
-    'website-blocklist':'Block globally on the Traffic page adds names here. While household access rules are on example.com also blocks video.example.com for every test Wi-Fi device. Unblock removes the exact name and its subdomains resolve again.'
+    'website-blocklist':'Block globally on the Traffic page adds names here. While household access rules are on example.com also blocks video.example.com for every test Wi-Fi device. Unblock frees the exact name and the names under it unless one is listed on its own.'
   })) {
     const input = element(id);
     if (input.closest('label') && input.closest('label').querySelector('.help-icon')) continue;
