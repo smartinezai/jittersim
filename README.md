@@ -726,6 +726,15 @@ The installer preserves your saved Wi-Fi name and password. Use it when
 upgrading an older release so it can add new system services. A code-only
 update does not install those services.
 
+An upgrade from a release that did not record the hardware address of each
+device clears the DNS names listed under Traffic once when any device is
+protected. Those names cannot be tied to a device and a protected device may
+have moved to another address since they were saved. The installer prints a
+notice with the number of names before it happens. The Traffic page then says
+when the list was cleared until the first new name arrives and `jittersim
+traffic` says the same. The list fills again as devices browse. Names are kept
+for 30 days from their last sighting. Nothing else is lost.
+
 The test network requires WPA3 with AES and protected Wi-Fi management messages.
 Upgrades save the stronger security settings and report when an active network
 needs a planned restart. Manual
