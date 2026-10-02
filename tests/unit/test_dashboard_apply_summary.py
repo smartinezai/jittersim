@@ -778,9 +778,9 @@ def test_the_sidebar_is_one_column_that_scrolls_as_a_whole():
 
 def test_a_short_window_gives_the_footer_room_so_panic_stays_in_view():
     css = re.search(r"<style>(.*?)</style>", DASHBOARD_HTML, re.DOTALL).group(1)
-    # Up to 900px of height (a laptop screen) the sidebar and its footer use tighter gaps.
+    # Up to 1000px of height (a laptop or a full HD screen) the sidebar and its footer use tighter gaps.
     block = re.search(
-        r"@media \(min-width: 48\.01rem\) and \(max-height: 900px\) \{([^@]*?)\n    \}", css
+        r"@media \(min-width: 48\.01rem\) and \(max-height: 1000px\) \{([^@]*?)\n    \}", css
     ).group(1)
     assert re.search(r"\.sidebar \{[^{}]*gap: 0\.5rem", block)
     assert re.search(r"\.sidebar-nav a \{[^{}]*padding-block: 0\.22rem", block)

@@ -240,7 +240,13 @@ def run():
             Path("test-results").mkdir(exist_ok=True)
             try:
                 page.goto(f"http://127.0.0.1:{port}")
+                # The public health check has no system details. Signed in the
+                # health card reads them from the private route.
+                public_health = page.request.get(f"http://127.0.0.1:{port}/api/health").json()
+                assert "system" not in public_health, public_health
                 unlock(page)
+                expect(page.locator("#health-details")).to_contain_text("Version: ")
+                expect(page.locator("#health-details")).not_to_contain_text("Version: Unknown")
                 expect(page.locator("#update-preference-status")).to_contain_text(
                     "Automatic checking is on."
                 )

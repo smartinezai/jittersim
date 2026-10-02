@@ -822,11 +822,11 @@ DASHBOARD_HTML = r"""<!doctype html>
       .sidebar .sidebar-action-row .help-icon::after { position: fixed; top: auto; bottom: 1rem; left: 16rem; right: auto; width: min(22rem, calc(100vw - 17rem)); }
     }
     /* A short window needs the room for the footer so that Panic and the router switch and the
-       copy buttons stay in view. The sidebar lists nine pages and on a laptop screen the list
-       would push them below the fold. Up to 900px of height the links share a compact row of
-       24px (the smallest comfortable target) and the footer uses tighter gaps. Wider Linux fonts
-       wrap the mode badge and the status lines so the copy buttons need this margin there. */
-    @media (min-width: 48.01rem) and (max-height: 900px) {
+       copy buttons stay in view. The sidebar lists nine pages and on a laptop or a full HD screen
+       the list would push them below the fold. Up to 1000px of height the links share a compact
+       row of 24px (the smallest comfortable target) and the footer uses tighter gaps. Wider Linux
+       fonts wrap the mode badge and the status lines so the footer needs this margin there. */
+    @media (min-width: 48.01rem) and (max-height: 1000px) {
       .sidebar { gap: 0.5rem; padding-block: 0.65rem; }
       .sidebar-brand h1 { font-size: 1.2rem; }
       .sidebar-brand .badge { padding: 0.2rem 0.45rem; font-size: 0.72rem; }
@@ -5983,6 +5983,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     async function loadHealth() {
       const data = await request("/api/health", "GET");
       renderMode(data);
+      // The system details need the admin token. The public check only has the mode.
+      if (adminTokenVerified) data.system = (await request("/api/system-health", "GET")).system;
       renderSystemHealth(data);
     }
 
@@ -10680,9 +10682,12 @@ class ControlServer(HTTPServer):
                     "mode": "hardware" if self.helper_client is not None else "configuration-only",
                     "helper_configured": self.helper_client is not None,
                     "helper_reachable": helper_reachable,
-                    "system": machine_health(),
                 }
             )
+        if path == "/api/system-health":
+            # The public health check carries only the mode like the Pi base. The
+            # version and free disk and temperature and uptime need the admin token.
+            return HTTPStatus.OK, "application/json", _json_bytes({"system": machine_health()})
         if path == "/api/profiles":
             profiles = [_profile_payload(profile) for profile in self.repository.list_profiles()]
             return HTTPStatus.OK, "application/json", _json_bytes({"profiles": profiles})
