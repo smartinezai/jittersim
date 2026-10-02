@@ -52,6 +52,32 @@ Please check `git branch -r` and the open pull requests before starting an item.
   - Open System Settings then Privacy and Security then Local Network and allow Chrome.
   - If it still fails, check `nc -vz 192.168.0.17 8080` from the Terminal.
 
+### 8. Forced test network window
+
+- **Status:** needs a decision (see the open questions).
+- **Why:** the owner wants a weekend where the only Wi-Fi at home is the Pi. A schedule such as Friday to Sunday or Saturday 15:00 to Sunday 05:00 switches the router's Wi-Fi off and makes the Pi's test Wi-Fi look like it. Every device has to join the Pi. When the window ends the Pi goes back to its own name and the router's Wi-Fi comes back on.
+- **How it would work:**
+  - A new schedule kind with a start and an end. A window may cross midnight and may span several days.
+  - At the start the Pi copies the router's Wi-Fi name and password to its test Wi-Fi and then turns the router's Wi-Fi off. It uses the existing copy and switch actions.
+  - At the end the Pi restores its own name and password and turns the router's Wi-Fi on.
+  - The window state is stored in the database. After a reboot or a crash the Pi either carries on or restores. Restoring twice is safe.
+  - Panic and Reset end the window and restore everything at once.
+  - The dashboard and the command line show "The router's Wi-Fi is off until <time>" while a window runs.
+- **Rules that must hold:**
+  - Order matters. Copy the name first and check the Pi's Wi-Fi works. Only then turn the router's Wi-Fi off. If the switch-off fails roll back to the Pi's own name and report it.
+  - The Pi stays reachable over Ethernet. Do not start a window without an Ethernet path.
+  - Do not start a window when the Pi's clock is not synced.
+  - The restore never depends on the router answering. The Pi's own name comes back first and the router's Wi-Fi is retried with a warning until it works.
+- **Open questions:**
+  - The unattended switch-on and switch-off need the router login on the Pi. Today it lives in the browser for 24 hours. Storing it on the Pi is a bigger step and needs the owner's decision.
+  - What the Pi does when the router is off at the end and does not answer. A retry with an alert is proposed.
+- **Tests:**
+  - Storage: a window that crosses midnight and one that spans days. State survives a reopen. A second restore changes nothing.
+  - Runner with a fake router: start and end in order. A failed switch-off rolls back. A crash after the copy resumes. Panic ends the window.
+  - Journey: the Schedules page form and the notice while a window runs on desktop and phone sizes.
+  - Mutation tests for the order of the steps and the rollback.
+- **Notes:** it touches the router switching code (`networking/router.py` and `api/router_operations.py`). Coordinate with whoever works there.
+
 ## In progress
 
 ### 5. Remote command line and one-command deploy from the Mac
@@ -121,6 +147,8 @@ For the record. See the pull requests for details.
 - Block globally shows its state and can be undone.
 - Saved profiles list with Edit and Apply to all.
 - Help icons on every profile field.
+- Help icons as small round marks with a 44 pixel touch target on phones.
+- A note on the Traffic page and in the installer when an upgrade clears the DNS names.
 - Sidebar status with the general profile and the affected devices.
 - Copy router Wi-Fi name and password.
 - Impact card in Diagnostics.
