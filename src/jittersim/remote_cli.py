@@ -11,10 +11,12 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from jittersim import dashboard_rules as rules
+from jittersim import impact_rules
 from jittersim.config.models import normalize_domain
 from jittersim.remote_client import (
     CA_CERT_ENV,
@@ -27,6 +29,7 @@ from jittersim.remote_client import (
     RemoteError,
     config_path,
     hidden_prompt,
+    js_number,
     read_token,
     resolve_connection,
     validate_url,
@@ -716,6 +719,106 @@ def _wifi_show(arguments: argparse.Namespace) -> int:
 
 
 # --- end: wifi
+
+
+# --- section: impact ----------------------------------------------------------------------
+
+DEFAULT_IMPACT_WAIT = 10
+MAX_IMPACT_WAIT = 60
+
+
+def _wait_seconds(value: str) -> int:
+    try:
+        seconds = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("the wait must be a whole number of seconds") from error
+    if not 1 <= seconds <= MAX_IMPACT_WAIT:
+        raise argparse.ArgumentTypeError(f"the wait must be from 1 to {MAX_IMPACT_WAIT} seconds")
+    return seconds
+
+
+def _impact_parser() -> argparse.ArgumentParser:
+    parser = _parser(
+        "jittersim impact",
+        "Show the Impact check: for each affected device and direction the set and actual "
+        "loss, the speed cap and rate, the queue wait and a verdict. The command takes two "
+        "samples of the Pi's queue counters --wait seconds apart and judges them with the "
+        "dashboard's rules.",
+    )
+    parser.add_argument(
+        "--wait", type=_wait_seconds, default=DEFAULT_IMPACT_WAIT, metavar="SECONDS",
+        help=f"seconds between the two samples, 1 to {MAX_IMPACT_WAIT} "
+        f"(default {DEFAULT_IMPACT_WAIT})",
+    )
+    return parser
+
+
+def _impact_sample(client: DashboardClient) -> Dict[str, Any]:
+    data = client.get("/api/impact")
+    if data.get("available") is not True:
+        raise RemoteError(str(data.get("message") or "Impact is not available."))
+    if isinstance(data.get("sampled_at"), bool) or not isinstance(
+        data.get("sampled_at"), (int, float)
+    ):
+        raise RemoteError(UNDERSTOOD_MESSAGE)
+    _require(data.get("queues"), list)
+    return data
+
+
+@register("impact", _impact_parser)
+def _impact(arguments: argparse.Namespace) -> int:
+    client = _client(arguments)
+    first = _impact_sample(client)
+    if not arguments.json:
+        print(f"Measuring for {arguments.wait} seconds...", file=sys.stderr)
+    # The rules ignore samples more than a minute apart so the longest wait stays inside it.
+    time.sleep(min(arguments.wait, impact_rules.IMPACT_WINDOW_SECONDS - 1))
+    second = _impact_sample(client)
+    rows = impact_rules.two_sample_rows(first, second)
+    protected = [str(name) for name in second.get("protected") or []]
+    window = round(second["sampled_at"] - first["sampled_at"], 1)
+    if arguments.json:
+        _print_json({
+            "window_seconds": window,
+            "rows": [
+                {
+                    "name": row["name"],
+                    "direction": row["direction"],
+                    "verdict": row["verdict"],
+                    "verdict_text": impact_rules.verdict_label(row["verdict"]),
+                    "lines": row["lines"] if row["verdict"] != "collecting" else [],
+                    "configured": row["configured"],
+                    "offered": row["offered"],
+                    "packets": row["packets"],
+                    "drops": row["drops"],
+                    "loss_percent": row["lossPercent"],
+                    "rate_kbit": row["rateKbit"],
+                    "peak_kbit": row["peakKbit"],
+                    "cap_reached": row["capReached"],
+                    "queue_wait_ms": row["queueWaitMs"],
+                }
+                for row in rows
+            ],
+            "protected": protected,
+        })
+        return 0
+    if not rows:
+        _out(impact_rules.IMPACT_NOTHING_SLOWED)
+    for row in rows:
+        direction = "Upload" if row["direction"] == "upload" else "Download"
+        _out(f"{row['name']} · {direction} · {impact_rules.verdict_label(row['verdict'])}")
+        if row["verdict"] != "collecting":
+            for line in row["lines"]:
+                _out(f"  {line}")
+    if any(row["verdict"] == "collecting" for row in rows):
+        _out("A queue was replaced between the two samples. Run the command again.")
+    if protected:
+        _out("Protected (not affected): " + ", ".join(protected))
+    _out(f"Measured over {js_number(window)} seconds. " + impact_rules.IMPACT_NOTE)
+    return 0
+
+
+# --- end: impact
 
 
 def _command_words(argv: List[str]) -> List[str]:
