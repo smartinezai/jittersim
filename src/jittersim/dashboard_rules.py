@@ -6,8 +6,9 @@ to one shared place without changing the page. `tests/unit/test_dashboard_rules_
 runs both versions on the same inputs and fails when they drift apart.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
+from jittersim.remote_client import js_number, js_round
 
 # --- section: status
 
@@ -182,5 +183,70 @@ def runtime_status_text(
 
 
 # --- end: status
+
+
+# --- section: profiles
+
+
+def _positive(value: Any) -> bool:
+    """JavaScript's `value > 0` for a field that may be missing or null."""
+
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+
+def general_badge(general_state: Optional[Dict[str, Any]]) -> str:
+    """The badge of the general profile in renderSavedProfiles."""
+
+    general = general_state.get("profile") if general_state else None
+    if general and general_state.get("active"):
+        return "General · active"
+    observed = ((general_state or {}).get("state") or {}).get("observed_state")
+    return "General · paused" if observed == "reset" else "General · saved"
+
+
+def profile_direction_summary(direction: Dict[str, Any]) -> str:
+    """profileDirectionSummary."""
+
+    parts: List[str] = []
+    if _positive(direction.get("delay_ms")) or _positive(direction.get("jitter_ms")):
+        jitter = direction.get("jitter_ms")
+        parts.append(
+            js_number(direction.get("delay_ms")) + " ms"
+            + (" ±" + js_number(jitter) if _positive(jitter) else "")
+        )
+    if _positive(direction.get("loss_percent")):
+        parts.append(js_number(direction["loss_percent"]) + "% loss")
+    bandwidth = direction.get("bandwidth_kbit")
+    if bandwidth:
+        parts.append(
+            js_number(js_round(bandwidth / 10) / 100) + " Mbit/s"
+            if bandwidth >= 1000
+            else js_number(bandwidth) + " kbit/s"
+        )
+    for field, word in (
+        ("reorder_percent", "reorder"),
+        ("duplicate_percent", "duplicate"),
+        ("corrupt_percent", "corrupt"),
+    ):
+        if _positive(direction.get(field)):
+            parts.append(word + " " + js_number(direction[field]) + "%")
+    return " · ".join(parts) if parts else "no impairment"
+
+
+def profile_summary(profile: Dict[str, Any]) -> str:
+    """profileSummary: the one line under a saved profile."""
+
+    upload = profile_direction_summary(profile.get("upload") or {})
+    download = profile_direction_summary(profile.get("download") or {})
+    parts = ["↕ " + upload if upload == download else "↑ " + upload + " · ↓ " + download]
+    if _positive(profile.get("outage_probability")):
+        parts.append("outages " + js_number(profile["outage_probability"]) + "%")
+    if profile.get("website_mode") == "allow_only":
+        sites = len(profile.get("website_domains") or [])
+        parts.append("allow-only " + str(sites) + (" site" if sites == 1 else " sites"))
+    return " · ".join(parts)
+
+
+# --- end: profiles
 
 

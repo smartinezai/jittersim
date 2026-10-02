@@ -113,6 +113,72 @@ def test_runtime_status_text_matches_the_page():
 # --- end: status
 
 
+# --- section: profiles
+
+
+def test_the_general_badge_matches_the_saved_profiles_list():
+    render = function_source("renderSavedProfiles")
+    start = render.index("const general = generalProfileState")
+    body = render[start : render.index(';', render.index('"General · saved"')) + 1]
+    badge = ("function badgeFor(generalProfileState) {\n" + body + "\nreturn general ? "
+             "generalBadge : null; }")
+    states = [
+        None,
+        {"profile": None, "active": False},
+        {"profile": {"id": "a"}, "active": True, "state": {"observed_state": "applied"}},
+        {"profile": {"id": "a"}, "active": False, "state": {"observed_state": "reset"}},
+        {"profile": {"id": "a"}, "active": False, "state": {"observed_state": "applied"}},
+        {"profile": {"id": "a"}, "active": False},
+    ]
+    page = run_node([badge], f"{js(states)}.map((s) => badgeFor(s))")
+    for general, expected in zip(states, page):
+        if expected is not None:
+            assert rules.general_badge(general) == expected
+
+
+def direction(**fields):
+    base = {"delay_ms": 0, "jitter_ms": 0, "loss_percent": 0, "bandwidth_kbit": None,
+            "reorder_percent": 0, "duplicate_percent": 0, "corrupt_percent": 0}
+    return {**base, **fields}
+
+
+DIRECTIONS = [
+    direction(),
+    direction(delay_ms=50, jitter_ms=10, loss_percent=2, bandwidth_kbit=5000),
+    direction(jitter_ms=15),
+    direction(delay_ms=300),
+    direction(loss_percent=2.5, bandwidth_kbit=999),
+    direction(bandwidth_kbit=1000),
+    direction(bandwidth_kbit=1555),
+    direction(bandwidth_kbit=1005),
+    direction(bandwidth_kbit=15005),
+    direction(bandwidth_kbit=0),
+    direction(reorder_percent=25, duplicate_percent=5, corrupt_percent=0.5),
+    direction(delay_ms=0.5, loss_percent=0.1),
+]
+
+
+def test_profile_summaries_match_the_page():
+    profiles = []
+    for upload, download in itertools.product(DIRECTIONS, DIRECTIONS[:6]):
+        profiles.append({"upload": upload, "download": download, "outage_probability": 0,
+                         "website_mode": "block", "website_domains": []})
+    for outage, mode, sites in itertools.product((0, 5, 12.5), ("block", "allow_only"),
+                                                 ([], ["a"], ["a", "b", "c"])):
+        profiles.append({"upload": DIRECTIONS[1], "download": DIRECTIONS[1],
+                         "outage_probability": outage, "website_mode": mode,
+                         "website_domains": sites})
+    page = run_node(
+        [function_source("profileSummary"), function_source("profileDirectionSummary")],
+        f"{js(profiles)}.map((p) => profileSummary(p))",
+    )
+    for profile, expected in zip(profiles, page):
+        assert rules.profile_summary(profile) == expected
+
+
+# --- end: profiles
+
+
 # --- section: numbers
 
 NUMBERS = [0, 1, 2, -2, 2.5, 4.7, 21.6, 0.1, 0.2 + 0.1, 1 / 3, 1e21, 1e20, 123456789.125, 1e-7,

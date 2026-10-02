@@ -313,6 +313,122 @@ def _status(arguments: argparse.Namespace) -> int:
 # --- end: status
 
 
+# --- section: profiles --------------------------------------------------------------------
+
+register_group(
+    "profiles",
+    "List the saved profiles or apply one to every connected device.",
+    ("list", "apply-all", "stop-all"),
+)
+
+
+def _profiles_list_parser() -> argparse.ArgumentParser:
+    return _parser(
+        "jittersim profiles list",
+        "List the saved profiles with a one-line summary and mark the general profile.",
+    )
+
+
+def _apply_all_parser() -> argparse.ArgumentParser:
+    parser = _parser(
+        "jittersim profiles apply-all",
+        "Make one saved profile the general profile for every connected device. "
+        "Protected devices stay untouched.",
+    )
+    parser.add_argument("profile_id", metavar="PROFILE_ID")
+    return parser
+
+
+def _stop_all_parser() -> argparse.ArgumentParser:
+    return _parser(
+        "jittersim profiles stop-all",
+        "Stop the general profile. Saved device rules resume and protected devices stay "
+        "untouched.",
+    )
+
+
+@register("profiles list", _profiles_list_parser)
+def _profiles_list(arguments: argparse.Namespace) -> int:
+    client = _client(arguments)
+    profiles = _require(client.get("/api/profiles").get("profiles"), list)
+    general = client.get("/api/general-profile")
+    general_id = (general.get("profile") or {}).get("id")
+    badge = rules.general_badge(general)
+    rows = [
+        {
+            "id": profile.get("id"),
+            "name": profile.get("name"),
+            "summary": rules.profile_summary(profile),
+            "general": profile.get("id") == general_id,
+        }
+        for profile in profiles
+    ]
+    if arguments.json:
+        _print_json({
+            "profiles": rows,
+            "general_profile_id": general_id,
+            "general_badge": badge if general_id else None,
+        })
+        return 0
+    if not rows:
+        _out("No saved profiles yet. Create one in the dashboard.")
+        return 0
+    for row in rows:
+        _out(f"{row['name']} ({row['id']})" + (f"  {badge}" if row["general"] else ""))
+        _out(f"  {row['summary']}")
+    return 0
+
+
+def _general_profile_change(arguments: argparse.Namespace, *, stop: bool) -> int:
+    client = _client(arguments)
+    path = "/api/general-profile/stop" if stop else "/api/general-profile"
+    payload: Dict[str, Any] = {} if stop else {"profile_id": arguments.profile_id}
+    result = client.post(path, payload, timeout=ACTION_TIMEOUT_SECONDS)
+    general = result.get("general_profile") or {}
+    if stop:
+        # Without a saved general profile the dashboard answers without applying anything.
+        lines = (
+            ["General profile stopped. Saved device rules resumed."] if "applied" in result
+            else ["No general profile was set. Nothing changed."]
+        )
+        lines.append("Protected devices stay untouched.")
+    else:
+        lines = ["General profile applied. Protected devices remain unaffected."]
+        profile = general.get("profile") or {}
+        if profile:
+            lines.append(
+                "General profile: " + str(profile.get("name") or profile.get("id"))
+                + " · " + rules.general_badge(general).split(" · ")[-1]
+            )
+    warning = result.get("warning")
+    if arguments.json:
+        _print_json({
+            "message": " ".join(lines),
+            "general_profile": general.get("profile"),
+            "active": general.get("active") is True,
+            "warning": warning,
+        })
+    else:
+        for line in lines:
+            _out(line)
+    if isinstance(warning, str) and warning:
+        print(warning, file=sys.stderr)
+    return 0
+
+
+@register("profiles apply-all", _apply_all_parser)
+def _apply_all(arguments: argparse.Namespace) -> int:
+    return _general_profile_change(arguments, stop=False)
+
+
+@register("profiles stop-all", _stop_all_parser)
+def _stop_all(arguments: argparse.Namespace) -> int:
+    return _general_profile_change(arguments, stop=True)
+
+
+# --- end: profiles
+
+
 def _command_words(argv: List[str]) -> List[str]:
     """Return the registered command name followed by the arguments for it."""
 
