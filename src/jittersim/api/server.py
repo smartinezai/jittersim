@@ -7407,6 +7407,8 @@ DASHBOARD_HTML = r"""<!doctype html>
           password: element("access-point-password").value
         });
         element("access-point-password").value = "";
+        // The saved name is what the field shows now so nothing is left to restore.
+        clearDraft("access-point-form");
         showMessage("Pi access point updated. Reconnect the test device if its Wi-Fi name changed.", "success");
       } catch (error) {
         showMessage(error.message, "error");
@@ -7424,6 +7426,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       try {
         const response = await request("/api/access-point/reset-name", "POST", {});
         element("access-point-ssid").value = response.result.ssid;
+        // The restored name replaces what was typed. Without this the next refresh
+        // puts the typed name back and a later save sends it to the access point.
+        clearDraft("access-point-form");
         status.textContent = "JitterSim restored using " + response.result.security + ". Password unchanged.";
         showMessage(status.textContent, "success");
       } catch (error) {
