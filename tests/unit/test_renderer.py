@@ -27,70 +27,54 @@ def make_device(device_id: str, address: str, profile_id: str) -> Device:
 EIGHT_DEVICE_TC_COMMANDS = """\
 tc qdisc replace dev eth0 root handle 10: prio bands 9 priomap 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
 tc qdisc replace dev eth0 parent 10:1 handle 100: fq_codel
-tc qdisc del dev eth0 parent 10:2 handle 11:
-tc qdisc del dev eth0 parent 10:3 handle 12:
-tc qdisc del dev eth0 parent 10:4 handle 13:
-tc qdisc del dev eth0 parent 10:5 handle 14:
-tc qdisc del dev eth0 parent 10:6 handle 15:
-tc qdisc del dev eth0 parent 10:7 handle 16:
-tc qdisc del dev eth0 parent 10:8 handle 17:
-tc qdisc del dev eth0 parent 10:9 handle 18:
-tc qdisc replace dev eth0 parent 10:2 handle 11: netem delay 50ms corrupt 0% rate 0bit
+tc qdisc replace dev eth0 parent 10:2 handle 41: netem delay 50ms corrupt 0% rate 0bit
 tc filter replace dev eth0 protocol ip parent 10: pref 1 handle 1 fw flowid 10:2
 tc filter replace dev eth0 protocol ipv6 parent 10: pref 101 handle 1 fw flowid 10:2
-tc qdisc replace dev eth0 parent 10:3 handle 12: netem delay 50ms corrupt 0% rate 0bit
+tc qdisc replace dev eth0 parent 10:3 handle 42: netem delay 50ms corrupt 0% rate 0bit
 tc filter replace dev eth0 protocol ip parent 10: pref 2 handle 2 fw flowid 10:3
 tc filter replace dev eth0 protocol ipv6 parent 10: pref 102 handle 2 fw flowid 10:3
-tc qdisc replace dev eth0 parent 10:4 handle 13: netem delay 50ms corrupt 0% rate 0bit
+tc qdisc replace dev eth0 parent 10:4 handle 43: netem delay 50ms corrupt 0% rate 0bit
 tc filter replace dev eth0 protocol ip parent 10: pref 3 handle 3 fw flowid 10:4
 tc filter replace dev eth0 protocol ipv6 parent 10: pref 103 handle 3 fw flowid 10:4
-tc qdisc replace dev eth0 parent 10:5 handle 14: netem delay 50ms corrupt 0% rate 0bit
+tc qdisc replace dev eth0 parent 10:5 handle 44: netem delay 50ms corrupt 0% rate 0bit
 tc filter replace dev eth0 protocol ip parent 10: pref 4 handle 4 fw flowid 10:5
 tc filter replace dev eth0 protocol ipv6 parent 10: pref 104 handle 4 fw flowid 10:5
-tc qdisc replace dev eth0 parent 10:6 handle 15: netem delay 50ms corrupt 0% rate 0bit
+tc qdisc replace dev eth0 parent 10:6 handle 45: netem delay 50ms corrupt 0% rate 0bit
 tc filter replace dev eth0 protocol ip parent 10: pref 5 handle 5 fw flowid 10:6
 tc filter replace dev eth0 protocol ipv6 parent 10: pref 105 handle 5 fw flowid 10:6
-tc qdisc replace dev eth0 parent 10:7 handle 16: netem delay 50ms corrupt 0% rate 0bit
+tc qdisc replace dev eth0 parent 10:7 handle 46: netem delay 50ms corrupt 0% rate 0bit
 tc filter replace dev eth0 protocol ip parent 10: pref 6 handle 6 fw flowid 10:7
 tc filter replace dev eth0 protocol ipv6 parent 10: pref 106 handle 6 fw flowid 10:7
-tc qdisc replace dev eth0 parent 10:8 handle 17: netem delay 50ms corrupt 0% rate 0bit
+tc qdisc replace dev eth0 parent 10:8 handle 47: netem delay 50ms corrupt 0% rate 0bit
 tc filter replace dev eth0 protocol ip parent 10: pref 7 handle 7 fw flowid 10:8
 tc filter replace dev eth0 protocol ipv6 parent 10: pref 107 handle 7 fw flowid 10:8
-tc qdisc replace dev eth0 parent 10:9 handle 18: netem delay 50ms corrupt 0% rate 0bit
+tc qdisc replace dev eth0 parent 10:9 handle 48: netem delay 50ms corrupt 0% rate 0bit
 tc filter replace dev eth0 protocol ip parent 10: pref 8 handle 8 fw flowid 10:9
 tc filter replace dev eth0 protocol ipv6 parent 10: pref 108 handle 8 fw flowid 10:9
 tc qdisc replace dev wlan0 root handle 10: prio bands 9 priomap 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
 tc qdisc replace dev wlan0 parent 10:1 handle 100: fq_codel
-tc qdisc del dev wlan0 parent 10:2 handle 11:
-tc qdisc del dev wlan0 parent 10:3 handle 12:
-tc qdisc del dev wlan0 parent 10:4 handle 13:
-tc qdisc del dev wlan0 parent 10:5 handle 14:
-tc qdisc del dev wlan0 parent 10:6 handle 15:
-tc qdisc del dev wlan0 parent 10:7 handle 16:
-tc qdisc del dev wlan0 parent 10:8 handle 17:
-tc qdisc del dev wlan0 parent 10:9 handle 18:
-tc qdisc replace dev wlan0 parent 10:2 handle 11: netem delay 60ms corrupt 0% rate 0bit
+tc qdisc replace dev wlan0 parent 10:2 handle 41: netem delay 60ms corrupt 0% rate 0bit
 tc filter replace dev wlan0 protocol ip parent 10: pref 1 handle 1 fw flowid 10:2
 tc filter replace dev wlan0 protocol ipv6 parent 10: pref 101 handle 1 fw flowid 10:2
-tc qdisc replace dev wlan0 parent 10:3 handle 12: netem delay 60ms corrupt 0% rate 0bit
+tc qdisc replace dev wlan0 parent 10:3 handle 42: netem delay 60ms corrupt 0% rate 0bit
 tc filter replace dev wlan0 protocol ip parent 10: pref 2 handle 2 fw flowid 10:3
 tc filter replace dev wlan0 protocol ipv6 parent 10: pref 102 handle 2 fw flowid 10:3
-tc qdisc replace dev wlan0 parent 10:4 handle 13: netem delay 60ms corrupt 0% rate 0bit
+tc qdisc replace dev wlan0 parent 10:4 handle 43: netem delay 60ms corrupt 0% rate 0bit
 tc filter replace dev wlan0 protocol ip parent 10: pref 3 handle 3 fw flowid 10:4
 tc filter replace dev wlan0 protocol ipv6 parent 10: pref 103 handle 3 fw flowid 10:4
-tc qdisc replace dev wlan0 parent 10:5 handle 14: netem delay 60ms corrupt 0% rate 0bit
+tc qdisc replace dev wlan0 parent 10:5 handle 44: netem delay 60ms corrupt 0% rate 0bit
 tc filter replace dev wlan0 protocol ip parent 10: pref 4 handle 4 fw flowid 10:5
 tc filter replace dev wlan0 protocol ipv6 parent 10: pref 104 handle 4 fw flowid 10:5
-tc qdisc replace dev wlan0 parent 10:6 handle 15: netem delay 60ms corrupt 0% rate 0bit
+tc qdisc replace dev wlan0 parent 10:6 handle 45: netem delay 60ms corrupt 0% rate 0bit
 tc filter replace dev wlan0 protocol ip parent 10: pref 5 handle 5 fw flowid 10:6
 tc filter replace dev wlan0 protocol ipv6 parent 10: pref 105 handle 5 fw flowid 10:6
-tc qdisc replace dev wlan0 parent 10:7 handle 16: netem delay 60ms corrupt 0% rate 0bit
+tc qdisc replace dev wlan0 parent 10:7 handle 46: netem delay 60ms corrupt 0% rate 0bit
 tc filter replace dev wlan0 protocol ip parent 10: pref 6 handle 6 fw flowid 10:7
 tc filter replace dev wlan0 protocol ipv6 parent 10: pref 106 handle 6 fw flowid 10:7
-tc qdisc replace dev wlan0 parent 10:8 handle 17: netem delay 60ms corrupt 0% rate 0bit
+tc qdisc replace dev wlan0 parent 10:8 handle 47: netem delay 60ms corrupt 0% rate 0bit
 tc filter replace dev wlan0 protocol ip parent 10: pref 7 handle 7 fw flowid 10:8
 tc filter replace dev wlan0 protocol ipv6 parent 10: pref 107 handle 7 fw flowid 10:8
-tc qdisc replace dev wlan0 parent 10:9 handle 18: netem delay 60ms corrupt 0% rate 0bit
+tc qdisc replace dev wlan0 parent 10:9 handle 48: netem delay 60ms corrupt 0% rate 0bit
 tc filter replace dev wlan0 protocol ip parent 10: pref 8 handle 8 fw flowid 10:9
 tc filter replace dev wlan0 protocol ipv6 parent 10: pref 108 handle 8 fw flowid 10:9
 """.splitlines()
@@ -327,7 +311,7 @@ class RendererTests(unittest.TestCase):
         # prio needs at least two bands; the applier resets the roots instead.
         self.assertEqual([command.executable for command in commands], ["nft"])
 
-    def test_a_child_queue_is_removed_before_its_kind_can_change(self) -> None:
+    def test_each_child_kind_has_its_own_handle(self) -> None:
         topology = Topology(uplink_interface="eth0", test_interface="wlan0")
 
         def child(profile):
@@ -336,23 +320,21 @@ class RendererTests(unittest.TestCase):
                 profiles={profile.id: profile},
             )
             commands = render_command_plan(plan=plan, topology=topology)
-            band = [
+            self.assertFalse(any(command.argv[1:3] == ("qdisc", "del") for command in commands))
+            (argv,) = [
                 command.argv
                 for command in commands
                 if "eth0" in command.argv and "10:2" in command.argv and command.argv[1] == "qdisc"
             ]
-            # tc cannot change a netem into an fq_codel, so the old child goes
-            # first and the replacement always finds the band empty.
-            self.assertEqual(band[0][2:3], ("del",))
-            self.assertEqual(band[0][-1], "11:")
-            (argv,) = band[1:]
             return argv[argv.index("handle") + 1 :]
 
         normal = child(Profile(id="normal", name="Normal"))
         slow = child(Profile(id="slow", name="Slow", upload=Impairment(delay_ms=50)))
 
-        self.assertEqual(normal, ("11:", "fq_codel"))
-        self.assertEqual(slow[:3], ("11:", "netem", "delay"))
+        # tc cannot change a netem into an fq_codel, so a band that switches kind
+        # gets a new child under another handle instead of a change.
+        self.assertEqual(normal, ("61:", "fq_codel"))
+        self.assertEqual(slow[:3], ("41:", "netem", "delay"))
 
     def test_nftables_rules_are_replaced_in_one_transaction(self) -> None:
         plan = compile_plan(
@@ -574,7 +556,7 @@ class RendererTests(unittest.TestCase):
         netem = list(upload.argv[upload.argv.index("netem") :])
         self.assertEqual(netem, ["netem", "delay", "0ms", "50ms", "corrupt", "0%", "rate", "10gbit"])
 
-    def test_clears_all_previous_device_queues_before_replacements(self) -> None:
+    def test_device_queues_are_replaced_in_place_under_kind_specific_handles(self) -> None:
         plan = compile_plan(
             devices=(
                 make_device("alice", "192.168.50.10", "duplicate"),
@@ -605,13 +587,19 @@ class RendererTests(unittest.TestCase):
                 and "parent" in command.arguments
                 and command.arguments[command.arguments.index("parent") + 1] != "10:1"
             ]
+            # Nothing is deleted first: a replaced netem keeps the packets it holds and
+            # a band that changes kind gets a child under the other kind's handle.
             self.assertEqual(
                 [command.arguments[1] for command in queue_commands],
-                ["del", "del", "replace", "replace"],
+                ["replace", "replace"],
             )
             self.assertEqual(
-                [command.arguments[-1] for command in queue_commands[:2]],
-                ["11:", "12:"],
+                [command.arguments[command.arguments.index("handle") + 1] for command in queue_commands],
+                ["41:", "62:"],
+            )
+            self.assertEqual(
+                [command.arguments[command.arguments.index("parent") + 1] for command in queue_commands],
+                ["10:2", "10:3"],
             )
 
     def test_reset_targets_only_project_owned_state(self) -> None:
@@ -795,23 +783,23 @@ class EveryoneElseRenderingTests(unittest.TestCase):
         }
         self.assertEqual(children, {("eth0", "netem"), ("wlan0", "fq_codel")})
 
-# mark -> (band that tc reads as a hexadecimal class minor, parent class, child qdisc handle)
+# mark -> (band that tc reads as a hexadecimal class minor, parent class, netem child handle)
 QUEUE_NAMES = {
-    1: ("2", "10:2", "11:"),
-    2: ("3", "10:3", "12:"),
-    3: ("4", "10:4", "13:"),
-    4: ("5", "10:5", "14:"),
-    5: ("6", "10:6", "15:"),
-    6: ("7", "10:7", "16:"),
-    7: ("8", "10:8", "17:"),
-    8: ("9", "10:9", "18:"),
-    9: ("a", "10:a", "19:"),
-    10: ("b", "10:b", "20:"),
-    11: ("c", "10:c", "21:"),
-    12: ("d", "10:d", "22:"),
-    13: ("e", "10:e", "23:"),
-    14: ("f", "10:f", "24:"),
-    15: ("10", "10:10", "25:"),
+    1: ("2", "10:2", "41:"),
+    2: ("3", "10:3", "42:"),
+    3: ("4", "10:4", "43:"),
+    4: ("5", "10:5", "44:"),
+    5: ("6", "10:6", "45:"),
+    6: ("7", "10:7", "46:"),
+    7: ("8", "10:8", "47:"),
+    8: ("9", "10:9", "48:"),
+    9: ("a", "10:a", "49:"),
+    10: ("b", "10:b", "4a:"),
+    11: ("c", "10:c", "4b:"),
+    12: ("d", "10:d", "4c:"),
+    13: ("e", "10:e", "4d:"),
+    14: ("f", "10:f", "4e:"),
+    15: ("10", "10:10", "4f:"),
 }
 
 
@@ -866,18 +854,8 @@ class QueueClassTests(unittest.TestCase):
             on_interface = [command for command in commands if command.arguments[3] == interface]
             roots = [command for command in on_interface if "prio" in command.arguments]
             self.assertEqual([argument_after(command, "bands") for command in roots], ["16"])
-            clears = [
-                command
-                for command in on_interface
-                if command.arguments[:2] == ("qdisc", "del")
-            ]
-            self.assertEqual(
-                [argument_after(command, "parent") for command in clears],
-                ["10:" + band for band in HEX_BANDS],
-            )
-            self.assertEqual(
-                [argument_after(command, "handle") for command in clears],
-                [f"{mark + 10}:" for mark in range(1, 16)],
+            self.assertFalse(
+                any(command.arguments[:2] == ("qdisc", "del") for command in on_interface)
             )
             netem = [
                 command
@@ -890,7 +868,7 @@ class QueueClassTests(unittest.TestCase):
             )
             self.assertEqual(
                 [argument_after(command, "handle") for command in netem],
-                [f"{mark + 10}:" for mark in range(1, 16)],
+                [f"{0x40 + mark:x}:" for mark in range(1, 16)],
             )
             filters = [command for command in on_interface if command.arguments[0] == "filter"]
             self.assertEqual(len(filters), 30)

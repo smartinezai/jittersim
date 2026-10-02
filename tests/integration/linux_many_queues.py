@@ -109,7 +109,7 @@ def check_plan_applied(count):
         check_filters(interface, count)
         # Spelled out because the kernel prints a class minor number in hexadecimal.
         if count >= 9:
-            assert by_handle["19:"]["parent"] == "10:a", by_handle["19:"]
+            assert by_handle[queue_handle(9)]["parent"] == "10:a", by_handle[queue_handle(9)]
         if count == 15:
             assert by_handle["25:"]["parent"] == "10:10", by_handle["25:"]
 

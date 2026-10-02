@@ -50,14 +50,19 @@ def queue_parent(mark: int) -> str:
     return ROOT_HANDLE + queue_band(mark)
 
 
-def queue_handle(mark: int) -> str:
-    """Return the handle of a mark's child queue.
+# tc cannot change a netem into an fq_codel in place, so each kind of child
+# queue has its own handle range and a band that switches kind gets a new child.
+CHILD_HANDLE_BASES = {"netem": 0x40, "fq_codel": 0x60}
+
+
+def queue_handle(mark: int, kind: str = "netem") -> str:
+    """Return the handle of a mark's child queue of the given kind.
 
     tc reads the digits as a hexadecimal major number and prints them back
     unchanged. Marks of 1 and above never reach the root handle `10:`.
     """
 
-    return f"{mark + 10}:"
+    return f"{CHILD_HANDLE_BASES[kind] + mark:x}:"
 
 
 def _render_set(values: Sequence[object]) -> str:
@@ -465,26 +470,8 @@ def _render_tc_commands(*, queues: Sequence[QueueSpec], interface: str) -> List[
             purpose=f"preserve fair queuing for ordinary traffic on {interface}",
         ),
     ]
-    for queue in queues:
-        commands.append(
-            Command(
-                executable="tc",
-                arguments=(
-                    "qdisc",
-                    "del",
-                    "dev",
-                    interface,
-                    "parent",
-                    queue_parent(queue.mark),
-                    "handle",
-                    queue_handle(queue.mark),
-                ),
-                purpose=f"clear the previous queue for device {queue.device_id} on {interface}",
-                ignore_failure=True,
-            )
-        )
-    # Old sibling queues can prevent the kernel from accepting duplication.
-    # Clear them all before installing any replacement queues.
+    # "tc qdisc replace" changes a queue of the same kind in place, so the
+    # packets it holds survive a settings change.
     for queue in queues:
         if queue.impairment != Impairment():
             commands.append(
@@ -498,7 +485,7 @@ def _render_tc_commands(*, queues: Sequence[QueueSpec], interface: str) -> List[
                         "parent",
                         queue_parent(queue.mark),
                         "handle",
-                        queue_handle(queue.mark),
+                        queue_handle(queue.mark, "netem"),
                         *_format_impairment_arguments(queue),
                     ),
                     purpose=(
@@ -519,7 +506,7 @@ def _render_tc_commands(*, queues: Sequence[QueueSpec], interface: str) -> List[
                         "parent",
                         queue_parent(queue.mark),
                         "handle",
-                        queue_handle(queue.mark),
+                        queue_handle(queue.mark, "fq_codel"),
                         "fq_codel",
                     ),
                     purpose=(
