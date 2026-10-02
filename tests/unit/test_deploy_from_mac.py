@@ -135,6 +135,20 @@ def short_head(repository=ROOT, ref="HEAD"):
                           capture_output=True, text=True, check=True).stdout.strip()
 
 
+def version_head(repository=ROOT, ref="HEAD"):
+    """The version the checkout's own build script gives a commit. An older build script has no
+    versions and then the short commit name is the version."""
+
+    result = subprocess.run(
+        ["sh", "deploy/raspberry-pi/build-release.sh", "--version", ref],
+        cwd=repository, capture_output=True, text=True,
+    )
+    reported = result.stdout.strip()
+    if result.returncode == 0 and reported:
+        return reported
+    return short_head(repository, ref)
+
+
 def printed_sha(output):
     return next(line.split(": ", 1)[1] for line in output.splitlines()
                 if line.startswith("SHA-256: "))
@@ -152,9 +166,10 @@ def terminal_call(argv, fakes, remote):
     assert argv == [*TERMINAL_OPTIONS, "-i", str(fakes["key"]), "--", HOST, remote]
 
 
-def stage_command(short, sha):
+def stage_command(short, sha, version=None):
+    version = version or short
     return (f"sudo /usr/bin/python3 -I {MANAGER} stage jittersim-release-{short}.tar.gz "
-            f"--version {short} --sha256 {sha} && rm -f jittersim-release-{short}.tar.gz")
+            f"--version {version} --sha256 {sha} && rm -f jittersim-release-{short}.tar.gz")
 
 
 def test_dry_run_prints_every_command_and_runs_none(fakes):
@@ -198,7 +213,7 @@ def test_stage_only_copies_the_verified_archive_and_prints_the_install_command(f
     assert copy[-1] == f"{HOST}:{archive_name}"
     assert Path(copy[-2]).name == archive_name and Path(copy[-2]).is_absolute()
     sha = printed_sha(result.stdout)
-    terminal_call(stage, fakes, stage_command(short, sha))
+    terminal_call(stage, fakes, stage_command(short, sha, version_head()))
     assert f"{HOST} 'sudo jittersim update install'" in result.stdout
     assert "Install staged release" in result.stdout
     # the temporary build folder is gone and the copied archive is the one that was checked
@@ -208,9 +223,9 @@ def test_stage_only_copies_the_verified_archive_and_prints_the_install_command(f
     # the update flow accepts it exactly as the Pi's root-only staging step does
     root = tmp_path / "updates"
     root.mkdir(mode=0o700)
-    updates.stage_release(archive, sha, short, root=root)
+    updates.stage_release(archive, sha, version_head(), root=root)
     assert json.loads((root / "staged" / ".jittersim-release.json").read_text()) == {
-        "version": short, "sha256": sha}
+        "version": version_head(), "sha256": sha}
     assert (root / "staged" / "src" / "jittersim" / "updates.py").is_file()
 
 
@@ -228,16 +243,17 @@ def test_the_archive_is_the_one_build_release_makes(fakes):
 
 def test_install_stages_installs_waits_and_compares_the_running_release(fakes):
     short = short_head()
-    result, calls = deploy(fakes, "--install", FAKE_INSTALLED=short)
+    version = version_head()
+    result, calls = deploy(fakes, "--install", FAKE_INSTALLED=version)
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh", "scp", "ssh", "ssh"]
     sha = printed_sha(result.stdout)
     terminal_call(calls[2]["argv"], fakes, (
-        stage_command(short, sha) + " && sudo jittersim update install --yes && " + WAIT
+        stage_command(short, sha, version) + " && sudo jittersim update install --yes && " + WAIT
         + " && sudo systemctl start jittersim-update.service"
     ))
     batch_call(calls[3]["argv"], fakes, "jittersim update check")
-    assert f"The Pi now runs release {short}." in result.stdout
+    assert f"The Pi now runs release {version}." in result.stdout
     assert "git rev-parse --short HEAD" in result.stdout
     # the command is shown once and its answer is not mixed into the trace
     assert result.stdout.count("'jittersim update check'") == 1
@@ -246,19 +262,19 @@ def test_install_stages_installs_waits_and_compares_the_running_release(fakes):
 
 @pytest.mark.parametrize("extra", [(), ("--install",)])
 def test_a_pi_that_already_runs_the_release_needs_nothing(fakes, extra):
-    short = short_head()
-    result, calls = deploy(fakes, *extra, FAKE_RUNNING=short)
+    version = version_head()
+    result, calls = deploy(fakes, *extra, FAKE_RUNNING=version)
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh"]
-    assert f"The Pi already runs release {short}. Nothing to stage or install." in result.stdout
+    assert f"The Pi already runs release {version}. Nothing to stage or install." in result.stdout
 
 
 def test_the_installer_runs_again_for_the_same_release(fakes):
-    short = short_head()
-    result, calls = deploy(fakes, "--use-installer", FAKE_RUNNING=short)
+    version = version_head()
+    result, calls = deploy(fakes, "--use-installer", FAKE_RUNNING=version)
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh", "scp", "ssh"]
-    assert f"The Pi already runs release {short}. The installer runs again." in result.stdout
+    assert f"The Pi already runs release {version}. The installer runs again." in result.stdout
 
 
 def test_install_reports_a_different_running_release(fakes):
@@ -270,16 +286,16 @@ def test_install_reports_a_different_running_release(fakes):
 
 
 def test_install_waits_for_the_helper_to_answer_again(fakes):
-    short = short_head()
-    result, calls = deploy(fakes, "--install", FAKE_INSTALLED=short, FAKE_CHECK_FAILS="3")
+    version = version_head()
+    result, calls = deploy(fakes, "--install", FAKE_INSTALLED=version, FAKE_CHECK_FAILS="3")
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh", "scp", "ssh", "ssh", "sleep", "ssh", "sleep", "ssh", "sleep",
                             "ssh"]
-    assert f"The Pi now runs release {short}." in result.stdout
+    assert f"The Pi now runs release {version}." in result.stdout
 
 
 def test_install_gives_up_when_the_release_cannot_be_read_and_says_why(fakes):
-    result, calls = deploy(fakes, "--install", FAKE_INSTALLED=short_head(),
+    result, calls = deploy(fakes, "--install", FAKE_INSTALLED=version_head(),
                            FAKE_CHECK_FAILS="99")
     assert result.returncode == 1
     # the probe and the sudo step, then ten checks with a pause between two of them
@@ -386,6 +402,7 @@ def unpack_on_a_stand_in_pi(fakes, home, short, command):
 
 def test_installer_mode_checks_unpacks_and_labels_the_copy(fakes, tmp_path):
     short = short_head()
+    version = version_head()
     result, calls = deploy(fakes, "--use-installer")
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh", "scp", "ssh"]
@@ -402,7 +419,7 @@ def test_installer_mode_checks_unpacks_and_labels_the_copy(fakes, tmp_path):
     release = home / f"jittersim-release-{short}"
     assert (release / "deploy" / "raspberry-pi" / "install.sh").stat().st_mode & stat.S_IXUSR
     assert json.loads((release / ".jittersim-release.json").read_text()) == {
-        "version": short, "sha256": sha}
+        "version": version, "sha256": sha}
     assert not (home / f"jittersim-release-{short}.tar.gz").exists()
     # a changed copy is refused before anything is unpacked
     shutil.rmtree(release)
@@ -425,20 +442,21 @@ def test_the_installer_label_reaches_the_installed_folder(fakes, tmp_path):
     release = home / f"jittersim-release-{short}"
     subprocess.run([sys.executable, str(release / "deploy/raspberry-pi/replace-source.py"),
                     str(release), str(installed)], check=True, capture_output=True)
-    assert updates.update_status(root=tmp_path / "none", code=installed)["installed"] == short
+    assert updates.update_status(root=tmp_path / "none", code=installed)["installed"] == version_head()
     assert json.loads((installed / ".jittersim-release.json").read_text())["sha256"] == (
         printed_sha(result.stdout))
 
 
 def test_installer_mode_with_install_runs_the_installer_in_a_terminal(fakes):
     short = short_head()
-    result, calls = deploy(fakes, "--use-installer", "--install", FAKE_INSTALLED=short)
+    version = version_head()
+    result, calls = deploy(fakes, "--use-installer", "--install", FAKE_INSTALLED=version)
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh", "scp", "ssh", "ssh", "ssh"]
     terminal_call(calls[3]["argv"], fakes,
                   f"sudo ./jittersim-release-{short}/deploy/raspberry-pi/install.sh")
     batch_call(calls[4]["argv"], fakes, "jittersim update check")
-    assert f"The Pi now runs release {short}." in result.stdout
+    assert f"The Pi now runs release {version}." in result.stdout
 
 
 def test_installer_mode_works_on_a_pi_without_the_update_service(fakes):
@@ -463,7 +481,7 @@ def repository(tmp_path):
     (checkout / "src" / "jittersim").mkdir(parents=True)
     shutil.copy(SCRIPT, checkout / "deploy" / "raspberry-pi")
     shutil.copy(BUILD, checkout / "deploy" / "raspberry-pi")
-    (checkout / "pyproject.toml").write_text("[project]\nname = 'jittersim'\n")
+    (checkout / "pyproject.toml").write_text('[project]\nname = "jittersim"\nversion = "0.2.0"\n')
     (checkout / "src" / "jittersim" / "__init__.py").write_text("")
 
     def git(*arguments):
@@ -505,7 +523,7 @@ def test_an_older_ref_builds_that_commit(fakes, repository):
     short = short_head(repository, "HEAD~1")
     assert archived_readme(fakes["copies"] / f"jittersim-release-{short}.tar.gz") == (
         "first release\n")
-    assert f"--version {short} " in calls[2]["argv"][-1]
+    assert f"--version {version_head(repository, 'HEAD~1')} " in calls[2]["argv"][-1]
 
 
 def test_a_checksum_that_does_not_match_the_archive_stops_everything(fakes, repository):
@@ -513,7 +531,9 @@ def test_a_checksum_that_does_not_match_the_archive_stops_everything(fakes, repo
     zeros = "0" * 64
     build.write_text(build.read_text()
                      .replace('sha256sum "$output"', f'echo "{zeros}  $output"')
-                     .replace('shasum -a 256 "$output"', f'echo "{zeros}  $output"'))
+                     .replace('shasum -a 256 "$output"', f'echo "{zeros}  $output"')
+                     .replace('sha256sum "$archive"', f'echo "{zeros}  $archive"')
+                     .replace('shasum -a 256 "$archive"', f'echo "{zeros}  $archive"'))
     script = repository / "deploy" / "raspberry-pi" / "deploy-from-mac.sh"
     result, calls = deploy(fakes, script=script)
     assert result.returncode == 1
@@ -593,7 +613,7 @@ def test_it_runs_under_each_available_shell(fakes, shell):
     assert result.returncode == 0, result.stderr
     assert calls == []
     assert "/keys dir/it'\\''s_ed25519'" in result.stdout
-    result, calls = deploy(fakes, "--install", shell=shell, FAKE_INSTALLED=short_head())
+    result, calls = deploy(fakes, "--install", shell=shell, FAKE_INSTALLED=version_head())
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh", "scp", "ssh", "ssh"]
     result, _ = deploy(fakes, shell=shell, FAKE_HANG="probe", FAKE_SLEEP_SCALE="0.002")
@@ -639,3 +659,79 @@ needs_a_checkout = pytest.mark.skipif(
 for _name, _test in list(globals().items()):
     if _name.startswith("test_") and _name not in WITHOUT_GIT:
         globals()[_name] = needs_a_checkout(_test)
+
+
+# the version that is staged ---------------------------------------------------------------
+
+STUB = """#!/bin/sh
+# a build script that knows versions in front of the real one
+if [ "$1" = "--version" ]; then
+    printf '%s\\n' "$STUB_VERSION"
+    [ -z "$STUB_FAIL" ] || exit 1
+    exit 0
+fi
+exec sh "$(dirname "$0")/build-release-real.sh" "$@"
+"""
+
+
+def with_version_stub(repository, version, fail=False):
+    directory = repository / "deploy" / "raspberry-pi"
+    real = directory / "build-release.sh"
+    shutil.copy(real, directory / "build-release-real.sh")
+    real.write_text(STUB.replace("$STUB_VERSION", version).replace('[ -z "$STUB_FAIL" ] || exit 1', "exit 1" if fail else ":"))
+    return directory / "deploy-from-mac.sh"
+
+
+def test_the_version_the_build_script_reports_is_staged_and_compared(fakes, repository):
+    script = with_version_stub(repository, "0.2.0")
+    short = short_head(repository)
+    result, calls = deploy(fakes, "--install", script=script, FAKE_INSTALLED="0.2.0")
+    assert result.returncode == 0, result.stderr
+    assert "Release version: 0.2.0" in result.stdout
+    sha = printed_sha(result.stdout)
+    terminal_call(calls[2]["argv"], fakes, (
+        stage_command(short, sha, "0.2.0") + " && sudo jittersim update install --yes && " + WAIT
+        + " && sudo systemctl start jittersim-update.service"))
+    assert "The Pi now runs release 0.2.0." in result.stdout
+    # the archive and its folder still carry the commit
+    assert (fakes["copies"] / f"jittersim-release-{short}.tar.gz").is_file()
+
+
+def test_a_dev_build_version_is_staged_as_it_is(fakes, repository):
+    script = with_version_stub(repository, "0.2.0.dev+abc1234")
+    result, calls = deploy(fakes, script=script)
+    assert result.returncode == 0, result.stderr
+    assert "--version 0.2.0.dev+abc1234 " in calls[2]["argv"][-1]
+
+
+def test_a_pi_that_runs_the_version_needs_nothing(fakes, repository):
+    script = with_version_stub(repository, "0.2.0")
+    result, calls = deploy(fakes, script=script, FAKE_RUNNING="0.2.0")
+    assert result.returncode == 0, result.stderr
+    assert tools(calls) == ["ssh"]
+    assert "The Pi already runs release 0.2.0. Nothing to stage or install." in result.stdout
+
+
+def test_the_installer_label_carries_the_version(fakes, repository):
+    script = with_version_stub(repository, "0.2.0")
+    result, calls = deploy(fakes, "--use-installer", script=script)
+    assert result.returncode == 0, result.stderr
+    assert '"version": "0.2.0"' in calls[2]["argv"][-1] or "0.2.0" in calls[2]["argv"][-1]
+
+
+@pytest.mark.parametrize("reported", ["", "a b", "0.2.0;rm -rf /", "$(id)", "0.2.0\\n1.0.0x y"])
+def test_a_version_that_looks_unsafe_falls_back_to_the_commit(fakes, repository, reported):
+    script = with_version_stub(repository, reported)
+    short = short_head(repository)
+    result, calls = deploy(fakes, script=script)
+    assert result.returncode == 0, result.stderr
+    assert f"--version {short} " in calls[2]["argv"][-1]
+    assert "Release version:" not in result.stdout
+
+
+def test_a_build_script_that_cannot_say_the_version_falls_back_to_the_commit(fakes, repository):
+    script = with_version_stub(repository, "0.2.0", fail=True)
+    short = short_head(repository)
+    result, calls = deploy(fakes, script=script)
+    assert result.returncode == 0, result.stderr
+    assert f"--version {short} " in calls[2]["argv"][-1]
