@@ -314,7 +314,7 @@ def run_node(source):
                     reason="node runs the page script")
 def test_the_page_script_has_the_online_controls_and_never_a_token_field():
     script = (ROOT / "src/jittersim/api/workflows.js").read_text()
-    for needle in ("check-online", "online-settings", "release-check-now",
+    for needle in ("check-online", "online-settings", "release-check",
                    "online-daily-check", "online-install-automatically"):
         assert needle in script
     lowered = script.lower()

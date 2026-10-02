@@ -12,7 +12,7 @@ from jittersim.api.server import DASHBOARD_HTML
 
 PAGES = (
     "devices", "profiles", "schedules", "router", "traffic", "measurements", "activity", "access",
-    "diagnostics",
+    "diagnostics", "updates",
 )
 OLD_IDS = Path(__file__).with_name("dashboard_ids.txt").read_text().split()
 HTML = DASHBOARD_HTML.split("<script>")[0]
@@ -36,6 +36,7 @@ CARD_PAGES = {
     "Profiles": "diagnostics", "Devices": "diagnostics", "Compiled plan": "diagnostics",
     "Runtime state": "diagnostics", "Access rules": "diagnostics", "Diagnostics": "diagnostics",
     "Backup and action history": "diagnostics",
+    "Updates": "router",
 }
 
 
@@ -56,8 +57,8 @@ def test_every_previous_id_survives_exactly_once():
         assert HTML.count(f' id="{element_id}"') == 1, element_id
 
 
-def test_sidebar_links_follow_the_nine_pages_in_order():
-    assert re.findall(r'href="#(\w+)"', sidebar_html()) == list(PAGES)
+def test_sidebar_links_follow_the_ten_pages_in_order():
+    assert re.findall(r'href="#(\w+)" data-page-link', sidebar_html()) == list(PAGES)
     for page in PAGES:
         page_html(page)
 
@@ -137,3 +138,24 @@ def test_sections_are_labelled_with_the_visible_link_text():
     for page in PAGES:
         link = re.search(rf'<a href="#{page}"[^>]*>([^<]+?)\s*(?:<span|</a>)', HTML).group(1).strip()
         assert f'id="page-{page}" data-page="{page}" aria-label="{link}"' in HTML, page
+
+
+def test_updates_have_their_own_page_and_the_sidebar_shows_version_and_badge():
+    sidebar = sidebar_html()
+    assert re.search(r'<a href="#updates" data-page-link="updates"[^>]*>Updates ', sidebar)
+    assert 'id="update-available-badge"' in sidebar
+    footer = sidebar[sidebar.index('class="sidebar-footer"'):]
+    assert 'id="sidebar-version"' in footer
+    link = re.search(r'<a id="sidebar-update-link"[^>]*>', footer).group(0)
+    assert 'href="#updates"' in link and "hidden" in link
+    assert "page-updates" in HTML
+    # Router and Wi-Fi keeps a link to the new page.
+    assert 'href="#updates"' in page_html("router")
+    assert 'updates: "updates"' in DASHBOARD_HTML
+
+
+def test_the_update_card_is_mounted_on_updates_and_only_that_page_polls_it():
+    script = (Path(__file__).resolve().parents[2] / "src/jittersim/api/workflows.js").read_text()
+    assert "workflowCard('release-controls', 'Updates and recovery', 'updates'" in script
+    assert 'if (page === "updates") jobs.push(pollReleaseProgress);' in DASHBOARD_HTML
+    assert "pollReleaseProgress" not in re.search(r'if \(page === "router"\)[^\n]*', DASHBOARD_HTML).group(0)

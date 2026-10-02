@@ -191,7 +191,7 @@ function actionButton(label, action) {
     finally {
       setButtonBusy(button, false);
       if (button.id === 'test-session-finish') button.disabled = Boolean(activeTestRecord && activeTestRecord.ended_at !== null);
-      if (button.id === 'release-install' || button.id === 'release-rollback') { releasePollAt = 0; loadReleaseStatus().catch(error => showMessage(error.message, 'error')); }
+      if (typeof button.afterAction === 'function') button.afterAction();
     }
   });
   return button;
@@ -244,6 +244,7 @@ function renderSystemHealth(data) {
     system.uptime_seconds == null ? null : 'Pi uptime: ' + Math.floor(system.uptime_seconds / 3600) + ' hours',
     'Checked: ' + new Date().toLocaleTimeString()
   ];
+  if (!releaseState && system.version) element('sidebar-version').textContent = 'Version ' + system.version;
   element('health-details').replaceChildren(...values.filter(Boolean).map(value => textNode('p', value)));
   const uplink = textNode('p', element('uplink-state').textContent === 'Unavailable' ? 'Ethernet information unavailable' : 'Ethernet: ' + element('uplink-state').textContent);
   uplink.id = 'health-uplink'; element('health-details').append(uplink);
@@ -537,58 +538,152 @@ let releaseState = null;
 let releasePollAt = 0;
 let releaseStatusRequest = null;
 let autoCheckStagedUpdates = null;
+// An install or restore this page follows until it ends. {label, kind: 'install' | 'restore'}
+let updateWatch = null;
+let updateFollowing = false;
+let updateCheckRunning = false;
+let updateOutcome = '';
 const RELEASE_BUSY_PHASES = ['queued','stopping','backing-up','installing','checking','rolling-back'];
+const PHASE_TEXT = {
+  queued: 'The update is queued.',
+  stopping: 'Stopping services before the backup.',
+  'backing-up': 'Backing up the installation and settings.',
+  installing: 'Installing the new release.',
+  checking: 'Restarting services and checking that everything works.',
+  'rolling-back': 'Restoring the previous installation.'
+};
+const updateSleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function releaseOperationBusy() {
   return Boolean(releaseState && RELEASE_BUSY_PHASES.includes(releaseState.phase));
 }
-// The Setup poll follows an install or restore until it finishes.
-function pollReleaseProgress() {
-  return releaseOperationBusy() ? loadReleaseStatus() : Promise.resolve(releaseState);
+// Only the Updates page asks the Pi about updates. A hidden page or tab stays quiet.
+function updatesPageActive() {
+  return !document.hidden && currentPage() === 'updates';
 }
-function showStagedReleaseBadge(available) {
-  element('staged-release-badge').hidden = !available;
-  const setupLink = element('setup-tab-link');
-  if (available) setupLink.setAttribute('aria-label', 'Router and Wi-Fi, release staged');
-  else setupLink.removeAttribute('aria-label');
+function releaseLabel(state) {
+  return (state && (state.tag || state.available)) || '';
+}
+function stagedReleaseReady(state) {
+  // Only a release staged with a valid signature of a trusted key can be installed.
+  return Boolean(state && state.available && state.available !== state.installed && state.installable === true);
+}
+// The Updates poll follows an install or restore until it finishes.
+function pollReleaseProgress() {
+  if (releaseOperationBusy() || updateWatch) followUpdate();
+  return Promise.resolve(releaseState);
+}
+function updateProgressText(failedRead) {
+  if (updateOutcome) return updateOutcome;
+  if (!updateWatch) return '';
+  if (failedRead) return 'The dashboard is restarting. This page reconnects by itself.';
+  const phase = releaseState && releaseState.phase;
+  return PHASE_TEXT[phase] || 'Working on the ' + updateWatch.kind + '.';
+}
+// One place decides what every control shows, so a button can never be left enabled while
+// a request or an install is running.
+function renderUpdates(failedRead) {
+  const state = releaseState;
+  const busy = Boolean(updateWatch) || releaseOperationBusy();
+  const working = busy || updateCheckRunning;
+  const ready = stagedReleaseReady(state);
+  const installed = (state && state.installed) || null;
+  const blocked = state && state.available && state.installable === false && state.reason;
+  if (installed) element('sidebar-version').textContent = 'Version ' + installed;
+  element('update-installed').textContent = installed || 'Unknown';
+  element('update-available').textContent = ready ? releaseLabel(state)
+    : (blocked ? releaseLabel(state) + ' (cannot be installed)' : 'No newer release found');
+  element('update-signer').textContent = ready && state.signed_by ? state.signed_by : 'Not applicable';
+  element('update-last-checked').textContent = onlineView && onlineView.checked_at
+    ? new Date(onlineView.checked_at * 1000).toLocaleString() : 'Not checked yet';
+  element('release-check').disabled = working;
+  element('release-install').disabled = working || !ready;
+  element('release-install').classList.toggle('primary', ready && !working);
+  element('release-rollback').disabled = working || !(state && state.rollback_available);
+  const progress = updateProgressText(failedRead);
+  element('update-progress').hidden = !progress;
+  element('update-progress').textContent = progress;
+  element('sidebar-update-link').hidden = !ready;
+  element('sidebar-update-link').textContent = ready ? 'Update available: ' + releaseLabel(state) : '';
+  element('update-available-badge').hidden = !ready;
+  const nav = element('updates-tab-link');
+  if (ready) nav.setAttribute('aria-label', 'Updates, update available');
+  else nav.removeAttribute('aria-label');
 }
 async function loadReleaseStatus({force = false} = {}) {
   if (releaseStatusRequest) return releaseStatusRequest;
   if (!force && Date.now() - releasePollAt < 5000) return releaseState;
   releasePollAt = Date.now();
-  element('release-status').textContent = 'Checking for a staged release on this Pi…';
+  if (!updateWatch) element('release-status').textContent = 'Checking for a staged release on this Pi…';
   releaseStatusRequest = (async () => {
     try {
       releaseState = await request('/api/updates', 'GET');
-      // Only a release staged with a valid signature of a trusted key can be installed.
-      const stagedReleaseReady = Boolean(
-        releaseState.available && releaseState.available !== releaseState.installed &&
-        releaseState.installable === true
-      );
       const signer = releaseState.available && releaseState.signed_by ? ' (signed by ' + releaseState.signed_by + ')' : '';
       const blocked = releaseState.available && releaseState.installable === false && releaseState.reason;
       element('release-status').textContent = 'Installed: ' + (releaseState.installed || 'Unknown') +
         ' · Available: ' + (releaseState.available ? releaseState.available + signer : 'None staged') +
         ' · ' + (blocked ? releaseState.reason : releaseState.message);
-      showStagedReleaseBadge(stagedReleaseReady);
-      const busy = releaseOperationBusy();
-      element('release-install').disabled = busy || !stagedReleaseReady;
-      element('release-install').classList.toggle('primary', stagedReleaseReady && !busy);
-      element('release-rollback').disabled = busy || !releaseState.rollback_available;
+      // An install started elsewhere, such as Install automatically, is followed too.
+      if (releaseOperationBusy() && !updateWatch) {
+        updateWatch = {label: releaseLabel(releaseState), kind: releaseState.phase === 'rolling-back' ? 'restore' : 'install'};
+        updateOutcome = '';
+      }
+      renderUpdates();
       return releaseState;
     } catch (error) {
-      if (releaseOperationBusy()) {
+      if (releaseOperationBusy() || updateWatch) {
         // Services restart during an install, so this page waits for them.
         element('release-status').textContent = 'Waiting for the dashboard to restart. This page checks again shortly.';
+        renderUpdates(true);
         throw error;
       }
       element('release-status').textContent = 'Could not check for a staged release. Use Check for updates to try again.';
-      showStagedReleaseBadge(false);
+      releaseState = null;
+      renderUpdates();
       throw error;
     } finally {
       releaseStatusRequest = null;
     }
   })();
   return releaseStatusRequest;
+}
+// Follows an install until the new version answers. A restart makes requests fail for a
+// few seconds. That is expected, so the loop keeps going and reconnects by itself.
+async function followUpdate() {
+  if (updateFollowing || !updateWatch) return;
+  updateFollowing = true;
+  const started = Date.now();
+  try {
+    while (updateWatch && Date.now() - started < 15 * 60 * 1000) {
+      if (updatesPageActive()) {
+        try {
+          await loadReleaseStatus({force: true});
+          const phase = releaseState.phase;
+          if (phase === 'complete' && updateWatch.kind === 'install') {
+            updateOutcome = 'Updated to ' + updateWatch.label + '.';
+            updateWatch = null;
+          } else if (phase === 'rolled-back' && updateWatch.kind === 'restore') {
+            updateOutcome = 'The previous installation is back.';
+            updateWatch = null;
+          } else if (phase === 'complete' || phase === 'rolled-back' || phase === 'failed') {
+            updateOutcome = 'The update did not finish. ' + (releaseState.message || '') +
+              ' The previous installation was kept or restored.';
+            updateWatch = null;
+          }
+          renderUpdates();
+        } catch (error) {
+          renderUpdates(true);
+        }
+      }
+      if (updateWatch) await updateSleep(2000);
+    }
+  } finally {
+    if (updateWatch) {
+      updateOutcome = 'The dashboard did not come back in time. Reload this page, or check the Pi.';
+      updateWatch = null;
+      renderUpdates();
+    }
+    updateFollowing = false;
+  }
 }
 async function loadUpdateCheckPreference() {
   const toggle = element('check-staged-updates-on-open');
@@ -662,16 +757,19 @@ function showOnline(view) {
   const ready = view && view.state !== 'unavailable';
   let text = onlineSummary(view);
   if (ready && view.token_set === false) {
-    text = 'No GitHub token is saved on the Pi yet. Open "The GitHub token" below for the one-time setup.';
+    text = 'No GitHub token is saved on the Pi yet, so Check for updates only looks at releases already staged on the Pi.';
   }
   element('online-check-status').textContent = text;
-  element('release-check-now').disabled = !ready || view.state === 'running' || view.token_set === false;
+  const noToken = Boolean(ready && view.token_set === false);
+  if (noToken) element('github-access-hint').textContent = 'To let the Pi look at GitHub, run this on the Pi: sudo jittersim update set-token (see The GitHub token below).';
+  element('github-access-hint').hidden = !noToken;
   const settings = (view && view.settings) || null;
   for (const [id, name] of [['online-daily-check', 'daily_check'], ['online-install-automatically', 'install_automatically']]) {
     const box = element(id);
     box.disabled = !settings;
     if (settings) box.checked = settings[name] === true;
   }
+  renderUpdates();
 }
 async function runOnlineCheck({force = false} = {}) {
   if (onlinePolling) return;
@@ -681,7 +779,9 @@ async function runOnlineCheck({force = false} = {}) {
     showOnline(view);
     const started = Date.now();
     while (view.state === 'running' && Date.now() - started < 8 * 60 * 1000) {
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      await updateSleep(2000);
+      // A hidden page or tab waits without asking the Pi.
+      if (!updatesPageActive()) continue;
       view = await request('/api/updates/check-online/' + encodeURIComponent(view.job), 'GET');
       if (view.state === 'unknown') view = await request('/api/updates/check-online', 'GET');
       showOnline(view);
@@ -698,8 +798,41 @@ async function loadOnlineStatus() {
     showOnline(await request('/api/updates/check-online', 'GET'));
   } catch (error) {
     element('online-check-status').textContent = 'Online checks are not available on this dashboard.';
-    element('release-check-now').disabled = true;
   }
+}
+// Check for updates: GitHub when the Pi has a token, otherwise only the releases staged on the Pi.
+async function checkForUpdates() {
+  updateOutcome = '';
+  updateCheckRunning = true;
+  renderUpdates();
+  try {
+    if (onlineView && onlineView.state !== 'unavailable' && onlineView.token_set === true) {
+      await runOnlineCheck({force: true});
+    } else {
+      await loadReleaseStatus({force: true});
+    }
+  } finally {
+    updateCheckRunning = false;
+    renderUpdates();
+  }
+}
+async function installUpdate() {
+  if (!stagedReleaseReady(releaseState)) return;
+  const label = releaseLabel(releaseState);
+  if (!await confirmWorkflow('Install ' + label + '? The dashboard and the test network will drop for a few seconds while it restarts. Keep Ethernet or SSH available in case you need to recover.')) return;
+  updateOutcome = '';
+  await request('/api/updates/install', 'POST', {version: releaseState.available, confirm: true});
+  updateWatch = {label, kind: 'install'};
+  renderUpdates();
+  followUpdate();
+}
+async function restoreUpdate() {
+  if (!await confirmWorkflow('Restore the previous installation and its settings backup? Changes made since that backup will be replaced. The dashboard and the test network will drop for a few seconds.')) return;
+  updateOutcome = '';
+  await request('/api/updates/rollback', 'POST', {confirm: true});
+  updateWatch = {label: 'the previous installation', kind: 'restore'};
+  renderUpdates();
+  followUpdate();
 }
 function installOnlineControls() {
   const status = element('online-setting-status');
@@ -727,40 +860,48 @@ function installOnlineControls() {
   element('online-install-automatically').addEventListener('change', event => save(event.target, 'install_automatically'));
   loadOnlineStatus();
 }
-function installReleaseControls() {
-  workflowCard('release-controls', 'Updates and recovery', 'setup', `
-    <p>Install a signed release staged on this Pi. An update briefly interrupts the dashboard and test network. The previous installation and settings are backed up before installation.</p>
-    <label class="update-auto-check"><input id="check-staged-updates-on-open" type="checkbox" disabled><span>Check for staged updates when the dashboard opens</span></label>
-    <p class="form-note">Checks only for a verified release already staged on this Pi. Downloads and installation stay manual.</p>
-    <p id="update-preference-status" class="form-note update-preference-status" role="status" aria-live="polite">Loading the saved preference…</p>
-    <p id="release-status" role="status">Check for an approved release on this Pi.</p><div id="release-actions"></div>
-    <h3 class="online-heading">Check GitHub for a new release</h3>
-    <p class="form-note">The Pi can look for the newest signed release on GitHub itself. It stages a release only when the key you trusted signed it and it is newer than the one installed. Installing stays your button press unless you turn on Install automatically below.</p>
-    <p id="online-check-status" class="form-note" role="status" aria-live="polite">Loading the online check…</p>
-    <div id="online-actions"></div>
-    <label class="update-auto-check"><input id="online-daily-check" type="checkbox" disabled><span>Check GitHub once a day</span></label>
-    <label class="update-auto-check"><input id="online-install-automatically" type="checkbox" disabled><span>Install automatically</span></label>
-    <p class="form-note">Install automatically installs a new signed release without anyone pressing Install. It uses the same checks and the same recovery copy as a manual install. It is off unless you turn it on.</p>
-    <p id="online-setting-status" class="form-note" role="status" aria-live="polite"></p>
-    <details><summary>The GitHub token</summary><p>The repository is private, so the Pi needs a read-only token for this one repository. Create it on GitHub (Settings, Developer settings, Fine-grained tokens, only this repository, Contents read-only, with an expiry date). Then run <code>sudo jittersim update set-token</code> on the Pi, paste the token and press Ctrl-D. This page never asks for the token and never shows it.</p></details>
-    <details><summary>How releases reach this private Pi</summary><p>The owner builds and signs a release on the Mac and deploy-from-mac.sh stages it over SSH. The Pi stages only a release signed by a key it trusts and newer than the one it runs. The admin token cannot stage a release: it can only install the one already staged. See Signed releases in the deployment guide.</p></details>`);
-  const install = actionButton('Install staged release', async () => {
-    if (!releaseState || !await confirmWorkflow('Install release ' + releaseState.available + '? The network will be interrupted briefly. Keep Ethernet or SSH available for recovery.')) return;
-    await request('/api/updates/install','POST',{version:releaseState.available,confirm:true});
-    showMessage('Installation queued. This page will reconnect and show the result.', 'working');
-    await loadReleaseStatus({force:true});
-  }); install.id='release-install'; install.disabled=true;
-  const rollback = actionButton('Restore previous installation', async () => {
-    if (!await confirmWorkflow('Restore the previous installation and its settings backup? Changes made since that backup will be replaced.')) return;
-    await request('/api/updates/rollback','POST',{confirm:true});
-    await loadReleaseStatus({force:true});
-  }); rollback.id='release-rollback'; rollback.disabled=true;
-  element('release-actions').append(actionButton('Check for updates', async () => {await loadReleaseStatus({force:true});}), install, rollback);
-  const checkNow = actionButton('Check now', async () => { await runOnlineCheck({force: true}); });
-  checkNow.id = 'release-check-now'; checkNow.disabled = true;
-  element('online-actions').append(checkNow);
+function wireReleaseControls() {
+  const buttons = [
+    ['release-check', 'Check for updates', checkForUpdates],
+    ['release-install', 'Install update', installUpdate],
+    ['release-rollback', 'Restore previous installation', restoreUpdate]
+  ].map(([id, label, action]) => {
+    const button = actionButton(label, action);
+    button.id = id;
+    // actionButton enables a button again when its request ends. The page then decides.
+    button.afterAction = () => renderUpdates();
+    return button;
+  });
+  buttons[1].disabled = true;
+  buttons[2].disabled = true;
+  element('release-actions').append(...buttons);
   installUpdateCheckPreference();
   installOnlineControls();
+}
+function installReleaseControls() {
+  workflowCard('release-controls', 'Updates and recovery', 'updates', `
+    <p>Check for a new signed release and install it with one click. An update briefly interrupts the dashboard and the test network. The previous installation and settings are backed up first.</p>
+    <dl class="update-facts">
+      <div><dt>Installed</dt><dd id="update-installed">Unknown</dd></div>
+      <div><dt>Last checked</dt><dd id="update-last-checked">Not checked yet</dd></div>
+      <div><dt>Newest release</dt><dd id="update-available">No newer release found</dd></div>
+      <div><dt>Signed by</dt><dd id="update-signer">Not applicable</dd></div>
+    </dl>
+    <p id="release-status" role="status" aria-live="polite">Check for an approved release on this Pi.</p>
+    <p id="online-check-status" class="form-note" role="status" aria-live="polite">Loading the online check…</p>
+    <p id="github-access-hint" class="form-note" hidden></p>
+    <div id="release-actions"></div>
+    <p id="update-progress" class="update-progress" role="status" aria-live="polite" hidden></p>
+    <h3 class="online-heading">Settings</h3>
+    <label class="update-auto-check"><input id="online-daily-check" type="checkbox" disabled><span>Check automatically every day</span></label>
+    <label class="update-auto-check"><input id="online-install-automatically" type="checkbox" disabled><span>Install automatically</span></label>
+    <p class="form-note">Install automatically installs a new signed release without anyone pressing Install. It uses the same checks and the same recovery copy as a manual install. Both settings are off until you turn them on.</p>
+    <p id="online-setting-status" class="form-note" role="status" aria-live="polite"></p>
+    <details><summary>The GitHub token</summary><p>The repository is private, so the Pi needs a read-only token for this one repository. Create it on GitHub (Settings, Developer settings, Fine-grained tokens, only this repository, Contents read-only, with an expiry date). Then run <code>sudo jittersim update set-token</code> on the Pi, paste the token and press Ctrl-D. This page never asks for the token and never shows it.</p></details>
+    <label class="update-auto-check"><input id="check-staged-updates-on-open" type="checkbox" disabled><span>Look for a release staged on this Pi when the dashboard opens</span></label>
+    <p id="update-preference-status" class="form-note update-preference-status" role="status" aria-live="polite">Loading the saved preference…</p>
+    <details><summary>How releases reach this private Pi</summary><p>The owner builds and signs a release on the Mac and deploy-from-mac.sh stages it over SSH. The Pi can also fetch the newest signed release from GitHub itself. The Pi stages only a release signed by a key it trusts and newer than the one it runs. The admin token cannot stage a release: it can only install the one already staged. See Signed releases in the deployment guide.</p></details>`);
+  wireReleaseControls();
 }
 installReleaseControls();
 

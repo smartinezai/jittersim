@@ -366,7 +366,7 @@ EXPECTED_PAGE_HEADINGS = {
     ],
     "page-router": [
         "Wi-Fi name", "Upstream router connection", "Manual Pi access-point fallback",
-        "Router outage behavior",
+        "Router outage behavior", "Updates",
     ],
     "page-traffic": ["Live traffic", "Traffic discovery", "Random website choices"],
     "page-measurements": ["Measurements"],
@@ -3962,7 +3962,7 @@ class ControlServerTests(unittest.TestCase):
 
     PAGES = (
         "devices", "profiles", "schedules", "router", "traffic", "measurements", "activity",
-        "access", "diagnostics",
+        "access", "diagnostics", "updates",
     )
 
     def _panel(self, name: str) -> str:
