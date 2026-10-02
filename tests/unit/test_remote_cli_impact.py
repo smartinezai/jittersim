@@ -46,7 +46,7 @@ def test_impact_takes_two_samples_and_uses_the_dashboard_words(dashboard, capsys
     assert sleeps == [10]
     assert dashboard.paths() == [("GET", "/api/impact"), ("GET", "/api/impact")]
     lines = out.splitlines()
-    assert lines[0] == "Fixture phone · Upload · Affected in the last minute"
+    assert lines[0] == "Fixture phone · Upload · Affected in the last 10 seconds"
     assert lines[1] == "  Loss: set 10% · actual 10% (111 of 1111 packets dropped)"
     assert lines[2] == "  Delay: set 100 ms ± 20 · configured, not measured"
     assert "Protected (not affected): Alice laptop" in lines
@@ -71,15 +71,21 @@ def test_impact_json(dashboard, capsys):
     assert data["protected"] == []
 
 
-def test_the_longest_wait_stays_inside_the_dashboard_window(dashboard, capsys):
+def test_the_longest_wait_leaves_room_inside_the_dashboard_window(dashboard, capsys):
     dashboard.answer("GET", "/api/impact", impact_answer(0.0, 0, 0))
-    with patch("jittersim.remote_cli.time.sleep") as sleep:
-        run(dashboard, capsys, "impact", "--wait", "60")
-    sleep.assert_called_once_with(59)
+
+    def sleep(seconds):
+        dashboard.answer("GET", "/api/impact", impact_answer(50.0, 100, 10))
+
+    with patch("jittersim.remote_cli.time.sleep", side_effect=sleep) as slept:
+        code, out, _, _ = run(dashboard, capsys, "impact", "--wait", "50")
+    assert code == 0
+    slept.assert_called_once_with(50)
+    assert "Affected in the last 50 seconds" in out
 
 
-@pytest.mark.parametrize("wait", ["0", "61", "-1", "ten"])
-def test_impact_wait_outside_one_to_sixty_is_a_usage_error(capsys, wait):
+@pytest.mark.parametrize("wait", ["0", "51", "60", "-1", "ten"])
+def test_impact_wait_outside_one_to_fifty_is_a_usage_error(capsys, wait):
     with pytest.raises(SystemExit) as stop:
         main(["impact", "--wait", wait])
     assert stop.value.code == 2
@@ -100,7 +106,11 @@ def test_impact_with_nothing_slowed_down(dashboard, capsys):
     empty = {"available": True, "paused": False, "message": None, "sampled_at": 1.0,
              "queues": [], "protected": []}
     dashboard.answer("GET", "/api/impact", empty)
-    with patch("jittersim.remote_cli.time.sleep"):
+
+    def sleep(seconds):
+        dashboard.answer("GET", "/api/impact", {**empty, "sampled_at": 2.0})
+
+    with patch("jittersim.remote_cli.time.sleep", side_effect=sleep):
         code, out, _, _ = run(dashboard, capsys, "impact", "--wait", "1")
     assert code == 0
     assert out.startswith("Nothing is slowed down right now.")

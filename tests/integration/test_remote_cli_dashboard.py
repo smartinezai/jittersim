@@ -5,6 +5,7 @@ The dashboard, helper and fake kernel are the ones the browser journeys use
 """
 
 import queue
+import re
 import shutil
 import tempfile
 import threading
@@ -146,8 +147,10 @@ def test_every_remote_command_against_the_live_dashboard(dashboard, capsys):
 
     code, out, _ = run(capsys, "impact", "--wait", "1")
     assert code == 0, out
-    assert "Fixture phone · Upload · Affected in the last minute" in out
-    assert "Fixture phone · Download · Affected in the last minute" in out
+    # The verdict names the time the command measured, not the page's minute.
+    assert re.search(r"Fixture phone · Upload · Affected in the last \d+ seconds?\n", out)
+    assert re.search(r"Fixture phone · Download · Affected in the last \d+ seconds?\n", out)
+    assert "last minute" not in out
     assert "  Loss: set 10% · actual 9.9% (11 of 111 packets dropped)" in out
     assert "  Delay: set 100 ms ± 20 · configured, not measured" in out
 
@@ -172,6 +175,10 @@ def test_every_remote_command_against_the_live_dashboard(dashboard, capsys):
     assert "tags-eu.tiqcdn.com" in out and "Blocked" in out and "netflix" not in out
     code, out, _ = run(capsys, "traffic", "unblock", "tags-eu.tiqcdn.com")
     assert code == 0
+    assert out.startswith("Saved: removed tags-eu.tiqcdn.com")
+    code, out, _ = run(capsys, "traffic", "unblock", "tags-eu.tiqcdn.com")
+    assert code == 0
+    assert "was not on the global block list. Nothing changed." in out
     code, out, _ = run(capsys, "traffic", "--scan")
     assert code == 0
     assert "Traffic scan complete:" in out

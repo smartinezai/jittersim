@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.scripts]
-jittersim = "jittersim.cli:main"
+jittersim = "jittersim.command:main"
 jittersim-dashboard = "jittersim.api.server:main"
 jittersim-helper = "jittersim.networking.helper:main"
 jittersim-browser-proxy = "jittersim.networking.browser_proxy:main"

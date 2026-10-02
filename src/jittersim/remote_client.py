@@ -14,6 +14,8 @@ import os
 import socket
 import ssl
 import stat
+import time
+import unicodedata
 import warnings
 from dataclasses import dataclass
 from decimal import Decimal
@@ -38,12 +40,33 @@ MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_ERROR_BYTES = 64 * 1024
 MAX_MESSAGE_CHARS = 400
 DEFAULT_TIMEOUT_SECONDS = 20.0
+ERROR_READ_SECONDS = 5.0
 EXAMPLE_URL = "https://192.168.0.17:8080"
 
 CERTIFICATE_MESSAGE = (
     "Certificate check failed: make sure the SHA-256 fingerprint of the --ca-cert file "
     "matches the one the installer printed."
 )
+NAME_MISMATCH_MESSAGE = (
+    "The dashboard's certificate does not cover {host}. Use an address it covers such as the "
+    "Pi's name.local or the Ethernet address the Pi had when the installer ran. If the Pi has "
+    "a new address run the installer on the Pi again and copy the new certificate."
+)
+EXPIRED_MESSAGE = (
+    "The dashboard's certificate has expired. Run the installer on the Pi again to make a new "
+    "one and copy the new /etc/jittersim/dashboard.crt."
+)
+NOT_YET_VALID_MESSAGE = (
+    "The dashboard's certificate is not valid yet. Check the date and time on this computer "
+    "and on the Pi."
+)
+# OpenSSL and LibreSSL verify codes (X509_V_ERR_*) that need a different sentence.
+_CERT_NOT_YET_VALID = 9
+_CERT_HAS_EXPIRED = 10
+_HOSTNAME_MISMATCH = 62
+_IP_ADDRESS_MISMATCH = 64
+# Zero-width joiners keep emoji sequences together and are harmless on a terminal.
+_ALLOWED_FORMAT_CHARACTERS = frozenset("‌‍")
 TOKEN_REFUSED_MESSAGE = "The dashboard refused the admin token. Check it and try again."
 NOT_ALLOWED_MESSAGE = (
     "The dashboard does not allow this computer yet. On Pi Wi-Fi run "
@@ -102,7 +125,13 @@ def validate_url(raw: Any) -> str:
             f"Give the dashboard address as https://HOST:PORT, for example {EXAMPLE_URL}.",
             exit_code=2,
         )
-    parsed = urlsplit(raw)
+    try:
+        parsed = urlsplit(raw)
+    except ValueError as error:
+        raise RemoteError(
+            f"Give the dashboard address as https://HOST:PORT, for example {EXAMPLE_URL}.",
+            exit_code=2,
+        ) from error
     if parsed.scheme.lower() != "https":
         raise RemoteError(
             f"Plain HTTP is refused. Use the Pi's HTTPS address, for example {EXAMPLE_URL}.",
@@ -110,16 +139,21 @@ def validate_url(raw: Any) -> str:
         )
     try:
         hostname = parsed.hostname
-        parsed.port
+        port = parsed.port
     except ValueError as error:
         raise RemoteError("The dashboard address has an invalid port.", exit_code=2) from error
-    if (
+    unclear = (
         not hostname
         or "@" in parsed.netloc
         or parsed.path not in ("", "/")
         or "?" in raw
         or "#" in raw
-    ):
+    )
+    if not unclear:
+        # Nothing may hide next to the host and the port such as "[::1]x:80".
+        host = f"[{hostname}]" if ":" in hostname else hostname
+        unclear = parsed.netloc.lower() != (host + (f":{port}" if port is not None else ""))
+    if unclear:
         raise RemoteError(
             "Use only https://HOST:PORT for the dashboard address: no user name, password, "
             "path, query or fragment.",
@@ -208,10 +242,26 @@ def resolve_connection(
             f"{EXAMPLE_URL} --ca-cert PATH' once or pass --url and --ca-cert.",
             exit_code=2,
         )
-    certificate = Path(raw_cert).expanduser()
-    if not certificate.is_file():
+    return Connection(validate_url(raw_url), checked_certificate(Path(raw_cert)))
+
+
+def checked_certificate(path: Path) -> Path:
+    """The --ca-cert file decides who gets the token: nobody else may be able to change it."""
+
+    certificate = path.expanduser()
+    try:
+        info = certificate.stat()
+    except OSError:
+        info = None
+    if info is None or not stat.S_ISREG(info.st_mode):
         raise RemoteError(f"The certificate file {certificate} does not exist.", exit_code=2)
-    return Connection(validate_url(raw_url), certificate)
+    if info.st_uid not in (os.geteuid(), 0) or info.st_mode & 0o022:
+        raise RemoteError(
+            f"The certificate file {certificate} decides where the admin token goes so it must "
+            f"belong to you and must not be writable by others. Run: chmod 644 {certificate}",
+            exit_code=2,
+        )
+    return certificate
 
 
 def valid_token(token: str) -> bool:
@@ -285,9 +335,64 @@ def js_round(value: float) -> int:
     return floor + 1 if value - floor >= 0.5 else floor
 
 
+class _TooSlow(Exception):
+    """The answer kept trickling in after its deadline."""
+
+
+def _read_bounded(stream: Any, limit: int, deadline: float) -> bytes:
+    """Read at most `limit` bytes and stop at `deadline` even when bytes keep trickling in."""
+
+    read = getattr(stream, "read1", None) or stream.read
+    chunks = []
+    size = 0
+    while size < limit:
+        chunk = read(min(65536, limit - size))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+        if time.monotonic() > deadline:
+            raise _TooSlow()
+    return b"".join(chunks)
+
+
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
+
+
+def printable(text: Any, replacement: str = "?") -> str:
+    """Text that is safe to show on a terminal.
+
+    Control characters (C0, DEL and C1 such as ESC or U+009B), bidi overrides and other
+    invisible format characters become `replacement` so a name from the dashboard can never
+    move the cursor, clear the screen or reverse what follows. Other spaces become a space.
+    """
+
+    if not isinstance(text, str):
+        text = str(text)
+    shown = []
+    for character in text:
+        if character.isprintable() or character in _ALLOWED_FORMAT_CHARACTERS:
+            shown.append(character)
+        elif unicodedata.category(character) == "Zs":
+            shown.append(" ")
+        else:
+            shown.append(replacement)
+    return "".join(shown)
+
+
+def certificate_message(error: Any, host: str) -> str:
+    """Say what is wrong with the certificate: only an unknown one is about the fingerprint."""
+
+    code = getattr(error, "verify_code", None)
+    if code in (_HOSTNAME_MISMATCH, _IP_ADDRESS_MISMATCH):
+        return NAME_MISMATCH_MESSAGE.format(host=printable(host))
+    if code == _CERT_HAS_EXPIRED:
+        return EXPIRED_MESSAGE
+    if code == _CERT_NOT_YET_VALID:
+        return NOT_YET_VALID_MESSAGE
+    return CERTIFICATE_MESSAGE
 
 
 def _clean(text: Any, secrets: Iterable[str] = ()) -> str:
@@ -295,9 +400,7 @@ def _clean(text: Any, secrets: Iterable[str] = ()) -> str:
 
     if not isinstance(text, str):
         return ""
-    cleaned = "".join(
-        character if character.isprintable() else " " for character in text
-    ).strip()
+    cleaned = printable(text, " ").strip()
     for secret in secrets:
         if secret:
             cleaned = cleaned.replace(secret, "[hidden]")
@@ -323,12 +426,16 @@ class DashboardClient:
         self.max_bytes = max_bytes
         self._token = token
         self._secrets = [token or "", *secrets]
+        self.host = urlsplit(self.url).hostname or self.url
         try:
+            # Only this file is trusted: no system certificate authorities are loaded.
             context = ssl.create_default_context(cafile=str(connection.ca_cert))
         except (OSError, ssl.SSLError, ValueError) as error:
             raise RemoteError(
                 f"The certificate file {connection.ca_cert} could not be read as a certificate."
             ) from error
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        self.context = context
         # Environment proxies are ignored: the dashboard is on the local network.
         self._opener = build_opener(
             ProxyHandler({}), _NoRedirect(), HTTPSHandler(context=context)
@@ -361,24 +468,28 @@ class DashboardClient:
         request = Request(self.url + path, data=data, method=method, headers=headers)
         try:
             with self._opener.open(request, timeout=seconds) as response:
-                body = response.read(self.max_bytes + 1)
+                body = _read_bounded(response, self.max_bytes + 1, time.monotonic() + seconds)
         except HTTPError as error:
             raise self._refused(error) from None
         except URLError as error:
             raise self._unreachable(error.reason, seconds) from None
+        except _TooSlow:
+            raise RemoteError(
+                f"The dashboard did not finish its answer within {js_number(seconds)} seconds."
+            ) from None
         except (socket.timeout, TimeoutError):
             raise RemoteError(
                 f"The dashboard did not answer within {js_number(seconds)} seconds."
             ) from None
-        except ssl.SSLCertVerificationError:
-            raise RemoteError(CERTIFICATE_MESSAGE) from None
+        except ssl.SSLCertVerificationError as error:
+            raise RemoteError(certificate_message(error, self.host)) from None
         except (ssl.SSLError, http.client.HTTPException, OSError):
             raise RemoteError("The connection to the dashboard failed.") from None
         if len(body) > self.max_bytes:
             raise RemoteError("The dashboard answer was too large.")
         try:
             result = json.loads(body)
-        except ValueError:
+        except (ValueError, RecursionError):
             raise RemoteError("The dashboard answer was not valid JSON.") from None
         if not isinstance(result, dict):
             raise RemoteError(UNDERSTOOD_MESSAGE)
@@ -386,7 +497,7 @@ class DashboardClient:
 
     def _unreachable(self, reason: Any, seconds: float) -> RemoteError:
         if isinstance(reason, ssl.SSLCertVerificationError):
-            return RemoteError(CERTIFICATE_MESSAGE)
+            return RemoteError(certificate_message(reason, self.host))
         if isinstance(reason, ssl.SSLError):
             return RemoteError("The secure connection to the dashboard failed.")
         if isinstance(reason, (socket.timeout, TimeoutError)):
@@ -399,11 +510,14 @@ class DashboardClient:
         status = error.code
         data: Dict[str, Any] = {}
         try:
-            raw = error.read(MAX_ERROR_BYTES + 1) if error.fp is not None else b""
+            raw = (
+                _read_bounded(error.fp, MAX_ERROR_BYTES + 1, time.monotonic() + ERROR_READ_SECONDS)
+                if error.fp is not None else b""
+            )
             if len(raw) <= MAX_ERROR_BYTES:
                 parsed = json.loads(raw) if raw else {}
                 data = parsed if isinstance(parsed, dict) else {}
-        except (OSError, ValueError, http.client.HTTPException):
+        except (OSError, ValueError, RecursionError, http.client.HTTPException, _TooSlow):
             data = {}
         finally:
             error.close()

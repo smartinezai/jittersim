@@ -150,15 +150,19 @@ def test_traffic_unavailable_says_why(dashboard, capsys):
 )
 def test_block_and_unblock_say_the_change_is_saved_and_applies_on_its_own(
         dashboard, capsys, word, path, listed):
+    before = [] if word == "block" else ["tracker.example"]
+    dashboard.answer("GET", "/api/policies", {"websites": {"blocked_domains": before}})
     dashboard.answer("POST", path, {"policies": {"websites": {"blocked_domains": listed}}})
     code, out, _, _ = run(dashboard, capsys, "traffic", word, "Tracker.Example.")
     assert code == 0
-    assert dashboard.requests[0]["body"] == {"domain": "tracker.example"}
+    assert dashboard.paths() == [("GET", "/api/policies"), ("POST", path)]
+    assert dashboard.requests[1]["body"] == {"domain": "tracker.example"}
     assert out.startswith("Saved: ")
     assert "It applies on its own while JitterSim is running." in out
 
 
 def test_block_that_the_dashboard_did_not_confirm_fails(dashboard, capsys):
+    dashboard.answer("GET", "/api/policies", {"websites": {"blocked_domains": []}})
     dashboard.answer("POST", "/api/observations/add-global-block",
                      {"policies": {"websites": {"blocked_domains": []}}})
     code, _, err, _ = run(dashboard, capsys, "traffic", "block", "tracker.example")

@@ -28,8 +28,10 @@ from jittersim.remote_client import (
     DashboardClient,
     RemoteError,
     config_path,
+    checked_certificate,
     hidden_prompt,
     js_number,
+    printable,
     read_token,
     resolve_connection,
     validate_url,
@@ -64,7 +66,15 @@ GROUPS: Dict[str, Dict[str, Any]] = {}
 
 
 class _Parser(argparse.ArgumentParser):
-    """argparse without echoing what it did not understand: that could be a pasted secret."""
+    """argparse without echoing what it did not understand: that could be a pasted secret.
+
+    Abbreviations are off so `--pass=VALUE` is never read as `--password` with a value that
+    argparse would then repeat in its error.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("allow_abbrev", False)
+        super().__init__(*args, **kwargs)
 
     def error(self, message: str) -> None:
         if message.startswith("unrecognized arguments"):
@@ -72,7 +82,11 @@ class _Parser(argparse.ArgumentParser):
         message = re.sub(
             r"invalid choice: .*? \(choose from", "invalid choice (choose from", message
         )
-        super().error(message)
+        message = re.sub(
+            r"ignored explicit argument .*", "ignored explicit argument (not shown here)",
+            message, flags=re.S,
+        )
+        super().error(printable(message))
 
 
 def _epilog() -> str:
@@ -122,11 +136,33 @@ def _secret_argument(argv: Sequence[str]) -> bool:
 
 
 def _out(text: str = "") -> None:
-    print(text)
+    """Every line for the terminal passes here so dashboard names cannot carry escapes."""
+
+    print(printable(text))
+
+
+def _err(text: str) -> None:
+    print(printable(text), file=sys.stderr)
+
+
+def _json_character(character: str) -> str:
+    if character == "\n" or printable(character) == character:
+        return character
+    code = ord(character)
+    if code > 0xFFFF:
+        code -= 0x10000
+        return "\\u%04x\\u%04x" % (0xD800 + (code >> 10), 0xDC00 + (code & 0x3FF))
+    return "\\u%04x" % code
 
 
 def _print_json(value: Any) -> None:
-    print(json.dumps(value, indent=2, ensure_ascii=False))
+    """JSON with readable letters but every control, bidi or invisible character escaped."""
+
+    text = json.dumps(value, indent=2, ensure_ascii=False)
+    # Outside strings the JSON text has only spaces and new lines. Inside strings json.dumps
+    # already escaped the C0 controls so what is left (C1, bidi and format characters) is
+    # escaped here. The result is the same JSON value.
+    print("".join(_json_character(character) for character in text))
 
 
 def _client(arguments: argparse.Namespace) -> DashboardClient:
@@ -164,9 +200,7 @@ def _connect(arguments: argparse.Namespace) -> int:
             f"Give both --url (for example {EXAMPLE_URL}) and --ca-cert.", exit_code=2
         )
     url = validate_url(arguments.url)
-    certificate = arguments.ca_cert.expanduser()
-    if not certificate.is_file():
-        raise RemoteError(f"The certificate file {certificate} does not exist.", exit_code=2)
+    certificate = checked_certificate(arguments.ca_cert)
     connection = Connection(url, certificate.resolve())
     checked = False
     if not arguments.no_check:
@@ -274,11 +308,19 @@ def _status(arguments: argparse.Namespace) -> int:
     health = client.get("/api/health")
     state = _require(client.get("/api/state").get("state"), dict)
     general = client.get("/api/general-profile")
-    connected = client.get("/api/connected-devices")
+    try:
+        connected = client.get("/api/connected-devices")
+    except RemoteError as error:
+        if error.status in (401, 403):
+            raise
+        # Like the page: the device list is unavailable and the rest of the status still shows.
+        connected = {"available": False, "devices": []}
     profiles = _require(client.get("/api/profiles").get("profiles"), list)
     lists = _require(client.get("/api/service-lists").get("service_lists"), list)
     release = _release(client)
     clients = _require(connected.get("devices") or [], list)
+    clients_available = (connected.get("available") is not False
+                         and connected.get("association_status_available") is not False)
     observed = state.get("observed_state")
     running = state.get("running") is True
     view = rules.sidebar_status(
@@ -291,8 +333,7 @@ def _status(arguments: argparse.Namespace) -> int:
             "generalState": general,
             "profiles": profiles,
             "clients": clients,
-            "clientsAvailable": connected.get("available") is not False
-            and connected.get("association_status_available") is not False,
+            "clientsAvailable": clients_available,
             "serviceLists": lists,
         },
         limit=None,
@@ -320,6 +361,7 @@ def _status(arguments: argparse.Namespace) -> int:
             "last_result": state.get("last_result"),
             "general_profile": _general_status(view["general"]["text"], general),
             "devices_summary": view["devices"]["summary"],
+            "connected_devices_available": clients_available,
             "affected_devices": view["devices"]["items"],
             "service_lists": enabled_lists,
             "protected_connected_devices": protected,
@@ -449,7 +491,7 @@ def _general_profile_change(arguments: argparse.Namespace, *, stop: bool) -> int
         for line in lines:
             _out(line)
     if isinstance(warning, str) and warning:
-        print(warning, file=sys.stderr)
+        _err(warning)
     return 0
 
 
@@ -671,20 +713,38 @@ def _traffic_block(arguments: argparse.Namespace, *, block: bool) -> int:
     except ValueError as error:
         raise RemoteError("That is not a valid DNS name.", exit_code=2) from error
     client = _client(arguments)
-    path = "/api/observations/" + ("add-global-block" if block else "remove-global-block")
-    result = client.post(path, {"domain": domain})
-    listed = ((result.get("policies") or {}).get("websites") or {}).get("blocked_domains")
-    if not isinstance(listed, list) or (domain in listed) != block:
-        raise RemoteError("The dashboard did not confirm the change to the global block list.")
-    message = (
-        f"Saved: added {domain} to the global block list. " if block
-        else f"Saved: removed {domain} from the global block list. "
-    ) + ENFORCE_NOTE
+    before = _blocked_domains(client.get("/api/policies"))
+    if (domain in before) == block:
+        # Nothing to save: say so instead of claiming a change.
+        message = (
+            f"{domain} is already on the global block list. Nothing changed." if block
+            else f"{domain} was not on the global block list. Nothing changed."
+        )
+        saved = False
+    else:
+        path = "/api/observations/" + ("add-global-block" if block else "remove-global-block")
+        result = client.post(path, {"domain": domain})
+        listed = _blocked_domains(result.get("policies") or {})
+        if (domain in listed) != block:
+            raise RemoteError(
+                "The dashboard did not confirm the change to the global block list.")
+        message = (
+            f"Saved: added {domain} to the global block list. " if block
+            else f"Saved: removed {domain} from the global block list. "
+        ) + ENFORCE_NOTE
+        saved = True
     if arguments.json:
-        _print_json({"domain": domain, "blocked": block, "saved": True, "message": message})
+        _print_json({"domain": domain, "blocked": block, "saved": saved, "message": message})
     else:
         _out(message)
     return 0
+
+
+def _blocked_domains(policies: Dict[str, Any]) -> List[str]:
+    listed = (policies.get("websites") or {}).get("blocked_domains")
+    if not isinstance(listed, list):
+        raise RemoteError(UNDERSTOOD_MESSAGE)
+    return listed
 
 
 @register("traffic block", _block_parser("block", "Add one name to"))
@@ -758,7 +818,9 @@ def _wifi_show(arguments: argparse.Namespace) -> int:
 # --- section: impact ----------------------------------------------------------------------
 
 DEFAULT_IMPACT_WAIT = 10
-MAX_IMPACT_WAIT = 60
+# The rules compare samples at most a minute apart. Two slow answers must still fit.
+MAX_IMPACT_WAIT = 50
+PAGE_WINDOW_WORDS = "in the last minute"
 
 
 def _wait_seconds(value: str) -> int:
@@ -777,7 +839,8 @@ def _impact_parser() -> argparse.ArgumentParser:
         "Show the Impact check: for each affected device and direction the set and actual "
         "loss, the speed cap and rate, the queue wait and a verdict. The command takes two "
         "samples of the Pi's queue counters --wait seconds apart and judges them with the "
-        "dashboard's rules.",
+        "dashboard's rules. The verdicts name the time it measured such as 'in the last 10 "
+        "seconds' where the page says 'in the last minute'.",
     )
     parser.add_argument(
         "--wait", type=_wait_seconds, default=DEFAULT_IMPACT_WAIT, metavar="SECONDS",
@@ -799,33 +862,58 @@ def _impact_sample(client: DashboardClient) -> Dict[str, Any]:
     return data
 
 
+def _window_words(seconds: float) -> str:
+    whole = max(1, int(seconds + 0.5))
+    return "in the last " + ("1 second" if whole == 1 else f"{whole} seconds")
+
+
+def _for_window(text: str, seconds: float) -> str:
+    """The page judges the last minute. The command judges only the time it measured."""
+
+    return text.replace(PAGE_WINDOW_WORDS, _window_words(seconds))
+
+
 @register("impact", _impact_parser)
 def _impact(arguments: argparse.Namespace) -> int:
     client = _client(arguments)
     first = _impact_sample(client)
     if not arguments.json:
-        print(f"Measuring for {arguments.wait} seconds...", file=sys.stderr)
-    # The rules ignore samples more than a minute apart so the longest wait stays inside it.
-    time.sleep(min(arguments.wait, impact_rules.IMPACT_WINDOW_SECONDS - 1))
+        _err(f"Measuring for {arguments.wait} seconds...")
+    time.sleep(arguments.wait)
     second = _impact_sample(client)
+    # The measured time is what the Pi's own clock says passed between its two samples.
+    gap = second["sampled_at"] - first["sampled_at"]
+    if gap <= 0:
+        raise RemoteError(
+            "The Pi's clock did not move forward between the two samples. Run the command again."
+        )
+    if gap > impact_rules.IMPACT_WINDOW_SECONDS:
+        raise RemoteError(
+            f"The two samples were {js_number(round(gap, 1))} seconds apart: more than the "
+            "minute the counters can be compared over. Run the command again with a shorter "
+            "--wait."
+        )
     rows = impact_rules.two_sample_rows(first, second)
+    for row in rows:
+        row["verdict_text"] = _for_window(impact_rules.verdict_label(row["verdict"]), gap)
+        row["lines"] = [_for_window(line, gap) for line in row["lines"]]
     protected = [str(name) for name in second.get("protected") or []]
-    window = round(second["sampled_at"] - first["sampled_at"], 1)
+    window = round(gap, 1)
     if arguments.json:
         _print_json({
-            "window_seconds": window,
+            "window_seconds": float(window),
             "rows": [
                 {
                     "name": row["name"],
                     "direction": row["direction"],
                     "verdict": row["verdict"],
-                    "verdict_text": impact_rules.verdict_label(row["verdict"]),
+                    "verdict_text": row["verdict_text"],
                     "lines": row["lines"] if row["verdict"] != "collecting" else [],
                     "configured": row["configured"],
                     "offered": row["offered"],
                     "packets": row["packets"],
                     "drops": row["drops"],
-                    "loss_percent": row["lossPercent"],
+                    "loss_percent": float(row["lossPercent"]),
                     "rate_kbit": row["rateKbit"],
                     "peak_kbit": row["peakKbit"],
                     "cap_reached": row["capReached"],
@@ -840,12 +928,13 @@ def _impact(arguments: argparse.Namespace) -> int:
         _out(impact_rules.IMPACT_NOTHING_SLOWED)
     for row in rows:
         direction = "Upload" if row["direction"] == "upload" else "Download"
-        _out(f"{row['name']} · {direction} · {impact_rules.verdict_label(row['verdict'])}")
+        _out(f"{row['name']} · {direction} · {row['verdict_text']}")
         if row["verdict"] != "collecting":
             for line in row["lines"]:
                 _out(f"  {line}")
     if any(row["verdict"] == "collecting" for row in rows):
-        _out("A queue was replaced between the two samples. Run the command again.")
+        # The gap is inside the window so only new counters explain a missing comparison.
+        _out("A queue was replaced or changed between the two samples. Run the command again.")
     if protected:
         _out("Protected (not affected): " + ", ".join(protected))
     _out(f"Measured over {js_number(window)} seconds. " + impact_rules.IMPACT_NOTE)
@@ -894,14 +983,20 @@ def main(argv: Sequence[str]) -> int:
     try:
         return HANDLERS[words[0]](arguments)
     except RemoteError as error:
-        print(error.message, file=sys.stderr)
-        return error.exit_code
+        return _failed(arguments, error.message, error.exit_code)
     except KeyboardInterrupt:
-        print("Cancelled.", file=sys.stderr)
-        return 1
-    except (KeyError, TypeError, ValueError, AttributeError, IndexError):
-        print(UNDERSTOOD_MESSAGE, file=sys.stderr)
-        return 1
+        return _failed(arguments, "Cancelled.", 1)
+    except (KeyError, TypeError, ValueError, AttributeError, IndexError, RecursionError):
+        return _failed(arguments, UNDERSTOOD_MESSAGE, 1)
     except OSError as error:
-        print(f"The command failed: {error.strerror or 'system error'}.", file=sys.stderr)
-        return 1
+        return _failed(arguments, f"The command failed: {error.strerror or 'system error'}.", 1)
+
+
+def _failed(arguments: argparse.Namespace, message: str, code: int) -> int:
+    """With --json a failure is JSON on stdout too so scripts always read one shape."""
+
+    if getattr(arguments, "json", False):
+        _print_json({"error": message, "exit_code": code})
+    else:
+        _err(message)
+    return code

@@ -125,11 +125,18 @@ printed. Then save the address and the certificate path once:
 
 `connect` checks that the dashboard presents exactly that certificate and saves
 only the address and the certificate path in `~/.config/jittersim/cli.json`.
+The certificate file decides where the token goes, so it must belong to you and
+must not be writable by others. If the check fails the command says why: an
+unknown certificate (compare the fingerprint), an address the certificate does
+not cover (for example after the Pi got a new address: run the installer again
+and copy the new certificate) or an expired certificate.
+
 Every other command asks for the **admin token** with a hidden prompt each time.
 The token is never saved and never accepted as an argument. Scripts may set
 `JITTERSIM_ADMIN_TOKEN` instead: other programs that can read your environment
 can then read it too. Plain HTTP, redirects and addresses with a user name,
-path or query are refused.
+path or query are refused. Names from the dashboard are shown without terminal
+control characters.
 
 | Command (on the Mac) | What it does |
 | --- | --- |
@@ -138,11 +145,12 @@ path or query are refused.
 | `jittersim profiles apply-all PROFILE_ID` | Makes that profile the general profile for every connected device. Protected devices stay untouched. |
 | `jittersim profiles stop-all` | Stops the general profile. Saved device rules resume. |
 | `jittersim traffic` | The names each test device looked up, grouped by app or site like **Traffic discovery**. Add `--scan` to sample first, `--expand` for every name, `--blocked` for blocked names only or `--device NAME_OR_IP`. |
-| `jittersim traffic block DOMAIN` | Adds a name to the global block list. `traffic unblock DOMAIN` removes it. |
+| `jittersim traffic block DOMAIN` | Adds a name to the global block list. `traffic unblock DOMAIN` removes it. Both say so when nothing had to change. |
 | `jittersim wifi show` | The router's own Wi-Fi name, read live from the router. It also asks for the router admin password with a hidden prompt. Add `--password` to show the Wi-Fi password too. |
-| `jittersim impact` | The **Impact** check: two samples of the Pi's queues `--wait` seconds apart (10 by default) judged with the dashboard's rules. |
+| `jittersim impact` | The **Impact** check: two samples of the Pi's queues `--wait` seconds apart (10 by default, at most 50) judged with the dashboard's rules. The verdicts name the time it measured such as "in the last 10 seconds". |
 
-Add `--json` to any of them for machine-readable output or `--help` for details.
+Add `--json` to any of them for machine-readable output (a failure is then
+`{"error": ..., "exit_code": ...}` on standard output) or `--help` for details.
 On the Pi itself `sudo jittersim status` still shows the local helper status
 and `sudo jittersim wifi reset` still runs there.
 

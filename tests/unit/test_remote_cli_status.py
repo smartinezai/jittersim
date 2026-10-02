@@ -82,6 +82,7 @@ def test_status_json_shape(dashboard, capsys):
         "last_result": "success",
         "general_profile": {"id": "slow", "name": "Slow connection", "status": "active"},
         "devices_summary": "1 device affected",
+        "connected_devices_available": True,
         "affected_devices": [{"name": "Phone", "profile": "Slow connection"}],
         "service_lists": [],
         "protected_connected_devices": 0,
