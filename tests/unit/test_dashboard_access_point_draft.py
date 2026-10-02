@@ -73,11 +73,11 @@ def handler(source_start):
 
 def test_the_reset_and_the_save_clear_the_draft_after_setting_the_field():
     reset = handler('element("reset-wifi-name").addEventListener("click"')
-    assert reset.index("element(\"access-point-ssid\").value = response.result.ssid") < reset.index(
+    assert reset.index("element(\"access-point-ssid\").value = operation.ssid") < reset.index(
         'clearDraft("access-point-form")'
     )
     # The failure path keeps the typed name so nothing the person wrote is lost.
     assert reset.index('clearDraft("access-point-form")') < reset.index("} catch (error)")
     save = handler('element("access-point-form").addEventListener("submit"')
-    assert save.index('request("/api/access-point"') < save.index('clearDraft("access-point-form")')
+    assert save.index('runWifiChange("/api/access-point"') < save.index('clearDraft("access-point-form")')
     assert save.index('clearDraft("access-point-form")') < save.index("} catch (error)")

@@ -83,6 +83,11 @@ def check_router_copy(page):
     expect(page.locator("#router-action-message")).to_contain_text("Copied Browser home using WPA2")
     assert len(copies) == 1
     assert len(copies[0].post_data_json["expected_fingerprint"]) == 64
+    # The network to join stays on screen until it is dismissed. It sits above the controls.
+    banner = page.locator("#wifi-change-banner")
+    expect(banner).to_contain_text("Browser home")
+    banner.get_by_role("button", name="Dismiss").click()
+    expect(banner).to_be_hidden()
 
 
 def check_router_switch(page):

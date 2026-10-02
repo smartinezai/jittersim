@@ -5856,15 +5856,24 @@ class ControlServerTests(unittest.TestCase):
 
     def test_updates_the_local_test_access_point_without_returning_password(self) -> None:
         self.server.helper_client = FakeHelper()
+        self.server.wifi_operations.delay = 0
 
         status, _, body = self.server.write_response_for(
             "/api/access-point",
             {"ssid": "JitterSim-Test", "password": "test-password-123"},
         )
 
-        self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["result"]["action"], "configure-ap")
+        # The Wi-Fi restarts after this answer, so the answer only accepts the change.
+        self.assertEqual(status, 202)
         self.assertNotIn("test-password-123", body.decode("utf-8"))
+        deadline = time.monotonic() + 5
+        while self.server.wifi_operations.busy() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        _, _, stored = self.server.response_for(
+            "/api/wifi-operation", query="id=" + json.loads(body)["operation_id"])
+        operation = json.loads(stored)["operation"]
+        self.assertEqual((operation["state"], operation["ssid"]), ("succeeded", "JitterSim-Test"))
+        self.assertNotIn("test-password-123", stored.decode("utf-8"))
 
     def test_can_promote_an_observed_domain_to_a_profile_or_global_block(self) -> None:
         status, _, body = self.server.write_response_for(

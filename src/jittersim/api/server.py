@@ -114,7 +114,7 @@ from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.scenarios import active_scenario_runs
 from jittersim.engine.schedules import active_schedule
 from jittersim.engine.service import compile_stored_plan
-from jittersim.networking.applier import MAX_PROTECTED_MACS
+from jittersim.networking.applier import MAX_PROTECTED_MACS, _validate_access_point_settings
 from jittersim.networking.helper import (
     HELPER_OUT_OF_DATE_MESSAGE,
     WIFI_DETAILS_MISSING_MESSAGE,
@@ -129,6 +129,7 @@ from jittersim.networking.router import (
 )
 from jittersim.networking.wifi_security import SECURITY_MODES
 from jittersim.api.router_operations import RouterOperations
+from jittersim.api.wifi_operations import WifiOperations, WifiOutcome
 from jittersim.engine.timeline import overlapping_schedules
 
 LOGGER = logging.getLogger(__name__)
@@ -370,6 +371,23 @@ DASHBOARD_HTML = r"""<!doctype html>
       animation: toast-spin 0.8s linear infinite;
     }
     .toast button { margin: 0; padding: 0.25rem 0.45rem; }
+    .wifi-change-banner {
+      margin: 0 0 1rem; padding: 0.9rem 1.1rem;
+      border: 1px solid #46627f; border-left: 0.3rem solid #f5ca78; border-radius: 0.7rem;
+      background: #102238; color: #dcecff;
+    }
+    .wifi-change-banner[hidden] { display: none; }
+    .wifi-change-banner p { margin: 0.35rem 0 0; font-size: 0.9rem; }
+    .wifi-change-banner.success { border-color: #2c9d73; border-left-color: #70d7a9; background: #123b31; }
+    .wifi-change-banner.error { border-color: #a9565d; border-left-color: #ff8585; background: #45222c; }
+    .wifi-change-banner.warning { border-left-color: #f5ca78; }
+    .wifi-change-banner.working strong::after {
+      display: inline-block; width: 0.7rem; height: 0.7rem; margin-left: 0.6rem;
+      border: 2px solid #f5ca78; border-right-color: transparent; border-radius: 50%;
+      content: ""; animation: toast-spin 0.8s linear infinite;
+    }
+    .wifi-change-actions { margin-top: 0.7rem; }
+    .wifi-change-actions button { margin: 0; padding: 0.3rem 0.8rem; }
     button[aria-busy="true"] { position: relative; }
     button[aria-busy="true"]::after {
       display: inline-block;
@@ -2321,24 +2339,34 @@ DASHBOARD_HTML = r"""<!doctype html>
       const submittedDraft = submitForm && drafts ? drafts.get(submitForm.id) : null;
       pendingFormSubmitButton = null;
       try {
-        const response = await fetch(path, {
-          method: method,
-          headers: headers,
-          body: body === undefined ? undefined : JSON.stringify(body),
-          cache: "no-store"
-        });
-        const data = await response.json();
+        let response;
+        let data;
+        try {
+          response = await fetch(path, {
+            method: method,
+            headers: headers,
+            body: body === undefined ? undefined : JSON.stringify(body),
+            cache: "no-store"
+          });
+          data = await response.json();
+        } catch (networkError) {
+          // A dropped Wi-Fi shows up here. Say so plainly and keep the sign-in untouched.
+          throw typeof lostConnectionError === "function" ? lostConnectionError(networkError) : networkError;
+        }
         if (method === "GET" && tokenRevision !== adminTokenRevision) {
           throw new Error("Token changed. Choose Check token to load.");
         }
         if (!response.ok) {
-          if (data.registration_required) lockDashboardAccess(data.error);
+          // Just after a Wi-Fi restart the Pi may not have matched this Mac to its connection yet.
+          const waitingForRejoin = data.registration_required && typeof wifiReconnectActive === "function" && wifiReconnectActive();
+          if (data.registration_required && !waitingForRejoin) lockDashboardAccess(data.error);
           const applyHint = data.error === "network helper apply failed" &&
             typeof data.hint === "string"
             ? "Network helper apply failed. " + data.hint
             : data.error || response.statusText;
           const error = new Error(applyHint);
           error.status = response.status;
+          if (waitingForRejoin) error.transient = true;
           throw error;
         }
         if (submitForm && drafts && drafts.get(submitForm.id) === submittedDraft) {
@@ -3323,6 +3351,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }, true);
 
     let wifiResetPending = false;
+    let wifiChangePending = false;
 
     function renderMode(data) {
       helperConfigured = data.helper_configured;
@@ -6547,6 +6576,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           await startTrafficSampling();
           if (tokenRevision !== adminTokenRevision) return;
           if (typeof syncImpact === "function") syncImpact();
+          if (typeof resumeWifiChangeNotice === "function") resumeWifiChangeNotice();
         } else {
           adminTokenVerified = false;
           adminTokenRejected = true;
@@ -6564,14 +6594,19 @@ DASHBOARD_HTML = r"""<!doctype html>
       } catch (error) {
         if (tokenRevision !== adminTokenRevision) return;
         adminTokenVerified = false;
-        adminTokenRejected = true;
+        // A dropped connection says nothing about the token. It is kept and checked again
+        // as soon as the Pi answers, so a Wi-Fi restart never looks like a sign-out.
+        const connectionLost = typeof isConnectionLost === "function" && isConnectionLost(error);
+        adminTokenRejected = !connectionLost;
         adminTokenRefused = error.status === 401;
         setDashboardUnlocked(false);
         element("allow-dashboard-device").disabled = true;
-        setPrivateDataPanels("Token check failed: " + error.message);
-        status.textContent = "Token check failed: " + error.message;
+        setPrivateDataPanels(connectionLost ? error.message : "Token check failed: " + error.message);
+        status.textContent = connectionLost ? error.message + " Your token is kept and checked again when the Pi answers."
+          : "Token check failed: " + error.message;
         status.className = "token-check-status error";
         showMessage(status.textContent, "error");
+        if (connectionLost && typeof recheckTokenWhenPiAnswers === "function") recheckTokenWhenPiAnswers();
       } finally {
         button.disabled = false;
         button.removeAttribute("aria-busy");
@@ -7454,36 +7489,55 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     element("access-point-form").addEventListener("submit", async (event) => {
       event.preventDefault();
+      const cancelChange = (text) => {
+        if (pendingFormSubmitButton) setButtonBusy(pendingFormSubmitButton, false);
+        pendingFormSubmitButton = null;
+        showMessage(text);
+      };
+      if (wifiChangePending) return cancelChange("Another Pi Wi-Fi change is still running.");
+      if (!window.confirm(WIFI_RESTART_NOTICE)) return cancelChange("Pi Wi-Fi change cancelled.");
+      wifiChangePending = true;
+      const submittedSsid = element("access-point-ssid").value;
       try {
-        await request("/api/access-point", "POST", {
-          ssid: element("access-point-ssid").value,
+        // The Pi confirms first and restarts its Wi-Fi afterwards. The result is read once it is back.
+        const outcome = await runWifiChange("/api/access-point", {
+          ssid: submittedSsid,
           password: element("access-point-password").value
+        }, (operation) => {
+          if (!operation || operation.state !== "succeeded") return;
+          element("access-point-password").value = "";
+          // The saved name is what the field shows now so nothing is left to restore.
+          clearDraft("access-point-form");
+          showMessage(operation.message, "success");
         });
-        element("access-point-password").value = "";
-        // The saved name is what the field shows now so nothing is left to restore.
-        clearDraft("access-point-form");
-        showMessage("Pi access point updated. Reconnect the test device if its Wi-Fi name changed.", "success");
+        if (outcome && outcome.gaveUp) showMessage("The Pi has not answered yet. See the note on this page.", "error");
       } catch (error) {
         showMessage(error.message, "error");
+      } finally {
+        wifiChangePending = false;
       }
     });
 
     element("reset-wifi-name").addEventListener("click", async (event) => {
-      if (wifiResetPending || !helperConfigured) return;
-      if (!window.confirm("Restore the Wi-Fi name to JitterSim? The password and security type stay the same. Test clients will disconnect while Wi-Fi restarts.")) return;
+      if (wifiResetPending || wifiChangePending || !helperConfigured) return;
+      if (!window.confirm("Restore the Wi-Fi name to JitterSim? The password and security type stay the same. " + WIFI_RESTART_NOTICE)) return;
       const button = event.currentTarget;
       const status = element("wifi-reset-status");
       wifiResetPending = true;
       setButtonBusy(button, true);
       status.textContent = "Restoring the Pi Wi-Fi name...";
       try {
-        const response = await request("/api/access-point/reset-name", "POST", {});
-        element("access-point-ssid").value = response.result.ssid;
-        // The restored name replaces what was typed. Without this the next refresh
-        // puts the typed name back and a later save sends it to the access point.
-        clearDraft("access-point-form");
-        status.textContent = "JitterSim restored using " + response.result.security + ". Password unchanged.";
-        showMessage(status.textContent, "success");
+        const outcome = await runWifiChange("/api/access-point/reset-name", {}, (operation) => {
+          if (operation && operation.state === "succeeded") {
+            element("access-point-ssid").value = operation.ssid;
+            // The restored name replaces what was typed. Without this the next refresh
+            // puts the typed name back and a later save sends it to the access point.
+            clearDraft("access-point-form");
+          }
+          status.textContent = operation ? operation.message : "Check the Pi Wi-Fi settings.";
+          showMessage(status.textContent, operation && operation.state === "succeeded" ? "success" : "error");
+        });
+        if (outcome && outcome.gaveUp) status.textContent = "The Pi has not answered yet. See the note on this page.";
       } catch (error) {
         status.textContent = error.message;
         showMessage(error.message, "error");
@@ -7710,9 +7764,13 @@ DASHBOARD_HTML = r"""<!doctype html>
         if (passwordRevision !== routerPasswordRevision || tokenRevision !== adminTokenRevision) {
           throw new Error("Credentials changed. Check router state before another change.");
         }
-        response = await request("/api/router/operation", "POST", {
-          admin_password: body.admin_password, operation_id: response.operation_id
+        const pendingId = response.operation_id;
+        // A Wi-Fi copy restarts the Pi's Wi-Fi in the middle of this wait. Waiting for the Pi
+        // keeps the stored result reachable instead of failing on the dropped connection.
+        const poll = () => request("/api/router/operation", "POST", {
+          admin_password: body.admin_password, operation_id: pendingId
         });
+        response = await (typeof requestAcrossWifiRestart === "function" ? requestAcrossWifiRestart(poll) : poll());
       }
       if (passwordRevision !== routerPasswordRevision || tokenRevision !== adminTokenRevision) {
         throw new Error("Credentials changed. Check router state before another change.");
@@ -7749,7 +7807,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           if (passwordRevision !== routerPasswordRevision) throw new Error("Router password changed. Check Wi-Fi security again.");
           status.textContent = "Router Wi-Fi uses " + preview.security + " on " + preview.band + ".";
           const warning = preview.legacy ? " Older WPA is weak security. Copy it only for compatibility testing." : "";
-          if (!window.confirm("Copy " + preview.ssid + " using " + preview.security + " (" + preview.band + ")?" + warning + " The Pi will use the router's Wi-Fi password. Test clients disconnect while Wi-Fi restarts. Keep a separate management connection.")) {
+          if (!window.confirm("Copy " + preview.ssid + " using " + preview.security + " (" + preview.band + ")?" + warning + " The Pi will use the router's Wi-Fi password. " + (typeof WIFI_RESTART_NOTICE === "string" ? WIFI_RESTART_NOTICE : "") + " Keep a separate management connection.")) {
             status.textContent = "Wi-Fi security checked. Copy cancelled.";
             showMessage(status.textContent, "success");
             return;
@@ -7766,6 +7824,17 @@ DASHBOARD_HTML = r"""<!doctype html>
         status.textContent = result.ssid
           ? "Copied " + result.ssid + " using " + result.security + ". Join with the router's Wi-Fi password."
           : (result.enabled ? "Router Wi-Fi is on." : "Router Wi-Fi is off.");
+        if (typeof showWifiResult !== "function") {
+          // The reconnect script is not part of this page.
+        } else if (result.ssid) {
+          showWifiResult({state: "succeeded", kind: "router-copy",
+            message: "Copied " + result.ssid + " using " + result.security + ".", ssid: result.ssid});
+        } else if (reconnectHappened) {
+          showWifiBanner("success", "Router Wi-Fi change finished", [status.textContent].concat(
+            result.enabled ? [] : ["If this Mac was using the router's Wi-Fi, join the Pi's test Wi-Fi network."]),
+            [{label: "Dismiss", run: hideWifiBanner}]);
+        }
+        if (typeof clearReconnectFlag === "function") clearReconnectFlag();
         element("credential-router-status").textContent = status.textContent;
         showMessage(status.textContent, "success");
         if (passwordRevision === routerPasswordRevision) {
@@ -7782,6 +7851,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           routerPasswordRejected = true;
         }
       } finally {
+        if (typeof clearReconnectFlag === "function") clearReconnectFlag();
         routerActionPending = false;
         ["sync-router-ap", "router-wifi-toggle"].forEach((id) => { element(id).disabled = false; });
         setButtonBusy(button, false);
@@ -7861,7 +7931,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     element("router-wifi-toggle").addEventListener("click", (event) => {
       if (typeof routerWifiEnabled !== "boolean" || event.currentTarget.disabled) return;
       const enabled = !routerWifiEnabled;
-      if (!enabled && !window.confirm("Turn off router Wi-Fi, including guest Wi-Fi? Keep the Pi connected by Ethernet.")) return;
+      if (!enabled && !window.confirm("Turn off router Wi-Fi, including guest Wi-Fi? Keep the Pi connected by Ethernet. A Mac that is using the router's Wi-Fi loses its connection and needs to join the Pi's test Wi-Fi network.")) return;
       routerAction("/api/router/wifi", {enabled, confirm_disable: !enabled},
         enabled ? "Turning on router Wi-Fi..." : "Turning off router Wi-Fi...", event.currentTarget);
     });
@@ -9973,6 +10043,7 @@ DASHBOARD_HTML = DASHBOARD_HTML.replace("</style>", Path(__file__).with_name("wo
 DASHBOARD_HTML = DASHBOARD_HTML.replace("    startDashboard();", Path(__file__).with_name("workflows.js").read_text(encoding="utf-8") + "\n    startDashboard();")
 DASHBOARD_HTML = DASHBOARD_HTML.replace("</style>", Path(__file__).with_name("access.css").read_text(encoding="utf-8") + "</style>", 1)
 DASHBOARD_HTML = DASHBOARD_HTML.replace("    startDashboard();", Path(__file__).with_name("access.js").read_text(encoding="utf-8") + "\n    startDashboard();")
+DASHBOARD_HTML = DASHBOARD_HTML.replace("    startDashboard();", Path(__file__).with_name("reconnect.js").read_text(encoding="utf-8") + "\n    startDashboard();")
 
 
 def _inline_source_hashes(tag: str, page: str = DASHBOARD_HTML) -> str:
@@ -10576,8 +10647,10 @@ class ControlServer(HTTPServer):
         self.helper_client = helper_client
         self.scheduler = scheduler
         self.router_operations = RouterOperations(
-            self._router_response_for, str(admin_token) + "\0" + str(getattr(helper_client, "socket_path", "local")),
+            self._router_execute, str(admin_token) + "\0" + str(getattr(helper_client, "socket_path", "local")),
         )
+        # Wi-Fi restarts answer first and restart later. Their outcome waits to be read.
+        self.wifi_operations = WifiOperations()
         self.secure_transport = tls_context is not None
         self._tls_context = tls_context
         self._pending_connections: Dict[socket.socket, _PendingConnection] = {}
@@ -10778,6 +10851,11 @@ class ControlServer(HTTPServer):
         workflow = read_workflow(self, path)
         if workflow is not None:
             return workflow
+        if path == "/api/wifi-operation":
+            self._record_wifi_outcome()
+            identifier = parse_qs(query).get("id", [None])[0]
+            status, data = self.wifi_operations.last(identifier)
+            return status, "application/json", _json_bytes(data)
         if path == "/":
             return HTTPStatus.OK, "text/html; charset=utf-8", DASHBOARD_HTML.encode("utf-8")
         if path == "/api/health":
@@ -12160,23 +12238,7 @@ class ControlServer(HTTPServer):
                 return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
                     {"error": "network helper is not configured"}
                 )
-            try:
-                result = self.helper_client.reset_wifi_name()
-                if result.get("ssid") != "JitterSim" or result.get("security") not in SECURITY_MODES:
-                    raise HelperClientError("The helper did not confirm the expected Wi-Fi settings.")
-            except HelperClientError as error:
-                status = (HTTPStatus.CONFLICT if error.reason in ("wifi-busy", "helper-busy")
-                          else HTTPStatus.BAD_GATEWAY)
-                safe_errors = {
-                    "wifi-restored": "Wi-Fi name reset failed. The previous Wi-Fi settings were restored.",
-                    "wifi-restore-failed": "Wi-Fi name reset failed and recovery failed. Use management access to repair jittersim-ap.",
-                    "wifi-busy": "Another Pi Wi-Fi change is running. Try again later.",
-                    "helper-busy": "The networking helper is busy. Try again later.",
-                }
-                return status, "application/json", _json_bytes({
-                    "error": safe_errors.get(error.reason, "Wi-Fi name reset failed. Check the Pi helper and jittersim-ap connection through management access.")
-                })
-            return HTTPStatus.OK, "application/json", _json_bytes({"result": result})
+            return self._start_wifi_change("reset-name", self._reset_wifi_name)
 
         if path == "/api/access-point":
             if self.helper_client is None:
@@ -12184,18 +12246,13 @@ class ControlServer(HTTPServer):
                     {"error": "network helper is not configured"}
                 )
             try:
-                result = self.helper_client.configure_access_point(
-                    ssid=payload["ssid"],
-                    password=payload["password"],
-                )
+                ssid, password = payload["ssid"], payload["password"]
+                # A refusal can only reach the browser now, not after the Wi-Fi restarted.
+                _validate_access_point_settings(ssid=ssid, password=password)
             except (KeyError, TypeError, ValueError) as error:
                 return _bad_request("invalid access point settings", error)
-            except HelperClientError:
-                LOGGER.exception("access point configuration failed")
-                return HTTPStatus.BAD_GATEWAY, "application/json", _json_bytes(
-                    {"error": "access point configuration failed"}
-                )
-            return HTTPStatus.OK, "application/json", _json_bytes({"result": result})
+            return self._start_wifi_change(
+                "access-point", lambda: self._configure_access_point(ssid, password))
 
         if path.startswith("/api/router/"):
             return self._handle_router_request(path, payload)
@@ -12241,7 +12298,76 @@ class ControlServer(HTTPServer):
             self._close_pending(connection)
         self._request_inputs.clear()
         self.router_operations.close()
+        self.wifi_operations.close()
         super().server_close()
+
+    def _record_wifi_outcome(self) -> None:
+        outcome = self.wifi_operations.completed_action()
+        if outcome:
+            self.repository.record_action(action=outcome[0], status_code=outcome[1])
+
+    def _start_wifi_change(self, kind, work):
+        """Answer now. The Wi-Fi restarts after the answer has left."""
+        self._record_wifi_outcome()
+        started = self.wifi_operations.start(kind, work)
+        if started is None:
+            return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+                {"error": "Another Pi Wi-Fi change is running. Try again later."})
+        return HTTPStatus.ACCEPTED, "application/json", _json_bytes(
+            {"operation_id": started["id"], "pending": True, "kind": kind})
+
+    def _reset_wifi_name(self) -> WifiOutcome:
+        try:
+            result = self.helper_client.reset_wifi_name()
+            if result.get("ssid") != "JitterSim" or result.get("security") not in SECURITY_MODES:
+                raise HelperClientError("The helper did not confirm the expected Wi-Fi settings.")
+        except HelperClientError as error:
+            return _wifi_failure(error, "Wi-Fi name reset failed",
+                                 "Check the Pi helper and jittersim-ap connection through management access.")
+        return WifiOutcome(
+            200, "%s restored using %s. Password unchanged." % (result["ssid"], result["security"]),
+            ssid=result["ssid"], security=result["security"])
+
+    def _configure_access_point(self, ssid, password) -> WifiOutcome:
+        try:
+            self.helper_client.configure_access_point(ssid=ssid, password=password)
+        except (TypeError, ValueError, HelperClientError) as error:
+            LOGGER.warning("access point configuration failed")
+            if not isinstance(error, HelperClientError):
+                error = HelperClientError("access point configuration failed")
+            return _wifi_failure(error, "Pi Wi-Fi update failed",
+                                 "Check the Pi helper and jittersim-ap connection through management access.")
+        return WifiOutcome(
+            200, "Pi Wi-Fi updated. Join %s with the new password." % ssid,
+            ssid=ssid, security="WPA3", password_changed=True)
+
+    def _router_execute(self, path, payload):
+        """Run a router request on its worker. A Wi-Fi copy is also recorded as a Wi-Fi change."""
+        if path != "/api/router/sync-ap":
+            return self._router_response_for(path, payload)
+        identifier = self.wifi_operations.begin("router-copy")
+        # The router sign-in and the restart that follows start after the answer has left.
+        time.sleep(max(0.0, self.wifi_operations.delay))
+        outcome = WifiOutcome(502, "The Wi-Fi copy did not finish. Check the Pi Wi-Fi settings before trying again.")
+        try:
+            status, content_type, body = self._router_response_for(path, payload)
+            try:
+                data = json.loads(body)
+                if status == HTTPStatus.OK:
+                    result = data["result"]
+                    outcome = WifiOutcome(
+                        200, "Copied %s using %s. Join with the router's Wi-Fi password."
+                        % (result["ssid"], result["security"]),
+                        ssid=result["ssid"], security=result["security"], password_changed=True)
+                else:
+                    outcome = WifiOutcome(int(status), data["error"])
+            except (KeyError, TypeError, ValueError):
+                pass
+            return status, content_type, body
+        finally:
+            # A request that raised keeps the failure outcome and the exception goes on.
+            if identifier is not None:
+                self.wifi_operations.finish(identifier, outcome)
 
     def _record_router_outcome(self) -> None:
         outcome = self.router_operations.completed_action()
@@ -12277,6 +12403,9 @@ class ControlServer(HTTPServer):
             # carries the Wi-Fi password.
             return self._router_response_for(path, payload)
         if payload.get("background") is True:
+            if path == "/api/router/sync-ap" and self.wifi_operations.busy():
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+                    {"error": "Another Pi Wi-Fi change is running. Try again later."})
             fields = {key: payload[key] for key in (
                 "admin_password", "enabled", "confirm_disable", "expected_fingerprint", "confirm_legacy") if key in payload}
             status, data = self.router_operations.start(path, fields)
@@ -13802,6 +13931,20 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
 
 class RequestError(ValueError):
     """Raised when an HTTP request body cannot be safely decoded."""
+
+
+def _wifi_failure(error: HelperClientError, failed: str, fallback: str) -> WifiOutcome:
+    """Turn a helper failure into one of the safe texts. Nothing else is passed on."""
+
+    safe_errors = {
+        "wifi-restored": failed + ". The previous Wi-Fi settings were restored.",
+        "wifi-restore-failed": failed + " and recovery failed. Use management access to repair jittersim-ap.",
+        "wifi-busy": "Another Pi Wi-Fi change is running. Try again later.",
+        "helper-busy": "The networking helper is busy. Try again later.",
+    }
+    status = (HTTPStatus.CONFLICT if error.reason in ("wifi-busy", "helper-busy")
+              else HTTPStatus.BAD_GATEWAY)
+    return WifiOutcome(int(status), safe_errors.get(error.reason, failed + ". " + fallback))
 
 
 def _safe_wifi_copy_message(error: HelperClientError) -> str:

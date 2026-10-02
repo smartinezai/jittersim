@@ -63,6 +63,7 @@ class WifiRecoveryIntegrationTests(unittest.TestCase):
         self.api_thread.start()
         self.assertTrue(ready.wait(timeout=3))
         self.assertFalse(startup_errors, startup_errors)
+        self.api.wifi_operations.delay = 0
         self.addCleanup(self.stop_api)
 
     def stop_helper(self):
@@ -75,16 +76,34 @@ class WifiRecoveryIntegrationTests(unittest.TestCase):
         self.api.server_close()
         self.api_thread.join(timeout=3)
 
-    def request(self, headers=None):
+    def call(self, method, path, headers=None):
         connection = http.client.HTTPConnection(*self.api.server_address, timeout=3)
         try:
-            connection.request("POST", "/api/access-point/reset-name", body="{}",
+            connection.request(method, path, body="{}" if method == "POST" else None,
                                headers={"Content-Type": "application/json",
                                         "Accept": "application/json", **(headers or {})})
             response = connection.getresponse()
             return response.status, json.loads(response.read())
         finally:
             connection.close()
+
+    def request(self, headers=None):
+        """Ask for the reset and follow it to its stored outcome, as the page does."""
+        status, body = self.call("POST", "/api/access-point/reset-name", headers)
+        if status != 202:
+            return status, body
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            status, stored = self.call("GET", "/api/wifi-operation?id=" + body["operation_id"],
+                                       headers)
+            operation = stored["operation"]
+            if operation["state"] != "running":
+                break
+            time.sleep(0.02)
+        if operation["state"] == "succeeded":
+            return 200, {"result": {"ssid": operation["ssid"], "security": operation["security"]},
+                         "message": operation["message"]}
+        return operation["status"], {"error": operation["message"]}
 
     def console(self, *extra):
         output, errors = io.StringIO(), io.StringIO()
@@ -120,6 +139,8 @@ class WifiRecoveryIntegrationTests(unittest.TestCase):
 
     def test_api_requires_authentication_and_rejects_other_sites(self):
         self.assertEqual(self.request()[0], 401)
+        # The stored outcome names the network, so it needs the token as well.
+        self.assertEqual(self.call("GET", "/api/wifi-operation")[0], 401)
         self.assertFalse(self.executor.commands)
         headers = {"Authorization": "Bearer wifi-test"}
         self.assertEqual(self.request({**headers, "Sec-Fetch-Site": "cross-site"})[0], 403)
