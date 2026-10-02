@@ -4,6 +4,8 @@ This page lists what JitterSim does not do yet. It is a working list for the own
 
 Last updated: 2026-10-02. The list was checked against three reviews of the earlier work on that day.
 
+Known problems and fixes that are not features live in [planned-fixes.md](planned-fixes.md). Put a bug there and a new capability here.
+
 How to read an entry:
 
 - **Status** is one of: planned (nobody has started) or in progress (a branch exists) or needs a decision (the owner has to choose first) or taken (a separate session owns it so ask the owner before you start).
