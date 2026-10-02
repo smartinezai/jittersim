@@ -185,8 +185,7 @@ DASHBOARD_HTML = """<!doctype html>
     * { box-sizing: border-box; }
     [hidden] { display: none !important; }
     .dashboard-locked #router-credentials,
-    .dashboard-locked .sidebar-nav, .dashboard-locked .sidebar-footer,
-    .dashboard-locked .sidebar-secondary,
+    .dashboard-locked .sidebar-nav, .dashboard-locked .sidebar-operate,
     .dashboard-locked #open-router-credentials { display: none; }
     body { margin: 0; background: #0b1220; line-height: 1.5; }
     h1, h2, h3, p { margin-top: 0; }
@@ -722,16 +721,7 @@ DASHBOARD_HTML = """<!doctype html>
     .status-device-name { color: #e7eef8; }
     .status-device-profile, .status-more { color: var(--muted); font-size: 0.72rem; }
     .status-more { margin-top: 0.4rem; }
-    /* Only the navigation and what hangs on it scroll. The buttons that act on the network stay
-       pinned at the bottom so that Panic is in view whatever the height of the text is. */
-    .sidebar-scroll {
-      display: flex; flex-direction: column; gap: 1rem; flex: 1 1 0; min-height: 0;
-      overflow-y: auto; margin: -0.3rem; padding: 0.3rem;
-      scrollbar-width: thin; scrollbar-color: #2b435f transparent;
-    }
-    .sidebar-secondary { display: grid; gap: 0.5rem; margin-top: auto; }
-    .dashboard-locked .sidebar-credentials { margin-top: auto; }
-    .sidebar-footer { display: grid; gap: 0.6rem; flex: none; padding-top: 0.75rem; border-top: 1px solid var(--line); }
+    .sidebar-footer { display: grid; gap: 0.6rem; margin-top: auto; }
     .sidebar-operate, .sidebar-actions { display: grid; gap: 0.5rem; }
     .sidebar-credentials { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
     .dashboard-locked .sidebar-credentials { grid-template-columns: 1fr; }
@@ -740,11 +730,10 @@ DASHBOARD_HTML = """<!doctype html>
     .sidebar-actions button { text-align: center; }
     .sidebar-action-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 0.45rem; }
     .sidebar .sidebar-action-row .help-icon { display: inline-grid; flex: none; }
-    /* A long profile name or message scrolls in its own box so the pinned footer keeps a height. */
-    .sidebar .apply-summary { margin: -0.15rem 0 0; color: var(--muted); font-size: 0.76rem; line-height: 1.35; overflow-wrap: anywhere; max-height: 4.4rem; overflow-y: auto; }
+    .sidebar .apply-summary { margin: -0.15rem 0 0; color: var(--muted); font-size: 0.76rem; line-height: 1.35; overflow-wrap: anywhere; }
     .sidebar span { display: block; }
     .sidebar .runtime-summary { margin: 0; font-size: 0.78rem; }
-    .sidebar .action-message { min-height: 0; padding: 0.4rem 0.55rem; font-size: 0.78rem; max-height: 5.6rem; overflow-y: auto; }
+    .sidebar .action-message { min-height: 0; padding: 0.4rem 0.55rem; font-size: 0.78rem; }
     .sidebar .panic-button { min-height: 3rem; font-weight: 600; }
     .content { min-width: 0; max-width: 84rem; padding: 1.5rem 1.75rem 4rem; }
     .page > .card:first-child { margin-top: 0; }
@@ -768,12 +757,7 @@ DASHBOARD_HTML = """<!doctype html>
       .app { display: block; }
       .sidebar { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
       .sidebar-nav ul { display: flex; flex-wrap: wrap; gap: 0.35rem; }
-      /* The phone layout keeps its old order and spacing. The groups only matter on a desktop. */
-      .sidebar-scroll { display: contents; }
-      .sidebar-footer { order: 1; padding-top: 0; border-top: 0; }
-      .sidebar-secondary { order: 2; margin-top: -0.5rem; }
-      .sidebar-credentials { order: 3; margin-top: -0.4rem; }
-      .dashboard-locked .sidebar-credentials { margin-top: 0; }
+      .sidebar-footer { margin-top: 0; }
       .content { padding: 1rem 0.9rem 3rem; }
     }
     .token-check-status { min-height: 1.25rem; margin: 0.65rem 0 0; color: #91a8c1; }
@@ -795,6 +779,11 @@ DASHBOARD_HTML = """<!doctype html>
        sidebar the tip is fixed to the window and always has room. */
     @media (min-width: 701px) {
       .sidebar .sidebar-action-row .help-icon::after { position: fixed; top: auto; bottom: 1rem; left: 16rem; right: auto; width: min(22rem, calc(100vw - 17rem)); }
+    }
+    /* A short window needs the room for the footer so that Panic stays in view. */
+    @media (min-width: 48.01rem) and (max-height: 800px) {
+      .sidebar { gap: 0.6rem; }
+      .sidebar-nav a { padding-block: 0.25rem; }
     }
     /* The label wraps to two lines in the narrow sidebar. Both labels need the same room so the
        buttons below do not jump when it changes. */
@@ -894,29 +883,46 @@ DASHBOARD_HTML = """<!doctype html>
       <h1>JitterSim</h1>
       <span id="mode-badge" class="badge pending">Checking mode...</span>
     </div>
-    <div class="sidebar-scroll">
-      <nav class="sidebar-nav" aria-label="Sections">
-        <ul>
-          <li><a href="#devices" data-page-link="devices">Devices <span id="nav-devices-count" class="nav-chip" hidden></span></a></li>
-          <li><a href="#profiles" data-page-link="profiles">Profiles</a></li>
-          <li><a href="#schedules" data-page-link="schedules">Schedules and limits</a></li>
-          <li><a href="#router" data-page-link="router">Router and Wi-Fi</a></li>
-          <li><a href="#traffic" data-page-link="traffic">Traffic</a></li>
-          <li><a href="#access" data-page-link="access">Access and rules</a></li>
-          <li><a href="#diagnostics" data-page-link="diagnostics">Diagnostics</a></li>
-        </ul>
-      </nav>
-      <section id="sidebar-status" class="sidebar-status" aria-label="Current status" hidden>
-        <p id="status-general" class="status-line"></p>
-        <p id="status-devices-plain" class="status-line" hidden></p>
-        <details id="status-devices" class="status-devices" hidden>
-          <summary id="status-devices-summary"></summary>
-          <ul id="status-devices-list"></ul>
-          <p id="status-devices-more" class="status-more" hidden></p>
-        </details>
-        <p id="status-lists" class="status-line" hidden></p>
-      </section>
-      <div class="sidebar-secondary">
+    <nav class="sidebar-nav" aria-label="Sections">
+      <ul>
+        <li><a href="#devices" data-page-link="devices">Devices <span id="nav-devices-count" class="nav-chip" hidden></span></a></li>
+        <li><a href="#profiles" data-page-link="profiles">Profiles</a></li>
+        <li><a href="#schedules" data-page-link="schedules">Schedules and limits</a></li>
+        <li><a href="#router" data-page-link="router">Router and Wi-Fi</a></li>
+        <li><a href="#traffic" data-page-link="traffic">Traffic</a></li>
+        <li><a href="#access" data-page-link="access">Access and rules</a></li>
+        <li><a href="#diagnostics" data-page-link="diagnostics">Diagnostics</a></li>
+      </ul>
+    </nav>
+    <section id="sidebar-status" class="sidebar-status" aria-label="Current status" hidden>
+      <p id="status-general" class="status-line"></p>
+      <p id="status-devices-plain" class="status-line" hidden></p>
+      <details id="status-devices" class="status-devices" hidden>
+        <summary id="status-devices-summary"></summary>
+        <ul id="status-devices-list"></ul>
+        <p id="status-devices-more" class="status-more" hidden></p>
+      </details>
+      <p id="status-lists" class="status-line" hidden></p>
+    </section>
+    <div class="sidebar-footer">
+      <div class="sidebar-operate">
+        <div class="sidebar-actions">
+          <div class="sidebar-action-row">
+            <button id="apply-button" class="primary" type="button">Start with saved settings</button>
+            <span class="help-icon" tabindex="0" role="img" aria-label="Start or re-apply saved settings help" data-help="Starts JitterSim with everything you saved: device and group profiles and schedules and limits and service lists and access rules. While it runs saved changes apply on their own within a few seconds. Reset or Panic stops it. Protected devices stay untouched.">?</span>
+          </div>
+          <p id="apply-summary" class="apply-summary" aria-live="polite" hidden></p>
+          <div class="sidebar-action-row">
+            <button id="reset-button" class="danger" type="button">Reset network</button>
+            <span class="help-icon" tabindex="0" role="img" aria-label="Reset network help" data-help="Stops JitterSim and removes every rule from the Pi so all devices run normally. Your saved settings are kept. Choose Start with saved settings to run them again.">?</span>
+          </div>
+        </div>
+        <p id="runtime-summary" class="runtime-summary unknown">Check the admin token to view the network state.</p>
+        <p id="message" class="action-message" role="status" aria-live="polite">Ready.</p>
+        <button id="panic-button" class="danger panic-button" type="button"
+          title="Remove all traffic shaping now. Choose Start with saved settings to run again.">
+          <span>Panic</span><span id="panic-state" class="credential-state">Turn all profiles off</span>
+        </button>
         <div class="router-wifi-control">
           <div><span id="router-wifi-label" class="router-wifi-label">Router Wi-Fi</span>
             <p id="router-wifi-status" class="router-wifi-status" role="status" aria-live="polite">Enter router password</p>
@@ -937,27 +943,6 @@ DASHBOARD_HTML = """<!doctype html>
         </button>
         <button id="open-router-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
           <span>Router password</span><span id="router-credential-state" class="credential-state">Not entered</span>
-        </button>
-      </div>
-    </div>
-    <div class="sidebar-footer">
-      <div class="sidebar-operate">
-        <div class="sidebar-actions">
-          <div class="sidebar-action-row">
-            <button id="apply-button" class="primary" type="button">Start with saved settings</button>
-            <span class="help-icon" tabindex="0" role="img" aria-label="Start or re-apply saved settings help" data-help="Starts JitterSim with everything you saved: device and group profiles and schedules and limits and service lists and access rules. While it runs saved changes apply on their own within a few seconds. Reset or Panic stops it. Protected devices stay untouched.">?</span>
-          </div>
-          <p id="apply-summary" class="apply-summary" aria-live="polite" hidden></p>
-          <div class="sidebar-action-row">
-            <button id="reset-button" class="danger" type="button">Reset network</button>
-            <span class="help-icon" tabindex="0" role="img" aria-label="Reset network help" data-help="Stops JitterSim and removes every rule from the Pi so all devices run normally. Your saved settings are kept. Choose Start with saved settings to run them again.">?</span>
-          </div>
-        </div>
-        <p id="runtime-summary" class="runtime-summary unknown">Check the admin token to view the network state.</p>
-        <p id="message" class="action-message" role="status" aria-live="polite">Ready.</p>
-        <button id="panic-button" class="danger panic-button" type="button"
-          title="Remove all traffic shaping now. Choose Start with saved settings to run again.">
-          <span>Panic</span><span id="panic-state" class="credential-state">Turn all profiles off</span>
         </button>
       </div>
     </div>
