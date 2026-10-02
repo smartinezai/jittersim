@@ -78,6 +78,21 @@ Please check `git branch -r` and the open pull requests before starting an item.
   - Mutation tests for the order of the steps and the rollback.
 - **Notes:** it touches the router switching code (`networking/router.py` and `api/router_operations.py`). Coordinate with whoever works there.
 
+### 9. Semantic version numbers for releases
+
+- **Status:** planned. The owner chose semantic versions.
+- **Why:** a release is named after a commit today (for example `a0dc551`). That says nothing about order or size of change. The package version is `0.1.0` in `pyproject.toml` and in `src/jittersim/__init__.py` and never changes.
+- **How it would work:**
+  - Releases are numbered `MAJOR.MINOR.PATCH`. A new feature raises MINOR. A fix raises PATCH. A change that needs a reinstall with the installer or breaks saved settings raises MAJOR.
+  - Versions before `1.0.0` may change more freely. The first number to ship from the Pi line is `0.2.0`.
+  - A tag `vX.Y.Z` marks each release. The build script takes the tag and names the bundle `jittersim-X.Y.Z.tar.gz`.
+  - A single source for the number: `pyproject.toml`. The package reads it and the dashboard and the command line show it. A test fails when the tag and the file disagree.
+  - The Diagnostics card shows `0.2.0 (a0dc551)`. The commit stays for tracing but the number is the name.
+  - A build from a branch that is not tagged is `X.Y.Z.dev+<commit>` so it never looks like a release.
+  - `jittersim.updates stage --version` accepts only these forms and refuses to install an older number over a newer one unless the owner restores on purpose.
+- **Open questions:** whether the stack builds the owner installs for testing count as releases or as `.dev` builds. Whether the installer should print the number it installs.
+- **Tests:** the version regex accepts `0.2.0` and `1.0.0` and `0.2.0.dev+a0dc551` and rejects `v0.2` and `a0dc551`. The build script names the file after the tag. The tag and `pyproject.toml` must match. A downgrade is refused without the restore flag. The dashboard shows the number.
+
 ## In progress
 
 ### 5. Remote command line and one-command deploy from the Mac
