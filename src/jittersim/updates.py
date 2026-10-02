@@ -13,8 +13,10 @@ import gzip
 import hashlib
 import http.client
 import json
+import logging
 import os
 import re
+import secrets
 import shutil
 import socket
 import ssl
@@ -27,6 +29,7 @@ import time
 from collections import namedtuple
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
+from urllib.parse import urljoin, urlsplit
 
 UPDATE_ROOT = Path("/var/lib/jittersim-updates")
 CODE_ROOT = Path("/opt/jittersim")
@@ -108,11 +111,13 @@ SERVICES = (
     "jittersim-browser-proxy.service",
 )
 WATCHER = "jittersim-service-watch.service"
+# The one-shot root unit that runs one online release check for the dashboard.
+FETCH_UNIT = "jittersim-update-fetch.service"
 WIFI_UNIT = "jittersim-ap.service"
 NAME_UNIT = "jittersim-mdns.service"
 # Every unit file install.sh copies into /etc/systemd/system.
 UNITS = SERVICES + (
-    "jittersim-control-firewall.service", "jittersim-update.service",
+    "jittersim-control-firewall.service", "jittersim-update.service", FETCH_UNIT,
     "jittersim-dns.service", "jittersim-access-boot.service", WIFI_UNIT,
     WATCHER, NAME_UNIT,
 )
@@ -173,6 +178,10 @@ class UpdateError(RuntimeError):
     """The release cannot be installed or recovered safely."""
 
 
+class NotNewerError(UpdateError):
+    """The signed release is not newer than the installed one."""
+
+
 def atomic_json(path, value):
     temporary = path.with_suffix(".tmp")
     with temporary.open("w") as handle:
@@ -211,11 +220,15 @@ def install_manager(source, destination):
         os.close(descriptor)
 
 
-@contextmanager
-def update_lock(root=UPDATE_ROOT):
+def _private_folder(root):
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     if root.is_symlink() or root.stat().st_uid != os.geteuid() or root.stat().st_mode & 0o022:
         raise UpdateError("update directory must be owned by the administrator")
+
+
+@contextmanager
+def update_lock(root=UPDATE_ROOT):
+    _private_folder(root)
     with (root / "lock").open("a") as handle:
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -672,13 +685,15 @@ def staged_problem(record, signers, *, root=UPDATE_ROOT, code=CODE_ROOT):
 
 
 def stage_release(path, *, signature=None, root=UPDATE_ROOT, code=CODE_ROOT,
-                  config=CONFIG_ROOT, sha256=None, version=None):
+                  config=CONFIG_ROOT, sha256=None, version=None, origin=None, tag=None):
     """Stage a release that a trusted key signed. Nothing reads the archive's contents
     before its signature matched."""
     if sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}", sha256):
         raise UpdateError("SHA-256 is invalid")
     if version is not None and not VERSION.fullmatch(version):
         raise UpdateError("version is invalid")
+    if origin not in (None, "github") or (tag is not None and not LABEL.fullmatch(tag)):
+        raise UpdateError("release source is invalid")
     path = Path(path)
     signature = Path(signature) if signature is not None else path.with_name(path.name + ".sig")
     with update_lock(root):
@@ -742,7 +757,7 @@ def stage_release(path, *, signature=None, root=UPDATE_ROOT, code=CODE_ROOT,
             sequence = release["sequence"]
             floor = release_floor(root=root, code=code)
             if sequence <= floor:
-                raise UpdateError(
+                raise NotNewerError(
                     f"release {release['version']} (sequence {sequence}) is not newer than "
                     f"the installed release (sequence {floor}). An older release comes back "
                     "only with 'sudo jittersim update rollback'"
@@ -755,6 +770,10 @@ def stage_release(path, *, signature=None, root=UPDATE_ROOT, code=CODE_ROOT,
                 "signer": signer.fingerprint,
                 "signer_label": signer.label,
             }
+            if origin is not None:
+                record["source"] = origin
+            if tag is not None:
+                record["tag"] = tag
             atomic_json(extracted / ".jittersim-release.json", record)
             staged = root / "staged"
             if staged.exists():
@@ -797,6 +816,10 @@ def update_status(*, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT):
         "signed_by": staged.get("signer_label") if staged.get("signer") else None,
         "reason": reason,
         "trusted_keys": len(signers),
+        # Whether a token is saved. Its value never leaves root.
+        "token_set": token_is_set(config),
+        "source": staged.get("source"),
+        "tag": staged.get("tag"),
     }
 
 
@@ -901,6 +924,571 @@ def request_update(
                 {"phase": "failed", "message": "The update service could not start."},
             )
             raise
+
+
+# The online release source. Only root runs it (see docs/implementation-plan-online-release-
+# source-2026-10-03.md). The dashboard never sees the token or a download.
+
+GITHUB_REPO = "smartinezai/jittersim"
+GITHUB_API_HOST = "api.github.com"
+GITHUB_ASSET_HOSTS = ("objects.githubusercontent.com", "release-assets.githubusercontent.com")
+RELEASE_ASSETS = ("jittersim-release.tar.gz", "jittersim-release.tar.gz.sig")
+MAX_API_ANSWER = 64 * 1024
+MAX_REDIRECTS = 2
+HTTP_TIMEOUT = 30
+TOTAL_TIMEOUT = 5 * 60
+MAX_TOKEN_INPUT = 1024
+# A fine-grained token (github_pat_) or a classic one (ghp_).
+TOKEN_SHAPE = re.compile(r"(?:github_pat_[A-Za-z0-9_]{22,255}|ghp_[A-Za-z0-9]{30,255})\Z")
+ONLINE_FILE = "online.json"
+ONLINE_REQUEST = "online-request.json"
+ONLINE_SETTINGS = "online-settings.json"
+ONLINE_SEEN = "online-seen.json"
+ONLINE_LOCK = "online.lock"
+# The dashboard asks GitHub at most this often unless the owner presses Check now.
+CACHE_SECONDS = 10 * 60
+# A check that has run this long without an answer is treated as failed.
+STALE_SECONDS = TOTAL_TIMEOUT + 2 * 60
+DAILY_SECONDS = 24 * 60 * 60
+JOB = re.compile(r"[0-9a-f]{16}\Z")
+SETTING_NAMES = ("daily_check", "install_automatically")
+REDIRECTS = (301, 302, 303, 307, 308)
+
+
+class OnlineError(UpdateError):
+    """An online check stopped. The message is one plain line and never holds the token."""
+
+
+class TokenError(OnlineError):
+    """The token is missing or its file is not safe to use."""
+
+
+class OnlineBusy(OnlineError):
+    """Another online check is running."""
+
+
+class GitHubSource:
+    """Where releases come from. The defaults are the real GitHub. Tests give a fake one."""
+
+    def __init__(self, api_host=GITHUB_API_HOST, port=443, repo=GITHUB_REPO,
+                 asset_hosts=GITHUB_ASSET_HOSTS, context=None, timeout=HTTP_TIMEOUT,
+                 total=TOTAL_TIMEOUT):
+        self.api_host = api_host
+        self.port = port
+        self.repo = repo
+        self.asset_hosts = tuple(asset_hosts)
+        # The system CA store and the host name check.
+        self.context = context if context is not None else ssl.create_default_context()
+        self.timeout = timeout
+        self.total = total
+
+    def url(self, path):
+        authority = self.api_host if self.port == 443 else f"{self.api_host}:{self.port}"
+        return f"https://{authority}/repos/{self.repo}/{path}"
+
+
+def default_source():
+    return GitHubSource()
+
+
+# The token
+
+
+def token_is_set(config=CONFIG_ROOT):
+    try:
+        return stat.S_ISREG(os.lstat(config / TOKEN_NAME).st_mode)
+    except OSError:
+        return False
+
+
+def set_token(text, *, config=CONFIG_ROOT):
+    """Save a GitHub token for the online check: root only, replaced in one step."""
+    token = text.strip() if len(text) <= MAX_TOKEN_INPUT else ""
+    if not TOKEN_SHAPE.fullmatch(token):
+        raise UpdateError(
+            "that is not a GitHub token. A fine-grained token starts with github_pat_ and a "
+            "classic one with ghp_. Paste only the token"
+        )
+    if not config.is_dir():
+        raise UpdateError(f"{config} does not exist. Install JitterSim first")
+    _replace_file(config, ".update-token.", config / TOKEN_NAME, token + "\n", 0o600)
+
+
+def clear_token(*, config=CONFIG_ROOT):
+    try:
+        (config / TOKEN_NAME).unlink()
+    except FileNotFoundError:
+        raise UpdateError("no token is set") from None
+
+
+def read_token(config=CONFIG_ROOT):
+    """The saved token. Its file must be root's own, not a link and closed to others."""
+    path = config / TOKEN_NAME
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        raise TokenError(
+            "no GitHub token is set. Create a read-only token for the repository and save it "
+            "with 'sudo jittersim update set-token'"
+        ) from None
+    except OSError:
+        raise TokenError("the GitHub token file cannot be read") from None
+    if not stat.S_ISREG(info.st_mode):
+        raise TokenError(f"{path} must be a regular file, not a link")
+    if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        raise TokenError(f"{path} must belong to root and be readable by root only (mode 0600)")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "rb") as handle:
+            raw = handle.read(MAX_TOKEN_INPUT + 1)
+        token = raw.decode("ascii").strip()
+    except (OSError, UnicodeDecodeError):
+        raise TokenError("the GitHub token file cannot be read") from None
+    if len(raw) > MAX_TOKEN_INPUT or not TOKEN_SHAPE.fullmatch(token):
+        raise TokenError("the saved GitHub token is damaged. Save it again with set-token")
+    return token
+
+
+# Talking to GitHub
+
+
+def _left(deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise OnlineError("the check took too long and was stopped")
+    return remaining
+
+
+def _web_failure(error, deadline):
+    """A plain message for a failed connection. It never repeats what the error holds."""
+    if isinstance(error, OnlineError):
+        return error
+    if isinstance(error, ssl.SSLCertVerificationError):
+        return OnlineError(
+            "the certificate of GitHub could not be verified. Check the Pi's date and time"
+        )
+    if isinstance(error, ssl.SSLError):
+        return OnlineError("the secure connection to GitHub failed")
+    if isinstance(error, (socket.timeout, TimeoutError)):
+        if time.monotonic() >= deadline:
+            return OnlineError("the check took too long and was stopped")
+        return OnlineError("GitHub did not answer in time")
+    if isinstance(error, http.client.HTTPException):
+        return OnlineError("GitHub sent an answer that was not valid")
+    return OnlineError("Could not reach GitHub. Check the Pi's Ethernet connection")
+
+
+def _request(source, url, headers, limit, deadline, destination=None):
+    """One GET without following redirects. Returns (status, headers, body). With a
+    destination the body goes into that new private file and body is None."""
+    parts = urlsplit(url)
+    path = parts.path + ("?" + parts.query if parts.query else "")
+    connection = http.client.HTTPSConnection(
+        parts.hostname, parts.port or 443, timeout=min(source.timeout, _left(deadline)),
+        context=source.context,
+    )
+    try:
+        connection.request("GET", path, headers=headers)
+        response = connection.getresponse()
+        answer = {key.lower(): value for key, value in response.getheaders()}
+        if response.status in REDIRECTS or response.status >= 400:
+            return response.status, answer, b""
+        length = answer.get("content-length", "")
+        if length.isdigit() and int(length) > limit:
+            raise OnlineError("the file is too large")
+        total = 0
+        chunks = []
+        output = None
+        if destination is not None:
+            output = os.fdopen(os.open(
+                destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600), "wb")
+        try:
+            while True:
+                if connection.sock is not None:
+                    connection.sock.settimeout(min(source.timeout, _left(deadline)))
+                block = response.read(65536)
+                if not block:
+                    break
+                total += len(block)
+                if total > limit:
+                    raise OnlineError("the file is too large")
+                if output is not None:
+                    output.write(block)
+                else:
+                    chunks.append(block)
+            if output is not None:
+                output.flush()
+                os.fsync(output.fileno())
+        finally:
+            if output is not None:
+                output.close()
+        _left(deadline)
+        return response.status, answer, None if destination is not None else b"".join(chunks)
+    except (OSError, http.client.HTTPException) as error:
+        raise _web_failure(error, deadline) from None
+    finally:
+        connection.close()
+
+
+def _http_message(status, answer, what):
+    if status == 429 or (status == 403 and answer.get("x-ratelimit-remaining") == "0"):
+        return "GitHub is limiting requests right now. Try again later"
+    if what == "file":
+        return f"the release file could not be downloaded (HTTP {status})"
+    if status in (401, 403):
+        return (
+            "GitHub refused the token. It may have expired or be wrong. Create a new one and "
+            "save it with 'sudo jittersim update set-token'"
+        )
+    if status == 404:
+        return (
+            "GitHub has no release here or this token cannot see the repository. Check that "
+            f"the token is for {GITHUB_REPO} with Contents read access"
+        )
+    return f"GitHub answered with an error (HTTP {status})"
+
+
+def _redirect_target(source, current, location):
+    """The URL a redirect may go to or an error. Only https, no login part, no other port and
+    only a host on the allow list."""
+    refusal = OnlineError(
+        "GitHub redirected the download to a place JitterSim does not trust, so it was stopped"
+    )
+    if not location:
+        raise refusal
+    try:
+        target = urlsplit(urljoin(current, location))
+        port = target.port
+        host = target.hostname
+    except ValueError:
+        raise refusal from None
+    if (
+        target.scheme != "https"
+        or target.username is not None
+        or target.password is not None
+        or host not in source.asset_hosts
+        or port not in (None, source.port)
+        or (port is None and source.port != 443)
+    ):
+        raise refusal
+    return target.geturl()
+
+
+def _download(source, url, token, accept, limit, deadline, destination=None, what="file"):
+    """GET a URL with the token and follow at most two redirects. The token goes only to the
+    first URL (the API) and is dropped on every redirect."""
+    headers = {
+        "Authorization": "Bearer " + token,
+        "Accept": accept,
+        "User-Agent": "jittersim-update",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Connection": "close",
+    }
+    redirects = 0
+    while True:
+        status, answer, body = _request(source, url, headers, limit, deadline, destination)
+        if status in REDIRECTS:
+            if redirects >= MAX_REDIRECTS:
+                raise OnlineError("GitHub sent too many redirects")
+            url = _redirect_target(source, url, answer.get("location", ""))
+            headers.pop("Authorization", None)
+            redirects += 1
+            continue
+        if status != 200:
+            raise OnlineError(_http_message(status, answer, what))
+        return body
+
+
+def _is_id(value):
+    return type(value) is int and 0 < value < MAX_SEQUENCE
+
+
+def _parse_release(body):
+    """The tag, the ids and the sizes of the two assets of GitHub's latest release."""
+    broken = OnlineError("GitHub's answer is not a release JitterSim understands")
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise broken from None
+    if (
+        not isinstance(data, dict)
+        or not isinstance(data.get("tag_name"), str)
+        or not LABEL.fullmatch(data["tag_name"])
+        or not _is_id(data.get("id"))
+        or not isinstance(data.get("assets"), list)
+        or not all(isinstance(asset, dict) for asset in data["assets"])
+    ):
+        raise broken
+    if data.get("draft") is not False or data.get("prerelease") is not False:
+        raise OnlineError("the newest GitHub release is not a final release")
+    assets = data["assets"]
+    names = sorted(str(asset.get("name")) for asset in assets)
+    if names != sorted(RELEASE_ASSETS):
+        raise OnlineError(
+            "the newest GitHub release must hold exactly two files named "
+            + " and ".join(RELEASE_ASSETS)
+        )
+    found = {}
+    for asset in assets:
+        size = asset.get("size")
+        if not _is_id(asset.get("id")) or type(size) is not int or size < 0:
+            raise broken
+        found[asset["name"]] = (asset["id"], size)
+    for name, limit, label in ((RELEASE_ASSETS[0], MAX_ARCHIVE, "archive"),
+                               (RELEASE_ASSETS[1], MAX_SIGNATURE, "signature")):
+        if found[name][1] > limit:
+            raise OnlineError(f"the release {label} is too large")
+    return {
+        "tag": data["tag_name"], "id": data["id"],
+        "archive": found[RELEASE_ASSETS[0]][0], "signature": found[RELEASE_ASSETS[1]][0],
+        "fingerprint": f"{data['id']}:{found[RELEASE_ASSETS[0]][0]}:"
+                       f"{found[RELEASE_ASSETS[1]][0]}:{data['tag_name']}",
+    }
+
+
+@contextmanager
+def online_lock(root=UPDATE_ROOT):
+    _private_folder(root)
+    with (root / ONLINE_LOCK).open("a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise OnlineBusy("an online check is already running") from None
+        yield
+
+
+def _sentence(error):
+    text = str(error)
+    return text[:1].upper() + text[1:]
+
+
+def _outcome(result, message, **more):
+    return {"result": result, "message": message, "tag": None, "available": None,
+            "contacted": False, **more}
+
+
+def _check_online(root, code, config, source):
+    token = read_token(config)
+    deadline = time.monotonic() + source.total
+    body = _download(source, source.url("releases/latest"), token, "application/vnd.github+json",
+                     MAX_API_ANSWER, deadline, what="answer")
+    release = _parse_release(body)
+    tag = release["tag"]
+    installed = _record(code / ".jittersim-release.json")
+    staged_record = _record(root / "staged" / ".jittersim-release.json")
+    seen = _record(root / ONLINE_SEEN)
+    base = {"tag": tag, "contacted": True}
+    uptodate = _outcome(
+        "up-to-date",
+        f"Already up to date: the newest release on GitHub ({tag}) is not newer than the "
+        "installed one.", **base,
+    )
+    if installed.get("source") == "github" and installed.get("tag") == tag:
+        return uptodate
+    if staged_record.get("source") == "github" and staged_record.get("tag") == tag:
+        return _outcome(
+            "staged", f"Release {staged_record.get('version')} ({tag}) is already staged and "
+            "ready to install.", **{**base, "available": staged_record.get("version")},
+        )
+    if seen.get("fingerprint") == release["fingerprint"] and seen.get("outcome") == "not-newer":
+        return uptodate
+    work = Path(tempfile.mkdtemp(prefix="online-", dir=root))
+    try:
+        archive, signature = work / RELEASE_ASSETS[0], work / RELEASE_ASSETS[1]
+        for number, target, limit, what in ((release["archive"], archive, MAX_ARCHIVE, "archive"),
+                                            (release["signature"], signature, MAX_SIGNATURE,
+                                             "signature")):
+            _download(source, source.url(f"releases/assets/{number}"), token,
+                      "application/octet-stream", limit, deadline, target, what="file")
+        try:
+            record = stage_release(archive, signature=signature, root=root, code=code,
+                                   config=config, origin="github", tag=tag)
+        except NotNewerError:
+            atomic_json(root / ONLINE_SEEN, {"fingerprint": release["fingerprint"],
+                                             "outcome": "not-newer"})
+            return uptodate
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return _outcome(
+        "staged",
+        f"Release {record['version']} ({tag}) is staged and ready to install. Install it with "
+        "'sudo jittersim update install' or in the dashboard.",
+        **{**base, "available": record["version"]},
+    )
+
+
+def check_online(*, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT, source=None):
+    """Look for the newest release on GitHub and stage it when a trusted key signed it and it
+    is newer. Never raises: the answer says what happened in one plain line."""
+    source = source if source is not None else default_source()
+    try:
+        with online_lock(root):
+            return _check_online(root, code, config, source)
+    except OnlineBusy as error:
+        return {**_outcome("failed", _sentence(error)), "busy": True}
+    except UpdateError as error:
+        # stage_release holds no token. Its messages are plain lines.
+        return _outcome("failed", _sentence(error), contacted=not isinstance(error, TokenError))
+    except Exception as error:
+        # Say what kind of failure it was but never what it holds.
+        logging.getLogger(__name__).error("online check failed: %s", type(error).__name__)
+        return _outcome("failed", "The check stopped on an unexpected error. See the update "
+                        "service log")
+
+
+# Jobs: how the dashboard asks for a check without ever handling the token
+
+
+def online_settings(root=UPDATE_ROOT):
+    """The two online settings. Both are off until the owner turns them on."""
+    saved = _record(root / ONLINE_SETTINGS)
+    return {name: saved.get(name) is True for name in SETTING_NAMES}
+
+
+def set_online_settings(changes, *, root=UPDATE_ROOT):
+    if (not isinstance(changes, dict) or not changes or set(changes) - set(SETTING_NAMES)
+            or not all(isinstance(value, bool) for value in changes.values())):
+        raise UpdateError("online settings are daily_check and install_automatically (true or false)")
+    with update_lock(root):
+        values = {**online_settings(root), **changes}
+        atomic_json(root / ONLINE_SETTINGS, values)
+    return values
+
+
+def _view(record, now, cached=False):
+    """The record without anything the dashboard has no use for. A check that never ended is
+    shown as failed."""
+    keys = ("job", "state", "requested_at", "checked_at", "result", "message", "available", "tag",
+            "install_queued")
+    view = {key: record.get(key) for key in keys}
+    view["install_queued"] = record.get("install_queued") is True
+    if record.get("state") == "running" and now - record.get("requested_at", 0) > STALE_SECONDS:
+        view.update(state="done", result="failed",
+                    message="The check did not finish. Try again.")
+    view["cached"] = cached
+    return view
+
+
+def online_overview(job=None, *, root=UPDATE_ROOT, config=CONFIG_ROOT, now=time.time):
+    """The state of the online check for the dashboard. With a job only that job."""
+    record = _record(root / ONLINE_FILE)
+    if not record:
+        view = {"job": None, "state": "none", "message": "No online check has run yet."}
+    elif job is not None and record.get("job") != job:
+        view = {"job": job, "state": "unknown",
+                "message": "This check is no longer tracked. Check again."}
+    else:
+        view = _view(record, now())
+    view["settings"] = online_settings(root)
+    view["token_set"] = token_is_set(config)
+    return view
+
+
+def new_job():
+    return secrets.token_hex(8)
+
+
+def request_online_check(*, force=False, root=UPDATE_ROOT, config=CONFIG_ROOT, run=run_command,
+                         now=time.time, job_id=new_job):
+    """Start one online check in the root fetch unit and return its job at once. Unless FORCE
+    is set a check that ended less than ten minutes ago answers instead of a new one."""
+    current = now()
+    with update_lock(root):
+        record = _record(root / ONLINE_FILE)
+        if record.get("state") == "running" and current - record.get("requested_at", 0) <= STALE_SECONDS:
+            return _view(record, current, cached=True)
+        if (not force and record.get("state") == "done" and record.get("contacted") is True
+                and isinstance(record.get("checked_at"), (int, float))
+                and 0 <= current - record["checked_at"] < CACHE_SECONDS):
+            return _view(record, current, cached=True)
+        job = job_id()
+        if not token_is_set(config):
+            record = {"job": job, "state": "done", "requested_at": int(current),
+                      "checked_at": int(current), "result": "failed", "contacted": False,
+                      "message": "No GitHub token is set. Save one with "
+                                 "'sudo jittersim update set-token' on the Pi."}
+            atomic_json(root / ONLINE_FILE, record)
+            return _view(record, current)
+        record = {"job": job, "state": "running", "requested_at": int(current),
+                  "checked_at": None, "result": None, "message": "Checking GitHub for a release."}
+        atomic_json(root / ONLINE_REQUEST, {"job": job, "requested_at": int(current)})
+        atomic_json(root / ONLINE_FILE, record)
+        try:
+            run(["systemctl", "start", "--no-block", FETCH_UNIT], 10)
+        except Exception:
+            (root / ONLINE_REQUEST).unlink(missing_ok=True)
+            record.update(state="done", result="failed", checked_at=int(current), contacted=False,
+                          message="The online check service could not start.")
+            atomic_json(root / ONLINE_FILE, record)
+        return _view(record, current)
+
+
+def scheduled_online_check(*, root=UPDATE_ROOT, config=CONFIG_ROOT, run=run_command,
+                           now=time.time):
+    """Start the daily check when it is on, a token is saved and a day passed since the last
+    one. Returns whether a check was started."""
+    if not online_settings(root)["daily_check"] or not token_is_set(config):
+        return False
+    record = _record(root / ONLINE_FILE)
+    last = record.get("checked_at") if record.get("state") == "done" else None
+    current = now()
+    if record.get("state") == "running" and current - record.get("requested_at", 0) <= STALE_SECONDS:
+        return False
+    if isinstance(last, (int, float)) and 0 <= current - last < DAILY_SECONDS:
+        return False
+    started = request_online_check(force=True, root=root, config=config, run=run, now=now)
+    return started.get("state") == "running"
+
+
+def perform_online_check(job, *, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT, source=None,
+                         run=run_command, now=time.time, auto_install=True):
+    """Run one check, record the answer under JOB and, when the owner turned Install
+    automatically on, queue the install of a release that is staged and installable."""
+    result = check_online(root=root, code=code, config=config, source=source)
+    if result.get("busy"):
+        return result
+    queued = False
+    message = result["message"]
+    if result["result"] == "staged" and auto_install and online_settings(root)["install_automatically"]:
+        status = update_status(root=root, code=code, config=config)
+        seen = _record(root / ONLINE_SEEN)
+        if status["installable"] and status["available"] != status["installed"]:
+            tried = f"{status['available']}:{status.get('tag')}"
+            if seen.get("auto") == tried:
+                message += " It is not installed automatically because that failed before."
+            else:
+                try:
+                    atomic_json(root / ONLINE_SEEN, {**seen, "auto": tried})
+                    request_update(status["available"], root=root, code=code, config=config,
+                                   run=run)
+                    queued = True
+                    message = (f"Release {status['available']} is staged and its install was "
+                               "started (Install automatically is on).")
+                except UpdateError as error:
+                    message += " It was not installed automatically: " + str(error)
+    finished = int(now())
+    record = {"job": job, "state": "done", "requested_at": finished, "checked_at": finished,
+              "result": result["result"], "message": message, "available": result["available"],
+              "tag": result["tag"], "contacted": result["contacted"], "install_queued": queued}
+    previous = _record(root / ONLINE_FILE)
+    if previous.get("job") == job:
+        record["requested_at"] = previous.get("requested_at", finished)
+    atomic_json(root / ONLINE_FILE, record)
+    return record
+
+
+def run_fetch_job(*, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT, source=None,
+                  run=run_command, now=time.time):
+    """The work of jittersim-update-fetch.service: take the request the helper wrote, check
+    and record the result. Without a request it does nothing."""
+    request = _record(root / ONLINE_REQUEST)
+    job = request.get("job")
+    if not isinstance(job, str) or not JOB.fullmatch(job):
+        return None
+    (root / ONLINE_REQUEST).unlink(missing_ok=True)
+    return perform_online_check(job, root=root, code=code, config=config, source=source, run=run,
+                                now=now)
 
 
 def healthy(*, config=CONFIG_ROOT, run=run_command, port=8080):
@@ -1289,6 +1877,36 @@ def _read_key_file(source):
         raise UpdateError("the key file holds characters that a public key never has") from None
 
 
+def _read_token_input():
+    """The token from standard input only. On a terminal nothing is shown while it is typed."""
+    stream = getattr(sys.stdin, "buffer", None)
+    if sys.stdin.isatty():
+        print("Paste the GitHub token, then press Ctrl-D. It is not shown.", file=sys.stderr)
+    echo_off = None
+    try:
+        import termios
+
+        if sys.stdin.isatty():
+            echo_off = termios.tcgetattr(sys.stdin.fileno())
+            changed = list(echo_off)
+            changed[3] &= ~termios.ECHO
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, changed)
+    except (ImportError, OSError):
+        echo_off = None
+    try:
+        raw = stream.read(MAX_TOKEN_INPUT + 1) if stream else sys.stdin.read(
+            MAX_TOKEN_INPUT + 1).encode()
+    finally:
+        if echo_off is not None:
+            import termios
+
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, echo_off)
+    try:
+        return raw.decode("ascii")
+    except UnicodeDecodeError:
+        return ""
+
+
 def running_as_root():
     return os.geteuid() == 0
 
@@ -1332,6 +1950,18 @@ def main(argv=None, prog=None):
     untrust.add_argument("name", metavar="LABEL_OR_FINGERPRINT")
     commands.add_parser("list-keys", help="show the trusted release signing keys")
     commands.add_parser(
+        "set-token", help="save the read-only GitHub token of the online check (root)",
+        description="Read a fine-grained GitHub token (this repository, Contents read-only) "
+        "from standard input and save it for root only. The token is never printed.",
+    )
+    commands.add_parser("clear-token", help="remove the saved GitHub token (root)")
+    commands.add_parser(
+        "check-online", help="look for a newer signed release on GitHub and stage it (root)",
+        description="Ask GitHub for the newest release and stage it when a trusted key signed "
+        "it and it is newer than the installed one.",
+    )
+    commands.add_parser("fetch", help="run the online check the dashboard asked for (service)")
+    commands.add_parser(
         "enable-passwordless-staging",
         help="let the jittersim login stage and install signed releases without a password",
     )
@@ -1353,6 +1983,25 @@ def main(argv=None, prog=None):
                   "Install it with 'sudo jittersim update install' or in the dashboard.")
         elif args.command == "apply":
             apply_update(root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT)
+        elif args.command == "set-token":
+            set_token(_read_token_input(), config=CONFIG_ROOT)
+            print("The GitHub token is saved. Only root can read it. Check with "
+                  "'sudo jittersim update check --online'.")
+        elif args.command == "clear-token":
+            clear_token(config=CONFIG_ROOT)
+            print("The GitHub token is removed.")
+        elif args.command == "check-online":
+            result = perform_online_check(
+                new_job(), root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT,
+                source=default_source(), auto_install=False,
+            )
+            if result["result"] == "failed":
+                raise UpdateError(result["message"])
+            print(result["message"])
+        elif args.command == "fetch":
+            result = run_fetch_job(root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT,
+                                   source=default_source())
+            print(result["message"] if result else "No online check was requested.")
         elif args.command == "trust-key":
             signer = trust_key(_read_key_file(args.key_file), label=args.label,
                                config=CONFIG_ROOT, root=UPDATE_ROOT)
@@ -1388,7 +2037,7 @@ def main(argv=None, prog=None):
                   "Passwordless staging was already off.")
     except UpdateError as error:
         print(f"{name}: {error}", file=sys.stderr)
-        if args.command != "apply":
+        if args.command not in ("apply", "fetch"):
             print("Nothing was changed.", file=sys.stderr)
         return 1
     return 0

@@ -48,6 +48,9 @@ LOCAL_UPDATE_COMMANDS = {
     "enable-passwordless-staging": "let the jittersim login stage signed releases "
                                    "without a password (root)",
     "disable-passwordless-staging": "ask for the sudo password again (root)",
+    "set-token": "save the read-only GitHub token of the online check, read from standard "
+                 "input (root)",
+    "clear-token": "remove the saved GitHub token (root)",
 }
 UPDATE_SERVICE = "jittersim-update.service"
 UPDATE_WAIT_SECONDS = 20 * 60
@@ -557,6 +560,9 @@ def _update_command(arguments) -> int:
                 print(f"Ready to install: no. {status.get('reason') or ''}".rstrip())
         if "trusted_keys" in status:
             print(f"Trusted signing keys: {status['trusted_keys']}")
+        if "token_set" in status:
+            # Only whether one is saved. The value stays with root.
+            print(f"Online check token: {'set' if status['token_set'] else 'not set'}")
         print(f"Update phase: {status.get('phase', 'unknown')}")
         print(f"Update state: {status.get('message', 'unknown')}")
         print(
@@ -757,6 +763,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         arguments = _build_control_parser(command).parse_args(raw_arguments[1:])
         return (_reset(arguments, all_restrictions=command == "normal-access")
                 if command != "status" else _status(arguments))
+    if raw_arguments[:2] == ["update", "check"] and "--online" in raw_arguments[2:]:
+        from jittersim.updates import main as manager_main
+
+        extra = [item for item in raw_arguments[2:] if item != "--online"]
+        if extra:
+            print("jittersim update check --online takes no other argument.", file=sys.stderr)
+            return 2
+        return manager_main(["check-online"], prog="jittersim update")
     if raw_arguments[:1] == ["update"] and raw_arguments[1:2] and (
         raw_arguments[1] in LOCAL_UPDATE_COMMANDS
     ):

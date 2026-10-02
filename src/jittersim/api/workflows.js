@@ -645,6 +645,88 @@ function installUpdateCheckPreference() {
     }
   });
 }
+// The online check. The Pi fetches the release as root. This page only asks for a check, follows
+// its job and saves two settings. It never handles the token.
+let onlineView = null;
+let onlinePolling = false;
+function onlineSummary(view) {
+  if (!view || view.state === 'none') return 'No online check has run yet.';
+  if (view.state === 'unavailable') return view.message || 'Online checks are not available.';
+  if (view.state === 'running') return 'Checking GitHub…';
+  const when = view.checked_at ? ' (' + new Date(view.checked_at * 1000).toLocaleString() + ')' : '';
+  const outcome = view.result === 'failed' ? 'The check failed: ' : '';
+  return outcome + (view.message || 'The check finished.') + when;
+}
+function showOnline(view) {
+  onlineView = view;
+  const ready = view && view.state !== 'unavailable';
+  let text = onlineSummary(view);
+  if (ready && view.token_set === false) {
+    text = 'No GitHub token is saved on the Pi yet. Open "The GitHub token" below for the one-time setup.';
+  }
+  element('online-check-status').textContent = text;
+  element('release-check-now').disabled = !ready || view.state === 'running' || view.token_set === false;
+  const settings = (view && view.settings) || null;
+  for (const [id, name] of [['online-daily-check', 'daily_check'], ['online-install-automatically', 'install_automatically']]) {
+    const box = element(id);
+    box.disabled = !settings;
+    if (settings) box.checked = settings[name] === true;
+  }
+}
+async function runOnlineCheck({force = false} = {}) {
+  if (onlinePolling) return;
+  onlinePolling = true;
+  try {
+    let view = await request('/api/updates/check-online', 'POST', {force});
+    showOnline(view);
+    const started = Date.now();
+    while (view.state === 'running' && Date.now() - started < 8 * 60 * 1000) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      view = await request('/api/updates/check-online/' + encodeURIComponent(view.job), 'GET');
+      if (view.state === 'unknown') view = await request('/api/updates/check-online', 'GET');
+      showOnline(view);
+    }
+    if (view.state === 'done' && view.result !== 'failed') await loadReleaseStatus({force: true}).catch(() => {});
+  } catch (error) {
+    element('online-check-status').textContent = 'The online check could not run: ' + error.message;
+  } finally {
+    onlinePolling = false;
+  }
+}
+async function loadOnlineStatus() {
+  try {
+    showOnline(await request('/api/updates/check-online', 'GET'));
+  } catch (error) {
+    element('online-check-status').textContent = 'Online checks are not available on this dashboard.';
+    element('release-check-now').disabled = true;
+  }
+}
+function installOnlineControls() {
+  const status = element('online-setting-status');
+  const save = async (box, name) => {
+    const previous = !box.checked;
+    if (name === 'install_automatically' && box.checked && !await confirmWorkflow('Install automatically will install every new signed release without asking. A leaked release signing key together with GitHub write access could then change this Pi without anyone pressing a button. Turn it on?')) {
+      box.checked = false; return;
+    }
+    box.disabled = true;
+    status.textContent = 'Saving…';
+    try {
+      const body = {[name]: box.checked};
+      if (name === 'install_automatically' && box.checked) body.confirm = true;
+      const view = await request('/api/updates/online-settings', 'POST', body);
+      showOnline({...(onlineView || {}), settings: view.settings, token_set: view.token_set});
+      status.textContent = 'Saved.';
+    } catch (error) {
+      box.checked = previous;
+      status.textContent = 'The setting was not saved. The previous setting is still in place.';
+    } finally {
+      box.disabled = false;
+    }
+  };
+  element('online-daily-check').addEventListener('change', event => save(event.target, 'daily_check'));
+  element('online-install-automatically').addEventListener('change', event => save(event.target, 'install_automatically'));
+  loadOnlineStatus();
+}
 function installReleaseControls() {
   workflowCard('release-controls', 'Updates and recovery', 'setup', `
     <p>Install a signed release staged on this Pi. An update briefly interrupts the dashboard and test network. The previous installation and settings are backed up before installation.</p>
@@ -652,6 +734,15 @@ function installReleaseControls() {
     <p class="form-note">Checks only for a verified release already staged on this Pi. Downloads and installation stay manual.</p>
     <p id="update-preference-status" class="form-note update-preference-status" role="status" aria-live="polite">Loading the saved preference…</p>
     <p id="release-status" role="status">Check for an approved release on this Pi.</p><div id="release-actions"></div>
+    <h3 class="online-heading">Check GitHub for a new release</h3>
+    <p class="form-note">The Pi can look for the newest signed release on GitHub itself. It stages a release only when the key you trusted signed it and it is newer than the one installed. Installing stays your button press unless you turn on Install automatically below.</p>
+    <p id="online-check-status" class="form-note" role="status" aria-live="polite">Loading the online check…</p>
+    <div id="online-actions"></div>
+    <label class="update-auto-check"><input id="online-daily-check" type="checkbox" disabled><span>Check GitHub once a day</span></label>
+    <label class="update-auto-check"><input id="online-install-automatically" type="checkbox" disabled><span>Install automatically</span></label>
+    <p class="form-note">Install automatically installs a new signed release without anyone pressing Install. It uses the same checks and the same recovery copy as a manual install. It is off unless you turn it on.</p>
+    <p id="online-setting-status" class="form-note" role="status" aria-live="polite"></p>
+    <details><summary>The GitHub token</summary><p>The repository is private, so the Pi needs a read-only token for this one repository. Create it on GitHub (Settings, Developer settings, Fine-grained tokens, only this repository, Contents read-only, with an expiry date). Then run <code>sudo jittersim update set-token</code> on the Pi, paste the token and press Ctrl-D. This page never asks for the token and never shows it.</p></details>
     <details><summary>How releases reach this private Pi</summary><p>The owner builds and signs a release on the Mac and deploy-from-mac.sh stages it over SSH. The Pi stages only a release signed by a key it trusts and newer than the one it runs. The admin token cannot stage a release: it can only install the one already staged. See Signed releases in the deployment guide.</p></details>`);
   const install = actionButton('Install staged release', async () => {
     if (!releaseState || !await confirmWorkflow('Install release ' + releaseState.available + '? The network will be interrupted briefly. Keep Ethernet or SSH available for recovery.')) return;
@@ -665,7 +756,11 @@ function installReleaseControls() {
     await loadReleaseStatus({force:true});
   }); rollback.id='release-rollback'; rollback.disabled=true;
   element('release-actions').append(actionButton('Check for updates', async () => {await loadReleaseStatus({force:true});}), install, rollback);
+  const checkNow = actionButton('Check now', async () => { await runOnlineCheck({force: true}); });
+  checkNow.id = 'release-check-now'; checkNow.disabled = true;
+  element('online-actions').append(checkNow);
   installUpdateCheckPreference();
+  installOnlineControls();
 }
 installReleaseControls();
 

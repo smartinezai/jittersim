@@ -213,7 +213,7 @@ WRITE_PATHS = frozenset(
 WRITE_PATHS = WRITE_PATHS | WORKFLOW_WRITES | ACCESS_WRITES | {"/api/schedules/preview"}
 ACTION_PATHS = frozenset(
     ("/api/apply", "/api/reset", "/api/observations/scan", "/api/update-preferences",
-     "/api/access-point/reset-name")
+     "/api/access-point/reset-name", "/api/updates/check-online")
 )
 PUBLIC_READ_PATHS = frozenset(("/", "/api/health"))
 

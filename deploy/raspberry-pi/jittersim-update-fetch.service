@@ -1,0 +1,19 @@
+[Unit]
+Description=Check GitHub for a signed JitterSim release
+After=network-online.target
+Wants=network-online.target
+# The helper writes this file when the dashboard asks for a check. Starting the unit by hand
+# without a request does nothing.
+ConditionPathExists=/var/lib/jittersim-updates/online-request.json
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+# Only root reads the GitHub token. The dashboard asks the helper and the helper starts this unit.
+ExecStart=/usr/bin/python3 -I /usr/local/lib/jittersim-update.py fetch
+TimeoutStartSec=6min
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+NoNewPrivileges=true

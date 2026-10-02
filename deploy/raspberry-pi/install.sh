@@ -218,6 +218,9 @@ install -m 0644 -o root -g root \
 install -m 0644 -o root -g root \
     "$SOURCE_DIR/deploy/raspberry-pi/jittersim-update.service" \
     /etc/systemd/system/jittersim-update.service
+install -m 0644 -o root -g root \
+    "$SOURCE_DIR/deploy/raspberry-pi/jittersim-update-fetch.service" \
+    /etc/systemd/system/jittersim-update-fetch.service
 
 # Recovery must run even if an interrupted package install damages the venv.
 install -d -m 0755 -o root -g root /usr/local/lib
