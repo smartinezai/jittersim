@@ -25,6 +25,11 @@ from typing import Any, Collection, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, urlsplit
 
 from jittersim.api.access import ACCESS_WRITES, read_access_api, write_access_api
+from jittersim.api.forced_window import (
+    FORCED_WINDOW_WRITES,
+    read_forced_window_api,
+    write_forced_window_api,
+)
 from jittersim.api.workflows import WORKFLOW_WRITES, machine_health, read_workflow, write_workflow
 from jittersim.config.device_labels import (
     DeviceLabelError,
@@ -104,6 +109,7 @@ from jittersim.engine.compiler import (
 )
 from jittersim.engine.conditions import device_conditions, everyone_else_condition
 from jittersim.engine.eligibility import eligible_clients, station_snapshot
+from jittersim.engine.forced_window_service import ForcedWindowService
 from jittersim.engine.plan import EVERYONE_ELSE_QUEUE_ID, GENERAL_QUEUE_ID, NetworkPlan
 from jittersim.engine.progression import progression_factor
 from jittersim.engine.runtime import RuntimeScheduler
@@ -210,7 +216,7 @@ WRITE_PATHS = frozenset(
         "/api/dashboard-access/remove",
     )
 )
-WRITE_PATHS = WRITE_PATHS | WORKFLOW_WRITES | ACCESS_WRITES | {"/api/schedules/preview"}
+WRITE_PATHS = WRITE_PATHS | WORKFLOW_WRITES | ACCESS_WRITES | FORCED_WINDOW_WRITES | {"/api/schedules/preview"}
 ACTION_PATHS = frozenset(
     ("/api/apply", "/api/reset", "/api/observations/scan", "/api/update-preferences",
      "/api/access-point/reset-name")
@@ -10829,6 +10835,7 @@ class ControlServer(HTTPServer):
         scheduler: Optional[RuntimeScheduler] = None,
         tls_certfile: Optional[Path] = None,
         tls_keyfile: Optional[Path] = None,
+        forced_window=None,
     ) -> None:
         if admin_token == "":
             raise ValueError("admin_token must not be empty")
@@ -10847,6 +10854,7 @@ class ControlServer(HTTPServer):
         self.admin_token = admin_token
         self.helper_client = helper_client
         self.scheduler = scheduler
+        self.forced_window = forced_window
         self.router_operations = RouterOperations(
             self._router_response_for, str(admin_token) + "\0" + str(getattr(helper_client, "socket_path", "local")),
         )
@@ -11047,6 +11055,9 @@ class ControlServer(HTTPServer):
         access_response = read_access_api(self, path)
         if access_response is not None:
             return access_response
+        window_response = read_forced_window_api(self, path)
+        if window_response is not None:
+            return window_response
         workflow = read_workflow(self, path)
         if workflow is not None:
             return workflow
@@ -11663,6 +11674,11 @@ class ControlServer(HTTPServer):
         with operation:
             before = self.repository.get_runtime_state().configuration_version
             try:
+                if path in ("/api/normal-access", "/api/reset"):
+                    self._end_forced_window()
+                window_response = write_forced_window_api(self, path, payload)
+                if window_response is not None:
+                    return window_response
                 access_response = write_access_api(self, path, payload)
                 if access_response is not None:
                     return access_response
@@ -13758,6 +13774,16 @@ class ControlServer(HTTPServer):
             return False
         return True
 
+    def _end_forced_window(self) -> None:
+        """Panic and Reset end a running forced window and bring the router's Wi-Fi back."""
+
+        if self.forced_window is None:
+            return
+        try:
+            self.forced_window.request_end()
+        except Exception:
+            LOGGER.exception("could not end the forced window")
+
     def _record_activity(self, kind: str, message: str) -> None:
         try:
             self.repository.record_activity(kind=kind, message=message, now=time.time())
@@ -14711,6 +14737,11 @@ def run_server(
             database_path=database_path,
             helper_client=helper_client,
         )
+        forced_window = (
+            None if helper_client is None else ForcedWindowService(
+                database_path=database_path, helper_client=helper_client, error_type=HelperClientError
+            )
+        )
         with ControlServer(
             (host, port),
             repository,
@@ -14719,14 +14750,19 @@ def run_server(
             scheduler=scheduler,
             tls_certfile=tls_certfile,
             tls_keyfile=tls_keyfile,
+            forced_window=forced_window,
         ) as server:
             LOGGER.info("jittersim dashboard listening on %s:%s", host, port)
             try:
                 server.recover_saved_network_state()
+                if forced_window is not None:
+                    forced_window.start()
                 server.serve_forever()
             except KeyboardInterrupt:
                 pass
             finally:
+                if forced_window is not None:
+                    forced_window.stop()
                 scheduler.stop()
 
 
