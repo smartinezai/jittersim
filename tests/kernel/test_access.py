@@ -12,8 +12,18 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from jittersim.config.models import AccessOptions, MacPolicy, SiteBlock, WebsitePolicy
+from jittersim.config.models import (
+    AccessOptions,
+    Device,
+    Impairment,
+    MacPolicy,
+    Profile,
+    SiteBlock,
+    WebsitePolicy,
+)
 from jittersim.engine.access import AccessClient, AccessPlan
+from jittersim.engine.codec import plan_to_payload
+from jittersim.engine.compiler import compile_plan
 from jittersim.networking.access import AccessManager, read_access, transition_firewall
 from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.commands import CommandResult
@@ -336,6 +346,132 @@ class AccessDatapathTests(unittest.TestCase):
         self.assertNotIn("status: ", self.query("news.example.com", OTHER_CLIENT))
         self.manager.disable()
         self.assertEqual(incoming(OTHER_CLIENT, OTHER_CLIENT_ADDRESSES[0]), "arrived")
+
+    def integrated_mac_profile(self):
+        access = AccessPlan(
+            mac=MacPolicy("denylist", (), (CLIENT_MAC,)),
+            clients=(AccessClient("child", CLIENT_ADDRESS, CLIENT_MAC),),
+        )
+        plan = compile_plan(
+            devices=(Device("child", "Child", CLIENT_ADDRESS, "slow", CLIENT_MAC),),
+            profiles={
+                "slow": Profile(
+                    "slow", "Slow", upload=Impairment(delay_ms=25),
+                    download=Impairment(delay_ms=35),
+                )
+            },
+            mac_policy=access.mac,
+            access=access,
+        )
+        helper = HelperService(
+            NetworkApplier(executor=self.executor, topology=TOPOLOGY),
+            active_plan_path=self.directory / "active-plan.json",
+            access_manager=self.manager,
+        )
+        return helper, plan
+
+    def profile_queue_settings(self):
+        settings = {}
+        for interface in ("eth0", "wlan0"):
+            queues = json.loads(run_in(PI, "tc", "-j", "qdisc", "show", "dev", interface).stdout)
+            settings[interface] = sorted(
+                [
+                    {key: queue[key] for key in ("kind", "handle", "parent", "options")
+                     if key in queue}
+                    for queue in queues
+                ],
+                key=lambda queue: queue["handle"],
+            )
+        return settings
+
+    def client_datagram_arrives(self, *, download):
+        receiver_namespace = CLIENT if download else ROUTER
+        sender_namespace = ROUTER if download else CLIENT
+        destination = CLIENT_ADDRESS if download else "192.168.0.1"
+        sender_address = "192.168.0.1" if download else CLIENT_ADDRESS
+        receiver = subprocess.Popen(
+            [
+                "ip", "netns", "exec", receiver_namespace, "python", "-u", "-c",
+                "import socket\n"
+                "s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+                "s.bind(('0.0.0.0', 50888))\n"
+                "s.settimeout(1)\n"
+                "print('ready')\n"
+                "try:\n"
+                "    print(s.recv(32).decode())\n"
+                "except socket.timeout:\n"
+                "    print('blocked')\n",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            self.assertTrue(select.select([receiver.stdout], [], [], 3)[0])
+            self.assertEqual(receiver.stdout.readline().strip(), "ready")
+            run_in(
+                sender_namespace, "python", "-c",
+                "import socket\n"
+                "s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+                f"s.bind(('{sender_address}', 0))\n"
+                f"s.sendto(b'arrived', ('{destination}', 50888))\n",
+            )
+            output, error = receiver.communicate(timeout=3)
+            self.assertEqual(receiver.returncode, 0, error)
+            return output.strip() == "arrived"
+        finally:
+            if receiver.poll() is None:
+                receiver.kill()
+                receiver.communicate(timeout=3)
+
+    def test_household_mac_disable_releases_both_directions_without_replacing_queues(self):
+        run_in(ROUTER, "ip", "route", "add", "192.168.50.0/24", "via", "192.168.0.2")
+        helper, plan = self.integrated_mac_profile()
+        answer = helper.handle_payload({"action": "apply", "plan": plan_to_payload(plan)})
+        self.assertTrue(answer["ok"], answer)
+        published = (self.directory / "active-plan.json").read_bytes()
+        queues = self.profile_queue_settings()
+        for direction in (False, True):
+            self.assertFalse(self.client_datagram_arrives(download=direction))
+        for settings in queues.values():
+            self.assertTrue(any(queue["kind"] == "netem" for queue in settings))
+
+        disabled = replace(plan.access, options=AccessOptions(enabled=False))
+        answer = helper.handle_payload({"action": "access-apply", "policy": disabled.payload()})
+
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual((self.directory / "active-plan.json").read_bytes(), published)
+        self.assertEqual(self.profile_queue_settings(), queues)
+        self.assertFalse(self.manager.applied.options.enabled)
+        self.assertEqual(self.manager.applied.mac, plan.mac_policy)
+        arrived = tuple(
+            self.client_datagram_arrives(download=direction) for direction in (False, True)
+        )
+        self.assertEqual(arrived, (True, True), "Disabling access must release upload and download")
+
+    def test_household_mac_blocks_stay_off_after_panic_and_profile_restart(self):
+        run_in(ROUTER, "ip", "route", "add", "192.168.50.0/24", "via", "192.168.0.2")
+        helper, plan = self.integrated_mac_profile()
+        answer = helper.handle_payload({"action": "apply", "plan": plan_to_payload(plan)})
+        self.assertTrue(answer["ok"], answer)
+        self.assertTrue(helper.handle_payload({"action": "normal-access"})["ok"])
+        self.assertFalse(self.manager.applied.options.enabled)
+        self.assertEqual(self.manager.applied.mac, plan.mac_policy)
+
+        restarted = replace(plan, access=self.manager.applied)
+        answer = helper.handle_payload({"action": "apply", "plan": plan_to_payload(restarted)})
+
+        self.assertTrue(answer["ok"], answer)
+        self.assertFalse(self.manager.applied.options.enabled)
+        self.assertEqual(self.manager.applied.mac, plan.mac_policy)
+        for settings in self.profile_queue_settings().values():
+            self.assertTrue(any(queue["kind"] == "netem" for queue in settings))
+        arrived = tuple(
+            self.client_datagram_arrives(download=direction) for direction in (False, True)
+        )
+        self.assertEqual(
+            arrived, (True, True), "Starting profiles must keep household MAC blocks off"
+        )
 
     def test_policy_follows_mac_address_and_failed_recovery_closes_network(self):
         self.manager.apply(self.plan)

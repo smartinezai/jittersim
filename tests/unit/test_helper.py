@@ -2671,6 +2671,26 @@ class QueueStatsClientTests(unittest.TestCase):
         self.assertEqual([q["device_id"] for q in self.read(entries)],
                          ["lab", "general-profile", "quota:abc-1", "servicelist:streaming"])
 
+    def test_accepts_renderer_handles_for_every_supported_mark(self) -> None:
+        entries = [
+            good_queue(handle=queue_handle(mark, kind),
+                       kind="netem" if kind == "duplicate" else kind)
+            for kind in ("netem", "duplicate", "fq_codel")
+            for mark in range(1, MAX_SHAPED_MARKS_PER_PLAN + 1)
+        ]
+
+        result = self.read(entries)
+
+        self.assertEqual([entry["handle"] for entry in result],
+                         [entry["handle"] for entry in entries])
+        self.assertIn("4a:", [entry["handle"] for entry in result])
+        self.assertIn("4f:", [entry["handle"] for entry in result])
+
+    def test_accepts_the_largest_kernel_queue_handle(self) -> None:
+        (entry,) = self.read([good_queue(handle="ffff:")])
+
+        self.assertEqual(entry["handle"], "ffff:")
+
     def test_keeps_only_the_numbers_the_dashboard_uses_from_the_impairment(self) -> None:
         impairment = dict(good_queue()["impairment"], loss_randomness={"variation_percent": 5})
 
@@ -2690,6 +2710,12 @@ class QueueStatsClientTests(unittest.TestCase):
             "string counter": [good_queue(qlen="3")],
             "bad handle": [good_queue(handle="abc")],
             "long handle": [good_queue(handle="123456:")],
+            "five digit handle": [good_queue(handle="10000:")],
+            "upper case handle": [good_queue(handle="4A:")],
+            "handle with whitespace": [good_queue(handle=" 4a:")],
+            "handle with newline": [good_queue(handle="4a:\n")],
+            "handle with suffix": [good_queue(handle="4a:1")],
+            "non hex handle": [good_queue(handle="4g:")],
             "bad direction": [good_queue(direction="sideways")],
             "bad kind": [good_queue(kind="tbf")],
             "bad id": [good_queue(device_id="Lab Phone")],
