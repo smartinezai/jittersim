@@ -821,16 +821,20 @@ DASHBOARD_HTML = r"""<!doctype html>
     @media (min-width: 701px) {
       .sidebar .sidebar-action-row .help-icon::after { position: fixed; top: auto; bottom: 1rem; left: 16rem; right: auto; width: min(22rem, calc(100vw - 17rem)); }
     }
-    /* A short window needs the room for the footer so that Panic and the router switch stay in
-       view. The sidebar lists nine pages and on a laptop screen the list would push the router
-       switch and the copy buttons below the fold. Up to 900px of height the links share a
-       compact row of 24px (the smallest comfortable target) and do not scroll the footer away. */
-    @media (min-width: 48.01rem) and (max-height: 800px) {
-      .sidebar { gap: 0.6rem; }
-    }
+    /* A short window needs the room for the footer so that Panic and the router switch and the
+       copy buttons stay in view. The sidebar lists nine pages and on a laptop screen the list
+       would push them below the fold. Up to 900px of height the links share a compact row of
+       24px (the smallest comfortable target) and the footer uses tighter gaps. Wider Linux fonts
+       wrap the mode badge and the status lines so the copy buttons need this margin there. */
     @media (min-width: 48.01rem) and (max-height: 900px) {
+      .sidebar { gap: 0.5rem; padding-block: 0.65rem; }
+      .sidebar-brand h1 { font-size: 1.2rem; }
+      .sidebar-brand .badge { padding: 0.2rem 0.45rem; font-size: 0.72rem; }
       .sidebar-nav ul { gap: 0; }
       .sidebar-nav a { min-height: 1.5rem; padding-block: 0.22rem; font-size: 0.88rem; line-height: 1.2; }
+      .sidebar-status { padding-block: 0.25rem; }
+      .sidebar-footer, .sidebar-operate, .sidebar-actions { gap: 0.35rem; }
+      .sidebar .router-wifi-control { padding-block: 0.25rem; }
     }
     /* The label wraps to two lines in the narrow sidebar. Both labels need the same room so the
        buttons below do not jump when it changes. */
@@ -1062,7 +1066,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         <div class="sidebar-actions">
           <div class="sidebar-action-row">
             <button id="apply-button" class="primary" type="button">Start with saved settings</button>
-            <span class="help-icon" tabindex="0" role="img" aria-label="Start or re-apply saved settings help" data-help="Starts JitterSim with everything you saved: device and group profiles and schedules and limits and service lists and access rules. While it runs saved changes apply on their own within a few seconds. Reset or Panic stops the profiles. Protected devices stay untouched.">?</span>
+            <span class="help-icon" tabindex="0" role="img" aria-label="Start or re-apply saved settings help" data-help="Starts JitterSim with everything you saved: device and group profiles and schedules and limits and service lists and access rules. Then saved changes apply on their own within a few seconds. Reset or Panic stops the profiles. Protected devices stay untouched.">?</span>
           </div>
           <p id="apply-summary" class="apply-summary" aria-live="polite" hidden></p>
           <div class="sidebar-action-row">
