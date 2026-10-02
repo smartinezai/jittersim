@@ -30,10 +30,19 @@ from jittersim.networking.topology import Topology
 from tests.wifi_support import WifiExecutor
 
 
+# The fake kernel moves this much through every project queue for as long as it is read. It equals
+# the 250 kbit/s cap the impact journey sets. The impact card calls a cap reached from 90% of it,
+# so a poll that comes a little late still counts.
+QUEUE_KBIT_PER_SECOND = 250
+
+
 class DashboardWifiExecutor(WifiExecutor):
-    def __init__(self):
+    def __init__(self, clock=time.time):
         super().__init__()
         self.queue_reads = {}
+        self.queue_started = {}
+        # The server stamps each sample with time.time(), so the byte counter uses the same clock.
+        self.clock = clock
 
     def run(self, command):
         if command.executable == "ip":
@@ -60,9 +69,11 @@ class DashboardWifiExecutor(WifiExecutor):
         return super().run(command)
 
     def run_tc(self, command):
-        """Answer queue counter reads with numbers that grow on every read.
+        """Answer queue counter reads with numbers that grow like a busy kernel's.
 
-        Every read adds 100 forwarded packets and 11 dropped ones to each project queue.
+        Every read adds 100 forwarded packets and 11 dropped ones to each project queue, so the
+        loss figure never depends on timing. The bytes grow with the time since the first read at
+        QUEUE_KBIT_PER_SECOND, so the speed figure does not depend on how long a poll took.
         A new root queue or a removed one starts the counters again like the kernel does.
         """
 
@@ -70,10 +81,12 @@ class DashboardWifiExecutor(WifiExecutor):
         if interface is not None:
             self.commands.append(command)
             reads = self.queue_reads[interface] = self.queue_reads.get(interface, 0) + 1
+            now = self.clock()
+            queue_bytes = int(QUEUE_KBIT_PER_SECOND * 125 * (now - self.queue_started.setdefault(interface, now)))
             queues = [
                 {
                     "kind": "netem", "handle": queue_handle(mark), "parent": queue_parent(mark),
-                    "bytes": 150_000 * reads, "packets": 100 * reads, "drops": 11 * reads,
+                    "bytes": queue_bytes, "packets": 100 * reads, "drops": 11 * reads,
                     "overlimits": 0, "requeues": 0, "backlog": 0, "qlen": 0,
                 }
                 for mark in range(1, 5)
@@ -84,6 +97,7 @@ class DashboardWifiExecutor(WifiExecutor):
         if command.arguments[:1] == ("qdisc",) and command.arguments[1] in ("replace", "del"):
             if "root" in command.arguments:
                 self.queue_reads.pop(command.arguments[3], None)
+                self.queue_started.pop(command.arguments[3], None)
         return super().run(command)
 
 
