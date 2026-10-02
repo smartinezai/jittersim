@@ -155,6 +155,7 @@ The things the owner has to try on the Pi are in the [Pi acceptance checklist](p
   - Switching from one active profile to another works from the panel in one step. Today the control applies the choice and the old one stops being the general profile.
   - The panel shows the name of the profile and how many devices it affects, as the status block does now.
   - It works at phone width inside the Controls sheet.
+- **Stop must be in the left panel too:** while a general profile is active the left panel shows a clearly labelled Stop button next to the profile name, at all window sizes. The owner could not find the Stop general profile button on the Devices page during a Pi test on 2026-10-02 and asked for one in the left panel. Check this in the final build and add a Stop button to the sidebar status line if the control is collapsed or hidden.
 - **Notes:** asked for again on 2026-10-02 while testing on the Pi.
 
 ## Ideas that look useful
