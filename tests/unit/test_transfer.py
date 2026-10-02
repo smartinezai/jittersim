@@ -349,11 +349,6 @@ class SettingsTransferTests(unittest.TestCase):
             "unaffected device aa:aa:aa:aa:aa:aa appears twice": SavedSettings(
                 unaffected_devices=(UnaffectedDevice(mac), UnaffectedDevice(mac))
             ),
-            "aa:aa:aa:aa:aa:aa is unaffected and belongs to device alice": SavedSettings(
-                profiles=(slow,),
-                devices=(Device("alice", "Alice", "192.168.50.10", "slow", mac),),
-                unaffected_devices=(UnaffectedDevice(mac),),
-            ),
             "the unaffected list holds at most 256 devices": SavedSettings(
                 unaffected_devices=tuple(
                     UnaffectedDevice(f"02:00:00:00:{index // 256:02x}:{index % 256:02x}")

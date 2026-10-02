@@ -5627,7 +5627,7 @@ class ControlServerTests(unittest.TestCase):
         )
         self.assertEqual(status, 404)
 
-    def test_a_saved_device_can_be_protected_but_not_the_other_way_round(self) -> None:
+    def test_a_saved_device_can_be_protected_and_a_protected_one_can_be_saved(self) -> None:
         bob = Device("bob", "Bob", "192.168.50.11", "slow", "ba:bb:bb:bb:bb:bb")
         self.repository.save_device(bob)
         status, _, body = self.server.write_response_for(
@@ -5648,8 +5648,12 @@ class ControlServerTests(unittest.TestCase):
                 "mac_address": "cc:cc:cc:cc:cc:cc",
             },
         )
-        self.assertEqual(status, 409)
-        self.assertIn("unaffected list", json.loads(body)["error"])
+        # Saving or editing it is allowed. The assignment stays dormant while protected.
+        self.assertEqual(status, 200, body)
+        self.assertEqual(self.repository.get_device("carol").mac_address, "cc:cc:cc:cc:cc:cc")
+        plan = compile_stored_plan(repository=self.repository)
+        self.assertEqual([rule.device_id for rule in plan.mark_rules], ["alice"])
+        self.assertIn("cc:cc:cc:cc:cc:cc", plan.protected_mac_addresses)
 
     def test_a_listed_connected_client_cannot_get_a_profile(self) -> None:
         self.server.helper_client = FakeHelper()

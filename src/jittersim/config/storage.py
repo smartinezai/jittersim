@@ -1501,12 +1501,17 @@ class ConfigRepository:
         *,
         expected_version: Optional[int] = None,
         preserve_usage: bool = False,
+        observation_addresses: Iterable[str] = (),
     ) -> None:
         """Replace every saved setting at once. On failure nothing changes.
 
-        DNS observations, action history and the runtime state stay. Timers,
-        progressions and scenario runs are removed because they belong to the
-        replaced devices, groups and scenarios.
+        Action history and the runtime state stay. DNS observations stay except
+        those of devices the new settings protect: protected devices are never
+        monitored so their stored names go in the same transaction. Matching uses
+        the recorded hardware address, the addresses of saved devices with that
+        hardware address and `observation_addresses` (connected clients that the
+        caller found). Timers, progressions and scenario runs are removed because
+        they belong to the replaced devices, groups and scenarios.
         """
 
         try:
@@ -1532,6 +1537,14 @@ class ConfigRepository:
                         usage[table] = (key, columns, self._connection.execute(
                             "SELECT " + ", ".join(key + columns) + " FROM " + table
                         ).fetchall())
+                newly_protected = {
+                    item.mac_address for item in settings.unaffected_devices
+                } - {item.mac_address for item in self.list_unaffected_devices()}
+                protected_addresses = set(observation_addresses) | {
+                    str(device.ipv4_address)
+                    for device in self.list_devices() + tuple(settings.devices)
+                    if device.mac_address in newly_protected
+                }
                 # The everyone-else and general profiles refer to profiles replaced below.
                 self._connection.execute("UPDATE everyone_else_settings SET profile_id = NULL")
                 self._connection.execute("UPDATE general_profile_setting SET profile_id = NULL")
@@ -1592,6 +1605,8 @@ class ConfigRepository:
                     self.save_unaffected_device(unaffected)
                 self.save_everyone_else_profile_id(settings.everyone_else_profile_id)
                 self.save_general_profile(settings.general_profile_id)
+                if newly_protected:
+                    self.delete_domain_observations(protected_addresses, newly_protected)
                 for table, (key, columns, rows) in usage.items():
                     for row in rows:
                         self._connection.execute(

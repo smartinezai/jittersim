@@ -90,6 +90,7 @@ from jittersim.config.transfer import (
     SETTINGS_FORMAT,
     SETTINGS_VERSION,
     check_settings,
+    keep_sections_missing_from,
     settings_to_payload,
 )
 from jittersim.config.workflows import WorkflowStore
@@ -11346,7 +11347,9 @@ class ControlServer(HTTPServer):
 
         if path == "/api/import":
             try:
-                settings = _settings_from_payload(payload)
+                settings = keep_sections_missing_from(
+                    payload, _settings_from_payload(payload), self.repository.saved_settings()
+                )
                 check_settings(
                     settings,
                     max_traffic_classes=MAX_SHAPED_MARKS_PER_PLAN,
@@ -11354,7 +11357,10 @@ class ControlServer(HTTPServer):
                 )
             except (KeyError, TypeError, ValueError) as error:
                 return _bad_request("invalid settings import", error)
-            self.repository.replace_settings(self._with_counter_baselines(settings))
+            self.repository.replace_settings(
+                self._with_counter_baselines(settings),
+                observation_addresses=self.newly_protected_station_addresses(settings),
+            )
             self._sync_gateway_persistence()
             return self._apply_saved_change(
                 "imported",
@@ -11482,9 +11488,8 @@ class ControlServer(HTTPServer):
                     raise ValueError("the original device ID must match")
             except (KeyError, TypeError, ValueError) as error:
                 return _bad_request("invalid device configuration", error)
-            conflict = self._unaffected_conflict(device.mac_address)
-            if conflict is not None:
-                return conflict
+            # A protected saved device stays editable. Its assignment is dormant while
+            # the protection lasts and comes back when the protection is removed.
             if self.repository.get_device(device.id) is None:
                 capacity_error = self._capacity_error(adding=1)
                 if capacity_error is not None:
@@ -13033,17 +13038,24 @@ class ControlServer(HTTPServer):
         response.setdefault("live_applied", status == HTTPStatus.OK)
         return status, content_type, _json_bytes(response)
 
-    def _unaffected_conflict(
-        self, mac_address: Optional[str]
-    ) -> Optional[Tuple[int, str, bytes]]:
-        """Refuse to save a device whose MAC address is on the unaffected list."""
+    def newly_protected_station_addresses(self, settings: SavedSettings) -> set:
+        """Return the current addresses of clients that settings about to be saved protect.
 
-        listed = {device.mac_address for device in self.repository.list_unaffected_devices()}
-        if mac_address is None or mac_address not in listed:
-            return None
-        return HTTPStatus.CONFLICT, "application/json", _json_bytes(
-            {"error": f"{mac_address} is on the unaffected list; remove it there first"}
-        )
+        Stored DNS observations of those clients go in the same transaction as the new
+        settings. Saved devices and recorded hardware addresses are matched by the
+        storage itself. This adds connected clients that are not saved devices.
+        """
+
+        newly = {item.mac_address for item in settings.unaffected_devices} - {
+            item.mac_address for item in self.repository.list_unaffected_devices()
+        }
+        if not newly:
+            return set()
+        return {
+            str(station["ipv4_address"])
+            for station in self._station_devices()
+            if station_mac(station) in newly and station.get("ipv4_address")
+        }
 
     def _everyone_else_counted(self) -> bool:
         """Return whether everyone else already holds a traffic class."""
@@ -14064,6 +14076,22 @@ def _settings_from_payload(payload: Dict[str, Any]) -> SavedSettings:
             mac_address=value["mac_address"], display_name=_unaffected_label(value)
         ),
     )
+    # Files from main and from older Pi builds carry neither key. The caller then
+    # keeps the saved lists and the saved general profile.
+    general_profile_id = payload.get("general_profile_id")
+    if general_profile_id is not None and not isinstance(general_profile_id, str):
+        raise ValueError("general_profile_id must be a profile ID or null")
+    service_lists = items(
+        "service_lists",
+        lambda value: ServiceList(
+            id=value["id"],
+            name=value["name"],
+            profile_id=value["profile_id"],
+            services=_list_field(value, "services"),
+            hostnames=_list_field(value, "hostnames"),
+            enabled=value.get("enabled", True),
+        ),
+    )
     # Usage starts again from zero on the new installation.
     return SavedSettings(
         profiles=items("profiles", _profile_from_payload),
@@ -14139,6 +14167,8 @@ def _settings_from_payload(payload: Dict[str, Any]) -> SavedSettings:
         ),
         everyone_else_profile_id=everyone_else_profile_id,
         unaffected_devices=unaffected_devices,
+        general_profile_id=general_profile_id,
+        service_lists=service_lists,
     )
 
 
