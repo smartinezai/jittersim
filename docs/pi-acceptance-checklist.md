@@ -185,7 +185,7 @@ Release tried: ________________  Date: ________________
 ### From the Mac
 
 - [ ] **Remote commands**
-  - Do: copy `/etc/jittersim/dashboard.crt` from the Pi over a connection you trust and compare its fingerprint with the installer's. Run `jittersim connect --url https://<pi-address>:8080 --ca-cert ~/jittersim-dashboard.crt`. Then run `jittersim status` and `jittersim profiles list` and `jittersim traffic --scan` and `jittersim impact`.
+  - Do: copy `/etc/jittersim/ca/ca.crt` from the Pi over a connection you trust and compare its fingerprint with the installer's. Run `jittersim connect --url https://<pi-address>:8080 --ca-cert ~/jittersim-dashboard.crt`. Then run `jittersim status` and `jittersim profiles list` and `jittersim traffic --scan` and `jittersim impact`.
   - Expect: each command asks for the admin token with a hidden prompt and prints its result. Status names the release on the Pi and the affected devices. The impact check waits about ten seconds.
   - **Warning:** never type the token or a password in the command itself. Skip `jittersim wifi show --password` because it prints the Wi-Fi password on the screen.
 - [ ] **Deploy script**

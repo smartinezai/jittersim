@@ -240,10 +240,18 @@ requires the router network or a local Pi terminal.
 
 ### Dashboard access from Pi Wi-Fi
 
-Open the HTTPS dashboard using the Pi address covered by its certificate,
-for example `https://192.168.0.17:8080`. Choose **Admin token** then **Check
+On the Pi Wi-Fi open `https://pi.home.arpa:8080`. The Pi answers this neutral
+name itself, so it needs no router and no Ethernet cable. The address can be
+changed in `/etc/jittersim/trust.env` (see the Pi deployment guide). You can
+also use an address covered by the certificate, for example
+`https://192.168.50.1:8080`. Choose **Admin token** then **Check
 token** and **Allow this device**. This registers the actual requesting
 computer. The dashboard lists saved devices and supports removal.
+
+The first visit shows a certificate warning. After signing in, **Trust this Pi**
+offers the Pi's local certificate as a `.crt` file and as an Apple profile with
+three short steps for a Mac and an iPhone. Once installed, the warning is gone.
+The certificate only lets that device trust the Pi dashboard names.
 
 Only dashboard traffic avoids simulated loss and client blocks. Your ordinary
 internet traffic still follows its profile. The separate unaffected-device
@@ -257,7 +265,7 @@ register their own device. Changed private Wi-Fi addresses need registration
 again. If current device observations cannot be verified, reconnect and retry.
 
 From your **Mac**, with JitterSim installed and a trusted copy of the Pi's
-public dashboard certificate:
+public authority certificate (`/etc/jittersim/ca/ca.crt`):
 
 ```sh
 jittersim dashboard-access allow-self --url https://192.168.0.17:8080 \
@@ -266,7 +274,7 @@ jittersim dashboard-access allow-self --url https://192.168.0.17:8080 \
 
 The hidden prompt asks for the **JitterSim admin token**. Certificate checks
 stay enabled. No `sudo` or Linux firewall command is needed on the Mac. Copy
-`/etc/jittersim/dashboard.crt` through a previously trusted Pi connection.
+`/etc/jittersim/ca/ca.crt` through a previously trusted Pi connection, or download it from **Trust this Pi**.
 Do not copy the private key or accept an unverified replacement certificate.
 
 From a **Pi terminal**, root recovery works while the dashboard is stopped:

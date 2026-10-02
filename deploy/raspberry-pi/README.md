@@ -94,21 +94,45 @@ settings changed, restart it during a planned maintenance window. The
 installer preserves existing credential files and an existing access-point
 password so an update does not silently invalidate access. The values in
 `ap.env` are the initial credentials. Later dashboard changes are stored in the
-network connection. The installer also creates a local HTTPS certificate. Its
-private key is readable only by root and the JitterSim service. The installer
-prints the certificate fingerprint. It also links the `jittersim` command into
+network connection. The installer also creates a small local certificate
+authority once and issues the dashboard's HTTPS certificate from it. The
+authority is kept across updates and rollbacks and is only replaced when it is
+missing or damaged. It can vouch only for the dashboard names and the two
+address ranges in use. Its private key is readable only by root. The
+installer prints the authority's fingerprint. It also links the `jittersim` command into
 `/usr/local/bin`.
 
 Open the dashboard at `https://jittersim.local:8080` or use the Pi's Ethernet
 address. Avahi publishes the name on the local network and the installer
 refreshes it when the management interface receives a new address. Routers do
 not normally carry mDNS between separate networks. If the name does not
-resolve from the management Wi-Fi, use the Pi's Ethernet address. Before
-trusting the local certificate in a browser, compare its SHA-256 fingerprint
-with the value printed by the installer. The certificate includes the Pi's
-current Ethernet address and the test Wi-Fi address `192.168.50.1`. If the
-Ethernet address changes, run the installer again and verify and trust the
-newly printed certificate.
+resolve from the management Wi-Fi, use the Pi's Ethernet address.
+
+**On the test Wi-Fi** use the easy address `https://pi.home.arpa:8080`. The
+Pi's own DNS answers this neutral name with `192.168.50.1`, with access rules
+on or off. It never contains the product name, because anyone on the test
+Wi-Fi can read it before signing in. To use another name, set
+`JITTERSIM_LOCAL_NAME=dash.home.arpa` in `/etc/jittersim/trust.env` (it must end
+in `.home.arpa`) and run the installer again. The name reaches the Pi's DHCP
+and DNS service when the test Wi-Fi restarts, so run
+`sudo nmcli connection up jittersim-ap` or reboot once after the first install.
+mDNS stays blocked on the test Wi-Fi. Devices there reach the Pi by the easy
+address or `192.168.50.1`, and by nothing else.
+
+**Trust the Pi once** to stop certificate warnings. The first time, open
+the easy address, accept the warning once, sign in with the admin token and
+choose **Allow this device**. A **Trust this Pi** section then offers the
+authority certificate as a `.crt` file and as an Apple profile
+(`.mobileconfig`) with three short steps for a Mac and for an iPhone or iPad.
+Compare the fingerprint shown there with the one the installer printed.
+After that, the easy address, `jittersim.local` and the Ethernet address open
+without a warning on that device. Test Wi-Fi devices receive a separate
+certificate that names only the easy address and `192.168.50.1`, so the
+sign-in page does not reveal other names.
+
+The leaf certificate is renewed by the installer (and by dashboard updates)
+when its names or the Ethernet address change or fewer than 30 days remain.
+Devices that already trust the authority need nothing when that happens.
 
 After updating from a version before September 2026, choose **Reset network**
 once. Older versions left duplicate traffic filters behind and a reset removes
@@ -118,10 +142,14 @@ An update also upgrades the saved schedules so they can apply to a group or to
 everyone else. Older versions can't read those schedules, so before going back
 to one, delete them or restore a backup from before the update.
 
-The certificate is named after the Pi (`<pi-name>.local`) and also covers
-`jittersim.local` and the current Ethernet address. If the host name or the
-address changes, run the installer again and verify and trust the newly
-printed certificate.
+The dashboard certificate is named after the Pi (`<pi-name>.local`) and also
+covers `jittersim.local`, the easy name and the current Ethernet address. If the
+host name or the address changes, run the installer again. It issues a new
+certificate from the same authority, so trusted devices keep working. The
+Ethernet address must stay in the same private range (for example
+`192.168.x.x`) as when the authority was created. For an address in another
+range, use the easy address, or delete `/etc/jittersim/ca` as root to create a
+new authority and trust it again on every device.
 
 Open **Admin token** in the sidebar and choose **Check token** to load the
 dashboard: `sudo grep JITTERSIM_ADMIN_TOKEN /etc/jittersim/control.env` shows
