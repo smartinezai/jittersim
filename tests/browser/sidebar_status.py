@@ -47,7 +47,11 @@ def show_status(page):
 
 
 def wait_for_automatic_token_check(page):
-    expect(page.locator("#message")).to_contain_text("Token accepted. Diagnostics loaded.")
+    # The check ends after many requests to a dashboard that answers one at a time.
+    # A slow shared CI machine needs more than 5 seconds (like apply_clarity).
+    expect(page.locator("#message")).to_contain_text(
+        "Token accepted. Diagnostics loaded.", timeout=20000
+    )
     show_status(page)
 
 
@@ -75,6 +79,10 @@ def check_width(browser, width, height):
         page.locator("#check-admin-token").click()
         expect(page.locator("#private-dashboard")).to_be_visible()
         page.locator("#remember-admin-token").check()
+        # A reload before the token is stored would forget it.
+        expect(page.locator("#remember-admin-token-note")).to_contain_text(
+            "Remembered until", timeout=20000
+        )
         page.locator("#close-credentials").click()
 
         post(

@@ -1759,6 +1759,37 @@ class ActivityRecordingTests(unittest.TestCase):
 
         self.assertEqual(self.messages(), [])
 
+    def test_the_log_names_devices_like_the_dashboard_and_not_by_their_placeholder(self) -> None:
+        # A client saved from the connected list gets the placeholder "Client <ip>".
+        self.repository.save_device(
+            Device("laptop", "Client 192.168.50.11", "192.168.50.11", "normal",
+                   "aa:aa:aa:aa:aa:11")
+        )
+        self.repository.save_connected_device_label(
+            mac_address="aa:aa:aa:aa:aa:11", display_name="Sam laptop", device_type="laptop"
+        )
+        self.repository.save_device(
+            Device("spare", "Client 192.168.50.12", "192.168.50.12", "normal")
+        )
+        self.tick(self.BEFORE)
+        for device_id in ("laptop", "spare"):
+            self.repository.save_timer(
+                Timer(
+                    id=device_id + "-timer", device_id=device_id, profile_id="slow",
+                    started_at=int(self.BEFORE), expires_at=int(self.BEFORE) + 600,
+                )
+            )
+
+        self.tick(self.BEFORE + 1)
+
+        self.assertEqual(
+            sorted(self.messages()),
+            [
+                "Sam laptop: timer started, now Slow",
+                "Unknown device (192.168.50.12): timer started, now Slow",
+            ],
+        )
+
     def test_outages_are_recorded(self) -> None:
         self.repository.save_profile(
             Profile(
@@ -2051,6 +2082,33 @@ class DeviceAddressTests(unittest.TestCase):
         self.assertEqual(
             [(event["kind"], event["message"]) for event in self.repository.list_activity()],
             [("address", "Phone moved from 192.168.50.10 to 192.168.50.23")],
+        )
+
+    def test_address_messages_name_devices_by_their_label_and_not_their_placeholder(self) -> None:
+        self.repository.save_device(
+            Device("phone", "Client 192.168.50.10", "192.168.50.10", "slow", "aa:aa:aa:aa:aa:01")
+        )
+        self.repository.save_connected_device_label(
+            mac_address="aa:aa:aa:aa:aa:01", display_name="Sam phone", device_type="phone"
+        )
+        self.repository.save_device(Device("tablet", "Client 192.168.50.23", "192.168.50.23", "slow"))
+        self.connect(("aa:aa:aa:aa:aa:01", "192.168.50.23"))
+
+        with self.assertLogs("jittersim.engine.runtime", "WARNING"):
+            self.check(100)
+
+        self.assertEqual(
+            [event["message"] for event in self.repository.list_activity()],
+            [
+                "Sam phone now uses 192.168.50.23, which Unknown device (192.168.50.23) keeps, "
+                "so it stays at 192.168.50.10"
+            ],
+        )
+        self.repository.delete_device("tablet")
+        self.check(131)
+        self.assertEqual(
+            self.repository.list_activity()[0]["message"],
+            "Sam phone moved from 192.168.50.10 to 192.168.50.23",
         )
 
     def test_devices_that_swap_addresses_both_move(self) -> None:

@@ -27,7 +27,7 @@ function populateAccessTargets() {
   const select = element('site-rule-target');
   const selected = select.value;
   const options = [new Option('Everyone on the test Wi-Fi', 'everyone')];
-  devices.forEach(device => options.push(new Option(device.name, 'device:' + device.id)));
+  devices.forEach(device => options.push(new Option(devicePickerLabel(device), 'device:' + device.id)));
   groups.forEach(group => options.push(new Option('Group: ' + group.name, 'group:' + group.id)));
   select.replaceChildren(...options);
   if (options.some(option => option.value === selected)) select.value = selected;
@@ -95,7 +95,8 @@ function renderSiteRules() {
   if (!siteRules.length) container.append(textNode('p', 'No named site rules yet. Add a site or a collection of domains for a service.'));
   siteRules.forEach(rule => {
     const row = textNode('article', '', 'access-rule-row');
-    const owner = rule.device_id ? devices.find(d => d.id === rule.device_id)?.name || rule.device_id :
+    const owner = rule.device_id ? (devices.some(d => d.id === rule.device_id)
+      ? deviceTitle(devices.find(d => d.id === rule.device_id)) : rule.device_id) :
       rule.group_id ? 'Group: ' + (groups.find(g => g.id === rule.group_id)?.name || rule.group_id) : 'Everyone';
     const copy = textNode('div', '');
     copy.append(textNode('h3', rule.name), textNode('p', owner + ' · ' + (rule.enabled ? 'Enabled' : 'Disabled')),
@@ -131,7 +132,7 @@ function renderAccessDevices() {
   const policy = applied || accessState?.saved_policy;
   if (!policy) return;
   container.replaceChildren();
-  const all = new Map(devices.filter(d => d.mac_address).map(d => [d.mac_address, d]));
+  const all = new Map(devices.filter(d => d.mac_address).map(d => [d.mac_address, {...d, name: deviceTitle(d)}]));
   (lastConnectedDevices?.devices || []).forEach(d => {
     if (d.mac_address && !all.has(d.mac_address)) all.set(d.mac_address, {...d, name:d.display_name || d.hostname || d.mac_address});
   });

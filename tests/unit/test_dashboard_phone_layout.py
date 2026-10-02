@@ -212,9 +212,11 @@ def test_scrolling_honours_reduced_motion():
     page = "".join(SCRIPTS)
     assert 'window.matchMedia("(prefers-reduced-motion: reduce)")' in SECOND_SCRIPT
     reveal = re.search(r"function revealElement\(.*?\n    }\n", SECOND_SCRIPT, re.DOTALL).group(0)
-    assert "behavior: scrollBehavior()" in reveal
+    assert 'behavior: reduceMotion ? "auto" : "smooth"' in reveal
+    # Every other smooth scroll asks the same setting through scrollBehavior().
     smooth = re.findall(r'behavior: ([^,}]*"smooth"[^,}]*)', page)
-    assert smooth and all("scrollBehavior()" in found for found in smooth), smooth
+    assert len(smooth) >= 3, smooth
+    assert all("scrollBehavior()" in found or found.startswith("reduceMotion ?") for found in smooth), smooth
 
 
 def test_the_desktop_page_list_gives_room_to_the_footer_on_a_short_window():

@@ -18,7 +18,11 @@ def wait_for_automatic_token_check(page):
     before it ends the late message overwrites the one a test is waiting for.
     """
 
-    expect(page.locator("#message")).to_contain_text("Token accepted. Diagnostics loaded.")
+    # The check ends after many requests to a dashboard that answers one at a time.
+    # A slow shared CI machine needs more than 5 seconds (like apply_clarity).
+    expect(page.locator("#message")).to_contain_text(
+        "Token accepted. Diagnostics loaded.", timeout=20000
+    )
 
 
 def run():
@@ -66,6 +70,10 @@ def run():
                     ).ok
                     sidebar_control(page, "#open-admin-credentials").click()
                     page.locator("#remember-admin-token").check()
+                    # A reload before the token is stored would forget it.
+                    expect(page.locator("#remember-admin-token-note")).to_contain_text(
+                        "Remembered until", timeout=20000
+                    )
                     page.locator("#close-credentials").click()
                     page.reload()
                     wait_for_automatic_token_check(page)

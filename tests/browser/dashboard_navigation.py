@@ -17,7 +17,18 @@ def unlock(page):
     page.locator("#check-admin-token").click()
     expect(page.locator("#private-dashboard")).to_be_visible()
     page.locator("#remember-admin-token").check()
+    # The token is stored once it is accepted. A reload before that forgets it.
+    expect(page.locator("#remember-admin-token-note")).to_contain_text(
+        "Remembered until", timeout=20000
+    )
     page.locator("#close-credentials").click()
+
+
+def wait_for_remembered_token(page):
+    """After a reload the page checks the remembered token again before it unlocks."""
+
+    expect(page.locator("#admin-credential-state")).to_have_text("Accepted", timeout=20000)
+    expect(page.locator("#private-dashboard")).to_be_visible()
 
 
 def only_visible(page, name):
@@ -72,6 +83,7 @@ def check_collapsing(page):
     expect(timer).to_have_attribute("aria-expanded", "true")
     expect(page.locator("#timer-list")).to_be_visible()
     page.reload()
+    wait_for_remembered_token(page)
     only_visible(page, "schedules")
     expect(page.get_by_role("button", name="Run a profile timer")).to_have_attribute(
         "aria-expanded", "true"

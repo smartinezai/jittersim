@@ -148,14 +148,16 @@ if [ -z "$dashboard_ip" ]; then
     dashboard_ip=127.0.0.1
 fi
 # The certificate is named after the Pi and also covers the jittersim.local
-# name that the Avahi publisher announces on the management network.
+# name that the Avahi publisher announces on the management network and the
+# test Wi-Fi gateway address that browsers on the test Wi-Fi use.
 dashboard_host="$(hostname -s).local"
 dashboard_cert_matches=false
 if [ -s "$CONFIG_DIR/dashboard.crt" ] && [ -s "$CONFIG_DIR/dashboard.key" ]; then
     dashboard_cert_text=$(openssl x509 -in "$CONFIG_DIR/dashboard.crt" -noout -text 2>/dev/null || true)
     if printf '%s\n' "$dashboard_cert_text" | grep -Fq "IP Address:$dashboard_ip" \
         && printf '%s\n' "$dashboard_cert_text" | grep -Fq "DNS:$dashboard_host" \
-        && printf '%s\n' "$dashboard_cert_text" | grep -Fq "DNS:jittersim.local"; then
+        && printf '%s\n' "$dashboard_cert_text" | grep -Fq "DNS:jittersim.local" \
+        && printf '%s\n' "$dashboard_cert_text" | grep -Fq "IP Address:192.168.50.1"; then
         dashboard_cert_matches=true
     fi
 fi
@@ -165,7 +167,7 @@ if [ "$dashboard_cert_matches" = false ]; then
         -keyout "$CONFIG_DIR/dashboard.key" \
         -out "$CONFIG_DIR/dashboard.crt" \
         -subj "/CN=$dashboard_host" \
-        -addext "subjectAltName=DNS:$dashboard_host,DNS:jittersim.local,IP:$dashboard_ip" \
+        -addext "subjectAltName=DNS:$dashboard_host,DNS:jittersim.local,IP:$dashboard_ip,IP:192.168.50.1" \
         -addext "extendedKeyUsage=serverAuth"
 fi
 chown root:jittersim "$CONFIG_DIR/dashboard.key"
