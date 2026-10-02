@@ -8,6 +8,7 @@ dashboard's node tests and runs both versions on the same samples.
 """
 
 import json
+import unicodedata
 from typing import Any, Dict, List
 
 from jittersim.remote_client import js_number, js_round
@@ -278,11 +279,46 @@ def impact_row(key: str, entry: Dict[str, Any]) -> Dict[str, Any]:
     return row
 
 
-def _name_key(name: Any) -> tuple:
-    """Close to the browser's localeCompare for ordinary device names: case is ignored first."""
+# The order the browser's localeCompare gives ASCII in English and German (Unicode's default
+# collation): spaces and punctuation first, then digits, then letters with a and A equal.
+_COLLATION_ORDER = " _-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$0123456789abcdefghijklmnopqrstuvwxyz"
+_COLLATION_WEIGHTS = {character: index for index, character in enumerate(_COLLATION_ORDER)}
+# The accents in that collation's order. Others follow by code point.
+_ACCENT_ORDER = ("̧̨́̀̆̂̌̊̈̋̃̇"
+                 "̵̸̣̱̄̉")
+_ACCENT_WEIGHTS = {mark: index for index, mark in enumerate(_ACCENT_ORDER)}
+# æ and ß sort as two letters with a mark after the first that outweighs every accent.
+_LIGATURE_MARK = ""
+_ACCENT_WEIGHTS[_LIGATURE_MARK] = 900
+# Letters that sort as a base letter with a mark or as two letters.
+_EXPANSIONS = {"æ": "ae", "Æ": "AE", "ß": "ss", "ø": "o̸",
+               "Ø": "O̸", "ł": "l̵", "Ł": "L̵", "đ": "d̵",
+               "Đ": "D̵"}
 
-    text = str(name)
-    return (text.casefold(), text.swapcase())
+
+def _name_key(name: Any) -> tuple:
+    """Sort names like the page's localeCompare: letters first, then accents, then case.
+
+    It matches the browser in English and German for names made of ASCII and Latin letters
+    with accents. Letters of other scripts follow the Latin ones by code point, which the
+    browser may order otherwise.
+    """
+
+    text = "".join(_EXPANSIONS.get(character, character)
+                   for character in unicodedata.normalize("NFKD", str(name)))
+    letters, accents, cases = [], [], []
+    for character in text:
+        if unicodedata.combining(character) or character == _LIGATURE_MARK:
+            if accents:
+                accents[-1] += (_ACCENT_WEIGHTS.get(character, 1000 + ord(character)),)
+            continue
+        lower = character.lower()
+        weight = _COLLATION_WEIGHTS.get(lower)
+        letters.append((0, weight) if weight is not None else (1, ord(lower)))
+        accents.append(())
+        # Lower case sorts before upper case when everything else is equal.
+        cases.append(0 if character == lower else 1)
+    return (letters, accents, cases)
 
 
 def impact_rows(history: Dict[str, Any]) -> List[Dict[str, Any]]:

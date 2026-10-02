@@ -217,7 +217,7 @@ def test_recording_does_not_change_the_history_it_was_given():
     assert json.dumps(history) == before
 
 
-def random_samples(generator):
+def random_impairment(generator):
     impairment = {}
     for field, choices in (
         ("delay_ms", (0, 0, 50, 2000)), ("jitter_ms", (0, 0, 15)),
@@ -226,6 +226,14 @@ def random_samples(generator):
         ("corrupt_percent", (0, 1)),
     ):
         impairment[field] = generator.choice(choices)
+    return impairment
+
+
+def random_samples(generator, *, changes=False):
+    """Counter samples of one queue. With `changes` the counters may restart (a reset or a
+    restarted queue) and the settings may change between two samples."""
+
+    impairment = random_impairment(generator)
     count = generator.choice((1, 2, 2, 2, 3, 5, 13, 15))
     moment = generator.choice((0, 1000.25))
     packets = drops = sent = 0
@@ -238,7 +246,88 @@ def random_samples(generator):
         packets += generator.choice((0, 3, 49, 50, 100, 1000))
         drops += generator.choice((0, 0, 1, 11, 216))
         sent += generator.choice((0, 1500, kbit_bytes(1800, 5), kbit_bytes(2000, 10)))
+        if changes and generator.random() < 0.25:
+            # One counter starts again from a smaller number like after a new queue.
+            counter = generator.choice(("packets", "drops", "bytes"))
+            if counter == "packets":
+                packets = generator.choice((0, packets // 2))
+            elif counter == "drops":
+                drops = generator.choice((0, drops // 2))
+            else:
+                sent = generator.choice((0, sent // 2))
+        if changes and generator.random() < 0.2:
+            impairment = random_impairment(generator)
     return samples
+
+
+def test_random_changes_include_resets_and_new_settings():
+    generator = random.Random(4)
+    cases = [random_samples(generator, changes=True) for _ in range(200)]
+    resets = settings = 0
+    for samples in cases:
+        for (_, before), (_, after) in zip(samples, samples[1:]):
+            resets += any(after[name] < before[name] for name in ("packets", "drops", "bytes"))
+            settings += after["impairment"] != before["impairment"]
+    assert resets > 20 and settings > 20
+
+
+@needs_node
+def test_counter_resets_and_setting_changes_restart_like_the_page():
+    generator = random.Random(20261003)
+    cases = [random_samples(generator, changes=True) for _ in range(400)]
+    page = run_node([served_functions(), PRELUDE], f"{json.dumps(cases)}.map((c) => rowsOf(c))")
+    for samples, expected in zip(cases, page):
+        assert rows_of([tuple(item) for item in samples]) == expected, samples
+
+
+def test_a_counter_reset_or_new_settings_start_the_history_again():
+    imp = {"loss_percent": 5}
+    for second in ({"packets": 5}, {"drops": 0}, {"bytes": 10},
+                   {"impairment": {"loss_percent": 10}}):
+        history = feed([(0, {"impairment": imp, "packets": 10, "drops": 2, "bytes": 100}),
+                        (5, {"impairment": imp, "packets": 10, "drops": 2, "bytes": 100,
+                             **second})])
+        assert len(history["eth0/11:"]["samples"]) == 1, second
+
+
+# The page sorts with the browser's language. The test pins English like a Mac set to English
+# or German would sort.
+ENGLISH_COLLATION = (
+    "const pageLocaleCompare = String.prototype.localeCompare;\n"
+    "String.prototype.localeCompare = function (other) {\n"
+    "  return pageLocaleCompare.call(this, other, 'en');\n};"
+)
+SORT_ALPHABET = "aAbBeEzZoO019 _-.'(äÄéÉèêöÖøüÜßñÑæÆłđ"
+
+
+@needs_node
+def test_rows_are_sorted_like_the_page_for_mixed_names():
+    generator = random.Random(1303)
+    names = sorted({
+        "".join(generator.choice(SORT_ALPHABET) for _ in range(generator.randint(1, 4)))
+        for _ in range(400)
+    } | {"phone", "Phone", "PHONE", "Ärger", "Zebra", "-x", "_x", "x", "x1", "X1", "é", "e"})
+    generator.shuffle(names)
+    queues = [entry({"name": name, "handle": f"{index}:", "impairment": {"loss_percent": 5}})
+              for index, name in enumerate(names)]
+    history = rules.record_impact_sample({}, {"queues": queues}, 0)
+    python = [row["name"] for row in rules.impact_rows(history)]
+    page = run_node(
+        [ENGLISH_COLLATION, served_functions(), PRELUDE],
+        f"impactRows(recordImpactSample({{}}, {{queues: {json.dumps(queues)}}}, 0))"
+        ".map((row) => row.name)",
+    )
+    assert python == page
+
+
+def test_case_and_accents_only_decide_after_the_letters():
+    imp = {"loss_percent": 5}
+    names = ["Zebra", "ärger", "Phone", "phone", "Apfel", "apfel", "_x", "-x", "x"]
+    history = rules.record_impact_sample({}, {"queues": [
+        entry({"name": name, "handle": f"{index}:", "impairment": imp})
+        for index, name in enumerate(names)]}, 0)
+    assert [row["name"] for row in rules.impact_rows(history)] == [
+        "_x", "-x", "apfel", "Apfel", "ärger", "phone", "Phone", "x", "Zebra"]
 
 
 @needs_node
