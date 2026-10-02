@@ -80,7 +80,6 @@ These come from reviews of the recent work. Nobody has asked for them yet.
 - **Rename and regroup traffic names.** The groups come from a built-in table. Let the owner move a name to another group or give an unknown name a label.
 - **Other tabs.** The Saved line under the Start button reads devices and groups and lists once. A change made in another tab shows after a reload. Poll them like the connected clients.
 - **Double announcements.** The message line and the pop-up message both announce each message so a screen reader reads it twice.
-- **Light theme.** The page is dark only.
 - **Accessibility audit.** Run axe-core on every page. It could not be run so far.
 
 ### Diagnostics
@@ -106,6 +105,10 @@ These come from reviews of the recent work. Nobody has asked for them yet.
 - **Journey races.** Two browser journeys failed on timing in CI before they were fixed (a message that arrived late and a busy helper). Review every journey for waits that depend on timing and wait for state instead.
 - **Browser versions.** The local Playwright version differs from the one in CI. Pin both to one version.
 - **Pi in the loop.** A regular check that installs the release on a spare Pi and runs the journeys would catch what the Linux container cannot.
+
+## Not planned
+
+- **A light theme.** The owner does not want one. The dashboard stays dark.
 
 ## Finished
 
