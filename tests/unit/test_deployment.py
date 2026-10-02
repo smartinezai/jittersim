@@ -329,3 +329,18 @@ class StaleAccessStateTests(unittest.TestCase):
             if "systemctl restart jittersim-access-boot.service" in line and "if !" not in line
         ]
         self.assertEqual(bare, [])
+
+
+def test_the_filtered_dns_unit_lets_unbound_list_the_network_interfaces():
+    # Unbound lists interfaces through a netlink socket. Without it the service
+    # stops with "getifaddrs: Address family not supported by protocol" on the Pi.
+    unit = (REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "jittersim-dns.service").read_text()
+    families = [
+        line.split("=", 1)[1].split()
+        for line in unit.splitlines()
+        if line.startswith("RestrictAddressFamilies=")
+    ]
+    assert families, "the unit must restrict address families"
+    assert "AF_NETLINK" in families[0]
+    assert "AF_INET" in families[0] and "AF_UNIX" in families[0]
+    assert "AF_PACKET" not in families[0]
