@@ -10,6 +10,10 @@ from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
+class SessionRejected(ValueError):
+    """The simulated browser credential is no longer valid."""
+
+
 class Fixture:
     """Keep test-only pairing and policy state in bounded memory."""
 
@@ -31,7 +35,8 @@ class Fixture:
     @staticmethod
     def defaults():
         return {"identity": "verified", "protected": False, "service": None,
-                "general": 100, "device": 0, "mode": "normal", "delay": 0}
+                "general": 100, "device": 0, "mode": "normal", "delay": 0,
+                "pair_delay": 0}
 
     def start(self):
         self.thread.start()
@@ -47,6 +52,19 @@ class Fixture:
         with self.lock:
             if payload.get("read_counts") is True:
                 return {"counts": dict(self.counts)}
+            if set(payload) == {"event"}:
+                if payload["event"] == "pairing-code":
+                    self.code = secrets.token_hex(16)
+                    self.code_deadline = time.monotonic() + 120
+                    return {"code": self.code}
+                if payload["event"] in ("expire-session", "restart"):
+                    self.capability = None
+                    self.session_deadline = 0
+                    if payload["event"] == "restart":
+                        self.code = None
+                        self.revision += 1
+                    return {"ok": True}
+                raise ValueError("Unknown fixture event")
             allowed = set(self.defaults())
             if set(payload) - allowed:
                 raise ValueError("Unknown fixture setting")
@@ -60,9 +78,15 @@ class Fixture:
             if type(updated["protected"]) is not bool:
                 raise ValueError("Invalid protection")
             if updated["mode"] not in (
-                "normal", "unavailable", "stale", "malformed", "wrong-origin", "oversized"
-            ) or not isinstance(updated["delay"], (int, float)) or not 0 <= updated["delay"] <= 2:
+                "normal", "unavailable", "stale", "malformed", "wrong-origin", "oversized",
+                "wrong-request", "old-revision", "invalid-identity", "pair-malformed",
+                "pair-invalid-token", "short-lease"
+            ):
                 raise ValueError("Invalid fixture failure")
+            for name in ("delay", "pair_delay"):
+                if (type(updated[name]) not in (int, float)
+                        or not 0 <= updated[name] <= 2):
+                    raise ValueError("Invalid fixture delay")
             self.config = updated
             self.revision += 1
             return {"ok": True}
@@ -71,19 +95,31 @@ class Fixture:
         with self.lock:
             if (set(payload) != {"code"} or not isinstance(payload["code"], str)
                     or not self.code or time.monotonic() >= self.code_deadline
+                    or not payload["code"].isascii()
                     or not hmac.compare_digest(payload["code"], self.code)):
                 raise ValueError("Pairing refused")
             self.code = None
             self.capability = secrets.token_hex(32)
             self.session_deadline = time.monotonic() + 3600
-            return {"kind": "reference-pair", "reference_only": True,
-                    "capability": self.capability, "revision": self.revision}
+            result = {"kind": "reference-pair", "reference_only": True,
+                      "capability": self.capability, "revision": self.revision}
+            delay = self.config["pair_delay"]
+            if self.config["mode"] == "pair-malformed":
+                result["extra"] = True
+            elif self.config["mode"] == "pair-invalid-token":
+                result["capability"] = [result["capability"]]
+            self.counts["pair"] += 1
+        time.sleep(delay)
+        return result
 
     def policy(self, payload, authorization):
         with self.lock:
+            self.counts["policy_attempts"] += 1
             if (not self.capability or time.monotonic() >= self.session_deadline
-                    or not hmac.compare_digest(authorization, "Reference " + self.capability)
-                    or set(payload) != {"origin", "request_id"}
+                    or not authorization.isascii()
+                    or not hmac.compare_digest(authorization, "Reference " + self.capability)):
+                raise SessionRejected("Pairing lost")
+            if (set(payload) != {"origin", "request_id"}
                     or payload["origin"] != self.origin
                     or not isinstance(payload["request_id"], str)
                     or len(payload["request_id"]) > 40):
@@ -101,10 +137,19 @@ class Fixture:
                   "origin": self.origin, "request_id": payload["request_id"]}
         if config["mode"] == "stale":
             result["lease_ms"] = 0
+        elif config["mode"] == "short-lease":
+            result["lease_ms"] = 100
         elif config["mode"] == "malformed":
             result["chance"] = 101
         elif config["mode"] == "wrong-origin":
             result["origin"] = "http://192.168.50.1:8080"
+        elif config["mode"] == "wrong-request":
+            result["request_id"] = "another-request"
+        elif config["mode"] == "old-revision":
+            result["revision"] = 0
+        elif config["mode"] == "invalid-identity":
+            result["simulated_identity"] = "protected"
+            result["enabled"] = True
         elif config["mode"] == "oversized":
             result["extra"] = "x" * 9000
         return (503 if config["mode"] == "unavailable" else 200), result
@@ -150,6 +195,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
         self.end_headers()
         try:
             self.wfile.write(body)
@@ -190,5 +236,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(status, result)
             else:
                 self.respond(404, {"error": "No reference route"})
+        except SessionRejected:
+            self.respond(401, {"error": "Reference pairing lost"})
         except (ValueError, UnicodeError, socket.timeout):
             self.respond(400, {"error": "Reference request refused"})

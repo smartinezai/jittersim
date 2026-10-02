@@ -12,15 +12,27 @@ let capability = null;
 let lastRevision = 0;
 let epoch = 0;
 let pending = null;
+let pairing = false;
+let cancellation = "Pending action cancelled.";
 let testTab = null;
 const ready = chrome.storage.session.get(["referenceSession", "referenceTab"]).then(
   ({ referenceSession, referenceTab }) => {
-  if (referenceSession && /^[a-f0-9]{64}$/.test(referenceSession.capability || "")) {
+  if (referenceSession && typeof referenceSession.capability === "string" &&
+      /^[a-f0-9]{64}$/.test(referenceSession.capability) &&
+      Number.isSafeInteger(referenceSession.revision) && referenceSession.revision >= 1) {
     capability = referenceSession.capability;
     lastRevision = referenceSession.revision;
   }
   if (Number.isSafeInteger(referenceTab) && referenceTab >= 0) testTab = referenceTab;
 });
+
+class SessionRejected extends Error {}
+
+function cancelPending(status) {
+  cancellation = status;
+  epoch += 1;
+  pending?.abort();
+}
 
 async function boundedJSON(path, body, credential, controller) {
   const timer = setTimeout(() => controller.abort(), 750);
@@ -32,8 +44,13 @@ async function boundedJSON(path, body, credential, controller) {
       } : {}) },
       body: JSON.stringify(body), signal: controller.signal
     });
+    if (credential && [401, 403].includes(response.status)) {
+      controller.abort();
+      throw new SessionRejected();
+    }
     if (!response.ok || response.url !== base + path ||
         !/^application\/json(?:;|$)/i.test(response.headers.get("Content-Type") || "")) {
+      controller.abort();
       throw new Error("Policy unavailable");
     }
     const reader = response.body.getReader();
@@ -71,7 +88,7 @@ function validPolicy(policy, requestId, started) {
     (!policy.enabled || policy.simulated_identity === "verified");
 }
 
-async function navigate(path) {
+async function navigate(path, currentEpoch) {
   const url = new URL(path, base);
   if (url.origin !== base || !["/", ...Object.values(actions)].includes(url.pathname) ||
       url.search || url.hash || url.username || url.password) {
@@ -81,12 +98,18 @@ async function navigate(path) {
     try { await chrome.tabs.update(testTab, { url: url.href, active: false }); return; }
     catch { testTab = null; }
   }
+  if (epoch !== currentEpoch) throw new Error("Action cancelled");
   const tab = await chrome.tabs.create({ url: url.href, active: false });
   testTab = tab.id;
   await chrome.storage.session.set({ referenceTab: testTab });
 }
 
-chrome.tabs.onRemoved.addListener(id => { if (id === testTab) testTab = null; });
+chrome.tabs.onRemoved.addListener(id => {
+  if (id !== testTab) return;
+  testTab = null;
+  cancelPending("Test tab closed. Pending action cancelled.");
+  chrome.storage.session.remove("referenceTab").catch(() => {});
+});
 
 async function handle(message) {
   await ready;
@@ -94,11 +117,11 @@ async function handle(message) {
   if (message.command === "status") return { ok: true, enabled, paired: !!capability };
   if (message.command === "off") {
     enabled = false;
-    epoch += 1;
-    pending?.abort();
+    cancelPending("Off. Pending action cancelled.");
     return { ok: true, status: "Off. Pending action cancelled." };
   }
   if (message.command === "enable") {
+    if (pairing) return { ok: false, status: "Pairing in progress. Effect is off." };
     enabled = !!capability;
     return { ok: enabled, status: enabled ? "Enabled for reference actions" : "Pair first" };
   }
@@ -110,21 +133,37 @@ async function handle(message) {
     pending = controller;
     const currentEpoch = ++epoch;
     enabled = false;
+    pairing = true;
+    capability = null;
+    lastRevision = 0;
     try {
+      await chrome.storage.session.remove("referenceSession");
+      if (currentEpoch !== epoch) throw new Error("Pairing cancelled");
       const result = await boundedJSON("/reference/pair", { code: message.code }, null, controller);
-      if (currentEpoch !== epoch || result.reference_only !== true ||
-          result.kind !== "reference-pair" || !/^[a-f0-9]{64}$/.test(result.capability || "") ||
+      if (currentEpoch !== epoch || !result || typeof result !== "object" ||
+          Array.isArray(result) || Object.keys(result).sort().join(",") !==
+            "capability,kind,reference_only,revision" || result.reference_only !== true ||
+          result.kind !== "reference-pair" || typeof result.capability !== "string" ||
+          !/^[a-f0-9]{64}$/.test(result.capability) ||
           !Number.isSafeInteger(result.revision) || result.revision < 1) {
         throw new Error("Invalid pairing response");
       }
+      await chrome.storage.session.set({ referenceSession: {
+        capability: result.capability, revision: result.revision
+      } });
+      if (currentEpoch !== epoch) {
+        await chrome.storage.session.remove("referenceSession");
+        return { ok: false, status: cancellation };
+      }
       capability = result.capability;
       lastRevision = result.revision;
-      await chrome.storage.session.set({ referenceSession: {
-        capability, revision: lastRevision
-      } });
       return { ok: true, status: "Simulated device paired. Effect is off." };
-    } catch { return { ok: false, status: "Pairing unavailable" }; }
-    finally { if (pending === controller) pending = null; }
+    } catch {
+      return { ok: false, status: currentEpoch !== epoch ? cancellation : "Pairing unavailable" };
+    } finally {
+      pairing = false;
+      if (pending === controller) pending = null;
+    }
   }
   if (message.command !== "launch" || !Object.hasOwn(actions, message.action)) {
     return { ok: false, status: "Action refused" };
@@ -158,12 +197,19 @@ async function handle(message) {
             status = "Policy expired. Opened the test page.";
           }
         }
-      } catch { /* An unavailable policy leaves ordinary test navigation usable. */ }
+      } catch (error) {
+        if (error instanceof SessionRejected) {
+          enabled = false;
+          capability = null;
+          lastRevision = 0;
+          await chrome.storage.session.remove("referenceSession");
+          status = "Pairing lost. Effect off. Opened the test page.";
+        }
+        /* An unavailable policy leaves ordinary test navigation usable. */
+      }
     }
-    if (epoch !== currentEpoch || controller.signal.aborted && !enabled) {
-      return { ok: false, status: "Off. Pending action cancelled." };
-    }
-    await navigate(selected ? "/" : actions[message.action]);
+    if (epoch !== currentEpoch) return { ok: false, status: cancellation };
+    await navigate(selected ? "/" : actions[message.action], currentEpoch);
     return { ok: true, status };
   } finally { if (pending === controller) pending = null; }
 }

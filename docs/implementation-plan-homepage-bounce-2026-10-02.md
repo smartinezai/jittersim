@@ -2,6 +2,12 @@
 
 ## Human review summary
 
+The follow-up review stays within the approved local reference. Re-pairing
+must leave the effect off and discard the old local session. Off and test-tab
+closure must invalidate pending work even if Enable is clicked afterwards.
+Real worker and browser restarts are checked separately from simulated server
+identity and session loss. Live pairing and production delivery remain open.
+
 Verify the existing DNS connection-error setting first. Then build a small
 optional Chrome extension prototype that starts explicit test navigations on
 enrolled sites. A selected navigation goes either to the requested test page
@@ -257,3 +263,45 @@ the separate DNS test commit. No production module changed. Live identity,
 HTTPS pairing, profile persistence and the broader verification table above
 remain requirements for a later release. These results do not cover that
 future implementation or establish physical protection.
+
+## Bounded reference review on 2 October 2026
+
+The authorized follow-up reviews only this isolated reference. The central
+reasoning is whether pairing, Off and browser lifecycle changes can invalidate
+pending work safely. Routine runtime checks and documentation stay local.
+
+Reproduce Enable during re-pairing with the actual extension before changing
+its state handling. Also check replayed pairing codes, session loss, worker
+restart, closing a test tab during a pending lookup and late interface replies.
+Validate policy shape and freshness with controlled fixture failures. Preserve
+one outstanding request and the fixed loopback destination list.
+
+Fix only confirmed material problems. Add focused regression checks that use
+the served fixture and installed extension. Keep the existing off default and
+ordinary named-page fallback when policy is unavailable. A rejected session
+must require explicit pairing and Enable again. Successful pairing stays off.
+
+Use a separate local review branch from `8aa7f80`. Run the focused browser
+journey, relevant fixture checks, lint and JavaScript syntax checks. Review the
+complete reference diff. No production endpoint, schema, deployment or live
+traffic change belongs to this scope. Rollback removes the disposable test
+profile and reverts the local review commits.
+
+The Docker VM still has fourteen unrelated containers, so the extended DNS
+packet case remains unrun. No container may be stopped or deleted for this
+review. Physical three-device acceptance and live identity/HTTPS pairing stay
+unverified. The latest fetched integration and Pi snapshots are `aef052e` and
+`d38c590`; this review does not verify them.
+
+Confirmed before fixes in the actual browser:
+
+- Enable during a rejected re-pair left the worker enabled with the old
+  credential while the page reported pairing unavailable.
+- Closing the dedicated test tab during a delayed policy lookup created a
+  replacement tab after the owner closed the original.
+
+Clear the old local session before re-pairing and refuse Enable until pairing
+finishes. Successful pairing stays off. Rejecting an expired or replaced
+session clears local pairing. Make Off and tab closure invalidate pending
+work. Prevent an older interface reply from overwriting a newer Off result.
+Extend only the disposable harness to model pairing delay and session loss.
