@@ -40,3 +40,15 @@ The final release uses the normal installer and the coordinator's deployment pla
 ## Verification record
 
 Independent plan review approved forwarding the optional rules through the existing DNS wrapper. It required direct empty-input and shared-budget tests. These requirements are included above. Record the exact before/after failures, focused checks, independent source review and final source commit here before handoff.
+
+
+Completed source repair: `ab2a8da749cb38914cdab8bd5f97b6ba5257872c`.
+
+- The actual merged source produced 22 failures and 48 passes in selected existing general/variation checks. All four new direct compilation cases failed with the same `NameError` before repair.
+- After repair 121 affected general, variation, service-list, website, resolver and lookup-pool checks passed.
+- Direct coverage preserves saved fallback, supplied rolls and outages, intentionally empty input and one shared lookup deadline. The deadline check observes lookup admission rather than depending on worker startup timing.
+- Independent source review found no production blocker. Its test timing concern was resolved before the source checkpoint.
+- Final combined source `894d40ec346c20e7c2b933dc158a6c47e51f0fe8` passed 3,071 tests with 39 expected skips on both Mac and Linux. Required Ruff and whitespace checks passed.
+- Fresh installed-wheel general-profile, protected-client and complete browser journeys passed. Service-list packet acceptance passed for rerolls, outages, both directions, IPv4, IPv6, protected clients and continued Pi DNS.
+
+The release coordinator carried the source into its local combined candidate. Exact-head green CI and final combined deployment acceptance remain separate gates. No original source branch, remote ref or physical Pi was changed by this repair.

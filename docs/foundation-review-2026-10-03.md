@@ -1,6 +1,6 @@
 # Remaining foundation review
 
-The service-list variation merge needs a small general-profile integration repair. The browser proxy also has a pre-existing unfinished-DNS-work defect. Both are being repaired separately on this isolated branch. The semantic-version and deployment changes have no new blocker in isolation but their combined signing and first-upgrade paths need deliberate integration and acceptance tests.
+The service-list variation merge needs a small general-profile integration repair. The browser proxy also has a pre-existing unfinished-DNS-work defect. Both are repaired in separate commits on this isolated branch and their local verification passed. The semantic-version and deployment changes have no new blocker in isolation but their combined signing and first-upgrade paths need deliberate integration and acceptance tests.
 
 This is a source review and local reproduction record. It is not evidence of device acceptance or green CI.
 
@@ -50,3 +50,12 @@ Exact-source execution confirmed that older managers reject the development labe
 Relevant source points are PR74 `deploy-from-mac.sh:403`, PR60 `build-release.sh:12` and `updates.py:385`, PR52 `updates.py:744` and `updates.py:893` and PR52 signing fixtures `test_release_signing_scripts.py:273`. The historical foundation did not yet include the remote CLI/deployment script.
 
 Physical first installation, signing trust setup, passwordless staging and rollback still need the deployment owner's acceptance. No physical Pi command was run during these source reviews.
+
+
+## Completed repair handoff
+
+General-profile integration is fixed in `ab2a8da749cb38914cdab8bd5f97b6ba5257872c`. Proxy DNS work is bounded in `894d40ec346c20e7c2b933dc158a6c47e51f0fe8`. Both had reviewed plans before source changes and independent source reviews after implementation. The coordinator has carried both into its local candidate.
+
+The complete repaired source passed 3,071 tests with 39 expected skips on each of Mac and Linux. The final installed wheel passed general-profile, protected-client and complete dashboard browser journeys. Real service-list packet acceptance passed for IPv4, IPv6, outages, rerolls, both traffic directions, continued Pi DNS and protected devices. Required Ruff and whitespace checks passed.
+
+This closes the two reproduced source defects within this review. It does not close the separate signing/version upgrade integration, final combined CI or physical deployment gates. PR72 remains open and its failed-job annotation reports account billing or a spending limit preventing startup.
