@@ -281,3 +281,100 @@ class AddressMoveServerTests(unittest.TestCase):
         self.assertEqual(self.server.address_move_offer(identity)["replaced"][0]["old_mac"], OLD)
         identity["allowed"] = False
         self.assertEqual(self.server.address_move_offer(identity)["replaced"], [])
+
+
+# ---- review fixes ----------------------------------------------------------
+
+from jittersim.networking.helper import HelperClientError  # noqa: E402
+
+THIRD = "02:00:00:00:00:77"
+
+
+class AccessListHelper(PlanRecordingHelper):
+    """Answers the saved access list and records what the server asks the helper to do."""
+
+    def __init__(self, devices):
+        super().__init__()
+        self.devices = devices
+        self.calls = []
+
+    def dashboard_access(self, operation, **values):
+        self.calls.append(operation)
+        if operation == "local-list":
+            return {"ok": True, "devices": self.devices}
+        if operation == "undo-move":
+            raise HelperClientError("There is no move to undo for that device.")
+        return {"ok": True, "network": "test", "allowed": True, "can_register": True,
+                "mac_address": MAC}
+
+
+class ReviewFixTests(unittest.TestCase):
+    def setUp(self):
+        self.repository = ConfigRepository(":memory:")
+        self.server = ControlServer(("127.0.0.1", 0), self.repository)
+        self.server.helper_client = AccessListHelper([])
+        self.repository.save_unaffected_device(UnaffectedDevice(OLD, "Aeromac", 1))
+
+    def tearDown(self):
+        self.server.server_close()
+        self.repository.close()
+
+    def identity(self, **values):
+        return {"network": "test", "mac_address": MAC, "allowed": True, "can_register": True, **values}
+
+    def test_a_device_that_is_not_a_candidate_cannot_be_the_source_of_a_move(self):
+        self.assertTrue(self.server.is_address_move_source(self.identity(), OLD))
+        self.assertFalse(self.server.is_address_move_source(self.identity(), THIRD))
+        # A device that is still connected under its own address is not an old address.
+        self.server._station_devices = lambda: [
+            {"ipv4_address": "192.168.50.20", "mac_address": OLD, "hostname": None}]
+        self.assertFalse(self.server.is_address_move_source(self.identity(), OLD))
+
+    def test_an_unverified_requester_is_not_offered_a_move(self):
+        offer = self.server.address_move_offer(self.identity(can_register=False))
+        self.assertFalse(offer["offer"])
+        self.assertEqual(offer["candidates"], [])
+
+    def test_an_earlier_move_cannot_be_undone_after_the_device_moved_again(self):
+        self.server.move_device_address(OLD, MAC, access_moved=False)
+        self.server.move_device_address(MAC, THIRD, access_moved=False)
+        status, _, body = self.server.undo_device_address_move(OLD, PEER)
+        self.assertEqual(status, 409, body)
+        self.assertIn("latest move first", json.loads(body)["error"])
+        self.assertEqual({item.mac_address for item in self.repository.list_unaffected_devices()},
+                         {THIRD})
+        self.assertEqual(self.server.undo_device_address_move(MAC, PEER)[0], 200)
+        self.assertEqual(self.server.undo_device_address_move(OLD, PEER)[0], 200)
+        self.assertEqual({item.mac_address for item in self.repository.list_unaffected_devices()},
+                         {OLD})
+
+    def test_undo_still_works_when_the_replaced_access_entry_was_removed(self):
+        self.repository.delete_unaffected_device(OLD)
+        self.server.move_device_address(OLD, MAC, access_moved=True)
+        status, _, body = self.server.undo_device_address_move(OLD, PEER)
+        self.assertEqual(status, 200, body)
+        self.assertIsNone(self.repository.get_address_move(OLD))
+        self.assertNotIn("undo-move", self.server.helper_client.calls)
+
+    def test_undo_still_asks_the_helper_while_the_replaced_entry_exists(self):
+        self.repository.delete_unaffected_device(OLD)
+        self.server.helper_client.devices = [
+            {"mac_address": OLD, "name": "Aeromac", "added_at": 1, "replaced_by": MAC, "replaced_at": 2}]
+        self.server.move_device_address(OLD, MAC, access_moved=True)
+        status, _, _ = self.server.undo_device_address_move(OLD, PEER)
+        self.assertEqual(status, 409)
+        self.assertIn("undo-move", self.server.helper_client.calls)
+        self.assertIsNotNone(self.repository.get_address_move(OLD))
+
+
+def test_nothing_new_shows_before_the_token_is_accepted():
+    import re
+
+    from jittersim.api.server import DASHBOARD_HTML
+
+    for element_id in ("address-help", "address-type-note", "address-move-card", "address-move-replaced"):
+        tag = re.search(r'<[a-z]+ [^>]*id="%s"[^>]*>' % element_id, DASHBOARD_HTML).group(0)
+        assert " hidden" in tag, element_id
+    # The help is revealed with the other account details and hidden again when access is locked.
+    assert 'element("address-help").hidden = false' in DASHBOARD_HTML
+    assert 'element("address-help").hidden = true' in DASHBOARD_HTML

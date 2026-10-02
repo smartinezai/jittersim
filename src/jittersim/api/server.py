@@ -1137,7 +1137,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     <p>Saved access keeps this dashboard usable during tests. Internet traffic still follows profiles.
       A changed private Wi-Fi address needs a one-click move to the new address. The admin token is always required.</p>
     <p id="address-type-note" class="form-note" hidden></p>
-    <details id="address-help">
+    <details id="address-help" hidden>
       <summary>Keep this device's Wi-Fi address from changing</summary>
       <p class="form-note">On a Mac: System Settings, Wi-Fi, this network, Details, Private Wi-Fi address, Fixed.
         On an iPhone or iPad: Settings, Wi-Fi, the (i) beside this network, Private Wi-Fi Address, Fixed.
@@ -2415,6 +2415,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       element("address-move-card").hidden = true;
       element("address-type-note").hidden = true;
       element("address-move-replaced").hidden = true;
+      element("address-help").hidden = true;
       element("dashboard-access-status").textContent = message;
       setPrivateDataPanels(message);
       stopTrafficSampling(message);
@@ -2533,6 +2534,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         : data.can_register ? "Token accepted. Choose Allow this device to save dashboard access."
         : "Token accepted but this device could not be verified. Wait a few seconds and check again.";
       setDashboardUnlocked(data.allowed);
+      element("address-help").hidden = false;
       await loadAddressMoves();
       return data;
     }
@@ -12961,6 +12963,19 @@ class ControlServer(HTTPServer):
                 response["error"] = "Selection saved but the network update failed. " + response["error"]
             return status, content_type, _json_bytes(response)
 
+    def _replaced_access_entry_gone(self, old_mac: str) -> bool:
+        """True only when the saved access list was read and no replaced entry for this address is in it."""
+
+        reader = getattr(self.helper_client, "dashboard_access", None)
+        if reader is None:
+            return False
+        try:
+            devices = reader("local-list").get("devices", [])
+        except (HelperClientError, AttributeError, TypeError):
+            return False
+        return not any(isinstance(item, dict) and item.get("mac_address") == old_mac
+                       and "replaced_by" in item for item in devices)
+
     def _active_access_entries(self) -> list:
         """The saved dashboard access entries that grant access, or nothing when unreadable."""
 
@@ -13005,7 +13020,8 @@ class ControlServer(HTTPServer):
                 for move in self.repository.list_address_moves()
                 if move.new_mac == current
             ]
-        if registered and protected:
+        if registered and protected or identity.get("can_register") is not True:
+            # Nothing to take over, or the Pi could not verify this device so a move would be refused.
             return result
         # A device that is still connected under its own address is not an old address.
         connected = {station_mac(item) for item in self._station_devices()}
@@ -13033,6 +13049,12 @@ class ControlServer(HTTPServer):
         )
         result["offer"] = bool(result["candidates"])
         return result
+
+    def is_address_move_source(self, identity: Dict[str, Any], old_mac: str) -> bool:
+        """Only a device the page could have offered may be moved, never one that is still connected."""
+
+        offer = self.address_move_offer(identity)
+        return any(item["mac_address"] == old_mac for item in offer["candidates"])
 
     def move_device_address(self, old_mac: str, new_mac: str, *, access_moved: bool,
                             name: str = ""):
@@ -13090,6 +13112,13 @@ class ControlServer(HTTPServer):
                 if record is None:
                     return HTTPStatus.NOT_FOUND, "application/json", _json_bytes(
                         {"error": "There is no move to undo for that device."})
+                if any(move.old_mac == record.new_mac for move in self.repository.list_address_moves()):
+                    return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+                        {"error": "That device moved again. Undo the latest move first."})
+                if record.moved_access and self._replaced_access_entry_gone(record.old_mac):
+                    # Someone removed the replaced entry, so only the record is left to clear.
+                    record = replace(record, moved_access=False)
+                    self.repository.save_address_move(record)
                 if record.moved_access:
                     try:
                         self.dashboard_access(peer, "undo-move", mac_address=record.old_mac)
@@ -14003,6 +14032,10 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                     status, content_type, body = self.server.undo_device_address_move(
                         old, self.client_address[0])
                 else:
+                    if not self.server.is_address_move_source(
+                            self.server.dashboard_access(self.client_address[0]), old):
+                        raise RequestError("That device cannot be moved to this one. Choose a saved "
+                                           "device that is not connected.")
                     data = self.server.dashboard_access(
                         self.client_address[0], "move-address", mac_address=old)
                     status, content_type, body = self.server.move_device_address(

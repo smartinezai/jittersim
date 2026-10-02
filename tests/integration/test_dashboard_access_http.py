@@ -133,6 +133,14 @@ def test_moving_to_a_new_address_needs_the_token_and_the_connection_identity(tmp
         assert request("/api/profiles")[0] == 403
 
 
+def test_moving_from_a_device_that_was_never_saved_is_refused(tmp_path):
+    with dashboard(tmp_path) as (request, store, _):
+        store.add("02:00:00:00:00:99", "Aeromac")
+        status, body = request("/api/dashboard-access/move", "POST", {"from_mac": "02:00:00:00:00:55"})
+        assert status == 400, body
+        assert [item["mac_address"] for item in store.list_devices()] == ["02:00:00:00:00:99"]
+
+
 def test_moving_registers_the_new_address_and_undo_can_reverse_it(tmp_path):
     old = "02:00:00:00:00:99"
     with dashboard(tmp_path) as (request, store, _):
