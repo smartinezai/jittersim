@@ -59,14 +59,18 @@ class DeploymentFirewallTests(unittest.TestCase):
         # The browser shows the certificate's name to anyone who opens the address.
         self.assertIn('dashboard_host="$(hostname -s).local"', installer)
         self.assertIn('-subj "/CN=$dashboard_host"', installer)
-        # It also covers the name the Avahi publisher announces.
+        # It also covers the name the Avahi publisher announces and the test Wi-Fi
+        # gateway that browsers on the test Wi-Fi open.
         self.assertIn(
-            "subjectAltName=DNS:$dashboard_host,DNS:jittersim.local,IP:$dashboard_ip", installer
+            "subjectAltName=DNS:$dashboard_host,DNS:jittersim.local,IP:$dashboard_ip,"
+            "IP:192.168.50.1",
+            installer,
         )
         # A certificate for another name or address is made again.
         self.assertIn('grep -Fq "DNS:$dashboard_host"', installer)
         self.assertIn('grep -Fq "DNS:jittersim.local"', installer)
         self.assertIn('grep -Fq "IP Address:$dashboard_ip"', installer)
+        self.assertIn('grep -Fq "IP Address:192.168.50.1"', installer)
 
 
 class InstallerTests(unittest.TestCase):
