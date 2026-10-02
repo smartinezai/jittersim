@@ -19,7 +19,7 @@ The latest temporary permission was recorded at 00:54 Berlin time on 3 October a
 ## Current evidence
 
 - Read local branch `codex/master-continuation` at `c922427`. This establishes local behavior only. The installed Pi version was not checked.
-- Implementation uses the isolated `codex/combined-router-wifi` branch from the newer local commit `2fbaff5`. Unrelated working files are preserved.
+- The original local implementation used `codex/combined-router-wifi` from `2fbaff5`. The publication branch is `codex/combined-router-wifi-integration` from `integrate/main-into-stack` at `cf2a6fe44ec245061839a44b09a57e0b28782a6a`. Only this task's changes were carried across. Unrelated working files are preserved.
 - `src/jittersim/api/server.py` contains `copy-wifi-name` and `copy-wifi-password` in the sidebar. Their handlers use `/api/router/wifi-credentials` and the existing clipboard helper.
 - The existing `sync-router-ap` action checks `/api/router/preview-ap` then confirms before `/api/router/sync-ap`. It carries the preview fingerprint and any required legacy-security confirmation.
 - Router actions share busy and password-rejection checks. `routerRequest` checks for credential changes and stops waiting after a bounded deadline.
@@ -60,10 +60,14 @@ The separate plan review on 3 October found no planning blocker beyond destinati
 
 The sidebar now contains one **Copy router Wi-Fi to Pi** button and the action's progress message. The old clipboard controls and their unused frontend code are removed. The existing preview, confirmation, combined configuration and recovery behavior are retained. The password prompt clears after a password edit while active operation feedback remains visible.
 
-The full Python suite and the existing CI lint rules passed. Browser checks for router copying, Wi-Fi recovery and action reachability passed. The final status correction then passed the focused credential checks and a fresh router-copy browser run at 1920 px and 375 px. Desktop and phone screenshots were inspected. Cancellation, a pending request, failed login, a missing helper and secret handling were checked with the disposable fixture.
+The integration branch preserves the phone's pinned Panic and router switch controls. The combined copy button appears in the phone Controls sheet. The source conflicts were resolved and the affected browser and phone-layout checks were adapted.
 
-The final separate review found no blocking issue. There are no new build inputs or deployment changes. No remote push or live Pi change was performed. Physical reconnection after an installed update remains a release check.
+The full Python suite passed with 2,891 tests passed and 37 platform skips. The existing CI lint rules passed. All four browser journeys passed: router copying, Wi-Fi recovery, phone layout and action reachability. Router copying passed at 1920 px and 375 px. Phone layout passed at 390 px, 360 px and 320 px with normal and wide fonts plus desktop widths. Desktop and phone screenshots were inspected. Cancellation, a pending request, failed login, a missing helper and secret handling were checked with the disposable fixture.
+
+The final separate review of the integration change found no blocking issue. There are no new build inputs or deployment changes. No live Pi change was performed. Physical reconnection after an installed update remains a release check.
 
 ## Publication gate
 
-Fresh GitHub checks on 3 October show recent CI jobs failed before any steps ran. The checked Linux job reports that recent account payments failed or the spending limit needs to be increased. This does not provide a test result. The green-CI condition is therefore still unmet. No merge was performed and no branch protection or CI check was bypassed. Before publication, prepare a focused branch against the current agreed target so unrelated continuation commits are not included.
+Fresh GitHub checks on 3 October show recent CI jobs failed before any steps ran. The checked Linux job reports that recent account payments failed or the spending limit needs to be increased. This does not provide a test result. The green-CI condition is therefore still unmet. No merge was performed and no branch protection or CI check was bypassed.
+
+The coordinating chat requested a reviewed draft pull request against `integrate/main-into-stack` and owns the combined merge and deployment sequence under the owner's separate coordination request. Publish the focused branch for CI and hand over its exact commit and local verification. Keep the pull request unmerged while CI cannot start. The earlier local branch remains available as a checkpoint.
