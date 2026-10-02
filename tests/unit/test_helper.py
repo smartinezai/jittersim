@@ -2652,6 +2652,46 @@ def good_queue(**changes):
     return entry
 
 
+class GeneralProfileSupportClientTests(unittest.TestCase):
+    def test_a_busy_helper_is_reported_as_busy_and_not_as_out_of_date(self) -> None:
+        client = RecordingHelperClient(
+            {"ok": True}, capabilities=HelperClientError("helper is busy", reason="helper-busy")
+        )
+
+        with self.assertRaises(HelperClientError) as caught:
+            client.check_general_profile_support()
+
+        self.assertEqual(caught.exception.reason, "helper-busy")
+        self.assertNotIn("Update the Pi helper", str(caught.exception))
+
+    def test_a_helper_that_does_not_know_the_action_is_out_of_date(self) -> None:
+        client = RecordingHelperClient(
+            {"ok": True}, capabilities=HelperClientError("unknown action")
+        )
+
+        with self.assertRaisesRegex(
+            HelperClientError, "Update the Pi helper before applying a general profile"
+        ):
+            client.check_general_profile_support()
+
+    def test_a_helper_without_the_general_profile_capability_is_out_of_date(self) -> None:
+        client = RecordingHelperClient(
+            {"ok": True}, capabilities={"ok": True, "protected_dns_capture": True}
+        )
+
+        with self.assertRaisesRegex(
+            HelperClientError, "Update the Pi helper before applying a general profile"
+        ):
+            client.check_general_profile_support()
+
+    def test_a_helper_with_the_capability_passes(self) -> None:
+        client = RecordingHelperClient(
+            {"ok": True}, capabilities={"ok": True, "general_profile": True}
+        )
+
+        client.check_general_profile_support()
+
+
 class QueueStatsClientTests(unittest.TestCase):
     def read(self, queues):
         client = RecordingHelperClient({"ok": True, "action": "queue-stats", "queues": queues})

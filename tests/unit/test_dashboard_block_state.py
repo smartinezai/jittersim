@@ -264,7 +264,12 @@ let observedNames = new Set();
 const openObservationGroups = new Set();
 const observationProfileChoice = new Map();
 const calls = [];
+const confirmations = [];
 const pending = [];
+function confirmWorkflow(message) {
+  confirmations.push(message);
+  return Promise.resolve(true);
+}
 function request(path, method, body) {
   calls.push(["request", path, method, body]);
   return new Promise((resolve, reject) => pending.push({ resolve, reject }));
@@ -313,8 +318,9 @@ RENDER_FUNCTIONS = (
     "changeGlobalBlock",
 )
 
-SLOW = {"id": "slow", "name": "Slow", "website_domains": ["a.example"]}
-FAST = {"id": "fast", "name": "Fast", "website_domains": []}
+# Both profiles already allow only listed sites, so adding to them asks nothing first.
+SLOW = {"id": "slow", "name": "Slow", "website_domains": ["a.example"], "website_mode": "allow_only"}
+FAST = {"id": "fast", "name": "Fast", "website_domains": [], "website_mode": "allow_only"}
 
 
 def function_source(name):

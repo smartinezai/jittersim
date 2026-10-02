@@ -1480,6 +1480,9 @@ class HelperClient:
         try:
             capabilities = self._request({"action": "capabilities"})
         except HelperClientError as error:
+            # A busy helper is not an old one, so it keeps its own message.
+            if error.reason == "helper-busy":
+                raise
             raise HelperClientError("Update the Pi helper before applying a general profile") from error
         if capabilities.get("general_profile") is not True:
             raise HelperClientError("Update the Pi helper before applying a general profile")

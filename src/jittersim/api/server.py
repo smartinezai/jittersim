@@ -114,6 +114,7 @@ from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.scenarios import active_scenario_runs
 from jittersim.engine.schedules import active_schedule
 from jittersim.engine.service import compile_stored_plan
+from jittersim.engine.website import describe_timed_out_names
 from jittersim.networking.applier import MAX_PROTECTED_MACS
 from jittersim.networking.helper import (
     HELPER_OUT_OF_DATE_MESSAGE,
@@ -4767,6 +4768,28 @@ DASHBOARD_HTML = r"""<!doctype html>
       return { label: label, disabled: disabled, ariaLabel: label + " " + domain };
     }
 
+    // Adding a name to a profile that does not allow only listed sites yet turns it into an
+    // allow list, so every other site stops working for devices on it. The page asks first.
+    function needsAllowOnlyConfirm(profile) {
+      return Boolean(profile) && profile.website_mode !== "allow_only";
+    }
+
+    function allowOnlyConfirmText(subject, profile) {
+      return "Adding " + subject + " turns the profile " + profile.name + " into an allow list. " +
+        "Every other site will stop working for devices on that profile. Continue?";
+    }
+
+    // Callers wait for this only when needsAllowOnlyConfirm says so, so a profile that
+    // already is an allow list adds its names at once and with no pause.
+    async function askAllowOnly(subject, profile) {
+      try {
+        return await confirmWorkflow(allowOnlyConfirmText(subject, profile));
+      } catch (error) {
+        showMessage(error.message, "error");
+        return false;
+      }
+    }
+
     const ENFORCE_NOTE = "It applies on its own while JitterSim is running. " +
       "After Reset or Panic choose Start with saved settings. After Panic also turn household blocking back on.";
 
@@ -5290,6 +5313,8 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     async function addDomainToProfile(domain, profileId, button, onChange) {
       if (!profileId) return;
+      const profile = profiles.find((item) => item.id === profileId);
+      if (needsAllowOnlyConfirm(profile) && !await askAllowOnly(domain, profile)) return;
       setButtonBusy(button, true);
       showMessage("Adding " + domain + " to the profile...", "working");
       try {
@@ -5349,6 +5374,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       const action = groupProfileAction(group, profile);
       if (action.disabled) return;
       const messages = groupProfileMessages(group, action);
+      if (needsAllowOnlyConfirm(profile) &&
+          !await askAllowOnly(groupSubject(group, action.domains.length), profile)) return;
       setButtonBusy(button, true);
       showMessage(messages.busy, "working");
       try {
@@ -13753,11 +13780,9 @@ class ControlServer(HTTPServer):
                     "state": self._runtime_state_with_running(state),
                     "applied": self._applied_summary(plan),
                     "unverified_device_ids": list(plan.unverified_device_ids),
-                    "warning": (
-                        "Profiles were skipped for devices whose current Wi-Fi identity could not be verified: "
-                        + ", ".join(plan.unverified_device_ids)
-                        if plan.unverified_device_ids
-                        else None
+                    "warning": _apply_warning(
+                        plan.unverified_device_ids,
+                        prepared.unresolved_names if prepared is not None else (),
                     ),
                 }
             ),
@@ -14165,6 +14190,25 @@ def _safe_wifi_copy_message(error: HelperClientError) -> str:
     if str(error) == WIFI_DETAILS_MISSING_MESSAGE:
         return WIFI_DETAILS_MISSING_MESSAGE
     return safe_router_check_message(str(error))
+
+
+def _apply_warning(
+    unverified_device_ids: Sequence[str], unresolved_names: Sequence[str]
+) -> Optional[str]:
+    """Say in plain words what an apply left out, or None when it left nothing out."""
+
+    parts = []
+    if unverified_device_ids:
+        parts.append(
+            "Profiles were skipped for devices whose current Wi-Fi identity could not be verified: "
+            + ", ".join(unverified_device_ids)
+        )
+    if unresolved_names:
+        parts.append(
+            "These website names could not be looked up in time and are left out of the rules "
+            "until their lookup works: " + describe_timed_out_names(unresolved_names)
+        )
+    return ". ".join(parts) if parts else None
 
 
 def _bad_request(message: str, error: Exception) -> Tuple[int, str, bytes]:
