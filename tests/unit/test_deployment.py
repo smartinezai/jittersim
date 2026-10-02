@@ -173,12 +173,51 @@ class AccessPointStartTests(unittest.TestCase):
             for name in ("Requires", "BindsTo", "PartOf", "Requisite", "Upholds"):
                 for line in self.directives(text, name):
                     self.assertNotIn("jittersim-ap.service", line, f"{path.name} {name}")
-        self.assertIn("ExecStart=/usr/bin/nmcli connection up jittersim-ap", self.unit)
         self.assertIn("RemainAfterExit=yes", self.unit)
         # The one safety check that stays: no test Wi-Fi without the management firewall.
         self.assertIn(
             "ExecStartPre=/usr/sbin/nft list table inet jittersim_control", self.unit
         )
+
+    def test_the_start_retries_a_bounded_number_of_times_and_never_takes_the_wifi_down(self):
+        # NetworkManager counts as started before wlan0 may be ready. Autoconnect is off
+        # so a single failed `nmcli connection up` would leave the Wi-Fi down until reboot.
+        start = [line for line in self.unit.splitlines() if line.startswith("ExecStart=")]
+        self.assertEqual(len(start), 1)
+        command = start[0]
+        self.assertIn("for try in 1 2 3 4 5 6 7 8 9 10; do", command)
+        self.assertIn("sleep 3", command)
+        # An active connection counts as success and is never brought up again.
+        self.assertLess(
+            command.index("GENERAL.STATE connection show jittersim-ap"),
+            command.index("connection up jittersim-ap"),
+        )
+        self.assertIn("= activated ] && exit 0", command)
+        self.assertIn("/usr/bin/nmcli --wait 10 connection up jittersim-ap && exit 0", command)
+        self.assertIn("did not start after 10 tries", command)
+        self.assertTrue(command.rstrip("'").endswith("exit 1"))
+        self.assertIn("TimeoutStartSec=180", self.unit)
+
+    def test_the_retry_loop_runs_and_stops_at_the_first_success(self):
+        command = [line for line in self.unit.splitlines() if line.startswith("ExecStart=")][0]
+        script = command.split("-c '", 1)[1].rsplit("'", 1)[0].replace("$$", "$")
+        with tempfile.TemporaryDirectory() as directory:
+            fake = Path(directory) / "nmcli"
+            log = Path(directory) / "calls"
+            # The third `connection up` succeeds.
+            fake.write_text(
+                "#!/bin/sh\necho \"$*\" >> %s\n"
+                "case \"$*\" in *GENERAL.STATE*) echo activating;; "
+                "*'connection up'*) [ $(grep -c 'connection up' %s) -ge 3 ];; esac\n" % (log, log)
+            )
+            fake.chmod(0o755)
+            result = subprocess.run(
+                ["sh", "-c", script.replace("/usr/bin/nmcli", str(fake)).replace("sleep 3", "sleep 0")],
+                capture_output=True, text=True, timeout=20,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(log.read_text().count("connection up"), 3)
+            self.assertNotIn("down", log.read_text())
 
     def test_the_installer_enables_the_unit_and_keeps_boot_activation_with_it(self):
         self.assertIn(
