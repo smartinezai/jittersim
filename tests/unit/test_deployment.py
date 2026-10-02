@@ -1,5 +1,7 @@
+import re
 import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -207,3 +209,84 @@ class AccessPointStartTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StaleAccessStateTests(unittest.TestCase):
+    """An upgrade never restores main-era access state and never aborts on a restore.
+
+    The owner's Pi once ran main's access recovery. A release without access rules
+    (the Pi line before the merge) never wrote /var/lib/jittersim-access, so state
+    found there on such an upgrade is stale and nothing in the database knows it.
+    """
+
+    INSTALLER = (REPOSITORY_ROOT / "deploy" / "raspberry-pi" / "install.sh").read_text()
+
+    def function(self, name):
+        match = re.search(r"^" + name + r"\(\) \{\n.*?^\}\n", self.INSTALLER, re.DOTALL | re.MULTILINE)
+        self.assertIsNotNone(match, name)
+        return match.group(0)
+
+    def run_shell(self, script):
+        return subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=20)
+
+    def archive(self, root, previous):
+        body = self.function("archive_stale_access_state").replace(
+            "/var/lib/jittersim-access", str(root / "jittersim-access")
+        )
+        # Root owns the copy on the Pi. The test only records the call.
+        script = "set -eu\nchown() { echo chown \"$@\"; }\nprevious_access_release=%s\n%s\narchive_stale_access_state\n" % (previous, body)
+        return self.run_shell(script)
+
+    def test_state_from_a_release_without_access_rules_is_moved_aside_for_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "jittersim-access").mkdir()
+            (root / "jittersim-access" / "policy.json").write_text("{}")
+
+            result = self.archive(root, "no")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((root / "jittersim-access").exists())
+            backups = list(root.glob("jittersim-access-before-*"))
+            self.assertEqual(len(backups), 1)
+            self.assertTrue((backups[0] / "policy.json").exists())
+            self.assertEqual(oct(backups[0].stat().st_mode & 0o777), "0o700")
+            self.assertIn("chown -R root:root", result.stdout)
+            self.assertIn("not restored", result.stderr)
+
+    def test_state_of_a_release_with_access_rules_and_an_empty_folder_stay(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "jittersim-access").mkdir()
+            self.assertEqual(self.archive(root, "no").returncode, 0)
+            (root / "jittersim-access" / "policy.json").write_text("{}")
+            self.assertEqual(self.archive(root, "yes").returncode, 0)
+            self.assertTrue((root / "jittersim-access" / "policy.json").exists())
+            self.assertEqual(list(root.glob("jittersim-access-before-*")), [])
+
+    def test_a_failed_restore_warns_and_the_installer_carries_on(self):
+        body = self.function("restore_access_rules")
+        for code, warned in ((1, True), (0, False)):
+            with self.subTest(code=code):
+                result = self.run_shell(
+                    "set -eu\nsystemctl() { return %d; }\n%s\nrestore_access_rules\necho carried on\n"
+                    % (code, body)
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("carried on", result.stdout)
+                self.assertEqual("sudo jittersim normal-access" in result.stderr, warned)
+
+    def test_the_installer_reads_the_old_release_first_and_restores_only_through_the_guard(self):
+        text = self.INSTALLER
+        check = text.index('[ -x "$INSTALL_DIR/.venv/bin/jittersim-access-restore" ]')
+        self.assertLess(check, text.index("replace-source.py\" \"$SOURCE_DIR\" \"$INSTALL_DIR\""))
+        self.assertLess(check, text.index('"$INSTALL_DIR/.venv/bin/pip" install'))
+        archive = text.index("\narchive_stale_access_state\n")
+        self.assertLess(archive, text.index("install -d -m 0750 -o root -g jittersim /var/lib/jittersim-access"))
+        self.assertLess(archive, text.index("\nrestore_access_rules\n"))
+        # Every restart of the restore runs inside the warning so set -e never aborts.
+        bare = [
+            line for line in text.splitlines()
+            if "systemctl restart jittersim-access-boot.service" in line and "if !" not in line
+        ]
+        self.assertEqual(bare, [])
