@@ -37,6 +37,7 @@ from jittersim.config.device_names import (
     UNKNOWN_DEVICE_NAME,
     has_hidden_characters,
     resolve_device_name,
+    saved_device_title,
 )
 from jittersim.config.domain_labels import group_domain, label_domain, seen_with
 from jittersim.config.exemptions import UnaffectedDevice, normalize_exempt_mac
@@ -90,9 +91,11 @@ from jittersim.config.transfer import (
     SETTINGS_FORMAT,
     SETTINGS_VERSION,
     check_settings,
+    keep_sections_missing_from,
     settings_to_payload,
 )
 from jittersim.config.workflows import WorkflowStore
+from jittersim.engine.access import build_access_plan
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import (
     MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN,
@@ -2019,7 +2022,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         <button id="scan-observations" class="primary" type="button">Scan now</button>
       </div>
     </div>
-    <p id="observation-note" class="observation-note">Scanning is on demand. Results are local aggregates, not exact page visits. Protected devices are never monitored and never appear here.</p>
+    <p id="observation-note" class="observation-note">Scanning is on demand. Results are local aggregates, not exact page visits. Protected devices are never monitored and never appear here. Block globally also blocks every name under a name (example.com also blocks www.example.com) while household access rules are on. Blocked and Unblock show on the exact name that was blocked.</p>
     <div id="observations" class="observation-list" aria-live="polite">No observations yet.</div>
   </section>
     <section class="card analytics-card" data-collapse="closed">
@@ -2940,6 +2943,15 @@ DASHBOARD_HTML = r"""<!doctype html>
     function deviceDisplayName(device) {
       return device.display_name || device.name || device.assigned_device_name ||
         device.ipv4_address || "Unknown device";
+    }
+
+    // The name in a line of text such as a list row or a question. An unnamed device keeps its
+    // address there so that two of them never look the same.
+    function deviceTitle(device) {
+      const name = deviceDisplayName(device);
+      return name === "Unknown device" && device.ipv4_address
+        ? name + " (" + device.ipv4_address + ")"
+        : name;
     }
 
     function devicePickerLabel(device) {
@@ -4292,7 +4304,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         groupSelect.setAttribute("aria-label", "Group for " + (device.display_name || device.mac_address));
         const groupPlaceholder = document.createElement("option");
         groupPlaceholder.value = "";
-        groupPlaceholder.textContent = groups.length ? "Choose group..." : "Create a group below";
+        groupPlaceholder.textContent = groups.length ? "Choose group..." : "Create a group on the Profiles page";
         groupSelect.appendChild(groupPlaceholder);
         groups.forEach((group) => {
           const option = document.createElement("option");
@@ -4484,7 +4496,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
       setActionBusy(true, "/api/apply");
       setButtonBusy(button, true);
-      showMessage("Applying " + profileId + " to " + device.ipv4_address + "...", "working");
+      showMessage("Applying " + profileName(profileId) + " to " + (device.display_name || device.ipv4_address) + "...", "working");
       try {
         const result = await request("/api/connected-devices/apply-profile", "POST", {
           ipv4_address: device.ipv4_address,
@@ -6051,7 +6063,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
       const status = element("general-profile-status");
       status.textContent = !data.profile
-        ? profiles.length ? "No general profile. Saved device rules apply when profiles are on." : "Create a saved profile below to use this control."
+        ? profiles.length ? "No general profile. Saved device rules apply when profiles are on." : "Create a saved profile on the Profiles page to use this control."
         : data.active ? "Active: " + data.profile.name + ". Applies to every unprotected device."
         : data.state.observed_state === "reset" ? "Paused: " + data.profile.name + ". Choose Apply to all or Start with saved settings to resume."
         : data.state.observed_state === "error" ? "Saved: " + data.profile.name + ". Network update failed. Retry Apply to all."
@@ -6502,6 +6514,9 @@ DASHBOARD_HTML = r"""<!doctype html>
         if (tokenRevision !== adminTokenRevision) return;
         if (result.ok) {
           adminTokenVerified = true;
+          // Remember an accepted token now. The refresh below can take seconds and a
+          // reload in between would otherwise forget it.
+          updateCredentialStatus();
           await refresh();
           if (tokenRevision !== adminTokenRevision) return;
           if (!adminTokenVerified) {
@@ -7986,7 +8001,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     function deviceName(deviceId) {
       const device = devices.find((candidate) => candidate.id === deviceId);
-      return device ? device.name : deviceId;
+      return device ? deviceTitle(device) : deviceId;
     }
 
     function scheduleTargetFields(value) {
@@ -8145,7 +8160,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     function renderDeviceTable() {
       const rows = devices.map((device) => ({
         cells: [
-          [device.name, device.id],
+          [deviceDisplayName(device), device.id],
           [device.ipv4_address, device.mac_address || "No MAC address"],
           appliedProfileCell(profileName(device.profile_id),
             Object.prototype.hasOwnProperty.call(deviceConditions.devices, device.id)
@@ -8331,7 +8346,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       element("device-ip").value = device.ipv4_address;
       element("device-profile").value = device.profile_id;
       element("device-mac").value = device.mac_address || "";
-      startEditing("device", device.name);
+      startEditing("device", deviceTitle(device));
     }
 
     async function deleteItem(path, body, successMessage, button) {
@@ -8353,7 +8368,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function deleteDevice(device, button) {
-      const question = "Delete " + device.name + "? Its schedules, timers, progressions, " +
+      const question = "Delete " + deviceTitle(device) + "? Its schedules, timers, progressions, " +
         "limits and browser service profiles are deleted too, and so is a group it is the " +
         "only member of.";
       if (!window.confirm(question)) return;
@@ -9292,7 +9307,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         item.append(time, message);
         (event.device_ids || []).forEach(id => {
           const device = devices.find(candidate => candidate.id === id);
-          if (device) item.append(actionButton("Open " + device.name, () => openDevice(id)));
+          if (device) item.append(actionButton("Open " + deviceTitle(device), () => openDevice(id)));
         });
         list.appendChild(item);
       });
@@ -9849,7 +9864,8 @@ DASHBOARD_HTML = r"""<!doctype html>
         showPage(page.dataset.page, false);
         window.history.replaceState(null, "", "#" + page.dataset.page);
       }
-      target.scrollIntoView({ behavior: "smooth", block: "center" });
+      const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      target.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "center" });
     }
 
     function syncDeviceChip() {
@@ -9933,10 +9949,11 @@ def _device_title(
 
     if device is None:
         return fallback_id
-    name = _device_display_name(device, labels_by_mac)
-    if name == UNKNOWN_DEVICE_NAME:
-        return f"{UNKNOWN_DEVICE_NAME} ({device.ipv4_address})"
-    return name
+    return saved_device_title(
+        saved_label=labels_by_mac.get(device.mac_address or "", {}).get("display_name"),
+        saved_name=device.name,
+        ipv4_address=device.ipv4_address,
+    )
 
 
 IMPACT_NO_HELPER_MESSAGE = "Impact needs the Pi helper."
@@ -10092,8 +10109,11 @@ def _scenario_run_payload(
     """Describe one running scenario, its current step and the time left."""
 
     if run.device_id is not None:
-        device = repository.get_device(run.device_id)
-        target_name = device.name if device is not None else run.device_id
+        target_name = _device_title(
+            repository.get_device(run.device_id),
+            repository.list_connected_device_labels(),
+            run.device_id,
+        )
     elif run.group_id is not None:
         group = repository.get_device_group(run.group_id)
         target_name = "Group " + (group.name if group is not None else run.group_id)
@@ -10353,8 +10373,10 @@ def _labelled_domain_payloads(
 ) -> List[Dict[str, Any]]:
     """Add a label and a group and a seen-with guess and the global block state to observed names.
 
-    A name counts as blocked only when it is an exact entry of the global block list because
-    the engine resolves each listed name on its own and does not match subdomains.
+    A name counts as blocked only when it is an exact entry of the global block list: that is
+    the entry Unblock removes. While household access rules are on the Pi's filtered resolver
+    also refuses every name under a listed name. Without them the engine blocks only the
+    addresses of each listed name while JitterSim runs.
     """
 
     hints = seen_with([(row.domain, row.first_seen) for row in rows])
@@ -11346,7 +11368,9 @@ class ControlServer(HTTPServer):
 
         if path == "/api/import":
             try:
-                settings = _settings_from_payload(payload)
+                settings = keep_sections_missing_from(
+                    payload, _settings_from_payload(payload), self.repository.saved_settings()
+                )
                 check_settings(
                     settings,
                     max_traffic_classes=MAX_SHAPED_MARKS_PER_PLAN,
@@ -11354,7 +11378,10 @@ class ControlServer(HTTPServer):
                 )
             except (KeyError, TypeError, ValueError) as error:
                 return _bad_request("invalid settings import", error)
-            self.repository.replace_settings(self._with_counter_baselines(settings))
+            self.repository.replace_settings(
+                self._with_counter_baselines(settings),
+                observation_addresses=self.newly_protected_station_addresses(settings),
+            )
             self._sync_gateway_persistence()
             return self._apply_saved_change(
                 "imported",
@@ -11482,9 +11509,8 @@ class ControlServer(HTTPServer):
                     raise ValueError("the original device ID must match")
             except (KeyError, TypeError, ValueError) as error:
                 return _bad_request("invalid device configuration", error)
-            conflict = self._unaffected_conflict(device.mac_address)
-            if conflict is not None:
-                return conflict
+            # A protected saved device stays editable. Its assignment is dormant while
+            # the protection lasts and comes back when the protection is removed.
             if self.repository.get_device(device.id) is None:
                 capacity_error = self._capacity_error(adding=1)
                 if capacity_error is not None:
@@ -12386,6 +12412,9 @@ class ControlServer(HTTPServer):
             self.repository.save_website_policy(updated)
         except (KeyError, TypeError, ValueError, StorageError) as error:
             return _bad_request("could not add domain to global block list", error)
+        failed = self._apply_household_block_list()
+        if failed is not None:
+            return failed
         return HTTPStatus.OK, "application/json", _json_bytes(
             {"policies": _policies_payload(self.repository)}
         )
@@ -12403,9 +12432,43 @@ class ControlServer(HTTPServer):
             return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
                 {"error": "could not remove domain from global block list"}
             )
+        failed = self._apply_household_block_list()
+        if failed is not None:
+            return failed
         return HTTPStatus.OK, "application/json", _json_bytes(
             {"policies": _policies_payload(self.repository)}
         )
+
+    def _apply_household_block_list(self) -> Optional[Tuple[int, str, bytes]]:
+        """Bring the filtered resolver in line with a changed global block list.
+
+        Block globally and Unblock act at once like main's device quick action. Main's
+        resolver otherwise kept refusing an unblocked name and the names under it until
+        someone chose Apply access rules. While household access rules are off the
+        resolver does not filter so nothing needs to change. The scheduler still blocks
+        the addresses of each listed name within a second while JitterSim runs.
+        """
+
+        settings = self.repository.access_settings()
+        if (
+            not settings.access_options.enabled
+            or self.helper_client is None
+            or not hasattr(self.helper_client, "apply_access")
+        ):
+            return None
+        try:
+            self.helper_client.apply_access(build_access_plan(settings))
+        except (HelperClientError, ValidationError):
+            LOGGER.warning("the global block list did not reach the filtered resolver")
+            return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                {
+                    "error": (
+                        "Saved but the household access rules could not be updated. "
+                        "Choose Apply access rules on the Access and rules page."
+                    )
+                }
+            )
+        return None
 
     def _save_service_list(self, payload: dict):
         operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
@@ -13033,17 +13096,24 @@ class ControlServer(HTTPServer):
         response.setdefault("live_applied", status == HTTPStatus.OK)
         return status, content_type, _json_bytes(response)
 
-    def _unaffected_conflict(
-        self, mac_address: Optional[str]
-    ) -> Optional[Tuple[int, str, bytes]]:
-        """Refuse to save a device whose MAC address is on the unaffected list."""
+    def newly_protected_station_addresses(self, settings: SavedSettings) -> set:
+        """Return the current addresses of clients that settings about to be saved protect.
 
-        listed = {device.mac_address for device in self.repository.list_unaffected_devices()}
-        if mac_address is None or mac_address not in listed:
-            return None
-        return HTTPStatus.CONFLICT, "application/json", _json_bytes(
-            {"error": f"{mac_address} is on the unaffected list; remove it there first"}
-        )
+        Stored DNS observations of those clients go in the same transaction as the new
+        settings. Saved devices and recorded hardware addresses are matched by the
+        storage itself. This adds connected clients that are not saved devices.
+        """
+
+        newly = {item.mac_address for item in settings.unaffected_devices} - {
+            item.mac_address for item in self.repository.list_unaffected_devices()
+        }
+        if not newly:
+            return set()
+        return {
+            str(station["ipv4_address"])
+            for station in self._station_devices()
+            if station_mac(station) in newly and station.get("ipv4_address")
+        }
 
     def _everyone_else_counted(self) -> bool:
         """Return whether everyone else already holds a traffic class."""
@@ -14064,6 +14134,22 @@ def _settings_from_payload(payload: Dict[str, Any]) -> SavedSettings:
             mac_address=value["mac_address"], display_name=_unaffected_label(value)
         ),
     )
+    # Files from main and from older Pi builds carry neither key. The caller then
+    # keeps the saved lists and the saved general profile.
+    general_profile_id = payload.get("general_profile_id")
+    if general_profile_id is not None and not isinstance(general_profile_id, str):
+        raise ValueError("general_profile_id must be a profile ID or null")
+    service_lists = items(
+        "service_lists",
+        lambda value: ServiceList(
+            id=value["id"],
+            name=value["name"],
+            profile_id=value["profile_id"],
+            services=_list_field(value, "services"),
+            hostnames=_list_field(value, "hostnames"),
+            enabled=value.get("enabled", True),
+        ),
+    )
     # Usage starts again from zero on the new installation.
     return SavedSettings(
         profiles=items("profiles", _profile_from_payload),
@@ -14139,6 +14225,8 @@ def _settings_from_payload(payload: Dict[str, Any]) -> SavedSettings:
         ),
         everyone_else_profile_id=everyone_else_profile_id,
         unaffected_devices=unaffected_devices,
+        general_profile_id=general_profile_id,
+        service_lists=service_lists,
     )
 
 

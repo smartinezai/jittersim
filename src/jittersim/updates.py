@@ -16,6 +16,7 @@ import shutil
 import socket
 import ssl
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -29,19 +30,76 @@ DATA_ROOT = Path("/var/lib/jittersim")
 ACCESS_ROOT = Path("/var/lib/jittersim-access")
 UNITS_ROOT = Path("/etc/systemd/system")
 MANAGER_PATH = Path("/usr/local/lib/jittersim-update.py")
+DISPATCHER_PATH = Path("/etc/NetworkManager/dispatcher.d/80-jittersim-mdns")
+COMMAND_PATH = Path("/usr/local/bin/jittersim")
 MAX_ARCHIVE = 25 * 1024 * 1024
 MAX_EXPANDED = 100 * 1024 * 1024
+PYTHON = sys.executable or "python3"
 SERVICES = (
     "jittersim-helper.service",
     "jittersim-dashboard.service",
     "jittersim-browser-proxy.service",
 )
+WATCHER = "jittersim-service-watch.service"
+WIFI_UNIT = "jittersim-ap.service"
+NAME_UNIT = "jittersim-mdns.service"
+# Every unit file install.sh copies into /etc/systemd/system.
 UNITS = SERVICES + (
     "jittersim-control-firewall.service", "jittersim-update.service",
-    "jittersim-dns.service", "jittersim-access-boot.service", "jittersim-ap.service",
-    "jittersim-service-watch.service",
+    "jittersim-dns.service", "jittersim-access-boot.service", WIFI_UNIT,
+    WATCHER, NAME_UNIT,
 )
+# Recovery copies made before they listed their files covered these units.
+LEGACY_UNITS = tuple(unit for unit in UNITS if unit != NAME_UNIT)
+UNIT_NAME = re.compile(r"jittersim-[a-z0-9-]{1,48}\.service\Z")
+# The systemctl calls of install.sh in its order. The test Wi-Fi unit only
+# starts when its connection is down. Nothing restarts or stops it so an update
+# never drops the running Wi-Fi.
+SERVICE_STEPS = (
+    ("enable", "jittersim-update.service"),
+    ("daemon-reload",),
+    ("enable", "jittersim-access-boot.service", WIFI_UNIT),
+    ("restart", "jittersim-access-boot.service"),
+    ("enable", "jittersim-control-firewall.service"),
+    ("restart", "jittersim-control-firewall.service"),
+    ("enable", *SERVICES, WATCHER),
+    ("restart", "jittersim-helper.service"),
+    ("start", WIFI_UNIT),
+    ("restart", "jittersim-browser-proxy.service"),
+    ("restart", WATCHER),
+    ("restart", "jittersim-dashboard.service"),
+)
+# install.sh publishes the dashboard name as a best effort. A failure only
+# means the name is not announced.
+NAME_STEPS = (
+    ("daemon-reload",),
+    ("enable", NAME_UNIT),
+    ("restart", NAME_UNIT),
+)
+PI = "deploy/raspberry-pi/"
+PREFLIGHT = PI + "preflight.py"
+EGRESS_CHECK = PI + "check-egress-hook.py"
+BOOTSTRAP = PI + "bootstrap-dashboard-access.py"
+FIREWALL_TEMPLATE = PI + "jittersim-control-firewall.nft"
+FIREWALL_RULES = "jittersim-control-firewall.nft"
+# install.sh imports these as the service user after the package install.
+IMPORT_CHECK = (
+    "import jittersim.api.server, jittersim.networking.helper, "
+    "jittersim.networking.browser_proxy, jittersim.networking.dns_watch, "
+    "jittersim.networking.access, jittersim.dashboard_access_cli"
+)
+INTERFACE = re.compile(r"[A-Za-z0-9_.:-]{1,15}\Z")
 VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+
+
+def release_files(*, code, units, dispatcher):
+    """Files install.sh copies from a release as (source, destination, mode)."""
+    files = [(PI + unit, units / unit, 0o644) for unit in UNITS]
+    files.append(
+        (PI + "publish-dashboard-name.sh", code / PI / "publish-dashboard-name.sh", 0o755)
+    )
+    files.append((PI + "jittersim-mdns-dispatcher", dispatcher, 0o755))
+    return files
 
 
 class UpdateError(RuntimeError):
@@ -128,8 +186,17 @@ def validate_archive(archive):
         "README.md",
         "src/jittersim/api/server.py",
         "src/jittersim/updates.py",
+        PREFLIGHT,
+        EGRESS_CHECK,
+        BOOTSTRAP,
+        FIREWALL_TEMPLATE,
     }
-    required.update("deploy/raspberry-pi/" + unit for unit in UNITS)
+    required.update(
+        source
+        for source, _, _ in release_files(
+            code=CODE_ROOT, units=UNITS_ROOT, dispatcher=DISPATCHER_PATH
+        )
+    )
     if not required.issubset(
         {str(PurePosixPath(member.name)) for member in members if member.isfile()}
     ):
@@ -231,7 +298,65 @@ def run_command(command, timeout=300):
             stderr=subprocess.DEVNULL,
         )
     except (subprocess.SubprocessError, OSError) as error:
+        # Name the release script rather than the Python that ran it.
+        name = next((part for part in command[1:2] if part.endswith(".py")), command[0])
+        raise UpdateError("release command failed: " + Path(name).name) from error
+
+
+def read_command(command, timeout=10):
+    try:
+        result = subprocess.run(
+            command,
+            check=True,
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except (subprocess.SubprocessError, OSError) as error:
         raise UpdateError("release command failed: " + Path(command[0]).name) from error
+    return result.stdout.strip()
+
+
+def runtime_interfaces(config):
+    """Read the interfaces like install.sh, with its defaults for an empty file."""
+    path = config / "runtime.env"
+    if not path.exists() or path.stat().st_size == 0:
+        return "eth0", "wlan0"
+    values = {}
+    for line in path.read_text().splitlines():
+        name, separator, value = line.strip().partition("=")
+        if separator:
+            values[name] = value.strip().strip("'\"")
+    interfaces = values.get("JITTERSIM_UPLINK"), values.get("JITTERSIM_TEST_INTERFACE")
+    if not all(name and INTERFACE.fullmatch(name) for name in interfaces):
+        raise UpdateError("runtime.env must name a safe uplink and test interface")
+    return interfaces
+
+
+def install_file(source, destination, mode):
+    shutil.copyfile(source, destination)
+    destination.chmod(mode)
+
+
+def render_firewall(template, destination, uplink, test_interface):
+    """Fill in the interfaces like the sed call of install.sh."""
+    rules = template.read_text()
+    rules = rules.replace("@UPLINK_INTERFACE@", uplink).replace("@TEST_INTERFACE@", test_interface)
+    temporary = destination.with_name(destination.name + ".next")
+    temporary.write_text(rules)
+    temporary.chmod(0o644)
+    temporary.replace(destination)
+
+
+def link_command(target, link):
+    """Point the link at target like ln -sf, replacing it in one step."""
+    temporary = link.with_name(link.name + ".next")
+    if temporary.is_symlink() or temporary.exists():
+        temporary.unlink()
+    os.symlink(target, temporary)
+    temporary.replace(link)
 
 
 def request_update(
@@ -304,9 +429,17 @@ def apply_update(
     access=ACCESS_ROOT,
     units=UNITS_ROOT,
     manager=MANAGER_PATH,
+    dispatcher=DISPATCHER_PATH,
+    command=COMMAND_PATH,
     run=run_command,
+    query=read_command,
     health=None,
 ):
+    """Install the staged release with the release steps of install.sh.
+
+    The steps that check the Pi run before anything stops. Every file the
+    install replaces is in the recovery copy first.
+    """
     health = health or (lambda: healthy(config=config, run=run))
     with update_lock(root):
         request = read_json(root / "request.json")
@@ -338,10 +471,49 @@ def apply_update(
         def progress(phase, message):
             atomic_json(root / "status.json", {"phase": phase, "message": message})
 
+        def present(names):
+            return [name for name in names if (units / name).exists()]
+
+        def restart_services():
+            """Run the systemctl steps of install.sh for the units installed now."""
+            try:
+                wifi = query(
+                    ["nmcli", "-g", "GENERAL.CONNECTION", "device", "show",
+                     runtime_interfaces(config)[1]],
+                    10,
+                )
+            except (UpdateError, OSError):
+                # An unknown state must never restart the running Wi-Fi.
+                wifi = "jittersim-ap"
+            for action, *names in SERVICE_STEPS:
+                installed = present(names)
+                if names and not installed:
+                    continue
+                if action == "start" and wifi == "jittersim-ap":
+                    continue
+                run(["systemctl", action, *installed], 120)
+            if present([NAME_UNIT]):
+                for action, *names in NAME_STEPS:
+                    try:
+                        run(["systemctl", action, *names], 120)
+                    except UpdateError:
+                        break
+
         def restore():
             if not (backup / "complete.json").exists():
                 raise UpdateError("the recovery copy is incomplete")
-            ownership = read_json(backup / "complete.json").get("ownership", {})
+            completed = read_json(backup / "complete.json")
+            ownership = completed.get("ownership", {})
+            targets = []
+            for name in completed.get("managed", ["units/" + unit for unit in LEGACY_UNITS]):
+                if name == "dispatcher":
+                    targets.append((name, dispatcher))
+                elif name == "command":
+                    targets.append((name, command))
+                elif name.startswith("units/") and UNIT_NAME.fullmatch(name[6:]):
+                    targets.append((name, units / name[6:]))
+                else:
+                    raise UpdateError("the recovery copy names an unknown file")
             for name, destination in (("code", code), ("config", config), ("data", data)):
                 if destination.exists():
                     shutil.rmtree(destination)
@@ -350,12 +522,23 @@ def apply_update(
                     uid, gid = ownership[name]
                     for entry in [destination, *destination.rglob("*")]:
                         os.chown(entry, uid, gid, follow_symlinks=False)
-            for unit in UNITS:
-                source = backup / "units" / unit
-                if source.exists():
-                    shutil.copy2(source, units / unit)
-                elif (units / unit).exists():
-                    (units / unit).unlink()
+            for name, destination in targets:
+                saved = backup / name
+                if saved.is_symlink():
+                    link_command(os.readlink(saved), destination)
+                elif saved.exists():
+                    shutil.copy2(saved, destination)
+                elif destination.is_symlink() or destination.exists():
+                    unit = name[6:] if name.startswith("units/") else None
+                    if unit:
+                        # The update added this unit. The running Wi-Fi and the
+                        # update itself keep running.
+                        keep = unit in (WIFI_UNIT, "jittersim-update.service")
+                        try:
+                            run(["systemctl", "disable", *([] if keep else ["--now"]), unit], 60)
+                        except UpdateError:
+                            pass
+                    destination.unlink()
             if (backup / "access").exists():
                 if access.exists():
                     shutil.rmtree(access)
@@ -366,8 +549,7 @@ def apply_update(
                         os.chown(entry, uid, gid, follow_symlinks=False)
             if (backup / "manager.py").exists():
                 install_manager(backup / "manager.py", manager)
-            run(["systemctl", "daemon-reload"], 30)
-            run(["systemctl", "start", *SERVICES], 60)
+            restart_services()
 
         def wait_healthy():
             for _ in range(30):
@@ -379,8 +561,26 @@ def apply_update(
         recovered = False
         keep_request = True
         backup_taken = False
+        stopped = False
         try:
+            if not request.get("rollback"):
+                staged = root / "staged"
+                if read_json(staged / ".jittersim-release.json").get("version") != request.get(
+                    "version"
+                ):
+                    raise UpdateError("staged release changed")
+                uplink, test_interface = runtime_interfaces(config)
+                # Like install.sh, check the Pi with the release's own scripts
+                # before anything changes.
+                progress("stopping", "Checking the Pi network before the update.")
+                run(
+                    [PYTHON, str(staged / PREFLIGHT),
+                     "--uplink", uplink, "--test-interface", test_interface],
+                    60,
+                )
+                run([PYTHON, str(staged / EGRESS_CHECK), test_interface], 60)
             progress("stopping", "Stopping services before the settings backup.")
+            stopped = True
             run(["systemctl", "stop", *reversed(SERVICES)], 60)
             if request.get("rollback"):
                 progress("rolling-back", "Restoring the previous installation and settings.")
@@ -391,11 +591,6 @@ def apply_update(
                 progress("rolled-back", "Previous installation restored and health check passed.")
                 keep_request = False
                 return
-            staged = root / "staged"
-            if read_json(staged / ".jittersim-release.json").get("version") != request.get(
-                "version"
-            ):
-                raise UpdateError("staged release changed")
             progress("backing-up", "Backing up the installation and settings.")
             candidate = root / "backup-next"
             if candidate.exists():
@@ -417,6 +612,11 @@ def apply_update(
             for unit in UNITS:
                 if (units / unit).exists():
                     shutil.copy2(units / unit, candidate / "units" / unit)
+            for name, path in (("dispatcher", dispatcher), ("command", command)):
+                if path.is_symlink():
+                    os.symlink(os.readlink(path), candidate / name)
+                elif path.exists():
+                    shutil.copy2(path, candidate / name)
             if manager.exists():
                 shutil.copy2(manager, candidate / "manager.py")
             atomic_json(
@@ -424,6 +624,8 @@ def apply_update(
                 {
                     "created_at": int(time.time()),
                     "target_version": request.get("version"),
+                    # A missing entry means the file did not exist before.
+                    "managed": ["units/" + unit for unit in UNITS] + ["dispatcher", "command"],
                     "ownership": {
                         name: [source.stat().st_uid, source.stat().st_gid]
                         for name, source in (("code", code), ("config", config), ("data", data), ("access", access))
@@ -442,6 +644,10 @@ def apply_update(
                 shutil.copytree(staged / name, code / name)
             for name in ("pyproject.toml", "README.md", ".jittersim-release.json"):
                 shutil.copy2(staged / name, code / name)
+            # Like replace-source.py: an old build folder could put removed
+            # modules back into the package.
+            if (code / "build").exists():
+                shutil.rmtree(code / "build")
             run(
                 [
                     str(code / ".venv/bin/python"),
@@ -454,14 +660,24 @@ def apply_update(
                 ],
                 300,
             )
-            for unit in UNITS:
-                source = code / "deploy/raspberry-pi" / unit
-                if not source.is_file():
-                    raise UpdateError("release is missing a service definition")
-                shutil.copy2(source, units / unit)
-            run(["systemctl", "daemon-reload"], 30)
+            # The root helper runs this code so only root may change it.
+            for entry in [code, *code.rglob("*")]:
+                if not entry.is_symlink():
+                    entry.chmod(entry.stat().st_mode & ~0o022)
+            python = str(code / ".venv/bin/python")
+            run(["runuser", "-u", "jittersim", "--", python, "-I", "-c", IMPORT_CHECK], 120)
+            run([python, str(code / BOOTSTRAP)], 60)
+            link_command(str(code / ".venv/bin/jittersim"), command)
+            render_firewall(
+                staged / FIREWALL_TEMPLATE, config / FIREWALL_RULES, uplink, test_interface
+            )
+            dispatcher.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+            for source, destination, mode in release_files(
+                code=code, units=units, dispatcher=dispatcher
+            ):
+                install_file(staged / source, destination, mode)
             progress("checking", "Restarting services and checking the dashboard and helper.")
-            run(["systemctl", "start", *SERVICES], 60)
+            restart_services()
             if not wait_healthy():
                 raise UpdateError("updated services failed their health check")
             install_manager(code / "src/jittersim/updates.py", manager)
@@ -478,17 +694,25 @@ def apply_update(
                     run(["systemctl", "stop", *reversed(SERVICES)], 60)
                     restore()
                     recovered = wait_healthy()
-                else:
-                    run(["systemctl", "start", *SERVICES], 60)
+                elif stopped:
+                    # Stopping the helper also stopped the watcher that needs it.
+                    run(["systemctl", "start", *present(SERVICES + (WATCHER,))], 60)
             except Exception:
                 recovered = False
             keep_request = bool(needs_recovery and not recovered)
-            progress(
-                "rolled-back" if recovered else "failed",
-                "Update failed. Previous installation restored and checked."
-                if recovered
-                else "Update or recovery failed. Use Ethernet or SSH to inspect the update service log.",
-            )
+            if recovered:
+                message = "Update failed. Previous installation restored and checked."
+            elif not stopped:
+                message = (
+                    "Update stopped before it changed anything. "
+                    "Use Ethernet or SSH to inspect the update service log."
+                )
+            else:
+                message = (
+                    "Update or recovery failed. "
+                    "Use Ethernet or SSH to inspect the update service log."
+                )
+            progress("rolled-back" if recovered else "failed", message)
             raise
         finally:
             if not keep_request:

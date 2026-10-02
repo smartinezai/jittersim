@@ -7,7 +7,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from jittersim.config.storage import StorageError
-from jittersim.config.transfer import check_settings
+from jittersim.config.transfer import check_settings, keep_sections_missing_from
 from jittersim.config.workflows import WorkflowStore, session_report, settings_snapshot
 from jittersim.engine.compiler import (
     MAX_SERVICE_ASSIGNMENT_DOMAINS_PER_PLAN,
@@ -206,7 +206,9 @@ def write_workflow(server, path, payload, parse_settings):
             expected = payload.get("current_version")
             if not isinstance(expected, int) or isinstance(expected, bool):
                 raise ValueError("preview the settings before restoring")
-            settings = parse_settings(previous)
+            settings = keep_sections_missing_from(
+                previous, parse_settings(previous), server.repository.saved_settings()
+            )
             check_settings(
                 settings,
                 max_traffic_classes=MAX_SHAPED_MARKS_PER_PLAN,
@@ -215,7 +217,10 @@ def write_workflow(server, path, payload, parse_settings):
             if server.scheduler:
                 server.scheduler.sample_usage(repository=server.repository)
             server.repository.replace_settings(
-                settings, expected_version=expected, preserve_usage=True
+                settings,
+                expected_version=expected,
+                preserve_usage=True,
+                observation_addresses=server.newly_protected_station_addresses(settings),
             )
             server._record_activity("reset", "Saved settings restored. Temporary runs stopped.")
             return server._apply_saved_change("restored", {"id": identifier})

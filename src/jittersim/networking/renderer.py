@@ -84,10 +84,8 @@ def _render_set(values: Sequence[object]) -> str:
     return "{ " + ", ".join(str(value) for value in values) + " }"
 
 
-# A rate far above any real link. netem only keeps packets in order when a
-
-
-# netem keeps jittered packets in order only when a rate serializes them.
+# A rate far above any real link. netem keeps jittered packets in order only when
+# a rate serializes them.
 ORDERING_RATE = "10gbit"
 
 

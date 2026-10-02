@@ -189,10 +189,13 @@ WIDE_FONTS_STYLE = (
 
 
 def allow_wide_fonts_style():
-    """Add the injected style's hash to the page's content security policy."""
+    """Add the wide-font style's hash to the page's content security policy.
 
-    if os.environ.get("JITTERSIM_BROWSER_TEST_WIDE_FONTS") != "1":
-        return
+    The apply clarity journey also puts this style on the page itself to stand in
+    for the fonts of another machine. Without the hash the policy drops it silently
+    and the journey checks the normal fonts twice.
+    """
+
     inner = WIDE_FONTS_STYLE[len(b"<style>"):-len(b"</style>")]
     digest = base64.b64encode(hashlib.sha256(inner).digest()).decode("ascii")
     server_module.DASHBOARD_CONTENT_SECURITY_POLICY = server_module.DASHBOARD_CONTENT_SECURITY_POLICY.replace(
@@ -268,6 +271,7 @@ def keep_helper_busy(helper_client):
 
 
 def main():
+    allow_wide_fonts_style()
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         executor = DashboardWifiExecutor()

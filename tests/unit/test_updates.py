@@ -3,6 +3,10 @@
 import hashlib
 import io
 import json
+import os
+import re
+import shlex
+import sys
 import tarfile
 import tempfile
 import threading
@@ -17,9 +21,43 @@ from jittersim.updates import (
     atomic_json,
     healthy,
     request_update,
+    run_command,
     stage_release,
     update_status,
 )
+
+PI = Path(__file__).resolve().parents[2] / "deploy" / "raspberry-pi"
+WATCHER = "jittersim-service-watch.service"
+NAME_UNIT = "jittersim-mdns.service"
+# The installer switches off new package defaults and picks a message. Neither
+# changes a release file or a JitterSim service.
+NOT_MIRRORED_SYSTEMCTL = (
+    "systemctl disable --now unbound.service",
+    "systemctl disable --now hostapd.service",
+    "systemctl is-active --quiet jittersim-mdns.service",
+)
+
+
+def installer_lines():
+    """install.sh with one command per line and its for loop written out."""
+    text = (PI / "install.sh").read_text().replace("\\\n", " ")
+    lines = [" ".join(line.split()) for line in text.splitlines()]
+    lines = [line for line in lines if line and not line.startswith("#")]
+    expanded = []
+    index = 0
+    while index < len(lines):
+        loop = re.fullmatch(r"for (\w+) in ([^;]+); do", lines[index])
+        if loop is None:
+            expanded.append(lines[index])
+            index += 1
+            continue
+        end = lines.index("done", index)
+        for value in loop.group(2).split():
+            expanded.extend(
+                line.replace("$" + loop.group(1), value) for line in lines[index + 1 : end]
+            )
+        index = end + 1
+    return [re.sub(r" \|\| return 1$", "", line) for line in expanded]
 
 
 class UpdateTests(unittest.TestCase):
@@ -35,12 +73,20 @@ class UpdateTests(unittest.TestCase):
         ]
         for directory in (self.code, self.config, self.data, self.units):
             directory.mkdir()
+        self.dispatcher = self.base / "dispatcher.d" / "80-jittersim-mdns"
+        self.command = self.base / "bin" / "jittersim"
+        self.command.parent.mkdir()
         (self.code / "old-file").write_text("previous installation")
         (self.data / "jittersim.db").write_text("original settings")
         (self.config / "control.env").write_text("private credentials")
         (self.config / "control.env").chmod(0o600)
+        (self.config / "runtime.env").write_text(
+            "JITTERSIM_UPLINK=eth7\nJITTERSIM_TEST_INTERFACE=wlan7\n"
+        )
         for unit in UNITS:
             (self.units / unit).write_text("old service")
+        # The test Wi-Fi is up unless a test says otherwise.
+        self.wifi = "jittersim-ap"
 
     def tearDown(self):
         self.temp.cleanup()
@@ -53,7 +99,14 @@ class UpdateTests(unittest.TestCase):
             "src/jittersim/api/server.py": "new code",
             "src/jittersim/updates.py": "new recovery manager",
         }
-        files.update({"deploy/raspberry-pi/" + unit: "new service" for unit in UNITS})
+        # The release ships this checkout's Pi files so the installer steps are real.
+        files.update(
+            {
+                "deploy/raspberry-pi/" + item.name: item.read_text()
+                for item in PI.iterdir()
+                if item.is_file()
+            }
+        )
         with tarfile.open(path, "w:gz") as archive:
             for name, content in files.items():
                 raw = content.encode()
@@ -68,7 +121,7 @@ class UpdateTests(unittest.TestCase):
         path, digest = self.archive()
         stage_release(path, digest, "v1", root=self.root)
 
-    def apply(self, run, health):
+    def apply(self, run, health, query=None):
         return apply_update(
             root=self.root,
             code=self.code,
@@ -77,9 +130,37 @@ class UpdateTests(unittest.TestCase):
             access=self.access,
             units=self.units,
             manager=self.manager,
+            dispatcher=self.dispatcher,
+            command=self.command,
             run=run,
+            query=query or (lambda command, timeout: self.wifi),
             health=health,
         )
+
+    def recorder(self, fail=lambda command: False):
+        commands = []
+
+        def run(command, timeout):
+            commands.append(list(command))
+            if fail(command):
+                raise UpdateError("command failed")
+
+        return commands, run
+
+    def install(self, fail=lambda command: False, query=None):
+        """Install the staged release and return every command it ran."""
+        self.stage()
+        request_update("v1", root=self.root, code=self.code, run=lambda *args: None)
+        commands, run = self.recorder(fail)
+        self.apply(run, lambda: True, query)
+        return commands
+
+    def after_package(self, commands):
+        index = next(i for i, command in enumerate(commands) if "pip" in command)
+        return commands[index + 1 :]
+
+    def systemctl(self, commands):
+        return [" ".join(command) for command in commands if command[0] == "systemctl"]
 
     def test_rejects_wrong_checksum_traversal_and_links_before_extraction(self):
         path, _ = self.archive()
@@ -215,6 +296,350 @@ class UpdateTests(unittest.TestCase):
         self.assertTrue(json.loads((self.root / "request.json").read_text())["rollback"])
         self.apply(lambda *args: None, lambda: True)
         self.assertFalse((self.root / "request.json").exists())
+
+    def installer_words(self, line):
+        """Split an install.sh command and point its paths at this test's Pi."""
+        replacements = (
+            ("$SOURCE_DIR", str(self.root / "staged")),
+            ("$INSTALL_DIR", str(self.code)),
+            ("$CONFIG_DIR", str(self.config)),
+            ("$DATA_DIR", str(self.data)),
+            ("$JITTERSIM_UPLINK", "eth7"),
+            ("$JITTERSIM_TEST_INTERFACE", "wlan7"),
+            ("/etc/systemd/system", str(self.units)),
+            ("/etc/NetworkManager/dispatcher.d/80-jittersim-mdns", str(self.dispatcher)),
+            ("/etc/NetworkManager/dispatcher.d", str(self.dispatcher.parent)),
+            ("/usr/local/lib/jittersim-update.py", str(self.manager)),
+            ("/usr/local/bin/jittersim", str(self.command)),
+        )
+        words = []
+        for word in shlex.split(line):
+            for old, new in replacements:
+                word = word.replace(old, new)
+            words.append(sys.executable if word == "python3" else word)
+        return words
+
+    def test_the_update_runs_every_release_step_of_the_installer(self):
+        # A new install.sh step that reads the release or installs a file fails
+        # here until the dashboard update does the same.
+        (self.code / "build" / "lib").mkdir(parents=True)
+        (self.code / "build" / "lib" / "removed.py").write_text("module of an older release")
+        (self.code / "old-file").chmod(0o666)
+        commands = self.install()
+        installed_units = set()
+        for line in installer_lines():
+            if not (
+                "$SOURCE_DIR" in line
+                or "$INSTALL_DIR" in line
+                or line.startswith(("install ", "sed ", "ln ", "runuser "))
+            ) or line.startswith(("SOURCE_DIR=", "INSTALL_DIR=", "if [ ", "echo ")):
+                continue
+            words = self.installer_words(line)
+            with self.subTest(line=line):
+                if line.startswith("install -m "):
+                    self.assertEqual(words[3:7], ["-o", "root", "-g", "root"])
+                    source, destination = Path(words[7]), Path(words[8])
+                    self.assertEqual(destination.read_bytes(), source.read_bytes())
+                    self.assertEqual(destination.stat().st_mode & 0o777, int(words[2], 8))
+                    if destination.parent == self.units:
+                        installed_units.add(destination.name)
+                elif line.startswith("install -d "):
+                    if words[-1] == str(self.dispatcher.parent):
+                        self.assertTrue(self.dispatcher.parent.is_dir())
+                    else:
+                        # An installed Pi has these folders and the recovery copy
+                        # keeps their owners.
+                        self.assertIn(
+                            words[-1],
+                            (
+                                str(self.config),
+                                str(self.data),
+                                str(self.code),
+                                "/usr/local/lib",
+                                "/var/lib/jittersim-access",
+                            ),
+                        )
+                elif line.startswith("sed "):
+                    self.assertEqual(words[-2], ">")
+                    expected = Path(words[-3]).read_text()
+                    for index, word in enumerate(words[:-3]):
+                        if word == "-e":
+                            _, placeholder, value, _ = words[index + 1].split("/")
+                            expected = expected.replace(placeholder, value)
+                    self.assertEqual(Path(words[-1]).read_text(), expected)
+                elif re.search(r"deploy/raspberry-pi/[\w.-]+\.py", line):
+                    script = Path(words[1]).name
+                    if script == "retire-services.py":
+                        # It refuses to run while the update service runs and no
+                        # unit waits to be retired. A test below keeps that true.
+                        continue
+                    if script == "replace-source.py":
+                        # The update replaces the same folders itself.
+                        self.assertFalse((self.code / "build").exists())
+                        for name in ("src", "deploy", "pyproject.toml", "README.md"):
+                            self.assertTrue((self.code / name).exists())
+                        continue
+                    self.assertIn(words, commands)
+                elif line.startswith("runuser "):
+                    self.assertIn(words, commands)
+                elif line.startswith("ln "):
+                    self.assertEqual(words[1], "-sf")
+                    self.assertEqual(os.readlink(self.command), words[2])
+                elif Path(words[0]).name == "pip":
+                    self.assertIn(
+                        [str(self.code / ".venv/bin/python"), "-m", "pip", "install",
+                         "--no-input", "--disable-pip-version-check", words[-1]],
+                        commands,
+                    )
+                elif words[:2] == ["chmod", "-R"]:
+                    self.assertEqual(words[2], "go-w")
+                    for entry in [self.code, *self.code.rglob("*")]:
+                        self.assertFalse(entry.stat().st_mode & 0o022, entry)
+                elif words[1:3] == ["-m", "venv"] or words[:2] == ["chown", "-R"]:
+                    # The update installs into the existing environment as root.
+                    continue
+                else:
+                    self.fail("the dashboard update does not do this install.sh step")
+        self.assertEqual(installed_units, set(UNITS))
+
+    def test_the_update_runs_the_installer_service_steps_in_order(self):
+        self.wifi = ""
+        commands = self.install()
+        installer = [
+            call
+            for line in installer_lines()
+            for call in re.findall(r"systemctl [^;|&]*[^;|&\s]", line)
+            if call not in NOT_MIRRORED_SYSTEMCTL
+        ]
+        self.assertIn("systemctl restart " + WATCHER, installer)
+        self.assertEqual(self.systemctl(self.after_package(commands)), installer)
+
+    def test_the_installer_adds_no_package_or_retired_unit_the_update_cannot_handle(self):
+        packages = [
+            word
+            for line in installer_lines()
+            if "apt-get install -y " in line
+            for word in line.split("apt-get install -y ", 1)[1].split()
+        ]
+        # A dashboard update cannot install OS packages. A release that needs a
+        # new one tells administrators to run install.sh first and updates this list.
+        self.assertEqual(
+            packages,
+            "dnsmasq-base iputils-ping iw wpasupplicant nftables openssl python3-venv "
+            "tcpdump unbound dnsutils hostapd conntrack avahi-daemon avahi-utils".split(),
+        )
+        # Retiring a unit needs its file and enabled state back on a rollback.
+        self.assertIn("\nOBSOLETE_SERVICES = ()\n", (PI / "retire-services.py").read_text())
+
+    def fresh(self):
+        """Start again on a new Pi inside one test."""
+        self.addCleanup(self.temp.cleanup)
+        self.setUp()
+
+    def test_failed_preflight_or_egress_check_stops_before_anything_changes(self):
+        for script in ("preflight.py", "check-egress-hook.py"):
+            with self.subTest(script=script):
+                self.fresh()
+                self.stage()
+                request_update("v1", root=self.root, code=self.code, run=lambda *args: None)
+                commands, run = self.recorder(lambda command: command[1].endswith(script))
+                with self.assertRaises(UpdateError):
+                    self.apply(run, lambda: True)
+                # Only the checks ran. No service was stopped or restarted.
+                self.assertTrue(all(command[0] == sys.executable for command in commands))
+                self.assertFalse((self.code / "src").exists())
+                self.assertEqual((self.units / UNITS[0]).read_text(), "old service")
+                self.assertFalse(self.dispatcher.exists())
+                self.assertFalse((self.root / "backup").exists())
+                self.assertFalse((self.root / "request.json").exists())
+                status = update_status(root=self.root, code=self.code)
+                self.assertEqual(status["phase"], "failed")
+                self.assertIn("before it changed anything", status["message"])
+
+    def test_a_failed_release_script_is_named_in_the_error(self):
+        with self.assertRaisesRegex(UpdateError, "preflight.py"):
+            run_command([sys.executable, str(self.base / "missing/preflight.py")], 30)
+
+    def test_the_checks_use_the_staged_scripts_and_the_saved_interfaces(self):
+        staged = self.root / "staged/deploy/raspberry-pi"
+        self.assertEqual(
+            self.install()[:2],
+            [
+                [sys.executable, str(staged / "preflight.py"),
+                 "--uplink", "eth7", "--test-interface", "wlan7"],
+                [sys.executable, str(staged / "check-egress-hook.py"), "wlan7"],
+            ],
+        )
+        # Without runtime.env the installer's defaults apply.
+        self.fresh()
+        (self.config / "runtime.env").unlink()
+        self.assertEqual(
+            self.install()[0],
+            [sys.executable, str(self.root / "staged/deploy/raspberry-pi/preflight.py"),
+             "--uplink", "eth0", "--test-interface", "wlan0"],
+        )
+
+    def test_an_unsafe_interface_name_stops_the_update_before_anything_runs(self):
+        (self.config / "runtime.env").write_text(
+            'JITTERSIM_UPLINK=eth7\nJITTERSIM_TEST_INTERFACE="wlan7; drop"\n'
+        )
+        self.stage()
+        request_update("v1", root=self.root, code=self.code, run=lambda *args: None)
+        commands, run = self.recorder()
+        with self.assertRaisesRegex(UpdateError, "interface"):
+            self.apply(run, lambda: True)
+        self.assertEqual(commands, [])
+        self.assertEqual(update_status(root=self.root, code=self.code)["phase"], "failed")
+
+    def test_the_firewall_is_rendered_with_the_saved_interfaces(self):
+        self.install()
+        rules = (self.config / "jittersim-control-firewall.nft").read_text()
+        self.assertIn('iifname "wlan7" tcp dport 22', rules)
+        self.assertIn('iifname "wlan7" oifname "eth7"', rules)
+        self.assertNotIn("@", rules)
+        mode = (self.config / "jittersim-control-firewall.nft").stat().st_mode & 0o777
+        self.assertEqual(mode, 0o644)
+
+    def test_the_dashboard_name_unit_and_dispatcher_are_installed(self):
+        self.install()
+        self.assertEqual(
+            (self.units / NAME_UNIT).read_text(), (PI / NAME_UNIT).read_text()
+        )
+        self.assertEqual(
+            self.dispatcher.read_text(), (PI / "jittersim-mdns-dispatcher").read_text()
+        )
+        self.assertEqual(self.dispatcher.stat().st_mode & 0o777, 0o755)
+        publisher = self.code / "deploy/raspberry-pi/publish-dashboard-name.sh"
+        self.assertEqual(publisher.stat().st_mode & 0o777, 0o755)
+
+    def test_the_watcher_restarts_and_a_running_test_wifi_is_left_alone(self):
+        commands = self.install()
+        calls = self.systemctl(commands)
+        self.assertLess(
+            calls.index("systemctl restart jittersim-helper.service"),
+            calls.index("systemctl restart " + WATCHER),
+        )
+        # The running test Wi-Fi is only enabled for boot, never started again,
+        # restarted or stopped.
+        for call in calls:
+            if "jittersim-ap.service" in call:
+                self.assertTrue(call.startswith("systemctl enable "), call)
+
+    def test_the_test_wifi_starts_only_when_it_is_down(self):
+        asked = []
+
+        def query(command, timeout):
+            asked.append(command)
+            return answer
+
+        for answer, starts in (("jittersim-ap", False), ("", True), ("--", True)):
+            with self.subTest(answer=answer):
+                self.fresh()
+                calls = self.systemctl(self.install(query=query))
+                self.assertEqual("systemctl start jittersim-ap.service" in calls, starts)
+                self.assertEqual(
+                    asked[-1], ["nmcli", "-g", "GENERAL.CONNECTION", "device", "show", "wlan7"]
+                )
+
+        def broken(command, timeout):
+            raise UpdateError("NetworkManager does not answer")
+
+        self.fresh()
+        calls = self.systemctl(self.install(query=broken))
+        # Unknown state never risks a restart of the running Wi-Fi.
+        self.assertNotIn("systemctl start jittersim-ap.service", calls)
+        self.assertEqual(update_status(root=self.root, code=self.code)["phase"], "complete")
+
+    def test_dashboard_name_setup_stays_best_effort(self):
+        commands = self.install(fail=lambda command: command[-1:] == [NAME_UNIT])
+        self.assertIn("systemctl enable " + NAME_UNIT, self.systemctl(commands))
+        self.assertNotIn("systemctl restart " + NAME_UNIT, self.systemctl(commands))
+        self.assertEqual(update_status(root=self.root, code=self.code)["phase"], "complete")
+
+    def test_failed_import_check_or_service_restart_restores_every_replaced_file(self):
+        failures = (
+            lambda command: command[0] == "runuser",
+            lambda command: command[1:] == ["restart", "jittersim-control-firewall.service"]
+            and (self.code / "src").exists(),
+        )
+        for number, fail in enumerate(failures):
+            with self.subTest(failure=number):
+                self.fresh()
+                self.dispatcher.parent.mkdir()
+                self.dispatcher.write_text("old dispatcher")
+                self.dispatcher.chmod(0o755)
+                os.symlink("/old/jittersim", self.command)
+                (self.config / "jittersim-control-firewall.nft").write_text("old rules")
+                publisher = self.code / "deploy/raspberry-pi/publish-dashboard-name.sh"
+                publisher.parent.mkdir(parents=True)
+                publisher.write_text("old publisher")
+                self.stage()
+                request_update("v1", root=self.root, code=self.code, run=lambda *args: None)
+                commands, run = self.recorder(fail)
+                with self.assertRaises(UpdateError):
+                    self.apply(run, lambda: True)
+                self.assertEqual(self.dispatcher.read_text(), "old dispatcher")
+                self.assertEqual(self.dispatcher.stat().st_mode & 0o777, 0o755)
+                self.assertEqual(os.readlink(self.command), "/old/jittersim")
+                self.assertEqual(
+                    (self.config / "jittersim-control-firewall.nft").read_text(), "old rules"
+                )
+                self.assertEqual(publisher.read_text(), "old publisher")
+                for unit in UNITS:
+                    self.assertEqual((self.units / unit).read_text(), "old service")
+                self.assertEqual(self.manager.read_text(), "old recovery manager")
+                self.assertFalse((self.code / "src").exists())
+                # The recovered installation gets the same service steps.
+                calls = self.systemctl(commands)
+                stops = [i for i, call in enumerate(calls) if call.startswith("systemctl stop ")]
+                self.assertIn("systemctl restart " + WATCHER, calls[stops[-1] :])
+                self.assertEqual(
+                    update_status(root=self.root, code=self.code)["phase"], "rolled-back"
+                )
+
+    def test_rollback_removes_what_the_update_added(self):
+        (self.units / NAME_UNIT).unlink()
+        self.install()
+        self.assertTrue((self.units / NAME_UNIT).exists())
+        self.assertTrue(self.dispatcher.exists())
+        self.assertTrue(self.command.is_symlink())
+        request_update("", rollback=True, root=self.root, code=self.code, run=lambda *a: None)
+        commands, run = self.recorder()
+        self.apply(run, lambda: True)
+        self.assertFalse((self.units / NAME_UNIT).exists())
+        self.assertFalse(self.dispatcher.exists())
+        self.assertFalse(self.command.is_symlink())
+        self.assertIn("systemctl disable --now " + NAME_UNIT, self.systemctl(commands))
+        self.assertNotIn("systemctl restart " + NAME_UNIT, self.systemctl(commands))
+        self.assertIn("systemctl restart " + WATCHER, self.systemctl(commands))
+        self.assertEqual(update_status(root=self.root, code=self.code)["phase"], "rolled-back")
+
+    def test_a_recovery_copy_without_a_file_list_keeps_newer_units(self):
+        # Recovery copies from before this release covered only the older units.
+        self.install()
+        record = json.loads((self.root / "backup/complete.json").read_text())
+        del record["managed"]
+        atomic_json(self.root / "backup/complete.json", record)
+        (self.root / "backup/units" / NAME_UNIT).unlink()
+        request_update("", rollback=True, root=self.root, code=self.code, run=lambda *a: None)
+        self.apply(lambda *args: None, lambda: True)
+        self.assertEqual((self.units / NAME_UNIT).read_text(), (PI / NAME_UNIT).read_text())
+        self.assertTrue(self.dispatcher.exists())
+        self.assertEqual((self.units / UNITS[0]).read_text(), "old service")
+
+    def test_failure_before_backup_starts_the_watcher_again(self):
+        self.stage()
+        request_update("v1", root=self.root, code=self.code, run=lambda *args: None)
+        commands, run = self.recorder()
+        with patch("jittersim.updates.shutil.disk_usage") as disk:
+            disk.return_value.free = 0
+            with self.assertRaises(UpdateError):
+                self.apply(run, lambda: True)
+        self.assertEqual(
+            self.systemctl(commands)[-1],
+            "systemctl start jittersim-helper.service jittersim-dashboard.service "
+            "jittersim-browser-proxy.service " + WATCHER,
+        )
 
     def test_health_uses_the_installer_certificate_name_and_checks_every_service(self):
         from jittersim.api.server import ControlServer

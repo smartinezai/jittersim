@@ -27,7 +27,7 @@ function populateAccessTargets() {
   const select = element('site-rule-target');
   const selected = select.value;
   const options = [new Option('Everyone on the test Wi-Fi', 'everyone')];
-  devices.forEach(device => options.push(new Option(device.name, 'device:' + device.id)));
+  devices.forEach(device => options.push(new Option(devicePickerLabel(device), 'device:' + device.id)));
   groups.forEach(group => options.push(new Option('Group: ' + group.name, 'group:' + group.id)));
   select.replaceChildren(...options);
   if (options.some(option => option.value === selected)) select.value = selected;
@@ -95,7 +95,8 @@ function renderSiteRules() {
   if (!siteRules.length) container.append(textNode('p', 'No named site rules yet. Add a site or a collection of domains for a service.'));
   siteRules.forEach(rule => {
     const row = textNode('article', '', 'access-rule-row');
-    const owner = rule.device_id ? devices.find(d => d.id === rule.device_id)?.name || rule.device_id :
+    const owner = rule.device_id ? (devices.some(d => d.id === rule.device_id)
+      ? deviceTitle(devices.find(d => d.id === rule.device_id)) : rule.device_id) :
       rule.group_id ? 'Group: ' + (groups.find(g => g.id === rule.group_id)?.name || rule.group_id) : 'Everyone';
     const copy = textNode('div', '');
     copy.append(textNode('h3', rule.name), textNode('p', owner + ' · ' + (rule.enabled ? 'Enabled' : 'Disabled')),
@@ -131,7 +132,7 @@ function renderAccessDevices() {
   const policy = applied || accessState?.saved_policy;
   if (!policy) return;
   container.replaceChildren();
-  const all = new Map(devices.filter(d => d.mac_address).map(d => [d.mac_address, d]));
+  const all = new Map(devices.filter(d => d.mac_address).map(d => [d.mac_address, {...d, name: deviceTitle(d)}]));
   (lastConnectedDevices?.devices || []).forEach(d => {
     if (d.mac_address && !all.has(d.mac_address)) all.set(d.mac_address, {...d, name:d.display_name || d.hostname || d.mac_address});
   });
@@ -203,7 +204,7 @@ function installAccessControls() {
     <p class="form-note">Each new DNS request from test Wi-Fi can get a quick connection error. Device and browser DNS caches may hide failures on later page visits. At 100%, test Wi-Fi name lookups will fail. This setting does not affect management traffic.</p>
     <p id="dns-failure-status" class="form-note" role="status">Checking the applied DNS failure chance…</p>`;
   element('policy-form').prepend(options);
-  card.querySelector('.policy-note').textContent = 'These rules persist after an experiment resets. Domain blocks include subdomains. VPNs, encrypted DNS over HTTPS and another internet connection can bypass network-only filtering. Existing direct connections or a device’s cached DNS answer can continue until it looks up the name again. The managed browser proxy also checks hostnames and closes tunnels when rules change.';
+  card.querySelector('.policy-note').textContent = 'These rules persist after an experiment resets. Domain blocks and global blocked domains include subdomains while household access rules are on. VPNs, encrypted DNS over HTTPS and another internet connection can bypass network-only filtering. Existing direct connections or a device’s cached DNS answer can continue until it looks up the name again. The managed browser proxy also checks hostnames and closes tunnels when rules change.';
   const actions = textNode('div', '', 'access-actions');
   const apply = actionButton('Apply access rules', async () => {
     if (formDrafts.has('policy-form') || formDrafts.has('site-rule-form')) throw new Error('Save or discard unfinished access-rule edits before applying.');
@@ -275,12 +276,13 @@ function installFieldHelp() {
     'profile-seed':'The same seed repeats the sequence of random choices with the same settings and timing. Leave blank for a different sequence.',
     'profile-website-mode':'Allow only listed domains limits a device while this profile runs. Household site blocks are separate and stay active after a profile changes.',
     'profile-website-domains':'These experimental profile rules use resolved server addresses. For persistent hostname and subdomain blocking, use Access rules.',
-    'site-rule-domains':'A rule for example.com also blocks video.example.com. It does not block unrelated-example.com. Enter names without https:// or a page path.'
+    'site-rule-domains':'A rule for example.com also blocks video.example.com. It does not block unrelated-example.com. Enter names without https:// or a page path.',
+    'website-blocklist':'Block globally on the Traffic page adds names here. While household access rules are on example.com also blocks video.example.com for every test Wi-Fi device. Unblock removes the exact name and its subdomains resolve again.'
   })) {
     const input = element(id);
     if (input.closest('label') && input.closest('label').querySelector('.help-icon')) continue;
     const icon = textNode('span', '?', 'help-icon'); icon.dataset.help = help;
-    icon.setAttribute('aria-label', id === 'site-rule-domains' ? 'Blocked domains help' : id.replaceAll('-', ' ') + ' help'); input.before(icon);
+    icon.setAttribute('aria-label', id === 'site-rule-domains' ? 'Blocked domains help' : id === 'website-blocklist' ? 'Global blocked domains help' : id.replaceAll('-', ' ') + ' help'); input.before(icon);
   }
   let active = null; let pinned = false; let closeTimer = null;
   function close() { if (active) { active.tip.hidden = true; active.button.setAttribute('aria-expanded', 'false'); } active = null; pinned = false; }

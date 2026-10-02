@@ -244,15 +244,13 @@ class HelperService:
         if action == "ping":
             return {"ok": True, "action": "ping"}
         if action == "capabilities":
+            # Each flag guards a check in HelperClient. Main's features need no flag
+            # because their helper actions answer "unknown action" on an older helper.
             return {
                 "ok": True,
                 "general_profile": True,
                 "service_lists": True,
                 "protected_dns_capture": True,
-                "everyone_else": True,
-                "access_controls": self._access_manager is not None,
-                "gateway_persistence": True,
-                "queue_stats": True,
             }
         if action == "dashboard-access":
             if not self._access_lock.acquire(blocking=False):

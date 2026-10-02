@@ -162,8 +162,10 @@ class WifiController:
         previous = self._settings(RECOVERY_CONNECTION)
         self._run(("connection", "delete", "id", AP_CONNECTION), ignore_failure=True)
         self._run(("connection", "clone", RECOVERY_CONNECTION, AP_CONNECTION))
+        # Like the installer: jittersim-ap.service starts the Wi-Fi at boot once the
+        # management firewall is loaded. NetworkManager must not start it earlier.
         self._run(("connection", "modify", "id", AP_CONNECTION,
-                   "connection.autoconnect", "yes"))
+                   "connection.autoconnect", "no"))
         self._activate()
         self._verify(previous, radio=False)
         self._run(("connection", "delete", "id", RECOVERY_CONNECTION))
