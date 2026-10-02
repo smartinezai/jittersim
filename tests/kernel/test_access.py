@@ -14,7 +14,7 @@ from pathlib import Path
 
 from jittersim.config.models import AccessOptions, MacPolicy, SiteBlock, WebsitePolicy
 from jittersim.engine.access import AccessClient, AccessPlan
-from jittersim.networking.access import AccessManager, read_access
+from jittersim.networking.access import AccessManager, read_access, transition_firewall
 from jittersim.networking.applier import NetworkApplier
 from jittersim.networking.commands import CommandResult
 from jittersim.networking.executor import CommandExecutionError
@@ -62,6 +62,9 @@ class DnsServiceExecutor(NamespaceExecutor):
     def run(self, command):
         if command.executable != "systemctl":
             return super().run(command)
+        if command.arguments[0] == "stop":
+            self.stop()
+            return CommandResult(return_code=0)
         if command.arguments[0] == "restart":
             self.stop()
             if self.fail_restarts:
@@ -211,7 +214,13 @@ class AccessDatapathTests(unittest.TestCase):
         self.manager.apply(self.plan)
         self.executor.fail_restarts = 1
         with self.assertRaises(CommandExecutionError):
-            self.manager.apply(replace(self.plan, blocks=()))
+            # A changed rule needs the DNS service. Dropping every rule would not.
+            self.manager.apply(
+                replace(
+                    self.plan,
+                    blocks=(SiteBlock("video", "Video", ("news.example.com",), device_id="child"),),
+                )
+            )
         self.assertEqual(read_access(self.directory / "policy.json"), self.plan)
         self.assertIn("status: NXDOMAIN", self.query("video.example.com"))
         self.executor.stop()
@@ -449,6 +458,185 @@ class AccessDatapathTests(unittest.TestCase):
         tables = run_in(PI, "nft", "list", "tables").stdout
         self.assertIn("jittersim_control", tables)
         self.assertNotIn("jittersim_access_transition", tables)
+
+    def sign_in_listeners(self):
+        """Listen on the dashboard port and on another port in the Pi namespace."""
+
+        listener = subprocess.Popen(
+            [
+                "ip", "netns", "exec", PI, "python", "-u", "-c",
+                "import selectors, socket\n"
+                "selector = selectors.DefaultSelector()\n"
+                "for port in (8080, 8081):\n"
+                "    s = socket.socket()\n"
+                "    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+                "    s.bind(('0.0.0.0', port))\n"
+                "    s.listen(16)\n"
+                "    selector.register(s, selectors.EVENT_READ)\n"
+                "print('ready')\n"
+                "while True:\n"
+                "    for key, _ in selector.select():\n"
+                "        connection, _ = key.fileobj.accept()\n"
+                "        connection.sendall(b'welcome')\n"
+                "        connection.close()\n",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        self.addCleanup(listener.communicate)
+        self.addCleanup(listener.kill)
+        self.assertTrue(select.select([listener.stdout], [], [], 3)[0])
+        self.assertEqual(listener.stdout.readline().strip(), "ready")
+
+    def reaches(self, namespace, port):
+        # A fresh lookup of the Pi's hardware address on every try. A cached entry
+        # would hide a block on ARP replies.
+        for name in (PI, CLIENT, OTHER_CLIENT):
+            run_in(name, "ip", "neigh", "flush", "all", check=False)
+        result = run_in(
+            namespace,
+            "python",
+            "-c",
+            "import socket\n"
+            f"s = socket.create_connection(('192.168.50.1', {port}), timeout=1)\n"
+            "print(s.recv(16).decode())\n",
+            check=False,
+        )
+        return result.stdout.strip() == "welcome"
+
+    def test_mac_blocked_client_keeps_the_dashboard_sign_in_and_panic_releases_the_rest(self):
+        self.sign_in_listeners()
+        self.assertTrue(self.reaches(CLIENT, 8081))
+        for mac in (
+            MacPolicy("denylist", (), (CLIENT_MAC,)),
+            MacPolicy("allowlist", ("02:00:00:00:00:99",), ()),
+        ):
+            with self.subTest(mode=mac.mode):
+                self.manager.apply(replace(self.plan, mac=mac))
+                # Sign-in is how a blocked person learns why and gets help. Both
+                # directions of the connection need the exception.
+                self.assertTrue(self.reaches(CLIENT, 8080))
+                self.assertFalse(self.reaches(CLIENT, 8081))
+        self.manager.apply(replace(self.plan, mac=MacPolicy("denylist", (), (CLIENT_MAC,))))
+        self.assertTrue(self.reaches(OTHER_CLIENT, 8080))
+        self.assertTrue(self.reaches(OTHER_CLIENT, 8081))
+        # A server that merely uses port 8080 must not reach the blocked device.
+        run_in(ROUTER, "ip", "route", "add", "192.168.50.0/24", "via", "192.168.0.2")
+        self.assertEqual(self.udp_from_port_8080_arrives(), "blocked")
+        self.assertTrue(self.helper().handle_payload({"action": "normal-access"})["ok"])
+        self.assertTrue(self.reaches(CLIENT, 8080))
+        self.assertTrue(self.reaches(CLIENT, 8081))
+        self.assertEqual(self.udp_from_port_8080_arrives(), "arrived")
+
+    def experiment_payload(self):
+        from jittersim.config.models import Device, Impairment, Profile
+        from jittersim.engine.codec import plan_to_payload
+        from jittersim.engine.compiler import compile_plan
+
+        return {
+            "action": "apply",
+            "plan": plan_to_payload(
+                compile_plan(
+                    devices=(Device("child", "Child", CLIENT_ADDRESS, "slow", CLIENT_MAC),),
+                    profiles={"slow": Profile("slow", "Slow", upload=Impairment(delay_ms=50))},
+                )
+            ),
+        }
+
+    def test_dashboard_sign_in_survives_an_access_change_made_while_an_experiment_runs(self):
+        self.sign_in_listeners()
+        helper = self.helper()
+        self.assertTrue(helper.handle_payload(self.experiment_payload())["ok"])
+        # The access table is loaded after the experiment's download chain. Its
+        # egress chain must still run first or the reply mark is already cleared.
+        self.manager.apply(replace(self.plan, mac=MacPolicy("denylist", (), (CLIENT_MAC,))))
+        self.assertTrue(self.reaches(CLIENT, 8080))
+        self.assertFalse(self.reaches(CLIENT, 8081))
+        self.assertTrue(helper.handle_payload({"action": "normal-access"})["ok"])
+        self.assertTrue(self.reaches(CLIENT, 8081))
+
+    def test_dashboard_sign_in_survives_an_experiment_started_after_the_access_rules(self):
+        self.sign_in_listeners()
+        self.manager.apply(replace(self.plan, mac=MacPolicy("denylist", (), (CLIENT_MAC,))))
+        helper = self.helper()
+        self.assertTrue(helper.handle_payload(self.experiment_payload())["ok"])
+        self.assertTrue(self.reaches(CLIENT, 8080))
+        self.assertFalse(self.reaches(CLIENT, 8081))
+        self.assertTrue(helper.handle_payload({"action": "normal-access"})["ok"])
+        self.assertTrue(self.reaches(CLIENT, 8081))
+
+    def udp_from_port_8080_arrives(self):
+        receiver = subprocess.Popen(
+            [
+                "ip", "netns", "exec", CLIENT, "python", "-u", "-c",
+                "import socket\n"
+                "s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+                "s.bind(('0.0.0.0', 50778))\n"
+                "s.settimeout(1)\n"
+                "print('ready')\n"
+                "try:\n"
+                "    print(s.recv(32).decode())\n"
+                "except socket.timeout:\n"
+                "    print('blocked')\n",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            self.assertTrue(select.select([receiver.stdout], [], [], 3)[0])
+            self.assertEqual(receiver.stdout.readline().strip(), "ready")
+            run_in(
+                ROUTER, "python", "-c",
+                "import socket\n"
+                "s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+                "s.bind(('0.0.0.0', 8080))\n"
+                f"s.sendto(b'arrived', ('{CLIENT_ADDRESS}', 50778))\n",
+            )
+            output, error = receiver.communicate(timeout=3)
+            self.assertEqual(receiver.returncode, 0, error)
+            return output.strip()
+        finally:
+            if receiver.poll() is None:
+                receiver.kill()
+                receiver.communicate(timeout=3)
+
+    def test_panic_removes_every_access_effect_and_a_leftover_guard(self):
+        self.assertTrue(
+            self.manager.apply(
+                replace(
+                    self.plan,
+                    mac=MacPolicy("denylist", (), (CLIENT_MAC,)),
+                    websites=WebsitePolicy(blocked_domains=("news.example.com",)),
+                )
+            )["enabled"]
+        )
+        self.assertIn("status: NXDOMAIN", self.query("news.example.com", OTHER_CLIENT))
+        # A failed earlier change can leave the guard table behind.
+        guard = self.directory / "guard.nft"
+        guard.write_text(transition_firewall(TOPOLOGY))
+        run_in(PI, "nft", "-f", str(guard))
+        self.assertIn("jittersim_access_transition", run_in(PI, "nft", "list", "tables").stdout)
+        self.executor.fail_restarts = 100
+
+        self.assertTrue(self.helper().handle_payload({"action": "normal-access"})["ok"])
+
+        ruleset = run_in(PI, "nft", "list", "ruleset").stdout
+        self.assertNotIn("jittersim_access_transition", ruleset)
+        for leftover in ("redirect", "ether saddr", "ether daddr", "reject", "numgen"):
+            self.assertNotIn(leftover, ruleset)
+        self.assertNotIn("chain outgoing", ruleset)
+        self.assertNotIn("table inet jittersim\n", ruleset)
+        self.assertFalse(read_access(self.directory / "policy.json").options.enabled)
+        # No filtering resolver keeps running and plain DNS answers everyone.
+        self.assertIsNone(self.executor.process)
+        for namespace in (CLIENT, OTHER_CLIENT):
+            self.assertIn(
+                "203.0.113.7",
+                self.query("news.example.com", namespace, resolver="192.168.50.1"),
+            )
+        self.assertEqual(self.udp_arrives(5353), "arrived")
 
     def test_real_hostapd_control_replaces_and_clears_admission_lists(self):
         control = self.directory / "hostapd"

@@ -1056,19 +1056,19 @@ DASHBOARD_HTML = r"""<!doctype html>
         <div class="sidebar-actions">
           <div class="sidebar-action-row">
             <button id="apply-button" class="primary" type="button">Start with saved settings</button>
-            <span class="help-icon" tabindex="0" role="img" aria-label="Start or re-apply saved settings help" data-help="Starts JitterSim with everything you saved: device and group profiles and schedules and limits and service lists and access rules. While it runs saved changes apply on their own within a few seconds. Reset or Panic stops it. Protected devices stay untouched.">?</span>
+            <span class="help-icon" tabindex="0" role="img" aria-label="Start or re-apply saved settings help" data-help="Starts JitterSim with everything you saved: device and group profiles and schedules and limits and service lists and access rules. While it runs saved changes apply on their own within a few seconds. Reset or Panic stops the profiles. Protected devices stay untouched.">?</span>
           </div>
           <p id="apply-summary" class="apply-summary" aria-live="polite" hidden></p>
           <div class="sidebar-action-row">
             <button id="reset-button" class="danger" type="button">Reset network</button>
-            <span class="help-icon" tabindex="0" role="img" aria-label="Reset network help" data-help="Stops JitterSim and removes every rule from the Pi so all devices run normally. Your saved settings are kept. Choose Start with saved settings to run them again.">?</span>
+            <span class="help-icon" tabindex="0" role="img" aria-label="Reset network help" data-help="Stops the profiles and removes their rules from the Pi so devices run normally. Household blocking of devices and sites stays on. Your saved settings are kept. Choose Start with saved settings to run them again.">?</span>
           </div>
         </div>
         <p id="runtime-summary" class="runtime-summary unknown">Check the admin token to view the network state.</p>
         <p id="message" class="action-message" role="status" aria-live="polite">Ready.</p>
         <button id="panic-button" class="danger panic-button" type="button"
-          title="Remove all traffic shaping now. Choose Start with saved settings to run again.">
-          <span>Panic</span><span id="panic-state" class="credential-state">Turn all profiles off</span>
+          title="Turn off all profiles and household blocking now. Your saved settings are kept.">
+          <span>Panic</span><span id="panic-state" class="credential-state">Turn profiles and blocking off</span>
         </button>
         <div class="router-wifi-control">
           <div><span id="router-wifi-label" class="router-wifi-label">Router Wi-Fi</span>
@@ -4692,7 +4692,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     const ENFORCE_NOTE = "It applies on its own while JitterSim is running. " +
-      "After Reset or Panic choose Start with saved settings.";
+      "After Reset or Panic choose Start with saved settings. After Panic also turn household blocking back on.";
 
     function queryCountText(count) {
       return count + (count === 1 ? " query" : " queries");
@@ -6563,10 +6563,10 @@ DASHBOARD_HTML = r"""<!doctype html>
       applyButton.textContent = applyBusy ? "Applying…" : currentApplyLabel();
       resetButton.textContent = busy && path === "/api/reset" ? "Resetting..." : "Reset network";
       const panicButton = element("panic-button");
-      const panicking = busy && path === "/api/reset";
+      const panicking = busy && path === "/api/normal-access";
       panicButton.disabled = busy || !helperConfigured;
       panicButton.setAttribute("aria-busy", String(panicking));
-      element("panic-state").textContent = panicking ? "Working..." : "Turn all profiles off";
+      element("panic-state").textContent = panicking ? "Working..." : "Turn profiles and blocking off";
       updateGeneralProfileControls();
       ["general-profile-apply", "general-profile-stop"].forEach((id) => {
         element(id).setAttribute("aria-busy", String(busy && path.startsWith("/api/general-profile")));
@@ -6620,11 +6620,13 @@ DASHBOARD_HTML = r"""<!doctype html>
       runAction("/api/reset", "Network reset successfully.", "Resetting network...");
     });
 
+    // Panic is the full way back: it stops the profiles like Reset and turns
+    // household blocking off as well. Saved settings stay.
     element("panic-button").addEventListener("click", () => {
       runAction(
-        "/api/reset",
-        "All profiles are off. Choose Start with saved settings to resume.",
-        "Turning all profiles off..."
+        "/api/normal-access",
+        "All profiles and household blocking are off. Choose Start with saved settings to run the profiles again. Turn blocking back on under Access rules.",
+        "Turning everything off..."
       );
     });
 

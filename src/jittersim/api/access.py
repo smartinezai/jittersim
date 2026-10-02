@@ -105,8 +105,9 @@ def normal_access(server):
         error = (
             "Normal access was not fully restored. Automation is paused. Retry the panic button."
         )
+    state = None
     try:
-        repository.update_runtime_state(
+        state = repository.update_runtime_state(
             observed_state="error" if error else "reset",
             last_action="reset",
             last_result="failure" if error else "success",
@@ -126,7 +127,11 @@ def normal_access(server):
         pass
     if error:
         return response({"error": error}, 503)
-    return response({"normal_access": True, "result": result})
+    body = {"normal_access": True, "result": result}
+    if state is not None:
+        # The sidebar Panic button shows this like the answer to a Reset.
+        body["state"] = server._runtime_state_with_running(state)
+    return response(body)
 
 
 def write_access_api(server, path, payload):

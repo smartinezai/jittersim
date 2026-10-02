@@ -411,9 +411,12 @@ plan supports at most 15 combined devices, service rules and service lists.
 and group profiles and schedules and limits and service lists and access rules.
 While JitterSim runs the dashboard says so and the button reads **Re-apply saved
 settings**. Changes you save apply on their own within a few seconds so you do
-not press the button again. **Reset network** and **Panic** stop JitterSim and
-remove every rule from the Pi. Your saved settings are kept. Choose **Start with
-saved settings** to run them again. Protected devices are never touched.
+not press the button again. **Reset network** stops the profiles and removes
+their rules from the Pi. Household blocking of devices and sites stays on.
+**Panic** does the same and turns household blocking off too. Your saved
+settings are kept. Choose **Start with saved settings** to run the profiles
+again. After Panic turn household blocking back on under Access rules.
+Protected devices are never touched.
 
 The line under the button counts what is saved. The message after a start counts
 what JitterSim really started. Access rules also run after a start so a start
@@ -540,7 +543,7 @@ buttons. A group opened stays open when the page refreshes.
 
 A block or profile change from this card is saved at once. It applies on its
 own while JitterSim is running. After Reset or Panic choose **Start with saved
-settings**.
+settings**. After Panic also turn household blocking back on.
 
 ### Impact check
 

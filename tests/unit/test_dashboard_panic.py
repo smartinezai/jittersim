@@ -87,14 +87,15 @@ CASES = {
       press("panic-button");
       await flush();
       assert.equal(networkCalls.length, 1);
-      assert.equal(networkCalls[0].path, "/api/reset");
+      // Panic is the full way back: profiles and household blocking.
+      assert.equal(networkCalls[0].path, "/api/normal-access");
       assert.equal(networkCalls[0].options.method, "POST");
       assert.equal(networkCalls[0].options.headers.Authorization, "Bearer fixture token");
       assert.equal(runtimeStates.length, 1);
       assert.equal(refreshMessages.length, 1);
       assert.equal(
         refreshMessages[0],
-        "All profiles are off. Choose Start with saved settings to resume."
+        "All profiles and household blocking are off. Choose Start with saved settings to run the profiles again. Turn blocking back on under Access rules."
       );
       for (const id of ACTION_BUTTONS) assert.equal(element(id).disabled, false, id);
       assert.equal(element("panic-button").getAttribute("aria-busy"), "false");

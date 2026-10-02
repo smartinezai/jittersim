@@ -52,8 +52,9 @@ WIFI_DETAILS_MISSING_MESSAGE = "The router did not return a Wi-Fi name or passwo
 MAX_MESSAGE_BYTES = 256 * 1024
 MAX_HELPER_CONNECTIONS = 8
 # Apply and reset wait this long for a read to finish before they answer helper-busy.
-# Reads never wait so a dashboard poll cannot make Panic fail.
-WRITE_ACTIONS = ("apply", "apply-experiment", "reset")
+# Reads never wait so a dashboard poll cannot make Panic fail. Normal access is the
+# Panic action and waits like Reset.
+WRITE_ACTIONS = ("apply", "apply-experiment", "reset", "normal-access")
 WRITE_LOCK_WAIT_SECONDS = 3.0
 WIFI_ACTIONS = ("configure-ap", "router-sync-ap", "router-preview-ap", "wifi-reset")
 ROUTER_ACTIONS = (
@@ -203,7 +204,10 @@ class HelperService:
             return {"ok": False, "error": "request must be an object"}
         action = payload.get("action")
         if action == "normal-access":
-            with self._network_lock:
+            if not self._network_lock.acquire(timeout=WRITE_LOCK_WAIT_SECONDS):
+                return {"ok": False, "error": "Pi networking is busy. Try again later.",
+                        "reason": "helper-busy"}
+            try:
                 reset = self._handle_reset()
                 access_ok = False
                 try:
@@ -213,6 +217,8 @@ class HelperService:
                     access_ok = True
                 except (OSError, ValueError, CommandExecutionError):
                     LOGGER.exception("could not disable household restrictions")
+            finally:
+                self._network_lock.release()
             if not reset["ok"] or not access_ok:
                 return {"ok": False, "error": "normal access was not fully restored",
                         "experiments_stopped": reset["ok"], "access_disabled": access_ok}
@@ -226,7 +232,7 @@ class HelperService:
                 return {"ok": True, **result}
             except (OSError, ValueError, CommandExecutionError):
                 LOGGER.exception("persistent access operation failed")
-                return {"ok": False, "error": "access rules could not be applied"}
+                return {"ok": False, "error": self._access_failure_message()}
         if action in ("update-status", "update-install", "update-rollback"):
             try:
                 if action != "update-status":
@@ -723,6 +729,15 @@ class HelperService:
             )
         return {"ok": True, "action": "queue-stats", "queues": entries}
 
+    def _access_failure_message(self) -> str:
+        if getattr(self._access_manager, "dns_failed", False):
+            return (
+                "Website rules were not applied because the filtered DNS service did not "
+                "start. Panic and Normal access still work. Read the cause with "
+                "sudo jittersim logs dns."
+            )
+        return "access rules could not be applied"
+
     def _handle_apply(
         self,
         payload: Any,
@@ -760,7 +775,7 @@ class HelperService:
                 self._access_manager.apply(plan.access)
             except (OSError, ValueError, CommandExecutionError):
                 LOGGER.exception("persistent access apply failed")
-                return {"ok": False, "error": "access rules could not be applied"}
+                return {"ok": False, "error": self._access_failure_message()}
         try:
             self._forget_changed_lists(plan)
             self._service_addresses.expire()
@@ -1830,6 +1845,24 @@ def _clean_queue_impairment(raw: Any) -> Dict[str, Any]:
     return clean
 
 
+def restore_access_at_start(access: AccessManager) -> bool:
+    """Restore the saved access rules and keep the helper alive when that fails.
+
+    A failed restore leaves the test network closed behind the guard table. The
+    helper must still run so that Normal access and Panic can open it again.
+    """
+
+    try:
+        access.restore()
+    except Exception:
+        LOGGER.exception(
+            "Saved access rules were not restored. The test network stays closed. "
+            "Use Normal access to open it."
+        )
+        return False
+    return True
+
+
 def run_helper(
     *,
     socket_path: Path,
@@ -1852,7 +1885,7 @@ def run_helper(
     gateway_state_path = socket_path.parent / "gateway-state.json"
     access = AccessManager(executor=SubprocessExecutor(timeout_seconds=20), topology=topology,
                            runtime_path=socket_path.parent / "access-policy.json")
-    access.restore()
+    restore_access_at_start(access)
     service = HelperService(
         applier,
         router_factory=router_factory,

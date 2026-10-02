@@ -2353,6 +2353,23 @@ class QueueStatsHelperTests(unittest.TestCase):
         self.assertEqual(queues[0]["impairment"]["loss_percent"], 20)
 
 
+class FakeAccessManager:
+    """Stand in for the persistent access manager when only the helper is tested."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.disabled = 0
+        self.fail = fail
+        self.dns_failed = False
+
+    def disable(self):
+        self.disabled += 1
+        if self.fail:
+            raise CommandExecutionError("simulated access failure")
+
+    def status(self):
+        return {"available": True, "enabled": False}
+
+
 class QueueReadAndWriteTests(unittest.TestCase):
     """A read never makes Panic or an apply fail and a write never waits for ever."""
 
@@ -2438,6 +2455,64 @@ class QueueReadAndWriteTests(unittest.TestCase):
         self.assertEqual(writer["result"]["action"], "apply")
         self.assertIn("result", reader)
         self.assertEqual(self.service._plan_count, 2)
+
+    def test_normal_access_that_arrives_during_a_slow_queue_read_waits_and_runs(self) -> None:
+        # Panic runs Normal access. It must wait for a read like Reset does and
+        # never answer busy after a fraction of a millisecond.
+        access = FakeAccessManager()
+        self.service._access_manager = access
+        reader, reader_thread = self.hold_a_read()
+        writer, writer_thread = self.in_thread(self.client().normal_access)
+
+        time.sleep(0.3)
+        self.assertEqual(writer, {})
+        self.executor.release.set()
+        writer_thread.join(5)
+        reader_thread.join(5)
+
+        self.assertEqual(writer["result"]["ok"], True)
+        self.assertTrue(writer["result"]["access_disabled"])
+        self.assertGreater(writer["seconds"], 0.25)
+        self.assertIn("result", reader)
+        self.assertEqual(access.disabled, 1)
+        self.assertIsNone(self.service._active_plan)
+
+    def test_normal_access_waits_only_a_bounded_time_for_a_hung_read(self) -> None:
+        self.service._access_manager = FakeAccessManager()
+        with mock.patch("jittersim.networking.helper.WRITE_LOCK_WAIT_SECONDS", 0.4):
+            reader, reader_thread = self.hold_a_read()
+            refused, thread = self.in_thread(self.client().normal_access)
+            thread.join(5)
+
+            self.assertEqual(refused["error"].reason, "helper-busy")
+            self.assertGreater(refused["seconds"], 0.35)
+            self.executor.release.set()
+            reader_thread.join(5)
+            self.assertTrue(self.client().normal_access()["access_disabled"])
+
+    def test_normal_access_also_waits_for_the_network_lock_of_a_direct_call(self) -> None:
+        self.service._access_manager = FakeAccessManager()
+        self.assertTrue(self.service._network_lock.acquire(blocking=False))
+        release = threading.Timer(0.3, self.service._network_lock.release)
+        release.start()
+        started = time.monotonic()
+        answer = self.service.handle_payload({"action": "normal-access"})
+        release.join(5)
+        self.assertTrue(answer["ok"])
+        self.assertGreater(time.monotonic() - started, 0.25)
+
+        with mock.patch("jittersim.networking.helper.WRITE_LOCK_WAIT_SECONDS", 0.2):
+            self.assertTrue(self.service._network_lock.acquire(blocking=False))
+            try:
+                answer = self.service.handle_payload({"action": "normal-access"})
+            finally:
+                self.service._network_lock.release()
+        self.assertEqual(answer["reason"], "helper-busy")
+
+    def test_normal_access_is_a_write_action(self) -> None:
+        from jittersim.networking.helper import WRITE_ACTIONS
+
+        self.assertIn("normal-access", WRITE_ACTIONS)
 
     def test_a_read_that_arrives_during_a_write_is_refused_at_once(self) -> None:
         self.executor.gate = is_queue_install

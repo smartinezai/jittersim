@@ -743,8 +743,9 @@ limit covers expanded device/domain combinations. Queries are not logged.
 Existing on-demand DNS observations remain a separate feature.
 
 **Reset network** and `sudo jittersim reset` now clear experiment effects while
-preserving household restrictions. Use the **Normal access** panic button or
-`sudo jittersim normal-access` to disable both. They pause automatic changes,
+preserving household restrictions. Use the sidebar **Panic** button (the same
+as **Normal access** under Access rules) or `sudo jittersim normal-access` to
+disable both. They pause automatic changes,
 remove profiles and disable access rules without deleting the saved lists.
 DNS connection mappings are cleared so a reused resolver connection follows
 the new setting. The emergency action does not depend on restarting Unbound.

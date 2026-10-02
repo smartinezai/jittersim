@@ -53,13 +53,30 @@ class AccessApiTests(unittest.TestCase):
         # An old tab cannot restore restrictions after another tab changes them.
         self.assertEqual(self.write("/api/access/apply", {"version": 0})[0], 409)
 
+    def test_panic_is_normal_access_and_reports_the_runtime_state(self):
+        rule = {"id": "video", "name": "Video", "domains": ["example.com"], "device_id": "alice"}
+        self.write("/api/site-blocks", {"rule": rule})
+        self.assertEqual(self.write("/api/access/apply")[0], 200)
+        status, _, body = self.api_server.write_response_for("/api/normal-access", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["state"]["observed_state"], "reset")
+        self.assertFalse(self.access_manager.applied.options.enabled)
+        self.assertFalse(self.repository.access_settings().access_options.enabled)
+        self.assertTrue(
+            self.access_manager.applied.permits_host("192.168.50.10", "sub.example.com")
+        )
+
     def test_failed_rule_change_reports_pending_without_replacing_working_policy(self):
         self.write(
             "/api/site-blocks",
             {"rule": {"id": "video", "name": "Video", "domains": ["example.com"]}},
         )
         self.assertEqual(self.write("/api/access/apply")[0], 200)
-        self.write("/api/site-blocks/delete", {"id": "video"})
+        # A changed rule still needs the DNS service. Removing every rule would not.
+        self.write(
+            "/api/site-blocks",
+            {"rule": {"id": "video", "name": "Video", "domains": ["example.org"]}},
+        )
         self.access_manager.executor.fail_restarts = 1
         with self.assertLogs(level="ERROR"):
             self.assertEqual(self.write("/api/access/apply")[0], 503)
