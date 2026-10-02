@@ -60,6 +60,7 @@ const DAY = 24 * HOUR;
 const ADMIN_KEY = "jittersim.remembered.admin-token";
 const ROUTER_KEY = "jittersim.remembered.router-password";
 let pendingFormSubmitButton = null;
+let messageSerial = 0;  // showMessage is stubbed below and does not count
 let toolResult = {ok: true, message: "accepted fixture token"};
 let refreshCalls = 0;
 let networkCalls = [];

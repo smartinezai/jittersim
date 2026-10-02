@@ -611,6 +611,22 @@ sudo journalctl -u jittersim-helper.service -n 80 --no-pager
 The log shows which network step failed, its error output and whether cleanup
 completed.
 
+## Troubleshoot Chrome not opening the dashboard
+
+If Safari opens the dashboard but Chrome shows **This site can't be reached**
+with `ERR_ADDRESS_UNREACHABLE`, the Pi is usually fine. On a Mac, Chrome needs
+permission to talk to devices on the local network. Open **System Settings**
+then **Privacy and Security** then **Local Network** and turn on **Google
+Chrome**. Then reload the page. A VPN that routes the Pi's address through its
+tunnel causes the same error in every browser, so pause the VPN while you use
+the dashboard from the Pi Wi-Fi.
+
+Chrome also warns about the dashboard's own certificate the first time. Compare
+the SHA-256 fingerprint in the warning with the one the installer printed and
+only then continue. The dashboard is on the Pi's test Wi-Fi at
+`https://192.168.50.1:8080` and on the router network at the Pi's Ethernet
+address.
+
 ## Credentials
 
 Read the credentials only on the Pi:

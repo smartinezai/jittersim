@@ -122,11 +122,35 @@ def run():
                         assert original[key] != original_other[key], key
                     assert saved(page, base, headers, "bigseed")["random_seed"] == 2**53 + 1
 
+                    # The dashboard unlocks while the token check is still loading. Hold the
+                    # last request the check makes so that window stays open, write a newer
+                    # message inside it and prove the finishing check does not replace it.
+                    held_settings = []
+                    page.route(
+                        "**/api/traffic-settings", lambda route: held_settings.append(route)
+                    )
                     page.goto(base + "/#profiles")
                     page.locator("#open-admin-credentials").click()
                     page.locator("#admin-token").fill("browser-test")
                     page.locator("#check-admin-token").click()
                     expect(page.locator("#private-dashboard")).to_be_visible()
+                    for _ in range(50):
+                        if held_settings:
+                            break
+                        page.wait_for_timeout(100)
+                    assert len(held_settings) == 1, "the token check did not reach its last request"
+                    expect(page.locator("#token-check-status")).to_have_text(
+                        "Checking the token and loading diagnostics..."
+                    )
+                    page.evaluate("showMessage('Newer message.', 'success')")
+                    held_settings[0].continue_()
+                    page.unroute("**/api/traffic-settings")
+                    # The check writes its status text and its message in one step, so once the
+                    # status is final nothing from the check can overwrite a later message.
+                    expect(page.locator("#token-check-status")).to_contain_text(
+                        "Token accepted. Diagnostics loaded"
+                    )
+                    expect(page.locator("#message")).to_have_text("Newer message.")
                     page.locator("#close-credentials").click()
                     expect(page.locator("#page-profiles")).to_be_visible()
 
