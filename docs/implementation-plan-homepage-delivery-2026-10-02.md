@@ -53,7 +53,9 @@ against the final installed live implementation.
 
 The clean Pi image must contain the fixture source loaded by its HTTP tests.
 Keep browser admission capped at four and give the test runner a separate
-loopback control listener capped at one. Reproduce runner rejection with four
+loopback control listener with one sequential handler and a listen backlog of
+one. Finish cleanup before accepting the next runner request. Reproduce runner
+rejection with four
 stalled browser requests before the repair. Verify route separation and recovery.
 The DNS journey must wait for the dashboard to finish reading the saved version
 before clicking Apply. A successful save response alone does not prove that

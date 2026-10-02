@@ -7,7 +7,7 @@ import socket
 import threading
 import time
 from collections import Counter
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 
 class SessionRejected(ValueError):
@@ -29,7 +29,7 @@ class Fixture:
         self.counts = Counter()
         self.server = BoundedServer(("127.0.0.1", 0), Handler)
         self.server.fixture = self
-        self.control_server = BoundedServer(("127.0.0.1", 0), Handler, slots=1)
+        self.control_server = HarnessServer(("127.0.0.1", 0), Handler)
         self.control_server.fixture = self
         self.origin = f"http://127.0.0.1:{self.server.server_port}"
         self.control_origin = f"http://127.0.0.1:{self.control_server.server_port}"
@@ -162,12 +162,16 @@ class Fixture:
         return (503 if config["mode"] == "unavailable" else 200), result
 
 
+class HarnessServer(HTTPServer):
+    request_queue_size = 1
+
+
 class BoundedServer(ThreadingHTTPServer):
     daemon_threads = True
     block_on_close = False
 
-    def __init__(self, *args, slots=4):
-        self.slots = threading.BoundedSemaphore(slots)
+    def __init__(self, *args):
+        self.slots = threading.BoundedSemaphore(4)
         super().__init__(*args)
 
     def process_request(self, request, client_address):

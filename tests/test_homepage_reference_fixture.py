@@ -4,7 +4,9 @@ import http.client
 import importlib.util
 import json
 import socket
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from pathlib import Path
 
@@ -122,3 +124,33 @@ def test_four_stalled_handlers_refuse_more_work_then_recover(fixture):
         time.sleep(0.01)
     assert fixture.server.slots._value == 4
     assert policy(fixture, pair(fixture))[0] == 200
+
+
+def test_next_control_waits_for_previous_handler_cleanup(fixture, monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    original_finish = MODULE.Handler.finish
+
+    def delayed_finish(handler):
+        try:
+            if handler.server is fixture.control_server and not entered.is_set():
+                entered.set()
+                release.wait(timeout=2)
+        finally:
+            original_finish(handler)
+
+    monkeypatch.setattr(MODULE.Handler, "finish", delayed_finish)
+    authorization = "Harness " + fixture.harness_key
+    with ThreadPoolExecutor(max_workers=1) as worker:
+        try:
+            assert post(fixture, "/__reference/control", {"read_counts": True},
+                        authorization, harness=True)[0] == 200
+            assert entered.wait(timeout=1)
+            pending = worker.submit(post, fixture, "/__reference/control",
+                                    {"read_counts": True}, authorization, harness=True)
+            time.sleep(0.05)
+            assert not pending.done()
+            release.set()
+            assert pending.result(timeout=1)[0] == 200
+        finally:
+            release.set()

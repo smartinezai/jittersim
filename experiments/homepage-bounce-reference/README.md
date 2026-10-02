@@ -38,7 +38,8 @@ The journey loads the actual Manifest V3 extension in a separate temporary
 Chromium profile. It checks the extension worker and served fixture navigation.
 Startup, lookups, browser actions and cleanup have deadlines. The fixture
 listens only on loopback and caps browser request handlers at four. A separate
-loopback listener allows one test-runner control request at a time so stalled
+loopback listener processes one test-runner control request at a time with a
+listen backlog of one. It finishes cleanup before the next request so stalled
 browser requests cannot block the runner’s observations. The control secret
 never enters the extension. Each listener refuses the other listener’s routes.
 
@@ -71,6 +72,9 @@ loss, one outstanding action, Off followed by Enable and actual worker and
 browser restarts. Eight HTTP checks cover credential deadlines, replacement,
 harness isolation, malformed requests and four stalled handlers with recovery.
 Full Ruff, JavaScript syntax and diff checks passed.
+
+The delivery repair also checks that the next runner request waits for the
+previous handler to finish cleanup. The current fixture has nine HTTP checks.
 
 Run the focused HTTP checks with:
 
