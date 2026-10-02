@@ -731,17 +731,23 @@ deploy/raspberry-pi/deploy-from-mac.sh --ref RELEASE_REF --install
 The defaults are `--host jittersim@192.168.0.17` and
 `--key ~/.ssh/jittersim_ed25519`. `--ref` defaults to `HEAD`.
 
+Deploying needs a connection to the Pi's router network: Ethernet or the
+router's Wi-Fi. A Mac on the Pi's test Wi-Fi cannot reach the Pi over SSH
+because the test network is kept apart. The script prints the address it
+connects to and says so when it cannot reach it.
+
 1. It builds the archive of the commit with `build-release.sh` so uncommitted
    changes are left out. It prints the commit and the SHA-256 checksum and
    checks that checksum with `shasum`.
-2. It checks that the Pi has the update service and copies the archive to the
-   login's home folder with `scp`.
+2. It asks the Pi (without sudo) whether it has the update service and which
+   release it runs. If the Pi already runs that commit nothing else happens.
+   Then it copies the archive to the login's home folder with `scp`.
 3. It stages the archive with the update service's own copy of `updates.py`
    (`sudo /usr/bin/python3 -I /usr/local/lib/jittersim-update.py stage ...`).
-   Staging checks the checksum and every archive entry again. This is the one
-   step that needs root. It runs through `ssh -t` so the Pi asks for its `sudo`
-   password in your terminal. The script never reads, stores or passes a
-   password.
+   Staging checks the checksum and every archive entry again. Staging and the
+   install need root. They run in one `ssh -t` session so the Pi asks for its
+   `sudo` password once in your terminal. The script never reads, stores or
+   passes a password.
 4. Without `--install` it prints the exact command to install the staged
    release. You can also choose **Check for updates** and then **Install staged
    release** in Setup. With `--install` the same terminal session runs
@@ -757,14 +763,17 @@ A Pi without the update service (a release from before staged updates) needs
 the full installer once. `--use-installer` copies the archive, checks its
 checksum on the Pi and unpacks it to `~/jittersim-release-COMMIT` as the login
 user. It then prints the installer command or runs it with `--install`. Use it
-as well for OS package or Wi-Fi changes.
+as well for OS package or Wi-Fi changes. The unpacked folder stays in the home
+folder like a release unpacked by hand.
 
-Every ssh and scp call has a ten second connection timeout and uses only the
-given key. All of them except the `sudo` step run in `BatchMode` so they never
-ask anything. Host keys come from your `known_hosts` as they are: connect once
-with `ssh -i ~/.ssh/jittersim_ed25519 jittersim@192.168.0.17` and check the
-host key before the first deploy. `--dry-run` prints every command and runs
-none.
+Every ssh and scp call has a ten second connection timeout, notices a dead
+connection within 45 seconds and uses only the given key. All of them except
+the `sudo` step run in `BatchMode` so they never ask anything and each has a
+time limit (one minute for a check, ten minutes for the copy). The `sudo` step
+has none because the install can take several minutes. Host keys come from
+your `known_hosts` as they are: connect once with
+`ssh -i ~/.ssh/jittersim_ed25519 jittersim@192.168.0.17` and check the host
+key before the first deploy. `--dry-run` prints every command and runs none.
 
 ## Persistent access rules and normal access
 

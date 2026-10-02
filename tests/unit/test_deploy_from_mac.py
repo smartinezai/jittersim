@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import time
 from pathlib import Path
 
 import pytest
@@ -21,25 +22,47 @@ HOST = "jittersim@192.168.0.17"
 MANAGER = "/usr/local/lib/jittersim-update.py"
 SHELLS = [shell for shell in ("/bin/sh", "/bin/bash", shutil.which("dash")) if shell and
           Path(shell).exists()]
-BATCH_OPTIONS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "IdentitiesOnly=yes"]
-TERMINAL_OPTIONS = ["-t", "-o", "ConnectTimeout=10", "-o", "IdentitiesOnly=yes"]
+CONNECTION = ["-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o",
+              "ServerAliveCountMax=3", "-o", "IdentitiesOnly=yes"]
+BATCH_OPTIONS = ["-o", "BatchMode=yes", *CONNECTION]
+TERMINAL_OPTIONS = ["-t", *CONNECTION]
+PROBE = (f"if test -f {MANAGER}; then echo update-service; fi; "
+         "jittersim update check 2>/dev/null || true")
 WAIT = "echo 'Waiting for the update service to install and check the release.'"
+NETWORK_HINT = "Deploying needs a connection to the Pi's router network"
 
 FAKE = r'''#!/usr/bin/env python3
-import json, os, shutil, sys
+import json, os, shutil, sys, time
 tool = os.path.basename(sys.argv[0])
+if tool == "sleep":
+    seconds = float(sys.argv[1])
+    if seconds != 3:
+        # a watchdog of the script: it sleeps for real unless the test speeds it up
+        time.sleep(seconds * float(os.environ.get("FAKE_SLEEP_SCALE", "1")))
+        sys.exit(0)
 with open(os.environ["FAKE_LOG"], "a") as log:
     log.write(json.dumps({"tool": tool, "argv": sys.argv[1:]}) + "\n")
 if tool == "sleep":
     sys.exit(0)
 if tool == "scp":
+    if os.environ.get("FAKE_HANG") == "scp":
+        time.sleep(60)
     destination = os.environ.get("FAKE_COPIES")
     if destination:
         shutil.copy(sys.argv[-2], destination)
     sys.exit(int(os.environ.get("FAKE_SCP_EXIT", "0")))
 remote = sys.argv[-1]
-if remote.startswith("test -f "):
-    sys.exit(int(os.environ.get("FAKE_PROBE_EXIT", "0")))
+if remote.startswith("if test -f "):
+    if os.environ.get("FAKE_HANG") == "probe":
+        time.sleep(60)
+    if os.environ.get("FAKE_PROBE_EXIT", "0") != "0":
+        sys.exit(int(os.environ["FAKE_PROBE_EXIT"]))
+    if not os.environ.get("FAKE_NO_SERVICE"):
+        print("update-service")
+    if os.environ.get("FAKE_RUNNING"):
+        print("Installed: " + os.environ["FAKE_RUNNING"])
+        print("Staged: none")
+    sys.exit(0)
 if remote == "jittersim update check":
     counter = os.environ["FAKE_LOG"] + ".checks"
     seen = int(open(counter).read()) if os.path.exists(counter) else 0
@@ -98,6 +121,12 @@ def tools(calls):
     return [call["tool"] for call in calls]
 
 
+def leftovers(fakes):
+    """The script's own temporary folders. Other tools (Apple's git) may use TMPDIR too."""
+
+    return list(fakes["tmp"].glob("jittersim-deploy.*"))
+
+
 def short_head(repository=ROOT, ref="HEAD"):
     return subprocess.run(["git", "-C", str(repository), "rev-parse", "--short", ref],
                           capture_output=True, text=True, check=True).stdout.strip()
@@ -129,17 +158,19 @@ def test_dry_run_prints_every_command_and_runs_none(fakes):
     result, calls = deploy(fakes, "--dry-run", "--install")
     assert result.returncode == 0, result.stderr
     assert calls == []
-    assert list(fakes["tmp"].iterdir()) == []
+    assert leftovers(fakes) == []
     assert list(fakes["copies"].iterdir()) == []
     printed = [line for line in result.stdout.splitlines() if line.startswith("+ ")]
     assert printed[0].startswith("+ sh deploy/raspberry-pi/build-release.sh ")
-    assert printed[1].endswith(f"'test -f {MANAGER}'")
+    assert printed[1].startswith("+ ssh -o BatchMode=yes -o ConnectTimeout=10")
+    assert printed[1].endswith(f"'{PROBE}'")
     assert printed[2].startswith("+ scp -o BatchMode=yes -o ConnectTimeout=10")
-    assert printed[3].startswith("+ ssh -t -o ConnectTimeout=10")
+    assert printed[3].startswith("+ ssh -t -o ConnectTimeout=10 -o ServerAliveInterval=15")
     assert " stage " in printed[3] and "&& sudo jittersim update install --yes" in printed[3]
     assert "sudo systemctl start jittersim-update.service" in printed[3]
     assert printed[4].endswith(" 'jittersim update check'")
     assert len(printed) == 5
+    assert f"Connecting to {HOST} with the key " in result.stdout
     assert result.stdout.rstrip().endswith("Dry run: nothing was built, copied or run on the Pi.")
 
 
@@ -148,7 +179,7 @@ def test_every_dry_run_runs_nothing(fakes, extra):
     result, calls = deploy(fakes, "--dry-run", *extra, FAKE_PROBE_EXIT="255")
     assert result.returncode == 0, result.stderr
     assert calls == []
-    assert list(fakes["tmp"].iterdir()) == []
+    assert leftovers(fakes) == []
     assert "Dry run: nothing was built" in result.stdout
 
 
@@ -158,7 +189,7 @@ def test_stage_only_copies_the_verified_archive_and_prints_the_install_command(f
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh", "scp", "ssh"]
     probe, copy, stage = (call["argv"] for call in calls)
-    batch_call(probe, fakes, f"test -f {MANAGER}")
+    batch_call(probe, fakes, PROBE)
     archive_name = f"jittersim-release-{short}.tar.gz"
     assert copy[:-2] == [*BATCH_OPTIONS, "-i", str(fakes["key"]), "--"]
     assert copy[-1] == f"{HOST}:{archive_name}"
@@ -168,7 +199,7 @@ def test_stage_only_copies_the_verified_archive_and_prints_the_install_command(f
     assert f"{HOST} 'sudo jittersim update install'" in result.stdout
     assert "Install staged release" in result.stdout
     # the temporary build folder is gone and the copied archive is the one that was checked
-    assert list(fakes["tmp"].iterdir()) == []
+    assert leftovers(fakes) == []
     archive = fakes["copies"] / archive_name
     assert hashlib.sha256(archive.read_bytes()).hexdigest() == sha
     # the update flow accepts it exactly as the Pi's root-only staging step does
@@ -210,6 +241,23 @@ def test_install_stages_installs_waits_and_compares_the_running_release(fakes):
     assert "Installed:" not in result.stdout
 
 
+@pytest.mark.parametrize("extra", [(), ("--install",)])
+def test_a_pi_that_already_runs_the_release_needs_nothing(fakes, extra):
+    short = short_head()
+    result, calls = deploy(fakes, *extra, FAKE_RUNNING=short)
+    assert result.returncode == 0, result.stderr
+    assert tools(calls) == ["ssh"]
+    assert f"The Pi already runs release {short}. Nothing to stage or install." in result.stdout
+
+
+def test_the_installer_runs_again_for_the_same_release(fakes):
+    short = short_head()
+    result, calls = deploy(fakes, "--use-installer", FAKE_RUNNING=short)
+    assert result.returncode == 0, result.stderr
+    assert tools(calls) == ["ssh", "scp", "ssh"]
+    assert f"The Pi already runs release {short}. The installer runs again." in result.stdout
+
+
 def test_install_reports_a_different_running_release(fakes):
     result, _ = deploy(fakes, "--install", FAKE_INSTALLED="abc1234")
     assert result.returncode == 1
@@ -227,7 +275,7 @@ def test_install_waits_for_the_helper_to_answer_again(fakes):
     assert f"The Pi now runs release {short}." in result.stdout
 
 
-def test_install_gives_up_when_the_release_cannot_be_read(fakes):
+def test_install_gives_up_when_the_release_cannot_be_read_and_says_why(fakes):
     result, calls = deploy(fakes, "--install", FAKE_INSTALLED=short_head(),
                            FAKE_CHECK_FAILS="99")
     assert result.returncode == 1
@@ -235,6 +283,7 @@ def test_install_gives_up_when_the_release_cannot_be_read(fakes):
     assert tools(calls) == ["ssh", "scp", "ssh"] + ["ssh", "sleep"] * 9 + ["ssh"]
     assert all(call["argv"] == ["3"] for call in calls if call["tool"] == "sleep")
     assert "could not read the installed release" in result.stderr
+    assert "Release status unavailable: helper not answering" in result.stderr
 
 
 def test_a_failed_install_on_the_pi_stops_before_the_check(fakes):
@@ -246,25 +295,40 @@ def test_a_failed_install_on_the_pi_stops_before_the_check(fakes):
 
 
 def test_a_pi_without_the_update_service_needs_the_installer_once(fakes):
-    result, calls = deploy(fakes, FAKE_PROBE_EXIT="1")
+    result, calls = deploy(fakes, FAKE_NO_SERVICE="1")
     assert result.returncode == 1
     assert "Run this once with --use-installer" in result.stderr
     assert tools(calls) == ["ssh"]
 
 
-def test_an_unreachable_pi_stops_before_copying_and_names_known_hosts(fakes):
-    result, calls = deploy(fakes, FAKE_PROBE_EXIT="255")
+@pytest.mark.parametrize("extra", [(), ("--use-installer",)])
+def test_an_unreachable_pi_stops_before_copying_and_says_which_network(fakes, extra):
+    result, calls = deploy(fakes, *extra, FAKE_PROBE_EXIT="255")
     assert result.returncode == 1
-    assert "could not reach" in result.stderr and "known_hosts" in result.stderr
+    assert f"could not reach {HOST} over SSH (exit 255)" in result.stderr
+    assert NETWORK_HINT in result.stderr and "test Wi-Fi" in result.stderr
+    assert "known_hosts" in result.stderr
+    assert f"Connecting to {HOST} with the key {fakes['key']}." in result.stdout
     assert tools(calls) == ["ssh"]
     assert list(fakes["copies"].iterdir()) == []
+
+
+@pytest.mark.parametrize("hang, words", [("probe", "Checking the Pi did not finish within 60"),
+                                         ("scp", "Copying the archive did not finish within 600")])
+def test_a_call_that_hangs_is_stopped_at_its_deadline(fakes, hang, words):
+    started = time.monotonic()
+    result, _ = deploy(fakes, FAKE_HANG=hang, FAKE_SLEEP_SCALE="0.002")
+    assert result.returncode == 1
+    assert words in result.stderr and NETWORK_HINT in result.stderr
+    assert time.monotonic() - started < 30
+    assert leftovers(fakes) == []
 
 
 def test_a_failed_copy_stops_before_staging(fakes):
     result, calls = deploy(fakes, FAKE_SCP_EXIT="1")
     assert result.returncode == 1
     assert tools(calls) == ["ssh", "scp"]
-    assert "copying the archive to the Pi failed" in result.stderr
+    assert "copying the archive to the Pi failed (exit 1)" in result.stderr
 
 
 def test_a_failed_sudo_step_is_reported(fakes):
@@ -286,8 +350,9 @@ def test_installer_mode_checks_unpacks_and_labels_the_copy(fakes, tmp_path):
     short = short_head()
     result, calls = deploy(fakes, "--use-installer")
     assert result.returncode == 0, result.stderr
-    assert tools(calls) == ["scp", "ssh"]
-    unpack = calls[1]["argv"]
+    assert tools(calls) == ["ssh", "scp", "ssh"]
+    batch_call(calls[0]["argv"], fakes, PROBE)
+    unpack = calls[2]["argv"]
     sha = printed_sha(result.stdout)
     batch_call(unpack, fakes, unpack[-1])
     assert unpack[-1].startswith(f"printf '%s  %s\\n' {sha} jittersim-release-{short}.tar.gz"
@@ -316,7 +381,7 @@ def test_the_installer_label_reaches_the_installed_folder(fakes, tmp_path):
     result, calls = deploy(fakes, "--use-installer")
     assert result.returncode == 0, result.stderr
     home = tmp_path / "pi-home"
-    assert unpack_on_a_stand_in_pi(fakes, home, short, calls[1]["argv"][-1]).returncode == 0
+    assert unpack_on_a_stand_in_pi(fakes, home, short, calls[2]["argv"][-1]).returncode == 0
     installed = tmp_path / "opt-jittersim"
     installed.mkdir()
     release = home / f"jittersim-release-{short}"
@@ -331,17 +396,23 @@ def test_installer_mode_with_install_runs_the_installer_in_a_terminal(fakes):
     short = short_head()
     result, calls = deploy(fakes, "--use-installer", "--install", FAKE_INSTALLED=short)
     assert result.returncode == 0, result.stderr
-    assert tools(calls) == ["scp", "ssh", "ssh", "ssh"]
-    terminal_call(calls[2]["argv"], fakes,
+    assert tools(calls) == ["ssh", "scp", "ssh", "ssh", "ssh"]
+    terminal_call(calls[3]["argv"], fakes,
                   f"sudo ./jittersim-release-{short}/deploy/raspberry-pi/install.sh")
-    batch_call(calls[3]["argv"], fakes, "jittersim update check")
+    batch_call(calls[4]["argv"], fakes, "jittersim update check")
     assert f"The Pi now runs release {short}." in result.stdout
+
+
+def test_installer_mode_works_on_a_pi_without_the_update_service(fakes):
+    result, calls = deploy(fakes, "--use-installer", FAKE_NO_SERVICE="1")
+    assert result.returncode == 0, result.stderr
+    assert tools(calls) == ["ssh", "scp", "ssh"]
 
 
 def test_installer_mode_reports_a_failed_check_of_the_copy(fakes):
     result, calls = deploy(fakes, "--use-installer", "--install", FAKE_UNPACK_EXIT="1")
     assert result.returncode == 1
-    assert tools(calls) == ["scp", "ssh"]
+    assert tools(calls) == ["ssh", "scp", "ssh"]
     assert "checking or unpacking the archive on the Pi failed" in result.stderr
 
 
@@ -412,19 +483,30 @@ def test_a_checksum_that_does_not_match_the_archive_stops_everything(fakes, repo
     assert calls == []
 
 
-@pytest.mark.parametrize(
-    "host",
-    ["-oProxyCommand=touch /tmp/x", "jittersim@pi;rm -rf ~", "jitter sim@pi", "user@$(id)",
-     "a@b@c", "@pi", "user@", "user@-pi", "", "user@pi`id`", "user@pi|x", "user@pi:22",
-     "user@pi/x", "user@pi\nx", "user@pi&x", "user@pi>x", "user@pi'x", 'user@pi"x',
-     "user@pi*", "user@pi\tx"],
-)
+UNSAFE_HOSTS = [
+    "-oProxyCommand=touch /tmp/x", "jittersim@pi;rm -rf ~", "jitter sim@pi", "user@$(id)",
+    "a@b@c", "@pi", "user@", "user@-pi", "", "user@pi`id`", "user@pi|x", "user@pi:22",
+    "user@pi/x", "user@pi\nx", "user@pi&x", "user@pi>x", "user@pi'x", 'user@pi"x',
+    "user@pi*", "user@pi\tx", "jittersim@pí", "jïttersim@pi", "user@Ａpi",
+]
+
+
+@pytest.mark.parametrize("host", UNSAFE_HOSTS)
 def test_unsafe_hosts_are_refused_before_anything_runs(fakes, host):
     result, calls = deploy(fakes, "--host", host)
     assert result.returncode == 2
     assert calls == []
     assert list(fakes["copies"].iterdir()) == []
     assert "refusing host" in result.stderr
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_letters_outside_ascii_are_refused_in_a_utf8_locale(fakes, shell):
+    for host in ("jittersim@pí", "user@Ａpi", "ßuser@pi"):
+        result, calls = deploy(fakes, "--host", host, shell=shell, LANG="en_US.UTF-8",
+                               LC_ALL="en_US.UTF-8")
+        assert result.returncode == 2, (shell, host)
+        assert calls == []
 
 
 @pytest.mark.parametrize("host", ["pi.local", "jittersim@pi.local", "pi_user@192.168.0.17"])
@@ -468,13 +550,16 @@ def test_it_runs_under_each_available_shell(fakes, shell):
     result, calls = deploy(fakes, "--install", shell=shell, FAKE_INSTALLED=short_head())
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh", "scp", "ssh", "ssh"]
+    result, _ = deploy(fakes, shell=shell, FAKE_HANG="probe", FAKE_SLEEP_SCALE="0.002")
+    assert "did not finish within 60 seconds" in result.stderr
 
 
-def test_help_names_the_defaults_and_where_it_runs(fakes):
+def test_help_names_the_defaults_where_it_runs_and_the_network(fakes):
     result, _ = deploy(fakes, "--help")
     assert result.returncode == 0
     assert HOST in result.stdout and "~/.ssh/jittersim_ed25519" in result.stdout
     assert "Runs on your Mac" in result.stdout and "known_hosts" in result.stdout
+    assert "router network" in result.stdout and "test Wi-Fi" in result.stdout
 
 
 def test_the_script_never_handles_a_password_or_trusts_new_host_keys():

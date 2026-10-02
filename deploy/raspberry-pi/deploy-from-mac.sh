@@ -2,8 +2,8 @@
 # Build the release archive of one commit on this Mac, copy it to the Pi and stage it for the
 # verified update service. With --install it also installs it and shows the release the Pi
 # runs afterwards. Only git, ssh, scp, tar and shasum are needed: not the Python package.
-# The script never reads, stores or passes a password. The one sudo step runs through
-# `ssh -t` so the Pi asks for its password in this terminal.
+# The script never reads, stores or passes a password. The steps that need root run in one
+# `ssh -t` session so the Pi asks for its sudo password in this terminal.
 # It is plain POSIX sh so it runs with the bash 3.2 that macOS ships and with dash.
 set -eu
 
@@ -11,6 +11,16 @@ DEFAULT_HOST=jittersim@192.168.0.17
 DEFAULT_KEY="$HOME/.ssh/jittersim_ed25519"
 # The update service's own copy of src/jittersim/updates.py. It runs with the system Python.
 MANAGER=/usr/local/lib/jittersim-update.py
+# Every ssh and scp call: a short connection timeout and a dead connection noticed within
+# 45 seconds. Host keys come from the user's known_hosts as they are.
+CONNECTION_OPTIONS="-o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+-o IdentitiesOnly=yes"
+# Whole-call limits in seconds for the calls that never ask anything.
+CHECK_SECONDS=60
+COPY_SECONDS=600
+UNPACK_SECONDS=180
+NETWORK_HINT="Deploying needs a connection to the Pi's router network: Ethernet or the \
+router's Wi-Fi. A Mac on the Pi's test Wi-Fi cannot reach the Pi over SSH."
 
 usage() {
     cat <<EOF
@@ -19,25 +29,28 @@ usage: deploy-from-mac.sh [--ref REF] [--host USER@HOST] [--key PATH] [--install
 
 Runs on your Mac in a JitterSim checkout. It builds the release archive of REF with
 build-release.sh, copies it to the Pi over SSH and stages it for the verified update
-service: the same check as 'sudo jittersim update install' and the dashboard's Install
-staged release.
+service. Staging checks the checksum and every file of the archive. Then 'sudo jittersim
+update install' or the dashboard's Install staged release installs it. Staging needs root
+on the Pi so the Pi asks for its sudo password in this terminal.
 
   --ref REF          tag, branch or commit to release (default: HEAD). The archive is built
                      from the commit so uncommitted changes are left out.
-  --host USER@HOST   the Pi's SSH login (default: $DEFAULT_HOST)
+  --host USER@HOST   the Pi's SSH login on its router network address
+                     (default: $DEFAULT_HOST)
   --key PATH         the SSH key for that login (default: ~/.ssh/jittersim_ed25519)
   --install          install the staged release too and show the release the Pi runs.
-                     The Pi asks for its sudo password in this terminal.
+                     It runs in the same sudo session as the staging.
   --use-installer    unpack the archive on the Pi and use its full installer instead of the
                      update service. Needed once on a Pi without the update service and for
                      OS package or Wi-Fi changes.
   --dry-run          resolve REF and print every command without running any of them.
   -h, --help         show this help
 
-Every ssh and scp call uses your known_hosts as it is: connect once with
-'ssh -i KEY USER@HOST' to check and save the Pi's host key. Only the sudo step opens a
-terminal on the Pi. The release is named after the short commit: compare it with
-'git rev-parse --short REF'.
+Deploying needs a connection to the Pi's router network (Ethernet or the router's Wi-Fi). A
+Mac on the Pi's test Wi-Fi cannot reach the Pi over SSH. Every ssh and scp call uses your
+known_hosts as it is: connect once with 'ssh -i KEY USER@HOST' to check and save the Pi's
+host key. Only the sudo step opens a terminal on the Pi. The release is named after the
+short commit: compare it with 'git rev-parse --short REF'.
 EOF
 }
 
@@ -88,6 +101,55 @@ run() {
     "$@"
 }
 
+# Run a command that never asks anything and stop it after LIMIT seconds. It returns 124
+# when the limit stopped it, like timeout(1) which macOS does not have.
+with_deadline() {
+    limit=$1
+    shift
+    rm -f "$work/deadline"
+    "$@" &
+    child=$!
+    (
+        trap 'kill "$sleeper" 2>/dev/null; exit 0' TERM
+        sleep "$limit" &
+        sleeper=$!
+        wait "$sleeper"
+        if kill -TERM "$child" 2>/dev/null; then
+            : > "$work/deadline"
+        fi
+    ) </dev/null >/dev/null 2>&1 &
+    watchdog=$!
+    # Keep the caller's errexit setting: it may be checking the result itself.
+    case $- in
+        *e*) errexit=yes ;;
+        *) errexit=no ;;
+    esac
+    set +e
+    wait "$child"
+    result=$?
+    kill -TERM "$watchdog" 2>/dev/null
+    wait "$watchdog" 2>/dev/null
+    if [ "$errexit" = yes ]; then
+        set -e
+    fi
+    if [ -e "$work/deadline" ]; then
+        rm -f "$work/deadline"
+        return 124
+    fi
+    return "$result"
+}
+
+# Show a command and run it with a deadline unless this is a dry run.
+run_limited() {
+    limit=$1
+    shift
+    printf '+ %s\n' "$(words "$@")"
+    if [ "$dry_run" = yes ]; then
+        return 0
+    fi
+    with_deadline "$limit" "$@"
+}
+
 ref=HEAD
 host=$DEFAULT_HOST
 key=$DEFAULT_KEY
@@ -113,14 +175,19 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-# A host is USER@NAME or NAME with letters, digits, dots, dashes and underscores only. It
-# never starts with a dash so ssh cannot read it as an option and it holds nothing a shell
-# would interpret.
-case $host in
-    ''|-*|*@|@*|*@*@*|*@-*|*[!A-Za-z0-9._@-]*)
-        fail "refusing host '$host': use USER@HOST with letters, digits, dots and dashes" 2
-        ;;
-esac
+# A host is USER@NAME or NAME with ASCII letters, digits, dots, dashes and underscores only.
+# It never starts with a dash so ssh cannot read it as an option and it holds nothing a
+# shell would interpret. The C locale keeps bash from counting other letters as letters.
+valid_host() (
+    LC_ALL=C
+    export LC_ALL
+    case $1 in
+        ''|-*|*@|@*|*@*@*|*@-*|*[!A-Za-z0-9._@-]*) return 1 ;;
+    esac
+    return 0
+)
+valid_host "$host" \
+    || fail "refusing host '$host': use USER@HOST with letters, digits, dots, dashes and underscores" 2
 case $key in
     ''|-*) fail "refusing key path '$key'" 2 ;;
 esac
@@ -144,13 +211,33 @@ if [ -n "$(git -C "$repo" status --porcelain --untracked-files=no)" ]; then
     printf 'Uncommitted changes in this checkout are not part of the archive.\n'
 fi
 
+# shellcheck disable=SC2086 # the options are single words on purpose
 ssh_batch() {
-    run ssh -o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes -i "$key" -- \
-        "$host" "$1"
+    run_limited "$1" ssh -o BatchMode=yes $CONNECTION_OPTIONS -i "$key" -- "$host" "$2"
 }
 
+# The same call for an answer that is read: the command is shown first because the answer
+# is captured.
+# shellcheck disable=SC2086
+show_ssh_batch() {
+    printf '+ %s\n' "$(words ssh -o BatchMode=yes $CONNECTION_OPTIONS -i "$key" -- "$host" "$1")"
+}
+
+# shellcheck disable=SC2086
+ssh_batch_answer() {
+    with_deadline "$1" ssh -o BatchMode=yes $CONNECTION_OPTIONS -i "$key" -- "$host" "$2"
+}
+
+# shellcheck disable=SC2086
 ssh_terminal() {
-    run ssh -t -o ConnectTimeout=10 -o IdentitiesOnly=yes -i "$key" -- "$host" "$1"
+    run ssh -t $CONNECTION_OPTIONS -i "$key" -- "$host" "$1"
+}
+
+unreachable() {
+    if [ "$1" -eq 124 ]; then
+        fail "$2 did not finish within $3 seconds. $NETWORK_HINT"
+    fi
+    fail "could not reach $host over SSH (exit $1). $NETWORK_HINT Also check the key and that the Pi's host key is in your known_hosts: connect once with ssh -i $(quote "$key") $host"
 }
 
 if [ "$dry_run" = yes ]; then
@@ -189,36 +276,58 @@ if [ "$dry_run" = no ]; then
 fi
 printf 'Archive: %s\nSHA-256: %s\n' "$remote_archive" "$sha"
 
-if [ "$use_installer" = no ]; then
-    # Staging needs the update service that the full installer adds once.
+# One look at the Pi before copying: can it be reached, does it have the update service and
+# which release does it run? `jittersim update check` needs no sudo.
+printf 'Connecting to %s with the key %s.\n' "$host" "$key"
+probe="if $(words test -f "$MANAGER"); then echo update-service; fi; \
+$(words jittersim update check) 2>/dev/null || true"
+show_ssh_batch "$probe"
+if [ "$dry_run" = yes ]; then
+    answer=update-service
+else
     set +e
-    ssh_batch "$(words test -f "$MANAGER")"
+    answer=$(ssh_batch_answer "$CHECK_SECONDS" "$probe")
     status=$?
     set -e
-    if [ "$status" -eq 1 ]; then
-        fail "the Pi has no update service yet. Run this once with --use-installer."
-    elif [ "$status" -ne 0 ]; then
-        fail "could not reach $host over SSH (exit $status). Check the address and the key and that the Pi's host key is in your known_hosts: connect once with ssh -i $(quote "$key") $host"
+    [ "$status" -eq 0 ] || unreachable "$status" "Checking the Pi" "$CHECK_SECONDS"
+fi
+running=$(printf '%s\n' "$answer" | sed -n 's/^Installed: //p' | head -n 1)
+if [ "$use_installer" = no ]; then
+    case $answer in
+        *update-service*) ;;
+        *) fail "the Pi has no update service yet. Run this once with --use-installer." ;;
+    esac
+    if [ "$running" = "$short" ]; then
+        printf 'The Pi already runs release %s. Nothing to stage or install.\n' "$short"
+        exit 0
     fi
+elif [ "$running" = "$short" ]; then
+    printf 'The Pi already runs release %s. The installer runs again.\n' "$short"
 fi
 
-run scp -o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes -i "$key" -- \
-    "$archive" "$host:$remote_archive" || fail "copying the archive to the Pi failed"
+set +e
+# shellcheck disable=SC2086
+run_limited "$COPY_SECONDS" scp -o BatchMode=yes $CONNECTION_OPTIONS -i "$key" -- \
+    "$archive" "$host:$remote_archive"
+status=$?
+set -e
+if [ "$status" -eq 124 ]; then
+    unreachable 124 "Copying the archive" "$COPY_SECONDS"
+elif [ "$status" -ne 0 ]; then
+    fail "copying the archive to the Pi failed (exit $status). $NETWORK_HINT"
+fi
 
 # Read the release label the Pi reports and compare it with this commit. The helper may still
 # be starting after an install so the check is tried a few times.
 check_release() {
     check=$(words jittersim update check)
+    show_ssh_batch "$check"
     if [ "$dry_run" = yes ]; then
-        ssh_batch "$check"
         return 0
     fi
-    printf '+ %s\n' "$(words ssh -o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes \
-        -i "$key" -- "$host" "$check")"
     attempt=1
     while :; do
-        if report=$(ssh -o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes -i "$key" \
-            -- "$host" "$check" 2>/dev/null); then
+        if report=$(ssh_batch_answer "$CHECK_SECONDS" "$check" 2>"$work/check.err"); then
             installed=$(printf '%s\n' "$report" | sed -n 's/^Installed: //p' | head -n 1)
             if [ "$installed" = "$short" ]; then
                 printf 'The Pi now runs release %s. Compare it with: git rev-parse --short %s\n' \
@@ -232,6 +341,8 @@ check_release() {
         attempt=$((attempt + 1))
         sleep 3
     done
+    # The last answer says why, for example a login that may not use the helper.
+    sed -n '1,5p' "$work/check.err" >&2
     fail "could not read the installed release. On the Pi run: jittersim update check"
 }
 
@@ -244,13 +355,22 @@ finish_dry_run() {
 
 if [ "$use_installer" = yes ]; then
     # Check the copy on the Pi, unpack it as the login user and label it so the installer
-    # records the release in /opt/jittersim/.jittersim-release.json.
+    # records the release in /opt/jittersim/.jittersim-release.json. The unpacked folder
+    # stays in the home folder like a release unpacked by hand.
     unpack="printf '%s  %s\\n' $(quote "$sha") $(quote "$remote_archive") | sha256sum -c - \
 && rm -rf $(quote "$release") && mkdir $(quote "$release") \
 && tar -xzf $(quote "$remote_archive") -C $(quote "$release") \
 && printf '{\"version\": \"%s\", \"sha256\": \"%s\"}\\n' $(quote "$short") $(quote "$sha") \
 > $(quote "$release/.jittersim-release.json") && rm -f $(quote "$remote_archive")"
-    ssh_batch "$unpack" || fail "checking or unpacking the archive on the Pi failed"
+    set +e
+    ssh_batch "$UNPACK_SECONDS" "$unpack"
+    status=$?
+    set -e
+    if [ "$status" -eq 124 ]; then
+        unreachable 124 "Unpacking on the Pi" "$UNPACK_SECONDS"
+    elif [ "$status" -ne 0 ]; then
+        fail "checking or unpacking the archive on the Pi failed"
+    fi
     install_command=$(words sudo "./$release/deploy/raspberry-pi/install.sh")
     if [ "$install" = no ]; then
         finish_dry_run
@@ -274,11 +394,13 @@ if [ "$install" = no ]; then
     printf 'or choose Check for updates and then Install staged release in the dashboard.\n'
     exit 0
 fi
-# `jittersim update install` queues the one-shot update service. `systemctl start` then
-# waits for that run to finish and fails when the update fails.
+# `jittersim update install` queues the one-shot update service. `systemctl start` joins that
+# queued run, waits for it and fails when the update fails. If the run already ended the
+# unit's condition (a queued request) is false and the start does nothing: the release
+# check below then shows what the Pi runs.
 ssh_terminal "$stage && $(words sudo jittersim update install --yes) \
 && $(words echo 'Waiting for the update service to install and check the release.') \
 && $(words sudo systemctl start jittersim-update.service)" \
-    || fail "staging or installing on the Pi failed. Read the messages above. If the Pi already runs this release there is nothing to install. On the Pi check: jittersim update check and sudo journalctl -u jittersim-update.service -n 80 --no-pager"
+    || fail "staging or installing on the Pi failed. Read the messages above. On the Pi check: jittersim update check and sudo journalctl -u jittersim-update.service -n 80 --no-pager"
 check_release "Check: sudo journalctl -u jittersim-update.service -n 80 --no-pager"
 finish_dry_run
