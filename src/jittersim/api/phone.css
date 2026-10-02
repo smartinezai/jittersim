@@ -1,0 +1,176 @@
+/* Phone layout. Up to 48rem the sidebar becomes a short header: the name, the mode, the page
+   links in one row that scrolls sideways and a one line status strip that opens the full status.
+   Panic and the router Wi-Fi switch sit in a bar pinned to the bottom of the window. The rest of
+   the sidebar footer opens from that bar as the Controls sheet. Wider windows keep the sidebar.
+   The server adds this file after access.css so that it wins over the earlier phone rules. */
+.status-strip, .controls-toggle { display: none; }
+.safety-bar { display: contents; }
+
+@media (max-width: 48rem) {
+  :root {
+    --controls-toggle-width: 4.75rem;
+    --phone-bar-height: calc(3.75rem + 1px + env(safe-area-inset-bottom, 0px));
+  }
+  /* Keyboard focus and scrollIntoView keep a control clear of the pinned bar. */
+  html { scroll-padding-bottom: calc(var(--phone-bar-height) + 0.75rem); }
+  .app { display: block; }
+  .content { padding: 1rem 1rem calc(var(--phone-bar-height) + 1.5rem); }
+  .page:focus { outline: none; }
+  .notice { padding: 0.6rem 0.8rem; font-size: 0.85rem; }
+
+  .sidebar {
+    position: static; height: auto; overflow: visible; gap: 0.5rem;
+    padding: 0.6rem 1rem 0.65rem; border-right: 0; border-bottom: 1px solid var(--line);
+  }
+  .sidebar-brand h1 { font-size: 1.25rem; }
+
+  /* Every page stays one tap away. The row scrolls inside itself and never the page. */
+  .sidebar-nav { margin-inline: -1rem; }
+  .sidebar-nav ul {
+    display: flex; gap: 0.35rem; padding: 0.1rem 1rem 0.2rem; overflow-x: auto;
+    overscroll-behavior-x: contain; scroll-padding-inline: 1rem; scrollbar-width: none;
+  }
+  .sidebar-nav ul::-webkit-scrollbar { display: none; }
+  .sidebar-nav li { flex: 0 0 auto; }
+  .sidebar-nav a {
+    min-height: 2.75rem; padding: 0.35rem 0.85rem; border: 1px solid var(--line);
+    background: #12233a; white-space: nowrap;
+  }
+  .sidebar-nav a[aria-current="page"] { border-color: #4c86bf; background: #1b3a5c; }
+  .sidebar-nav a:focus-visible { outline-offset: -3px; }
+  .sidebar-nav[data-more-after] ul {
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 2.5rem), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - 2.5rem), transparent);
+  }
+  .sidebar-nav[data-more-before] ul {
+    -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 2.5rem), transparent);
+    mask-image: linear-gradient(to left, #000 calc(100% - 2.5rem), transparent);
+  }
+  .sidebar-nav[data-more-before][data-more-after] ul {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 2.5rem, #000 calc(100% - 2.5rem), transparent);
+    mask-image: linear-gradient(to right, transparent, #000 2.5rem, #000 calc(100% - 2.5rem), transparent);
+  }
+
+  /* One line of status. The full block opens below it. */
+  .status-strip {
+    display: flex; align-items: center; gap: 0.6rem; width: 100%; min-height: 2.75rem;
+    padding: 0.3rem 0.75rem; border: 1px solid var(--line); border-radius: 0.5rem;
+    background: #12233a; color: #c4d5e8; font-size: 0.84rem; font-weight: 550;
+  }
+  .status-strip.status-on { color: #8de2bc; }
+  .sidebar .status-strip > span { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .status-strip::after {
+    content: ""; flex: 0 0 auto; width: 0.5rem; height: 0.5rem; margin-right: 0.2rem;
+    border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(45deg);
+  }
+  .status-strip[aria-expanded="true"]::after { transform: rotate(-135deg); }
+  .sidebar:not(.status-open) #sidebar-status { display: none; }
+  .sidebar-status { font-size: 0.82rem; }
+  .status-devices summary { display: flex; align-items: center; min-height: 2.75rem; }
+
+  /* Closed: the footer gives up its box. Only the bar shows and it is pinned. */
+  .sidebar-footer, .sidebar-operate { display: contents; }
+  .active-profile, .sidebar-actions, #runtime-summary, #message, .router-wifi-copy, .sidebar-credentials { display: none; }
+  /* Locked: the admin token is the only thing to do so its button stays in the header. */
+  .dashboard-locked .sidebar-credentials { display: grid; grid-template-columns: minmax(0, 1fr); }
+  .dashboard-locked .controls-toggle { display: none; }
+
+  .safety-bar {
+    position: fixed; z-index: 60; left: 0; right: 0; bottom: 0;
+    display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: stretch; gap: 0.5rem;
+    height: var(--phone-bar-height);
+    padding: 0.5rem calc(var(--controls-toggle-width) + 1.25rem) calc(0.5rem + env(safe-area-inset-bottom, 0px)) 0.75rem;
+    border-top: 1px solid var(--line); background: var(--sidebar-bg);
+    box-shadow: 0 -0.5rem 1.5rem rgba(0, 0, 0, 0.35);
+  }
+  .safety-bar .panic-button {
+    grid-column: auto; display: flex; align-items: center; justify-content: center;
+    height: 2.75rem; min-height: 0; padding: 0 0.85rem; font-size: 0.95rem; text-align: center;
+  }
+  /* The bar has room for the word. The longer state stays the button's name for screen readers. */
+  .safety-bar .panic-button #panic-state {
+    position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
+    clip-path: inset(50%); white-space: nowrap;
+  }
+  /* The spinner sits in the padding so that the bar does not move while Panic works. */
+  .safety-bar .panic-button[aria-busy="true"]::after {
+    position: absolute; top: 50%; right: 0.2rem; margin: -0.36rem 0 0;
+  }
+  .safety-bar .router-wifi-control {
+    min-width: 0; height: 2.75rem; gap: 0.35rem; padding: 0 0 0 0.6rem; border: 0;
+    border-radius: 0.5rem; background: #12233a; box-shadow: inset 0 0 0 1px var(--line);
+  }
+  .safety-bar .router-wifi-control > div { min-width: 0; }
+  .safety-bar .router-wifi-label {
+    overflow: hidden; font-size: 0.78rem; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .safety-bar .router-wifi-status {
+    display: -webkit-box; margin: 0.1rem 0 0; overflow: hidden; font-size: 0.7rem; line-height: 1.15;
+    overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  }
+  .sidebar .safety-bar .router-wifi-toggle { flex: 0 0 2.75rem; height: 2.75rem; min-height: 0; }
+
+  .controls-toggle {
+    position: fixed; z-index: 61; right: 0.75rem; bottom: calc(0.5rem + env(safe-area-inset-bottom, 0px));
+    display: flex; align-items: center; justify-content: center; gap: 0.4rem;
+    width: var(--controls-toggle-width); height: 2.75rem; min-height: 0; margin: 0; padding: 0 0.4rem;
+    border-color: #397bb0; background: #16314d; color: #f6fbff; font-size: 0.84rem; font-weight: 600;
+  }
+  .sidebar .controls-toggle { text-align: center; }
+  .controls-toggle::before {
+    content: ""; flex: 0 0 auto; width: 0.45rem; height: 0.45rem; margin-top: 0.2rem;
+    border-left: 2px solid currentColor; border-top: 2px solid currentColor; transform: rotate(45deg);
+  }
+  .controls-toggle[aria-expanded="true"] { border-color: var(--accent); background: #1b3a5c; }
+  .controls-toggle[aria-expanded="true"]::before { margin-top: -0.2rem; transform: rotate(225deg); }
+
+  /* Open: the footer becomes a sheet above the bar. The bar is pinned on its own and stays. */
+  .sidebar.controls-open .sidebar-footer {
+    position: fixed; z-index: 58; left: 0; right: 0; bottom: var(--phone-bar-height);
+    display: grid; align-content: start; gap: 0.75rem;
+    max-height: calc(100vh - var(--phone-bar-height) - 2.5rem);
+    max-height: calc(100dvh - var(--phone-bar-height) - 2.5rem);
+    overflow-y: auto; overscroll-behavior: contain; padding: 1rem 1rem 1.1rem;
+    border-top: 1px solid #547392; border-radius: 0.9rem 0.9rem 0 0; background: #102238;
+    box-shadow: 0 -1rem 2.5rem rgba(0, 0, 0, 0.5);
+  }
+  .sidebar.controls-open .sidebar-operate { display: grid; gap: 0.6rem; }
+  .sidebar.controls-open .active-profile, .sidebar.controls-open .sidebar-actions,
+  .sidebar.controls-open .router-wifi-copy, .sidebar.controls-open .sidebar-credentials { display: grid; }
+  .sidebar.controls-open #runtime-summary, .sidebar.controls-open #message { display: block; }
+  .sidebar.controls-open .active-profile { padding-bottom: 0.75rem; border-bottom: 1px solid #2b435f; }
+  .sidebar .active-profile select, .sidebar .active-profile button { min-height: 2.75rem; }
+  .sidebar .apply-summary { margin: 0; font-size: 0.8rem; }
+
+  /* Touch targets of at least 44px. */
+  .sidebar button, .sidebar-credentials button, .sidebar .router-wifi-copy button,
+  .credentials-panel button, .toast button, dialog button { min-height: 2.75rem; }
+  .toast button { min-width: 2.75rem; }
+  .content summary, .credentials-panel summary { min-height: 2.75rem; padding-block: 0.6rem; }
+  .button-link { display: inline-flex; align-items: center; min-height: 2.75rem; }
+  .remember-choice { min-height: 2.75rem; }
+  .remember-choice input { width: 1.25rem; height: 1.25rem; }
+
+  /* Messages and tips keep clear of the bar. */
+  .toast {
+    top: calc(0.75rem + env(safe-area-inset-top, 0px)); right: 0.75rem; bottom: auto; left: 0.75rem;
+    width: auto;
+  }
+  .sidebar .sidebar-action-row .help-icon::after {
+    position: fixed; top: auto; right: auto; bottom: calc(var(--phone-bar-height) + 0.75rem); left: 1rem;
+    width: calc(100vw - 2rem);
+  }
+}
+
+@media (max-width: 700px) {
+  .help-icon::after { bottom: calc(var(--phone-bar-height) + 0.75rem); }
+}
+
+/* The narrowest phones (320px) need the room in the bar for the router label. */
+@media (max-width: 21.25rem) {
+  :root { --controls-toggle-width: 4.25rem; }
+  .controls-toggle { font-size: 0.8rem; }
+  .controls-toggle::before { display: none; }
+  .safety-bar { gap: 0.4rem; padding-left: 0.6rem; }
+  .safety-bar .panic-button { padding: 0 0.7rem; }
+}

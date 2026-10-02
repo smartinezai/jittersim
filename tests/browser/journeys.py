@@ -10,6 +10,8 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.phone import close_controls, sidebar_control
+
 
 ROUTER_LINK = re.compile("^Router and Wi-Fi")
 DEVICES_LINK = re.compile("^Devices")
@@ -324,9 +326,11 @@ def run():
                 page.get_by_role("link", name="Access and rules", exact=True).click()
                 draft = page.get_by_label("Global blocked domains (comma separated)", exact=True)
                 draft.fill("unsaved.example")
-                page.locator("#apply-button").click()
+                # On a phone Start is in the Controls sheet of the bar at the bottom.
+                sidebar_control(page, "#apply-button").click()
                 expect(page.locator("#message")).to_contain_text(re.compile(r"^(Started|Re-applied)"))
                 expect(draft).to_have_value("unsaved.example")
+                close_controls(page)
                 page.get_by_role("link", name=DEVICES_LINK).click()
                 page.get_by_role("button", name="Open Test phone", exact=True).click()
                 page.get_by_role("combobox", name="Temporary profile", exact=True).select_option(

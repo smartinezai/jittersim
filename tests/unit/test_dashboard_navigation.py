@@ -78,10 +78,14 @@ def test_sidebar_holds_the_always_available_controls():
     assert 'id="reset-wifi-name"' in page_html("router")
 
 
+PHONE_PINNED = {".safety-bar", ".controls-toggle", ".sidebar.controls-open .sidebar-footer"}
+
+
 def test_floating_dock_and_sticky_bar_are_gone():
     assert "credential-dock" not in DASHBOARD_HTML
     assert "action-bar" not in DASHBOARD_HTML
     css = re.search(r"<style>(.*?)</style>", DASHBOARD_HTML, re.DOTALL).group(1)
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
     pinned = {
         selector.strip()
         for selector, _ in re.findall(
@@ -89,10 +93,24 @@ def test_floating_dock_and_sticky_bar_are_gone():
         )
     }
     # The sidebar scrolls so the tips of its buttons are fixed to the window instead.
-    # .field-tooltip is the help bubble that follows its button.
+    # .field-tooltip is the help bubble that follows its button. On a phone the bar with Panic
+    # and the router switch and the Controls sheet are pinned (see the next test).
     allowed = {".sidebar", ".toast", ".credentials-panel", ".help-icon::after",
-               ".sidebar .sidebar-action-row .help-icon::after", ".field-tooltip"}
+               ".sidebar .sidebar-action-row .help-icon::after", ".field-tooltip"} | PHONE_PINNED
     assert pinned <= allowed, pinned
+
+
+def test_only_the_phone_layout_pins_the_bar_and_the_sheet():
+    css = re.search(r"<style>(.*?)</style>", DASHBOARD_HTML, re.DOTALL).group(1)
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
+    phone = re.search(r"@media \(max-width: 48rem\) \{(.*?)\n\}", css, re.DOTALL).group(1)
+    outside = css.replace(phone, "")
+    for selector in PHONE_PINNED:
+        rule = re.search(r"(?:^|\n)\s*" + re.escape(selector) + r" \{([^{}]*)\}", phone)
+        assert rule and "position: fixed" in rule.group(1), selector
+        assert not re.search(
+            r"(?:^|[\n}])\s*" + re.escape(selector) + r" \{[^{}]*position:", outside
+        ), selector
 
 
 SECOND_SCRIPT = (

@@ -3998,7 +3998,7 @@ class ControlServerTests(unittest.TestCase):
             "activity": ['id="activity-list"'],
             "access": ["<h2>Network access rules</h2>"],
             "diagnostics": [
-                'id="plan"', 'id="state"', 'id="diagnostics"', 'id="action-history"',
+                'id="plan"', 'id="state"', 'id="diagnostics-json"', 'id="action-history"',
                 'id="export-settings"',
             ],
         }

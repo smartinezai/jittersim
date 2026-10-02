@@ -8,6 +8,8 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.phone import sidebar_control
+
 SLOW = {
     "id": "slow",
     "name": "Slow office",
@@ -338,7 +340,7 @@ def run():
                     expect(row).to_contain_text("Renamed elsewhere")
 
                     # Clearing the token locks the page and clears the form.
-                    page.locator("#open-admin-credentials").click()
+                    sidebar_control(page, "#open-admin-credentials").click()
                     page.locator("#admin-token").fill("")
                     for field, empty in (("profile-id", ""), ("profile-name", "")):
                         assert page.evaluate(f"document.getElementById('{field}').value") == empty

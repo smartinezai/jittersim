@@ -13,6 +13,8 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.phone import is_phone, sidebar_control
+
 ADMIN_TOKEN = "browser-test"
 ROUTER_PASSWORD = "browser-router-password"
 WIFI_NAME = "Browser home"
@@ -30,7 +32,7 @@ def sign_in(page):
 
 
 def enter_router_password(page):
-    page.locator("#open-router-credentials").click()
+    sidebar_control(page, "#open-router-credentials").click()
     page.locator("#router-admin-password").fill(ROUTER_PASSWORD)
     page.locator("#check-router-password").click()
     expect(page.locator("#credential-router-status")).to_contain_text("Router password accepted")
@@ -196,7 +198,7 @@ def run_width(browser, base, width, height):
     expect(page.locator("#copy-wifi-password")).to_have_attribute(
         "title", "Enter the router password first"
     )
-    page.locator("#copy-wifi-password").click()
+    sidebar_control(page, "#copy-wifi-password").click()
     expect(page.locator("#credentials-panel")).to_be_visible()
     expect(page.locator("#router-admin-password")).to_be_focused()
     assert credential_requests(requests) == []
@@ -206,33 +208,44 @@ def run_width(browser, base, width, height):
     expect(page.locator("#copy-wifi-name")).to_have_attribute(
         "title", "Copy the router Wi-Fi name"
     )
+    sidebar_control(page, "#copy-wifi-name")
     control = page.locator(".router-wifi-control").bounding_box()
     copy = page.locator(".router-wifi-copy").bounding_box()
     toggle = page.locator("#router-wifi-toggle").bounding_box()
-    # The copy buttons sit in their own row under the switch row and leave the switch where it was.
-    assert copy["y"] >= control["y"] + control["height"]
-    assert abs(copy["x"] - control["x"]) <= 1 and abs(copy["width"] - control["width"]) <= 1
-    assert toggle["x"] + toggle["width"] <= control["x"] + control["width"]
-    assert toggle["x"] > control["x"] + control["width"] / 2
-    assert toggle["y"] >= control["y"] and toggle["y"] + toggle["height"] <= control["y"] + control["height"]
-    page.screenshot(
-        path=f"test-results/router-copy-{width}.png",
-        clip={
-            "x": control["x"] - 4,
-            "y": control["y"] - 4,
-            "width": control["width"] + 8,
-            "height": copy["y"] + copy["height"] - control["y"] + 8,
-        },
-    )
+    if is_phone(page):
+        # On a phone the switch sits in the bar at the bottom of the window and the copy
+        # buttons in the Controls sheet above it.
+        bar = page.locator(".safety-bar").bounding_box()
+        assert abs(bar["y"] + bar["height"] - height) <= 1, bar
+        assert toggle["y"] >= bar["y"] and toggle["y"] + toggle["height"] <= bar["y"] + bar["height"] + 0.5
+        assert copy["y"] + copy["height"] <= bar["y"] + 0.5, (copy, bar)
+        page.screenshot(path=f"test-results/router-copy-{width}.png")
+    else:
+        # The copy buttons sit in their own row under the switch row and leave the switch where
+        # it was.
+        assert copy["y"] >= control["y"] + control["height"]
+        assert abs(copy["x"] - control["x"]) <= 1 and abs(copy["width"] - control["width"]) <= 1
+        assert toggle["x"] + toggle["width"] <= control["x"] + control["width"]
+        assert toggle["x"] > control["x"] + control["width"] / 2
+        assert toggle["y"] >= control["y"] and toggle["y"] + toggle["height"] <= control["y"] + control["height"]
+        page.screenshot(
+            path=f"test-results/router-copy-{width}.png",
+            clip={
+                "x": control["x"] - 4,
+                "y": control["y"] - 4,
+                "width": control["width"] + 8,
+                "height": copy["y"] + copy["height"] - control["y"] + 8,
+            },
+        )
 
     # The name: the password is not even asked for.
-    page.locator("#copy-wifi-name").click()
+    sidebar_control(page, "#copy-wifi-name").click()
     expect(page.locator("#copy-wifi-name")).to_have_text("Copied")
     assert clipboard_text(page) == WIFI_NAME
     expect(page.locator("#copy-wifi-name")).to_have_text("Copy Wi-Fi name")
 
     # The password.
-    page.locator("#copy-wifi-password").click()
+    sidebar_control(page, "#copy-wifi-password").click()
     expect(page.locator("#copy-wifi-password")).to_have_text("Copied")
     assert clipboard_text(page) == WIFI_PASSWORD
     expect(page.locator("#message")).to_contain_text(
@@ -305,7 +318,7 @@ def run_width(browser, base, width, height):
         ),
     )
     before = len(credential_requests(requests))
-    page.locator("#copy-wifi-password").click()
+    sidebar_control(page, "#copy-wifi-password").click()
     expect(page.locator("#message")).to_contain_text("Could not copy. Router login failed.")
     expect(page.locator("#copy-wifi-name")).to_be_disabled()
     expect(page.locator("#copy-wifi-password")).to_be_disabled()
@@ -315,24 +328,24 @@ def run_width(browser, base, width, height):
     expect(page.locator("#copy-wifi-password")).to_have_text("Copy Wi-Fi password")
     assert len(credential_requests(requests)) == before + 1
     page.unroute("**" + CREDENTIALS_PATH)
-    page.locator("#open-router-credentials").click()
+    sidebar_control(page, "#open-router-credentials").click()
     page.locator("#router-admin-password").fill(ROUTER_PASSWORD + "-new")
     expect(page.locator("#copy-wifi-name")).to_be_enabled()
     expect(page.locator("#copy-wifi-password")).to_be_enabled()
     page.locator("#close-credentials").click()
-    page.locator("#copy-wifi-name").click()
+    sidebar_control(page, "#copy-wifi-name").click()
     expect(page.locator("#copy-wifi-name")).to_have_text("Copied")
     assert clipboard_text(page) == WIFI_NAME
 
     # Clearing the router password sends the next click to the panel instead of the router.
     before = len(credential_requests(requests))
-    page.locator("#open-router-credentials").click()
+    sidebar_control(page, "#open-router-credentials").click()
     page.locator("#clear-router-password").click()
     page.locator("#close-credentials").click()
     expect(page.locator("#copy-wifi-password")).to_have_attribute(
         "title", "Enter the router password first"
     )
-    page.locator("#copy-wifi-password").click()
+    sidebar_control(page, "#copy-wifi-password").click()
     expect(page.locator("#credentials-panel")).to_be_visible()
     expect(page.locator("#router-admin-password")).to_be_focused()
     assert len(credential_requests(requests)) == before
