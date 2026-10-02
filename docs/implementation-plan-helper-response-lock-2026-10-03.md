@@ -41,3 +41,17 @@ Use the normal release installer after the full combined candidate passes its ga
 ## Verification record
 
 Independent plan review confirmed the ordering defect and required protected response serialization, tests before and after transport, error cleanup coverage and explicit acknowledgement of the eight-connection limit. These refinements are included above. Record the deterministic before/after result, focused test count, complete local test count and independent source review before handing over the commit.
+
+
+Completed verification for source `91f8ba013dd6111207520558606099de5c838552`:
+
+- Before the repair all four stalled-response socket cases failed with `helper-busy`. Exception cleanup already passed.
+- After the repair all 154 affected helper, service-address and API integration tests passed.
+- Full Mac suite: 2,964 passed and 39 skipped.
+- Full Linux release suite: 2,964 passed and 39 skipped in 127.17 seconds. Neither earlier immediate-follow-up failure recurred.
+- Required Ruff checks (`E9,F63,F7,F82,F811`) and whitespace checks passed.
+- Independent source review found no blocker in lock ordering, response snapshots, cleanup, connection bounds or uncertain client outcomes. Existing slow-operation assertions remain unchanged.
+- Release image `jittersim-pr72-response-final` has identifier `9edc0b9207bc1bd40319b599979881b52a39835d204a1a444651039fbee38b70`. All 241 relevant tracked source, test and deployment files matched the committed working tree.
+- The earlier 39 kernel packet cases and ten Linux release scripts passed on the preceding networking source `a0fcf169`. The coordinator owns repeating final combined release checks after other feature repairs.
+
+The coordinator carried the reviewed source into isolated candidate `6bf1bec98c139dbcc5bdd71b21854ff064279e26`. No remote publication or device action occurred in this repair. Exact-head green CI remains required and GitHub's account billing failure currently prevents jobs from starting.
