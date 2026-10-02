@@ -1,0 +1,8 @@
+{
+  "name": "jittersim-homepage-reference",
+  "private": true,
+  "version": "0.1.0",
+  "devDependencies": {
+    "playwright": "1.63.0"
+  }
+}

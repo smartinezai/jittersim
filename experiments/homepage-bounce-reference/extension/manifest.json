@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "JitterSim homepage reference",
+  "version": "0.1.0",
+  "description": "Isolated loopback navigation and simulated policy reference.",
+  "permissions": ["storage"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "background": {"service_worker": "background.js"},
+  "action": {"default_popup": "index.html"}
+}

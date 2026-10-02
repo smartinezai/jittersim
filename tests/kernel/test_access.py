@@ -212,17 +212,39 @@ class AccessDatapathTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertNotIn("203.0.113.7", result.stdout + result.stderr)
 
-        management_query = run_in(
-            PI,
-            "dig",
-            "@192.168.50.1",
-            "news.example.com",
-            "+time=1",
-            "+tries=1",
-            check=False,
-        )
-        self.assertEqual(management_query.returncode, 0, management_query.stderr)
-        self.assertIn("203.0.113.7", management_query.stdout)
+        for tcp in (False, True):
+            management_query = run_in(
+                PI,
+                "dig",
+                "@192.168.50.1",
+                "news.example.com",
+                "+time=1",
+                "+tries=1",
+                *(("+tcp",) if tcp else ()),
+                check=False,
+            )
+            self.assertEqual(management_query.returncode, 0, management_query.stderr)
+            self.assertIn("203.0.113.7", management_query.stdout)
+
+        recovered = replace(self.plan, options=AccessOptions(dns_failure_percent=0))
+        self.manager.apply(recovered)
+
+        def check_recovered_answers():
+            self.assertEqual(read_access(self.directory / "policy.json"), recovered)
+            for tcp in (False, True):
+                for namespace in (CLIENT, OTHER_CLIENT):
+                    self.assertIn(
+                        "203.0.113.7", self.query("news.example.com", namespace, tcp=tcp)
+                    )
+                for name in ("video.example.com", "cdn.video.example.com"):
+                    self.assertIn("status: NXDOMAIN", self.query(name, tcp=tcp))
+                    self.assertIn("203.0.113.7", self.query(name, OTHER_CLIENT, tcp=tcp))
+
+        # Zero removes only the injected failures. The child's saved site block stays active.
+        check_recovered_answers()
+        self.executor.stop()
+        self.manager.restore()
+        check_recovered_answers()
 
     def test_global_rules_allow_only_and_explicit_disable(self):
         plan = replace(

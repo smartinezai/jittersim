@@ -7,5 +7,6 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 COPY deploy ./deploy
 COPY tests ./tests
+COPY experiments/homepage-bounce-reference/fixture.py ./experiments/homepage-bounce-reference/fixture.py
 RUN pip install '.[dev]'
 CMD ["python", "-m", "pytest", "-q"]

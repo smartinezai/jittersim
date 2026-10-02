@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Homepage bounce reference</title>
+<style>
+  body { font: 16px system-ui; max-width: 42rem; min-width: 20rem; margin: 2rem auto;
+    padding: 0 1rem; background: #14202c; color: #e5edf4; }
+  section { margin: 1.3rem 0; padding: 1rem; border: 1px solid #617181; border-radius: .5rem; }
+  button, input { font: inherit; margin: .4rem .3rem .4rem 0; padding: .55rem; }
+  button { cursor: pointer; }
+  input { max-width: 100%; box-sizing: border-box; }
+  #status { min-height: 3rem; }
+</style>
+<main>
+  <h1>Homepage bounce reference</h1>
+  <p>Local simulation only. Pairing and device identity are simulated.
+    This does not connect to the Pi or monitor browsing.</p>
+  <section aria-label="Simulated pairing">
+    <label for="pair-code">Disposable pairing code</label><br>
+    <input id="pair-code" type="password" autocomplete="off" maxlength="32">
+    <button id="pair">Pair simulated device</button>
+  </section>
+  <section aria-label="Reference controls">
+    <button id="enable">Enable reference effect</button>
+    <button id="off">Off</button>
+    <p id="status" role="status" aria-live="polite">Off by default.</p>
+  </section>
+  <section aria-label="Safe fixture actions">
+    <p>Only these fixed HTML fixture pages are eligible. Chance comes from
+      the simulated policy. Normal browsing is untouched.</p>
+    <button data-action="article">Open article</button>
+    <button data-action="notes">Open notes</button>
+  </section>
+</main>
+<script src="page.js"></script>
+</html>
