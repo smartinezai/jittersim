@@ -9,6 +9,12 @@ from pathlib import Path
 from playwright.sync_api import expect, sync_playwright
 
 
+def deliver_reply(page, route, *, status, payload):
+    with page.expect_event("requestfinished", predicate=lambda request: request == route.request):
+        route.fulfill(status=status, json=payload)
+    page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+
+
 def run():
     process = subprocess.Popen(
         [sys.executable, "-m", "tests.browser.fixture"], stdout=subprocess.PIPE, text=True,
@@ -70,6 +76,75 @@ def run():
                     page.evaluate("dismissToast()")
                     page.locator("#profile-form").screenshot(path=f"test-results/pattern-form-{width}.png")
                     history.screenshot(path=f"test-results/pattern-history-{width}.png")
+                    # Previously loaded private data must disappear at the token edit itself.
+                    events = page.request.get(base + "/api/pattern-history", headers=headers).json()
+                    late_events = {"events": [dict(events["events"][0], scope="late-private-target")]}
+                    held = []
+                    page.route("**/api/pattern-history", lambda route: held.append(route))
+                    page.locator("#load-pattern-history").click()
+                    expect(page.locator("#load-pattern-history")).to_be_disabled()
+                    for _ in range(30):
+                        if held:
+                            break
+                        page.wait_for_timeout(50)
+                    assert len(held) == 1, "history request was not held"
+                    page.locator("#open-admin-credentials").click()
+                    page.locator("#admin-token").fill("rejected-token")
+                    expect(page.locator("#private-dashboard")).to_be_hidden()
+                    expect(page.locator("#pattern-history-body tr")).to_have_count(0)
+                    deliver_reply(page, held.pop(), status=200, payload=late_events)
+                    expect(page.locator("#load-pattern-history")).to_be_disabled()
+                    page.locator("#admin-token").fill("browser-test")
+                    page.locator("#check-admin-token").click()
+                    expect(page.locator("#message")).to_contain_text("Token accepted. Diagnostics loaded.")
+                    page.locator("#close-credentials").click()
+                    expect(page.locator("#pattern-history-body tr")).to_have_count(0)
+                    assert "late-private-target" not in page.locator("#pattern-history-body").text_content()
+                    page.unroute("**/api/pattern-history")
+                    page.locator("#load-pattern-history").click()
+                    expect(page.locator("#pattern-history-body tr").first).to_be_attached()
+
+                    # Revocation keeps the token unchanged. A late reply must still be ignored
+                    # even after access is accepted again while that old request is in flight.
+                    for stale_status in (200, 401, 403):
+                        held = []
+                        page.route("**/api/pattern-history", lambda route: held.append(route))
+                        page.locator("#load-pattern-history").click()
+                        for _ in range(30):
+                            if held:
+                                break
+                            page.wait_for_timeout(50)
+                        assert len(held) == 1, "history request was not held"
+                        old_request = held.pop()
+                        page.route("**/api/devices", lambda route: route.fulfill(status=403, json={
+                            "error": "Dashboard access removed", "registration_required": True,
+                        }))
+                        page.evaluate('request("/api/devices", "GET").catch(() => {})')
+                        expect(page.locator("#private-dashboard")).to_be_hidden()
+                        expect(page.locator("#pattern-history-body tr")).to_have_count(0)
+                        page.unroute("**/api/devices")
+                        page.locator("#open-admin-credentials").click()
+                        page.locator("#check-admin-token").click()
+                        expect(page.locator("#message")).to_contain_text("Token accepted. Diagnostics loaded.")
+                        page.locator("#close-credentials").click()
+                        page.locator("#load-pattern-history").click()
+                        for _ in range(30):
+                            if held:
+                                break
+                            page.wait_for_timeout(50)
+                        assert len(held) == 1, "new history request was not held"
+                        stale_payload = late_events if stale_status == 200 else {
+                            "error": "Dashboard access removed", "registration_required": True,
+                        }
+                        deliver_reply(page, old_request, status=stale_status, payload=stale_payload)
+                        expect(page.locator("#private-dashboard")).to_be_visible()
+                        expect(page.locator("#pattern-history-body tr")).to_have_count(0)
+                        expect(page.locator("#load-pattern-history")).to_be_disabled()
+                        deliver_reply(page, held.pop(), status=200, payload=events)
+                        expect(page.locator("#load-pattern-history")).to_be_enabled()
+                        expect(page.locator("#pattern-history-status")).to_have_text("Latest choices loaded.")
+                        assert "late-private-target" not in page.locator("#pattern-history-body").text_content()
+                        page.unroute("**/api/pattern-history")
                     assert not errors, errors
                     assert page.request.post(base + "/api/general-profile/stop", headers=headers, data={}).ok
                     context.close()

@@ -1935,7 +1935,7 @@ DASHBOARD_HTML = """<!doctype html>
     });
     syncScheduleDays();
 
-    async function request(path, method, body) {
+    async function request(path, method, body, isResponseCurrent) {
       const headers = {};
       const token = element("admin-token").value.trim();
       const tokenRevision = adminTokenRevision;
@@ -1960,6 +1960,9 @@ DASHBOARD_HTML = """<!doctype html>
           cache: "no-store"
         });
         const data = await response.json();
+        if (isResponseCurrent && !isResponseCurrent()) {
+          throw new Error("Request is no longer current.");
+        }
         if (method === "GET" && tokenRevision !== adminTokenRevision) {
           throw new Error("Token changed. Choose Check token to load.");
         }
@@ -1994,7 +1997,7 @@ DASHBOARD_HTML = """<!doctype html>
     const privateDataPanelIds = [
       "profiles", "devices", "plan", "state", "policies",
       "connected-devices", "unaffected-devices", "uplink-details", "general-profile-status",
-      "saved-profiles"
+      "saved-profiles", "pattern-history-body", "pattern-history-status"
     ];
     // Functions that clear private form state whenever the private panels are locked.
     const privateDataLockHooks = [];
@@ -2003,6 +2006,7 @@ DASHBOARD_HTML = """<!doctype html>
       element("private-dashboard").hidden = !allowed;
       element("dashboard-access-list").hidden = !allowed;
       document.body.classList.toggle("dashboard-locked", !allowed);
+      element("load-pattern-history").disabled = !allowed;
     }
 
     function lockDashboardAccess(message) {
@@ -6215,13 +6219,28 @@ DASHBOARD_HTML = """<!doctype html>
       });
     }
 
+    let patternHistoryRequest = 0;
+    privateDataLockHooks.push(() => {
+      patternHistoryRequest += 1;
+      element("pattern-history-body").replaceChildren();
+      element("pattern-history-status").textContent = "";
+      element("load-pattern-history").disabled = true;
+    });
+
     element("load-pattern-history").addEventListener("click", async () => {
       const button = element("load-pattern-history");
       const status = element("pattern-history-status");
+      if (!adminTokenVerified || element("private-dashboard").hidden || button.disabled) return;
+      const requestId = ++patternHistoryRequest;
+      const tokenRevision = adminTokenRevision;
+      const isCurrent = () => requestId === patternHistoryRequest &&
+        tokenRevision === adminTokenRevision && adminTokenVerified &&
+        !element("private-dashboard").hidden;
       button.disabled = true;
       status.textContent = "Loading pattern choices...";
       try {
-        const data = await request("/api/pattern-history", "GET");
+        const data = await request("/api/pattern-history", "GET", undefined, isCurrent);
+        if (!isCurrent()) return;
         const body = element("pattern-history-body");
         body.replaceChildren();
         data.events.forEach((event) => {
@@ -6238,9 +6257,14 @@ DASHBOARD_HTML = """<!doctype html>
         });
         status.textContent = data.events.length ? "Latest choices loaded." : "No pattern choices recorded yet.";
       } catch (error) {
+        if (!isCurrent()) return;
+        if (error.status === 401 || error.status === 403) {
+          lockDashboardAccess(error.message);
+          return;
+        }
         status.textContent = error.message;
       } finally {
-        button.disabled = false;
+        if (isCurrent()) button.disabled = false;
       }
     });
 
