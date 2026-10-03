@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "JitterSim homepage test",
+  "version": "0.1.0",
+  "description": "Explicit homepage bounce actions for enrolled controlled HTTPS test pages.",
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://netlab.local:8443/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "index.html"
+  }
+}

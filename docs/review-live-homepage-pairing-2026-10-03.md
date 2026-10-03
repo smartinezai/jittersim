@@ -1,5 +1,11 @@
 # Live homepage pairing plan review
 
+## Current status
+
+Samantha explicitly authorized implementation on 3 October after this review.
+The feedback pause below records the review-time state. It is now cleared.
+The owning implementation plan records the selected defaults and release gates.
+
 ## Human review summary
 
 The delivered reference and DNS packet acceptance are complete. The next

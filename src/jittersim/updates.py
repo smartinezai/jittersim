@@ -676,6 +676,13 @@ def apply_update(
                 code=code, units=units, dispatcher=dispatcher
             ):
                 install_file(staged / source, destination, mode)
+            compatibility = code / "deploy/raspberry-pi/homepage-profile-compat.py"
+            if compatibility.exists():
+                install_file(compatibility, manager.with_name("jittersim-profile-compat.py"), 0o644)
+                dropins = units / "jittersim-dashboard.service.d"
+                dropins.mkdir(mode=0o755, parents=True, exist_ok=True)
+                install_file(code / "deploy/raspberry-pi/homepage-compat.conf",
+                             dropins / "homepage-compat.conf", 0o644)
             progress("checking", "Restarting services and checking the dashboard and helper.")
             restart_services()
             if not wait_healthy():

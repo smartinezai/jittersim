@@ -160,6 +160,10 @@ def render_access_firewall(plan: AccessPlan, topology: Topology) -> str:
         f'add rule inet {table} input iifname "{interface}" tcp dport {DASHBOARD_PORT} '
         'accept comment "keep dashboard sign-in reachable"'
     )
+    lines.append(
+        f'add rule inet {table} input iifname "{interface}" ip daddr 192.168.50.1 '
+        'tcp dport 8443 accept comment "allow verified homepage policy reads"'
+    )
     if plan.options.dns_failure_percent:
         # nftables' random generator returns values from 0 to 99. At 100%,
         # reject directly instead of comparing against an invalid value.

@@ -310,6 +310,7 @@ class UpdateTests(unittest.TestCase):
             ("/etc/NetworkManager/dispatcher.d/80-jittersim-mdns", str(self.dispatcher)),
             ("/etc/NetworkManager/dispatcher.d", str(self.dispatcher.parent)),
             ("/usr/local/lib/jittersim-update.py", str(self.manager)),
+            ("/usr/local/lib/jittersim-profile-compat.py", str(self.manager.with_name("jittersim-profile-compat.py"))),
             ("/usr/local/bin/jittersim", str(self.command)),
         )
         words = []
@@ -339,6 +340,10 @@ class UpdateTests(unittest.TestCase):
                 if line.startswith("install -m "):
                     self.assertEqual(words[3:7], ["-o", "root", "-g", "root"])
                     source, destination = Path(words[7]), Path(words[8])
+                    if destination.parent.name == "jittersim-dashboard.service.d":
+                        self.assertTrue(destination.parent.is_dir())
+                        self.assertEqual(destination.parent.stat().st_mode & 0o777, 0o755)
+
                     self.assertEqual(destination.read_bytes(), source.read_bytes())
                     self.assertEqual(destination.stat().st_mode & 0o777, int(words[2], 8))
                     if destination.parent == self.units:
@@ -355,6 +360,7 @@ class UpdateTests(unittest.TestCase):
                                 str(self.config),
                                 str(self.data),
                                 str(self.code),
+                                str(self.units / "jittersim-dashboard.service.d"),
                                 "/usr/local/lib",
                                 "/var/lib/jittersim-access",
                             ),

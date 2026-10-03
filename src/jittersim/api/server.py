@@ -147,6 +147,8 @@ RESPONSE_SEND_TIMEOUT_SECONDS = 5.0
 MAX_IMPORT_BODY_BYTES = 1024 * 1024
 WRITE_PATHS = frozenset(
     (
+        "/api/homepage/pairing-code",
+        "/api/homepage/revoke",
         "/api/profiles",
         "/api/general-profile",
         "/api/general-profile/stop",
@@ -1257,6 +1259,17 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div id="saved-profiles" class="connected-list" aria-live="polite">Check the admin token to view saved profiles.</div>
     </section>
     <section class="card" data-collapse="open">
+      <details>
+        <summary>Pair homepage test extension</summary>
+        <p>Use only test pages you control. The effect stays off until enabled in Chrome.</p>
+        <label for="homepage-extension-id">Chrome extension ID</label>
+        <input id="homepage-extension-id" maxlength="32" autocomplete="off">
+        <label for="homepage-pages">Controlled HTTPS test pages, one per line</label>
+        <textarea id="homepage-pages" rows="3" maxlength="4104"></textarea>
+        <button id="homepage-create-code" type="button">Create pairing code</button>
+        <button id="homepage-revoke" type="button">Revoke all homepage pairings</button>
+        <output id="homepage-code" aria-live="polite"></output>
+      </details>
       <h2 id="profile-form-title">Save profile</h2>
       <form id="profile-form">
         <label><span class="field-label">Start from a preset<span class="help-icon" tabindex="0" role="img" aria-label="Profile preset help" data-help="Fills the form with rough values for a kind of network, such as a slow mobile connection. Change anything you like afterwards. Nothing is saved until you choose Save profile.">?</span></span>
@@ -1325,6 +1338,10 @@ DASHBOARD_HTML = r"""<!doctype html>
             </label>
             <label><span class="field-label">Interval variation (%)<span class="help-icon" tabindex="0" role="img" aria-label="Interval variation help" data-help="The reroll interval can move this percentage below or above the base interval. For example, 20% of 5 minutes means 4 to 6 minutes.">?</span></span>
               <input id="profile-reroll-variation" type="number" min="0" max="100" value="0">
+            </label>
+            <label><span class="field-label">Homepage bounce chance (%)<span class="help-icon" tabindex="0" role="img" aria-label="Homepage bounce help" data-help="The chance that an explicit test action in a paired Chrome extension opens the same site’s home page. Saving does not change an applied effect. Apply the profile after saving.">?</span></span>
+              <input id="profile-homepage-chance" type="number" min="0" max="100" step="1" value="0">
+              <span class="form-note">Only explicit test pages in a paired Chrome extension. Apply after saving.</span>
             </label>
             <label><span class="field-label">Outage chance (%)<span class="help-icon" tabindex="0" role="img" aria-label="Outage chance help" data-help="The chance that a device is disconnected when the outage check runs. A service list that uses this profile cuts only its listed services for every affected device.">?</span></span>
               <input id="profile-outage-probability" type="number" min="0" max="100" value="0">
@@ -7102,6 +7119,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       const upload = profileDirectionSummary(profile.upload);
       const download = profileDirectionSummary(profile.download);
       const parts = [upload === download ? "↕ " + upload : "↑ " + upload + " · ↓ " + download];
+      if (profile.homepage_bounce_percent > 0) parts.push("homepage bounce " + profile.homepage_bounce_percent + "%");
       if (profile.outage_probability > 0) parts.push("outages " + profile.outage_probability + "%");
       if (profile.website_mode === "allow_only") {
         const sites = profile.website_domains.length;
@@ -7136,6 +7154,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       set("profile-seed", profile.random_seed);
       set("profile-reroll", profile.reroll_interval_seconds);
       set("profile-reroll-variation", profile.reroll_interval_randomness.variation_percent);
+      set("profile-homepage-chance", profile.homepage_bounce_percent || 0);
       set("profile-outage-probability", profile.outage_probability);
       set("profile-outage-duration", profile.outage_duration_seconds);
       set("profile-outage-interval", profile.outage_interval_seconds);
@@ -7175,6 +7194,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           variation_percent: Number(element("profile-reroll-variation").value),
           enabled_probability: base ? base.reroll_interval_randomness.enabled_probability : 100
         },
+        homepage_bounce_percent: Number(element("profile-homepage-chance").value),
         outage_probability: Number(element("profile-outage-probability").value),
         outage_duration_seconds: Number(element("profile-outage-duration").value),
         outage_interval_seconds: Number(element("profile-outage-interval").value),
@@ -7347,6 +7367,24 @@ DASHBOARD_HTML = r"""<!doctype html>
       if (focusedKey && buttons.has(focusedKey)) buttons.get(focusedKey).focus();
     }
 
+    element("homepage-create-code").addEventListener("click", async () => {
+      const output = element("homepage-code");
+      output.textContent = "";
+      try {
+        const result = await request("/api/homepage/pairing-code", "POST", {
+          extension_id: element("homepage-extension-id").value.trim(),
+          pages: element("homepage-pages").value.split(/\n/).map(value => value.trim()).filter(Boolean)
+        });
+        output.textContent = "Pair within two minutes: " + result.code;
+        setTimeout(() => { if (output.textContent.endsWith(result.code)) output.textContent = "Code expired."; }, 120000);
+      } catch (error) { showMessage(error.message, "error"); }
+    });
+    element("homepage-revoke").addEventListener("click", async () => {
+      try {
+        await request("/api/homepage/revoke", "POST", {});
+        element("homepage-code").textContent = "All homepage pairings revoked.";
+      } catch (error) { showMessage(error.message, "error"); }
+    });
     element("profile-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
@@ -8218,7 +8256,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         })
       );
       return Boolean(
-        profile.reroll_interval_seconds || profile.outage_probability ||
+        profile.homepage_bounce_percent || profile.reroll_interval_seconds || profile.outage_probability ||
         profile.random_seed !== null || profile.website_mode !== "unrestricted" ||
         profile.website_domains.length ||
         advancedImpairment(profile.upload) || advancedImpairment(profile.download)
@@ -8562,6 +8600,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       element("profile-reroll").value = profile.reroll_interval_seconds;
       element("profile-reroll-variation").value =
         profile.reroll_interval_randomness.variation_percent;
+      element("profile-homepage-chance").value = profile.homepage_bounce_percent || 0;
       element("profile-outage-probability").value = profile.outage_probability;
       element("profile-outage-duration").value = profile.outage_duration_seconds;
       element("profile-outage-interval").value = profile.outage_interval_seconds;
@@ -11031,6 +11070,9 @@ class ControlServer(HTTPServer):
         scheduler: Optional[RuntimeScheduler] = None,
         tls_certfile: Optional[Path] = None,
         tls_keyfile: Optional[Path] = None,
+        homepage_host: Optional[str] = None,
+        homepage_port: int = 8443,
+        homepage_certfile: Path = Path("/etc/jittersim/dashboard-wifi.crt"),
     ) -> None:
         if admin_token == "":
             raise ValueError("admin_token must not be empty")
@@ -11057,7 +11099,34 @@ class ControlServer(HTTPServer):
         self._pending_connections: Dict[socket.socket, _PendingConnection] = {}
         self._request_inputs: Dict[socket.socket, Tuple[bytes, float]] = {}
         self._stop_connections = threading.Event()
+        self.homepage_store = None
+        self.homepage_server = None
+        self.homepage_worker = None
         super().__init__(server_address, ControlRequestHandler)
+        if homepage_host is not None and tls_context is not None and helper_client is not None:
+            from .homepage import PairingStore, PolicyServer
+            try:
+                if homepage_host != "192.168.50.1" or homepage_port != 8443 or not admin_token:
+                    raise ValueError("Homepage pairing requires the AP address, port 8443 and admin authentication")
+                store = PairingStore(helper_client)
+                policy_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                policy_context.minimum_version = ssl.TLSVersion.TLSv1_2
+                policy_context.load_cert_chain(str(homepage_certfile), str(tls_keyfile))
+                listener = PolicyServer((homepage_host, homepage_port), store, policy_context)
+                worker = threading.Thread(target=listener.serve_forever,
+                    daemon=True, name="homepage-policy")
+                worker.start()
+                self.homepage_store = store
+                self.homepage_server = listener
+                self.homepage_worker = worker
+            except (OSError, ValueError, RuntimeError):
+                if 'listener' in locals():
+                    if 'worker' in locals() and worker.is_alive():
+                        listener.shutdown()
+                    listener.server_close()
+                if 'store' in locals():
+                    store.close()
+                LOGGER.warning("Homepage pairing listener unavailable. Dashboard controls remain available.")
 
     def get_request(self) -> Tuple[socket.socket, Any]:
         """Advance waiting connections without serial waits for idle clients."""
@@ -12071,6 +12140,21 @@ class ControlServer(HTTPServer):
             self.repository.delete_connected_device_label(mac_address=mac_address)
             return HTTPStatus.OK, "application/json", _json_bytes({"deleted": True})
 
+        if path in ("/api/homepage/pairing-code", "/api/homepage/revoke"):
+            if self.homepage_store is None:
+                return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes({"error": "Trusted homepage pairing is not enabled"})
+            try:
+                if path.endswith("revoke") and payload == {}:
+                    self.homepage_store.revoke()
+                    result = {"revoked": True}
+                elif path.endswith("pairing-code") and set(payload) == {"extension_id", "pages"}:
+                    result = self.homepage_store.create(payload["extension_id"], payload["pages"])
+                else:
+                    raise ValueError("invalid pairing request")
+                return HTTPStatus.OK, "application/json", _json_bytes(result)
+            except (ValueError, RuntimeError):
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes({"error": "Pairing unavailable. Check the extension ID and controlled HTTPS pages."})
+
         if path == "/api/profiles":
             try:
                 profile = _profile_from_payload(payload)
@@ -12721,6 +12805,12 @@ class ControlServer(HTTPServer):
         return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
 
     def server_close(self) -> None:
+        if self.homepage_store is not None:
+            self.homepage_store.close()
+        if self.homepage_server is not None:
+            self.homepage_server.shutdown()
+            self.homepage_server.server_close()
+            self.homepage_worker.join(timeout=1)
         self._stop_connections.set()
         for connection in tuple(self._pending_connections):
             self._close_pending(connection)
@@ -14181,7 +14271,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
 
         origin = self.headers.get("Origin")
         host = self.headers.get("Host", "")
-        if (path.startswith("/api/router/") or path in ("/api/access-point/reset-name",
+        if (path.startswith(("/api/router/", "/api/homepage/")) or path in ("/api/access-point/reset-name",
                     "/api/dashboard-access/register-self", "/api/dashboard-access/remove")) and (
             self.headers.get("Sec-Fetch-Site") == "cross-site"
             or (origin is not None and origin not in ("http://" + host, "https://" + host))
@@ -14198,7 +14288,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 max_bytes=(
                     MAX_IMPORT_BODY_BYTES
                     if path in ("/api/import", "/api/test-sessions/save")
-                    else MAX_JSON_BODY_BYTES
+                    else (8192 if path.startswith("/api/homepage/") else MAX_JSON_BODY_BYTES)
                 ),
             )
             if path.startswith("/api/dashboard-access/"):
@@ -14408,6 +14498,7 @@ def _profile_from_payload(payload: Dict[str, Any]) -> Profile:
         reroll_interval_randomness=_randomness_from_payload(
             payload.get("reroll_interval_randomness")
         ),
+        homepage_bounce_percent=payload.get("homepage_bounce_percent", 0),
         outage_probability=payload.get("outage_probability", 0),
         outage_duration_seconds=payload.get("outage_duration_seconds", 0),
         outage_duration_randomness=_randomness_from_payload(
@@ -14974,6 +15065,8 @@ def run_server(
     helper_timeout_seconds: float = 8.0,
     tls_certfile: Optional[Path] = None,
     tls_keyfile: Optional[Path] = None,
+    homepage_host: Optional[str] = None,
+    homepage_certfile: Path = Path("/etc/jittersim/dashboard-wifi.crt"),
 ) -> None:
     """Run the dashboard until the process receives Ctrl-C."""
 
@@ -14998,6 +15091,8 @@ def run_server(
             scheduler=scheduler,
             tls_certfile=tls_certfile,
             tls_keyfile=tls_keyfile,
+            homepage_host=homepage_host,
+            homepage_certfile=homepage_certfile,
         ) as server:
             LOGGER.info("jittersim dashboard listening on %s:%s", host, port)
             try:
@@ -15018,6 +15113,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--helper-timeout-seconds", type=float, default=8.0)
     parser.add_argument("--tls-cert", type=Path)
     parser.add_argument("--tls-key", type=Path)
+    parser.add_argument("--homepage-cert", type=Path, default=Path("/etc/jittersim/dashboard-wifi.crt"))
+    parser.add_argument("--homepage-host", choices=("192.168.50.1",),
+                        default=os.environ.get("JITTERSIM_HOMEPAGE_HOST"))
     parser.add_argument(
         "--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO"
     )
@@ -15041,5 +15139,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         helper_timeout_seconds=arguments.helper_timeout_seconds,
         tls_certfile=arguments.tls_cert,
         tls_keyfile=arguments.tls_key,
+        homepage_host=arguments.homepage_host,
+        homepage_certfile=arguments.homepage_cert,
     )
     return 0
