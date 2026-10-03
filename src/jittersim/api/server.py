@@ -122,7 +122,7 @@ from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.scenarios import active_scenario_runs
 from jittersim.engine.schedules import active_schedule
 from jittersim.engine.service import compile_stored_plan
-from jittersim.engine.website import describe_timed_out_names
+from jittersim.engine.website import describe_timed_out_names, without_dns
 from jittersim.networking.applier import MAX_PROTECTED_MACS, _validate_access_point_settings
 from jittersim.networking.helper import (
     HELPER_OUT_OF_DATE_MESSAGE,
@@ -13865,6 +13865,11 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             return self._apply_saved_change("deleted_id", list_id)
 
     def _validate_saved_plan(self) -> None:
+        # Saving checks structure atomically. Applying resolves live addresses later.
+        with without_dns():
+            self._validate_saved_structure()
+
+    def _validate_saved_structure(self) -> None:
         if self.repository.get_general_profile() is not None:
             compile_stored_plan(repository=self.repository)
             return
