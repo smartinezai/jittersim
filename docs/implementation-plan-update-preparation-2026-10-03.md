@@ -182,3 +182,64 @@ plan and the current installer, update manager and service definitions.
 These requirements are implementation gates within the already authorized task.
 No additional human permission pause is required. The complete final source and
 new failure reproductions receive independent review before publication.
+
+## Explicit retry of retained failed work
+
+The existing manager retains failed recovery intent, but a new install request
+then refuses while that intent exists. Add one explicit retry of that same work.
+The independent reviewer approved this direction on 3 October. The update owner
+implements the root backend and local command. The dashboard owner implements
+the authenticated route and button. The helper owner adds its small dispatch
+outside the network control lock with normal shutdown ownership.
+
+Mint a public `request_id` of 32 lowercase hex characters before first
+preparation. Keep it with an immutable `request_kind` of `install` or `rollback`
+in the request, every progress result and the final result. Switching an install
+to recovery does not change these fields. Older retained requests gain them
+under the update lock before work starts. Frontend progress follows this identity.
+
+Failed status exposes either no retry or `retry` with `id`, `request_id`, `kind`,
+`version` and `recovering`. Its 64-character lowercase hex `id` is a fingerprint
+of the exact retained intent including the attempt and pinned recovery copy.
+This is an admission check rather than progress identity. Changed intent makes
+an old click stale. Return a plain `retry_unavailable_reason` if the command group
+or update service cannot be confirmed stopped.
+
+The status probe is read-only with a short total deadline. Bound record reads,
+process checks and systemd output. Confirm the complete pending process group
+has ended and the update service is inactive or failed with MainPID, ControlPID
+and TasksCurrent all zero. Unknown or malformed answers refuse retry. Never
+queue work from a status read. Recheck all these conditions under the update lock
+on admission rather than trusting a prior status response.
+
+An authenticated explicit POST to `/api/updates/retry` contains only `retry_id`.
+The helper verifies it then starts the existing one-shot service without waiting.
+It never stages another release, creates another request or chooses another
+recovery copy. Return 202 with fresh status. Stale, busy or unknown work returns
+409. A missing compatible helper returns 503. The browser never automatically
+replays this write after an uncertain answer or replacement credentials.
+
+Add `sudo jittersim update retry --yes [--wait]` through the same helper backend.
+Waiting follows the same public request identity and treats a completed recovery
+as success. Retry an unpublished forward attempt with its original attempt after
+clearing only that attempt's incomplete inputs. Preserve failed intent after an
+unknown start answer. Require failing backend and public-command tests before
+implementation, then review the complete source and integration evidence.
+
+## Preserving current stopped shaping and household state
+
+The helper owner provides a separate strict root-owned persistent safety guard
+outside mutable historical data. It survives reboot and is read before access
+startup. Do not infer loss of `/run/jittersim` from a helper stop alone because
+the access boot unit also owns it. Capture the complete latest helper control
+envelope after confirmed stop and restore it before any service startup.
+
+Normal update, explicit rollback and failed-install recovery must preserve
+current Panic and disabled household state. Before replacing mutable data or
+starting older services, refuse a candidate that cannot honor the guard. Prove
+support from the candidate's actual implementation rather than its version.
+Keep current safe source and the pinned recovery copy on refusal. Do not change
+the meaning of older outage flags or silently rewrite saved SQLite state.
+Include matched-version stop/start, failed SQLite Panic writes, reboot and
+legacy-reader refusal in the final proof. These hooks receive a separate source
+review before their integration.

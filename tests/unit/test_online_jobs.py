@@ -215,7 +215,10 @@ def test_install_automatically_queues_the_normal_install_with_its_recovery_copy(
     record = fetch(online)
     assert record["install_queued"] is True and "install was started" in record["message"]
     queued = json.loads((online.pi.root / "request.json").read_text())
-    assert queued == {"version": "v7", "rollback": False}
+    assert queued["version"] == "v7" and queued["rollback"] is False
+    assert queued["request_kind"] == "install"
+    assert len(queued["request_id"]) == 32
+    assert updates.read_json(online.pi.root / "status.json")["request_id"] == queued["request_id"]
     assert ["systemctl", "start", "--no-block", "jittersim-update.service"] in online.run_calls
     assert overview(online)["install_queued"] is True
 
