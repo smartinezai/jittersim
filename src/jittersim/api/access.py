@@ -81,46 +81,64 @@ def normal_access(server):
         return response(
             {"error": "A current networking helper is required to restore normal access."}, 503
         )
+    ticket = None
     if server.scheduler is not None:
-        # Panic never waits for an apply in flight: that apply sees the halt and backs out.
-        getattr(server.scheduler, "halt", server.scheduler.pause)()
+        ticket = server.scheduler.begin_recovery()
     persisted = True
+
+    def prepare():
+        nonlocal persisted
+        try:
+            settings = repository.access_settings()
+            repository.save_access_policies(
+                settings.mac_policy, settings.website_policy,
+                options=replace(settings.access_options, enabled=False),
+            )
+            repository.update_runtime_state(
+                observed_state="resetting", last_action="reset", last_result=None, last_error=None
+            )
+        except (StorageError, sqlite3.Error):
+            persisted = False
+
     try:
-        settings = repository.access_settings()
-        repository.save_access_policies(
-            settings.mac_policy,
-            settings.website_policy,
-            options=replace(settings.access_options, enabled=False),
-        )
-        repository.update_runtime_state(
-            observed_state="resetting", last_action="reset", last_result=None, last_error=None
-        )
-    except (StorageError, sqlite3.Error):
-        # A full disk must not prevent the attempt to release network restrictions.
-        persisted = False
+        if ticket:
+            server.scheduler.publish_recovery(ticket, prepare)
+        else:
+            prepare()
+    except BaseException:
+        if ticket:
+            server.scheduler.abandon_recovery(ticket)
+        raise
     error = None
     try:
         result = server.helper_client.normal_access()
     except HelperClientError:
         result = None
-        error = (
-            "Normal access was not fully restored. Automation is paused. Retry the panic button."
-        )
-    if hasattr(server.scheduler, "finish_halt"):
-        server.scheduler.finish_halt()
-    state = None
-    try:
-        state = repository.update_runtime_state(
-            observed_state="error" if error else "reset",
-            last_action="reset",
-            last_result="failure" if error else "success",
-            last_error=error,
-        )
-    except (StorageError, sqlite3.Error):
-        persisted = False
-    if not persisted and error is None:
-        error = ("Traffic restrictions are off but the stopped state could not be saved. "
-                 "Retry before restarting.")
+        error = "Normal access was not fully restored. Automation is paused. Retry the panic button."
+    except BaseException:
+        if ticket:
+            server.scheduler.abandon_recovery(ticket)
+        raise
+
+    def publish(overlap_failed=False):
+        nonlocal persisted, error
+        if overlap_failed and error is None:
+            error = "Another Panic cleanup failed during this recovery. Retry Panic before choosing Start."
+        if not persisted and error is None:
+            error = "Traffic restrictions are off but the stopped state could not be saved. Retry before restarting."
+        state = None
+        try:
+            state = repository.update_runtime_state(
+                observed_state="error" if error else "reset", last_action="reset",
+                last_result="failure" if error else "success", last_error=error,
+            )
+        except (StorageError, sqlite3.Error):
+            persisted = False
+        if not persisted and error is None:
+            error = "Traffic restrictions are off but the stopped state could not be saved. Retry before restarting."
+        return state, error is None
+
+    state = server.scheduler.finish_recovery(ticket, publish, failed=error is not None or not persisted) if ticket else publish()[0]
     try:
         server._record_activity(
             "access",
@@ -142,6 +160,10 @@ def write_access_api(server, path, payload):
         return None
     if path == "/api/normal-access":
         return normal_access(server)
+    if server.scheduler is not None:
+        refused = server._apply_refused(server.scheduler.apply_generation)
+        if refused is not None:
+            return refused
     repository = server.repository
     try:
         version = payload.get("version")

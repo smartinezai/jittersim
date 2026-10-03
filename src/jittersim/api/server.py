@@ -15052,6 +15052,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                 gateway_status = None
             if gateway_status and (
                 gateway_status.get("outage_stop_latched") is True
+                or gateway_status.get("panic_stop_latched") is True
                 or gateway_status.get("state_error") is True
             ):
                 return HTTPStatus.OK, "application/json", _json_bytes(
@@ -15080,7 +15081,10 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                 "application/json",
                 _json_bytes({"error": "network helper is not configured"}),
             )
-        halts_at_start = getattr(self.scheduler, "halt_count", 0)
+        halts_at_start = getattr(self.scheduler, "apply_generation", getattr(self.scheduler, "halt_count", 0))
+        refused = self._apply_refused(halts_at_start)
+        if refused is not None:
+            return refused
         try:
             prepared = (
                 self.scheduler.prepare_plan(
@@ -15106,17 +15110,17 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                 "application/json",
                 _json_bytes({"error": "stored configuration cannot be applied"}),
             )
-        self.repository.update_runtime_state(
-            observed_state="applying",
-            last_action="apply",
-            last_result=None,
-            last_error=None,
-        )
+        accepted, _ = self._publish_apply(halts_at_start, lambda: self.repository.update_runtime_state(
+            observed_state="applying", last_action="apply", last_result=None, last_error=None,
+        ))
+        if not accepted:
+            return self._apply_refused(halts_at_start)
         if self.scheduler is not None and sample_usage:
             # Applying recreates the helper counters, so record their traffic first.
             self.scheduler.sample_usage(repository=self.repository)
-        if self._panic_since(halts_at_start):
-            return self._stopped_by_panic(undo=False)
+        refused = self._apply_refused(halts_at_start)
+        if refused is not None:
+            return refused
         try:
             if explicit_apply:
                 result = self.helper_client.apply(plan=plan, explicit_apply=True)
@@ -15126,12 +15130,12 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             LOGGER.error("network helper apply failed: %s", error)
             if self.scheduler is not None:
                 self.scheduler.invalidate_applied_plan()
-            state = self.repository.update_runtime_state(
-                observed_state="error",
-                last_action="apply",
-                last_result="failure",
+            accepted, state = self._publish_apply(halts_at_start, lambda: self.repository.update_runtime_state(
+                observed_state="error", last_action="apply", last_result="failure",
                 last_error="network helper apply failed",
-            )
+            ))
+            if not accepted:
+                return self._apply_refused(halts_at_start, undo=True)
             return (
                 HTTPStatus.BAD_GATEWAY,
                 "application/json",
@@ -15147,22 +15151,18 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                     }
                 ),
             )
-        if self._panic_since(halts_at_start):
-            return self._stopped_by_panic(undo=True)
-        self.repository.rebase_quota_counters(now=int(time.time()))
-        state = self.repository.update_runtime_state(
-            observed_state="applied",
-            last_action="apply",
-            last_result="success",
-            last_error=None,
-        )
-        if self.scheduler is not None:
-            self.scheduler.activate_plan(repository=self.repository, prepared=prepared)
-            if self._panic_since(halts_at_start):
-                # Panic landed after the last check. It paused the scheduler and
-                # the activation above started it again, and the state written
-                # above hides Panic's own. Back out the same way as before.
-                return self._stopped_by_panic(undo=True)
+        def publish():
+            self.repository.rebase_quota_counters(now=int(time.time()))
+            state = self.repository.update_runtime_state(
+                observed_state="applied", last_action="apply", last_result="success", last_error=None,
+            )
+            if self.scheduler is not None:
+                self.scheduler.activate_plan(repository=self.repository, prepared=prepared)
+            return state
+
+        accepted, state = self._publish_apply(halts_at_start, publish)
+        if not accepted:
+            return self._apply_refused(halts_at_start, undo=True)
         return (
             HTTPStatus.OK,
             "application/json",
@@ -15183,25 +15183,67 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
     def _panic_since(self, halts_at_start: int) -> bool:
         return getattr(self.scheduler, "halt_count", 0) != halts_at_start
 
-    def _stopped_by_panic(self, *, undo: bool) -> Tuple[int, str, bytes]:
-        """Back out of an apply that Panic overtook, so Panic stays the last word."""
+    def _publish_apply(self, generation, publish):
+        if self.scheduler is not None and hasattr(self.scheduler, "publish_if_current"):
+            return self.scheduler.publish_if_current(generation, publish)
+        return True, publish()
 
+    def _apply_refused(self, generation, *, undo=False):
+        if self._panic_since(generation):
+            return self._stopped_by_panic(undo=undo)
+        if self.scheduler is not None and hasattr(self.scheduler, "can_apply"):
+            if not self.scheduler.can_apply(generation):
+                message = (
+                    "The dashboard is stopping. Retry after it restarts."
+                    if self.scheduler.shutting_down else
+                    "Normal access recovery is not confirmed. Retry Panic before choosing Start."
+                )
+                return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes({"error": message})
+        return None
+
+    def _stopped_by_panic(self, *, undo: bool) -> Tuple[int, str, bytes]:
+        """Preserve Panic's result and report unconfirmed late cleanup honestly."""
+
+        error = None
+        state = None
         if undo and self.helper_client is not None:
-            # The helper already applied this plan after Panic released the network.
+            ticket = self.scheduler.begin_recovery(cancel=False) if self.scheduler else None
             try:
                 restore = getattr(self.helper_client, "normal_access", self.helper_client.reset)
                 restore()
             except HelperClientError:
                 LOGGER.error("could not undo an apply that Panic overtook")
-        if self.scheduler is not None:
-            self.scheduler.pause()
-        state = self.repository.update_runtime_state(
-            observed_state="reset", last_action="reset", last_result="success", last_error=None,
-        )
-        return HTTPStatus.CONFLICT, "application/json", _json_bytes({
-            "error": "Panic stopped this apply. Choose Start with saved settings when it is safe.",
-            "state": self._runtime_state_with_running(state),
-        })
+                error = "Normal access was not fully restored after Panic. Retry Panic before choosing Start."
+            except BaseException:
+                if ticket:
+                    self.scheduler.abandon_recovery(ticket)
+                raise
+
+            def publish(overlap_failed=False):
+                nonlocal error
+                if overlap_failed and error is None:
+                    error = "Another Panic cleanup failed during this recovery. Retry Panic before choosing Start."
+                try:
+                    state = self.repository.update_runtime_state(
+                        observed_state="error" if error else "reset", last_action="reset",
+                        last_result="failure" if error else "success", last_error=error,
+                    )
+                except (StorageError, sqlite3.Error):
+                    error = "Panic cleanup could not be saved. Retry Panic before choosing Start."
+                    return None, False
+                return state, error is None
+
+            state = self.scheduler.finish_recovery(ticket, publish, failed=error is not None) if ticket else publish()[0]
+        if state is None:
+            try:
+                state = self.repository.get_runtime_state()
+            except (StorageError, sqlite3.Error):
+                pass
+        body = {"error": error or "Panic stopped this apply. Choose Start with saved settings when it is safe."}
+        if state is not None:
+            body["state"] = self._runtime_state_with_running(state)
+        return (HTTPStatus.SERVICE_UNAVAILABLE if error else HTTPStatus.CONFLICT,
+                "application/json", _json_bytes(body))
 
     def _reset_network(self) -> Tuple[int, str, bytes]:
         operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
@@ -15272,9 +15314,16 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             LOGGER.error("gateway recovery state was unavailable during dashboard startup")
             return
         if (gateway_status.get("outage_stop_latched") is True
+                or gateway_status.get("panic_stop_latched") is True
                 or gateway_status.get("state_error") is True):
             if self.scheduler is not None:
-                self.scheduler.pause()
+                saved = self.repository.get_runtime_state()
+                if (gateway_status.get("panic_stop_latched") is True
+                        and (saved.last_action != "reset" or saved.last_result != "success"
+                             or gateway_status.get("panic_recovery_failed") is True)):
+                    self.scheduler.require_recovery()
+                else:
+                    self.scheduler.pause()
             self._record_activity(
                 "outage",
                 "Profiles remain stopped after a router gateway outage",
@@ -15284,6 +15333,11 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         if state.last_action not in {"reset", "apply", "schedule"}:
             return
         if state.last_action == "reset":
+            if state.last_result != "success":
+                if self.scheduler is not None:
+                    self.scheduler.require_recovery()
+                LOGGER.error("saved recovery remains unconfirmed. Retry Panic before Start")
+                return
             status, _, _ = self._reset_network()
             kind, message = "reset", "Network reset again after the dashboard restarted"
         else:

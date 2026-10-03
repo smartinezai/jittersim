@@ -182,6 +182,8 @@ class HelperService:
         self._gateway_state = "unknown"
         self._outage_observed = False
         self._outage_stop_latched = False
+        self._panic_stop_latched = False
+        self._panic_recovery_failed = False
         self._reset_pending = False
         self._recovery_pending = False
         self._consecutive_failures = 0
@@ -216,6 +218,9 @@ class HelperService:
                 return {"ok": False, "error": "Pi networking is busy. Try again later.",
                         "reason": "helper-busy"}
             try:
+                self._panic_stop_latched = True
+                self._panic_recovery_failed = True
+                self._write_gateway_state(durable=True)
                 reset = self._handle_reset()
                 access_ok = False
                 try:
@@ -225,8 +230,14 @@ class HelperService:
                     access_ok = True
                 except (OSError, ValueError, CommandExecutionError):
                     LOGGER.exception("could not disable household restrictions")
+                failed = not reset["ok"] or not access_ok
+                saved = self._write_gateway_state(durable=True, panic_recovery_failed=failed)
+                self._panic_recovery_failed = failed or not saved
             finally:
                 self._network_lock.release()
+            if not saved:
+                return {"ok": False, "error": "normal access recovery state could not be saved",
+                        "experiments_stopped": reset["ok"], "access_disabled": access_ok}
             if not reset["ok"] or not access_ok:
                 return {"ok": False, "error": "normal access was not fully restored",
                         "experiments_stopped": reset["ok"], "access_disabled": access_ok}
@@ -554,6 +565,13 @@ class HelperService:
                 or not 0 <= successes <= GATEWAY_SUCCESSES_TO_UP
             ):
                 raise ValueError("gateway probe count is invalid")
+            for field in ("panic_stop_latched", "panic_recovery_failed"):
+                if field in state and not isinstance(state[field], bool):
+                    raise ValueError("Panic recovery state is invalid")
+            self._panic_stop_latched = state.get("panic_stop_latched", False)
+            self._panic_recovery_failed = state.get("panic_recovery_failed", False)
+            if self._panic_recovery_failed and not self._panic_stop_latched:
+                raise ValueError("Panic recovery state is inconsistent")
             self._persistence_enabled = state["persistence_enabled"]
             self._persistence_mode_initialized = True
             self._gateway_state = state["gateway_state"]
@@ -564,7 +582,7 @@ class HelperService:
             self._consecutive_failures = failures
             self._consecutive_successes = successes
             active_plan_needs_cleanup = (
-                self._outage_stop_latched
+                (self._outage_stop_latched or self._panic_stop_latched)
                 and self._active_plan_path is not None
                 and self._active_plan_path.is_file()
             )
@@ -578,6 +596,8 @@ class HelperService:
             self._gateway_state = "unknown"
             self._persistence_mode_initialized = True
             self._outage_stop_latched = True
+            self._panic_stop_latched = True
+            self._panic_recovery_failed = True
             self._reset_pending = True
             self._gateway_state_error = True
 
@@ -588,21 +608,27 @@ class HelperService:
             "gateway_state": self._gateway_state,
             "outage_observed": self._outage_observed,
             "outage_stop_latched": self._outage_stop_latched,
+            "panic_stop_latched": self._panic_stop_latched,
+            "panic_recovery_failed": self._panic_recovery_failed,
             "reset_pending": self._reset_pending,
             "recovery_pending": self._recovery_pending,
             "state_error": self._gateway_state_error,
         }
 
-    def _write_gateway_state(self) -> None:
+    def _write_gateway_state(self, *, durable: bool = False,
+                             panic_recovery_failed: Optional[bool] = None) -> bool:
         path = self._gateway_state_path
         if path is None:
-            return
+            return True
         state = {
             "version": 1,
             "persistence_enabled": self._persistence_enabled,
             "gateway_state": self._gateway_state,
             "outage_observed": self._outage_observed,
             "outage_stop_latched": self._outage_stop_latched,
+            "panic_stop_latched": self._panic_stop_latched,
+            "panic_recovery_failed": (self._panic_recovery_failed if panic_recovery_failed is None
+                                      else panic_recovery_failed),
             "reset_pending": self._reset_pending,
             "recovery_pending": self._recovery_pending,
             "consecutive_failures": self._consecutive_failures,
@@ -614,7 +640,16 @@ class HelperService:
             with os.fdopen(descriptor, "w", encoding="utf-8") as output:
                 json.dump(state, output, sort_keys=True)
                 output.write("\n")
+                if durable:
+                    output.flush()
+                    os.fsync(output.fileno())
             os.replace(temporary, path)
+            if durable:
+                parent = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(parent)
+                finally:
+                    os.close(parent)
             self._gateway_state_error = False
         except OSError:
             self._gateway_state_error = True
@@ -624,6 +659,7 @@ class HelperService:
                 temporary.unlink()
             except OSError:
                 pass
+        return not self._gateway_state_error
 
     def _handle_gateway_persistence(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         enabled = payload.get("enabled")
@@ -677,7 +713,8 @@ class HelperService:
                     self._gateway_state = "available"
                     if was_unavailable or self._outage_observed:
                         self._outage_observed = False
-                        if self._persistence_enabled and not self._outage_stop_latched:
+                        if (self._persistence_enabled and not self._outage_stop_latched
+                                and not self._panic_stop_latched):
                             self._recovery_pending = self._has_active_plan()
             else:
                 self._consecutive_successes = 0
@@ -850,6 +887,10 @@ class HelperService:
             plan = plan_from_payload(payload)
         except PlanCodecError:
             return {"ok": False, "error": "invalid network plan"}
+        if self._panic_recovery_failed:
+            return {"ok": False, "error": "Normal access recovery is not confirmed. Retry Panic before Start."}
+        if self._panic_stop_latched and not explicit_apply:
+            return {"ok": False, "error": "Panic stopped profiles. Choose Start explicitly when it is safe."}
         if self._outage_stop_latched:
             if not explicit_apply:
                 return {
@@ -935,13 +976,16 @@ class HelperService:
         self._plan_count += 1
         self._list_domains = {rule.list_id: rule.domains for rule in plan.service_list_rules}
         if explicit_apply:
+            self._panic_stop_latched = False
             self._outage_stop_latched = False
             self._reset_pending = False
             self._outage_observed = False
             self._gateway_state_error = False
         self._recovery_pending = False
-        self._write_gateway_state()
+        self._write_gateway_state(durable=explicit_apply)
         if self._gateway_state_error and explicit_apply:
+            self._panic_stop_latched = True
+            self._panic_recovery_failed = True
             self._outage_stop_latched = True
             self._reset_pending = True
             self._next_reset_retry_at = 0.0
@@ -1609,6 +1653,9 @@ class HelperClient:
         ):
             if not isinstance(result.get(field), bool):
                 raise HelperClientError("helper returned invalid gateway persistence state")
+        for field in ("panic_stop_latched", "panic_recovery_failed"):
+            if field in result and not isinstance(result[field], bool):
+                raise HelperClientError("helper returned invalid Panic recovery state")
         return result
 
     def set_gateway_persistence(self, *, enabled: bool) -> Dict[str, Any]:
