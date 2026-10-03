@@ -367,7 +367,7 @@ def assert_copies(pi_fakes, calls, short):
 @needs_a_checkout
 def test_passwordless_staging_runs_the_exact_allowed_command_without_a_terminal(pi_fakes, tmp_path):
     short = short_head()
-    result, calls = signed_deploy(pi_fakes)
+    result, calls = signed_deploy(pi_fakes, "--stage-only")
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh", "scp", "scp", "ssh"]
     assert calls[0]["argv"][-1] == PROBE
@@ -446,7 +446,7 @@ def test_a_loose_signing_key_stops_everything_before_the_pi_is_contacted(pi_fake
 @needs_a_checkout
 def test_a_status_message_cannot_pretend_to_be_a_marker(pi_fakes):
     result, calls = signed_deploy(
-        pi_fakes, markers="signed-updates trusted-key",
+        pi_fakes, "--stage-only", markers="signed-updates trusted-key",
         FAKE_PROBE_EXTRA="Update state: passwordless staging was mentioned here passwordless")
     assert result.returncode == 0, result.stderr
     assert calls[3]["argv"][0] == "-t"
@@ -463,7 +463,7 @@ def test_a_failed_passwordless_stage_is_reported_and_nothing_else_runs(pi_fakes)
 @needs_a_checkout
 def test_a_pi_from_before_signed_releases_gets_the_old_staging_command(pi_fakes):
     short = short_head()
-    result, calls = signed_deploy(pi_fakes, markers="")
+    result, calls = signed_deploy(pi_fakes, "--stage-only", markers="")
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh", "scp", "ssh"]
     assert calls[1]["argv"][-1] == f"{HOST}:jittersim-release-{short}.tar.gz"
