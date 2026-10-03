@@ -1,9 +1,10 @@
 """Background runtime for schedules, randomized rerolls and outages."""
 
 import logging
+import secrets
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Sequence, Union
 
@@ -65,6 +66,10 @@ class _DeviceRollState:
     next_roll_at: float
     next_outage_check_at: float
     outage_until: float
+    outage_number: int = 0
+    seed: int = 0
+    session_id: str = ""
+    started_at: float = 0.0
 
 
 class RuntimeScheduler:
@@ -81,7 +86,11 @@ class RuntimeScheduler:
         self._helper_client = helper_client
         self._poll_seconds = poll_seconds
         self._rolls: Dict[str, _DeviceRollState] = {}
+        self._preview = False
+        self._pending_events = []
+        self._last_pattern_cleanup_at = 0.0
         self._current_payload = None
+        self._retry_apply = False
         self._paused = True
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
@@ -134,13 +143,15 @@ class RuntimeScheduler:
         if self._service_addresses is not None:
             self._service_addresses.stop()
 
-    def activate(self, *, applied_payload: object) -> None:
+    def activate(self, *, applied_payload: object, counters_preserved: bool = False) -> None:
         """Resume scheduled work after a successful manual apply."""
 
         with self._lock:
             self._current_payload = applied_payload
+            self._retry_apply = False
             self._paused = False
-            self._last_device_counters.clear()
+            if not counters_preserved:
+                self._last_device_counters.clear()
         self.start()
 
     def build_plan(
@@ -155,6 +166,8 @@ class RuntimeScheduler:
         current_time = time.time() if now is None else now
         with self._lock:
             previous_rolls = self._rolls
+            previous_preview = self._preview
+            self._preview = True
             self._rolls = {device_id: replace(roll) for device_id, roll in previous_rolls.items()}
             try:
                 return self._build_plan(
@@ -162,6 +175,7 @@ class RuntimeScheduler:
                 )
             finally:
                 self._rolls = previous_rolls
+                self._preview = previous_preview
 
     @property
     def is_active(self) -> bool:
@@ -180,6 +194,7 @@ class RuntimeScheduler:
             self._paused = True
             self._rolls.clear()
             self._current_payload = None
+            self._retry_apply = False
             self._last_device_counters.clear()
             self._device_traffic_bytes.clear()
 
@@ -259,6 +274,9 @@ class RuntimeScheduler:
         current_time = time.time() if now is None else now
         owned_repository = repository is None
         active_repository = repository or ConfigRepository(self._database_path)
+        previous_rolls = {key: replace(roll) for key, roll in self._rolls.items()}
+        self._pending_events = []
+        helper_applied = False
         try:
             self._sample_traffic_if_needed(repository=active_repository, now=current_time)
             self._sample_quota_usage_if_needed(repository=active_repository, now=current_time)
@@ -296,12 +314,19 @@ class RuntimeScheduler:
                     "randomized website history omitted choices because the tick reached its limit"
                 )
             payload = plan_to_payload(plan)
-            if payload == self._current_payload:
+            if payload == self._current_payload and not self._retry_apply:
+                self._save_patterns(active_repository, current_time)
                 return False
-            self._helper_client.apply(plan=plan)
-            active_repository.rebase_quota_counters(now=int(current_time))
-            self._last_device_counters.clear()
+            self._last_quota_sample_at = 0
+            self._sample_quota_usage_if_needed(repository=active_repository, now=current_time)
+            result = self._helper_client.apply(plan=plan)
+            helper_applied = True
             self._current_payload = payload
+            self._retry_apply = False
+            if not isinstance(result, dict) or result.get("counters_preserved") is not True:
+                active_repository.rebase_quota_counters(now=int(current_time))
+                self._last_device_counters.clear()
+            self._save_patterns(active_repository, current_time)
             active_repository.update_runtime_state(
                 observed_state="applied",
                 last_action="schedule",
@@ -310,6 +335,9 @@ class RuntimeScheduler:
             )
             return True
         except (HelperClientError, PlanError, StorageError, OSError):
+            if not helper_applied:
+                self._rolls = previous_rolls
+                self._retry_apply = True
             LOGGER.exception("scheduled network plan failed")
             try:
                 active_repository.update_runtime_state(
@@ -453,20 +481,7 @@ class RuntimeScheduler:
                 or roll.profile_id != source_key
                 or roll.source_configuration != source_configuration
             ):
-                roll = _DeviceRollState(
-                    profile_id=source_key,
-                    source_configuration=source_configuration,
-                    runtime_profile=selected_profile,
-                    roll_number=0,
-                    next_roll_at=now + max(1, selected_profile.reroll_interval_seconds),
-                    next_outage_check_at=now
-                    + max(
-                        1,
-                        selected_profile.outage_interval_seconds
-                        or selected_profile.reroll_interval_seconds,
-                    ),
-                    outage_until=0,
-                )
+                roll = self._new_roll(selected_profile, device.id, source_key, source_configuration, now)
                 self._rolls[device.id] = roll
 
             if progression is not None:
@@ -474,6 +489,7 @@ class RuntimeScheduler:
                     profile=selected_profile,
                     device_id=device.id,
                     roll_number=roll.roll_number,
+                    session_seed=roll.seed,
                 )
                 roll.runtime_profile = reroll_profile(
                     profile=selected_profile,
@@ -485,6 +501,7 @@ class RuntimeScheduler:
                     profile=selected_profile,
                     device_id=device.id,
                     roll_number=roll.roll_number,
+                    session_seed=roll.seed,
                 )
                 website_choices = []
                 track_website_choices = (
@@ -514,28 +531,13 @@ class RuntimeScheduler:
                     else:
                         self._analytics_batch_overflowed = True
                 roll.roll_number += 1
+                self._record_pattern(roll, selected_profile, device.id, now, "reroll")
                 roll.next_roll_at = now + max(
                     1,
                     reroll_interval_seconds(profile=selected_profile, generator=generator),
                 )
 
-            outage_interval = selected_profile.outage_interval_seconds or selected_profile.reroll_interval_seconds
-            if outage_interval and now >= roll.next_outage_check_at:
-                generator = seeded_generator(
-                    profile=selected_profile,
-                    device_id=device.id,
-                    roll_number=100_000 + roll.roll_number,
-                )
-                if outage_is_selected(profile=selected_profile, generator=generator):
-                    duration = outage_duration_seconds(
-                        profile=selected_profile,
-                        generator=generator,
-                    )
-                    roll.outage_until = now + duration if duration else now
-                roll.next_outage_check_at = now + max(
-                    1,
-                    outage_interval_seconds(profile=selected_profile, generator=generator),
-                )
+            self._advance_outage(roll, selected_profile, device.id, now)
             if roll.outage_until > now:
                 blocked_addresses.append(device.ipv4_address)
 
@@ -543,11 +545,6 @@ class RuntimeScheduler:
             runtime_profiles[runtime_profile_id] = roll.runtime_profile
             runtime_devices.append(replace(device, profile_id=runtime_profile_id))
 
-        self._rolls = {
-            device_id: roll
-            for device_id, roll in self._rolls.items()
-            if device_id in active_device_ids
-        }
         website_policy = repository.get_website_policy()
         global_blocked, website_filters = build_website_filters(
             devices=runtime_devices,
@@ -570,6 +567,7 @@ class RuntimeScheduler:
             profile = profiles.get(assignment.profile_id)
             if device is None or profile is None:
                 raise PlanError(f"service assignment {assignment.id} has a missing reference")
+            profile = self._service_profile(profile, f"assignment:{assignment.id}", now)
             service_assignment_rules.append(
                 ServiceAssignmentRule(
                     assignment_id=assignment.id,
@@ -581,6 +579,13 @@ class RuntimeScheduler:
                     download_impairment=profile.download,
                 )
             )
+        service_lists = self._service_list_rules(repository, profiles, now)
+        active_device_ids.update(
+            f"assignment:{rule.assignment_id}" for rule in service_assignment_rules
+        )
+        active_device_ids.update(f"service-list:{rule.list_id}" for rule in service_lists)
+        active_device_ids.update(f"quota:{rule.quota_id}" for rule in service_quota_rules if rule.active)
+        self._rolls = {key: roll for key, roll in self._rolls.items() if key in active_device_ids}
         return compile_plan(
             devices=runtime_devices,
             profiles=runtime_profiles,
@@ -595,7 +600,7 @@ class RuntimeScheduler:
             blocked_device_addresses=blocked_addresses,
             service_quota_rules=service_quota_rules,
             service_assignment_rules=service_assignment_rules,
-            service_list_rules=build_service_list_rules(repository, profiles),
+            service_list_rules=service_lists,
         )
 
     def _build_general_plan(
@@ -604,43 +609,111 @@ class RuntimeScheduler:
         key = "@general"
         roll = self._rolls.get(key)
         if roll is None or roll.source_configuration != profile:
-            roll = _DeviceRollState(
-                profile_id=profile.id,
-                source_configuration=profile,
-                runtime_profile=profile,
-                roll_number=0,
-                next_roll_at=now + max(1, profile.reroll_interval_seconds),
-                next_outage_check_at=now + max(
-                    1, profile.outage_interval_seconds or profile.reroll_interval_seconds
-                ),
-                outage_until=0,
-            )
-        self._rolls = {key: roll}
+            roll = self._new_roll(profile, GENERAL_QUEUE_ID, profile.id, profile, now)
+        self._rolls[key] = roll
         if profile.reroll_interval_seconds and now >= roll.next_roll_at:
             generator = seeded_generator(
-                profile=profile, device_id=GENERAL_QUEUE_ID, roll_number=roll.roll_number
+                profile=profile, device_id=GENERAL_QUEUE_ID, roll_number=roll.roll_number, session_seed=roll.seed
             )
             roll.runtime_profile = reroll_profile(profile=profile, generator=generator)
             roll.roll_number += 1
+            self._record_pattern(roll, profile, GENERAL_QUEUE_ID, now, "reroll")
             roll.next_roll_at = now + max(
                 1, reroll_interval_seconds(profile=profile, generator=generator)
             )
-        outage_interval = profile.outage_interval_seconds or profile.reroll_interval_seconds
-        if outage_interval and now >= roll.next_outage_check_at:
-            generator = seeded_generator(
-                profile=profile, device_id=GENERAL_QUEUE_ID, roll_number=100_000 + roll.roll_number
-            )
-            if outage_is_selected(profile=profile, generator=generator):
-                duration = outage_duration_seconds(profile=profile, generator=generator)
-                roll.outage_until = now + duration
-            roll.next_outage_check_at = now + max(
-                1, outage_interval_seconds(profile=profile, generator=generator)
-            )
+        self._advance_outage(roll, profile, GENERAL_QUEUE_ID, now)
+        profiles = {item.id: item for item in repository.list_profiles()}
+        service_lists = self._service_list_rules(repository, profiles, now)
+        active_keys = {key} | {f"service-list:{rule.list_id}" for rule in service_lists}
+        self._rolls = {key: roll for key, roll in self._rolls.items() if key in active_keys}
         return compile_general_plan(
             repository=repository,
             profile=roll.runtime_profile,
             outage_active=roll.outage_until > now,
+            service_list_rules=service_lists,
         )
+
+    def _save_patterns(self, repository: ConfigRepository, now: float) -> None:
+        if not self._pending_events and now - self._last_pattern_cleanup_at < 3600:
+            return
+        try:
+            repository.save_pattern_events(self._pending_events, now=int(now))
+            self._last_pattern_cleanup_at = now
+        except StorageError:
+            LOGGER.warning("Could not save pattern history", exc_info=True)
+
+    def _new_roll(self, profile: Profile, scope: str, source_key: str, configuration: object, now: float) -> _DeviceRollState:
+        seed = secrets.randbits(53) if profile.random_mode == "fresh" and not self._preview else profile.random_seed or 0
+        roll = _DeviceRollState(
+            profile_id=source_key, source_configuration=configuration, runtime_profile=profile,
+            roll_number=0, next_roll_at=now + max(1, profile.reroll_interval_seconds),
+            next_outage_check_at=now + max(1, profile.outage_interval_seconds or profile.reroll_interval_seconds),
+            outage_until=0, seed=seed,
+            session_id=secrets.token_hex(16) if not self._preview else "preview",
+            started_at=now,
+        )
+        self._record_pattern(roll, profile, scope, now, "start")
+        return roll
+
+    def _record_pattern(self, roll: _DeviceRollState, profile: Profile, scope: str, now: float, kind: str) -> None:
+        if not self._preview and len(self._pending_events) < 1000:
+            self._pending_events.append({
+                "session_id": roll.session_id, "profile_id": profile.id, "scope": scope,
+                "happened_at": int(now), "kind": kind, "seed": str(roll.seed),
+                "elapsed_seconds": max(0.0, now - roll.started_at),
+                "roll_number": roll.roll_number, "outage_number": roll.outage_number,
+                "outage_until": roll.outage_until,
+                "outage_active": roll.outage_until > now,
+                "upload": asdict(roll.runtime_profile.upload), "download": asdict(roll.runtime_profile.download),
+            })
+
+    def _advance_outage(self, roll: _DeviceRollState, profile: Profile, scope: str, now: float) -> None:
+        interval = profile.outage_interval_seconds or profile.reroll_interval_seconds
+        if not interval or now < roll.next_outage_check_at:
+            return
+        generator = seeded_generator(
+            profile=profile, device_id=f"outage:{scope}", roll_number=roll.outage_number, session_seed=roll.seed
+        )
+        roll.outage_number += 1
+        selected = outage_is_selected(profile=profile, generator=generator)
+        duration = outage_duration_seconds(profile=profile, generator=generator)
+        if selected and now >= roll.outage_until:
+            roll.outage_until = now + duration
+        # One decision per tick avoids replaying an accumulated backlog after a delay.
+        roll.next_outage_check_at = max(now, roll.outage_until) + max(
+            1, outage_interval_seconds(profile=profile, generator=generator)
+        )
+        self._record_pattern(roll, profile, scope, now, "outage-check")
+
+    def _service_profile(self, profile: Profile, scope: str, now: float) -> Profile:
+        if profile.website_mode != "unrestricted":
+            raise PlanError("Service profiles cannot use a profile website allowlist")
+        roll = self._rolls.get(scope)
+        if roll is None or roll.source_configuration != profile:
+            roll = self._new_roll(profile, scope, profile.id, profile, now)
+            self._rolls[scope] = roll
+        if profile.reroll_interval_seconds and now >= roll.next_roll_at:
+            generator = seeded_generator(profile=profile, device_id=scope, roll_number=roll.roll_number, session_seed=roll.seed)
+            roll.runtime_profile = reroll_profile(profile=profile, generator=generator)
+            roll.roll_number += 1
+            self._record_pattern(roll, profile, scope, now, "reroll")
+            roll.next_roll_at = now + max(1, reroll_interval_seconds(profile=profile, generator=generator))
+        self._advance_outage(roll, profile, scope, now)
+        if roll.outage_until > now:
+            return replace(
+                roll.runtime_profile,
+                upload=replace(roll.runtime_profile.upload, loss_percent=100),
+                download=replace(roll.runtime_profile.download, loss_percent=100),
+            )
+        return roll.runtime_profile
+
+    def _service_list_rules(self, repository: ConfigRepository, profiles: Dict[str, Profile], now: float) -> tuple:
+        rules = []
+        for rule in build_service_list_rules(repository, profiles):
+            item = repository.get_service_list(rule.list_id)
+            profile = self._service_profile(profiles[item.profile_id], f"service-list:{rule.list_id}", now)
+            rules.append(replace(rule, upload_impairment=profile.upload, download_impairment=profile.download))
+        return tuple(rules)
 
     def _build_service_quota_rules(
         self,
@@ -673,6 +746,8 @@ class RuntimeScheduler:
                     quota.id,
                 )
                 continue
+            if quota.used_bytes >= quota.limit_bytes:
+                fallback_profile = self._service_profile(fallback_profile, f"quota:{quota.id}", now)
             rules.append(
                 ServiceQuotaRule(
                     quota_id=quota.id,
@@ -702,6 +777,10 @@ class RuntimeScheduler:
                     quota.id,
                 )
                 continue
+            if self._time_quota_window_is_active(quota, now) and quota.used_seconds >= quota.limit_seconds:
+                fallback_profile = self._service_profile(
+                    fallback_profile, f"quota:{time_quota_counter_id(quota.id)}", now
+                )
             rules.append(
                 ServiceQuotaRule(
                     quota_id=time_quota_counter_id(quota.id),

@@ -12,6 +12,7 @@ import socket
 import struct
 import subprocess
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from jittersim.config.models import Device, Impairment, Profile
@@ -250,6 +251,20 @@ def main():
         validated = DirectClient(service).queue_stats()
         assert {(item["device_id"], item["direction"]) for item in validated} == set(joined)
 
+        changed_profile = replace(profile, upload=Impairment(loss_percent=10), download=Impairment(loss_percent=10))
+        changed_plan = compile_plan(devices=(device,), profiles={profile.id: changed_profile})
+        counters_before_change = applier.traffic_counters()
+        response = service.handle_payload({"action": "apply", "plan": plan_to_payload(changed_plan)})
+        assert response["ok"] and response["counters_preserved"], response
+        live = applier.queue_stats()
+        for interface, direction in (("up0", "upload"), ("jittersim0", "download")):
+            before_change = project_queue(after, interface, marks[direction])
+            after_change = project_queue(live, interface, marks[direction])
+            assert after_change["packets"] >= before_change["packets"], (before_change, after_change)
+            assert after_change["drops"] == before_change["drops"], (before_change, after_change)
+            assert 0.09 < after_change["options"]["loss-random"]["loss"] < 0.11, after_change
+        assert applier.traffic_counters() == counters_before_change
+        print("OK live updates preserve queue counters and change the requested loss")
         joined_count = check_many_queues(service, applier)
         print(
             "upload dropped %d of %d (%.1f%%) and download dropped %d of %d (%.1f%%)"

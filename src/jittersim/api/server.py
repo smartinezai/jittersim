@@ -1075,8 +1075,15 @@ DASHBOARD_HTML = """<!doctype html>
             <label><span class="field-label">Outage check interval (seconds)<span class="help-icon" tabindex="0" role="img" aria-label="Outage interval help" data-help="How often JitterSim checks whether to start a new outage. Set this to 0 to use the reroll interval.">?</span></span>
               <input id="profile-outage-interval" type="number" min="0" value="0">
             </label>
-            <label><span class="field-label">Random seed (optional)<span class="help-icon" tabindex="0" role="img" aria-label="Random seed help" data-help="Makes the random changes repeat exactly. The same seed gives a device the same values in the same order every time. Leaving it empty is the same as 0. Pick another number for a different pattern.">?</span></span>
+            <label><span class="field-label">Random seed (optional)<span class="help-icon" tabindex="0" role="img" aria-label="Random seed help" data-help="Repeats chosen settings for the same target. Packet timing and app results can differ. For a saved pattern an empty seed means 0. Clear this field when choosing a fresh pattern.">?</span></span>
               <input id="profile-seed" type="number" min="0">
+            </label>
+            <label><span class="field-label">Pattern<span class="help-icon" tabindex="0" role="img" aria-label="Pattern help" data-help="A saved pattern repeats its chosen settings for the same target. A fresh pattern gets a new seed after Stop then Start. Editing settings also starts a new pattern for that target.">?</span></span>
+              <select id="profile-random-mode">
+                <option value="repeatable">Repeat saved pattern</option>
+                <option value="fresh">Fresh pattern</option>
+              </select>
+              <span class="form-note">Clear the seed for a fresh pattern. It changes after Stop then Start or after editing settings. Saved patterns repeat chosen settings. Packet timing and app results can differ.</span>
             </label>
             <label><span class="field-label">Website mode<span class="help-icon" tabindex="0" role="img" aria-label="Website mode help" data-help="Unrestricted puts no site limit on this profile. Allow only listed domains limits the device to the sites named in Profile domains.">?</span></span>
               <select id="profile-website-mode">
@@ -1210,6 +1217,16 @@ DASHBOARD_HTML = """<!doctype html>
         <button type="submit">Save profile</button>
         <button id="new-profile" type="button" hidden>New profile</button>
       </form>
+      <details>
+        <summary>Recent pattern choices</summary>
+        <p class="form-note">Shows the latest 100 choices. History keeps at most 1000 choices per session and 10000 overall for seven days. A start records the seed for that target. Stop then start a saved pattern with that seed to repeat its choices.</p>
+        <button id="load-pattern-history" type="button">Refresh pattern history</button>
+        <p id="pattern-history-status" role="status"></p>
+        <div class="analytics-table-wrap"><table>
+          <thead><tr><th scope="col">Time</th><th scope="col">Target</th><th scope="col">Choice</th><th scope="col">Seed</th><th scope="col">Download / connection</th></tr></thead>
+          <tbody id="pattern-history-body"></tbody>
+        </table></div>
+      </details>
     </section>
     <section class="card">
       <h2>Assign a device</h2>
@@ -6139,6 +6156,7 @@ DASHBOARD_HTML = """<!doctype html>
       const upload = profileDirectionSummary(profile.upload);
       const download = profileDirectionSummary(profile.download);
       const parts = [upload === download ? "↕ " + upload : "↑ " + upload + " · ↓ " + download];
+      if (profile.random_mode === "fresh") parts.push("fresh pattern");
       if (profile.outage_probability > 0) parts.push("outages " + profile.outage_probability + "%");
       if (profile.website_mode === "allow_only") {
         const sites = profile.website_domains.length;
@@ -6171,6 +6189,7 @@ DASHBOARD_HTML = """<!doctype html>
       set("profile-id", profile.id);
       set("profile-name", profile.name);
       set("profile-seed", profile.random_seed);
+      set("profile-random-mode", profile.random_mode || "repeatable");
       set("profile-reroll", profile.reroll_interval_seconds);
       set("profile-reroll-variation", profile.reroll_interval_randomness.variation_percent);
       set("profile-outage-probability", profile.outage_probability);
@@ -6196,6 +6215,35 @@ DASHBOARD_HTML = """<!doctype html>
       });
     }
 
+    element("load-pattern-history").addEventListener("click", async () => {
+      const button = element("load-pattern-history");
+      const status = element("pattern-history-status");
+      button.disabled = true;
+      status.textContent = "Loading pattern choices...";
+      try {
+        const data = await request("/api/pattern-history", "GET");
+        const body = element("pattern-history-body");
+        body.replaceChildren();
+        data.events.forEach((event) => {
+          const row = document.createElement("tr");
+          const choice = event.kind === "reroll" ? "new settings" : event.kind.replaceAll("-", " ");
+          const condition = event.outage_active ? "Disconnected until " + new Date(event.outage_until * 1000).toLocaleTimeString() : profileDirectionSummary(event.download);
+          [new Date(event.happened_at * 1000).toLocaleString(), event.scope,
+            choice, event.seed, condition].forEach((value) => {
+            const cell = document.createElement("td");
+            cell.textContent = value;
+            row.appendChild(cell);
+          });
+          body.appendChild(row);
+        });
+        status.textContent = data.events.length ? "Latest choices loaded." : "No pattern choices recorded yet.";
+      } catch (error) {
+        status.textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
+
     // The form has no inputs for some randomness details. A profile being edited keeps its own
     // values for them so that saving never resets them. A new profile gets the defaults.
     function profileFormPayload(base) {
@@ -6208,6 +6256,7 @@ DASHBOARD_HTML = """<!doctype html>
         upload: impairment("upload"),
         download: impairment("download"),
         random_seed: optionalNumber("profile-seed"),
+        random_mode: element("profile-random-mode").value,
         reroll_interval_seconds: Number(element("profile-reroll").value),
         reroll_interval_randomness: {
           variation_percent: Number(element("profile-reroll-variation").value),
@@ -8048,6 +8097,11 @@ class ControlServer(HTTPServer):
         if path == "/api/profiles":
             profiles = [_profile_payload(profile) for profile in self.repository.list_profiles()]
             return HTTPStatus.OK, "application/json", _json_bytes({"profiles": profiles})
+        if path == "/api/pattern-history":
+            return HTTPStatus.OK, "application/json", _json_bytes({
+                "events": self.repository.list_pattern_events(now=int(time.time())),
+                "limit": 100, "retention_days": 7,
+            })
         if path == "/api/general-profile":
             return HTTPStatus.OK, "application/json", _json_bytes(self._general_profile_status())
         if path == "/api/devices":
@@ -8551,6 +8605,10 @@ class ControlServer(HTTPServer):
         if path == "/api/profiles":
             try:
                 profile = _profile_from_payload(payload)
+            except ValidationError as error:
+                if str(error) == "Clear the saved seed before choosing a fresh pattern":
+                    return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes({"error": str(error)})
+                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes({"error": "invalid profile configuration"})
             except (KeyError, TypeError, ValueError):
                 return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
                     {"error": "invalid profile configuration"}
@@ -9988,7 +10046,8 @@ class ControlServer(HTTPServer):
                     }
                 ),
             )
-        self.repository.rebase_quota_counters(now=int(time.time()))
+        if result.get("counters_preserved") is not True:
+            self.repository.rebase_quota_counters(now=int(time.time()))
         state = self.repository.update_runtime_state(
             observed_state="applied",
             last_action="apply",
@@ -9996,7 +10055,10 @@ class ControlServer(HTTPServer):
             last_error=None,
         )
         if self.scheduler is not None:
-            self.scheduler.activate(applied_payload=plan_to_payload(plan))
+            self.scheduler.activate(
+                applied_payload=plan_to_payload(plan),
+                counters_preserved=result.get("counters_preserved") is True,
+            )
         return (
             HTTPStatus.OK,
             "application/json",
@@ -10354,6 +10416,7 @@ def _profile_from_payload(payload: Dict[str, Any]) -> Profile:
         upload=_impairment_from_payload(payload.get("upload")),
         download=_impairment_from_payload(payload.get("download")),
         random_seed=payload.get("random_seed"),
+        random_mode=payload.get("random_mode", "repeatable"),
         reroll_interval_seconds=payload.get("reroll_interval_seconds", 0),
         reroll_interval_randomness=_randomness_from_payload(
             payload.get("reroll_interval_randomness")

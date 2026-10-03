@@ -234,6 +234,12 @@ class BrowserProxyTests(unittest.TestCase):
                     replacement.write_text(json.dumps(plan_to_payload(plan)))
                     replacement.replace(plan_path)
                     client.sendall(b"stale-tunnel")
+                    self.assertEqual(client.recv(4096), b"stale-tunnel")
+                    replacement.write_text(json.dumps(plan_to_payload(replace(
+                        plan, blocked_device_addresses=(device.ipv4_address,)
+                    ))))
+                    replacement.replace(plan_path)
+                    client.sendall(b"blocked-tunnel")
                     self.assertEqual(client.recv(4096), b"")
             finally:
                 proxy.shutdown()

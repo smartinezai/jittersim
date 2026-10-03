@@ -74,7 +74,7 @@ def select_mark(
 
     if plan is None:
         return 0, "reset"
-    if plan.protected_mac_addresses or plan.general_profile is not None:
+    if plan.protected_mac_addresses or plan.general_profile is not None or plan.mac_policy.mode != "disabled":
         if client_mac is None:
             raise ProxyError("current Wi-Fi identity could not be verified")
         if client_mac in plan.mac_policy.denylist or (
@@ -233,7 +233,7 @@ class _ProxyHandler(socketserver.BaseRequestHandler):
             plan, generation = _read_active_plan(self.server.active_plan_path)
             client_mac = (
                 self.server.identify_mac(peer_ip)
-                if plan and (plan.protected_mac_addresses or plan.general_profile is not None) else None
+                if plan and (plan.protected_mac_addresses or plan.general_profile is not None or plan.mac_policy.mode != "disabled") else None
             )
             mark, assignment_id = select_mark(
                 plan, client_ip=client_ip, host=host, client_mac=client_mac
@@ -274,26 +274,31 @@ class _ProxyHandler(socketserver.BaseRequestHandler):
                 raise ProxyError("destination connection failed")
             with upstream:
 
-                def keep_protected_tunnel() -> bool:
+                def keep_valid_tunnel() -> bool:
                     try:
                         current_plan, _ = _read_active_plan(self.server.active_plan_path)
-                        current_mac = self.server.identify_mac(peer_ip)
+                        current_mac = (
+                            self.server.identify_mac(peer_ip)
+                            if current_plan and (
+                                current_plan.protected_mac_addresses or current_plan.general_profile is not None
+                                or current_plan.mac_policy.mode != "disabled"
+                            ) else None
+                        )
                         return (
-                            assignment_id == "unaffected"
-                            and current_plan is not None
-                            and current_mac == client_mac
+                            current_plan is not None
+                            and (client_mac is None or current_mac == client_mac)
                             and select_mark(
                                 current_plan, client_ip=client_ip, host=host, client_mac=current_mac
-                            )[1]
-                            == "unaffected"
+                            ) == (mark, assignment_id)
                             and destination_allowed(
-                                current_plan, client_ip, upstream.getpeername()[0], current_mac
+                                current_plan, client_ip, upstream.getpeername()[0], current_mac,
+                                service_list=assignment_id.startswith("service-list:"),
                             )
                         )
                     except (OSError, ProxyError, ValueError):
                         return False
 
-                allow_change = keep_protected_tunnel if assignment_id == "unaffected" else None
+                allow_change = keep_valid_tunnel
                 if _plan_generation(self.server.active_plan_path) != generation and not (
                     allow_change and allow_change()
                 ):

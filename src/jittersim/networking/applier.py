@@ -18,6 +18,7 @@ from .renderer import (
     PROJECT_TABLE,
     ROOT_HANDLE,
     render_command_plan,
+    render_live_queue_changes,
     render_reset_commands,
     render_service_address_commands,
 )
@@ -34,6 +35,7 @@ class ApplyReport:
     """Describe a completed apply operation."""
 
     commands_run: int
+    counters_preserved: bool = False
 
 
 class ApplyError(RuntimeError):
@@ -68,6 +70,7 @@ class NetworkApplier:
         self._executor = executor
         self._topology = topology
         self._lease_directory = lease_directory
+        self._installed_plan: Optional[NetworkPlan] = None
 
     def apply(
         self,
@@ -81,9 +84,10 @@ class NetworkApplier:
         already learned for it, so the new rules never start empty.
         """
 
+        roots_present = True
         try:
             for interface in (self._topology.uplink_interface, self._topology.test_interface):
-                self._root_queue(interface, for_apply=True)
+                roots_present = self._root_queue(interface, for_apply=True) and roots_present
             if not plan.queues:
                 for command in render_reset_commands(topology=self._topology):
                     if command.executable == "tc" and self._root_queue(
@@ -97,13 +101,21 @@ class NetworkApplier:
                 cause=error,
                 cleanup_attempted=False,
             ) from error
-        commands = render_command_plan(
-            plan=plan, topology=self._topology, service_addresses=service_addresses
-        )
+        commands = None
+        if roots_present and self._installed_plan is not None:
+            commands = render_live_queue_changes(
+                previous=self._installed_plan, plan=plan, topology=self._topology
+            )
+        counters_preserved = commands is not None
+        if commands is None:
+            commands = render_command_plan(
+                plan=plan, topology=self._topology, service_addresses=service_addresses
+            )
         for command_index, command in enumerate(commands):
             try:
                 self._run_checked(command)
             except CommandExecutionError as error:
+                self._installed_plan = None
                 reset_error = self._try_reset()
                 if reset_error is not None:
                     raise ApplyError(
@@ -117,7 +129,8 @@ class NetworkApplier:
                     failed_command_index=command_index,
                     cause=error,
                 ) from error
-        return ApplyReport(commands_run=len(commands))
+        self._installed_plan = plan
+        return ApplyReport(commands_run=len(commands), counters_preserved=counters_preserved)
 
     def update_service_addresses(
         self,
@@ -138,6 +151,7 @@ class NetworkApplier:
     def reset(self) -> int:
         """Remove only the nftables table and traffic queues owned by jittersim."""
 
+        self._installed_plan = None
         commands = render_reset_commands(topology=self._topology)
         project_roots = {
             interface: self._root_queue(interface, for_apply=False)

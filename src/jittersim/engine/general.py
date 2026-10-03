@@ -10,7 +10,8 @@ from .website import resolve_domains
 
 
 def compile_general_plan(
-    *, repository: ConfigRepository, profile: Profile, outage_active: bool = False
+    *, repository: ConfigRepository, profile: Profile, outage_active: bool = False,
+    service_list_rules=None,
 ) -> NetworkPlan:
     """Keep global access checks separate from bypassable profile behavior."""
 
@@ -33,5 +34,5 @@ def compile_general_plan(
             else None,
             outage_active=outage_active,
         ),
-        service_list_rules=build_service_list_rules(repository),
+        service_list_rules=build_service_list_rules(repository) if service_list_rules is None else service_list_rules,
     )

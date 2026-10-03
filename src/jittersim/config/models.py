@@ -205,6 +205,7 @@ class Profile:
     website_mode: str = "unrestricted"
     website_domains: Tuple[str, ...] = ()
     website_randomness: Randomness = Randomness()
+    random_mode: str = "repeatable"
 
     def __post_init__(self) -> None:
         _validate_identifier(self.id, "id")
@@ -215,6 +216,10 @@ class Profile:
             raise ValidationError("download must be an Impairment")
         if self.random_seed is not None:
             _validate_number(self.random_seed, "random_seed", 0, 2**63 - 1)
+        if self.random_mode not in ("repeatable", "fresh"):
+            raise ValidationError("random_mode must be repeatable or fresh")
+        if self.random_mode == "fresh" and self.random_seed is not None:
+            raise ValidationError("Clear the saved seed before choosing a fresh pattern")
         _validate_number(self.reroll_interval_seconds, "reroll_interval_seconds", 0, 604_800)
         _validate_percent(self.outage_probability, "outage_probability")
         _validate_number(self.outage_duration_seconds, "outage_duration_seconds", 0, 604_800)
