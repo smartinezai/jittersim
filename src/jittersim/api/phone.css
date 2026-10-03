@@ -163,9 +163,9 @@
 
   /* Messages and tips keep clear of the bar. */
   .toast {
-    top: calc(0.75rem + env(safe-area-inset-top, 0px)); right: 0.75rem; bottom: auto; left: 0.75rem;
-    width: auto;
-    /* A message at the top must not block taps on the page links under it. */
+    top: auto; right: 0.75rem; bottom: calc(var(--phone-bar-height) + 0.75rem); left: auto;
+    width: min(22rem, calc(100vw - 1.5rem));
+    /* Keep the safety bar usable beneath a message. */
     pointer-events: none;
   }
   .toast button { pointer-events: auto; }

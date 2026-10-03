@@ -105,7 +105,9 @@ def test_the_controls_toggle_sits_at_the_end_of_the_bar():
 def test_the_page_and_its_messages_keep_clear_of_the_bar():
     assert "var(--phone-bar-height)" in phone(".content")["padding"]
     assert "var(--phone-bar-height)" in phone("html")["scroll-padding-bottom"]
-    assert phone(".toast")["bottom"] == "auto" and "0.75rem" in phone(".toast")["top"]
+    assert phone(".toast")["top"] == "auto"
+    assert "--phone-bar-height" in phone(".toast")["bottom"]
+    assert phone(".toast")["width"] == "min(22rem, calc(100vw - 1.5rem))"
     tip = phone(".sidebar .sidebar-action-row .help-icon::after")
     assert tip["bottom"] == "calc(var(--phone-bar-height) + 0.75rem)"
     narrow = re.search(r"@media \(max-width: 700px\) \{([^@]*?)\n\}", CSS).group(1)
