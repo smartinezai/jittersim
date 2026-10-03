@@ -10400,6 +10400,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     function setControlsOpen(open, moveFocus) {
       const wasOpen = controlsOpen();
       sidebar.classList.toggle("controls-open", open);
+      document.body.classList.toggle("phone-controls-open", phoneLayout.matches && open);
       controlsToggle.setAttribute("aria-expanded", String(open));
       if (!moveFocus) return;
       if (open) {

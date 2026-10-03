@@ -8,7 +8,7 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
-from tests.browser.phone import is_phone, open_status, sidebar_control
+from tests.browser.phone import close_controls, is_phone, open_controls, open_status, sidebar_control
 
 MAC_ADDRESS = "02:00:00:00:00:01"
 CLIENT_NAME = "Fixture laptop"
@@ -116,6 +116,16 @@ def check_one_message(page, width, height):
         page.evaluate("document.getElementById('notification-source')?.remove()")
 
     if is_phone(page):
+        page.evaluate("showToast('Persistent recovery message', 'error')")
+        open_controls(page)
+        expect(toast).to_be_hidden()
+        hidden_dismiss = page.locator('#toast-dismiss')
+        hidden_dismiss.evaluate("node => node.focus()")
+        assert not hidden_dismiss.evaluate("node => node === document.activeElement")
+        expect(page.locator('#action-announcer')).to_have_text('Persistent recovery message')
+        close_controls(page)
+        expect(toast).to_be_visible()
+        expect(toast).to_contain_text('Persistent recovery message')
         page.evaluate("showToast('Recovery instructions. '.repeat(200), 'error')")
         message = page.locator("#toast-message")
         assert message.evaluate("node => node.scrollHeight > node.clientHeight")
