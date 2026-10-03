@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
+const { startDocumentTransport, withDeadline } = require("./transport.cjs");
 const modulePath = process.env.JITTERSIM_PLAYWRIGHT_MODULE || "playwright";
 const { chromium } = require(modulePath);
 const { expect } = require(modulePath + "/test");
@@ -10,15 +11,18 @@ const { expect } = require(modulePath + "/test");
 (async () => {
   const extension = path.resolve(__dirname, "../../../extensions/homepage-bounce");
   const profile = await fs.mkdtemp(path.join(os.tmpdir(), "homepage-live-browser-"));
-  const context = await chromium.launchPersistentContext(profile, {
-    executablePath: process.env.JITTERSIM_BROWSER_EXECUTABLE,
-    headless: true,
-    channel: "chromium",
-    args: ["--disable-extensions-except=" + extension, "--load-extension=" + extension],
-    timeout: 15000
-  });
-  const evidence = [];
+  let transport;
+  let context;
   try {
+    transport = await startDocumentTransport();
+    context = await chromium.launchPersistentContext(profile, {
+      executablePath: process.env.JITTERSIM_BROWSER_EXECUTABLE,
+      headless: true,
+      channel: "chromium",
+      args: ["--disable-extensions-except=" + extension, "--load-extension=" + extension, ...transport.args],
+      timeout: 15000
+    });
+    const evidence = [];
     let worker = context.serviceWorkers()[0] || await context.waitForEvent("serviceworker");
     const extensionId = new URL(worker.url()).host;
     // This journey verifies the real extension with a substituted transport.
@@ -49,9 +53,6 @@ const { expect } = require(modulePath + "/test");
         return response;
       };
     });
-    await context.route("https://example.org/**", route => route.fulfill({
-      contentType: "text/html", body: "<h1>Controlled test page</h1>"
-    }));
     const ui = await context.newPage();
     await ui.goto("chrome-extension://" + extensionId + "/index.html");
     const state = () => ui.evaluate(() => chrome.runtime.sendMessage({ command: "status" }));
@@ -64,9 +65,13 @@ const { expect } = require(modulePath + "/test");
     assert.equal(await ui.locator("#pair-code").inputValue(), "");
     evidence.push("Pairing clears the code and stays off");
     const launch = async expected => {
+      const beforeReads = transport.reads.length;
       await ui.getByRole("button", { name: "Open https://example.org/article", exact: true }).click();
       await expect.poll(() => context.pages().some(page => page.url() === expected)).toBe(true);
-      return context.pages().find(page => page.url() === expected);
+      const page = context.pages().find(page => page.url() === expected);
+      await expect(page.locator("h1")).toHaveText("Controlled HTTPS test page");
+      await expect.poll(() => transport.reads.slice(beforeReads).includes(new URL(expected).pathname)).toBe(true);
+      return page;
     };
     let test = await launch("https://example.org/article");
     assert.equal(await worker.evaluate(() => fixture.requests), 1);
@@ -103,9 +108,11 @@ const { expect } = require(modulePath + "/test");
       ["https://netlab.local:8443/*"]);
     assert.deepEqual(await ui.evaluate(() => chrome.runtime.getManifest().permissions), ["storage"]);
     evidence.push("The real manifest has only storage and the exact HTTPS policy origin");
-    console.log(JSON.stringify({ transport: "substituted", browser: context.browser().version(), checks: evidence }, null, 2));
+    assert(transport.reads.includes("/article") && transport.reads.includes("/"));
+    console.log(JSON.stringify({ documentRequests:transport.reads, transport: "substituted-policy-and-loopback-HTTPS-documents", browser: context.browser().version(), checks: evidence }, null, 2));
   } finally {
-    await context.close();
-    await fs.rm(profile, { recursive: true, force: true });
+    try { if (context) await withDeadline(context.close(), 15000); } finally {
+      try { if (transport) await transport.close(); } finally { await fs.rm(profile, { recursive: true, force: true }); }
+    }
   }
 })().catch(error => { console.error(error); process.exitCode = 1; });
