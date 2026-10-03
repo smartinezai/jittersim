@@ -108,7 +108,7 @@ class UpdateTests(unittest.TestCase):
             "README.md": "Release",
             "deploy/RELEASE": manifest(sequence or self.sequence, version),
             "src/jittersim/api/server.py": "new code",
-            "src/jittersim/updates.py": "# new recovery manager\nRECOVERY_FORMAT = 2\n",
+            "src/jittersim/updates.py": "# new recovery manager\nRECOVERY_FORMAT = 2\nOPERATION_FORMAT = 2\n",
         }
         # The release ships this checkout's Pi files so the installer steps are real.
         files.update(
@@ -371,7 +371,8 @@ class UpdateTests(unittest.TestCase):
                 or line.startswith(("install ", "sed ", "ln ", "runuser "))
             ) or line.startswith(("SOURCE_DIR=", "INSTALL_DIR=", "if [ ", "echo ")):
                 continue
-            if any(name in line for name in ("install-lock.py", "create-ap-profile.py")):
+            if any(name in line for name in ("install-lock.py", "create-ap-profile.py",
+                                             " check-operation", " prepare-installer")):
                 # Manual setup owns its lock and creates the first AP. Updates
                 # already hold the shared lock and preserve the existing AP.
                 continue

@@ -44,6 +44,8 @@ python3 -I "$SOURCE_DIR/deploy/raspberry-pi/create-ap-profile.py" --help >/dev/n
 
 # Refuse source that cannot preserve recovery before changing packages or files.
 python3 -I "$SOURCE_DIR/src/jittersim/updates.py" check-manager "$SOURCE_DIR/src/jittersim/updates.py"
+python3 -I "$SOURCE_DIR/src/jittersim/updates.py" check-operation
+python3 -I "$SOURCE_DIR/src/jittersim/updates.py" prepare-installer "$SOURCE_DIR"
 
 # The passwordless rule is only safe with a trusted release signing key: check it before
 # anything changes.

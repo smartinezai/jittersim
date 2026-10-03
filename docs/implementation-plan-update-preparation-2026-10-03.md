@@ -241,6 +241,69 @@ Keep one process-owned probe reservation if cancellation cannot be confirmed.
 Later status reads may inspect it but cannot launch another probe until it ends.
 Explicit admission propagates unknown completion. It never starts mutable work.
 
+## Shared ownership for manual certificate and name changes
+
+Manual name changes must hold the same stable update anchor for their whole
+transaction. Refuse any queued or retained update request before changing the
+name, certificate, DNS record or service. Provide `manual_identity_operation`
+as the context manager for this rule, using the same `update_lock` as updates.
+
+Check the anchor without following links. Require private root ownership of its
+folder, a regular single-link non-writable-by-others anchor and matching open
+and named inode. A verified inherited installer FD9 may be borrowed without
+closing it or unlocking its parent's open file description. Preserve normal
+immediate refusal and the bounded apply-only entry wait.
+
+An escaping `CommandNotStopped` persists a small protected
+`operation-pending.json` while the anchor remains held. Every mutable admission
+refuses that fence until complete process-group completion is confirmed. Clear
+only a confirmed finished record under ownership with directory sync. Internal
+recovery handlers also record unknown work before raising another saved error.
+Readonly retry probes inspect the same fence without clearing it.
+
+Pass the owned lock descriptor to supervised leaf commands. This retains kernel
+ownership if the parent exits while a leaf remains alive. The durable fence also
+protects against descendants that close inherited descriptors. The ordinary
+installer checks the fence under its verified FD9 before any mutable work.
+Test unknown parent exit, refused subsequent admission, confirmed completion,
+inherited same-description lifetime, unsafe anchors and queued-request refusal
+before integrating the manual name owner's direct-call implementation.
+
+The independent review requires a crash-safe launch boundary too. Before a
+mutable leaf runs, sync a launching lease then start a small isolated launcher
+waiting on a private pipe. Save and sync its known process group before sending
+the byte that permits execution. The launcher keeps the same process identity
+when it executes the real command. Parent death before admission closes the pipe
+without permitting risky work. Parent death after admission leaves a durable
+group fence even if descendants close inherited lock descriptors. A launching
+lease clears only after its owner is confirmed ended. A running lease clears
+only after the complete group ends. Match the unique lease before clearing it.
+
+Unknown publication or spawn ownership refuses recovery mutations and retains
+the request. Install a compatible current standalone manager before publishing
+this record format or running first preflight. Keep the manual name transaction
+under the same rule. Add an actual killed parent and killed leader test where a
+remaining descendant has closed the lock descriptor and still writes to its
+owned temporary file. No new admission may overlap that descendant.
+
+The ordinary installer also needs durable ownership of its complete shell
+session. A child that deliberately closes FD9 can outlive a killed installer.
+Keep a separate fixed `installer-pending.json` lease using the same launch
+barrier while individual supervised identity commands keep their independent
+`operation-pending.json` lease. Ordinary mutable admission checks both. Borrowed
+installer calls may ignore only their own running installer lease after proving
+the inherited anchor, current process group and exact inherited random identity.
+An outer installer completion never clears an inner command's fence.
+
+Before creating the installer lease, validate bounded owned candidate modules
+and the exact approved three-file Panic consumer bundle. Call the candidate's
+fixed stdlib fresh or upgrade producer directly under verified FD9. This keeps
+the fresh proof ahead of any extra update record, package install or network
+mutation. Unknown previous installation is refused. Do not weaken the fresh
+witness check to ignore a record. Retain secret isolation in Wi-Fi commands.
+Prove actual shell termination with a surviving child that closes FD9, parent
+death before GO and independent leaf ownership surviving outer completion.
+
 ## Preserving current stopped shaping and household state
 
 The helper owner provides a separate strict root-owned persistent safety guard

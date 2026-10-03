@@ -55,6 +55,52 @@ def test_package_preparation_failure_does_not_stop_services(pi):
     assert (pi.data / "jittersim.db").read_text() == "original settings"
 
 
+def test_unknown_command_admission_never_runs_recovery_or_loses_intent(pi):
+    commands = []
+
+    def run(command, timeout):
+        commands.append(list(command))
+        if command[:2] == ["systemctl", "stop"]:
+            raise updates.OperationOwnershipUnknown("controlled unknown launch")
+
+    with pytest.raises(updates.OperationOwnershipUnknown):
+        pi.apply(run, lambda: True)
+    assert commands[-1][:2] == ["systemctl", "stop"], "unknown launch cannot authorize another command"
+    assert updates.read_json(pi.root / "request.json"), "the interrupted intent must be retained"
+    assert updates.read_json(pi.root / "status.json")["phase"] == "failed"
+
+
+def test_internal_recovery_preserves_unfinished_command_shared_fence(pi):
+    class Pending:
+        pid = 123
+
+    stop_calls = 0
+
+    def run(command, timeout):
+        nonlocal stop_calls
+        if command[:2] == ["systemctl", "stop"]:
+            stop_calls += 1
+            if stop_calls == 1:
+                raise updates.UpdateError("controlled initial stop failure")
+        if command[:2] == ["systemctl", "restart"]:
+            raise updates.CommandNotStopped("controlled recovery leaf", Pending())
+
+    with pytest.raises(updates.UpdateError):
+        pi.apply(run, lambda: False)
+    assert updates.read_json(pi.root / "operation-pending.json")["group"] == Pending.pid
+
+
+def test_current_manager_is_published_before_the_first_owned_command(pi):
+    commands, record = pi.recorder()
+
+    def run(command, timeout):
+        if not commands:
+            assert "OPERATION_FORMAT = 2" in pi.manager.read_text()
+        return record(command, timeout)
+
+    pi.apply(run, lambda: True)
+
+
 def test_interruption_during_replacement_keeps_the_previous_copy_discoverable(pi):
     previous = pi.root / "backup"
     previous.mkdir()
@@ -528,7 +574,7 @@ def test_manual_manager_publication_requires_the_shared_lock_and_is_atomic(tmp_p
     destination = tmp_path / "installed.py"
     destination.write_text("previous manager")
     source = tmp_path / "manager.py"
-    source.write_text("RECOVERY_FORMAT = 2\n")
+    source.write_text("RECOVERY_FORMAT = 2\nOPERATION_FORMAT = 2\n")
     with (root / "lock").open("a+") as owner:
         fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
         with (root / "lock").open("a+") as unrelated:

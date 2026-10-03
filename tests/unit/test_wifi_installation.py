@@ -101,7 +101,9 @@ class WifiInstallationTests(unittest.TestCase):
             scripts.mkdir(parents=True)
             package = source / "src/jittersim"
             package.mkdir(parents=True)
-            shutil.copy2(Path(__file__).resolve().parents[2] / "src/jittersim/updates.py", package)
+            from tests.unit.test_installer_lock import simulated_installer_manager
+            (package / "updates.py").write_text(simulated_installer_manager(
+                root / "updates", root / "installed-manager.py"))
             actual_scripts = Path(__file__).resolve().parents[2] / "deploy/raspberry-pi"
             shutil.copy2(actual_scripts / "create-ap-profile.py", scripts)
             (scripts / "install-lock.py").write_text(
