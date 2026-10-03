@@ -1210,11 +1210,12 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
             self._send_response({"ok": False, "error": "request must be valid JSON"})
             return
         action = payload.get("action") if isinstance(payload, dict) else None
-        if action in ("ping", "dashboard-access") or action in WIFI_ACTIONS or action in ROUTER_ACTIONS:
+        # Capability flags are fixed for this process and read no live network state.
+        if action in ("ping", "capabilities", "dashboard-access") or action in WIFI_ACTIONS or action in ROUTER_ACTIONS:
             self._send_response(self.server.service.handle_payload(payload))
             return
-        # Apply and reset wait a moment for a read so a poll never refuses Panic. Every
-        # read answers helper-busy at once.
+        # Apply and reset wait a moment for a read so a poll never refuses Panic.
+        # Reads of live network state answer helper-busy at once.
         if action in WRITE_ACTIONS:
             acquired = self.server.operation_lock.acquire(timeout=WRITE_LOCK_WAIT_SECONDS)
         else:
