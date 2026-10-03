@@ -9,6 +9,7 @@ from jittersim.api.server import ControlServer
 from jittersim.api.wifi_operations import WifiOperations, WifiOutcome, issue_request_id
 from jittersim.config.storage import ConfigRepository
 from jittersim.networking.helper import HelperClientError
+from jittersim.networking.wifi import DEFAULT_WIFI_NAME
 
 WAIT = 5.0
 
@@ -134,7 +135,7 @@ class GatedHelper:
         return result
 
     def reset_wifi_name(self):
-        return self._restart("reset", {"ok": True, "ssid": "JitterSim", "security": "WPA2"})
+        return self._restart("reset", {"ok": True, "ssid": DEFAULT_WIFI_NAME, "security": "WPA2"})
 
     def configure_access_point(self, *, ssid, password):
         self.events.append(("configure", ssid))
@@ -185,7 +186,7 @@ class ServerWifiRestartTests(unittest.TestCase):
         operation = self.last(identifier)[1]["operation"]
         self.assertEqual(operation["state"], "succeeded")
         self.assertEqual(operation["kind"], "reset-name")
-        self.assertEqual(operation["ssid"], "JitterSim")
+        self.assertEqual(operation["ssid"], DEFAULT_WIFI_NAME)
         self.assertFalse(operation["password_changed"])
         self.assertIn("Password unchanged", operation["message"])
 

@@ -48,11 +48,31 @@ For this appliance deploy only a signed release built from the verified official
 `main` after its required checks are complete. This is the deployment policy.
 The scripts' general `--ref` option does not itself prove that a commit meets it.
 Keep an independent management connection before changing the installed release.
-Run the installer as root from that verified source or extracted signed archive:
+The installer requires a root-owned source tree that other users cannot change.
+Keep it outside `/opt/jittersim`, `/etc` and the appliance's data or runtime
+folders. A checkout or archive extracted by the login user does not meet this
+requirement. Do not copy credentials into the source tree.
+
+For a first installation, verify the official signed archive and its matching
+signature against the trusted release key before extracting it. Replace the
+archive path below with that verified file. Use a new source folder. If the
+folder already exists, stop and inspect the earlier attempt before retrying.
 
 ```sh
-sudo deploy/raspberry-pi/install.sh
+sudo test ! -e /root/jittersim-install-source
+sudo mkdir -m 0700 /root/jittersim-install-source
+sudo tar --extract --no-same-owner --no-same-permissions \
+  --file /path/to/verified-release.tar.gz \
+  --directory /root/jittersim-install-source
+sudo chmod -R go-w /root/jittersim-install-source
+sudo sh /root/jittersim-install-source/deploy/raspberry-pi/install.sh \
+  /root/jittersim-install-source
 ```
+
+Run these commands in order and stop if any command fails. Keep the verified
+archive and source until installation and recovery checks are complete. The
+installer's lock covers the complete attempt. Do not remove a lock file or
+change source permissions to bypass a refusal.
 
 From a Mac, `deploy/raspberry-pi/deploy-from-mac.sh --ref origin/main --use-installer --install`
 copies the release of a commit to the Pi and runs this installer from it. See
