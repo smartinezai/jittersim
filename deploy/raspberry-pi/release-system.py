@@ -13,6 +13,7 @@ import signal
 import stat
 import selectors
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -98,50 +99,158 @@ def write_json(path, value):
             os.unlink(temporary)
 
 
+GUARDIAN = """
+import os, signal, subprocess, sys
+status, lease = int(sys.argv[1]), int(sys.argv[2])
+try:
+    result = subprocess.Popen(sys.argv[3:], close_fds=True).wait()
+    os.write(status, (str(result) + '\\n').encode())
+    os.close(status)
+    if not os.read(lease, 1):
+        os.killpg(os.getpgrp(), signal.SIGKILL)
+except BaseException:
+    os.killpg(os.getpgrp(), signal.SIGKILL)
+"""
+UNCONFIRMED_COMMANDS = []
+
+
+def group_running(group, deadline, *, exclude_leader=False):
+    """Inspect live group members while its guardian PID is still owned."""
+    if Path("/proc").is_dir():
+        rows = []
+        with os.scandir("/proc") as entries:
+            count = 0
+            for entry in entries:
+                checked(time.monotonic() < deadline, "Command group inspection exceeded its deadline.")
+                if not entry.name.isdigit():
+                    continue
+                count += 1
+                checked(count <= 65536, "The process table exceeds the inspection limit.")
+                try:
+                    with open(Path(entry.path) / "stat", "rb") as stream:
+                        fields = stream.read(4096).rsplit(b")", 1)[1].split()
+                    rows.append((int(entry.name), int(fields[2]), fields[0].decode("ascii")))
+                except FileNotFoundError:
+                    continue
+                except (ValueError, IndexError, UnicodeError):
+                    raise ReleaseError("Command group completion could not be verified.") from None
+    else:
+        # ps is a fixed native inspection command. Its file output stays bounded.
+        with tempfile.TemporaryFile() as output:
+            probe = subprocess.Popen(["/bin/ps", "-axo", "pid=,pgid=,stat="], stdout=output,
+                                     stderr=subprocess.DEVNULL, start_new_session=True)
+            try:
+                while probe.poll() is None:
+                    checked(time.monotonic() < deadline and os.fstat(output.fileno()).st_size <= MAX_JSON,
+                            "Command group inspection exceeded its time or output limit.")
+                    time.sleep(0.005)
+                checked(probe.returncode == 0 and os.fstat(output.fileno()).st_size <= MAX_JSON,
+                        "Command group completion could not be verified.")
+                output.seek(0)
+                lines = output.read(MAX_JSON + 1).splitlines()
+                checked(len(lines) <= 65536, "The process table exceeds the inspection limit.")
+                rows = []
+                for line in lines:
+                    fields = line.split()
+                    checked(len(fields) == 3, "Command group completion could not be verified.")
+                    rows.append((int(fields[0]), int(fields[1]), fields[2].decode("ascii")))
+            finally:
+                if probe.returncode is None:
+                    os.killpg(probe.pid, signal.SIGKILL)
+                    probe.wait(timeout=1)
+    return any(pgid == group and not state.startswith(("Z", "X"))
+               and not (exclude_leader and pid == group) for pid, pgid, state in rows)
+
+
 def command(arguments, *, cwd=None, input_bytes=None, limit=MAX_JSON, timeout=60, env=None):
-    """Drain bounded output and cancel owned descendants before reaping on failure."""
+    """Bound output and retain group ownership through completion or cancellation."""
+    checked(type(limit) is int and 0 < limit <= MAX_ARCHIVE, "Invalid command output allowance.")
+    checked(isinstance(timeout, (int, float)) and 0 < timeout <= 180,
+            "Invalid command deadline.")
+    checked(input_bytes is None or isinstance(input_bytes, bytes) and len(input_bytes) <= MAX_ARCHIVE,
+            "Command input exceeds its allowance.")
     with tempfile.TemporaryFile() as source:
         if input_bytes is not None:
             source.write(input_bytes)
             source.seek(0)
-        process = subprocess.Popen(arguments, cwd=cwd, env=env, stdin=source,
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                   start_new_session=True, bufsize=0)
+        status_read, status_write = os.pipe()
+        lease_read, lease_write = os.pipe()
+        try:
+            process = subprocess.Popen([sys.executable, "-I", "-c", GUARDIAN,
+                                        str(status_write), str(lease_read), *arguments],
+                                       cwd=cwd, env=env, stdin=source, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, pass_fds=(status_write, lease_read),
+                                       start_new_session=True, bufsize=0)
+        except BaseException:
+            for descriptor in (status_read, status_write, lease_read, lease_write):
+                os.close(descriptor)
+            raise
+        os.close(status_write)
+        os.close(lease_read)
         deadline = time.monotonic() + timeout
-        answer, total = bytearray(), 0
+        work_deadline = deadline - min(1, timeout / 3)
+        answer, status, total = bytearray(), bytearray(), 0
+        result, released = None, False
+        confirmed = False
         try:
             with selectors.DefaultSelector() as selector:
                 selector.register(process.stdout, selectors.EVENT_READ, "stdout")
                 selector.register(process.stderr, selectors.EVENT_READ, "stderr")
-                # Keep the leader unreaped while descendants still own an output pipe.
+                selector.register(status_read, selectors.EVENT_READ, "status")
                 while selector.get_map():
-                    remaining = deadline - time.monotonic()
+                    remaining = work_deadline - time.monotonic()
                     checked(remaining > 0, "A release command exceeded its time limit.")
-                    for key, _ in selector.select(timeout=min(remaining, 0.1)):
+                    for key, _ in selector.select(timeout=min(remaining, 0.02)):
                         block = os.read(key.fd, 65536)
                         if not block:
                             selector.unregister(key.fileobj)
+                            if key.data == "status":
+                                checked(status.endswith(b"\n") and len(status) <= 32,
+                                        "The command result could not be verified.")
+                                result = int(status)
                             continue
-                        total += len(block)
-                        checked(total <= limit, "A release command exceeded its output limit.")
-                        if key.data == "stdout":
-                            answer.extend(block)
-            try:
-                process.wait(timeout=max(0, deadline - time.monotonic()))
-            except subprocess.TimeoutExpired:
-                raise ReleaseError("A release command exceeded its time limit.") from None
-            checked(process.returncode == 0, "A release command failed. No stable release was approved.")
+                        if key.data == "status":
+                            status.extend(block)
+                            checked(len(status) <= 32, "The command result exceeds its allowance.")
+                        else:
+                            total += len(block)
+                            checked(total <= limit, "A release command exceeded its output limit.")
+                            if key.data == "stdout":
+                                answer.extend(block)
+                    if result is not None:
+                        checked(result == 0, "A release command failed. No stable release was approved.")
+                        if not released and not group_running(process.pid, work_deadline, exclude_leader=True):
+                            os.write(lease_write, b"1")
+                            released = True
+            checked(released and result == 0, "The complete command result could not be verified.")
+            while group_running(process.pid, deadline):
+                checked(time.monotonic() < deadline, "A release command exceeded its time limit.")
+                time.sleep(0.005)
+            confirmed = True
+            process.wait(timeout=max(0, deadline - time.monotonic()))
+            checked(process.returncode == 0, "The command guardian failed.")
             return bytes(answer)
         finally:
-            if process.returncode is None:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                process.wait(timeout=5)
-            process.stdout.close()
-            process.stderr.close()
-
+            try:
+                if not confirmed:
+                    # The guardian has not been reaped so its group number cannot be reused.
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        while group_running(process.pid, deadline):
+                            checked(time.monotonic() < deadline, "The command group did not stop.")
+                            time.sleep(0.005)
+                        process.wait(timeout=max(0, deadline - time.monotonic()))
+                    except (ReleaseError, OSError, subprocess.TimeoutExpired):
+                        UNCONFIRMED_COMMANDS.append(process)
+                        raise ReleaseError("Command group termination is unconfirmed. Inspect before retrying.") from None
+            finally:
+                for descriptor in (status_read, lease_write):
+                    os.close(descriptor)
+                process.stdout.close()
+                process.stderr.close()
 
 class Git:
     def __init__(self, root):

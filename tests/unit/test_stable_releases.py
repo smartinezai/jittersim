@@ -430,7 +430,7 @@ def test_timeout_cancels_descendant_after_parent_exits(release, tmp_path):
     marker = tmp_path / "escaped"
     child = "import time; from pathlib import Path; time.sleep(0.5); Path(" + repr(str(marker)) + ").touch()"
     parent = "import subprocess,sys; subprocess.Popen([sys.executable,'-c'," + repr(child) + "])"
-    with pytest.raises(release.ReleaseError, match="time"):
+    with pytest.raises(release.ReleaseError, match="time|unconfirmed"):
         release.command([sys.executable, "-c", parent], timeout=0.15)
     time.sleep(0.6)
     assert not marker.exists()
@@ -449,3 +449,62 @@ def test_release_input_rejects_links_and_pipes_without_reading(release, tmp_path
         os.mkfifo(path)
     with pytest.raises(release.ReleaseError, match="regular file"):
         release.read_bytes(path, 100)
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_closed_pipe_descendants_cannot_outlive_a_command(release, tmp_path, exit_code):
+    import sys
+    import time
+    marker = tmp_path / "closed-pipe-child"
+    child = "import os,time; from pathlib import Path; os.close(1); os.close(2); time.sleep(0.5); Path(" + repr(str(marker)) + ").touch()"
+    parent = "import subprocess,sys; subprocess.Popen([sys.executable,'-c'," + repr(child) + "]); sys.exit(" + str(exit_code) + ")"
+    try:
+        release.command([sys.executable, "-c", parent], timeout=0.2)
+    except release.ReleaseError:
+        pass
+    existed_at_completion = marker.exists()
+    time.sleep(0.6)
+    assert marker.exists() == existed_at_completion, "A descendant acted after command completion"
+
+
+def test_successful_closed_pipe_child_finishes_before_command_returns(release, tmp_path):
+    import sys
+    marker = tmp_path / "finished"
+    child = "import os,time; from pathlib import Path; os.close(1); os.close(2); time.sleep(0.05); Path(" + repr(str(marker)) + ").touch()"
+    parent = "import subprocess,sys; subprocess.Popen([sys.executable,'-c'," + repr(child) + "])"
+    assert release.command([sys.executable, "-c", parent], timeout=2) == b""
+    assert marker.exists(), "Completion must wait for the owned group"
+
+
+def test_command_cancellation_never_signals_a_reaped_guardian(release, tmp_path, monkeypatch):
+    import sys
+    owned = {}
+    start, signal_group = release.subprocess.Popen, release.os.killpg
+
+    def create(*args, **kwargs):
+        process = start(*args, **kwargs)
+        owned[process.pid] = process
+        return process
+
+    def cancel(group, sig):
+        assert owned[group].returncode is None, "A reaped group number may be reused"
+        return signal_group(group, sig)
+
+    monkeypatch.setattr(release.subprocess, "Popen", create)
+    monkeypatch.setattr(release.os, "killpg", cancel)
+    with pytest.raises(release.ReleaseError):
+        release.command([sys.executable, "-c", "import time; time.sleep(60)"], timeout=0.2)
+
+
+def test_unconfirmed_group_is_refused_without_reaping_its_guardian(release, monkeypatch):
+    import sys
+    monkeypatch.setattr(release, "group_running", lambda *args, **kwargs: True)
+    try:
+        with pytest.raises(release.ReleaseError, match="unconfirmed"):
+            release.command([sys.executable, "-c", "import time; time.sleep(60)"], timeout=0.2)
+        assert len(release.UNCONFIRMED_COMMANDS) == 1
+        assert release.UNCONFIRMED_COMMANDS[0].returncode is None
+    finally:
+        # Cancellation was sent for this test's own guardian. Reap it only for cleanup.
+        for process in release.UNCONFIRMED_COMMANDS:
+            process.wait(timeout=2)
