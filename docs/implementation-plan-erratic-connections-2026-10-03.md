@@ -61,7 +61,7 @@ application knows. Passing tests establishes correctness. Explaining why an
 encrypted connection cannot reveal one file's progress establishes understanding.
 Dashboard wiring and documentation are supporting work.
 
-## Evidence from the current working tree
+## Evidence before implementation
 
 - [Profile settings](../src/jittersim/config/models.py) contain independent
   upload and download impairments plus reroll and outage settings.
@@ -657,3 +657,28 @@ Controlled download progress and per-device service ranking remain separate
 later designs. Their proposed experience is recorded without claiming those
 measurements are already available. No Pi configuration was changed while
 preparing this plan.
+
+## Delivery A implementation status
+
+The reliability foundations are implemented on the isolated feature branch.
+Outage choices have their own sequence. Service lists, browser assignments and
+active quota fallbacks use changing profiles. Compatible live queue changes
+preserve counters. Managed browser tunnels survive valid plan publications.
+Profiles offer fresh patterns or repeatable saved patterns with bounded private
+choice history. Existing profiles retain their previous saved-seed behaviour.
+
+Independent source review identified two additional problems. History needed
+immediate clearing when access was locked plus guards against late responses.
+Live updates needed to reconcile expired service addresses and track successful
+DNS updates. Regression tests cover both fixes including partial-update failures.
+
+The earlier full local suite passed 2218 tests. The Linux queue test measured
+upload and download loss then preserved queue and firewall counters through a
+live change. These results precede the final review fixes. Repeat the required
+checks on the frozen source before claiming release readiness.
+
+Deliveries B through F remain planned. No late-download percentage detection,
+application preset or usage-driven escalation is included in Delivery A. The
+existing scheduler must stay running for timed outages to end. Independent
+helper expiry, restart and physical multi-client acceptance remain deployment
+gates. The README explains recovery and compatible configuration rollback.

@@ -34,6 +34,7 @@ is a private lab tool, not a replacement for a home router.
   recover automatically.
 - Random value variation such as `200 ± 30%`.
 - Random feature enablement, reroll timing and short connection outages.
+- Fresh patterns per target or repeatable saved seeds with bounded history.
 - Inline help in the dashboard for the variation settings.
 - Daily counts of kept and removed website choices for scheduled random
   profile rerolls, with up to 30 days stored on the Pi. These counts show the
@@ -280,12 +281,46 @@ list from the device's own profile does not cut a listed service. A device in
 a random outage still loses the Pi's DNS and browser proxy so it reaches a
 listed service only through addresses it already has.
 
-Only the profile's delay, jitter, loss, speed limit, reordering, duplication and
-corruption settings are used. Its website list and random outages are not. A
-service list uses the saved profile as it is, so random variation in that
-profile is not rerolled. All affected devices share one speed limit for each
-list in the same way the general profile shares its limit. Delay, jitter and
-loss apply to each packet.
+The profile's packet settings, random variation and outage settings apply while
+the dashboard scheduler runs. A service list uses one shared changing pattern.
+Browser assignments use their own pattern for each assignment. Active byte and
+time quota fallbacks also use changing settings. A service outage temporarily
+uses 100% packet loss in that service's queues. Profile website allowlists are
+rejected on these service paths because their scope cannot be preserved there.
+Global access rules still apply.
+
+All affected devices share one speed limit for each list in the same way the
+general profile shares its limit. Delay, jitter and loss apply to each packet.
+
+### Changing patterns
+
+Under **Randomness, outages and website access**, choose **Repeat saved pattern**
+or **Fresh pattern**. Existing profiles keep their saved behaviour. An empty
+saved seed continues to mean zero. Clear the seed when choosing a fresh pattern.
+Stop then start to choose new seeds. Changing a target's profile settings also
+starts a new pattern. Pressing Start again with unchanged active settings keeps
+the current pattern.
+
+Outage choices advance independently of packet-setting changes. An outage ends
+before the next check interval begins so repeated choices cannot extend it
+forever. The dashboard scheduler must remain running to apply these changes.
+If it stops unexpectedly, use Reset or Panic through a working management
+connection. Independent expiry for future temporary scenarios is still planned.
+
+**Recent pattern choices** shows the latest 100 recorded choices with their
+target and seed. History keeps at most 1000 entries per session and 10000 overall
+for seven days. It contains selected settings rather than application contents.
+Copy a recorded seed into a saved pattern for the same target to repeat its
+choices. Packet timing, scheduler delays and application results can differ.
+
+Compatible changes to existing non-duplicating impairment queues preserve their
+counters. Changes of target membership, queue type or duplication still replace
+the queues. Valid managed-browser tunnels survive unrelated plan publications.
+Changes that block their destination or change their selected queue close them.
+
+Before a code downgrade, change fresh profiles back to saved patterns or restore
+a compatible private configuration backup. Older releases reject the fresh
+pattern setting. Stop profiles and verify normal traffic before replacing code.
 
 Matching is by destination address. A small service on the Pi reads the DNS
 answers that leave the Pi towards the test Wi-Fi. When an answer names a listed

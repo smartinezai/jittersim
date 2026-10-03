@@ -205,6 +205,8 @@ class ConfigRepository:
                 event_json TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS pattern_events_session ON pattern_events(session_id, id);
+            CREATE INDEX IF NOT EXISTS pattern_events_time ON pattern_events(happened_at);
+            CREATE INDEX IF NOT EXISTS pattern_events_scope ON pattern_events(scope);
             INSERT OR IGNORE INTO general_profile_setting (id, profile_id) VALUES (1, NULL);
             CREATE TABLE IF NOT EXISTS unaffected_devices (
                 mac_address TEXT PRIMARY KEY,
@@ -425,6 +427,9 @@ class ConfigRepository:
         self._migrate_domain_observations()
         self._commit()
         self._prune_random_website_analytics(now=int(time.time()))
+        self._connection.execute(
+            "DELETE FROM pattern_events WHERE happened_at < ?", (int(time.time()) - 7 * 86400,)
+        )
         self._commit()
 
     def _migrate_domain_observations(self) -> None:

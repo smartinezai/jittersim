@@ -275,15 +275,19 @@ Goal: address the four existing weaknesses before adding richer faults.
 - [x] Save the erratic connection implementation plan for review.
 - [ ] Complete independent plan review and obtain human feedback before
   production changes.
-- [ ] Advance outage choices independently from profile rerolls.
-- [ ] Define and verify changing behaviour for service lists, browser
+- [x] Advance outage choices independently from profile rerolls.
+- [x] Define and verify changing behaviour for service lists, browser
   assignments and quota fallback profiles while preserving current priority.
-- [ ] Update compatible live queues without unintended queue loss or browser
+- [x] Update compatible live queues without unintended queue loss or browser
   tunnel closures. Keep verified full replacement where it is required.
-- [ ] Offer a fresh pattern per session and a repeatable saved pattern while
+- [x] Offer a fresh pattern per session and a repeatable saved pattern while
   preserving existing profiles during upgrade.
-- [ ] Record bounded actual stage history without application contents.
+- [x] Record bounded pattern choices without application contents.
 - [ ] Verify limits, counters, protection, reset, restart and rollback.
+
+The implementation is undergoing independent source review and final release
+checks. The Linux live-update test verifies counter continuity. Physical client
+acceptance and independent expiry after a dashboard crash remain release gates.
 
 See Delivery A in the
 [plan](docs/implementation-plan-erratic-connections-2026-10-03.md).
