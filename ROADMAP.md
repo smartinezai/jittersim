@@ -146,6 +146,11 @@ Goal: create realistic changing conditions without making tests irreproducible.
 - [ ] Ensure only one scheduler owns transitions.
 - [x] Stop schedules cleanly during reset and shutdown.
 
+The next intermittent-behaviour work is detailed in the
+[erratic connection plan](docs/implementation-plan-erratic-connections-2026-10-03.md).
+Milestones 12 to 15 below record the agreed direction and later feature ideas.
+They are planned work rather than available features.
+
 Suggested commits:
 
 1. `Add network condition states`
@@ -252,8 +257,8 @@ verified on the target Pi under normal household load.
 - [x] Restore the Wi-Fi name from the dashboard or console without changing
   the password.
 - [ ] Verify stronger Wi-Fi security and name recovery on the target Pi.
-- [ ] Decide whether Wi-Fi devices need the router's wired printers, TVs, NAS
-  and other private services. The current isolated subnet blocks them.
+- [x] Use internet-only access for the first household trial. The isolated
+  subnet continues to block the router's private services.
 - [ ] Choose and implement a household network design if normal wired-network
   access and discovery are required.
 - [ ] Measure Wi-Fi coverage, client count, throughput and reconnection on the
@@ -262,6 +267,118 @@ verified on the target Pi under normal household load.
   changes, helper restarts, dashboard restarts and a Pi reboot.
 
 See the [household plan](docs/implementation-plan-household-access-point-2026-09.md).
+
+## Milestone 12: reliable changing profiles
+
+Goal: address the four existing weaknesses before adding richer faults.
+
+- [x] Save the erratic connection implementation plan for review.
+- [ ] Complete independent plan review and obtain human feedback before
+  production changes.
+- [ ] Advance outage choices independently from profile rerolls.
+- [ ] Define and verify changing behaviour for service lists, browser
+  assignments and quota fallback profiles while preserving current priority.
+- [ ] Update compatible live queues without unintended queue loss or browser
+  tunnel closures. Keep verified full replacement where it is required.
+- [ ] Offer a fresh pattern per session and a repeatable saved pattern while
+  preserving existing profiles during upgrade.
+- [ ] Record bounded actual stage history without application contents.
+- [ ] Verify limits, counters, protection, reset, restart and rollback.
+
+See Delivery A in the
+[plan](docs/implementation-plan-erratic-connections-2026-10-03.md).
+
+## Milestone 13: erratic connection patterns
+
+Goal: create changing experiences across browsing, streaming and calls.
+
+- [ ] Add clustered packet loss with measured burst behaviour.
+- [ ] Add occasional long delays with optional persistence.
+- [ ] Add bounded condition stages with variable durations and brief recoveries.
+- [ ] Add short pauses followed by bounded bursts of traffic.
+- [ ] Add Almost usable and Stop and go presets after their effects are verified.
+- [ ] Check Linux feature support before applying a requested effect.
+- [ ] Compare scenarios with similar average speed and loss using application
+  completion, stalls, interruptions and recovery time.
+
+See Deliveries B and C in the
+[plan](docs/implementation-plan-erratic-connections-2026-10-03.md).
+
+## Milestone 14: connection and application interruptions
+
+Goal: let selected activity start successfully then become unreliable.
+
+- [ ] Add a stable random outcome per selected browser connection.
+- [ ] Add bounded pauses or closure after a connection age or byte threshold.
+- [ ] Add deterioration under sustained load with bounded recovery.
+- [ ] Add partial service faults using verified supporting hostnames.
+- [ ] Add proposed ChatGPT and Claude presets for output arriving in bursts,
+  responses that start then stop, slow sending and brief recovery windows.
+- [ ] Add proposed Teams presets for one-way gaps, poor video and stalled
+  screen sharing after verifying the actual media paths.
+- [ ] Add reviewed targets for Google account sign-in, Search, Gmail, Drive
+  and Docs plus an explicit whole-Google bundle with clear overlap handling.
+- [ ] Add verified Netflix, Facebook and LinkedIn experiments for intermittent
+  playback, media loading, uploads and synchronization.
+- [ ] Add an approximate Almost finished mode based on connection traffic or
+  time. Do not label it as a file completion percentage.
+- [ ] Design an exact 90% to 99% interruption mode for controlled downloads
+  with verified progress and an isolated transfer.
+- [ ] Verify download resume, retries, parallel activity and client recovery.
+- [ ] Preserve encrypted contents and report browser or native-client coverage
+  honestly for every application preset.
+
+An ordinary HTTPS tunnel cannot identify one file's size or completion
+percentage. Exact progress and application-specific triggers require their own
+reviewed source of information. HTTPS interception remains outside scope.
+
+See Deliveries D and E in the
+[plan](docs/implementation-plan-erratic-connections-2026-10-03.md).
+
+## Milestone 15: later network experiments
+
+Goal: retain the second-stage ideas for separate reviewed tickets.
+
+- [ ] Fail new connections while established ones survive.
+- [ ] Add intermittent one-way faults to ordinary device profiles.
+- [ ] Delay or drop selected DNS lookups with clear cache and encrypted-DNS
+  limits.
+- [ ] Fail large packets while small transfers continue.
+- [ ] Add selected UDP and browser-protocol interruptions with verified
+  matching and fallback behaviour.
+- [ ] Share an incident across a group with individual recovery variation.
+- [ ] Explore delayed connection closure and idle-connection expiry.
+
+These ideas need their own implementation plans and acceptance evidence.
+Prioritise them after the earlier milestones demonstrate reliable recovery.
+
+## Milestone 16: worsening with service usage
+
+Goal: let a selected service become less reliable as one device uses it more.
+
+- [ ] Add several worsening stages based on matching bytes or estimated active
+  time without changing existing saved quotas.
+- [ ] Add a Netflix example that increases buffering and bounded pauses as
+  estimated active time grows.
+- [ ] Add a finite usage window, a severity ceiling and explicit recovery and
+  reset behaviour.
+- [ ] Measure verified per-device service totals for direct and proxied traffic
+  without double counting or counting protected clients.
+- [ ] Add optional selection of the most-used service from an enabled candidate
+  list with a stated measure and bounded lookback.
+- [ ] Keep selected targets stable for a bounded interval so faults and retries
+  cannot cause repeated switching or unbounded worsening.
+- [ ] Show the selected service, usage estimate, matching limits and active stage.
+- [ ] Verify profile conflicts, shared server addresses, unavailable measurements,
+  concurrent devices, limits and automatic history deletion.
+
+DNS queries are not page visits. Label this mode by measured service usage.
+Keep Google account and shared sign-in targets separate from automatic
+selection by default. One device's usage must not worsen another device's
+connection through a shared service rule.
+
+See Delivery F in the
+[plan](docs/implementation-plan-erratic-connections-2026-10-03.md).
 
 ## Deliberate non-goals
 
@@ -301,3 +418,12 @@ The project is ready for presentation when it can:
 - [x] Copy matching security with bounded recovery on failure.
 - [x] Preserve the mode during name reset and installation upgrades.
 - [ ] Complete physical client acceptance for every claimed supported mode.
+
+## Current remaining work
+
+See the [2 October audit](docs/unfinished-work-audit-2026-10-02.md) for current
+test results and historical checkpoints that are already complete. The
+[remaining work plan](docs/implementation-plan-remaining-work-2026-10-02.md)
+covers deferred physical acceptance, the tested local homepage reference and
+the completed reboot design. Live homepage policy and reboot implementation
+remain follow-ups. Integration and remote commands are separate deliveries.
