@@ -68,7 +68,7 @@ def check_reset_name(page):
     expect(banner).to_contain_text("Wi-Fi change finished", timeout=20000)
     expect(banner).to_contain_text("restored")
     expect(page.locator("#wifi-reset-status")).to_contain_text("Password unchanged")
-    expect(page.locator("#access-point-ssid")).to_have_value("JitterSim")
+    expect(page.locator("#access-point-ssid")).to_have_value("TestNet")
     assert len(seen) >= 3
     assert_no_raw_error(page)
     assert_still_signed_in(page)
