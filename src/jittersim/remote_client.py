@@ -467,7 +467,9 @@ def _resolve_before(host: str, port: int, deadline: float) -> Any:
     worker = threading.Thread(target=resolve, name="dashboard-name", daemon=True)
     try:
         worker.start()
-    except BaseException:
+    except RuntimeError:
+        # Thread.start reports failed creation with RuntimeError. Cancellation
+        # can arrive after creation, so that worker must keep its physical slot.
         _RESOLUTION_SLOTS.release()
         raise
     try:

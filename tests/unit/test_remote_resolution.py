@@ -118,3 +118,58 @@ raise SystemExit(remote_cli.main(['status', '--url', 'https://netlab.local:8080'
                             env=environment, capture_output=True, text=True, timeout=2)
     assert result.returncode == 1
     assert "did not answer within 0.02 seconds" in result.stderr
+
+
+def test_interrupted_thread_start_retains_running_resolver_capacity(monkeypatch):
+    release = threading.Event()
+    started, finished = [], []
+    workers = []
+    original_start = threading.Thread.start
+
+    def held(*args):
+        started.append(args)
+        release.wait(2)
+        finished.append(args)
+        return []
+
+    def interrupted_start(worker):
+        workers.append(worker)
+        original_start(worker)
+        limit = time.monotonic() + 1
+        while len(started) < len(workers) and time.monotonic() < limit:
+            time.sleep(0.001)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(socket, "getaddrinfo", held)
+    monkeypatch.setattr(threading.Thread, "start", interrupted_start)
+    try:
+        for _ in range(4):
+            with pytest.raises(KeyboardInterrupt):
+                remote_client._connect_before("netlab.local", 8080, time.monotonic() + 1, None)
+        outcome = None
+        try:
+            remote_client._connect_before("netlab.local", 8080, time.monotonic() + 0.01, None)
+        except BaseException as error:
+            outcome = type(error)
+        assert outcome is socket.timeout
+        assert len(started) == 4
+    finally:
+        release.set()
+        limit = time.monotonic() + 1
+        while len(finished) < len(started) and time.monotonic() < limit:
+            time.sleep(0.001)
+    assert len(finished) == len(started)
+
+
+def test_failed_thread_creation_returns_unused_capacity(monkeypatch):
+    def cannot_start(worker):
+        raise RuntimeError("can't start new thread")
+
+    with monkeypatch.context() as failing:
+        failing.setattr(threading.Thread, "start", cannot_start)
+        for _ in range(6):
+            with pytest.raises(RuntimeError, match="can't start"):
+                remote_client._connect_before("netlab.local", 8080, time.monotonic() + 1, None)
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args: [])
+    with pytest.raises(OSError, match="no address"):
+        remote_client._connect_before("netlab.local", 8080, time.monotonic() + 1, None)
