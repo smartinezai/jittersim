@@ -749,14 +749,14 @@ relying on it for everyday access.
 
 ### Deploy from a Mac
 
-`deploy/raspberry-pi/deploy-from-mac.sh` does the build, copy and staging steps
+`deploy/raspberry-pi/deploy-from-mac.sh` builds, copies, stages and installs
 above in one command. It runs on the **Mac** in a JitterSim checkout and needs
 only git, ssh, scp, tar and shasum (not the Python package):
 
 ```sh
 deploy/raspberry-pi/deploy-from-mac.sh --ref RELEASE_REF --dry-run
 deploy/raspberry-pi/deploy-from-mac.sh --ref RELEASE_REF
-deploy/raspberry-pi/deploy-from-mac.sh --ref RELEASE_REF --install
+deploy/raspberry-pi/deploy-from-mac.sh --ref RELEASE_REF --stage-only
 ```
 
 The defaults are `--host jittersim@192.168.0.17`,
@@ -784,9 +784,9 @@ connects to and says so when it cannot reach it.
    in your terminal. A Pi from before signed releases gets the old staging
    command with the update service's own copy of `updates.py`. The script never
    reads, stores or passes a password.
-4. Without `--install` it prints the exact command to install the staged
+4. With `--stage-only` it prints the exact command to install the staged
    release. You can also choose **Check for updates** and then **Install staged
-   release** in Setup. With `--install` the same session runs
+   release** in Setup. By default the same session runs
    `sudo jittersim update install --yes --wait` (`sudo jittersim update
    install --yes` and a wait for the update service on a Pi from before signed
    releases). Then it reads `jittersim update check` and prints the release the
@@ -802,7 +802,8 @@ The release is named after the short commit. The Pi records it in
 A Pi without the update service (a release from before staged updates) needs
 the full installer once. `--use-installer` copies the archive, checks its
 checksum on the Pi and unpacks it to `~/jittersim-release-COMMIT` as the login
-user. It then prints the installer command or runs it with `--install`. Use it
+user. It runs the installer by default. With `--stage-only` it prints the
+installer command. Use it
 as well for OS package or Wi-Fi changes. The unpacked folder stays in the home
 folder like a release unpacked by hand.
 

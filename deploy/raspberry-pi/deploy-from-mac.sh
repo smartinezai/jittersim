@@ -1,6 +1,6 @@
 #!/bin/sh
 # Build the release archive of one commit on this Mac, copy it to the Pi and stage it for the
-# verified update service. With --install it also installs it and shows the release the Pi
+# verified update service. It installs by default and shows the release the Pi
 # runs afterwards. Only git, ssh, scp, tar and shasum are needed: not the Python package.
 # The script never reads, stores or passes a password. The steps that need root run in one
 # `ssh -t` session so the Pi asks for its sudo password in this terminal. A Pi with signed
@@ -38,14 +38,14 @@ router's Wi-Fi. A Mac on the Pi's test Wi-Fi cannot reach the Pi over SSH."
 usage() {
     cat <<EOF
 usage: deploy-from-mac.sh [--ref REF] [--host USER@HOST] [--key PATH] [--signing-key PATH]
-                          [--install] [--use-installer] [--skip-network-check] [--dry-run]
+                          [--stage-only] [--use-installer] [--skip-network-check] [--dry-run]
                           [--https | --ssh] [--url URL] [--ca-cert FILE] [--save-token]
 
 Runs on your Mac in a JitterSim checkout. It builds the release archive of REF with
 build-release.sh, signs it, copies it to the Pi over SSH and stages it for the verified
-update service. Staging checks the signature, the release order and every file of the
-archive. Then 'sudo jittersim update install' or the dashboard's Install staged release
-installs it. Staging needs root on the Pi so the Pi asks for its sudo password in this
+update service then installs it and waits for the new release. Staging checks the
+signature, the release order and every file of the archive. Use --stage-only to
+upload without installing. Staging needs root on the Pi so the Pi asks for its sudo password in this
 terminal unless passwordless staging is on.
 
   --ref REF          tag, branch or commit to release (default: HEAD). The archive is built
@@ -56,8 +56,8 @@ terminal unless passwordless staging is on.
   --signing-key PATH the release signing key (default: ~/.ssh/jittersim_release_ed25519).
                      make-release-key.sh creates it. Without it the archive is not signed
                      and only a Pi without signed releases or --use-installer accepts it.
-  --install          install the staged release too and show the release the Pi runs.
-                     It runs in the same sudo session as the staging.
+  --stage-only       stage the release without installing it.
+  --install          install and wait (the default). Kept for existing commands.
   --use-installer    unpack the archive on the Pi and use its full installer instead of the
                      update service. Needed once on a Pi without the update service and for
                      OS package or Wi-Fi changes.
@@ -199,7 +199,7 @@ https_cert=
 host=$DEFAULT_HOST
 key=$DEFAULT_KEY
 signing_key=$DEFAULT_SIGNING_KEY
-install=no
+install=yes
 use_installer=no
 dry_run=no
 skip_network_check=no
@@ -223,6 +223,7 @@ while [ "$#" -gt 0 ]; do
             shift 2
             ;;
         --install) install=yes; shift ;;
+        --stage-only) install=no; shift ;;
         --use-installer) use_installer=yes; shift ;;
         --dry-run) dry_run=yes; shift ;;
         --skip-network-check) skip_network_check=yes; shift ;;
@@ -268,7 +269,7 @@ over_https() {
     set -- --ref "$ref" --host "$host" --signing-key "$signing_key"
     [ -z "$https_url" ] || set -- "$@" --url "$https_url"
     [ -z "$https_cert" ] || set -- "$@" --ca-cert "$https_cert"
-    [ "$install" = no ] || set -- "$@" --install
+    [ "$install" = yes ] || set -- "$@" --stage-only
     [ "$dry_run" = no ] || set -- "$@" --dry-run
     exec sh "$(dirname -- "$0")/deploy-over-https.sh" "$@"
 }

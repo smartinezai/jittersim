@@ -2,7 +2,7 @@
 # Deploy one commit to the Pi through its HTTPS dashboard instead of SSH. It works from any
 # network that reaches https://PI:8080, also the Pi's own test Wi-Fi where SSH is blocked on
 # purpose. deploy-from-mac.sh runs this for you when SSH does not work. It builds and signs the
-# release, uploads it to /api/updates/upload and, with --install, installs it and waits until
+# release, uploads it to /api/updates/upload, installs it and waits until
 # the Pi answers with the new release. Only git, ssh-keygen, curl and tar are needed.
 # The admin token comes from JITTERSIM_TOKEN or the macOS Keychain item jittersim-admin-token
 # (create it with --save-token). The token is never put on a command line, printed or saved
@@ -20,11 +20,12 @@ INSTALL_WAIT_SECONDS=${JITTERSIM_INSTALL_WAIT_SECONDS:-900}
 usage() {
     cat <<USAGE
 usage: deploy-over-https.sh [--ref REF] [--url https://PI:8080] [--ca-cert FILE]
-                            [--signing-key PATH] [--install] [--dry-run]
+                            [--signing-key PATH] [--stage-only] [--dry-run]
        deploy-over-https.sh --save-token
 
-Builds and signs the release of REF, uploads it over HTTPS, and with --install installs it and
-waits until the Pi runs it. The Pi stages only a release signed by a key it trusts and newer
+Builds and signs the release of REF, uploads it over HTTPS then installs it and
+waits until the Pi runs it. Use --stage-only to upload without installing.
+The Pi stages only a release signed by a key it trusts and newer
 than what it ran before, so the admin token alone cannot install other code.
 
   --url URL        the dashboard (default: JITTERSIM_URL, the address saved by
@@ -34,7 +35,8 @@ than what it ran before, so the admin token alone cannot install other code.
                    file saved by 'jittersim connect')
   --save-token     store the admin token in the macOS Keychain (item $KEYCHAIN_ITEM). The
                    Keychain asks for it with a hidden prompt.
-  --install        install the uploaded release and wait for the Pi to run it
+  --stage-only     upload the release without installing it
+  --install        install and wait (the default). Kept for existing commands
   --dry-run        print every command and run nothing
 On a Mac on the Pi's test Wi-Fi, first open the dashboard in a browser on this Mac and choose
 Allow this device once.
@@ -51,7 +53,7 @@ url=${JITTERSIM_URL:-}
 cert=${JITTERSIM_CA_CERT:-}
 host=
 signing_key=$DEFAULT_SIGNING_KEY
-install=no
+install=yes
 dry_run=no
 save_token=no
 while [ "$#" -gt 0 ]; do
@@ -68,6 +70,7 @@ while [ "$#" -gt 0 ]; do
             shift 2
             ;;
         --install) install=yes; shift ;;
+        --stage-only) install=no; shift ;;
         --dry-run) dry_run=yes; shift ;;
         --save-token) save_token=yes; shift ;;
         -h|--help) usage; exit 0 ;;

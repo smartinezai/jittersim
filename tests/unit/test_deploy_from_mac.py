@@ -228,7 +228,7 @@ def test_every_dry_run_runs_nothing(fakes, extra):
 
 def test_stage_only_copies_the_verified_archive_and_prints_the_install_command(fakes, tmp_path):
     short = short_head()
-    result, calls = deploy(fakes)
+    result, calls = deploy(fakes, "--stage-only")
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh", "scp", "ssh"]
     probe, copy, stage = (call["argv"] for call in calls)
@@ -267,7 +267,7 @@ def test_stage_only_copies_the_verified_archive_and_prints_the_install_command(f
 
 
 def test_the_archive_is_the_one_build_release_makes(fakes):
-    result, _ = deploy(fakes)
+    result, _ = deploy(fakes, "--stage-only")
     assert result.returncode == 0, result.stderr
     archive = next(fakes["copies"].iterdir())
     with tarfile.open(archive) as bundle:
@@ -280,7 +280,7 @@ def test_the_archive_is_the_one_build_release_makes(fakes):
 
 def test_install_stages_installs_waits_and_compares_the_running_release(fakes):
     short = short_head()
-    result, calls = deploy(fakes, "--install", FAKE_INSTALLED=short)
+    result, calls = deploy(fakes, FAKE_INSTALLED=short)
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh", "scp", "ssh", "ssh"]
     sha = printed_sha(result.stdout)
@@ -307,7 +307,7 @@ def test_a_pi_that_already_runs_the_release_needs_nothing(fakes, extra):
 
 def test_the_installer_runs_again_for_the_same_release(fakes):
     short = short_head()
-    result, calls = deploy(fakes, "--use-installer", FAKE_RUNNING=short)
+    result, calls = deploy(fakes, "--use-installer", "--stage-only", FAKE_RUNNING=short)
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh", "scp", "ssh"]
     assert f"The Pi already runs release {short}. The installer runs again." in result.stdout
@@ -422,7 +422,7 @@ def test_a_failed_copy_stops_before_staging(fakes):
 
 
 def test_a_failed_sudo_step_is_reported(fakes):
-    result, _ = deploy(fakes, FAKE_TERMINAL_EXIT="1")
+    result, _ = deploy(fakes, "--stage-only", FAKE_TERMINAL_EXIT="1")
     assert result.returncode == 1
     assert "staging on the Pi failed" in result.stderr
     assert "Install it with" not in result.stdout
@@ -438,7 +438,7 @@ def unpack_on_a_stand_in_pi(fakes, home, short, command):
 
 def test_installer_mode_checks_unpacks_and_labels_the_copy(fakes, tmp_path):
     short = short_head()
-    result, calls = deploy(fakes, "--use-installer")
+    result, calls = deploy(fakes, "--use-installer", "--stage-only")
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh", "scp", "ssh"]
     batch_call(calls[0]["argv"], fakes, PROBE)
@@ -468,7 +468,7 @@ def test_the_installer_label_reaches_the_installed_folder(fakes, tmp_path):
     """The label written next to the unpacked source is what replace-source.py installs."""
 
     short = short_head()
-    result, calls = deploy(fakes, "--use-installer")
+    result, calls = deploy(fakes, "--use-installer", "--stage-only")
     assert result.returncode == 0, result.stderr
     home = tmp_path / "pi-home"
     assert unpack_on_a_stand_in_pi(fakes, home, short, calls[2]["argv"][-1]).returncode == 0
@@ -482,9 +482,9 @@ def test_the_installer_label_reaches_the_installed_folder(fakes, tmp_path):
         printed_sha(result.stdout))
 
 
-def test_installer_mode_with_install_runs_the_installer_in_a_terminal(fakes):
+def test_installer_mode_installs_by_default_in_a_terminal(fakes):
     short = short_head()
-    result, calls = deploy(fakes, "--use-installer", "--install", FAKE_INSTALLED=short)
+    result, calls = deploy(fakes, "--use-installer", FAKE_INSTALLED=short)
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh", "scp", "ssh", "ssh", "ssh"]
     terminal_call(calls[3]["argv"], fakes,
@@ -494,7 +494,7 @@ def test_installer_mode_with_install_runs_the_installer_in_a_terminal(fakes):
 
 
 def test_installer_mode_works_on_a_pi_without_the_update_service(fakes):
-    result, calls = deploy(fakes, "--use-installer", FAKE_NO_SERVICE="1")
+    result, calls = deploy(fakes, "--use-installer", "--stage-only", FAKE_NO_SERVICE="1")
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh", "scp", "ssh"]
 
@@ -540,7 +540,7 @@ def archived_readme(archive):
 def test_the_archive_is_built_from_the_commit_and_leaves_local_edits_out(fakes, repository):
     (repository / "README.md").write_text("an uncommitted edit\n")
     script = repository / "deploy" / "raspberry-pi" / "deploy-from-mac.sh"
-    result, calls = deploy(fakes, script=script)
+    result, calls = deploy(fakes, "--stage-only", script=script)
     assert result.returncode == 0, result.stderr
     assert "Uncommitted changes in this checkout are not part of the archive." in result.stdout
     short = short_head(repository)
@@ -551,7 +551,7 @@ def test_the_archive_is_built_from_the_commit_and_leaves_local_edits_out(fakes, 
 
 def test_an_older_ref_builds_that_commit(fakes, repository):
     script = repository / "deploy" / "raspberry-pi" / "deploy-from-mac.sh"
-    result, calls = deploy(fakes, "--ref", "HEAD~1", script=script)
+    result, calls = deploy(fakes, "--ref", "HEAD~1", "--stage-only", script=script)
     assert result.returncode == 0, result.stderr
     assert "Uncommitted changes" not in result.stdout
     short = short_head(repository, "HEAD~1")

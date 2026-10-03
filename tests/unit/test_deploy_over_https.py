@@ -36,6 +36,7 @@ case $(basename "$0") in
     scp) exit 1 ;;
     sleep) exit 0 ;;
     ifconfig) printf "en0: flags=8863<UP>\\n\\tinet %s netmask 0xffffff00\\n" "${FAKE_MAC_ADDRESS:-192.168.0.5}" ;;
+    route) printf 'gateway: 192.168.0.1\\n' ;;
     security)
         case $1 in
             find-generic-password) printf '%s\\n' "${FAKE_KEYCHAIN_TOKEN:-}"; [ -n "${FAKE_KEYCHAIN_TOKEN:-}" ] ;;
@@ -119,7 +120,7 @@ def make_certificate(directory, name):
 def lab(tmp_path):
     bin_directory = tmp_path / "bin"
     bin_directory.mkdir()
-    for name in ("curl", "ssh", "scp", "sleep", "ifconfig", "security"):
+    for name in ("curl", "ssh", "scp", "sleep", "ifconfig", "route", "security"):
         shim = bin_directory / name
         shim.write_text(SHIM)
         shim.chmod(0o755)
@@ -169,7 +170,7 @@ def logged(lab):
 
 
 def test_one_command_uploads_installs_and_waits_for_the_new_release(lab):
-    result = https(lab, *base_arguments(lab), "--install")
+    result = https(lab, *base_arguments(lab))
     assert result.returncode == 0, result.stdout + result.stderr
     short = lab["short"]
     assert f"The Pi checked the signature and staged release {short}" in result.stdout
@@ -180,8 +181,8 @@ def test_one_command_uploads_installs_and_waits_for_the_new_release(lab):
     assert not list(lab["tmp"].glob("jittersim-https.*")), "the work folder is removed"
 
 
-def test_without_install_it_stages_and_says_how_to_install(lab):
-    result = https(lab, *base_arguments(lab))
+def test_explicit_stage_only_stages_and_says_how_to_install(lab):
+    result = https(lab, *base_arguments(lab), "--stage-only")
     assert result.returncode == 0, result.stderr
     assert "staged release" in result.stdout and "Install it with" in result.stdout
     assert lab["pi"].installs == []
@@ -303,6 +304,19 @@ def test_when_ssh_does_not_answer_it_falls_back_to_https(lab):
     assert "SSH to the Pi did not answer. Using the HTTPS upload instead." in result.stdout
     assert "ssh" in tools(lab)
     assert "staged release" in result.stdout
+
+
+@pytest.mark.parametrize("explicit_https", [True, False])
+def test_wrapper_stage_only_never_posts_an_install_on_either_https_route(lab, explicit_https):
+    arguments = ["--https"] if explicit_https else []
+    result = mac(lab, *arguments, *base_arguments(lab)[2:], "--stage-only",
+                 FAKE_SSH_EXIT="255")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (lab["pi"].root / "staged" / ".jittersim-release.json").is_file()
+    assert lab["pi"].installs == []
+    assert "--request POST" in logged(lab), "the signed upload must have run"
+    assert "/api/updates/install" not in logged(lab)
+    assert ("ssh" in tools(lab)) is not explicit_https
 
 
 def test_ssh_only_never_switches(lab):
