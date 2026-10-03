@@ -212,7 +212,7 @@ def test_without_a_token_check_reads_staged_releases_and_explains_set_token():
   assert.equal(calls.filter(c => c[1] === "/api/updates/check-online" && c[0] === "POST").length, 0);
   assert.ok(calls.some(c => c[0] === "GET" && c[1] === "/api/updates"));
   assert.equal(element("github-access-hint").hidden, false);
-  assert.match(element("github-access-hint").textContent, /sudo jittersim update set-token/);
+  assert.match(element("github-access-hint").textContent, /setup command in The GitHub token/);
 """)
 
 

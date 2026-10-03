@@ -2664,6 +2664,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       element("brand-sidebar").setAttribute("aria-label", name || "Network lab");
       element("measure-command").textContent = signedIn && brandInfo
         ? brandInfo.command + " measure --label normal" : "the measure command";
+      const updateTokenCommand = element("update-token-command");
+      if (updateTokenCommand) updateTokenCommand.textContent = signedIn && brandInfo
+        ? "sudo " + brandInfo.command + " update set-token" : "the setup command shown after sign-in";
       const ssid = element("access-point-ssid");
       if (signedIn && brandInfo && !ssid.value && document.activeElement !== ssid) {
         ssid.value = brandInfo.default_ssid;

@@ -532,8 +532,8 @@ def _stop_all(arguments: argparse.Namespace) -> int:
 SCAN_TIMEOUT_SECONDS = 120.0
 # The page's ENFORCE_NOTE word for word. Panic also turns household blocking off.
 ENFORCE_NOTE = (
-    "It applies on its own while JitterSim is running. "
-    "After Reset or Panic choose Start with saved settings. "
+    "It applies on its own while profiles are running. "
+    "After Reset or Panic choose Start. "
     "After Panic also turn household blocking back on."
 )
 KIND_TAGS = {

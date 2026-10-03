@@ -69,6 +69,8 @@ const document = {
 };
 let helperConfigured = true;
 let adminTokenVerified = true;
+let adminTokenRevision = 0;
+let actionIntentRevision = 0;
 let adminTokenChecking = false;
 let networkActionBusy = false;
 let connectedDevicesRequestInFlight = false;

@@ -319,22 +319,31 @@ def check_one_save_is_small(page, seen):
 
     go_to(page, "profiles")
     advance(page, 2)
-    # Pause scheduled polls while measuring the save's own reads. Network replies still run.
     page.clock.pause_at(page.evaluate("Date.now()"))
-    seen.clear()
-    page.evaluate("refresh()")
-    full = sum(count for path, count in seen.items() if path.startswith("/api/"))
-    assert full > 0, dict(seen)
-    page.locator("#profile-name").fill("Slow bus")
-    page.locator("#profile-id").fill("slow-bus")
-    seen.clear()
-    page.locator("#profile-form button[type='submit']").click()
-    page.wait_for_function("!dashboardRefresh && !recentWrites.size && profiles.some(p => p.id === 'slow-bus')")
-    reads = sum(count for path, count in seen.items() if path.startswith("/api/") and path != "/api/profiles")
-    assert 0 < seen["/api/profiles"] <= 3, dict(seen)
-    assert 0 < reads <= full * 0.75, (reads, full, dict(seen))
-    assert seen["/api/diagnostics"] == 0, dict(seen)
-    print("save-refresh", json.dumps({"scoped_reads": reads, "full_reads": full, "paths":dict(seen)}))
+    methods = collections.Counter()
+
+    def counted(request):
+        path = "/" + request.url.split("://", 1)[1].split("/", 1)[1].split("?", 1)[0]
+        methods[(request.method, path)] += 1
+
+    page.on("request", counted)
+    try:
+        page.evaluate("refresh()")
+        full = sum(count for (method, path), count in methods.items() if method == "GET" and path.startswith("/api/"))
+        assert full > 0, dict(methods)
+        page.locator("#profile-name").fill("Slow bus")
+        page.locator("#profile-id").fill("slow-bus")
+        methods.clear()
+        page.locator("#profile-form button[type='submit']").click()
+        page.wait_for_function("() => !dashboardRefresh && !recentWrites.size && profiles.some(p => p.id === 'slow-bus')")
+        reads = sum(count for (method, path), count in methods.items() if method == "GET" and path.startswith("/api/"))
+        assert methods[("POST", "/api/profiles")] == 1, dict(methods)
+        assert 0 < reads <= full * 0.75, (reads, full, dict(methods))
+        assert methods[("GET", "/api/diagnostics")] == 0, dict(methods)
+        print("save-refresh", json.dumps({"scoped_reads": reads, "full_reads": full,
+              "paths": {method + " " + path: count for (method, path), count in methods.items()}}))
+    finally:
+        page.remove_listener("request", counted)
 
 
 def run():

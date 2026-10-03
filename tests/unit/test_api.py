@@ -3282,7 +3282,7 @@ class ControlServerTests(unittest.TestCase):
                     return f"{kind} {name}({body}\n}}\n"
             raise AssertionError(f"{name} is not in the dashboard script")
 
-        harness = "const restoreDrafts = () => {}; const loadHealth = async () => {}; const loadWorkspace = async () => {};\n" + setup + "".join(function(name) for name in names) + calls
+        harness = "const invalidateAdminTools = () => {}; const restoreDrafts = () => {}; const loadHealth = async () => {}; const loadWorkspace = async () => {};\n" + setup + "".join(function(name) for name in names) + calls
         result = subprocess.run([node, "-e", harness], capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)

@@ -158,7 +158,7 @@ def test_block_and_unblock_say_the_change_is_saved_and_applies_on_its_own(
     assert dashboard.paths() == [("GET", "/api/policies"), ("POST", path)]
     assert dashboard.requests[1]["body"] == {"domain": "tracker.example"}
     assert out.startswith("Saved: ")
-    assert "It applies on its own while JitterSim is running." in out
+    assert "It applies on its own while profiles are running." in out
 
 
 def test_block_that_the_dashboard_did_not_confirm_fails(dashboard, capsys):

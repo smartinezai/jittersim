@@ -149,3 +149,108 @@ console.log(JSON.stringify({gets,checked:box.checked}));
 """
     actual=run(setup+body)
     assert actual=={"gets":2,"checked":True}
+
+
+def test_delayed_check_reply_cannot_replace_newly_saved_settings():
+    actual=run("""
+showOnline({state:'none',token_set:true,settings:{daily_check:false,install_automatically:false}});
+installOnlineControls(); const held=deferred();
+network=async(path,method)=> {
+  if(path==='/api/updates/check-online' && method==='POST') return await held.promise;
+  if(path==='/api/updates/online-settings') return {token_set:true,settings:{daily_check:true,install_automatically:false}};
+  return {installed:'1.0.0',phase:'idle'};
+};
+const checking=runOnlineCheck(); await Promise.resolve();
+const box=element('online-daily-check'); box.checked=true;
+await box.listeners.change({target:box});
+held.resolve({state:'done',result:'staged',token_set:true,settings:{daily_check:false,install_automatically:false}});
+await checking; console.log(JSON.stringify({checked:box.checked}));
+""")
+    assert actual["checked"] is True
+
+
+def test_failed_status_read_retains_last_confirmed_signed_version():
+    actual=run("""
+knownHealthVersion='0.2.0';
+network=async()=>({installed:'2.0.0',phase:'idle'});
+await loadReleaseStatus({force:true});
+network=async()=>{throw new Error('temporary status failure');};
+try {await loadReleaseStatus({force:true});} catch(e) {}
+console.log(JSON.stringify({installed:element('update-installed').textContent,available:element('update-available').textContent}));
+""")
+    assert actual["installed"] == "2.0.0"
+    assert "Unknown" in actual["available"]
+
+
+@pytest.mark.parametrize("category", ["online", "preference"])
+def test_pending_setting_save_keeps_controls_disabled(category):
+    setup = """
+const held=deferred(); network=()=>held.promise;
+"""
+    if category == "online":
+        body = """
+showOnline({state:'none',token_set:true,settings:{daily_check:false,install_automatically:false}});
+installOnlineControls(); const box=element('online-daily-check'); box.checked=true;
+const saving=box.listeners.change({target:box}); await Promise.resolve();
+assert.equal(box.disabled,true);
+assert.equal(element('online-install-automatically').disabled,true);
+held.resolve({token_set:true,settings:{daily_check:true,install_automatically:false}});
+await saving; console.log(JSON.stringify({disabled:box.disabled,checked:box.checked,posts:calls.length}));
+"""
+    else:
+        body = """
+autoCheckStagedUpdates=true; installUpdateCheckPreference();
+const box=element('check-staged-updates-on-open'); box.checked=false;
+const saving=box.listeners.change(); await Promise.resolve(); assert.equal(box.disabled,true);
+held.resolve({saved:true,check_staged_updates_on_open:false}); await saving;
+console.log(JSON.stringify({disabled:box.disabled,checked:box.checked,posts:calls.length}));
+"""
+    assert run(setup+body)=={"disabled":False,"checked":category=="online","posts":1}
+
+
+def test_pending_automatic_install_confirmation_serializes_both_settings():
+    actual=run("""
+showOnline({state:'none',token_set:true,settings:{daily_check:false,install_automatically:false}});
+installOnlineControls(); const held=deferred(); confirmWorkflow=()=>held.promise;
+const automatic=element('online-install-automatically'); automatic.checked=true;
+const saving=automatic.listeners.change({target:automatic}); await Promise.resolve();
+assert.equal(automatic.disabled,true); assert.equal(element('online-daily-check').disabled,true);
+const daily=element('online-daily-check'); daily.checked=true; await daily.listeners.change({target:daily});
+assert.equal(calls.length,0); held.resolve(false); await saving;
+console.log(JSON.stringify({disabled:automatic.disabled,checked:automatic.checked,posts:calls.length}));
+""")
+    assert actual=={"disabled":False,"checked":False,"posts":0}
+
+
+def test_device_access_loss_discards_held_update_state_without_token_change():
+    actual=run("""
+const held=deferred(); network=()=>held.promise;
+const loading=loadOnlineStatus(); await Promise.resolve();
+privateDataLockHooks.forEach(hook=>hook());
+held.resolve({state:'done',token_set:true,settings:{daily_check:true,install_automatically:true}});
+await loading;
+console.log(JSON.stringify({text:element('online-check-status').textContent,disabled:element('online-daily-check').disabled,view:onlineView}));
+""")
+    assert actual=={"text":"Sign in to read update status.","disabled":True,"view":None}
+
+
+def test_pre_restore_status_cannot_become_the_restore_result():
+    actual=run("""
+releaseState={installed:'2.0.0',phase:'idle',rollback_available:true};
+const held=deferred(); let gets=0;
+network=async(path,method)=> {
+  if(method==='POST') return {phase:'queued'};
+  if(++gets===1) return await held.promise;
+  return {installed:'1.0.0',phase:'complete',message:'current status without an attempt identity'};
+};
+const old=loadReleaseStatus({force:true}); await Promise.resolve();
+await restoreUpdate();
+held.resolve({installed:'2.0.0',phase:'complete',message:'old unrelated completion'});
+await old;
+for(let i=0;i<20&&updateFollowing;i++) await new Promise(resolve=>setImmediate(resolve));
+assert.equal(updateFollowing,false);
+console.log(JSON.stringify({gets,installed:element('update-installed').textContent,outcome:updateOutcome}));
+""")
+    assert actual["gets"]==2
+    assert actual["installed"]=="1.0.0"
+    assert "not confirmed" in actual["outcome"]

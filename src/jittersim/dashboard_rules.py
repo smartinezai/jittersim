@@ -53,13 +53,13 @@ def sidebar_status(
         (general_profile.get("name") or general_profile.get("id")) if general_profile else ""
     )
 
-    general = {"text": "General profile: none", "tone": "muted"}
+    general = {"text": "Everyone: none", "tone": "muted"}
     if general_profile:
         if general_in_effect:
-            general = {"text": "General profile: " + general_name + " · active", "tone": "on"}
+            general = {"text": "Everyone: " + general_name + " · active", "tone": "on"}
         else:
             general = {
-                "text": "General profile: " + general_name + " · "
+                "text": "Everyone: " + general_name + " · "
                 + ("paused" if state == "reset" else "saved, not applied"),
                 "tone": "muted",
             }
@@ -167,7 +167,7 @@ def runtime_status_text(
             return {"text": "Off. No traffic shaping is running.", "tone": "muted"}
         if state == "unknown":
             return {
-                "text": "JitterSim is not running. Choose Start with saved settings.",
+                "text": "Nothing is running. Choose Start.",
                 "tone": "pending",
             }
         if state == "error":

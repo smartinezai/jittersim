@@ -551,6 +551,7 @@ let releasePollAt = 0;
 let releaseStatusRequest = null;
 let autoCheckStagedUpdates = null;
 let knownHealthVersion = null;
+let lastConfirmedInstalledVersion = null;
 let updateWatch = null;
 let updateFollowing = false;
 let updateCheckRunning = false;
@@ -605,7 +606,7 @@ function updatesPageActive() { return !document.hidden && currentPage() === 'upd
 function releaseLabel(state) { return (state && (state.tag || state.available)) || ''; }
 function installedReleaseLabel() {
   const label = releaseState && releaseState.installed;
-  return label && !/^Unversioned(?: installation)?$/i.test(label) ? label : knownHealthVersion;
+  return label && !/^Unversioned(?: installation)?$/i.test(label) ? label : lastConfirmedInstalledVersion || knownHealthVersion;
 }
 function stagedReleaseReady(state) {
   return Boolean(state && state.available && state.available !== state.installed && state.installable === true);
@@ -663,6 +664,7 @@ function loadReleaseStatus({force = false} = {}) {
       const state = await request('/api/updates', 'GET');
       if (!updateContextCurrent(context)) return null;
       releaseState = state;
+      if (state.installed && !/^Unversioned(?: installation)?$/i.test(state.installed)) lastConfirmedInstalledVersion = state.installed;
       const signer = state.available && state.signed_by ? ' (signed by ' + state.signed_by + ')' : '';
       const blocked = state.available && state.installable === false && state.reason;
       element('release-status').textContent = 'Installed: ' + (installedReleaseLabel() || 'Unknown') +
@@ -805,7 +807,7 @@ function showOnline(view) {
   const noToken = Boolean(ready && view.token_set === false);
   if (noToken) text = 'No GitHub token is saved on the Pi. Check for updates looks at releases already staged on the Pi.';
   element('online-check-status').textContent = text;
-  if (noToken) element('github-access-hint').textContent = 'To let the Pi look at GitHub, run this on the Pi: sudo jittersim update set-token (see The GitHub token below).';
+  if (noToken) element('github-access-hint').textContent = 'To let the Pi look at GitHub, follow the setup command in The GitHub token below.';
   element('github-access-hint').hidden = !noToken;
   const settings = ready && view.settings;
   for (const [id, name] of [['online-daily-check','daily_check'],['online-install-automatically','install_automatically']]) {
@@ -836,9 +838,13 @@ async function runOnlineCheck({force = false} = {}) {
   const context = updateContext();
   if (!updateContextCurrent(context)) return;
   onlinePolling = true;
+  const settingsGeneration = updateReadRevisions.online;
   try {
     let view = await request('/api/updates/check-online', 'POST', {force});
     if (!updateContextCurrent(context)) return;
+    if (settingsGeneration !== updateReadRevisions.online) {
+      view = {...view, settings:onlineView && onlineView.settings, token_set:onlineView && onlineView.token_set};
+    }
     showOnline(view);
     const started = Date.now();
     while (view.state === 'running' && updateContextCurrent(context) && Date.now() - started < 8 * 60 * 1000) {
@@ -885,8 +891,8 @@ async function installUpdate() {
   updateOutcome = '';
   updateReadRevisions.release += 1;
   await request('/api/updates/install', 'POST', {version, confirm: true});
-  updateReadRevisions.release += 1;
   if (!updateContextCurrent(context)) return;
+  updateReadRevisions.release += 1;
   updateWatch = {label: version, kind: 'install', context};
   renderUpdates();
   followUpdate();
@@ -899,8 +905,8 @@ async function restoreUpdate() {
   updateOutcome = '';
   updateReadRevisions.release += 1;
   await request('/api/updates/rollback', 'POST', {confirm: true});
-  updateReadRevisions.release += 1;
   if (!updateContextCurrent(context)) return;
+  updateReadRevisions.release += 1;
   updateWatch = {label: '', kind: 'restore', context};
   renderUpdates();
   followUpdate();
@@ -960,6 +966,7 @@ async function loadUpdateStateAfterSignIn() {
 function clearUpdatePrivateState() {
   updateAccessRevision += 1;
   releaseState = null;
+  lastConfirmedInstalledVersion = null;
   releasePollAt = 0;
   onlineView = null;
   autoCheckStagedUpdates = null;
@@ -1023,7 +1030,7 @@ function installReleaseControls() {
     <label class="update-auto-check"><input id="online-install-automatically" type="checkbox" disabled><span>Install automatically</span></label>
     <p class="form-note">Install automatically installs a new signed release without anyone pressing Install. It uses the same checks and the same recovery copy as a manual install. Both settings are off until you turn them on.</p>
     <p id="online-setting-status" class="form-note" role="status" aria-live="polite"></p>
-    <details><summary>The GitHub token</summary><p>The repository is private, so the Pi needs a read-only token for this one repository. Create it on GitHub (Settings, Developer settings, Fine-grained tokens, only this repository, Contents read-only, with an expiry date). Then run <code>sudo jittersim update set-token</code> on the Pi, paste the token and press Ctrl-D. This page never asks for the token and never shows it.</p></details>
+    <details><summary>The GitHub token</summary><p>The repository is private, so the Pi needs a read-only token for this one repository. Create it on GitHub (Settings, Developer settings, Fine-grained tokens, only this repository, Contents read-only, with an expiry date). Then run <code id="update-token-command">the setup command shown after sign-in</code> on the Pi, paste the token and press Ctrl-D. This page never asks for the token and never shows it.</p></details>
     <label class="update-auto-check"><input id="check-staged-updates-on-open" type="checkbox" disabled><span>Look for a release staged on this Pi when the dashboard opens</span></label>
     <p id="update-preference-status" class="form-note update-preference-status" role="status" aria-live="polite">Loading the saved preference…</p>
     <details><summary>How releases reach this private Pi</summary><p>The owner builds and signs a release on the Mac and deploy-from-mac.sh stages it over SSH. The Pi can also fetch the newest signed release from GitHub itself. The Pi stages only a release signed by a key it trusts and newer than the one it runs. The admin token cannot stage a release: it can only install the one already staged. See Signed releases in the deployment guide.</p></details>`);
