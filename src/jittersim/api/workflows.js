@@ -343,7 +343,7 @@ async function loadWorkspace() {
       const seconds = now - previousWorkspaceTraffic.at;
       const upload = Math.max(0, counters.upload_bytes - previousWorkspaceTraffic.counters.upload_bytes) * 8 / seconds / 1000000;
       const download = Math.max(0, counters.download_bytes - previousWorkspaceTraffic.counters.download_bytes) * 8 / seconds / 1000000;
-      text = 'At the Pi: ↑ ' + upload.toFixed(2) + ' Mbit/s · ↓ ' + download.toFixed(2) + ' Mbit/s. Measured before JitterSim effects.';
+      text = 'At the Pi: ↑ ' + upload.toFixed(2) + ' Mbit/s · ↓ ' + download.toFixed(2) + ' Mbit/s. Measured before any profile effects.';
     }
     if (counters) previousWorkspaceTraffic = {at:now,counters};
     element('workspace-traffic').textContent = text;

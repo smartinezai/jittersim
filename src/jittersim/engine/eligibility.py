@@ -96,7 +96,7 @@ def device_protection_states(
         if device.mac_address in protected:
             states[device.id] = {
                 "effective_state": "protected",
-                "effective_note": "On the Unaffected list. The saved profile is paused "
+                "effective_note": "On the Protected list. The saved profile is paused "
                 "and traffic is not monitored.",
                 "protected_match": None,
             }
@@ -120,7 +120,7 @@ def device_protection_states(
             elif device.mac_address is None:
                 note = (
                     "This saved device has no MAC address so JitterSim cannot check it "
-                    "against the Unaffected list. Its profile is paused until a MAC address "
+                    "against the Protected list. Its profile is paused until a MAC address "
                     "is saved."
                 )
             else:

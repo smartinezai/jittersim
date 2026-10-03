@@ -29,10 +29,10 @@ def expect_greyed_out(row):
     for name, control in controls(row).items():
         expect(control, name).to_have_js_property("disabled", True)
         expect(control, name).to_have_attribute("aria-disabled", "true")
-    expect(row.get_by_role("button", name=re.compile("^Remove protection"))).to_have_js_property(
+    expect(row.get_by_role("button", name=re.compile("^Stop protecting"))).to_have_js_property(
         "disabled", False
     )
-    expect(row.get_by_role("button", name=re.compile("^Remove protection"))).not_to_have_attribute(
+    expect(row.get_by_role("button", name=re.compile("^Stop protecting"))).not_to_have_attribute(
         "aria-disabled", re.compile(".*")
     )
     row.locator("summary", has_text="Edit name and type").click()
@@ -45,7 +45,7 @@ def expect_greyed_out(row):
 def expect_ordinary(row):
     expect(row).not_to_have_class(re.compile("protected"))
     expect(row.locator(".protected-badge")).to_have_count(0)
-    expect(row.get_by_role("button", name=re.compile("^Make unaffected"))).to_be_enabled()
+    expect(row.get_by_role("button", name=re.compile("^Protect"))).to_be_enabled()
     found = controls(row)
     for name in ("profile", "group"):
         expect(found[name], name).to_have_js_property("disabled", False)
@@ -191,7 +191,7 @@ def check_width(browser, base, width, height):
     expect(row).to_be_visible()
     expect(row).to_have_class(re.compile(r"\bprotected\b"))
     expect(row.locator(".protected-badge")).to_have_text("Protected")
-    expect(row).to_contain_text("Unaffected by all profiles and quotas")
+    expect(row).to_contain_text("Protected from all profiles and quotas")
     protected_look = look(row)
     assert protected_look["dot"] != ordinary_look["dot"], (protected_look, ordinary_look)
     assert protected_look["border"] != ordinary_look["border"], (protected_look, ordinary_look)
@@ -203,8 +203,8 @@ def check_width(browser, base, width, height):
     check_saved_device_rows(page, post, width)
     row = page.locator(f'.connected-row[data-mac-address="{MAC_ADDRESS}"]')
 
-    row.get_by_role("button", name=re.compile("^Remove protection")).click()
-    expect(row.get_by_role("button", name=re.compile("^Make unaffected"))).to_be_visible()
+    row.get_by_role("button", name=re.compile("^Stop protecting")).click()
+    expect(row.get_by_role("button", name=re.compile("^Protect"))).to_be_visible()
     expect(row).not_to_have_class(re.compile("protected"))
     expect(row.locator(".protected-badge")).to_have_count(0)
     expect(controls(row)["profile"]).to_have_js_property("disabled", False)

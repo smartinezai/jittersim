@@ -12,8 +12,8 @@ from jittersim.api.server import DASHBOARD_HTML
 SCRIPT = re.search(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL).group(1)
 NODE = pytest.mark.skipif(shutil.which("node") is None, reason="node is required")
 WHEN_IT_APPLIES = (
-    "It applies on its own while JitterSim is running. "
-    "After Reset or Panic choose Start with saved settings. After Panic also turn household blocking back on."
+    "It applies on its own while profiles are running. "
+    "After Reset or Panic choose Start. After Panic also turn household blocking back on."
 )
 
 
@@ -189,7 +189,7 @@ def test_a_failed_change_keeps_the_state_and_shows_the_error(blocked):
 
 def test_the_success_text_says_when_the_change_applies():
     # While the scheduler runs it applies a saved change on its next tick. After Reset or
-    # Panic it is paused and a saved change waits for Start with saved settings.
+    # Panic it is paused and a saved change waits for Start.
     assert "to enforce it" not in served_functions()
 
 

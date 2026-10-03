@@ -22,7 +22,7 @@ OLD_PHRASES = (
     "Configuration applied successfully",
 )
 
-NOT_RUNNING = "JitterSim is not running. Choose Start with saved settings."
+NOT_RUNNING = "Nothing is running. Choose Start."
 OFF = "Off. No traffic shaping is running."
 RUNNING = "Running. Your saved settings are applied. New changes apply on their own."
 CHANGE_PENDING = "Running. Your latest change applies on its own."
@@ -31,10 +31,10 @@ NEEDS_HELPER = "Needs the Pi helper to run."
 SAVED_DEVICE = "Saved: 1 device with a profile"
 NOTHING_SAVED = "No device profiles or service lists saved yet"
 NONE_TO_SHAPE = "No device profiles or service lists are saved yet."
-START = "Start with saved settings"
-REAPPLY = "Re-apply saved settings"
+START = "Start"
+REAPPLY = "Start"
 APPLY_HELP = (
-    "Starts JitterSim with everything you saved: device and group profiles and schedules"
+    "Starts everything you saved: device and group profiles and schedules"
     " and limits and service lists and access rules."
 )
 RESET_HELP = "Stops the profiles and removes their rules from the Pi so devices run normally."
@@ -374,7 +374,7 @@ def check_tips(browser):
         expect(apply_button).to_have_text(REAPPLY)
         apply_button.click()
         expect(message).to_have_text(
-            "Re-applied. " + NONE_TO_SHAPE + " Access rules apply."
+            "Started. " + NONE_TO_SHAPE + " Access rules apply."
         )
         # a protected device alone is not something that is shaped
         post("/api/unaffected-devices", {"mac_address": MAC_ADDRESS, "display_name": "Mine"})
@@ -383,7 +383,7 @@ def check_tips(browser):
         expect(summary).to_have_text("Saved: 1 protected device stays untouched")
         apply_button.click()
         expect(message).to_have_text(
-            "Re-applied. 1 protected device stays untouched. " + NONE_TO_SHAPE
+            "Started. 1 protected device stays untouched. " + NONE_TO_SHAPE
             + " Access rules apply."
         )
         assert not errors, errors
@@ -445,7 +445,7 @@ def check_sidebar_reach(browser):
         page.locator("#apply-button").click()
         expect(runtime).to_have_text(RUNNING)
         expect(page.locator("#apply-button")).to_have_text(REAPPLY)
-        expect(page.locator("#apply-summary")).to_contain_text("Saved: General profile")
+        expect(page.locator("#apply-summary")).to_contain_text("Saved: Profile")
         assert_sidebar_everywhere(page, "running")
 
         # The same with a message that fills several lines.
@@ -542,7 +542,7 @@ def check_width(browser, width, height):
         # the help text beside each button opens on hover and on keyboard focus
         apply_icon = page.locator("#apply-button + .help-icon")
         reset_icon = page.locator("#reset-button + .help-icon")
-        expect(apply_icon).to_have_attribute("aria-label", "Start or re-apply saved settings help")
+        expect(apply_icon).to_have_attribute("aria-label", "Start help")
         assert not tip_of(page, apply_icon)["shown"]
         apply_icon.hover()
         tip = tip_of(page, apply_icon)
@@ -557,11 +557,11 @@ def check_width(browser, width, height):
         expect(reset_icon).to_be_focused()
         tip = tip_of(page, reset_icon)
         assert tip["shown"] and tip["text"].startswith(RESET_HELP), tip
-        assert "Choose Start with saved settings to run them again." in tip["text"], tip
+        assert "Choose Start to run them again." in tip["text"], tip
         page.keyboard.press("Tab")
         assert not tip_of(page, reset_icon)["shown"]
 
-        # Start with saved settings
+        # Start
         sidebar_control(page, "#apply-button").click()
         expect(message).to_contain_text("Started: 1 device with a profile.")
         expect(runtime).to_have_text(RUNNING)
@@ -580,7 +580,7 @@ def check_width(browser, width, height):
 
         # applying again while it runs
         sidebar_control(page, "#apply-button").click()
-        expect(message).to_contain_text("Re-applied: 1 device with a profile.")
+        expect(message).to_contain_text("Started: 1 device with a profile.")
         expect(runtime).to_have_text(RUNNING)
         expect(apply_button).to_have_text(REAPPLY)
 
@@ -618,7 +618,7 @@ def check_width(browser, width, height):
         page.reload()
         wait_for_automatic_token_check(page)
         expect(summary).to_have_text(
-            f'Saved: General profile "{PROFILE_NAME}" for every unprotected device'
+            f'Saved: Profile "{PROFILE_NAME}" for every unprotected device'
             " · 1 protected device stays untouched"
         )
         expect(runtime).to_have_text(RUNNING)
@@ -678,11 +678,11 @@ def check_width(browser, width, height):
         # Panic stops it again and says how to run it
         page.locator("#panic-button").click()
         expect(message).to_contain_text(
-            "All profiles and household blocking are off. Choose Start with saved settings"
+            "All profiles and household blocking are off. Choose Start"
         )
         expect(runtime).to_have_text(OFF)
         expect(apply_button).to_have_text(START)
-        expect(summary).to_contain_text('Saved: General profile "')
+        expect(summary).to_contain_text('Saved: Profile "')
         assert_old_wording_is_gone(page)
         shoot("off")
 

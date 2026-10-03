@@ -1501,9 +1501,9 @@ class HelperClient:
             # A busy helper is not an old one, so it keeps its own message.
             if error.reason == "helper-busy":
                 raise
-            raise HelperClientError("Update the Pi helper before applying a general profile") from error
+            raise HelperClientError("Update the Pi helper before applying a profile for everyone") from error
         if capabilities.get("general_profile") is not True:
-            raise HelperClientError("Update the Pi helper before applying a general profile")
+            raise HelperClientError("Update the Pi helper before applying a profile for everyone")
 
     def reset(self) -> Dict[str, Any]:
         """Ask the helper to remove project-owned network state."""

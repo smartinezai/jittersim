@@ -213,7 +213,7 @@ def check_first_screen(page, what):
 
 def check_header(page, what):
     expect(page.locator("#status-strip")).to_be_visible()
-    expect(page.locator("#status-strip")).to_contain_text("General: ")
+    expect(page.locator("#status-strip")).to_contain_text("Everyone: ")
     expect(page.locator("#sidebar-status")).to_be_hidden()
     open_status(page)
     expect(page.locator("#sidebar-status")).to_be_visible()
@@ -293,7 +293,9 @@ def check_sheet(page, what):
         }"""
     )
     assert focused, (what, "the sheet did not take the focus")
-    for selector in SHEET_CONTROLS + ("#runtime-summary", "#message", "#apply-summary"):
+    expect(page.locator("#message")).to_be_hidden()
+    expect(page.locator("#message")).to_have_attribute("aria-hidden", "true")
+    for selector in SHEET_CONTROLS + ("#runtime-summary", "#apply-summary"):
         control = page.locator(selector)
         if selector == "#apply-summary" and control.is_hidden():
             continue
@@ -349,21 +351,21 @@ def check_active_profile(page, base, what):
     expect(button).to_be_enabled()
     button.click()
     expect(page.locator("#message")).to_contain_text(
-        "General profile applied. Protected devices remain unaffected."
+        "Profile applied for everyone. Protected devices keep normal access."
     )
     expect(button).to_have_text("Stop")
     expect(select).to_have_value("slow")
     close_controls(page)
-    expect(page.locator("#status-strip")).to_contain_text(f"General: {PROFILE['name']} · active")
+    expect(page.locator("#status-strip")).to_contain_text(f"Everyone: {PROFILE['name']} · active")
     open_controls(page)
     page.locator("#active-profile-button").click()
     expect(page.locator("#message")).to_contain_text(
-        "General profile stopped. Saved device rules resumed."
+        "Stopped the profile for everyone. Saved device rules resumed."
     )
     expect(button).to_have_text("Apply to all devices")
     expect(select).to_have_value("")
     close_controls(page)
-    expect(page.locator("#status-strip")).to_contain_text("General: none")
+    expect(page.locator("#status-strip")).to_contain_text("Everyone: none")
 
 
 def check_phone(page, base, width, height, stress, css, first):
