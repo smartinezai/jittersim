@@ -792,11 +792,11 @@ INSTALLER = Path(__file__).resolve().parents[2] / "deploy" / "raspberry-pi" / "i
 
 
 def run_installer(tmp_path, *arguments):
-    """install.sh with a fake id (root) and a fake getent that stops it at the user check, so
-    nothing after that check can run on this machine."""
+    """Run the real leased installer until its key or service-user refusal."""
     import subprocess
     import shlex
     import sys
+    from tests.unit.test_installer_lock import simulated_installer_manager
 
     fake = tmp_path / "bin"
     fake.mkdir(exist_ok=True)
@@ -804,40 +804,51 @@ def run_installer(tmp_path, *arguments):
     for name, body in (("id", 'echo 0'), ("getent", 'exit 1')):
         (fake / name).write_text(f'#!/bin/sh\necho "{name} $*" >> "{log}"\n{body}\n')
         (fake / name).chmod(0o755)
-    # Keep host ownership probes outside this fixture. Their real descriptor
-    # and process behavior has separate tests. The real shell still reenters
-    # and parses the explicit passwordless choice, then stops at fake getent.
-    dispatch = tmp_path / "installer-python.py"
-    dispatch.write_text("""import os, sys
-from pathlib import Path
-arguments = sys.argv[1:]
-script = Path(arguments[1]).name
-if script == 'install-lock.py':
-    if '--verify' in arguments:
-        raise SystemExit(0)
-    installer = arguments[arguments.index('--installer') + 1]
-    source = arguments[arguments.index('--source') + 1]
-    choices = ['--enable-passwordless-staging'] if '--enable-passwordless-staging' in arguments else []
-    os.environ['JITTERSIM_INSTALL_LOCK_FD'] = '9'
-    os.execv('/bin/sh', ['sh', installer, *choices, source])
-if script == 'create-ap-profile.py' and '--help' in arguments:
-    raise SystemExit(0)
-os.execv(sys.executable, [sys.executable, *arguments])
-""")
+    source = tmp_path / "source"
+    scripts = source / "deploy/raspberry-pi"
+    scripts.mkdir(parents=True)
+    (source / "pyproject.toml").touch()
+    config = tmp_path / "config"
+    config.mkdir()
+    update_root = tmp_path / "updates"
+    update_root.mkdir(mode=0o700)
+    launcher = scripts / "install-lock.py"
+    launcher.write_text((INSTALLER.parent / launcher.name).read_text().replace(
+        'LOCK_ROOT = Path("/var/lib/jittersim-updates")',
+        "LOCK_ROOT = Path(" + repr(str(update_root)) + ")"))
+    package = source / "src/jittersim"
+    package.mkdir(parents=True)
+    # Keep actual descriptor checks and the whole-command lease. Only the
+    # machine role and Panic provisioning are isolated from this flag test.
+    (package / "updates.py").write_text(simulated_installer_manager(
+        update_root, tmp_path / "installed-manager.py"))
+    (scripts / "create-ap-profile.py").write_text("pass\n")
+    # This source admission call belongs to the locked-wheel preparation tests.
+    (scripts / "prepare-locked-wheels.py").write_text("pass\n")
+    installer = scripts / "install.sh"
+    installer.write_text(INSTALLER.read_text().replace(
+        "CONFIG_DIR=/etc/jittersim", "CONFIG_DIR=" + shlex.quote(str(config))))
     python = fake / "python3"
-    python.write_text('#!/bin/sh\nexec ' + shlex.quote(sys.executable) + ' '
-                      + shlex.quote(str(dispatch)) + ' "$@"\n')
+    python.write_text('#!/bin/sh\nexec ' + shlex.quote(sys.executable) + ' "$@"\n')
     python.chmod(0o755)
+    # The production supervisor hides child output. Capture this fixture's
+    # early refusal inside the leased process so the assertions observe the
+    # real shell message without changing production output handling.
+    errors = tmp_path / "installer-error.txt"
+    entry = tmp_path / "leased-entry.sh"
+    entry.write_text("#!/bin/sh\n/bin/sh " + shlex.quote(str(installer))
+                     + ' "$@" 2>' + shlex.quote(str(errors)) + "\n")
     result = subprocess.run(
-        ["/bin/sh", str(INSTALLER), *arguments], capture_output=True, text=True, timeout=30,
+        [sys.executable, "-I", str(launcher), "--installer", str(entry),
+         "--source", str(source), *arguments], capture_output=True, text=True, timeout=30,
         env={"PATH": f"{fake}:/usr/bin:/bin", "HOME": str(tmp_path)},
     )
+    if errors.exists():
+        result.stderr = errors.read_text() + result.stderr
     return result, log.read_text().split("\n") if log.exists() else []
 
 
 def test_the_installer_refuses_passwordless_staging_without_a_trusted_key(tmp_path):
-    if Path("/etc/jittersim/release-signers").exists():
-        pytest.skip("this machine has a real trusted key list")
     result, calls = run_installer(tmp_path, "--enable-passwordless-staging")
     assert result.returncode == 1
     assert "needs a trusted release signing key first" in result.stderr
