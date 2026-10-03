@@ -238,7 +238,7 @@ WRITE_PATHS = (WRITE_PATHS | WORKFLOW_WRITES | ACCESS_WRITES | {"/api/schedules/
                | {RELEASE_UPLOAD_PATH})
 ACTION_PATHS = frozenset(
     ("/api/apply", "/api/reset", "/api/observations/scan", "/api/update-preferences",
-     "/api/access-point/reset-name", "/api/updates/check-online")
+     "/api/access-point/reset-name", "/api/updates/check-online", "/api/updates/retry")
 )
 PUBLIC_READ_PATHS = frozenset(("/", "/api/health"))
 # Panic runs ahead of other writes: it never waits for the write lock of an apply in flight.

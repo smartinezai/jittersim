@@ -24,7 +24,7 @@ def run():
                 context = browser.new_context(viewport={"width": width, "height": 900})
                 counts = collections.Counter()
                 errors = []
-                state = {"staged": None, "daily": False, "fail_read": False, "lose_save": False}
+                state = {"staged": None, "daily": False, "fail_read": False, "lose_save": False, "operation": None, "lose_retry": False, "other_retry": False}
                 held = []
 
                 def update_reply(route):
@@ -49,15 +49,29 @@ def run():
                             route.abort()
                             return
                         data = {"token_set": True, "settings": {"daily_check": state["daily"], "install_automatically": False}}
+                    elif path == "api/updates/retry":
+                        assert request.method == "POST"
+                        assert request.post_data_json == {"retry_id": "c" * 64}
+                        queued = dict(state["operation"], phase="queued")
+                        state["operation"] = dict(state["operation"], phase="complete", installed="2.0.0", retry=None)
+                        if state["other_retry"]:
+                            state["operation"]["request_id"] = "b" * 32
+                        if state["lose_retry"]:
+                            state["lose_retry"] = False
+                            route.abort()
+                            return
+                        data = {"status": queued}
                     elif path == "api/update-preferences":
                         data = {"check_staged_updates_on_open": False}
                     else:
                         data = {"installed": "1.0.0", "available": state["staged"], "phase": "ready",
                                 "installable": bool(state["staged"]), "signed_by": "fixture-key",
                                 "message": "fixture signed release status", "rollback_available": False}
+                        if state["operation"]:
+                            data.update(state["operation"])
                     route.fulfill(status=200, content_type="application/json", body=json.dumps(data))
 
-                for path in ("updates", "updates/check-online", "updates/online-settings", "update-preferences"):
+                for path in ("updates", "updates/retry", "updates/check-online", "updates/online-settings", "update-preferences"):
                     context.route("**/api/" + path, update_reply)
                 page = context.new_page()
                 page.on("pageerror", lambda error: errors.append(str(error)))
@@ -101,6 +115,46 @@ def run():
                 expect(page.locator("#online-setting-status")).to_have_text("Current setting on the Pi: on.")
                 assert counts[("POST", "api/updates/online-settings")] == 1
                 checks.append("lost save reply recovers by reading without replay")
+                expect(page.locator("#release-retry")).to_be_hidden()
+                checks.append("legacy status offers no retained retry")
+
+                def failed_operation():
+                    return {"installed": "1.0.0", "phase": "failed", "request_id": "a" * 32,
+                            "request_kind": "install", "message": "Retained failed update",
+                            "retry": {"id": "c" * 64, "request_id": "a" * 32, "kind": "install",
+                                      "version": "2.0.0", "recovering": False}}
+
+                state["operation"] = failed_operation()
+                page.evaluate("loadReleaseStatus({force:true})")
+                expect(page.locator("#release-retry")).to_be_enabled()
+                page.locator("#release-retry").click()
+                page.locator("dialog").get_by_role("button", name="Cancel", exact=True).click()
+                expect(page.locator("#release-retry")).to_be_enabled()
+                assert counts[("POST", "api/updates/retry")] == 0
+                checks.append("cancelled retained retry sends no write")
+                page.locator("#release-retry").click()
+                state["operation"]["retry"]["id"] = "d" * 64
+                page.locator("dialog").get_by_role("button", name="Continue", exact=True).click()
+                expect(page.locator("#update-progress")).to_contain_text("changed")
+                assert counts[("POST", "api/updates/retry")] == 0
+                checks.append("changed retry admission is rejected after confirmation")
+                state["operation"] = failed_operation()
+                state["lose_retry"] = True
+                page.evaluate("loadReleaseStatus({force:true})")
+                page.locator("#release-retry").click()
+                page.locator("dialog").get_by_role("button", name="Continue", exact=True).click()
+                expect(page.locator("#update-progress")).to_have_text("Updated to 2.0.0.")
+                assert counts[("POST", "api/updates/retry")] == 1
+                checks.append("lost retry reply confirms the same request by reads without replay")
+                state["operation"] = failed_operation()
+                state["other_retry"] = True
+                page.evaluate("loadReleaseStatus({force:true})")
+                page.locator("#release-retry").click()
+                page.locator("dialog").get_by_role("button", name="Continue", exact=True).click()
+                expect(page.locator("#update-progress")).to_contain_text("not confirmed")
+                assert counts[("POST", "api/updates/retry")] == 2
+                checks.append("same version from another request cannot confirm retry")
+                state["operation"] = None
                 remembered = context.new_page()
                 remembered.on("pageerror", lambda error: errors.append(str(error)))
                 remembered.goto(f"http://127.0.0.1:{port}")

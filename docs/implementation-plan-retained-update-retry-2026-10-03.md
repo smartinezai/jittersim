@@ -54,3 +54,33 @@ new contract remains optional for older managers. Exact final source passes
 configured lint and the complete combined installed Linux workflows. A failed
 retry retains the original recovery information. Publication and live Pi
 installation retain the normal source and independent recovery requirements.
+
+## Reviewed transport direction
+
+The agreed public request is POST `/api/updates/retry` with exactly one
+`retry_id` containing 64 lowercase hexadecimal characters. The API calls
+`HelperClient.retry_update(retry_id=...)` once and returns 202 with the fresh
+helper status under `status`. Known stale or busy admission refusals return
+409. A missing or unsupported helper returns a plain unavailable response.
+Existing token and accepted-device checks apply before helper dispatch.
+
+Register this endpoint as an action so queue admission does not acquire the
+scheduler configuration lock. Root owns the API workflow module and dashboard.
+The concurrency owner owns the helper adapter. The backend owner supplies the
+stable `request_id` and operation kind for status ownership before watchers
+are implemented. Unknown fields and malformed identifiers never reach helper.
+
+
+## Final status field names
+
+The stable `request_id` is 32 lowercase hexadecimal characters, minted before
+first preparation. `request_kind` is `install` or `rollback` and remains the
+original choice through automatic recovery. Both fields accompany queue,
+progress and terminal responses. A missing operation has null values.
+
+`retry` is null or contains `id` (64 lowercase hexadecimal admission hash),
+`request_id`, original `kind`, original `version` or null and `recovering`.
+`retry_unavailable_reason` is a safe plain message or null. The dashboard
+matches progress by the stable request identity. The admission hash is used
+only to reject stale confirmations. Legacy status without identity never
+becomes a confirmed completion for an identified operation.
