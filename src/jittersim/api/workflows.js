@@ -555,6 +555,7 @@ let lastConfirmedInstalledVersion = null;
 let updateWatch = null;
 let updateFollowing = false;
 let updateCheckRunning = false;
+let updateRetryOwner = null;
 let updateOutcome = '';
 let updateAccessRevision = 0;
 const updateReads = new Map();
@@ -599,6 +600,22 @@ function updateRead(kind, context, read) {
   updateReads.set(kind, owner);
   return owner.promise;
 }
+function identifiedUpdate(state) {
+  return Boolean(state && typeof state.request_id === 'string' && state.request_id.length === 32 && /^[0-9a-f]{32}$/.test(state.request_id) &&
+    ['install','rollback'].includes(state.request_kind));
+}
+function retainedRetry(state) {
+  const retry = state && state.retry;
+  return identifiedUpdate(state) && retry && typeof retry.id === 'string' && retry.id.length === 64 && /^[0-9a-f]{64}$/.test(retry.id) &&
+    retry.request_id === state.request_id && retry.kind === state.request_kind &&
+    (retry.version === null || (typeof retry.version === 'string' && retry.version.length <= 64)) &&
+    typeof retry.recovering === 'boolean' ? retry : null;
+}
+function watchUpdate(state, context, kind, label) {
+  return {context, kind, label,
+    requestId:identifiedUpdate(state) ? state.request_id : null,
+    requestKind:identifiedUpdate(state) ? (kind === 'restore' ? 'rollback' : 'install') : null};
+}
 function releaseOperationBusy() {
   return Boolean(releaseState && RELEASE_BUSY_PHASES.includes(releaseState.phase));
 }
@@ -628,7 +645,7 @@ function updateProgressText(failedRead) {
 function renderUpdates(failedRead) {
   const state = releaseState;
   const busy = Boolean(updateWatch) || releaseOperationBusy();
-  const working = !adminTokenVerified || busy || updateCheckRunning || onlinePolling;
+  const working = !adminTokenVerified || busy || updateCheckRunning || onlinePolling || Boolean(updateRetryOwner);
   const ready = adminTokenVerified && stagedReleaseReady(state);
   const installed = installedReleaseLabel();
   const blocked = state && state.available && state.installable === false && state.reason;
@@ -643,6 +660,13 @@ function renderUpdates(failedRead) {
   element('release-install').disabled = working || !ready;
   element('release-install').classList.toggle('primary', ready && !working);
   element('release-rollback').disabled = working || !(state && state.rollback_available);
+  const retry = retainedRetry(state);
+  element('release-retry').hidden = !retry;
+  element('release-retry').disabled = working || !retry;
+  const retryReason = state && !retry && typeof state.retry_unavailable_reason === 'string'
+    ? state.retry_unavailable_reason.slice(0, 500) : '';
+  element('update-retry-status').textContent = retryReason;
+  element('update-retry-status').hidden = !retryReason;
   const progress = updateProgressText(failedRead);
   element('update-progress').hidden = !progress;
   element('update-progress').textContent = progress;
@@ -671,7 +695,7 @@ function loadReleaseStatus({force = false} = {}) {
         ' · Available: ' + (state.available ? state.available + signer : 'None staged') +
         ' · ' + (blocked ? state.reason : state.message || 'Status read.');
       if (releaseOperationBusy() && !updateWatch) {
-        updateWatch = {label: state.available || '', kind: state.phase === 'rolling-back' ? 'restore' : 'install', context};
+        updateWatch = watchUpdate(state, context, state.request_kind === 'rollback' || (!identifiedUpdate(state) && state.phase === 'rolling-back') ? 'restore' : 'install', state.available || '');
         updateOutcome = '';
       }
       renderUpdates();
@@ -705,11 +729,18 @@ async function followUpdate() {
           if (!updateContextCurrent(context) || updateWatch !== watch) return;
           if (!state) break;
           const phase = state.phase;
-          if (phase === 'complete' && watch.kind === 'install' && watch.label && state.installed === watch.label) {
+          const sameRequest = !watch.requestId || (identifiedUpdate(state) &&
+            state.request_id === watch.requestId && state.request_kind === watch.requestKind);
+          if (!sameRequest) {
+            updateOutcome = 'The requested update was not confirmed. The Pi now reports a different or unidentified operation.';
+            updateWatch = null;
+          } else if (phase === 'complete' && watch.kind === 'install' && watch.label && state.installed === watch.label) {
             updateOutcome = 'Updated to ' + watch.label + '.';
             updateWatch = null;
           } else if (phase === 'rolled-back' && watch.kind === 'restore' && state.installed) {
-            updateOutcome = 'The Pi reports rollback status. This restore request is not confirmed. Installed version: ' + state.installed + '.';
+            updateOutcome = watch.requestId
+              ? 'Previous installation restored. Installed version: ' + state.installed + '.'
+              : 'The Pi reports rollback status. This restore request is not confirmed. Installed version: ' + state.installed + '.';
             updateWatch = null;
           } else if (['complete','rolled-back','failed'].includes(phase)) {
             updateOutcome = 'The requested update was not confirmed. ' + (state.message || '') +
@@ -890,10 +921,10 @@ async function installUpdate() {
   if (!updateContextCurrent(context) || !stagedReleaseReady(releaseState) || releaseState.available !== version) return;
   updateOutcome = '';
   updateReadRevisions.release += 1;
-  await request('/api/updates/install', 'POST', {version, confirm: true});
+  const queued = await request('/api/updates/install', 'POST', {version, confirm: true});
   if (!updateContextCurrent(context)) return;
   updateReadRevisions.release += 1;
-  updateWatch = {label: version, kind: 'install', context};
+  updateWatch = watchUpdate(queued.status || queued, context, 'install', version);
   renderUpdates();
   followUpdate();
 }
@@ -904,12 +935,61 @@ async function restoreUpdate() {
   if (!updateContextCurrent(context) || !releaseState || !releaseState.rollback_available) return;
   updateOutcome = '';
   updateReadRevisions.release += 1;
-  await request('/api/updates/rollback', 'POST', {confirm: true});
+  const queued = await request('/api/updates/rollback', 'POST', {confirm: true});
   if (!updateContextCurrent(context)) return;
   updateReadRevisions.release += 1;
-  updateWatch = {label: '', kind: 'restore', context};
+  updateWatch = watchUpdate(queued.status || queued, context, 'restore', '');
   renderUpdates();
   followUpdate();
+}
+async function retryUpdate() {
+  const context = updateContext();
+  const chosen = retainedRetry(releaseState);
+  if (!updateContextCurrent(context) || !chosen || updateRetryOwner || updateWatch || releaseOperationBusy()) return;
+  const owner = {context};
+  updateRetryOwner = owner;
+  renderUpdates();
+  try {
+    if (!await confirmWorkflow('Retry this failed ' + (chosen.kind === 'rollback' ? 'restore' : 'update') +
+      ' using its saved request and recovery copy? The dashboard and test network may restart. Keep an independent management connection available.')) return;
+    if (!updateContextCurrent(context)) return;
+    const current = await loadReleaseStatus({force:true});
+    if (!updateContextCurrent(context)) return;
+    const admission = retainedRetry(current);
+    if (!admission || admission.id !== chosen.id || admission.request_id !== chosen.request_id ||
+        admission.kind !== chosen.kind || releaseOperationBusy()) {
+      updateOutcome = 'The failed update changed. Read its current status before retrying.';
+      return;
+    }
+    updateReadRevisions.release += 1;
+    let queued = null;
+    try {
+      const reply = await request('/api/updates/retry', 'POST', {retry_id:chosen.id});
+      if (!updateContextCurrent(context)) return;
+      queued = reply && reply.status;
+    } catch (error) {
+      if (!updateContextCurrent(context)) return;
+      updateOutcome = 'The retry result is unknown. Reading status without repeating the retry.';
+    }
+    if (!updateContextCurrent(context)) return;
+    updateReadRevisions.release += 1;
+    if (!identifiedUpdate(queued) || queued.request_id !== chosen.request_id || queued.request_kind !== chosen.kind) {
+      queued = await loadReleaseStatus({force:true}).catch(() => null);
+      if (!updateContextCurrent(context)) return;
+    }
+    if (!identifiedUpdate(queued) || queued.request_id !== chosen.request_id || queued.request_kind !== chosen.kind) {
+      updateOutcome = 'The retry was not confirmed. Read the current operation before trying again.';
+      return;
+    }
+    updateOutcome = '';
+    updateWatch = watchUpdate(queued, context, chosen.kind === 'rollback' ? 'restore' : 'install', chosen.version || '');
+    await followUpdate();
+  } catch (error) {
+    if (updateContextCurrent(context)) updateOutcome = 'The retry was not confirmed. Check its current status before trying again.';
+  } finally {
+    if (updateRetryOwner === owner) updateRetryOwner = null;
+    if (updateContextCurrent(context)) renderUpdates();
+  }
 }
 function installOnlineControls() {
   const status = element('online-setting-status');
@@ -977,7 +1057,13 @@ function clearUpdatePrivateState() {
     element(id).checked = false;
     element(id).disabled = true;
   }
-  for (const id of ['release-install','release-rollback','release-check']) element(id).disabled = true;
+  for (const id of ['release-install','release-rollback','release-check','release-retry']) {
+    element(id).disabled = true;
+    element(id).removeAttribute('aria-busy');
+  }
+  element('release-retry').hidden = true;
+  element('update-retry-status').textContent = '';
+  element('update-retry-status').hidden = true;
   for (const id of ['online-check-status','online-setting-status','release-status','update-preference-status']) element(id).textContent = 'Sign in to read update status.';
   element('github-access-hint').textContent = '';
   element('github-access-hint').hidden = true;
@@ -997,15 +1083,28 @@ function wireReleaseControls() {
   const buttons = [
     ['release-check','Check for updates',checkForUpdates],
     ['release-install','Install update',installUpdate],
-    ['release-rollback','Restore previous installation',restoreUpdate]
+    ['release-rollback','Restore previous installation',restoreUpdate],
+    ['release-retry','Retry failed update',retryUpdate]
   ].map(([id,label,action]) => {
-    const button = actionButton(label, action);
+    const button = textNode('button', label);
+    button.type = 'button';
     button.id = id;
-    button.afterAction = () => renderUpdates();
+    button.addEventListener('click', async () => {
+      const context = updateContext();
+      if (button.disabled || !updateContextCurrent(context)) return;
+      setButtonBusy(button, true);
+      try { await action(); }
+      catch (error) { if (updateContextCurrent(context)) showMessage(error.message, 'error'); }
+      finally {
+        if (updateContextCurrent(context)) { setButtonBusy(button, false); renderUpdates(); }
+      }
+    });
     return button;
   });
   buttons[1].disabled = true;
   buttons[2].disabled = true;
+  buttons[3].disabled = true;
+  buttons[3].hidden = true;
   element('release-actions').append(...buttons);
   installUpdateCheckPreference();
   installOnlineControls();
@@ -1024,6 +1123,7 @@ function installReleaseControls() {
     <p id="online-check-status" class="form-note" role="status" aria-live="polite">Loading the online check…</p>
     <p id="github-access-hint" class="form-note" hidden></p>
     <div id="release-actions"></div>
+    <p id="update-retry-status" class="form-note" hidden></p>
     <p id="update-progress" class="update-progress" role="status" aria-live="polite" hidden></p>
     <h3 class="online-heading">Settings</h3>
     <label class="update-auto-check"><input id="online-daily-check" type="checkbox" disabled><span>Check automatically every day</span></label>
