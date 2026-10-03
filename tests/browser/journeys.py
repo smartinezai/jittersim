@@ -69,10 +69,15 @@ def check_wifi_recovery(page):
     page.route("**/api/access-point/reset-name", lambda route: held.append(route))
     page.once("dialog", lambda dialog: dialog.accept())
     button.click()
+    # The control becomes busy before the asynchronous request reaches the route.
+    for _ in range(100):
+        if held:
+            break
+        page.wait_for_timeout(10)
     expect(button).to_be_disabled()
-    assert len(held) == 1
+    assert len(held) == 1, held
     held[0].continue_()
-    expect(field).to_have_value("JitterSim")
+    expect(field).to_have_value("TestNet")
     expect(button).to_be_enabled()
     assert len(requests) == 2
     page.unroute("**/api/access-point/reset-name")
@@ -227,6 +232,8 @@ def run():
             errors = []
             release_checks = []
             release_installs = []
+            online_checks = []
+            preference_requests = []
             page.on("pageerror", lambda error: errors.append(str(error)))
             page.on(
                 "request",
@@ -240,6 +247,19 @@ def run():
                 if request.method == "POST" and request.url.endswith("/api/updates/install")
                 else None,
             )
+            page.on(
+                "request",
+                lambda request: online_checks.append(request.url)
+                if request.method == "POST" and request.url.endswith("/api/updates/check-online")
+                else None,
+            )
+            page.on(
+                "request",
+                lambda request: preference_requests.append(request.method)
+                if request.url.endswith("/api/update-preferences")
+                else None,
+            )
+            page.clock.install()
             Path("test-results").mkdir(exist_ok=True)
             try:
                 page.goto(f"http://127.0.0.1:{port}")
@@ -247,6 +267,8 @@ def run():
                 # health card reads them from the private route.
                 public_health = page.request.get(f"http://127.0.0.1:{port}/api/health").json()
                 assert "system" not in public_health, public_health
+                # Keep periodic status reads from racing the exact request counts.
+                page.clock.pause_at(page.evaluate("Date.now() / 1000") + 1)
                 unlock(page)
                 expect(page.locator("#health-details")).to_contain_text("Version: ")
                 expect(page.locator("#health-details")).not_to_contain_text("Version: Unknown")
@@ -266,22 +288,32 @@ def run():
                 expect(page.locator("#update-preference-status")).to_contain_text(
                     "Automatic checking is off."
                 )
+                # On-open checks are optional. Visible Updates always reads local status.
+                page.get_by_role("link", name=DEVICES_LINK).click()
                 page.reload()
                 expect(page.locator("#update-preference-status")).to_contain_text(
                     "Automatic checking is off."
                 )
                 assert len(release_checks) == 1, release_checks
+                assert not online_checks, online_checks
+                assert not release_installs, release_installs
                 page.get_by_role("link", name=UPDATES_LINK).click()
-                page.get_by_role("button", name="Check for updates", exact=True).click()
                 expect(page.locator("#release-status")).to_contain_text("candidate-release")
                 assert len(release_checks) == 2, release_checks
+                page.get_by_role("button", name="Check for updates", exact=True).click()
+                expect(page.get_by_role("button", name="Check for updates", exact=True)).to_be_enabled()
+                expect(page.locator("#release-status")).to_contain_text("candidate-release")
+                assert len(release_checks) == 3, release_checks
                 automatic_check = page.locator("#check-staged-updates-on-open")
                 automatic_check.check()
+                expect(automatic_check).to_be_enabled()
                 expect(page.locator("#update-preference-status")).to_contain_text(
                     "Automatic checking is on."
                 )
                 expect(page.locator("#update-available-badge")).to_be_visible()
-                assert len(release_checks) == 3, release_checks
+                assert len(release_checks) == 4, release_checks
+                preference_writes = preference_requests.count("POST")
+                preference_reads = preference_requests.count("GET")
                 page.route(
                     "**/api/update-preferences",
                     lambda route: route.fulfill(
@@ -294,10 +326,14 @@ def run():
                 )
                 automatic_check.uncheck()
                 expect(automatic_check).to_be_checked()
+                expect(automatic_check).to_be_enabled()
                 expect(page.locator("#update-preference-status")).to_contain_text(
-                    "The preference was not saved."
+                    "Automatic checking is on."
                 )
+                assert preference_requests.count("POST") == preference_writes + 1, preference_requests
+                assert preference_requests.count("GET") == preference_reads + 1, preference_requests
                 page.unroute("**/api/update-preferences")
+                page.get_by_role("link", name=DEVICES_LINK).click()
                 preference_read_count = len(release_checks)
                 page.route(
                     "**/api/update-preferences",
@@ -310,20 +346,33 @@ def run():
                 page.reload()
                 expect(page.locator("#check-staged-updates-on-open")).to_be_disabled()
                 expect(page.locator("#update-preference-status")).to_contain_text(
-                    "The saved preference could not be read."
+                    "The saved preference is unknown."
                 )
                 assert len(release_checks) == preference_read_count, release_checks
-                page.get_by_role("button", name="Check for updates", exact=True).click()
+                assert not online_checks, online_checks
+                assert not release_installs, release_installs
+                page.get_by_role("link", name=UPDATES_LINK).click()
                 expect(page.locator("#release-status")).to_contain_text("candidate-release")
                 assert len(release_checks) == preference_read_count + 1, release_checks
+                page.get_by_role("button", name="Check for updates", exact=True).click()
+                expect(page.get_by_role("button", name="Check for updates", exact=True)).to_be_enabled()
+                expect(page.locator("#release-status")).to_contain_text("candidate-release")
+                expect(page.locator("#check-staged-updates-on-open")).to_be_disabled()
+                expect(page.locator("#update-preference-status")).to_contain_text(
+                    "The saved preference is unknown."
+                )
+                assert len(release_checks) == preference_read_count + 2, release_checks
                 page.unroute("**/api/update-preferences")
+                page.get_by_role("link", name=DEVICES_LINK).click()
                 page.reload()
                 expect(page.locator("#update-preference-status")).to_contain_text(
                     "Automatic checking is on."
                 )
                 expect(page.locator("#check-staged-updates-on-open")).to_be_checked()
                 expect(page.locator("#release-status")).to_contain_text("candidate-release")
-                assert len(release_checks) == preference_read_count + 2, release_checks
+                assert len(release_checks) == preference_read_count + 3, release_checks
+                # The remaining journey exercises ordinary status polling and timers.
+                page.clock.resume()
                 page.get_by_role("link", name="Access and rules", exact=True).click()
                 draft = page.get_by_label("Global blocked domains (comma separated)", exact=True)
                 draft.fill("unsaved.example")
@@ -476,7 +525,7 @@ def run():
                 )
                 page.get_by_role("button", name="Check for updates", exact=True).click()
                 expect(page.locator("#release-status")).to_contain_text(
-                    "Could not check for a staged release."
+                    "Staged release status is unknown."
                 )
                 expect(page.get_by_role("button", name="Check for updates")).to_be_enabled()
                 page.unroute("**/api/updates")
@@ -498,22 +547,24 @@ def run():
                 )
                 page.get_by_role("button", name="Check for updates", exact=True).click()
                 expect(page.locator("#release-status")).to_contain_text(
-                    "Installed: Unknown · Available: None staged"
+                    "Installed: test-release · Available: None staged"
                 )
                 expect(page.locator("#update-available-badge")).to_be_hidden()
                 expect(page.locator("#release-install")).to_be_disabled()
                 page.unroute("**/api/updates")
-                release_phases = ["installing", "done"]
+                release_operation = {"phase": "installing"}
 
                 def release_progress(route):
-                    phase = release_phases.pop(0) if len(release_phases) > 1 else release_phases[0]
+                    phase = release_operation["phase"]
                     route.fulfill(
                         status=200,
                         content_type="application/json",
                         body=json.dumps(
                             {
                                 "phase": phase,
-                                "installed": "test-release",
+                                "request_id": "a" * 32,
+                                "request_kind": "install",
+                                "installed": "candidate-release" if phase == "complete" else "test-release",
                                 "available": "candidate-release",
                                 "rollback_available": True,
                                 "message": "Update " + phase + ".",
@@ -525,11 +576,15 @@ def run():
                 page.get_by_role("button", name="Check for updates", exact=True).click()
                 expect(page.locator("#release-status")).to_contain_text("Update installing.")
                 expect(page.locator("#release-install")).to_be_disabled()
-                # The Setup poll follows the install without another click.
+                # Updates follows the same operation until the installed version confirms it.
+                release_operation["phase"] = "complete"
                 expect(page.locator("#release-status")).to_contain_text(
-                    "Update done.", timeout=15000
+                    "Update complete.", timeout=15000
                 )
+                expect(page.locator("#update-progress")).to_have_text("Updated to candidate-release.")
+                expect(page.locator("#update-installed")).to_have_text("candidate-release")
                 expect(page.locator("#release-rollback")).to_be_enabled()
+                assert not release_installs, release_installs
                 page.unroute("**/api/updates")
                 page.set_viewport_size({"width": 320, "height": 740})
                 for tab in (
