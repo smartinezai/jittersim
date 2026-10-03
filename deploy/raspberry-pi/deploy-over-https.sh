@@ -174,6 +174,14 @@ if [ "$dry_run" = no ]; then
     (cd "$repo" && sh deploy/raspberry-pi/build-release.sh "$commit" "$archive" "$signing_key" >/dev/null) \
         || fail "building or signing the release failed"
 fi
+version=$(cd "$repo" && sh deploy/raspberry-pi/build-release.sh --version "$commit") \
+    || fail 'the build script could not report the release version'
+case $version in ''|*[!0-9A-Za-z._+-]*) fail 'the build script reported an unsafe release version' ;; esac
+[ "${#version}" -le 64 ] || fail 'the build script reported an oversized release version'
+if [ "$dry_run" = no ]; then
+    sh "$script_dir/check-release-manifest.sh" "$archive" "$commit" "$version" >/dev/null \
+        || fail 'the built release manifest does not match the requested source and version'
+fi
 
 # One call to the dashboard. The token goes to curl on its standard input as a header line so it
 # never shows in a process list. Redirects are refused and only --ca-cert is trusted.
@@ -216,10 +224,10 @@ field() {
 
 if [ "$dry_run" = yes ]; then
     printf '+ curl --cacert %s GET %s/api/updates\n' "$cert" "$url"
-    printf '+ curl --cacert %s POST %s/api/updates/upload (archive and signature, %s)\n' "$cert" "$url" "$short"
+    printf '+ curl --cacert %s POST %s/api/updates/upload (archive and signature, %s)\n' "$cert" "$url" "$version"
     if [ "$install" = yes ]; then
         printf '+ curl --cacert %s POST %s/api/updates/install\n' "$cert" "$url"
-        printf '+ curl --cacert %s GET %s/api/updates (until the Pi runs %s)\n' "$cert" "$url" "$short"
+        printf '+ curl --cacert %s GET %s/api/updates (until the Pi runs %s)\n' "$cert" "$url" "$version"
     fi
     printf 'Dry run: nothing was built, uploaded or installed.\n'
     exit 0
@@ -229,20 +237,21 @@ fi
 status=$(api GET /api/updates 30)
 [ "$status" = 200 ] || explain "$status"
 running=$(field installed)
-if [ "$running" = "$short" ]; then
-    printf 'The Pi already runs release %s. Nothing to upload or install.\n' "$short"
+if [ "$running" = "$version" ]; then
+    printf 'The Pi already runs release %s. Nothing to upload or install.\n' "$version"
     exit 0
 fi
 
 cat "$archive" "$archive.sig" >"$work/upload"
 archive_bytes=$(wc -c <"$archive" | tr -d ' ')
-printf 'Uploading release %s (%s bytes) over HTTPS.\n' "$short" "$archive_bytes"
+printf 'Uploading release %s (%s bytes) over HTTPS.\n' "$version" "$archive_bytes"
 status=$(api POST /api/updates/upload "$UPLOAD_SECONDS" \
     --header "Content-Type: application/octet-stream" \
     --header "X-Jittersim-Archive-Bytes: $archive_bytes" --data-binary "@$work/upload")
 [ "$status" = 200 ] || explain "$status"
 staged=$(field staged_version)
 [ -n "$staged" ] || fail "the dashboard accepted the upload but did not say which release it staged"
+[ "$staged" = "$version" ] || fail 'the dashboard staged another version. Check the staged release before installing.'
 printf 'The Pi checked the signature and staged release %s.\n' "$staged"
 
 if [ "$install" = no ]; then

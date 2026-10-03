@@ -135,6 +135,8 @@ def lab(tmp_path):
     (repo / "src" / "jittersim" / "updates.py").write_text("y = 1\n")
     for name in ("pyproject.toml", "README.md"):
         (repo / name).write_text(name)
+    (repo / "pyproject.toml").write_text('[project]\nname = "jittersim"\nversion = "0.2.0"\n')
+    (repo / "src/jittersim/__init__.py").write_text('__version__ = "0.2.0"\n')
     home = tmp_path / "home"
     home.mkdir()
     env = {"PATH": f"{bin_directory}:{os.environ['PATH']}", "HOME": str(home),
@@ -145,11 +147,12 @@ def lab(tmp_path):
         subprocess.run(["git", "-C", str(repo), *command], check=True, env=env)
     short = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short", "HEAD"],
                            capture_output=True, text=True, check=True).stdout.strip()
+    version = "0.2.0.dev+" + short[:7]
     private, public = make_key(tmp_path / "keys")
     certificate, key = make_certificate(tmp_path, "dashboard")
     stranger, _ = make_certificate(tmp_path, "stranger")
     pi = Pi(tmp_path, certificate, key, public)
-    yield {"pi": pi, "env": env, "repo": repo, "short": short, "private": private,
+    yield {"pi": pi, "env": env, "repo": repo, "short": short, "version": version, "private": private,
            "certificate": certificate, "stranger": stranger, "tmp": tmp_path,
            "log": tmp_path / "calls.log"}
     pi.stop()
@@ -176,7 +179,7 @@ def logged(lab):
 def test_one_command_uploads_installs_and_waits_for_the_new_release(lab):
     result = https(lab, *base_arguments(lab))
     assert result.returncode == 0, result.stdout + result.stderr
-    short = lab["short"]
+    short = lab["version"]
     assert f"The Pi checked the signature and staged release {short}" in result.stdout
     assert f"The Pi now runs release {short}" in result.stdout
     assert lab["pi"].installs == [short]
@@ -192,8 +195,29 @@ def test_explicit_stage_only_stages_and_says_how_to_install(lab):
     assert lab["pi"].installs == []
 
 
+def test_reported_staged_version_must_match_the_signed_build(lab, monkeypatch):
+    helper = lab["pi"].server.helper_client
+    stage = helper.stage_uploaded_release
+    attempted = []
+
+    def wrong_label(**options):
+        answer = stage(**options)
+        return {**answer, "staged_version": "9.9.9"}
+
+    def install(**options):
+        attempted.append(options)
+        return {"ok": True, "installed": options["version"]}
+
+    monkeypatch.setattr(helper, "stage_uploaded_release", wrong_label)
+    monkeypatch.setattr(helper, "install_release", install)
+    result = https(lab, *base_arguments(lab), env={"JITTERSIM_INSTALL_WAIT_SECONDS": "1"})
+    assert result.returncode != 0
+    assert attempted == []
+    assert "another version" in result.stderr
+
+
 def test_a_release_the_pi_already_runs_is_not_uploaded_again(lab):
-    updates.atomic_json(lab["pi"].code / ".jittersim-release.json", {"version": lab["short"]})
+    updates.atomic_json(lab["pi"].code / ".jittersim-release.json", {"version": lab["version"]})
     result = https(lab, *base_arguments(lab), "--install")
     assert result.returncode == 0
     assert "already runs release" in result.stdout
@@ -292,7 +316,7 @@ def test_on_the_test_wifi_it_never_uses_ssh(lab):
     result = mac(lab, *base_arguments(lab)[2:], "--install", FAKE_MAC_ADDRESS="192.168.50.23")
     assert result.returncode == 0, result.stdout + result.stderr
     assert "SSH is blocked on purpose" in result.stdout
-    assert f"The Pi now runs release {lab['short']}" in result.stdout
+    assert f"The Pi now runs release {lab['version']}" in result.stdout
     assert "ssh" not in tools(lab) and "scp" not in tools(lab)
 
 

@@ -82,8 +82,10 @@ terminal unless passwordless staging is on.
 Deploying needs a connection to the Pi's router network (Ethernet or the router's Wi-Fi). A
 Mac on the Pi's test Wi-Fi cannot reach the Pi over SSH. Every ssh and scp call uses your
 known_hosts as it is: connect once with 'ssh -i KEY USER@HOST' to check and save the Pi's
-host key. Only the sudo step opens a terminal on the Pi. The release is named after the
-short commit: compare it with 'git rev-parse --short REF'.
+host key. Only the sudo step opens a terminal on the Pi. The release version comes from
+build-release.sh (a tag vMAJOR.MINOR.PATCH gives MAJOR.MINOR.PATCH and any other commit gives
+NUMBER.dev+COMMIT). With an older build script the short commit is the version: compare it
+with 'git rev-parse --short REF'.
 EOF
 }
 
@@ -331,7 +333,25 @@ esac
 release="jittersim-release-$short"
 remote_archive="$release.tar.gz"
 
+# The version that is staged and compared with the Pi. A build script that knows semantic
+# versions reports it (0.2.0 for a tagged commit and 0.2.0.dev+COMMIT for any other). An older
+# build script does not and then the short commit name is the version.
+version=$short
+if reported_version=$(cd "$repo" && sh deploy/raspberry-pi/build-release.sh --version "$commit" 2>/dev/null); then
+    case $reported_version in
+        ''|*[!0-9A-Za-z.+-]*) ;;
+        *) version=$reported_version ;;
+    esac
+fi
+case $version in
+    ''|*[!0-9A-Za-z._+-]*) fail 'the build script reported an unsafe release version' ;;
+esac
+[ "${#version}" -le 64 ] || fail 'the build script reported an oversized release version'
+
 printf 'Commit: %s (%s)\n' "$commit" "$short"
+if [ "$version" != "$short" ]; then
+    printf 'Release version: %s\n' "$version"
+fi
 if [ -n "$(git -C "$repo" status --porcelain --untracked-files=no)" ]; then
     printf 'Uncommitted changes in this checkout are not part of the archive.\n'
 fi
@@ -365,6 +385,7 @@ unreachable() {
     fail "could not reach $host over SSH (exit $1). $NETWORK_HINT Also check the key and that the Pi's host key is in your known_hosts: connect once with ssh -i $(quote "$key") $host"
 }
 
+release_sequence=0
 if [ "$dry_run" = yes ]; then
     work="${TMPDIR:-/tmp}/jittersim-deploy.XXXXXX"
     sha='SHA256_OF_THE_ARCHIVE'
@@ -406,6 +427,8 @@ if [ "$dry_run" = no ]; then
     [ "${#sha}" -eq 64 ] || fail "could not compute the archive checksum"
     [ "$reported" = "$sha" ] \
         || fail "build-release.sh printed the checksum '$reported' but the archive has $sha"
+    release_sequence=$(sh "$script_dir/check-release-manifest.sh" "$archive" "$commit" "$version") \
+        || fail 'the built release manifest does not match the requested source and version'
 fi
 printf 'Archive: %s\nSHA-256: %s\n' "$remote_archive" "$sha"
 
@@ -446,12 +469,12 @@ if [ "$use_installer" = no ]; then
         *update-service*) ;;
         *) fail "the Pi has no update service yet. Run this once with --use-installer." ;;
     esac
-    if [ "$running" = "$short" ]; then
-        printf 'The Pi already runs release %s. Nothing to stage or install.\n' "$short"
+    if [ "$running" = "$version" ]; then
+        printf 'The Pi already runs release %s. Nothing to stage or install.\n' "$version"
         exit 0
     fi
-elif [ "$running" = "$short" ]; then
-    printf 'The Pi already runs release %s. The installer runs again.\n' "$short"
+elif [ "$running" = "$version" ]; then
+    printf 'The Pi already runs release %s. The installer runs again.\n' "$version"
 fi
 
 # One line of the probe's answer, matched as a whole so a status message cannot fake it.
@@ -497,13 +520,13 @@ check_release() {
     while :; do
         if report=$(ssh_batch_answer "$CHECK_SECONDS" "$check" 2>"$work/check.err"); then
             installed=$(printf '%s\n' "$report" | sed -n 's/^Installed: //p' | head -n 1)
-            if [ "$installed" = "$short" ]; then
+            if [ "$installed" = "$version" ]; then
                 printf 'The Pi now runs release %s. Compare it with: git rev-parse --short %s\n' \
-                    "$short" "$(quote "$ref")"
+                    "$version" "$(quote "$ref")"
                 return 0
             fi
             printf '%s\n' "$report"
-            fail "the Pi reports release '$installed' instead of $short. $1"
+            fail "the Pi reports release '$installed' instead of $version. $1"
         fi
         [ "$attempt" -lt 10 ] || break
         attempt=$((attempt + 1))
@@ -528,7 +551,8 @@ if [ "$use_installer" = yes ]; then
     unpack="printf '%s  %s\\n' $(quote "$sha") $(quote "$remote_archive") | sha256sum -c - \
 && rm -rf $(quote "$release") && mkdir $(quote "$release") \
 && tar -xzf $(quote "$remote_archive") -C $(quote "$release") \
-&& printf '{\"version\": \"%s\", \"sha256\": \"%s\"}\\n' $(quote "$short") $(quote "$sha") \
+&& printf '{\"version\": \"%s\", \"sha256\": \"%s\", \"commit\": \"%s\", \"sequence\": %s}\\n' \
+$(quote "$version") $(quote "$sha") $(quote "$commit") $(quote "$release_sequence") \
 > $(quote "$release/.jittersim-release.json") && rm -f $(quote "$remote_archive")"
     set +e
     ssh_batch "$UNPACK_SECONDS" "$unpack"
@@ -585,7 +609,7 @@ if [ "$pi_signed" = yes ]; then
     fi
     if [ "$install" = no ]; then
         finish_dry_run
-        printf 'Staged release %s on the Pi. Install it with:\n  %s\n' "$short" \
+        printf 'Staged release %s on the Pi. Install it with:\n  %s\n' "$version" \
             "$(words ssh -t -i "$key" -- "$host" "$install_step")"
         printf 'or choose Check for updates and then Install staged release in the dashboard.\n'
         exit 0
@@ -595,12 +619,12 @@ if [ "$pi_signed" = yes ]; then
     exit 0
 fi
 
-stage="$(words sudo /usr/bin/python3 -I "$MANAGER" stage "$remote_archive" --version "$short" \
+stage="$(words sudo /usr/bin/python3 -I "$MANAGER" stage "$remote_archive" --version "$version" \
     --sha256 "$sha") && $(words rm -f "$remote_archive")"
 if [ "$install" = no ]; then
     ssh_terminal "$stage" || fail "staging on the Pi failed. Read the message above."
     finish_dry_run
-    printf 'Staged release %s on the Pi. Install it with:\n  %s\n' "$short" \
+    printf 'Staged release %s on the Pi. Install it with:\n  %s\n' "$version" \
         "$(words ssh -t -i "$key" -- "$host" "$(words sudo jittersim update install)")"
     printf 'or choose Check for updates and then Install staged release in the dashboard.\n'
     exit 0

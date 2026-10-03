@@ -175,6 +175,12 @@ def short_head(repository=ROOT, ref="HEAD"):
                           capture_output=True, text=True, check=True).stdout.strip()
 
 
+def version_head(repository=ROOT, ref="HEAD"):
+    return subprocess.run(["sh", str(repository / "deploy/raspberry-pi/build-release.sh"),
+                           "--version", ref], cwd=repository, check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
 def printed_sha(output):
     return next(line.split(": ", 1)[1] for line in output.splitlines()
                 if line.startswith("SHA-256: "))
@@ -192,9 +198,10 @@ def terminal_call(argv, fakes, remote):
     assert argv == [*TERMINAL_OPTIONS, "-i", str(fakes["key"]), "--", HOST, remote]
 
 
-def stage_command(short, sha):
+def stage_command(short, sha, version=None):
+    version = version or version_head()
     return (f"sudo /usr/bin/python3 -I {MANAGER} stage jittersim-release-{short}.tar.gz "
-            f"--version {short} --sha256 {sha} && rm -f jittersim-release-{short}.tar.gz")
+            f"--version {version} --sha256 {sha} && rm -f jittersim-release-{short}.tar.gz")
 
 
 def test_dry_run_prints_every_command_and_runs_none(fakes):
@@ -259,9 +266,9 @@ def test_stage_only_copies_the_verified_archive_and_prints_the_install_command(f
     updates.trust_key(public, config=config, root=root)
     sign(archive, private)
     updates.stage_release(archive, root=root, code=tmp_path / "code", config=config, sha256=sha,
-                          version=short)
+                          version=version_head())
     record = json.loads((root / "staged" / ".jittersim-release.json").read_text())
-    assert record["version"] == short and record["sha256"] == sha
+    assert record["version"] == version_head() and record["sha256"] == sha
     assert record["commit"].startswith(short) and record["sequence"] > 1_700_000_000
     assert (root / "staged" / "src" / "jittersim" / "updates.py").is_file()
 
@@ -280,7 +287,7 @@ def test_the_archive_is_the_one_build_release_makes(fakes):
 
 def test_install_stages_installs_waits_and_compares_the_running_release(fakes):
     short = short_head()
-    result, calls = deploy(fakes, FAKE_INSTALLED=short)
+    result, calls = deploy(fakes, FAKE_INSTALLED=version_head())
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh", "scp", "ssh", "ssh"]
     sha = printed_sha(result.stdout)
@@ -289,7 +296,7 @@ def test_install_stages_installs_waits_and_compares_the_running_release(fakes):
         + " && sudo systemctl start jittersim-update.service"
     ))
     batch_call(calls[3]["argv"], fakes, "jittersim update check")
-    assert f"The Pi now runs release {short}." in result.stdout
+    assert f"The Pi now runs release {version_head()}." in result.stdout
     assert "git rev-parse --short HEAD" in result.stdout
     # the command is shown once and its answer is not mixed into the trace
     assert result.stdout.count("'jittersim update check'") == 1
@@ -299,18 +306,18 @@ def test_install_stages_installs_waits_and_compares_the_running_release(fakes):
 @pytest.mark.parametrize("extra", [(), ("--install",)])
 def test_a_pi_that_already_runs_the_release_needs_nothing(fakes, extra):
     short = short_head()
-    result, calls = deploy(fakes, *extra, FAKE_RUNNING=short)
+    result, calls = deploy(fakes, *extra, FAKE_RUNNING=version_head())
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh"]
-    assert f"The Pi already runs release {short}. Nothing to stage or install." in result.stdout
+    assert f"The Pi already runs release {version_head()}. Nothing to stage or install." in result.stdout
 
 
 def test_the_installer_runs_again_for_the_same_release(fakes):
     short = short_head()
-    result, calls = deploy(fakes, "--use-installer", "--stage-only", FAKE_RUNNING=short)
+    result, calls = deploy(fakes, "--use-installer", "--stage-only", FAKE_RUNNING=version_head())
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh", "scp", "ssh"]
-    assert f"The Pi already runs release {short}. The installer runs again." in result.stdout
+    assert f"The Pi already runs release {version_head()}. The installer runs again." in result.stdout
 
 
 def test_install_reports_a_different_running_release(fakes):
@@ -323,15 +330,15 @@ def test_install_reports_a_different_running_release(fakes):
 
 def test_install_waits_for_the_helper_to_answer_again(fakes):
     short = short_head()
-    result, calls = deploy(fakes, "--install", FAKE_INSTALLED=short, FAKE_CHECK_FAILS="3")
+    result, calls = deploy(fakes, "--install", FAKE_INSTALLED=version_head(), FAKE_CHECK_FAILS="3")
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh", "scp", "ssh", "ssh", "sleep", "ssh", "sleep", "ssh", "sleep",
                             "ssh"]
-    assert f"The Pi now runs release {short}." in result.stdout
+    assert f"The Pi now runs release {version_head()}." in result.stdout
 
 
 def test_install_gives_up_when_the_release_cannot_be_read_and_says_why(fakes):
-    result, calls = deploy(fakes, "--install", FAKE_INSTALLED=short_head(),
+    result, calls = deploy(fakes, "--install", FAKE_INSTALLED=version_head(),
                            FAKE_CHECK_FAILS="99")
     assert result.returncode == 1
     # the probe and the sudo step, then ten checks with a pause between two of them
@@ -453,8 +460,11 @@ def test_installer_mode_checks_unpacks_and_labels_the_copy(fakes, tmp_path):
     assert unpack_on_a_stand_in_pi(fakes, home, short, unpack[-1]).returncode == 0
     release = home / f"jittersim-release-{short}"
     assert (release / "deploy" / "raspberry-pi" / "install.sh").stat().st_mode & stat.S_IXUSR
+    with tarfile.open(fakes["copies"] / f"jittersim-release-{short}.tar.gz") as bundle:
+        manifest = json.load(bundle.extractfile("deploy/RELEASE"))
     assert json.loads((release / ".jittersim-release.json").read_text()) == {
-        "version": short, "sha256": sha}
+        "version": version_head(), "sha256": sha,
+        "commit": manifest["commit"], "sequence": manifest["sequence"]}
     assert not (home / f"jittersim-release-{short}.tar.gz").exists()
     # a changed copy is refused before anything is unpacked
     shutil.rmtree(release)
@@ -477,20 +487,20 @@ def test_the_installer_label_reaches_the_installed_folder(fakes, tmp_path):
     release = home / f"jittersim-release-{short}"
     subprocess.run([sys.executable, str(release / "deploy/raspberry-pi/replace-source.py"),
                     str(release), str(installed)], check=True, capture_output=True)
-    assert updates.update_status(root=tmp_path / "none", code=installed)["installed"] == short
+    assert updates.update_status(root=tmp_path / "none", code=installed)["installed"] == version_head()
     assert json.loads((installed / ".jittersim-release.json").read_text())["sha256"] == (
         printed_sha(result.stdout))
 
 
 def test_installer_mode_installs_by_default_in_a_terminal(fakes):
     short = short_head()
-    result, calls = deploy(fakes, "--use-installer", FAKE_INSTALLED=short)
+    result, calls = deploy(fakes, "--use-installer", FAKE_INSTALLED=version_head())
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh", "scp", "ssh", "ssh", "ssh"]
     terminal_call(calls[3]["argv"], fakes,
                   f"sudo ./jittersim-release-{short}/deploy/raspberry-pi/install.sh")
     batch_call(calls[4]["argv"], fakes, "jittersim update check")
-    assert f"The Pi now runs release {short}." in result.stdout
+    assert f"The Pi now runs release {version_head()}." in result.stdout
 
 
 def test_installer_mode_works_on_a_pi_without_the_update_service(fakes):
@@ -515,8 +525,9 @@ def repository(tmp_path):
     (checkout / "src" / "jittersim").mkdir(parents=True)
     shutil.copy(SCRIPT, checkout / "deploy" / "raspberry-pi")
     shutil.copy(BUILD, checkout / "deploy" / "raspberry-pi")
-    (checkout / "pyproject.toml").write_text("[project]\nname = 'jittersim'\n")
-    (checkout / "src" / "jittersim" / "__init__.py").write_text("")
+    shutil.copy(BUILD.with_name("check-release-manifest.sh"), checkout / "deploy/raspberry-pi")
+    (checkout / "pyproject.toml").write_text('[project]\nname = "jittersim"\nversion = "0.2.0"\n')
+    (checkout / "src" / "jittersim" / "__init__.py").write_text('__version__ = "0.2.0"\n')
 
     def git(*arguments):
         subprocess.run(["git", "-C", str(checkout), "-c", "user.name=Test",
@@ -535,6 +546,20 @@ def repository(tmp_path):
 def archived_readme(archive):
     with tarfile.open(archive) as bundle:
         return bundle.extractfile("README.md").read().decode()
+
+
+def test_build_of_another_commit_is_refused_before_connection(fakes, repository):
+    build = repository / "deploy/raspberry-pi/build-release.sh"
+    real = build.with_name("build-release-real.sh")
+    shutil.copy(build, real)
+    build.write_text('#!/bin/sh\nif [ "$1" = --version ]; then\n'
+                     'exec sh "$(dirname -- "$0")/build-release-real.sh" "$@"\nfi\n'
+                     'exec sh "$(dirname -- "$0")/build-release-real.sh" HEAD~1 "$2"\n')
+    result, calls = deploy(fakes, "--stage-only",
+                           script=repository / "deploy/raspberry-pi/deploy-from-mac.sh")
+    assert result.returncode != 0
+    assert "manifest" in result.stderr
+    assert calls == []
 
 
 def test_the_archive_is_built_from_the_commit_and_leaves_local_edits_out(fakes, repository):
@@ -557,15 +582,15 @@ def test_an_older_ref_builds_that_commit(fakes, repository):
     short = short_head(repository, "HEAD~1")
     assert archived_readme(fakes["copies"] / f"jittersim-release-{short}.tar.gz") == (
         "first release\n")
-    assert f"--version {short} " in calls[2]["argv"][-1]
+    assert f"--version {version_head(repository, 'HEAD~1')} " in calls[2]["argv"][-1]
 
 
 def test_a_checksum_that_does_not_match_the_archive_stops_everything(fakes, repository):
     build = repository / "deploy" / "raspberry-pi" / "build-release.sh"
     zeros = "0" * 64
     build.write_text(build.read_text()
-                     .replace('sha256sum "$output"', f'echo "{zeros}  $output"')
-                     .replace('shasum -a 256 "$output"', f'echo "{zeros}  $output"'))
+                     .replace('sha256sum "$archive"', f'echo "{zeros}  $archive"')
+                     .replace('shasum -a 256 "$archive"', f'echo "{zeros}  $archive"'))
     script = repository / "deploy" / "raspberry-pi" / "deploy-from-mac.sh"
     result, calls = deploy(fakes, script=script)
     assert result.returncode == 1
@@ -645,7 +670,7 @@ def test_it_runs_under_each_available_shell(fakes, shell):
     assert result.returncode == 0, result.stderr
     assert calls == []
     assert "/keys dir/it'\\''s_ed25519'" in result.stdout
-    result, calls = deploy(fakes, "--install", shell=shell, FAKE_INSTALLED=short_head())
+    result, calls = deploy(fakes, "--install", shell=shell, FAKE_INSTALLED=version_head())
     assert result.returncode == 0, result.stderr
     assert tools(calls) == ["ssh", "scp", "ssh", "ssh"]
     result, _ = deploy(fakes, "--ssh", shell=shell, FAKE_HANG="probe", FAKE_SLEEP_SCALE="0.002")
