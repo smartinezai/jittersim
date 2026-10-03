@@ -170,6 +170,7 @@ class _DeviceRollState:
     session_id: str = ""
     started_at: float = 0.0
     history_started: bool = False
+    random_mode: str = "repeatable"
 
 
 class RuntimeScheduler:
@@ -1550,9 +1551,21 @@ class RuntimeScheduler:
                 seed=(secrets.randbits(53) if selected_profile.random_mode == "fresh" and not self._preview else selected_profile.random_seed or 0),
                 session_id=secrets.token_hex(16) if not self._preview else "preview",
                 started_at=now,
+                random_mode=selected_profile.random_mode,
             )
             self._rolls[key] = roll
             self._record_pattern(roll, selected_profile, generator_key, now, "start")
+
+        seed_changed = roll.random_mode != selected_profile.random_mode or (
+            selected_profile.random_mode == "repeatable"
+            and roll.seed != (selected_profile.random_seed or 0)
+        )
+        if seed_changed:
+            roll.random_mode = selected_profile.random_mode
+            roll.seed = (
+                secrets.randbits(53) if roll.random_mode == "fresh" and not self._preview
+                else selected_profile.random_seed or 0
+            )
 
         if reroll_each_tick:
             generator = seeded_generator(
@@ -1628,6 +1641,8 @@ class RuntimeScheduler:
                 outage_interval_seconds(profile=selected_profile, generator=generator),
             )
             self._record_pattern(roll, selected_profile, generator_key, now, "outage-check")
+        if seed_changed:
+            self._record_pattern(roll, selected_profile, generator_key, now, "seed-change")
         return roll
 
     def _record_pattern(self, roll: _DeviceRollState, profile: Profile, scope: str, now: float, kind: str) -> None:

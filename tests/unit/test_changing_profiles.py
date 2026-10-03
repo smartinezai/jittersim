@@ -8,12 +8,13 @@ import pytest
 
 from jittersim.config.exemptions import UnaffectedDevice
 from jittersim.config.models import (
-    DataLimit, Device, Impairment, Profile, Randomness, ServiceAssignment, ServiceList,
+    DataLimit, Device, Impairment, Profile, Progression, Randomness, ServiceAssignment, ServiceList,
     ServiceQuota, TimeQuota, ValidationError,
 )
 from jittersim.config.storage import ConfigRepository
 from jittersim.engine.compiler import PlanError, compile_plan
 from jittersim.engine.runtime import RuntimeScheduler
+from jittersim.engine.randomizer import reroll_profile, seeded_generator
 from jittersim.networking.applier import ApplyError, NetworkApplier
 from jittersim.networking.executor import CommandExecutionError
 from jittersim.networking.helper import HelperClientError
@@ -149,6 +150,32 @@ def test_gateway_stop_does_not_restore_the_old_fresh_session(control):
     with patch("jittersim.engine.runtime.secrets.randbits", return_value=84):
         assert scheduler.tick(repository=repository, now=3)
     assert scheduler._rolls["alice"].seed == 84
+
+
+@pytest.mark.parametrize("end_mode", ["repeatable", "fresh"])
+def test_completed_byte_progression_uses_the_end_profiles_pattern(control, end_mode):
+    repository, helper, scheduler = control
+    impairment = Impairment(delay_ms=100, delay_randomness=Randomness(variation_percent=100))
+    start = Profile("start", "Start", download=impairment, random_seed=11)
+    end = Profile("end", "End", download=impairment, random_mode=end_mode,
+                  random_seed=37 if end_mode == "repeatable" else None)
+    repository.save_profile(start)
+    repository.save_profile(end)
+    repository.save_device(Device("alice", "Alice", "192.168.50.10", "start"))
+    repository.save_progression(Progression("progress", "alice", "start", "end", 0, 3600,
+                                            mode="bytes", traffic_target_bytes=100))
+    helper.counters = {"devices": {"alice": 0}, "services": {}}
+    with patch("jittersim.engine.runtime.secrets.randbits", return_value=42) as draw:
+        assert scheduler.tick(repository=repository, now=0)
+        helper.counters["devices"]["alice"] = 100
+        scheduler.tick(repository=repository, now=6)
+        scheduler.tick(repository=repository, now=8)
+        assert draw.call_count == (1 if end_mode == "fresh" else 0)
+    seed = 42 if end_mode == "fresh" else 37
+    expected = reroll_profile(profile=end, generator=seeded_generator(
+        profile=end, device_id="alice", roll_number=0, session_seed=seed))
+    assert scheduler._rolls["alice"].seed == seed
+    assert scheduler._rolls["alice"].runtime_profile.download == expected.download
 
 
 @pytest.mark.parametrize("scope", ["assignment", "bytes", "time"])
