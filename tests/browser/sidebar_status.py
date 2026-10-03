@@ -115,13 +115,34 @@ def check_one_message(page, width, height):
         expect(page.locator("#notification-source" if unavailable is None else "#brand-title")).to_be_focused()
         page.evaluate("document.getElementById('notification-source')?.remove()")
 
+    if is_phone(page):
+        page.evaluate("showToast('Recovery instructions. '.repeat(200), 'error')")
+        message = page.locator("#toast-message")
+        assert message.evaluate("node => node.scrollHeight > node.clientHeight")
+        expect(dismiss).to_be_visible()
+        rect = message.bounding_box()
+        session = page.context.new_cdp_session(page)
+        start_y, end_y = rect["y"] + rect["height"] - 12, rect["y"] + 12
+        touch = {"x": rect["x"] + rect["width"] / 2, "y": start_y}
+        session.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [touch]})
+        for step in range(1, 6):
+            touch["y"] = start_y + (end_y - start_y) * step / 5
+            session.send("Input.dispatchTouchEvent", {"type": "touchMove", "touchPoints": [touch]})
+            page.wait_for_timeout(20)
+        session.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        page.wait_for_function("document.getElementById('toast-message').scrollTop > 0")
+        session.detach()
+        page.screenshot(path=f"test-results/sidebar-long-recovery-{width}.png")
+        dismiss.click()
+        expect(toast).to_be_hidden()
+
 
 def check_width(browser, width, height):
     # a fresh fixture for each width so that each run starts before the first Apply
     process, port = start_fixture()
     try:
         base = f"http://127.0.0.1:{port}"
-        context = browser.new_context(viewport={"width": width, "height": height})
+        context = browser.new_context(viewport={"width": width, "height": height}, has_touch=width < 769)
         page = context.new_page()
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))

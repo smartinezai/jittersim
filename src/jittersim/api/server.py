@@ -399,6 +399,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       color: #dcecff;
       box-shadow: 0 0.9rem 2rem rgba(0, 0, 0, 0.4);
     }
+    #toast-message { max-height: calc(40vh - 2rem); overflow-y: auto; overscroll-behavior: contain; }
     .toast[hidden] { display: none; }
     .toast.success { border-color: #2c9d73; border-left-color: #70d7a9; background: #123b31; }
     .toast.error { border-color: #a9565d; border-left-color: #ff8585; background: #45222c; }

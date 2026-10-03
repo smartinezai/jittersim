@@ -165,8 +165,8 @@
   .toast {
     top: auto; right: 0.75rem; bottom: calc(var(--phone-bar-height) + 0.75rem); left: auto;
     width: min(22rem, calc(100vw - 1.5rem));
-    /* Keep the safety bar usable beneath a message. */
-    pointer-events: none;
+    /* Read and scroll recovery instructions while keeping the safety bar usable. */
+    pointer-events: auto;
   }
   .toast button { pointer-events: auto; }
   .sidebar .sidebar-action-row .help-icon::after {
