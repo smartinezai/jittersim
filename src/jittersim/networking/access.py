@@ -596,7 +596,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         guard = PanicGuard().provision(ACCESS_RUNTIME.parent / "gateway-state.json")
-        stopped = guard["panic_stop_latched"]
+        stopped = guard["household_stop_latched"]
     except OSError:
         LOGGER.exception("Panic state was not readable. Household rules remain disabled.")
         stopped = True

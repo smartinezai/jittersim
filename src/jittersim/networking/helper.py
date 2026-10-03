@@ -36,7 +36,7 @@ from jittersim.updates import (
     stage_upload,
     update_status,
 )
-from jittersim.panic_guard import PanicGuard
+from jittersim.panic_guard import PANIC_GUARD_FORMAT, PanicGuard
 from jittersim.request_workers import RequestWorkers, WorkersStillRunning
 from jittersim.socket_deadlines import DeadlineReader, read_line
 
@@ -199,6 +199,7 @@ class HelperService:
         self._outage_observed = False
         self._outage_stop_latched = False
         self._panic_stop_latched = False
+        self._household_stop_latched = False
         self._panic_recovery_failed = False
         self._control_revision = secrets.token_bytes(16).hex()
         self._revision_lock = threading.Lock()
@@ -216,6 +217,7 @@ class HelperService:
             try:
                 guard = panic_guard.provision(gateway_state_path)
                 self._panic_stop_latched = guard["panic_stop_latched"]
+                self._household_stop_latched = guard["household_stop_latched"]
                 self._panic_recovery_failed = guard["panic_recovery_failed"]
                 self._control_revision_required = guard["control_revision_required"]
                 if (self._panic_stop_latched and self._active_plan_path is not None
@@ -225,6 +227,7 @@ class HelperService:
             except OSError:
                 LOGGER.exception("persistent Panic stop state could not be read")
                 self._panic_stop_latched = True
+                self._household_stop_latched = True
                 self._panic_recovery_failed = True
                 self._control_revision_required = True
                 self._panic_guard_error = True
@@ -263,6 +266,7 @@ class HelperService:
                     self._control_revision = secrets.token_bytes(16).hex()
                     self._control_revision_required = True
                     self._panic_stop_latched = True
+                    self._household_stop_latched = True
                     self._panic_recovery_failed = True
                 self._write_panic_guard()
                 self._write_gateway_state(durable=True)
@@ -308,6 +312,19 @@ class HelperService:
                     if self._panic_recovery_failed:
                         return {"ok": False, "error": "Retry Panic before applying access rules."}
                     result = self._access_manager.apply(access_from_payload(payload.get("policy")))
+                    self._household_stop_latched = False
+                    saved = self._write_gateway_state(durable=True)
+                    saved = self._write_panic_guard() and saved
+                    if not saved:
+                        self._block_unconfirmed_intent()
+                        self._handle_reset()
+                        try:
+                            self._access_manager.disable()
+                        except (OSError, ValueError, CommandExecutionError):
+                            LOGGER.exception("household cleanup failed after stop state save failure")
+                        self._write_panic_guard()
+                        self._write_gateway_state(durable=True)
+                        return {"ok": False, "error": "Household recovery state could not be saved. Retry Panic."}
                 return {"ok": True, **result}
             except (OSError, ValueError, CommandExecutionError):
                 LOGGER.exception("persistent access operation failed")
@@ -668,15 +685,16 @@ class HelperService:
                 or not 0 <= successes <= GATEWAY_SUCCESSES_TO_UP
             ):
                 raise ValueError("gateway probe count is invalid")
-            for field in ("panic_stop_latched", "panic_recovery_failed", "control_revision_required"):
+            for field in ("panic_stop_latched", "household_stop_latched", "panic_recovery_failed", "control_revision_required"):
                 if field in state and not isinstance(state[field], bool):
                     raise ValueError("Panic recovery state is invalid")
             self._panic_stop_latched = state.get("panic_stop_latched", False)
+            self._household_stop_latched = state.get("household_stop_latched", self._panic_stop_latched)
             self._panic_recovery_failed = state.get("panic_recovery_failed", False)
             self._control_revision_required = state.get("control_revision_required", self._panic_stop_latched)
-            if self._panic_stop_latched:
+            if self._panic_stop_latched or self._household_stop_latched:
                 self._control_revision_required = True
-            if self._panic_recovery_failed and not self._panic_stop_latched:
+            if self._panic_recovery_failed and not (self._panic_stop_latched and self._household_stop_latched):
                 raise ValueError("Panic recovery state is inconsistent")
             self._persistence_enabled = state["persistence_enabled"]
             self._persistence_mode_initialized = True
@@ -703,6 +721,7 @@ class HelperService:
             self._persistence_mode_initialized = True
             self._outage_stop_latched = True
             self._panic_stop_latched = True
+            self._household_stop_latched = True
             self._panic_recovery_failed = True
             self._control_revision_required = True
             self._reset_pending = True
@@ -718,13 +737,22 @@ class HelperService:
                     "reason": "control-changed"}
         return None
 
+    def _block_unconfirmed_intent(self):
+        with self._revision_lock:
+            self._control_revision = secrets.token_bytes(16).hex()
+            self._control_revision_required = True
+            self._panic_stop_latched = True
+            self._household_stop_latched = True
+            self._panic_recovery_failed = True
+
     def _write_panic_guard(self, *, panic_recovery_failed=None):
         if self._panic_guard is None:
             return True
         try:
             self._panic_guard.write({
-                "version": 1,
+                "version": PANIC_GUARD_FORMAT,
                 "panic_stop_latched": self._panic_stop_latched,
+                "household_stop_latched": self._household_stop_latched,
                 "panic_recovery_failed": (self._panic_recovery_failed
                                           if panic_recovery_failed is None
                                           else panic_recovery_failed),
@@ -745,6 +773,7 @@ class HelperService:
             "outage_observed": self._outage_observed,
             "outage_stop_latched": self._outage_stop_latched,
             "panic_stop_latched": self._panic_stop_latched,
+            "household_stop_latched": self._household_stop_latched,
             "control_revision_required": self._control_revision_required,
             "panic_recovery_failed": self._panic_recovery_failed,
             "reset_pending": self._reset_pending,
@@ -765,6 +794,7 @@ class HelperService:
             "outage_observed": self._outage_observed,
             "outage_stop_latched": self._outage_stop_latched,
             "panic_stop_latched": self._panic_stop_latched,
+            "household_stop_latched": self._household_stop_latched,
             "control_revision_required": self._control_revision_required,
             "panic_recovery_failed": (self._panic_recovery_failed if panic_recovery_failed is None
                                       else panic_recovery_failed),
@@ -1049,7 +1079,7 @@ class HelperService:
                 "ok": False,
                 "error": "the router gateway is unavailable; profiles cannot start in this mode",
             }
-        if plan.access is not None and update_access:
+        if plan.access is not None and update_access and not self._household_stop_latched:
             if self._access_manager is None:
                 return {"ok": False, "error": "persistent access controls are unavailable"}
             try:
@@ -1124,8 +1154,7 @@ class HelperService:
         self._write_gateway_state(durable=explicit_apply)
         guard_saved = self._write_panic_guard() if explicit_apply else True
         if (self._gateway_state_error or not guard_saved) and explicit_apply:
-            self._panic_stop_latched = True
-            self._panic_recovery_failed = True
+            self._block_unconfirmed_intent()
             self._outage_stop_latched = True
             self._reset_pending = True
             self._next_reset_retry_at = 0.0
@@ -1868,7 +1897,7 @@ class HelperClient:
         ):
             if not isinstance(result.get(field), bool):
                 raise HelperClientError("helper returned invalid gateway persistence state")
-        for field in ("panic_stop_latched", "panic_recovery_failed"):
+        for field in ("panic_stop_latched", "household_stop_latched", "panic_recovery_failed"):
             if field in result and not isinstance(result[field], bool):
                 raise HelperClientError("helper returned invalid Panic recovery state")
         if "control_revision" in result:
@@ -2486,9 +2515,9 @@ def run_helper(
         panic_guard=PanicGuard(),
         homepage_database=homepage_database,
     )
-    restored = restore_access_at_start(access, panic_stopped=service._panic_stop_latched)
-    if not restored and service._panic_stop_latched:
-        service._panic_recovery_failed = True
+    restored = restore_access_at_start(access, panic_stopped=service._household_stop_latched)
+    if not restored:
+        service._block_unconfirmed_intent()
         service._write_panic_guard()
         service._write_gateway_state(durable=True)
     stopped = threading.Event()

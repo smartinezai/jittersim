@@ -155,14 +155,17 @@ def normal_access(server):
     return response(body)
 
 
-def write_access_api(server, path, payload):
+def write_access_api(server, path, payload, *, control_intent=None):
     if path not in ACCESS_WRITES:
         return None
     if path == "/api/normal-access":
         return normal_access(server)
     generation = getattr(server.scheduler, "apply_generation", 0)
     control_revision = None
-    if path in ("/api/site-blocks", "/api/site-blocks/delete"):
+    if control_intent is not None:
+        generation, control_revision = control_intent
+        refused = server._apply_refused(generation)
+    elif path in ("/api/site-blocks", "/api/site-blocks/delete"):
         refused = server._apply_refused(generation)
     else:
         refused, control_revision = server._capture_control_intent(generation)

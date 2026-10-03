@@ -69,11 +69,12 @@ def test_candidate_evidence_never_accepts_unreviewed_or_unsafe_source(candidate,
         check_panic_candidate(state, root, [approved], owner_uid=os.getuid())
 
 
-def test_only_clear_unrequired_state_permits_legacy_candidate():
+def test_clear_guard_also_refuses_a_candidate_that_cannot_preserve_future_panic():
     state = {
         "version": 1,
         "panic_stop_latched": False,
         "panic_recovery_failed": False,
         "control_revision_required": False,
     }
-    check_panic_candidate(state, Path("/no-package"), [], owner_uid=os.getuid())
+    with pytest.raises(PanicGuardError, match="cannot preserve Panic protection"):
+        check_panic_candidate(state, Path("/no-package"), [], owner_uid=os.getuid())
