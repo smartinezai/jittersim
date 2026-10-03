@@ -1603,11 +1603,12 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
         if action in ("homepage-snapshot", "homepage-confirm"):
             self._send_response({"ok": False, "error": "use the policy socket"})
             return
-        if action in ("ping", "control-revision", "dashboard-access", "update-retry") or action in WIFI_ACTIONS or action in ROUTER_ACTIONS:
+        # Capability flags are fixed for this process and read no live network state.
+        if action in ("ping", "capabilities", "control-revision", "dashboard-access", "update-retry") or action in WIFI_ACTIONS or action in ROUTER_ACTIONS:
             self._send_response(self.server.service.handle_payload(payload))
             return
-        # Apply and reset wait a moment for a read so a poll never refuses Panic. Every
-        # read answers helper-busy at once.
+        # Apply and reset wait a moment for a read so a poll never refuses Panic.
+        # Reads of live network state answer helper-busy at once.
         # Signed staging only changes release files. It must not hold network
         # ownership while verifying an archive or copying it from the dashboard.
         lock = (self.server.release_stage_lock if action in (
