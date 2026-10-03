@@ -1930,7 +1930,8 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             "/api/normal-access", "/api/site-blocks", "/api/site-blocks/delete"
         )
         live_global = path in ("/api/observations/add-global-block", "/api/observations/remove-global-block")
-        if path == "/api/apply" or live_access or live_global:
+        live_general = path in ("/api/general-profile", "/api/general-profile/stop")
+        if path == "/api/apply" or live_access or live_global or live_general:
             generation = getattr(self.scheduler, "apply_generation", getattr(self.scheduler, "halt_count", 0))
             refused, revision = self._capture_control_intent(generation)
             if refused is not None:
@@ -1955,7 +1956,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                 if workflow is not None:
                     return workflow
                 return (self._write_response_for(path, payload, control_intent=control_intent)
-                        if path == "/api/apply" or live_global else self._write_response_for(path, payload))
+                        if path == "/api/apply" or live_global or live_general else self._write_response_for(path, payload))
             finally:
                 if self.repository.get_runtime_state().configuration_version != before:
                     WorkflowStore(self.repository).checkpoint(path.removeprefix("/api/").replace("/", " "))
@@ -2191,7 +2192,8 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             )
 
         if path in ("/api/general-profile", "/api/general-profile/stop"):
-            return self._change_general_profile(payload, stop=path.endswith("/stop"))
+            return self._change_general_profile(
+                payload, stop=path.endswith("/stop"), control_intent=control_intent)
 
         if path in ("/api/unaffected-devices", "/api/unaffected-devices/delete"):
             return self._change_unaffected_device(payload, remove=path.endswith("/delete"))
@@ -3533,13 +3535,23 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             "state": _runtime_state_payload(state),
         }
 
-    def _change_general_profile(self, payload: dict, *, stop: bool):
+    def _change_general_profile(self, payload: dict, *, stop: bool, control_intent=None):
         if self.helper_client is None:
             return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
                 {"error": "Connect the Pi networking helper to apply a profile for everyone"}
             )
+        if control_intent is None:
+            generation = getattr(self.scheduler, "apply_generation", getattr(self.scheduler, "halt_count", 0))
+            refused, revision = self._capture_control_intent(generation)
+            if refused is not None:
+                return refused
+            control_intent = (generation, revision)
+        generation, revision = control_intent
         operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
         with operation:
+            refused = self._apply_refused(generation)
+            if refused is not None:
+                return refused
             try:
                 if set(payload) != (set() if stop else {"profile_id"}):
                     raise ValueError("Choose one saved profile without device or schedule settings")
@@ -3553,16 +3565,29 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                     )
                 if self.scheduler:
                     self.scheduler.sample_before_control_change(repository=self.repository)
-                with self.repository.transaction():
-                    self.repository.save_general_profile(None if stop else payload["profile_id"])
-                    self._validate_saved_plan()
+                refused, current_revision = self._capture_control_intent(generation)
+                if refused is not None:
+                    return refused
+                if revision is not None and current_revision != revision:
+                    return self._control_rejected(HelperClientError(
+                        "Network control changed before saving the profile", reason="control-changed"))
+
+                def save_selection():
+                    with self.repository.transaction():
+                        self.repository.save_general_profile(None if stop else payload["profile_id"])
+                        self._validate_saved_plan()
+
+                accepted, _ = self._publish_apply(generation, save_selection)
+                if not accepted:
+                    return self._apply_refused(generation)
             except HelperClientError as error:
                 return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
                     {"error": str(error)}
                 )
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
-            status, content_type, body = self._apply_configuration_locked(sample_usage=False)
+            status, content_type, body = self._apply_configuration_locked(
+                sample_usage=False, explicit_apply=not stop, control_intent=control_intent)
             response = json.loads(body)
             response["general_profile"] = self._general_profile_status()
             if status != HTTPStatus.OK:
