@@ -70,12 +70,50 @@ def check_one_message(page, width, height):
           .filter((node) => !node.closest('[hidden]') && node.getAttribute('aria-hidden') !== 'true'
                   && node.textContent.includes('Token accepted')).map((node) => node.id)"""
     )
-    assert announcing == ["toast"], announcing
+    assert announcing == ["action-announcer"], announcing
     box = toast.bounding_box()
     assert box["width"] <= 22 * 16 + 1, box
-    assert width - (box["x"] + box["width"]) <= 17 and height - (box["y"] + box["height"]) <= 17, box
+    assert box["x"] >= 0 and box["y"] >= 0 and box["x"] + box["width"] <= width, box
+    if not is_phone(page):
+        assert height - (box["y"] + box["height"]) <= 17, box
     expect(toast.get_by_role("button", name="Dismiss message")).to_be_visible()
     expect(toast).to_be_hidden(timeout=9000)
+
+    # A result must not hide the control currently being used by keyboard.
+    page.evaluate("showToast('Keyboard notification check', 'success')")
+    dismiss = toast.get_by_role("button", name="Dismiss message")
+    dismiss.focus()
+    page.wait_for_timeout(6500)
+    expect(toast).to_be_visible()
+    expect(dismiss).to_be_focused()
+    page.locator("#page-devices").focus()
+    page.mouse.move(0, 0)
+    expect(toast).to_be_hidden(timeout=9000)
+    expect(page.locator("#page-devices")).to_be_focused()
+
+    page.evaluate("document.activeElement.blur(); showToast('Automatic sign-in result', 'success')")
+    dismiss.focus()
+    page.keyboard.press("Enter")
+    expect(toast).to_be_hidden()
+    expect(page.locator("#brand-title")).to_be_focused()
+
+    # Deliberate keyboard dismissal returns to a usable target even if the source disappears.
+    for unavailable in (None, "hidden", "removed"):
+        page.evaluate("""(unavailable) => {
+          const source = document.createElement('button');
+          source.id = 'notification-source'; source.textContent = 'Source';
+          document.body.appendChild(source); source.focus();
+          showToast('Persistent recovery hint', 'error');
+          if (unavailable === 'hidden') source.hidden = true;
+          if (unavailable === 'removed') source.remove();
+        }""", unavailable)
+        dismiss.focus()
+        page.wait_for_timeout(16000 if unavailable is None else 50)
+        expect(toast).to_be_visible()
+        page.keyboard.press("Enter")
+        expect(toast).to_be_hidden()
+        expect(page.locator("#notification-source" if unavailable is None else "#brand-title")).to_be_focused()
+        page.evaluate("document.getElementById('notification-source')?.remove()")
 
 
 def check_width(browser, width, height):

@@ -40,9 +40,9 @@ def test_the_new_words_are_on_the_buttons():
 
 
 def test_menus_show_profile_names_and_add_the_code_only_when_two_profiles_share_a_name():
-    shared = 'profiles.filter((other) => other.name === profile.name).length > 1 ? profile.name + " (" + profile.id + ")" : profile.name'
-    assert DASHBOARD_HTML.count("option.textContent = " + shared + ";") == 3
-    assert 'option.textContent = profile.name + " (" + profile.id + ")";' not in DASHBOARD_HTML
+    assert DASHBOARD_HTML.count("option.textContent = profileLabels.get(profile.id);") == 3
+    assert 'profiles.filter((other) => other.name === profile.name)' not in DASHBOARD_HTML
+
 
 
 def test_a_row_names_the_profile_not_its_code():
@@ -73,7 +73,8 @@ def test_a_result_shows_in_the_toast_and_nowhere_a_screen_reader_would_read_it_a
     status = re.search(r'<p id="token-check-status"[^>]*>', DASHBOARD_HTML).group(0)
     assert 'aria-live="off"' in status and "role=" not in status
     toast = re.search(r'<div id="toast"[^>]*>', DASHBOARD_HTML).group(0)
-    assert 'role="status"' in toast
+    assert 'role=' not in toast
+    assert 'id="action-announcer" class="action-announcer" role="status"' in DASHBOARD_HTML
     # Every message, with or without a kind, reaches the toast.
     body = re.search(r"function showMessage\(message, kind\) \{.*?\n    \}", DASHBOARD_HTML, re.DOTALL).group(0)
     assert 'showToast(message, kind || "info");' in body
@@ -85,16 +86,18 @@ def test_the_toast_is_small_leaves_by_itself_and_keeps_its_dismiss_button():
     assert re.search(r"bottom: 1rem;\s*right: 1rem;", css)
     assert "width: min(22rem," in css and "max-height: 40vh" in css
     body = re.search(r"function showToast\(message, kind\) \{.*?\n    \}", DASHBOARD_HTML, re.DOTALL).group(0)
-    assert 'if (kind !== "working")' in body
-    assert 'kind === "error" ? 15000 : 6000' in body
+    assert 'kind === "working" || kind === "error" ? 0' in body
+    assert 'scheduleToastDismissal();' in body
     assert 'id="toast-dismiss"' in DASHBOARD_HTML
 
 
 def test_no_edit_scroll_animates_for_a_person_who_asked_for_less_motion():
     assert 'behavior: "smooth"' not in DASHBOARD_HTML
-    # The two edit buttons and the reveal helper all ask the browser first.
-    assert DASHBOARD_HTML.count('prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"') == 2
+    # Both edit buttons use the merged helper that honors reduced motion.
+    assert DASHBOARD_HTML.count('behavior: typeof scrollBehavior === "function" ? scrollBehavior()') == 2
+    assert 'return reduce ? "auto" : "smooth";' in DASHBOARD_HTML
     assert 'behavior: reduceMotion ? "auto" : "smooth"' in DASHBOARD_HTML
+
 
 
 def test_the_hints_point_at_the_profiles_page():

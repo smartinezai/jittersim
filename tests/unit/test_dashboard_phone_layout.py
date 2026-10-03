@@ -362,9 +362,9 @@ def test_smooth_scrolling_only_without_reduced_motion():
 
 @NEEDS_NODE
 @pytest.mark.parametrize("general,devices,expected", [
-    ("General profile: Slow · active", "1 device affected", "General: Slow · active · 1 device affected"),
-    ("General profile: none", "Not running", "General: none · Not running"),
-    ("General profile: none", "", "General: none"),
+    ("Everyone: Slow · active", "1 device affected", "Everyone: Slow · active · 1 device affected"),
+    ("Everyone: none", "Not running", "Everyone: none · Not running"),
+    ("Everyone: none", "", "Everyone: none"),
     ("", "Profiles off", "Profiles off"),
 ])
 def test_the_status_strip_is_one_line_of_the_status(general, devices, expected):
@@ -468,7 +468,7 @@ def test_the_strip_follows_the_status_block():
     result = run_node(
         "const seen = [];\n"
         "syncStatusStrip(); seen.push([statusStrip.hidden, stripText.textContent]);\n"
-        "statusBlock.hidden = false; general.textContent = 'General profile: Slow · active';\n"
+        "statusBlock.hidden = false; general.textContent = 'Everyone: Slow · active';\n"
         "general.classes.add('status-on'); plain.hidden = true; summary.textContent = '2 devices affected';\n"
         "syncStatusStrip();\n"
         "seen.push([statusStrip.hidden, stripText.textContent, statusStrip.classes.has('status-on')]);\n"
@@ -480,7 +480,7 @@ def test_the_strip_follows_the_status_block():
     )
     assert result == [
         [True, ""],
-        [False, "General: Slow · active · 2 devices affected", True],
+        [False, "Everyone: Slow · active · 2 devices affected", True],
         "true",
         [True, "false", False],
     ]

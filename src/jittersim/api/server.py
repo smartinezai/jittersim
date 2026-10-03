@@ -378,6 +378,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     .action-message.success { background: #123b31; color: #8de2bc; }
     .action-message.error { background: #45222c; color: #ffb0b0; }
     .action-message.working { background: #3b2d15; color: #f5ca78; }
+    .action-announcer { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
     .toast {
       position: fixed;
       bottom: 1rem;
@@ -1053,7 +1054,8 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body class="dashboard-locked">
-  <div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true" hidden>
+  <div id="action-announcer" class="action-announcer" role="status" aria-live="polite" aria-atomic="true"></div>
+  <div id="toast" class="toast" hidden>
     <span id="toast-icon" class="toast-icon" aria-hidden="true"></span>
     <span id="toast-message"></span>
     <button id="toast-dismiss" type="button" aria-label="Dismiss message">Dismiss</button>
@@ -1269,7 +1271,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         <button type="submit">Save everyone-else profile</button>
       </form>
     </section>
-  <section class="card connected-card" data-collapse="closed" aria-labelledby="unaffected-title">
+  <section class="card connected-card" data-collapse="closed" data-card-key="unaffected-by-profiles" aria-labelledby="unaffected-title">
     <div class="section-heading">
       <div>
         <h2 id="unaffected-title">Protected devices</h2>
@@ -2457,27 +2459,37 @@ DASHBOARD_HTML = r"""<!doctype html>
     // The product name, the command name and the default Wi-Fi name come from a private route
     // after the token is accepted. Until then the page stays neutral.
     let brandInfo = null;
+    let brandRequestSerial = 0;
 
     function applyBrand(signedIn) {
       const name = signedIn && brandInfo ? brandInfo.name : "";
       document.title = name || "Sign in";
       element("brand-title").textContent = name || "Network lab";
       element("brand-sidebar").setAttribute("aria-label", name || "Network lab");
-      if (!brandInfo) return;
-      element("measure-command").textContent = signedIn
+      element("measure-command").textContent = signedIn && brandInfo
         ? brandInfo.command + " measure --label normal" : "the measure command";
       const ssid = element("access-point-ssid");
-      if (signedIn && !ssid.value && document.activeElement !== ssid) ssid.value = brandInfo.default_ssid;
-      // Signed out again: the default name must not stay in a field of the page.
-      if (!signedIn && ssid.value === brandInfo.default_ssid) ssid.value = "";
+      if (signedIn && brandInfo && !ssid.value && document.activeElement !== ssid) {
+        ssid.value = brandInfo.default_ssid;
+      }
+      if (!signedIn) {
+        if (brandInfo && ssid.value === brandInfo.default_ssid) ssid.value = "";
+        brandInfo = null;
+        brandRequestSerial += 1;
+      }
     }
 
     async function loadBrand() {
+      const tokenRevision = adminTokenRevision;
+      const serial = ++brandRequestSerial;
       try {
-        brandInfo = await request("/api/brand", "GET");
+        const data = await request("/api/brand", "GET");
+        if (serial !== brandRequestSerial || tokenRevision !== adminTokenRevision) return;
+        brandInfo = data;
         applyBrand(adminTokenVerified);
       } catch (error) {
-        brandInfo = null;
+        if (serial !== brandRequestSerial || tokenRevision !== adminTokenRevision) return;
+        applyBrand(false);
       }
     }
 
@@ -3628,36 +3640,59 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     let toastTimer = null;
+    let toastDismissDelay = 0;
+    let toastReturnFocus = null;
+
+    function cancelToastDismissal() {
+      if (toastTimer !== null) window.clearTimeout(toastTimer);
+      toastTimer = null;
+    }
+
+    function scheduleToastDismissal() {
+      cancelToastDismissal();
+      const toast = element("toast");
+      if (!toastDismissDelay || toast.hidden || toast.contains(document.activeElement) || toast.matches(":hover")) return;
+      toastTimer = window.setTimeout(() => {
+        toastTimer = null;
+        if (!toast.contains(document.activeElement) && !toast.matches(":hover")) toast.hidden = true;
+      }, toastDismissDelay);
+    }
 
     function showToast(message, kind) {
       const toast = element("toast");
       const icon = element("toast-icon");
-      if (toastTimer !== null) {
-        window.clearTimeout(toastTimer);
-        toastTimer = null;
-      }
+      cancelToastDismissal();
+      if (!toast.contains(document.activeElement)) toastReturnFocus = document.activeElement;
       element("toast-message").textContent = message;
       toast.className = "toast " + (kind || "working");
-      toast.setAttribute("aria-live", kind === "error" ? "assertive" : "polite");
+      const announcer = element("action-announcer");
+      announcer.setAttribute("aria-live", kind === "error" ? "assertive" : "polite");
+      announcer.textContent = message;
       icon.textContent = kind === "success" ? "✓" : kind === "error" ? "!" : "";
       toast.hidden = false;
-      // Results leave on their own so they never sit on the row buttons. A problem stays longer
-      // and the working message waits for its result.
-      if (kind !== "working") {
-        toastTimer = window.setTimeout(() => {
-          toast.hidden = true;
-          toastTimer = null;
-        }, kind === "error" ? 15000 : 6000);
-      }
+      toastDismissDelay = kind === "working" || kind === "error" ? 0 : 6000;
+      scheduleToastDismissal();
     }
 
     function dismissToast() {
-      if (toastTimer !== null) {
-        window.clearTimeout(toastTimer);
-        toastTimer = null;
+      cancelToastDismissal();
+      const toast = element("toast");
+      const focused = toast.contains(document.activeElement);
+      toast.hidden = true;
+      if (focused) {
+        const target = toastReturnFocus && toastReturnFocus.isConnected &&
+          !toastReturnFocus.disabled && toastReturnFocus.getClientRects().length &&
+          (toastReturnFocus.tabIndex >= 0 || toastReturnFocus.hasAttribute("tabindex") || toastReturnFocus.isContentEditable)
+          ? toastReturnFocus : element("brand-title");
+        if (!target.hasAttribute("tabindex") && target === element("brand-title")) target.setAttribute("tabindex", "-1");
+        target.focus({preventScroll: true});
       }
-      element("toast").hidden = true;
     }
+
+    element("toast").addEventListener("pointerenter", cancelToastDismissal);
+    element("toast").addEventListener("pointerleave", scheduleToastDismissal);
+    element("toast").addEventListener("focusin", cancelToastDismissal);
+    element("toast").addEventListener("focusout", () => window.setTimeout(scheduleToastDismissal, 0));
 
     document.addEventListener("submit", (event) => {
       const label = event.submitter ? event.submitter.textContent.trim() : "Save";
@@ -4481,7 +4516,15 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     const connectedRowHooks = [];
 
+    function profileOptionLabels(items) {
+      const counts = new Map();
+      items.forEach((profile) => counts.set(profile.name, (counts.get(profile.name) || 0) + 1));
+      return new Map(items.map((profile) => [profile.id, counts.get(profile.name) > 1
+        ? profile.name + " (" + profile.id + ")" : profile.name]));
+    }
+
     function renderConnectedDevices(data) {
+      const profileLabels = profileOptionLabels(profiles);
       lastConnectedDevices = data;
       const container = element("connected-devices");
       const count = element("connected-count");
@@ -4657,7 +4700,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         profiles.forEach((profile) => {
           const option = document.createElement("option");
           option.value = profile.id;
-          option.textContent = profiles.filter((other) => other.name === profile.name).length > 1 ? profile.name + " (" + profile.id + ")" : profile.name;
+          option.textContent = profileLabels.get(profile.id);
           option.selected = profile.id === device.assigned_profile_id;
           profileSelect.appendChild(option);
         });
@@ -6437,6 +6480,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     async function loadProfiles() {
       const data = await request("/api/profiles", "GET");
       profiles = data.profiles;
+      const profileLabels = profileOptionLabels(profiles);
       profilesLoaded = true;
       renderSidebarStatus();
       element("profiles-json").textContent = JSON.stringify(profiles, null, 2);
@@ -6472,7 +6516,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         profiles.forEach((profile) => {
           const option = document.createElement("option");
           option.value = profile.id;
-          option.textContent = profiles.filter((other) => other.name === profile.name).length > 1 ? profile.name + " (" + profile.id + ")" : profile.name;
+          option.textContent = profileLabels.get(profile.id);
           profileSelect.appendChild(option);
         });
         // Rebuilding the menu must not change a choice being edited.
@@ -6788,10 +6832,13 @@ DASHBOARD_HTML = r"""<!doctype html>
     function renderRandomWebsiteAnalytics(data) {
       const rows = element("random-website-rows");
       rows.replaceChildren();
+      const deviceNames = new Map((data.rows || []).map((item) =>
+        [item.device_id, {id: item.device_id, name: item.display_name || item.device_name}]));
+      const deviceLabels = profileOptionLabels(Array.from(deviceNames.values()));
       (data.rows || []).forEach((item) => {
         const row = document.createElement("tr");
         const device = document.createElement("td");
-        device.textContent = item.display_name || item.device_name;
+        device.textContent = deviceLabels.get(item.device_id);
         const domain = document.createElement("td");
         domain.className = "analytics-domain";
         domain.textContent = item.domain;
@@ -6841,10 +6888,12 @@ DASHBOARD_HTML = r"""<!doctype html>
         allDevices.value = "";
         allDevices.textContent = "All devices";
         deviceSelect.appendChild(allDevices);
+        const deviceLabels = profileOptionLabels((deviceData.devices || []).map((device) =>
+          ({id: device.id, name: deviceDisplayName(device)})));
         (deviceData.devices || []).forEach((device) => {
           const option = document.createElement("option");
           option.value = device.id;
-          option.textContent = deviceDisplayName(device);
+          option.textContent = deviceLabels.get(device.id);
           option.selected = device.id === selectedDevice;
           deviceSelect.appendChild(option);
         });
@@ -9494,6 +9543,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function scenarioStepRow(step) {
+      const profileLabels = profileOptionLabels(profiles);
       const row = document.createElement("div");
       row.className = "scenario-step";
       const profileLabel = document.createElement("label");
@@ -9504,7 +9554,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       profiles.forEach((profile) => {
         const option = document.createElement("option");
         option.value = profile.id;
-        option.textContent = profiles.filter((other) => other.name === profile.name).length > 1 ? profile.name + " (" + profile.id + ")" : profile.name;
+        option.textContent = profileLabels.get(profile.id);
         profileSelect.appendChild(option);
       });
       if (step.profile_id) profileSelect.value = step.profile_id;
@@ -10374,7 +10424,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function statusStripText(general, devices) {
-      return [String(general || "").replace(/^General profile: /, "General: "), devices]
+      return [String(general || ""), devices]
         .filter((part) => part).join(" · ");
     }
 
@@ -10455,7 +10505,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         toggle.setAttribute("aria-controls", body.id);
         while (title.firstChild) toggle.appendChild(title.firstChild);
         title.appendChild(toggle);
-        card.dataset.cardKey = title.textContent.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
+        card.dataset.cardKey = card.dataset.cardKey || title.textContent.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
         toggle.addEventListener("click", () => setCardOpen(card, body.hidden, true));
         setCardOpen(card, cardStartsOpen(storedCardState(card.dataset.cardKey), card.dataset.collapse), false);
       });

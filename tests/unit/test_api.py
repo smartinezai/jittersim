@@ -3536,7 +3536,7 @@ class ControlServerTests(unittest.TestCase):
 
     def test_the_step_editor_keeps_one_step_and_numbers_them(self) -> None:
         result = self._run_dashboard_functions(
-            ["scenarioStepRow", "renumberScenarioSteps"],
+            ["profileOptionLabels", "scenarioStepRow", "renumberScenarioSteps"],
             "function updateScenarioDuration() {}\n"
             "const profiles = [{id: 'slow', name: 'Slow'}];\n"
             "const node = (tag) => ({tag: tag, children: [], className: '', value: '',\n"
@@ -3580,7 +3580,7 @@ class ControlServerTests(unittest.TestCase):
 
     def test_rebuilt_profile_menus_keep_the_steps_being_edited(self) -> None:
         result = self._run_dashboard_functions(
-            ["loadProfiles", "followProfileMenus"],
+            ["profileOptionLabels", "loadProfiles", "followProfileMenus"],
             "let profiles = [];\n"
             "let profilesLoaded = false;\n"
             "function renderSidebarStatus() {}\n"
@@ -3824,7 +3824,7 @@ class ControlServerTests(unittest.TestCase):
 
     def test_dashboard_profile_menus_keep_the_everyone_else_choice(self) -> None:
         values = self._run_dashboard_functions(
-            ["loadProfiles", "followProfileMenus"],
+            ["profileOptionLabels", "loadProfiles", "followProfileMenus"],
             "let profiles = [];\n"
             "let profilesLoaded = false;\n"
             "function renderSidebarStatus() {}\n"
@@ -4432,7 +4432,7 @@ class ControlServerTests(unittest.TestCase):
             "      await checkAdminToken();\n",
             DASHBOARD_HTML,
         )
-        self.assertIn('id="toast" class="toast" role="status"', DASHBOARD_HTML)
+        self.assertIn('id="action-announcer" class="action-announcer" role="status"', DASHBOARD_HTML)
         self.assertIn(
             'element("toast-dismiss").addEventListener("click", dismissToast)',
             DASHBOARD_HTML,

@@ -96,10 +96,29 @@ def test_the_groups_card_lists_display_names():
 
 def test_the_analytics_picker_and_table_row_use_the_display_name():
     assert (
-        'option.textContent = deviceDisplayName(device);'
+        'option.textContent = deviceLabels.get(device.id);'
         in function_body("loadRandomWebsiteAnalytics")
     )
     assert (
-        'device.textContent = item.display_name || item.device_name;'
+        'device.textContent = deviceLabels.get(item.device_id);'
         in function_body("renderRandomWebsiteAnalytics")
     )
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required")
+def test_duplicate_labels_remain_distinct_without_codes_on_unique_names():
+    choices = [
+        {"id": "one", "name": "Phone"},
+        {"id": "two", "name": "Phone"},
+        {"id": "three", "name": "Laptop"},
+        {"id": "four", "name": "__proto__"},
+    ]
+    program = function_body("profileOptionLabels") + (
+        "console.log(JSON.stringify([...profileOptionLabels(" + json.dumps(choices) + ") ]));"
+    )
+    result = subprocess.run(["node", "-e", program], text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [
+        ["one", "Phone (one)"], ["two", "Phone (two)"],
+        ["three", "Laptop"], ["four", "__proto__"],
+    ]
