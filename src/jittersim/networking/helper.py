@@ -410,7 +410,6 @@ class HelperService:
                 "general_profile": True,
                 "service_lists": True,
                 "service_list_outages": True,
-                "ad_blocking": self._ad_blocking_store is not None,
                 "protected_dns_capture": True,
                 "identified_release_uploads": True,
                 "homepage_policy_version": 1,
@@ -430,6 +429,8 @@ class HelperService:
                         return refused
                     if payload.get("resume") and self._panic_recovery_failed:
                         return {"ok": False, "error": "Retry Panic before resuming ad blocking."}
+                    if self._panic_stop_latched and not self._ad_blocking_store.path.exists():
+                        self._ad_blocking_store.pause()
                 status = (
                     self._ad_blocking_store.configure(
                         payload.get("mac_addresses"), payload.get("allowed_domains"),

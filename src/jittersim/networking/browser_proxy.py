@@ -1,8 +1,6 @@
 """Bounded HTTPS CONNECT proxy for managed test browsers."""
 
 import argparse
-
-from jittersim.config.adblocking import ActiveBlocking
 import json
 import logging
 import os
@@ -15,6 +13,7 @@ from ipaddress import IPv4Address, ip_address, ip_network
 from pathlib import Path
 from typing import Callable, Optional, Sequence, Set, Tuple
 
+from jittersim.config.adblocking import ActiveBlocking
 from jittersim.config.exemptions import normalize_exempt_mac
 from jittersim.config.models import MacPolicy, ValidationError, normalize_domain
 from jittersim.engine.codec import PlanCodecError, plan_from_payload

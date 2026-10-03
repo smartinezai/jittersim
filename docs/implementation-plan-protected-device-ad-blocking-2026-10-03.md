@@ -165,8 +165,12 @@ returned a failure after namespace removal had already removed the virtual
 interface. Cleanup is corrected. This historical proof is not a final
 receipt for the adapted Unbound implementation.
 
-A final native Unbound proof, full release checks and final source review
-remain release gates. The first adapted proof attempt could not run because
+The corrected native Unbound proof passed with exit zero. It checked UDP,
+TCP, record types, current MAC isolation, allowances, pause, removal, DNS
+death, controller stall, household precedence and absence of saved history.
+Unbound reserves `.test` by default so the fixture uses controlled
+`example.net` names without changing production resolver safeguards.
+Full release checks and final source review remain release gates. The first adapted proof attempt could not run because
 the prepared images lacked required network or DNS tools. The owned test
 containers were removed. No unrelated containers were changed.
 
@@ -175,3 +179,31 @@ If CI is blocked solely by billing, merge only after all local equivalents
 pass. Do not bypass actual code or test failures. No live Pi deployment is
 included until independent management recovery is verified. Actual Pi
 memory, throughput and physical multi-client acceptance remain unverified.
+
+
+## Final source review checkpoint
+
+The helper and household rule consumers were reviewed together. Ad writes
+carry the existing control revision. Requests queued before Panic cannot
+restart blocking. A fresh explicit enable can resume it. Missing ad settings
+after a latched Panic start paused when they are reconstructed. An access
+transition clears ad routing while household rules change. It retains the
+latest saved pause choice even if Panic arrives during that transition.
+
+The updater still verifies exact reviewed source digests before migrating
+persistent Panic state. The feature records its helper and access digests
+alongside the original approved bundle. It does not accept arbitrary source,
+release labels or observed candidates as proof of compatibility. The signed
+release checks continue to cover the complete archive. Modified candidates,
+missing legacy intent and incompatible recovery remain refused.
+
+DNS validation failures wait at least five seconds before retrying. The
+service needs CAP_KILL to stop its own child after Unbound drops root
+identity. The bounded service permissions include that capability. Verify
+the actual stop and restart under those permissions in the final Linux run.
+
+Current focused evidence: 198 helper, Panic, ad state and dashboard checks
+passed. Another 156 update and compatibility checks passed with one expected
+platform skip. The first full diagnostic run found the retired button word,
+a redundant capability and source digest updates. Those were corrected.
+The final full run must use the complete corrected source.

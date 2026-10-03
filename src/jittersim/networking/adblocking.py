@@ -481,6 +481,7 @@ class AdController:
                 self.child is None or self.child.poll() is not None or self.key != key
             ):
                 if time.monotonic() >= self.next_start:
+                    self.next_start = time.monotonic() + 5
                     self._stop()
                     atomic_write(
                         self.config_path,
@@ -505,7 +506,6 @@ class AdController:
                         stderr=subprocess.DEVNULL,
                     )
                     self.key = key
-                    self.next_start = time.monotonic() + 5
             if (
                 self.key == key
                 and self.child is not None

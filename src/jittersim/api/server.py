@@ -210,7 +210,6 @@ WRITE_PATHS = frozenset(
         "/api/time-quotas/stop",
         "/api/policies",
         "/api/everyone-else",
-        "/api/ad-blocking",
         "/api/unaffected-devices",
         "/api/unaffected-devices/delete",
         "/api/access-point",

@@ -3069,8 +3069,8 @@
           name.append(title, mac);
           const button = document.createElement("button");
           button.type = "button";
-          button.textContent = "Remove protection";
-          button.setAttribute("aria-label", "Remove protection for " + (device.display_name || device.mac_address));
+          button.textContent = "Stop protecting";
+          button.setAttribute("aria-label", "Stop protecting " + (device.display_name || device.mac_address));
           button.addEventListener("click", () => connectedControlAction("/api/unaffected-devices/delete", {mac_address: device.mac_address}, button, "Protection and this device’s ad-blocking choice were removed. Saved profiles can apply again."));
           const actions = document.createElement("div");
           actions.className = "connected-actions";
@@ -8879,4 +8879,3 @@
     groupsLoadedHooks.push(renderTargetMenus);
 
     startDashboard();
-  

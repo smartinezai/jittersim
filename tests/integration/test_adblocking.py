@@ -182,6 +182,9 @@ def test_helper_rejects_injection_and_panic_pauses_saved_policy(tmp_path):
         with pytest.raises(HelperClientError):
             client.configure_ad_blocking([ALICE], [], resume=True, control_revision=revision)
         assert store.read()["running"] is False
+        store.path.unlink()
+        assert client.configure_ad_blocking([ALICE], [])["paused"]
+        assert store.read()["running"] is False
         assert client.configure_ad_blocking([ALICE], [], resume=True)["available"]
         assert store.read()["running"] is True
 

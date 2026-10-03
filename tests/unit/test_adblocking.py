@@ -330,6 +330,19 @@ def test_healthy_controller_commits_only_current_generation(store, tmp_path):
     item.close()
 
 
+def test_failed_dns_validation_has_a_bounded_restart_rate(store, tmp_path):
+    store.configure([ALICE], [])
+    applied(store, tmp_path)
+    item = controller(store, tmp_path)
+    with patch("jittersim.networking.adblocking.subprocess.run", side_effect=OSError) as check:
+        with pytest.raises(OSError):
+            item.tick()
+        item.tick()
+        assert check.call_count == 1
+        assert not store.status()["ready"]
+    item.close()
+
+
 def test_unhealthy_or_changed_config_cannot_receive_routing_lease(store, tmp_path):
     store.configure([ALICE], [])
     applied(store, tmp_path)

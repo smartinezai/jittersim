@@ -642,7 +642,7 @@ disabled. **Remove protection** and the name and type editor stay active.
 
 ### Optional ad blocking
 
-Each saved device in **Unaffected by profiles** has a **Block ads** switch.
+Each saved entry in **Protected devices** has a **Block ads** switch.
 It starts off and works independently from profiles and quotas. The saved
 choice follows the Wi-Fi MAC address even when the device disconnects.
 Removing protection also removes its ad-blocking choice. Adding it again
@@ -670,10 +670,10 @@ The publisher lists the contributing sources and their licenses.
 
 The dashboard separates the saved choice from whether blocking is active.
 If the DNS blocker dies or its controller stops responding, temporary
-routing expires within five seconds and ordinary DNS resumes. A failed
-initial download leaves ordinary DNS available. **Reset network** and
-**Panic** pause blocking while keeping the saved switches. **Start with
-saved settings** resumes it. Explicitly enabling a switch also resumes
+routing expires within five seconds and normal DNS rules resume. A failed
+initial download leaves normal DNS available. **Reset network** and
+**Panic** pause blocking while keeping the saved switches. **Start**
+resumes it. Explicitly enabling a switch also resumes
 blocking. Turning off a switch keeps profile protection.
 
 ### Traffic discovery
