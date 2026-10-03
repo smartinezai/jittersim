@@ -142,3 +142,48 @@ def test_unidentified_helper_reply_is_not_queue_confirmation(stack, result):
     assert status == 503
     assert reply == {"error": "update retry is unavailable"}
     assert helper.calls == [RETRY]
+
+
+def test_http_helper_and_locked_manager_keep_one_original_request(stack, tmp_path, monkeypatch):
+    import tempfile
+    from pathlib import Path
+
+    from jittersim import updates
+    from tests.unit.test_panic_restart_latch import helper as socket_helper
+    from tests.unit.test_update_retry import STOPPED
+
+    server, _ = stack
+    root, code, config = (tmp_path / name for name in ("updates", "code", "config"))
+    for path in (root, code, config):
+        path.mkdir(mode=0o700)
+    request = {"request_id": REQUEST, "request_kind": "install", "version": "v1",
+               "rollback": False, "attempt": "d" * 32, "restart_only": True}
+    updates.atomic_json(root / "request.json", request)
+    updates.atomic_json(root / "status.json", {"phase": "failed", "message": "Recovery paused.",
+                        "request_id": REQUEST, "request_kind": "install"})
+    calls = []
+
+    def query(*args):
+        return STOPPED if not calls else STOPPED.replace("ActiveState=failed", "ActiveState=activating").replace("Job=\n", "Job=12\n")
+
+    actual_retry = updates.retry_update
+
+    def retry(identifier):
+        return actual_retry(identifier, root=root, code=code, config=config, query=query,
+                            run=lambda *args: calls.append(args))
+
+    retry_id = updates.update_status(root=root, code=code, config=config, query=query)["retry"]["id"]
+    before = (root / "request.json").read_bytes()
+    monkeypatch.setattr(updates, "retry_update", retry)
+    with tempfile.TemporaryDirectory(prefix="js-retry-route-", dir="/tmp") as directory:
+        with socket_helper(Path(directory).resolve()) as (_, client):
+            server.helper_client = client
+            status, reply = post(server, {"retry_id": retry_id})
+            assert status == 202
+            assert reply["status"]["request_id"] == REQUEST
+            assert reply["status"]["request_kind"] == "install"
+            assert reply["status"]["phase"] == "queued"
+            assert post(server, {"retry_id": retry_id})[0] == 409
+    assert len(calls) == 1
+    assert calls[0][0] == ["systemctl", "start", "--no-block", "jittersim-update.service"]
+    assert (root / "request.json").read_bytes() == before
