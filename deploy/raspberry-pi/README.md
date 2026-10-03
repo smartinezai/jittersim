@@ -50,6 +50,10 @@ archive:
 sudo deploy/raspberry-pi/install.sh
 ```
 
+From a Mac, `deploy/raspberry-pi/deploy-from-mac.sh --use-installer --install`
+copies the release of a commit to the Pi and runs this installer from it. See
+[Deploy from a Mac](#deploy-from-a-mac).
+
 This Pi release replaces its source folders on upgrade so removed modules do
 not remain in the installed package. The installer installs the access
 recovery, DNS, update and Wi-Fi units and enables the recovery and Wi-Fi units.
@@ -594,11 +598,13 @@ sudo jittersim update install
 sudo jittersim update rollback
 ```
 
-`update check` reports releases already staged on the Pi. It does not query
-the private repository online. Install and rollback ask for confirmation and
-briefly interrupt the dashboard and test network. Keep Ethernet or SSH
-available for recovery. Run `sudo jittersim --help` or
-`sudo jittersim update --help` for command help.
+`update check` reports releases already staged on the Pi, who signed them and
+whether they can be installed. It does not query the private repository
+online. Install and rollback ask for confirmation and briefly interrupt the
+dashboard and test network. Keep Ethernet or SSH available for recovery.
+`sudo jittersim update stage`, `trust-key`, `untrust-key`, `list-keys` and
+`enable-passwordless-staging` manage [signed releases](#signed-releases). Run
+`sudo jittersim --help` or `sudo jittersim update --help` for command help.
 
 ## Troubleshoot a failed apply
 
@@ -675,28 +681,49 @@ JitterSim database.
 ## Approved release updates
 
 Install this version once using the normal installer to add the update service.
-After that, Setup can check the installed version, install an approved staged
+After that, Setup can check the installed version, install a signed staged
 release and restore the previous installation. The Pi stores no GitHub
-credentials. An administrator transfers the release over the existing SSH path.
+credentials. The owner transfers the release over the existing SSH path. See
+[Signed releases](#signed-releases) for the key that approves a release.
 
-Build a bundle from a reviewed tag or commit on the development machine:
+Releases have version numbers: MAJOR.MINOR.PATCH. A new feature raises
+MINOR and a fix raises PATCH. A change that needs a reinstall with the installer
+or breaks saved settings raises MAJOR. Put the number in `pyproject.toml` and in
+`src/jittersim/__init__.py` then mark the reviewed commit with
+`git tag vMAJOR.MINOR.PATCH`. A test fails when the tag and the files disagree.
+
+Build a bundle from the tag on the development machine:
 
 ```sh
-./deploy/raspberry-pi/build-release.sh RELEASE_REF /tmp/jittersim-release.tar.gz
+./deploy/raspberry-pi/build-release.sh vMAJOR.MINOR.PATCH /tmp ~/.ssh/jittersim_release_ed25519
 ```
 
-Save the printed SHA-256 checksum with the release record. Transfer that exact
-bundle to the Pi using the existing SSH account then stage it as root:
+The bundle is named `jittersim-MAJOR.MINOR.PATCH.tar.gz` and the script prints
+the version it built. A commit without a tag builds a test build named
+`NUMBER.dev+COMMIT` that never looks like a release. A second argument that ends
+in `.tar.gz` names the file yourself. `build-release.sh --version REF` only prints the version
+the commit would build.
+
+The archive includes the signed source commit, version and release order.
+The separate signature is saved beside it with `.sig` added to its name.
+Save the printed SHA-256 checksum with the release record.
+The update refuses to install an older number over a newer one. Use Restore previous
+installation to go back on purpose. Transfer the exact archive and its signature
+to the Pi using the existing SSH account then stage it as root.
+An older signed manager cannot read the new development label. Use
+`deploy-from-mac.sh --use-installer` once for the first upgrade. Later updates
+use the ordinary one-command signed route.
 
 ```sh
-sudo /opt/jittersim/.venv/bin/python -m jittersim.updates stage /tmp/jittersim-release.tar.gz --version RELEASE_VERSION --sha256 APPROVED_SHA256
+sudo jittersim update stage /tmp/jittersim-release.tar.gz
 ```
 
-The checksum must come from the trusted release record. Staging an archive is
-approval to run its code as root. Staging rejects unsafe archive paths, links,
-wrong checksums, more than 5000 files and excessive compressed or expanded size.
-Only the administrator can write the staged files. The dashboard can select
-only that staged release and cannot submit a URL, path or shell command.
+Staging checks the signature before it reads anything inside the archive. It
+also rejects a release that is not newer than the installed one, unsafe archive
+paths, links, more than 5000 files and excessive compressed or expanded size.
+`--sha256 CHECKSUM` and `--version LABEL` add two more checks. Only root can
+write the staged files. The dashboard can select only that staged release and
+cannot submit a URL, path or shell command.
 
 In Setup, press Check for updates then Install staged release. The operation
 runs the release steps of `install.sh`. It first runs the release's network
@@ -737,6 +764,206 @@ Automated tests exercise file validation and recovery with disposable files.
 They do not establish radio coverage, uninterrupted household service or actual
 Pi restart behavior. Complete the household and recovery trial on the Pi before
 relying on it for everyday access.
+
+### Deploy from a Mac
+
+`deploy/raspberry-pi/deploy-from-mac.sh` builds, copies, stages and installs
+above in one command. It runs on the **Mac** in a JitterSim checkout and needs
+git, ssh-keygen, ssh, scp, curl, tar, shasum and Python 3:
+
+```sh
+deploy/raspberry-pi/deploy-from-mac.sh --ref RELEASE_REF --dry-run
+deploy/raspberry-pi/deploy-from-mac.sh --ref RELEASE_REF
+deploy/raspberry-pi/deploy-from-mac.sh --ref RELEASE_REF --stage-only
+```
+
+The defaults are `--host jittersim@192.168.0.17`,
+`--key ~/.ssh/jittersim_ed25519` and
+`--signing-key ~/.ssh/jittersim_release_ed25519`. `--ref` defaults to `HEAD`.
+
+Deploying works on the Pi's router network or its own test Wi-Fi. On the test
+Wi-Fi the command uses the HTTPS dashboard. It also uses HTTPS when SSH cannot
+answer. Give the dashboard's certificate with `--ca-cert` and store the admin
+token once with `--save-token`. Open the dashboard and choose Allow this device
+once before uploading from the test Wi-Fi. The script prints its destination.
+HTTPS installation waits up to 900 seconds in total, including status reads.
+
+1. It builds the archive of the commit with `build-release.sh` so uncommitted
+   changes are left out. With the release signing key it signs the archive
+   with `sign-release.sh`, which refuses a key that others may read. It prints
+   the commit and the SHA-256 checksum and checks that checksum with `shasum`.
+2. It asks the Pi (without a password) whether it has the update service,
+   whether it installs only signed releases, whether it trusts a key, whether
+   passwordless staging is on and which release it runs. If the Pi already
+   runs that commit nothing else happens.
+3. A Pi with signed releases gets the archive and its signature in
+   `~/incoming/` and stages it with
+   `sudo /usr/local/bin/jittersim update stage ...`. With passwordless staging
+   this runs in `BatchMode` with `sudo -n` and asks for nothing. Without it the
+   step runs in one `ssh -t` session so the Pi asks for its `sudo` password once
+   in your terminal. A Pi from before signed releases gets the old staging
+   command with the update service's own copy of `updates.py`. The script never
+   reads, stores or passes a password.
+4. With `--stage-only` it prints the exact command to install the staged
+   release. You can also choose **Check for updates** and then **Install staged
+   release** in Setup. By default the same session runs
+   `sudo jittersim update install --yes --wait` (`sudo jittersim update
+   install --yes` and a wait for the update service on a Pi from before signed
+   releases). Then it reads `jittersim update check` and prints the release the
+   Pi now runs. Compare it with `git rev-parse --short RELEASE_REF`.
+
+A Pi with signed releases but no trusted key or a Mac without the signing key
+stops the deploy before anything is copied and says what to run.
+
+The release is named after the short commit. The Pi records it in
+`/opt/jittersim/.jittersim-release.json`. Setup shows it and so does
+`jittersim status` on the Mac.
+
+A Pi without the update service (a release from before staged updates) needs
+the full installer once. `--use-installer` copies the archive, checks its
+checksum on the Pi and unpacks it to `~/jittersim-release-COMMIT` as the login
+user. It runs the installer by default. With `--stage-only` it prints the
+installer command. Use it
+as well for OS package or Wi-Fi changes. The unpacked folder stays in the home
+folder like a release unpacked by hand.
+
+Every ssh and scp call has a ten second connection timeout, notices a dead
+connection within 45 seconds and uses only the given key. All of them except
+the `sudo` step run in `BatchMode` so they never ask anything and each has a
+time limit (one minute for a check, ten minutes for the copy, five minutes for
+passwordless staging and 25 minutes for a passwordless install). The `sudo`
+step that asks for the password has none because the install can take several
+minutes. Host keys come from your `known_hosts` as they are: connect once with
+`ssh -i ~/.ssh/jittersim_ed25519 jittersim@192.168.0.17` and check the host
+key before the first deploy. `--dry-run` prints every command and runs none.
+
+## Signed releases
+
+The Pi's root update manager stages and installs only an archive signed by a
+release signing key the owner trusts. A valid signature is the permission to
+install code as root. The admin token and the SSH login are not.
+
+- The owner's signing key lives on the Mac only
+  (`~/.ssh/jittersim_release_ed25519`, an ed25519 OpenSSH key).
+  `make-release-key.sh` creates it and prints the one command that makes the
+  Pi trust it.
+- `/etc/jittersim/release-signers` lists the trusted public keys (root, mode
+  0644). Only `sudo jittersim update trust-key` and `untrust-key` change it.
+  Staging refuses every signature while the file holds a line those commands
+  did not write or while others can change it.
+- Staging copies the archive and its signature `ARCHIVE.sig` into a root-only
+  folder first. `ssh-keygen -Y verify` then checks that copy against the trusted
+  keys in the `jittersim-release` namespace. Only that same copy is unpacked so
+  a file swapped in afterwards changes nothing. A signature for anything else
+  (for example a signed git commit) never approves a release.
+- Every archive carries a signed manifest `deploy/RELEASE` with its commit,
+  label and sequence (the build time). The Pi stages only a sequence newer than
+  the installed release and than every release it installed before. An older
+  release comes back only with the local rollback (`sudo jittersim update
+  rollback` or **Restore previous installation**), which restores the recovery
+  copy and never stages an archive.
+- Install staged release (dashboard, `jittersim update install`) checks again
+  that the staged release was signed by a key that is still trusted and is
+  still newer. A release staged without a signature cannot be installed.
+
+### One-time setup
+
+1. On the Mac: `deploy/raspberry-pi/make-release-key.sh`. Add `--passphrase`
+   for a key with a passphrase (keep it in ssh-agent with `ssh-add`).
+2. Install a release with signed updates once. On a Pi from before signed
+   releases `deploy-from-mac.sh --install` still uses the old staging command
+   and asks for the sudo password.
+3. Run the one command `make-release-key.sh` printed on the Pi. It asks for the
+   sudo password once. It looks like
+   `echo 'ssh-ed25519 AAAA… mac-20261002' | sudo jittersim update trust-key --label mac-20261002 --enable-passwordless-staging -`.
+
+From then on `deploy-from-mac.sh --install` signs, copies, stages and installs
+without a password. `sudo jittersim update list-keys` shows the trusted keys and
+whether passwordless staging is on.
+
+### Passwordless staging
+
+`sudo jittersim update enable-passwordless-staging` (or `trust-key
+--enable-passwordless-staging` or `install.sh --enable-passwordless-staging`)
+writes `/etc/sudoers.d/jittersim-update` (mode 0440) after `visudo -cf`
+accepted it. It works only while at least one key is trusted and the installer
+never turns it on by itself. The rule lets the `jittersim` login run exactly
+two commands without a password and nothing else:
+
+```text
+/usr/local/bin/jittersim update stage /home/jittersim/incoming/jittersim-release.tar.gz
+/usr/local/bin/jittersim update install --yes --wait
+```
+
+There is no wildcard in the rule so no other path or argument matches. Staging
+checks the signature itself so the rule alone installs nothing. The install
+command can only install the release already staged. `sudo jittersim update
+disable-passwordless-staging` removes the rule. The dashboard service cannot
+use sudo at all (`NoNewPrivileges`).
+
+### Deploy without SSH (HTTPS upload)
+
+`deploy-from-mac.sh` picks the way by itself. On the Pi's test Wi-Fi
+(192.168.50.0/24) SSH is blocked on purpose, so the script builds, signs and
+uploads the release to `https://PI:8080/api/updates/upload`. Everywhere else it
+tries SSH first and uses HTTPS when SSH does not answer. `--https` and `--ssh`
+force one way. The upload path needs:
+
+- the admin token in `JITTERSIM_TOKEN` or in the macOS Keychain. Store it once
+  with `deploy-from-mac.sh --save-token` (Keychain item `jittersim-admin-token`).
+  The token is never printed and never put on a command line;
+- a copy of the Pi's `/etc/jittersim/dashboard.crt` (`--ca-cert FILE` or the file
+  saved by `jittersim connect`). Only that certificate is trusted;
+- on the test Wi-Fi: open the dashboard once in a browser on the Mac and choose
+  **Allow this device**.
+
+The dashboard streams the archive and signature into a spool folder of its own
+user (`/var/lib/jittersim/incoming-release`). The root helper copies them into a
+root-only folder and runs the same staging as `jittersim update stage`: a trusted
+key must have signed exactly those bytes and the sequence must be newer than the
+high-water mark. Limits: Content-Length is required, the archive is at most 25 MiB,
+the signature at most 16 KiB and the whole upload must finish within 120 seconds.
+`jittersim remote update status|upload|install` does the same from the command
+line, and `deploy/raspberry-pi/publish-release.sh REF` publishes the two release
+files to GitHub for the online release source.
+
+### Who can do what
+
+| Someone has | They can | They cannot |
+| --- | --- | --- |
+| A leaked admin token | Use the dashboard from a registered device (on the test Wi-Fi the device must be allowed first). Upload a release over HTTPS and install it, but the Pi stages it only when a key in `release-signers` signed it and it is newer than every release installed before. Install the release already staged. Restore the one previous installation. | Stage or install any release you did not sign. Get root. |
+| A stolen SSH key for the `jittersim` login | Log in as `jittersim` and do what that user can. With passwordless staging also stage and install releases you signed. | Install their own code or get root unless they also learn the sudo password (for example by watching you type it). |
+| A stolen release signing key | Sign archives. | Put an archive on the Pi. A signature alone stages nothing. |
+| The signing key and the SSH key | With passwordless staging install their own signed code and so get root. Without it they still need the sudo password. | Install anything once you remove the key with `untrust-key`. |
+
+Keep the signing key on the Mac only and give it a passphrase if the Mac is
+shared. A release you signed stays installable on this Pi until a newer one is
+installed, so sign only what you want installed.
+
+### Rotate or remove a key
+
+To replace a key, rename the old key files on the Mac, run
+`make-release-key.sh` again and run its command on the Pi. Then remove the old
+key on the Pi:
+
+```sh
+sudo jittersim update list-keys
+sudo jittersim update untrust-key OLD_LABEL_OR_FINGERPRINT
+```
+
+After `untrust-key`:
+
+- archives signed by that key are refused from then on,
+- a staged release it signed is removed and cannot be installed,
+- releases already installed stay installed: a signature is checked when a
+  release is staged and installed, not while it runs,
+- passwordless staging turns off when no key is left,
+- a rollback keeps the key list of now. Recovery copies leave
+  `release-signers` out so a restore never brings back a removed key.
+
+If a signing key was stolen together with SSH access, treat the Pi as possibly
+compromised: remove the key, then reinstall the Pi from a fresh image and a
+release you build and sign with a new key.
 
 ## Persistent access rules and normal access
 

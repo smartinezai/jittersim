@@ -10,6 +10,14 @@ fi
 # use explicit private permissions.
 umask 022
 
+# Passwordless staging stays off unless the owner asks for it here or later with
+# 'sudo jittersim update enable-passwordless-staging'. An earlier choice is kept.
+enable_passwordless_staging=no
+if [ "${1:-}" = --enable-passwordless-staging ]; then
+    enable_passwordless_staging=yes
+    shift
+fi
+
 SOURCE_DIR=${1:-$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)}
 INSTALL_DIR=/opt/jittersim
 CONFIG_DIR=/etc/jittersim
@@ -17,6 +25,15 @@ DATA_DIR=/var/lib/jittersim
 
 if [ ! -f "$SOURCE_DIR/pyproject.toml" ]; then
     echo "source directory does not contain pyproject.toml: $SOURCE_DIR" >&2
+    exit 1
+fi
+
+# The passwordless rule is only safe with a trusted release signing key: check it before
+# anything changes.
+if [ "$enable_passwordless_staging" = yes ] \
+    && ! grep -q '^jittersim-release ' "$CONFIG_DIR/release-signers" 2>/dev/null; then
+    echo "--enable-passwordless-staging needs a trusted release signing key first." >&2
+    echo "Run 'sudo jittersim update trust-key PUBLIC_KEY_FILE' and try again." >&2
     exit 1
 fi
 
@@ -211,11 +228,18 @@ install -m 0644 -o root -g root \
 install -m 0644 -o root -g root \
     "$SOURCE_DIR/deploy/raspberry-pi/jittersim-update.service" \
     /etc/systemd/system/jittersim-update.service
+install -m 0644 -o root -g root \
+    "$SOURCE_DIR/deploy/raspberry-pi/jittersim-update-fetch.service" \
+    /etc/systemd/system/jittersim-update-fetch.service
 
 # Recovery must run even if an interrupted package install damages the venv.
 install -d -m 0755 -o root -g root /usr/local/lib
 install -m 0644 -o root -g root "$SOURCE_DIR/src/jittersim/updates.py" /usr/local/lib/jittersim-update.py
 systemctl enable jittersim-update.service
+# The update manager writes the sudoers rule itself and checks it with visudo first.
+if [ "$enable_passwordless_staging" = yes ]; then
+    python3 -I /usr/local/lib/jittersim-update.py enable-passwordless-staging
+fi
 
 for access_service in jittersim-dns jittersim-access-boot jittersim-ap; do
     install -m 0644 -o root -g root "$SOURCE_DIR/deploy/raspberry-pi/$access_service.service" \
@@ -295,6 +319,7 @@ else
     echo "Warning: local dashboard name setup failed. Use the Pi's Ethernet address." >&2
 fi
 
+echo "Installed JitterSim $("$INSTALL_DIR/.venv/bin/python" -c 'import jittersim; print(jittersim.__version__)')" >&2
 echo "JitterSim installed. Read the generated credentials locally from:" >&2
 echo "  $CONFIG_DIR/control.env" >&2
 echo "  $CONFIG_DIR/ap.env" >&2

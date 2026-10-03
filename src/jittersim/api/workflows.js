@@ -191,7 +191,7 @@ function actionButton(label, action) {
     finally {
       setButtonBusy(button, false);
       if (button.id === 'test-session-finish') button.disabled = Boolean(activeTestRecord && activeTestRecord.ended_at !== null);
-      if (button.id === 'release-install' || button.id === 'release-rollback') { releasePollAt = 0; loadReleaseStatus().catch(error => showMessage(error.message, 'error')); }
+      if (typeof button.afterAction === 'function') button.afterAction();
     }
   });
   return button;
@@ -246,6 +246,9 @@ function renderSystemHealth(data) {
     system.uptime_seconds == null ? null : 'Pi uptime: ' + Math.floor(system.uptime_seconds / 3600) + ' hours',
     'Checked: ' + new Date().toLocaleTimeString()
   ];
+  if (system.version) knownHealthVersion = system.version;
+  const version = installedReleaseLabel();
+  if (version) element('sidebar-version').textContent = 'Version ' + version;
   element('health-details').replaceChildren(...values.filter(Boolean).map(value => textNode('p', value)));
   const uplink = textNode('p', element('uplink-state').textContent === 'Unavailable' ? 'Ethernet information unavailable' : 'Ethernet: ' + element('uplink-state').textContent);
   uplink.id = 'health-uplink'; element('health-details').append(uplink);
@@ -299,6 +302,7 @@ async function openDevice(id) {
   }
   workspaceDevice = id;
   previousWorkspaceTraffic = null;
+  ['workspace-runs', 'workspace-usage', 'workspace-timeline'].forEach(key => delete element(key).dataset.renderKey);
   showTab('devices');
   element('device-workspace').hidden = false;
   populateWorkflowMenus();
@@ -313,30 +317,37 @@ async function loadWorkspace() {
   const id = workspaceDevice;
   workspaceRequest = (async () => {
     const data = await request('/api/device-workspace/' + encodeURIComponent(id), 'GET');
-    const traffic = await request('/api/traffic', 'GET');
+    // The graph page reads the counters every 2 seconds, so a fresh reading is reused here.
+    const traffic = await readTraffic(1500);
     if (id !== workspaceDevice) return;
     const list = element('workspace-runs');
-    list.replaceChildren();
-    data.timers.forEach(timer => list.append(textNode('p', 'Timer: ' + timer.profile_name + ' · ' + formatTimerRemaining(timer.remaining_seconds)),
-      actionButton('Stop timer', async button => { await cancelTimer(timer.id, button); await loadConditions(); })));
-    data.runs.forEach(run => list.append(textNode('p', 'Scenario: ' + (run.scenario_name || run.scenario_id)),
-      actionButton('Stop scenario', async () => { await request('/api/scenarios/stop', 'POST', {id:run.id}); refreshAfterSuccess('Scenario stopped.'); })));
-    data.progressions.forEach(run => list.append(textNode('p', 'Progression: ' + run.start_profile_name + ' → ' + run.end_profile_name),
-      actionButton('Stop progression', button => stopProgression(run.id, button))));
-    if (!list.children.length) list.append(textNode('p', 'No temporary runs.'));
+    replaceIfChanged(list, JSON.stringify([data.timers, data.runs, data.progressions]), () => {
+      list.replaceChildren();
+      data.timers.forEach(timer => list.append(textNode('p', 'Timer: ' + timer.profile_name + ' · ' + formatTimerRemaining(timer.remaining_seconds)),
+        actionButton('Stop timer', async button => { await cancelTimer(timer.id, button); await loadConditions(); })));
+      data.runs.forEach(run => list.append(textNode('p', 'Scenario: ' + (run.scenario_name || run.scenario_id)),
+        actionButton('Stop scenario', async () => { await request('/api/scenarios/stop', 'POST', {id:run.id}); refreshAfterSuccess('Scenario stopped.'); })));
+      data.progressions.forEach(run => list.append(textNode('p', 'Progression: ' + run.start_profile_name + ' → ' + run.end_profile_name),
+        actionButton('Stop progression', button => stopProgression(run.id, button))));
+      if (!list.children.length) list.append(textNode('p', 'No temporary runs.'));
+    });
     const usage = element('workspace-usage');
-    usage.replaceChildren();
-    [...data.data_limits, ...data.group_data_limits, ...data.service_quotas].forEach(limit => usage.append(textNode('p',
-      (limit.name || (limit.group_id ? 'Shared data limit' : 'Device data limit')) + ': ' +
-      (limit.used_bytes / 1048576).toFixed(1) + ' / ' + (limit.limit_bytes / 1048576).toFixed(1) + ' MB' + (limit.enabled ? '' : ' · Disabled'))));
-    data.time_quotas.forEach(limit => usage.append(textNode('p', limit.name + ': ' + Math.floor(limit.used_seconds / 60) + ' / ' + Math.floor(limit.limit_seconds / 60) + ' minutes')));
-    if (!usage.children.length) usage.append(textNode('p', 'No usage limits for this device.'));
+    replaceIfChanged(usage, JSON.stringify([data.data_limits, data.group_data_limits, data.service_quotas, data.time_quotas]), () => {
+      usage.replaceChildren();
+      [...data.data_limits, ...data.group_data_limits, ...data.service_quotas].forEach(limit => usage.append(textNode('p',
+        (limit.name || (limit.group_id ? 'Shared data limit' : 'Device data limit')) + ': ' +
+        (limit.used_bytes / 1048576).toFixed(1) + ' / ' + (limit.limit_bytes / 1048576).toFixed(1) + ' MB' + (limit.enabled ? '' : ' · Disabled'))));
+      data.time_quotas.forEach(limit => usage.append(textNode('p', limit.name + ': ' + Math.floor(limit.used_seconds / 60) + ' / ' + Math.floor(limit.limit_seconds / 60) + ' minutes')));
+      if (!usage.children.length) usage.append(textNode('p', 'No usage limits for this device.'));
+    });
     const timeline = element('workspace-timeline');
-    const entries = data.timeline.changes.map(change => textNode('li', new Date(change.at * 1000).toLocaleString() +
-      ' · ' + change.profile + ' · ' + change.reason + (change.overridden_schedules.length ? ' · Takes priority over: ' + change.overridden_schedules.join(', ') : '')));
-    timeline.replaceChildren(...entries.slice(0,6));
-    element('workspace-timeline-later').replaceChildren(...entries.slice(6));
-    element('workspace-later').hidden = entries.length <= 6;
+    replaceIfChanged(timeline, JSON.stringify(data.timeline), () => {
+      const entries = data.timeline.changes.map(change => textNode('li', new Date(change.at * 1000).toLocaleString() +
+        ' · ' + change.profile + ' · ' + change.reason + (change.overridden_schedules.length ? ' · Takes priority over: ' + change.overridden_schedules.join(', ') : '')));
+      timeline.replaceChildren(...entries.slice(0,6));
+      element('workspace-timeline-later').replaceChildren(...entries.slice(6));
+      element('workspace-later').hidden = entries.length <= 6;
+    });
     element('timeline-note').textContent = (deviceConditions.applied ? '' : 'Saved rules preview. These settings are not confirmed active. ') + data.timeline.note + (data.timeline.truncated ? ' Showing the first 32 changes.' : ' Next 24 hours.');
     const counters = traffic.devices && traffic.devices[id];
     const now = traffic.sampled_at;
@@ -539,130 +550,491 @@ let releaseState = null;
 let releasePollAt = 0;
 let releaseStatusRequest = null;
 let autoCheckStagedUpdates = null;
-const RELEASE_BUSY_PHASES = ['queued','stopping','backing-up','installing','checking','rolling-back'];
+let knownHealthVersion = null;
+let lastConfirmedInstalledVersion = null;
+let updateWatch = null;
+let updateFollowing = false;
+let updateCheckRunning = false;
+let updateOutcome = '';
+let updateAccessRevision = 0;
+const updateReads = new Map();
+const updateReadRevisions = {release:0, online:0, preference:0};
+let onlineSettingsWrite = null;
+let preferenceWrite = null;
+const RELEASE_BUSY_PHASES = ['queued','preparing','stopping','backing-up','installing','checking','rolling-back'];
+const PHASE_TEXT = {
+  queued: 'The update is queued.',
+  preparing: 'Preparing and checking the release while services remain available.',
+  stopping: 'Stopping services before the settings backup.',
+  'backing-up': 'Backing up the installation and settings.',
+  installing: 'Installing the new release.',
+  checking: 'Restarting services and checking that everything works.',
+  'rolling-back': 'Restoring the previous installation.'
+};
+const updateSleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+function updateContext() { return {token: adminTokenRevision, access: updateAccessRevision}; }
+function updateContextCurrent(context) {
+  return context.token === adminTokenRevision && context.access === updateAccessRevision && adminTokenVerified &&
+    (!context.kind || context.generation === updateReadRevisions[context.kind]);
+}
+function sameUpdateContext(first, second) {
+  return first.token === second.token && first.access === second.access;
+}
+function updateRead(kind, context, read) {
+  if (!updateContextCurrent(context)) return Promise.resolve(null);
+  const readContext = {...context, kind, generation:updateReadRevisions[kind]};
+  const active = updateReads.get(kind);
+  if (active) {
+    if (sameUpdateContext(active.context, readContext) && active.context.generation === readContext.generation) return active.promise;
+    // Wait for older physical work then start a read after the invalidating write.
+    return active.promise.catch(() => null).then(() => {
+      if (!updateContextCurrent(readContext)) return null;
+      return updateRead(kind, context, read);
+    });
+  }
+  const owner = {context:readContext, promise:null};
+  owner.promise = Promise.resolve().then(() => updateContextCurrent(readContext) ? read(readContext) : null).finally(() => {
+    if (updateReads.get(kind) === owner) updateReads.delete(kind);
+  });
+  updateReads.set(kind, owner);
+  return owner.promise;
+}
 function releaseOperationBusy() {
   return Boolean(releaseState && RELEASE_BUSY_PHASES.includes(releaseState.phase));
 }
-// The Setup poll follows an install or restore until it finishes.
-function pollReleaseProgress() {
-  return releaseOperationBusy() ? loadReleaseStatus() : Promise.resolve(releaseState);
+function updatesPageActive() { return !document.hidden && currentPage() === 'updates'; }
+function releaseLabel(state) { return (state && (state.tag || state.available)) || ''; }
+function installedReleaseLabel() {
+  const label = releaseState && releaseState.installed;
+  return label && !/^Unversioned(?: installation)?$/i.test(label) ? label : lastConfirmedInstalledVersion || knownHealthVersion;
 }
-function showStagedReleaseBadge(available) {
-  element('staged-release-badge').hidden = !available;
-  const setupLink = element('setup-tab-link');
-  if (available) setupLink.setAttribute('aria-label', 'Router and Wi-Fi, release staged');
-  else setupLink.removeAttribute('aria-label');
+function stagedReleaseReady(state) {
+  return Boolean(state && state.available && state.available !== state.installed && state.installable === true);
 }
-async function loadReleaseStatus({force = false} = {}) {
-  if (releaseStatusRequest) return releaseStatusRequest;
-  if (!force && Date.now() - releasePollAt < 5000) return releaseState;
-  releasePollAt = Date.now();
-  element('release-status').textContent = 'Checking for a staged release on this Pi…';
-  releaseStatusRequest = (async () => {
+async function pollReleaseProgress() {
+  if (!updatesPageActive() || !adminTokenVerified) return releaseState;
+  const reads = [loadReleaseStatus(), loadOnlineStatus()];
+  if (autoCheckStagedUpdates === null) reads.push(loadUpdateCheckPreference());
+  await Promise.allSettled(reads);
+  if (updateWatch) followUpdate();
+  return releaseState;
+}
+function updateProgressText(failedRead) {
+  if (updateOutcome) return updateOutcome;
+  if (!updateWatch) return '';
+  if (failedRead) return 'The dashboard is restarting. This page reconnects by itself.';
+  return PHASE_TEXT[releaseState && releaseState.phase] || 'Working on the ' + updateWatch.kind + '.';
+}
+function renderUpdates(failedRead) {
+  const state = releaseState;
+  const busy = Boolean(updateWatch) || releaseOperationBusy();
+  const working = !adminTokenVerified || busy || updateCheckRunning || onlinePolling;
+  const ready = adminTokenVerified && stagedReleaseReady(state);
+  const installed = installedReleaseLabel();
+  const blocked = state && state.available && state.installable === false && state.reason;
+  if (installed) element('sidebar-version').textContent = 'Version ' + installed;
+  element('update-installed').textContent = installed || 'Unknown';
+  element('update-available').textContent = !state ? 'Unknown. Check for updates to try again.'
+    : ready ? releaseLabel(state) : blocked ? releaseLabel(state) + ' (cannot be installed)' : 'No newer release staged';
+  element('update-signer').textContent = ready && state.signed_by ? state.signed_by : 'Not applicable';
+  element('update-last-checked').textContent = onlineView && onlineView.checked_at
+    ? new Date(onlineView.checked_at * 1000).toLocaleString() : 'Unknown';
+  element('release-check').disabled = working;
+  element('release-install').disabled = working || !ready;
+  element('release-install').classList.toggle('primary', ready && !working);
+  element('release-rollback').disabled = working || !(state && state.rollback_available);
+  const progress = updateProgressText(failedRead);
+  element('update-progress').hidden = !progress;
+  element('update-progress').textContent = progress;
+  element('sidebar-update-link').hidden = !ready;
+  element('sidebar-update-link').textContent = ready ? 'Update available: ' + releaseLabel(state) : '';
+  element('update-available-badge').hidden = !ready;
+  const nav = element('updates-tab-link');
+  if (ready) nav.setAttribute('aria-label', 'Updates, update available');
+  else nav.removeAttribute('aria-label');
+}
+function loadReleaseStatus({force = false} = {}) {
+  const context = updateContext();
+  if (!force && releaseState && Date.now() - releasePollAt < 5000) return Promise.resolve(releaseState);
+  return updateRead('release', context, async context => {
+    if (!updateContextCurrent(context)) return null;
+    releasePollAt = Date.now();
+    if (!updateWatch) element('release-status').textContent = 'Checking for a staged release on this Pi…';
     try {
-      releaseState = await request('/api/updates', 'GET');
-      const stagedReleaseReady = Boolean(
-        releaseState.available && releaseState.available !== releaseState.installed
-      );
-      element('release-status').textContent = 'Installed: ' + (releaseState.installed || 'Unknown') +
-        ' · Available: ' + (releaseState.available || 'None staged') + ' · ' + releaseState.message;
-      showStagedReleaseBadge(stagedReleaseReady);
-      const busy = releaseOperationBusy();
-      element('release-install').disabled = busy || !stagedReleaseReady;
-      element('release-install').classList.toggle('primary', stagedReleaseReady && !busy);
-      element('release-rollback').disabled = busy || !releaseState.rollback_available;
-      return releaseState;
-    } catch (error) {
-      if (releaseOperationBusy()) {
-        // Services restart during an install, so this page waits for them.
-        element('release-status').textContent = 'Waiting for the dashboard to restart. This page checks again shortly.';
-        throw error;
+      const state = await request('/api/updates', 'GET');
+      if (!updateContextCurrent(context)) return null;
+      releaseState = state;
+      if (state.installed && !/^Unversioned(?: installation)?$/i.test(state.installed)) lastConfirmedInstalledVersion = state.installed;
+      const signer = state.available && state.signed_by ? ' (signed by ' + state.signed_by + ')' : '';
+      const blocked = state.available && state.installable === false && state.reason;
+      element('release-status').textContent = 'Installed: ' + (installedReleaseLabel() || 'Unknown') +
+        ' · Available: ' + (state.available ? state.available + signer : 'None staged') +
+        ' · ' + (blocked ? state.reason : state.message || 'Status read.');
+      if (releaseOperationBusy() && !updateWatch) {
+        updateWatch = {label: state.available || '', kind: state.phase === 'rolling-back' ? 'restore' : 'install', context};
+        updateOutcome = '';
       }
-      element('release-status').textContent = 'Could not check for a staged release. Use Check for updates to try again.';
-      showStagedReleaseBadge(false);
+      renderUpdates();
+      return state;
+    } catch (error) {
+      if (!updateContextCurrent(context)) return null;
+      releasePollAt = 0;
+      if (updateWatch) {
+        element('release-status').textContent = 'Waiting for the dashboard to restart. This page checks again shortly.';
+        renderUpdates(true);
+      } else {
+        releaseState = null;
+        element('release-status').textContent = 'Staged release status is unknown. Check for updates to try again.';
+        renderUpdates();
+      }
       throw error;
-    } finally {
-      releaseStatusRequest = null;
     }
-  })();
-  return releaseStatusRequest;
+  });
 }
-async function loadUpdateCheckPreference() {
-  const toggle = element('check-staged-updates-on-open');
-  const state = element('update-preference-status');
+async function followUpdate() {
+  if (updateFollowing || !updateWatch) return;
+  const watch = updateWatch;
+  const context = watch.context || updateContext();
+  updateFollowing = true;
+  const started = Date.now();
   try {
-    const preference = await request('/api/update-preferences', 'GET');
-    if (typeof preference.check_staged_updates_on_open !== 'boolean') {
-      throw new Error('The saved update preference is invalid.');
+    while (updateWatch === watch && updateContextCurrent(context) && Date.now() - started < 15 * 60 * 1000) {
+      if (updatesPageActive()) {
+        try {
+          const state = await loadReleaseStatus({force: true});
+          if (!updateContextCurrent(context) || updateWatch !== watch) return;
+          if (!state) break;
+          const phase = state.phase;
+          if (phase === 'complete' && watch.kind === 'install' && watch.label && state.installed === watch.label) {
+            updateOutcome = 'Updated to ' + watch.label + '.';
+            updateWatch = null;
+          } else if (phase === 'rolled-back' && watch.kind === 'restore' && state.installed) {
+            updateOutcome = 'The Pi reports rollback status. This restore request is not confirmed. Installed version: ' + state.installed + '.';
+            updateWatch = null;
+          } else if (['complete','rolled-back','failed'].includes(phase)) {
+            updateOutcome = 'The requested update was not confirmed. ' + (state.message || '') +
+              ' Installed version: ' + (state.installed || 'Unknown') + '.';
+            updateWatch = null;
+          }
+          renderUpdates();
+        } catch (error) {
+          if (!updateContextCurrent(context) || updateWatch !== watch) return;
+          renderUpdates(true);
+        }
+      }
+      if (updateWatch === watch) await updateSleep(2000);
     }
-    autoCheckStagedUpdates = preference.check_staged_updates_on_open;
-    toggle.checked = autoCheckStagedUpdates;
-    toggle.disabled = false;
-    state.textContent = autoCheckStagedUpdates
-      ? 'Automatic checking is on.'
-      : 'Automatic checking is off. Use Check for updates whenever you want.';
-    if (autoCheckStagedUpdates) loadReleaseStatus().catch(() => {});
-    else if (releaseState === null && !releaseStatusRequest) {
-      element('release-status').textContent = 'Automatic checking is off. Use Check for updates to check now.';
+  } finally {
+    updateFollowing = false;
+    if (updateContextCurrent(context) && updateWatch === watch) {
+      updateOutcome = 'The update result is still unknown. Check the installed version or the Pi.';
+      updateWatch = null;
+      renderUpdates();
     }
-  } catch (error) {
-    autoCheckStagedUpdates = null;
-    toggle.disabled = true;
-    state.textContent = 'The saved preference could not be read. Automatic checking did not run. Manual checking is still available.';
-    element('release-status').textContent = 'Automatic checking did not run because its saved preference is unavailable.';
   }
+}
+function loadUpdateCheckPreference({afterWrite = false} = {}) {
+  if (preferenceWrite && !afterWrite) return Promise.resolve(null);
+  const context = updateContext();
+  return updateRead('preference', context, async context => {
+    const toggle = element('check-staged-updates-on-open');
+    const state = element('update-preference-status');
+    try {
+      const preference = await request('/api/update-preferences', 'GET');
+      if (!updateContextCurrent(context)) return null;
+      if (typeof preference.check_staged_updates_on_open !== 'boolean') throw new Error('Invalid saved preference.');
+      autoCheckStagedUpdates = preference.check_staged_updates_on_open;
+      toggle.checked = autoCheckStagedUpdates;
+      toggle.disabled = Boolean(preferenceWrite);
+      state.textContent = autoCheckStagedUpdates ? 'Automatic checking is on.' : 'Automatic checking is off. Use Check for updates whenever you want.';
+      return preference;
+    } catch (error) {
+      if (!updateContextCurrent(context)) return null;
+      autoCheckStagedUpdates = null;
+      toggle.disabled = true;
+      state.textContent = 'The saved preference is unknown. Open Updates or check again to retry.';
+      return null;
+    }
+  });
 }
 function installUpdateCheckPreference() {
   const toggle = element('check-staged-updates-on-open');
   const state = element('update-preference-status');
   toggle.addEventListener('change', async () => {
-    if (autoCheckStagedUpdates === null) return;
-    const previousValue = autoCheckStagedUpdates;
+    const context = updateContext();
+    if (!updateContextCurrent(context) || autoCheckStagedUpdates === null || preferenceWrite) return;
     const nextValue = toggle.checked;
+    const owner = {};
+    preferenceWrite = owner;
+    updateReadRevisions.preference += 1;
     toggle.disabled = true;
     state.textContent = 'Saving automatic-check preference…';
     try {
-      const result = await request('/api/update-preferences', 'POST', {
-        check_staged_updates_on_open: nextValue,
-      });
-      if (!result.saved || result.check_staged_updates_on_open !== nextValue) {
-        throw new Error('The saved update preference could not be confirmed.');
-      }
+      const result = await request('/api/update-preferences', 'POST', {check_staged_updates_on_open: nextValue});
+      if (!updateContextCurrent(context)) return;
+      if (!result.saved || result.check_staged_updates_on_open !== nextValue) throw new Error('Saved value was not confirmed.');
+      updateReadRevisions.preference += 1;
       autoCheckStagedUpdates = nextValue;
-      state.textContent = nextValue
-        ? 'Automatic checking is on. Checking for a staged release now.'
-        : 'Automatic checking is off. Use Check for updates whenever you want.';
-      if (nextValue) loadReleaseStatus({force: true}).catch(() => {});
+      state.textContent = nextValue ? 'Automatic checking is on.' : 'Automatic checking is off.';
+      if (nextValue) await loadReleaseStatus({force: true}).catch(() => {});
     } catch (error) {
-      toggle.checked = previousValue;
-      state.textContent = 'The preference was not saved. The previous setting is still in place.';
-      showMessage(error.message, 'error');
+      if (!updateContextCurrent(context)) return;
+      updateReadRevisions.preference += 1;
+      autoCheckStagedUpdates = null;
+      state.textContent = 'The save result is unknown. Reading the current setting without repeating the save.';
+      const current = await loadUpdateCheckPreference({afterWrite:true});
+      if (updateContextCurrent(context) && !current) state.textContent = 'The save result is unknown. Check the current setting before trying again.';
     } finally {
-      toggle.disabled = false;
+      if (preferenceWrite === owner) preferenceWrite = null;
+      if (updateContextCurrent(context)) toggle.disabled = autoCheckStagedUpdates === null;
     }
   });
 }
-function installReleaseControls() {
-  workflowCard('release-controls', 'Updates and recovery', 'setup', `
-    <p>Install a verified release staged by an administrator. An update briefly interrupts the dashboard and test network. The previous installation and settings are backed up before installation.</p>
-    <label class="update-auto-check"><input id="check-staged-updates-on-open" type="checkbox" disabled><span>Check for staged updates when the dashboard opens</span></label>
-    <p class="form-note">Checks only for a verified release already staged on this Pi. Downloads and installation stay manual.</p>
-    <p id="update-preference-status" class="form-note update-preference-status" role="status" aria-live="polite">Loading the saved preference…</p>
-    <p id="release-status" role="status">Check for an approved release on this Pi.</p><div id="release-actions"></div>
-    <details><summary>How releases reach this private Pi</summary><p>An administrator downloads a tagged release bundle and checks its SHA-256 checksum before staging it over SSH. GitHub credentials are not stored on the Pi. See the deployment guide for the staging command.</p></details>`);
-  const install = actionButton('Install staged release', async () => {
-    if (!releaseState || !await confirmWorkflow('Install release ' + releaseState.available + '? The network will be interrupted briefly. Keep Ethernet or SSH available for recovery.')) return;
-    await request('/api/updates/install','POST',{version:releaseState.available,confirm:true});
-    showMessage('Installation queued. This page will reconnect and show the result.', 'working');
-    await loadReleaseStatus({force:true});
-  }); install.id='release-install'; install.disabled=true;
-  const rollback = actionButton('Restore previous installation', async () => {
-    if (!await confirmWorkflow('Restore the previous installation and its settings backup? Changes made since that backup will be replaced.')) return;
-    await request('/api/updates/rollback','POST',{confirm:true});
-    await loadReleaseStatus({force:true});
-  }); rollback.id='release-rollback'; rollback.disabled=true;
-  element('release-actions').append(actionButton('Check for updates', async () => {await loadReleaseStatus({force:true});}), install, rollback);
+let onlineView = null;
+let onlinePolling = false;
+function onlineSummary(view) {
+  if (!view) return 'Online check status is unknown. Check again to retry.';
+  if (view.state === 'none') return 'No online check has run yet.';
+  if (view.state === 'unavailable') return view.message || 'Online checks are not available.';
+  if (view.state === 'running') return 'Checking GitHub…';
+  const when = view.checked_at ? ' (' + new Date(view.checked_at * 1000).toLocaleString() + ')' : '';
+  return (view.result === 'failed' ? 'The check failed: ' : '') + (view.message || 'The check finished.') + when;
+}
+function showOnline(view) {
+  onlineView = view;
+  const ready = adminTokenVerified && view && view.state !== 'unavailable';
+  let text = onlineSummary(view);
+  const noToken = Boolean(ready && view.token_set === false);
+  if (noToken) text = 'No GitHub token is saved on the Pi. Check for updates looks at releases already staged on the Pi.';
+  element('online-check-status').textContent = text;
+  if (noToken) element('github-access-hint').textContent = 'To let the Pi look at GitHub, follow the setup command in The GitHub token below.';
+  element('github-access-hint').hidden = !noToken;
+  const settings = ready && view.settings;
+  for (const [id, name] of [['online-daily-check','daily_check'],['online-install-automatically','install_automatically']]) {
+    const box = element(id);
+    box.disabled = !settings || Boolean(onlineSettingsWrite);
+    if (settings) box.checked = settings[name] === true;
+  }
+  renderUpdates();
+}
+function loadOnlineStatus({afterWrite = false} = {}) {
+  if (onlineSettingsWrite && !afterWrite) return Promise.resolve(null);
+  const context = updateContext();
+  return updateRead('online', context, async context => {
+    try {
+      const view = await request('/api/updates/check-online', 'GET');
+      if (!updateContextCurrent(context)) return null;
+      showOnline(view);
+      return view;
+    } catch (error) {
+      if (!updateContextCurrent(context)) return null;
+      showOnline(null);
+      return null;
+    }
+  });
+}
+async function runOnlineCheck({force = false} = {}) {
+  if (onlinePolling) return;
+  const context = updateContext();
+  if (!updateContextCurrent(context)) return;
+  onlinePolling = true;
+  const settingsGeneration = updateReadRevisions.online;
+  try {
+    let view = await request('/api/updates/check-online', 'POST', {force});
+    if (!updateContextCurrent(context)) return;
+    if (settingsGeneration !== updateReadRevisions.online) {
+      view = {...view, settings:onlineView && onlineView.settings, token_set:onlineView && onlineView.token_set};
+    }
+    showOnline(view);
+    const started = Date.now();
+    while (view.state === 'running' && updateContextCurrent(context) && Date.now() - started < 8 * 60 * 1000) {
+      await updateSleep(2000);
+      if (!updateContextCurrent(context)) return;
+      if (!updatesPageActive()) continue;
+      view = await loadOnlineStatus();
+      if (!updateContextCurrent(context)) return;
+      if (!view) break;
+    }
+    if (updateContextCurrent(context) && view && view.state === 'done') await loadReleaseStatus({force: true}).catch(() => {});
+  } catch (error) {
+    if (!updateContextCurrent(context)) return;
+    showOnline(null);
+    element('online-check-status').textContent = 'The check result is unknown. Reading status will not repeat the check.';
+  } finally {
+    onlinePolling = false;
+    if (updateContextCurrent(context)) renderUpdates();
+  }
+}
+async function checkForUpdates() {
+  const context = updateContext();
+  if (!updateContextCurrent(context) || updateCheckRunning || onlinePolling) return;
+  updateOutcome = '';
+  updateCheckRunning = true;
+  renderUpdates();
+  try {
+    if (!onlineView) await loadOnlineStatus();
+    if (!updateContextCurrent(context)) return;
+    if (!onlineView || (onlineView.state !== 'unavailable' && typeof onlineView.token_set !== 'boolean')) throw new Error('Online status is unknown. Check again to retry.');
+    if (onlineView.state !== 'unavailable' && onlineView.token_set === true) await runOnlineCheck({force: true});
+    else await loadReleaseStatus({force: true});
+  } finally {
+    if (updateContextCurrent(context)) { updateCheckRunning = false; renderUpdates(); }
+  }
+}
+async function installUpdate() {
+  const context = updateContext();
+  if (!updateContextCurrent(context) || !stagedReleaseReady(releaseState)) return;
+  const version = releaseState.available;
+  const label = releaseLabel(releaseState);
+  if (!await confirmWorkflow('Install ' + label + '? The dashboard and test network will restart. Keep an independent management connection available.')) return;
+  if (!updateContextCurrent(context) || !stagedReleaseReady(releaseState) || releaseState.available !== version) return;
+  updateOutcome = '';
+  updateReadRevisions.release += 1;
+  await request('/api/updates/install', 'POST', {version, confirm: true});
+  if (!updateContextCurrent(context)) return;
+  updateReadRevisions.release += 1;
+  updateWatch = {label: version, kind: 'install', context};
+  renderUpdates();
+  followUpdate();
+}
+async function restoreUpdate() {
+  const context = updateContext();
+  if (!updateContextCurrent(context) || !releaseState || !releaseState.rollback_available) return;
+  if (!await confirmWorkflow('Restore the previous installation and settings backup? Changes after that backup will be replaced.')) return;
+  if (!updateContextCurrent(context) || !releaseState || !releaseState.rollback_available) return;
+  updateOutcome = '';
+  updateReadRevisions.release += 1;
+  await request('/api/updates/rollback', 'POST', {confirm: true});
+  if (!updateContextCurrent(context)) return;
+  updateReadRevisions.release += 1;
+  updateWatch = {label: '', kind: 'restore', context};
+  renderUpdates();
+  followUpdate();
+}
+function installOnlineControls() {
+  const status = element('online-setting-status');
+  const save = async (box, name) => {
+    const context = updateContext();
+    if (!updateContextCurrent(context) || !onlineView || !onlineView.settings || onlineSettingsWrite) return;
+    const next = box.checked;
+    const previous = onlineView.settings[name];
+    const owner = {};
+    onlineSettingsWrite = owner;
+    updateReadRevisions.online += 1;
+    for (const id of ['online-daily-check','online-install-automatically']) element(id).disabled = true;
+    try {
+      if (name === 'install_automatically' && next && !await confirmWorkflow('Install automatically will install every new signed release without asking. A leaked release signing key together with GitHub write access could then change this Pi without anyone pressing a button. Turn it on?')) {
+        if (updateContextCurrent(context)) box.checked = previous;
+        return;
+      }
+      if (!updateContextCurrent(context)) return;
+      status.textContent = 'Saving…';
+      const body = {[name]: next};
+      if (name === 'install_automatically' && next) body.confirm = true;
+      const view = await request('/api/updates/online-settings', 'POST', body);
+      if (!updateContextCurrent(context)) return;
+      updateReadRevisions.online += 1;
+      if (!view.settings || view.settings[name] !== next) throw new Error('Saved value was not confirmed.');
+      showOnline({...onlineView, settings: view.settings, token_set: view.token_set});
+      status.textContent = 'Saved.';
+    } catch (error) {
+      if (!updateContextCurrent(context)) return;
+      updateReadRevisions.online += 1;
+      showOnline(null);
+      status.textContent = 'The save result is unknown. Reading the current setting without repeating the save.';
+      const current = await loadOnlineStatus({afterWrite:true});
+      if (!updateContextCurrent(context)) return;
+      status.textContent = current && current.settings
+        ? 'Current setting on the Pi: ' + (current.settings[name] ? 'on.' : 'off.')
+        : 'The save result is unknown. Check the current setting before trying again.';
+    } finally {
+      if (onlineSettingsWrite === owner) onlineSettingsWrite = null;
+      if (updateContextCurrent(context)) {
+        for (const id of ['online-daily-check','online-install-automatically']) element(id).disabled = !(onlineView && onlineView.settings);
+      }
+    }
+  };
+  element('online-daily-check').addEventListener('change', event => save(event.target, 'daily_check'));
+  element('online-install-automatically').addEventListener('change', event => save(event.target, 'install_automatically'));
+}
+async function loadUpdateStateAfterSignIn() {
+  const context = updateContext();
+  await Promise.allSettled([loadOnlineStatus(), loadUpdateCheckPreference()]);
+  if (!updateContextCurrent(context)) return;
+  if (autoCheckStagedUpdates || updatesPageActive()) await loadReleaseStatus({force: true}).catch(() => {});
+}
+function clearUpdatePrivateState() {
+  updateAccessRevision += 1;
+  releaseState = null;
+  lastConfirmedInstalledVersion = null;
+  releasePollAt = 0;
+  onlineView = null;
+  autoCheckStagedUpdates = null;
+  updateWatch = null;
+  updateOutcome = '';
+  updateCheckRunning = false;
+  for (const id of ['online-daily-check','online-install-automatically','check-staged-updates-on-open']) {
+    element(id).checked = false;
+    element(id).disabled = true;
+  }
+  for (const id of ['release-install','release-rollback','release-check']) element(id).disabled = true;
+  for (const id of ['online-check-status','online-setting-status','release-status','update-preference-status']) element(id).textContent = 'Sign in to read update status.';
+  element('github-access-hint').textContent = '';
+  element('github-access-hint').hidden = true;
+  element('sidebar-update-link').textContent = '';
+  element('sidebar-update-link').hidden = true;
+  element('update-available-badge').hidden = true;
+  element('update-progress').hidden = true;
+  element('update-progress').textContent = '';
+  element('updates-tab-link').removeAttribute('aria-label');
+  element('update-installed').textContent = knownHealthVersion || 'Unknown';
+  element('update-available').textContent = 'Sign in to read update status.';
+  element('update-signer').textContent = 'Sign in to read update status.';
+  element('update-last-checked').textContent = 'Unknown';
+}
+privateDataLockHooks.push(clearUpdatePrivateState);
+function wireReleaseControls() {
+  const buttons = [
+    ['release-check','Check for updates',checkForUpdates],
+    ['release-install','Install update',installUpdate],
+    ['release-rollback','Restore previous installation',restoreUpdate]
+  ].map(([id,label,action]) => {
+    const button = actionButton(label, action);
+    button.id = id;
+    button.afterAction = () => renderUpdates();
+    return button;
+  });
+  buttons[1].disabled = true;
+  buttons[2].disabled = true;
+  element('release-actions').append(...buttons);
   installUpdateCheckPreference();
+  installOnlineControls();
+}
+
+function installReleaseControls() {
+  workflowCard('release-controls', 'Updates and recovery', 'updates', `
+    <p>Check for a new signed release and install it with one click. An update briefly interrupts the dashboard and the test network. The previous installation and settings are backed up first.</p>
+    <dl class="update-facts">
+      <div><dt>Installed</dt><dd id="update-installed">Unknown</dd></div>
+      <div><dt>Last checked</dt><dd id="update-last-checked">Not checked yet</dd></div>
+      <div><dt>Newest release</dt><dd id="update-available">No newer release found</dd></div>
+      <div><dt>Signed by</dt><dd id="update-signer">Not applicable</dd></div>
+    </dl>
+    <p id="release-status" role="status" aria-live="polite">Check for an approved release on this Pi.</p>
+    <p id="online-check-status" class="form-note" role="status" aria-live="polite">Loading the online check…</p>
+    <p id="github-access-hint" class="form-note" hidden></p>
+    <div id="release-actions"></div>
+    <p id="update-progress" class="update-progress" role="status" aria-live="polite" hidden></p>
+    <h3 class="online-heading">Settings</h3>
+    <label class="update-auto-check"><input id="online-daily-check" type="checkbox" disabled><span>Check automatically every day</span></label>
+    <label class="update-auto-check"><input id="online-install-automatically" type="checkbox" disabled><span>Install automatically</span></label>
+    <p class="form-note">Install automatically installs a new signed release without anyone pressing Install. It uses the same checks and the same recovery copy as a manual install. Both settings are off until you turn them on.</p>
+    <p id="online-setting-status" class="form-note" role="status" aria-live="polite"></p>
+    <details><summary>The GitHub token</summary><p>The repository is private, so the Pi needs a read-only token for this one repository. Create it on GitHub (Settings, Developer settings, Fine-grained tokens, only this repository, Contents read-only, with an expiry date). Then run <code id="update-token-command">the setup command shown after sign-in</code> on the Pi, paste the token and press Ctrl-D. This page never asks for the token and never shows it.</p></details>
+    <label class="update-auto-check"><input id="check-staged-updates-on-open" type="checkbox" disabled><span>Look for a release staged on this Pi when the dashboard opens</span></label>
+    <p id="update-preference-status" class="form-note update-preference-status" role="status" aria-live="polite">Loading the saved preference…</p>
+    <details><summary>How releases reach this private Pi</summary><p>The owner builds and signs a release on the Mac and deploy-from-mac.sh stages it over SSH. The Pi can also fetch the newest signed release from GitHub itself. The Pi stages only a release signed by a key it trusts and newer than the one it runs. The admin token cannot stage a release: it can only install the one already staged. See Signed releases in the deployment guide.</p></details>`);
+  wireReleaseControls();
 }
 installReleaseControls();
 

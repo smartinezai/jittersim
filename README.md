@@ -52,6 +52,13 @@ Checking does not download or install a release. The **Router and Wi-Fi** page s
 when the staged and installed release labels differ. The terminal command
 `sudo jittersim update check` shows the same status.
 
+The Pi stages and installs only releases signed by a release signing key you
+trust on it and newer than the one it runs. The admin token can only install
+the release already staged. See
+[Signed releases](deploy/raspberry-pi/README.md#signed-releases) for the
+one-time setup, passwordless deploys and what a leaked token or a stolen key
+can do.
+
 ## What you can try
 
 - Slow down a test device, add delays, drop some data or simulate short
@@ -103,6 +110,73 @@ It restores `JitterSim` and keeps the current password. Confirming the reset
 restarts test Wi-Fi, so its clients need to reconnect. Add `--yes` when running
 without a prompt. This command needs the local helper but not the dashboard or
 its settings database.
+
+### Use the terminal on your Mac
+
+These commands run on your **Mac** (or any computer that reaches the dashboard)
+and talk to the Pi's HTTPS dashboard with the same checks as the browser. They
+need no `sudo` and no SSH. Install the command once from a checkout:
+
+```sh
+python3 -m venv ~/.jittersim-cli
+~/.jittersim-cli/bin/pip install .
+echo 'export PATH="$HOME/.jittersim-cli/bin:$PATH"' >> ~/.zshrc
+```
+
+Open a new terminal afterwards so `jittersim` is found.
+
+Copy `/etc/jittersim/dashboard.crt` from the Pi through a connection you
+already trust and compare its SHA-256 fingerprint with the one the installer
+printed. Then save the address and the certificate path once:
+
+```sh
+jittersim connect --url https://192.168.0.17:8080 --ca-cert ~/jittersim-dashboard.crt
+```
+
+`connect` checks that the dashboard presents exactly that certificate and saves
+only the address and the certificate path in `~/.config/jittersim/cli.json`.
+The certificate file decides where the token goes, so it must belong to you and
+must not be writable by others. If the check fails the command says why: an
+unknown certificate (compare the fingerprint), an address the certificate does
+not cover (for example after the Pi got a new address: run the installer again
+and copy the new certificate) or an expired certificate.
+
+Every other command asks for the **admin token** with a hidden prompt each time.
+The token is never saved and never accepted as an argument. Scripts may set
+`JITTERSIM_ADMIN_TOKEN` instead: other programs that can read your environment
+can then read it too. Plain HTTP, redirects and addresses with a user name,
+path or query are refused. Names from the dashboard are shown without terminal
+control characters.
+
+| Command (on the Mac) | What it does |
+| --- | --- |
+| `jittersim status` | The release the Pi runs (and a staged one), whether JitterSim is running, the general profile and each affected connected device with its profile. Protected devices are never listed. |
+| `jittersim profiles list` | The saved profiles with a one-line summary. The general profile is marked. |
+| `jittersim profiles apply-all PROFILE_ID` | Makes that profile the general profile for every connected device. Protected devices stay untouched. |
+| `jittersim profiles stop-all` | Stops the general profile. Saved device rules resume. |
+| `jittersim traffic` | The names each test device looked up, grouped by app or site like **Traffic discovery**. Add `--scan` to sample first, `--expand` for every name, `--blocked` for blocked names only or `--device NAME_OR_IP`. |
+| `jittersim traffic block DOMAIN` | Adds a name to the global block list. While household access rules are on the names under it are blocked too. `traffic unblock DOMAIN` removes the exact name. Both say so when nothing had to change. |
+| `jittersim wifi show` | The router's own Wi-Fi name, read live from the router. It also asks for the router admin password with a hidden prompt. Add `--password` to show the Wi-Fi password too. |
+| `jittersim impact` | The **Impact** check: two samples of the Pi's queues `--wait` seconds apart (10 by default, at most 50) judged with the dashboard's rules. The verdicts name the time it measured such as "in the last 10 seconds". |
+
+Add `--json` to any of them for machine-readable output (a failure is then
+`{"error": ..., "exit_code": ...}` on standard output) or `--help` for details.
+On the Pi itself `sudo jittersim status` still shows the local helper status
+and `sudo jittersim wifi reset` still runs there.
+
+To put a new release on the Pi from the Mac, run
+`deploy/raspberry-pi/deploy-from-mac.sh` in a checkout. It runs on the Mac and
+needs git, ssh-keygen, ssh, scp, curl, tar, shasum and Python 3. It builds the
+release archive of a commit, signs it with your release signing key and
+installs it through the verified update service. It shows the
+release the Pi now runs. Use `--stage-only` to upload without installing.
+When using SSH the Pi asks for its `sudo` password in your terminal unless
+passwordless staging is on (see
+[Signed releases](deploy/raspberry-pi/README.md#signed-releases)). Deploying needs a
+connection to the Pi's router network or its own test Wi-Fi. The command uses
+the trusted HTTPS dashboard on the test Wi-Fi and when SSH cannot answer.
+See
+[Deploy from a Mac](deploy/raspberry-pi/README.md#deploy-from-a-mac).
 
 ## Features
 

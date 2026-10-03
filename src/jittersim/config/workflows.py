@@ -1,6 +1,8 @@
 """Bounded configuration history and test records kept in the local database."""
 
+import functools
 import hashlib
+import inspect
 import json
 import time
 import uuid
@@ -247,6 +249,21 @@ class WorkflowStore:
             raise StorageError("session changed in another window")
         self.repository._commit()
         return self.session(identifier)
+
+
+def _under_repository_lock(method):
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self.repository._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
+# The store shares the repository connection, so its methods share the repository lock.
+for _name, _member in tuple(vars(WorkflowStore).items()):
+    if inspect.isfunction(_member) and _name != "__init__":
+        setattr(WorkflowStore, _name, _under_repository_lock(_member))
 
 
 def session_report(session):

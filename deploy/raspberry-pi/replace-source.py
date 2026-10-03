@@ -5,6 +5,11 @@ import shutil
 import tempfile
 from pathlib import Path
 
+# The release label written by the update service or by deploy-from-mac.sh. An installed
+# label that the new source does not carry is removed so `jittersim update check` never
+# names a release that is no longer installed.
+RELEASE_RECORD = ".jittersim-release.json"
+
 
 def replace_source(source, installed):
     if source.resolve() == installed.resolve():
@@ -19,18 +24,20 @@ def replace_source(source, installed):
             shutil.copytree(source / name, prepared / name)
         for name in ("pyproject.toml", "README.md"):
             shutil.copyfile(source / name, prepared / name)
+        if (source / RELEASE_RECORD).is_file():
+            shutil.copyfile(source / RELEASE_RECORD, prepared / RELEASE_RECORD)
         previous = prepared / "previous"
         previous.mkdir()
         changed = []
         try:
             # Keep the old folders until all replacements succeed. An error
             # restores them instead of leaving a mixture of two releases.
-            for name in ("src", "deploy", "pyproject.toml", "README.md", "build"):
+            for name in ("src", "deploy", "pyproject.toml", "README.md", "build", RELEASE_RECORD):
                 destination = installed / name
                 if destination.exists():
                     destination.rename(previous / name)
                 changed.append(name)
-                if name != "build":
+                if (prepared / name).exists():
                     (prepared / name).rename(destination)
         except Exception:
             try:

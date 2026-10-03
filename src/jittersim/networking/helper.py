@@ -1,6 +1,7 @@
 """Unix-socket boundary for the privileged networking process."""
 
 import argparse
+import copy
 import grp
 import hashlib
 import json
@@ -23,7 +24,17 @@ from jittersim.config.models import ValidationError, normalize_domain
 from jittersim.engine.access import AccessPlan, access_from_payload
 from jittersim.engine.codec import PlanCodecError, plan_from_payload, plan_to_payload
 from jittersim.engine.plan import EVERYONE_ELSE_QUEUE_ID, NetworkPlan
-from jittersim.updates import UpdateError, request_update, update_status
+from jittersim.release_uploads import UploadBusy, prepare_lock
+from jittersim.updates import (
+    UpdateError,
+    online_overview,
+    request_online_check,
+    request_update,
+    scheduled_online_check,
+    set_online_settings,
+    stage_upload,
+    update_status,
+)
 
 from .access import AccessManager
 from .applier import MAX_PROTECTED_MACS, ApplyError, NetworkApplier
@@ -90,6 +101,8 @@ _QUEUE_IMPAIRMENT_LIMITS = {
 }
 _SERVICE_LIST_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 GATEWAY_CHECK_INTERVAL_SECONDS = 5.0
+# How often the helper looks whether the daily online release check is due.
+ONLINE_CHECK_INTERVAL_SECONDS = 15 * 60
 GATEWAY_FAILURES_TO_DOWN = 3
 GATEWAY_SUCCESSES_TO_UP = 2
 GATEWAY_RESET_RETRY_SECONDS = 30.0
@@ -244,6 +257,42 @@ class HelperService:
             except (OSError, ValueError, UpdateError):
                 LOGGER.exception("release operation failed")
                 return {"ok": False, "error": "release operation could not be completed"}
+        if action in ("update-stage-upload", "update-stage-identified-upload"):
+            # The dashboard has streamed an uploaded release into its spool folder. This
+            # root helper copies it away, checks the signature and stages it. The refusal
+            # text is one of the update manager's plain sentences, never a path or a trace.
+            try:
+                if action == "update-stage-identified-upload":
+                    identifier = payload.get("upload_id")
+                    if not isinstance(identifier, str) or not re.fullmatch(r"[0-9a-f]{32}", identifier):
+                        raise UpdateError("the uploaded release identifier is invalid")
+                    record = stage_upload(identifier)
+                else:
+                    record = stage_upload()
+                return {"ok": True, "staged_version": record["version"], **update_status()}
+            except UploadBusy as error:
+                return {"ok": False, "error": str(error), "reason": "helper-busy"}
+            except UpdateError as error:
+                LOGGER.warning("uploaded release refused: %s", error)
+                return {"ok": False, "error": str(error), "reason": "release-refused"}
+            except (OSError, ValueError):
+                LOGGER.exception("uploaded release could not be staged")
+                return {"ok": False, "error": "the uploaded release could not be staged"}
+        if action in ("update-online-check", "update-online-status", "update-online-settings"):
+            # The root fetch unit holds the token and does the download. The answer here is only
+            # state: a job, a result and two settings.
+            try:
+                if action == "update-online-check":
+                    request_online_check(force=payload.get("force") is True)
+                elif action == "update-online-settings" and payload.get("changes") is not None:
+                    set_online_settings(payload.get("changes"))
+                job = payload.get("job")
+                return {"ok": True, **online_overview(job if isinstance(job, str) else None)}
+            except UpdateError as error:
+                return {"ok": False, "error": str(error)}
+            except (OSError, ValueError):
+                LOGGER.exception("online release check could not be handled")
+                return {"ok": False, "error": "online release check could not be completed"}
         if action == "ping":
             return {"ok": True, "action": "ping"}
         if action == "capabilities":
@@ -255,6 +304,7 @@ class HelperService:
                 "service_lists": True,
                 "service_list_outages": True,
                 "protected_dns_capture": True,
+                "identified_release_uploads": True,
             }
         if action == "dashboard-access":
             if not self._access_lock.acquire(blocking=False):
@@ -1288,10 +1338,15 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
             return
         # Apply and reset wait a moment for a read so a poll never refuses Panic. Every
         # read answers helper-busy at once.
+        # Signed staging only changes release files. It must not hold network
+        # ownership while verifying an archive or copying it from the dashboard.
+        lock = (self.server.release_stage_lock if action in (
+                    "update-stage-upload", "update-stage-identified-upload")
+                else self.server.operation_lock)
         if action in WRITE_ACTIONS:
-            acquired = self.server.operation_lock.acquire(timeout=WRITE_LOCK_WAIT_SECONDS)
+            acquired = lock.acquire(timeout=WRITE_LOCK_WAIT_SECONDS)
         else:
-            acquired = self.server.operation_lock.acquire(blocking=False)
+            acquired = lock.acquire(blocking=False)
         if not acquired:
             self._send_response({"ok": False, "error": "The networking helper is busy. Try again later.",
                                  "reason": "helper-busy"})
@@ -1300,7 +1355,7 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
             # Finish the response snapshot before another operation can change state.
             encoded = self._encode_response(self.server.service.handle_payload(payload))
         finally:
-            self.server.operation_lock.release()
+            lock.release()
         # A slow client must not hold the lock after its operation has finished.
         self.wfile.write(encoded)
 
@@ -1319,6 +1374,7 @@ class UnixHelperServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServe
         self.socket_path = socket_path
         self.service = service
         self.operation_lock = threading.Lock()
+        self.release_stage_lock = threading.Lock()
         self._request_slots = threading.BoundedSemaphore(MAX_HELPER_CONNECTIONS)
         self._prepare_socket_path()
         try:
@@ -1441,14 +1497,81 @@ def _validated_queues(raw_queues: Any) -> Dict[str, Any]:
     return queues
 
 
+# Helper actions that only read, so they leave a recent client scan valid.
+READ_ONLY_ACTIONS = frozenset((
+    "ping", "dashboard-access", "gateway-status", "capabilities", "access-status",
+    "update-status", "clients", "uplink-info", "observe-dns", "queue-stats", "traffic-counters",
+    "router-preview-ap", "router-status", "router-check", "router-wifi-credentials",
+))
+
+
+class _SnapshotFlight:
+    """One client scan in progress that other callers wait for."""
+
+    def __init__(self, generation: int) -> None:
+        self.generation = generation
+        self.done = threading.Event()
+        self.value: Optional[Dict[str, Any]] = None
+        self.error: Optional[BaseException] = None
+
+
+class _SnapshotCache:
+    """A short-lived shared client scan, shared by every copy of one client."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.generation = 0
+        self.expires_at = 0.0
+        self.value: Optional[Dict[str, Any]] = None
+        self.flight: Optional[_SnapshotFlight] = None
+        # The last good scan and when it was read, for a short stand-in while the helper is busy.
+        self.recent: Optional[Tuple[float, Dict[str, Any]]] = None
+
+
 class HelperClient:
     """Send bounded requests to a local privileged helper."""
+
+    # The scheduler and many dashboard reads ask for the clients. Within this window
+    # they share one scan, because each scan runs iw and ip on the Pi.
+    snapshot_ttl_seconds = 1.5
 
     def __init__(self, *, socket_path: Path, timeout_seconds: float = 8.0) -> None:
         if timeout_seconds <= 0 or timeout_seconds > 90:
             raise ValueError("timeout_seconds must be greater than 0 and no more than 90")
         self.socket_path = socket_path
         self.timeout_seconds = timeout_seconds
+        self._snapshots = _SnapshotCache()
+
+    def _with_timeout(self, timeout_seconds: float) -> "HelperClient":
+        """Return a client with a longer timeout that shares this client's scan cache."""
+
+        client = HelperClient(socket_path=self.socket_path, timeout_seconds=timeout_seconds)
+        client._snapshots = self._snapshots
+        client.snapshot_ttl_seconds = self.snapshot_ttl_seconds
+        return client
+
+    def invalidate_connected_devices(self, *, keep_recent: bool = False) -> None:
+        """Forget the shared client scan, for example after the network changed.
+
+        `keep_recent` is for a change that has only started: the last good list still
+        describes the network until the change is done.
+        """
+
+        with self._snapshots.lock:
+            self._snapshots.generation += 1
+            self._snapshots.value = None
+            self._snapshots.expires_at = 0.0
+            if not keep_recent:
+                self._snapshots.recent = None
+
+    def recent_connected_devices(self, max_age_seconds: float) -> Optional[Dict[str, Any]]:
+        """Return the last good scan if it is young enough and no change has happened since."""
+
+        with self._snapshots.lock:
+            recent = self._snapshots.recent
+            if recent is None or not 0 <= time.monotonic() - recent[0] <= max_age_seconds:
+                return None
+            return copy.deepcopy(recent[1])
 
     def ping(self) -> Dict[str, Any]:
         """Check whether the helper is accepting requests."""
@@ -1597,7 +1720,7 @@ class HelperClient:
         )
 
     def normal_access(self) -> Dict[str, Any]:
-        client = HelperClient(socket_path=self.socket_path, timeout_seconds=60)
+        client = self._with_timeout(60)
         return client._request({"action": "normal-access"})
 
     def access_status(self) -> Dict[str, Any]:
@@ -1605,13 +1728,13 @@ class HelperClient:
 
     def apply_access(self, policy: AccessPlan) -> Dict[str, Any]:
         # DNS restart and recovery can take longer than a status read.
-        client = HelperClient(socket_path=self.socket_path, timeout_seconds=60)
+        client = self._with_timeout(60)
         return client._request({"action": "access-apply", "policy": policy.payload()})
 
     def configure_access_point(self, *, ssid: str, password: str) -> Dict[str, Any]:
         """Set the local test AP credentials through the privileged helper."""
 
-        client = HelperClient(socket_path=self.socket_path, timeout_seconds=90)
+        client = self._with_timeout(90)
         return client._request(
             {"action": "configure-ap", "ssid": ssid, "password": password}
         )
@@ -1620,7 +1743,7 @@ class HelperClient:
         """Reset only the Pi Wi-Fi name without dashboard or router credentials."""
 
         # Live security checks and one restoration can take up to 75 seconds.
-        client = HelperClient(socket_path=self.socket_path, timeout_seconds=90)
+        client = self._with_timeout(90)
         return client._request({"action": "wifi-reset"})
 
     def preview_router_wifi(self, *, admin_password: str) -> Dict[str, Any]:
@@ -1640,6 +1763,33 @@ class HelperClient:
 
     def release_status(self) -> Dict[str, Any]:
         return self._request({"action": "update-status"})
+
+    def stage_uploaded_release(self, *, upload_id: Optional[str] = None) -> Dict[str, Any]:
+        """Ask the root helper to check and stage the release the dashboard just received."""
+        if upload_id is None:
+            return self._request({"action": "update-stage-upload"}, timeout_seconds=120.0)
+        message = "The Pi network helper needs an update before uploading a release."
+        try:
+            capabilities = self._request({"action": "capabilities"})
+            if capabilities.get("identified_release_uploads") is not True:
+                raise HelperClientError(message)
+            # A distinct action also refuses an older helper replaced after the read.
+            return self._request({"action": "update-stage-identified-upload", "upload_id": upload_id},
+                                 timeout_seconds=120.0)
+        except HelperClientError as error:
+            if str(error) == "unknown action":
+                raise HelperClientError(message) from None
+            raise
+
+    def online_check(self, *, force: bool = False) -> Dict[str, Any]:
+        """Start an online release check in the root fetch unit and return its job."""
+        return self._request({"action": "update-online-check", "force": bool(force)})
+
+    def online_status(self, job: Optional[str] = None) -> Dict[str, Any]:
+        return self._request({"action": "update-online-status", "job": job})
+
+    def online_settings(self, changes: Optional[Dict[str, bool]] = None) -> Dict[str, Any]:
+        return self._request({"action": "update-online-settings", "changes": changes})
 
     def install_release(self, *, version: str, rollback: bool = False) -> Dict[str, Any]:
         return self._request({"action": "update-rollback" if rollback else "update-install", "version": version})
@@ -1695,8 +1845,45 @@ class HelperClient:
         return result
 
     def connected_device_snapshot(self) -> Dict[str, Any]:
-        """Return current client details and whether association status is known."""
+        """Return current client details and whether association status is known.
 
+        Callers within `snapshot_ttl_seconds` share one scan, and callers that arrive
+        while a scan runs wait for it. A change to the network starts a fresh scan.
+        """
+
+        cache = self._snapshots
+        with cache.lock:
+            if cache.value is not None and time.monotonic() < cache.expires_at:
+                return copy.deepcopy(cache.value)
+            flight = cache.flight
+            leader = flight is None or flight.generation != cache.generation
+            if leader:
+                flight = cache.flight = _SnapshotFlight(cache.generation)
+        if not leader:
+            flight.done.wait()
+            if flight.error is not None:
+                raise flight.error
+            return copy.deepcopy(flight.value)
+        try:
+            value = self._read_connected_device_snapshot()
+        except BaseException as error:
+            flight.error = error
+            raise
+        else:
+            flight.value = value
+            with cache.lock:
+                if flight.generation == cache.generation:
+                    cache.value = value
+                    cache.expires_at = time.monotonic() + self.snapshot_ttl_seconds
+                    cache.recent = (time.monotonic(), copy.deepcopy(value))
+            return copy.deepcopy(value)
+        finally:
+            with cache.lock:
+                if cache.flight is flight:
+                    cache.flight = None
+            flight.done.set()
+
+    def _read_connected_device_snapshot(self) -> Dict[str, Any]:
         response = self._request({"action": "clients"})
         devices = response.get("devices")
         association_status_available = response.get("association_status_available")
@@ -1894,6 +2081,18 @@ class HelperClient:
     def _request(
         self, payload: Dict[str, Any], *, timeout_seconds: Optional[float] = None
     ) -> Dict[str, Any]:
+        if payload.get("action") in READ_ONLY_ACTIONS:
+            return self._send(payload, timeout_seconds=timeout_seconds)
+        # Anything else may change who is connected, so no earlier scan stays valid.
+        self.invalidate_connected_devices(keep_recent=True)
+        try:
+            return self._send(payload, timeout_seconds=timeout_seconds)
+        finally:
+            self.invalidate_connected_devices()
+
+    def _send(
+        self, payload: Dict[str, Any], *, timeout_seconds: Optional[float] = None
+    ) -> Dict[str, Any]:
         encoded = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
         if len(encoded) > MAX_MESSAGE_BYTES:
             raise HelperClientError("helper request is too large")
@@ -1918,7 +2117,7 @@ class HelperClient:
         if not decoded.get("ok", False):
             reason = decoded.get("reason")
             if reason not in ("wifi-busy", "helper-busy", "wifi-failed",
-                              "wifi-restored", "wifi-restore-failed"):
+                              "wifi-restored", "wifi-restore-failed", "release-refused"):
                 reason = None
             raise HelperClientError(str(decoded.get("error", "helper request failed")), reason=reason)
         return decoded
@@ -1974,6 +2173,7 @@ def run_helper(
 
     if not enable_hardware:
         raise HelperError("hardware mode requires --enable-hardware")
+    prepare_lock(socket_path.parent / "release-upload.lock")
     active_plan_path = socket_path.parent / "active-plan.json"
     applier = NetworkApplier(executor=SubprocessExecutor(timeout_seconds=timeout_seconds),
                              topology=topology)
@@ -2009,6 +2209,19 @@ def run_helper(
     worker = threading.Thread(target=maintain_access, daemon=True, name="access-addresses")
     worker.start()
 
+    def start_daily_release_check():
+        # Off unless the owner turned it on. The root fetch unit does the check.
+        while not stopped.wait(ONLINE_CHECK_INTERVAL_SECONDS):
+            try:
+                scheduled_online_check()
+            except Exception:
+                LOGGER.exception("could not start the daily release check")
+
+    release_worker = threading.Thread(
+        target=start_daily_release_check, daemon=True, name="daily-release-check"
+    )
+    release_worker.start()
+
     def monitor_gateway():
         while not stopped.is_set():
             started_at = time.monotonic()
@@ -2035,6 +2248,7 @@ def run_helper(
             stopped.set()
             worker.join(timeout=5)
             gateway_worker.join(timeout=5)
+            release_worker.join(timeout=5)
 
 
 def _build_parser() -> argparse.ArgumentParser:

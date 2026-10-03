@@ -77,6 +77,7 @@ def run():
                     expect(page.locator("#allow-dashboard-device")).to_be_enabled()
                     expect(page.locator("#private-dashboard")).to_be_hidden()
                     assert not any(url.endswith("/api/devices") for url in requested)
+                    assert not any("/api/updates" in url or "/api/update-preferences" in url for url in requested)
                     page.locator("#close-credentials").click()
                     page.route("**/api/dashboard-access/register-self", lambda route: route.fulfill(
                         status=503, content_type="application/json", body='{"error":"Cannot save fixture access"}'))
@@ -93,6 +94,9 @@ def run():
                     expect(page).to_have_title("JitterSim")
                     expect(page.locator("#brand-title")).to_have_text("JitterSim")
                     expect(page.locator("#measure-command")).to_have_text("jittersim measure --label normal")
+                    expect(page.locator("#update-token-command")).to_have_text("sudo jittersim update set-token")
+                    expect(page.locator("#release-status")).not_to_have_text("Sign in to read update status.")
+                    assert any(url.endswith("/api/updates") for url in requested)
                     expect(page.locator("#access-point-ssid")).to_have_value("JitterSim")
                     sidebar_control(page, "#open-admin-credentials").click()
                     page.locator("#remember-admin-token").check()
@@ -110,6 +114,9 @@ def run():
                     # Signed out again, the name goes away again.
                     expect(page).to_have_title("Sign in")
                     expect(page.locator("#brand-title")).to_have_text("Network lab")
+                    expect(page.locator("#update-token-command")).to_have_text("the setup command shown after sign-in")
+                    expect(page.locator("#online-check-status")).to_have_text("Sign in to read update status.")
+                    expect(page.locator("#online-daily-check")).to_be_disabled()
                     assert not NAME.search(page.evaluate(MARKUP))
                     assert not errors, errors
                     context.close()

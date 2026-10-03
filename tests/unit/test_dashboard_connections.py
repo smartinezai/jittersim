@@ -86,6 +86,13 @@ class DashboardConnectionTests(unittest.TestCase):
         self.threads.append(thread)
         thread.start()
 
+    def _wait_for_idle_server(self) -> None:
+        # Requests run on worker threads, so wait for the one just started to finish.
+        deadline = time.monotonic() + 3
+        while self.server.active_workers and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(self.server.active_workers, 0)
+
     def _connect(self) -> ssl.SSLSocket:
         raw = socket.create_connection(self.server.server_address, timeout=2)
         return self.context.wrap_socket(raw, server_hostname="127.0.0.1")
@@ -294,20 +301,21 @@ class DashboardConnectionTests(unittest.TestCase):
         with patch.object(api.ControlRequestHandler, "_read_json_body", queue_healthy_connection):
             self._assert_next_client_recovers("body", drip=True)
 
-    def test_active_work_cannot_extend_a_pending_connection_past_its_lifetime(self) -> None:
+    def test_a_running_request_does_not_extend_a_pending_connection_deadline(self) -> None:
+        # Requests run on their own threads, so waiting connections no longer lose time to
+        # active work and their deadlines stay exactly as set.
         connection, peer = socket.socketpair()
         try:
-            self.server._pending_connections[connection] = api._PendingConnection(
+            pending = api._PendingConnection(
                 address=("127.0.0.1", 1), deadline=100.1, handshake=True, expires_at=100.5,
             )
-            with patch.object(api.HTTPServer, "finish_request"), patch.object(
-                api.time, "monotonic", side_effect=(100.0, 101.0)
-            ):
+            self.server._pending_connections[connection] = pending
+            with patch.object(api.HTTPServer, "finish_request"):
                 self.server.finish_request(None, None)
-            self.assertEqual(self.server._pending_connections, {})
-            peer.settimeout(1)
-            self.assertEqual(peer.recv(1), b"")
+            self.assertEqual(pending.deadline, 100.1)
+            self.assertEqual(pending.expires_at, 100.5)
         finally:
+            self.server._pending_connections.clear()
             connection.close()
             peer.close()
 
@@ -431,6 +439,7 @@ class DashboardConnectionTests(unittest.TestCase):
         self._start_client(client_action)
         self._handle_next_request()
         self.threads[0].join(timeout=2)
+        self._wait_for_idle_server()
         self.assertEqual(calls, [True])
         history = self.repository.list_recent_actions()
         self.assertEqual(len(history), 1)
@@ -467,6 +476,7 @@ class DashboardConnectionTests(unittest.TestCase):
         self._start_client(malformed)
         with self.assertLogs(api.LOGGER, level="INFO") as logs:
             self._handle_next_request()
+            self._wait_for_idle_server()
         self.threads[0].join(timeout=2)
         self.assertNotIn("PRIVATE_REQUEST_MARKER", "\n".join(logs.output))
         self.assertIn(b"400", response[0])

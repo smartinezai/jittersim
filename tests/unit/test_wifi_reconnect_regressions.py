@@ -8,6 +8,13 @@ from jittersim.api.wifi_operations import WifiOperations, WifiOutcome, issue_req
 from tests.unit.test_dashboard_reconnect import run_node
 
 
+def request_support_source():
+    from tests.unit.test_dashboard_reconnect import SCRIPT
+    start = SCRIPT.index('    const PI_NOT_ANSWERING =')
+    end = SCRIPT.index('    function showPiNotAnswering(', start)
+    return SCRIPT[start:end] + "\nconst recentWrites = new Set();\nfunction notePiNotAnswering() {}\nfunction notePiAnswered() {}\n"
+
+
 def test_retry_budget_includes_time_inside_requests():
     result = run_node('''
     wifiSleep = sleep;
@@ -163,7 +170,7 @@ def test_acceptance_keeps_draft_and_late_write_reply_cannot_clear_it():
     let locks=0; const lockDashboardAccess=()=>locks++;
     const recordRead=()=>{}; const renderDraftNotice=()=>{};
     let fetch=async()=>({ok:true,status:202,json:async()=>({pending:true})});
-    ''' + function_source('request') + '''
+    ''' + request_support_source() + function_source('request') + '''
     await request("/api/access-point","POST",{});
     const retained=formDrafts.get("ap")===draft;
     pendingFormSubmitButton={form};
@@ -342,7 +349,7 @@ def test_request_timeout_aborts_a_stalled_response_body():
     const fetch=async(path,options)=>({ok:true,status:200,json:()=>new Promise((resolve,reject)=>{
       options.signal.addEventListener("abort",()=>{aborted=true;reject(new Error("aborted body"));});
     })});
-    ''' + function_source('request') + '''
+    ''' + request_support_source() + function_source('request') + '''
     const failed=await request("/api/wifi-operation?id=exact","GET",undefined,{timeoutMs:10})
       .then(()=>false,error=>error.connectionLost===true);
     console.log(JSON.stringify({failed,aborted}));
