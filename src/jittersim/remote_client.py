@@ -13,9 +13,11 @@ import http.client
 import io
 import json
 import os
+import queue
 import socket
 import ssl
 import stat
+import threading
 import time
 import unicodedata
 import warnings
@@ -43,6 +45,9 @@ MAX_ERROR_BYTES = 64 * 1024
 MAX_MESSAGE_CHARS = 400
 DEFAULT_TIMEOUT_SECONDS = 20.0
 ERROR_READ_SECONDS = 5.0
+# A timed-out lookup retains its slot until the system resolver actually returns.
+# Daemon threads let a one-command process exit even when the resolver is stuck.
+_RESOLUTION_SLOTS = threading.BoundedSemaphore(4)
 EXAMPLE_URL = "https://192.168.0.17:8080"
 
 CERTIFICATE_MESSAGE = (
@@ -454,11 +459,53 @@ class _DeadlineSocket:
         return getattr(self._sock, name)
 
 
+def _resolve_before(host: str, port: int, deadline: float) -> Any:
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise socket.timeout("timed out")
+    if not _RESOLUTION_SLOTS.acquire(timeout=left):
+        raise socket.timeout("name lookups are still busy")
+    answers: Any = queue.Queue(maxsize=1)
+
+    def resolve() -> None:
+        try:
+            try:
+                result = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+            except BaseException as error:
+                answers.put((False, error))
+            else:
+                answers.put((True, result))
+        finally:
+            _RESOLUTION_SLOTS.release()
+
+    left = deadline - time.monotonic()
+    if left <= 0:
+        _RESOLUTION_SLOTS.release()
+        raise socket.timeout("timed out")
+    worker = threading.Thread(target=resolve, name="dashboard-name", daemon=True)
+    try:
+        worker.start()
+    except RuntimeError:
+        # Thread.start reports failed creation with RuntimeError. Cancellation
+        # can arrive after creation, so that worker must keep its physical slot.
+        _RESOLUTION_SLOTS.release()
+        raise
+    try:
+        succeeded, result = answers.get(timeout=max(deadline - time.monotonic(), 0))
+    except queue.Empty:
+        raise socket.timeout("timed out") from None
+    if time.monotonic() >= deadline:
+        raise socket.timeout("timed out")
+    if not succeeded:
+        raise result
+    return result
+
+
 def _connect_before(host: str, port: int, deadline: float, source: Any) -> socket.socket:
     """Open a TCP connection, trying each address only for the time that is left."""
 
     failure: Optional[BaseException] = None
-    for family, kind, protocol, _, address in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
+    for family, kind, protocol, _, address in _resolve_before(host, port, deadline):
         left = deadline - time.monotonic()
         if left <= 0:
             raise socket.timeout("timed out")
