@@ -976,7 +976,42 @@ def _command_environment():
     return environment
 
 
-def _command_result(command, timeout, capture):
+def command_group_running(group, deadline):
+    """Confirm all group members have ended, including an unreaped descendant."""
+    if not Path("/proc").is_dir():
+        try:
+            os.killpg(group, 0)
+            return True
+        except ProcessLookupError:
+            return False
+    count = 0
+    with os.scandir("/proc") as entries:
+        for entry in entries:
+            if time.monotonic() >= deadline:
+                raise UpdateError("command completion could not be confirmed in time")
+            if not entry.name.isdigit():
+                continue
+            count += 1
+            if count > 65536:
+                raise UpdateError("too many processes to confirm command completion")
+            try:
+                with (Path(entry.path) / "stat").open() as handle:
+                    fields = handle.read(4096).rsplit(")", 1)[1].split()
+                if fields[0] != "Z" and int(fields[2]) == group:
+                    return True
+            except FileNotFoundError:
+                continue
+            except (ValueError, IndexError) as error:
+                raise UpdateError("command completion could not be confirmed") from error
+    return False
+
+
+def _command_result(command, timeout, capture, *, input_bytes=b"", output_limit=MAX_COMMAND_OUTPUT,
+                    answer_limit=MAX_COMMAND_ANSWER, binary=False):
+    if not isinstance(input_bytes, bytes) or len(input_bytes) > 65536:
+        raise UpdateError("release command input exceeds its allowance")
+    if type(output_limit) is not int or not 0 < output_limit <= MAX_COMMAND_OUTPUT:
+        raise UpdateError("release command output allowance is invalid")
     name = next((part for part in command[1:2] if part.endswith(".py")), command[0])
     name = Path(name).name
     if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
@@ -986,7 +1021,8 @@ def _command_result(command, timeout, capture):
     work_deadline = deadline - min(0.1, timeout / 5)
     try:
         process = subprocess.Popen(
-            command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            command, stdin=subprocess.PIPE if input_bytes else subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=True, env=_command_environment(), bufsize=0,
         )
     except OSError as error:
@@ -1014,6 +1050,10 @@ def _command_result(command, timeout, capture):
         with selectors.DefaultSelector() as selector:
             selector.register(process.stdout, selectors.EVENT_READ, "stdout")
             selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+            written = 0
+            if input_bytes:
+                os.set_blocking(process.stdin.fileno(), False)
+                selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
             while selector.get_map() or not finished():
                 observe = getattr(COMMAND_CONTEXT, "observe", None)
                 if observe is not None:
@@ -1022,16 +1062,25 @@ def _command_result(command, timeout, capture):
                 if remaining <= 0:
                     raise UpdateError("release command timed out: " + name)
                 for key, _ in selector.select(timeout=min(remaining, 0.1)):
+                    if key.data == "stdin":
+                        try:
+                            written += os.write(key.fd, memoryview(input_bytes)[written:written + 65536])
+                        except BlockingIOError:
+                            continue
+                        if written == len(input_bytes):
+                            selector.unregister(key.fileobj)
+                            process.stdin.close()
+                        continue
                     block = os.read(key.fd, 65536)
                     if not block:
                         selector.unregister(key.fileobj)
                         continue
                     total += len(block)
-                    if total > MAX_COMMAND_OUTPUT:
+                    if total > output_limit:
                         raise UpdateError("release command produced too much output: " + name)
                     if key.data == "stdout" and capture:
                         answer.extend(block)
-                        if len(answer) > MAX_COMMAND_ANSWER:
+                        if len(answer) > answer_limit:
                             raise UpdateError("release command answer has too much output: " + name)
                     elif key.data == "stderr":
                         diagnostic.extend(block[:max(0, MAX_COMMAND_DIAGNOSTIC - len(diagnostic))])
@@ -1049,20 +1098,38 @@ def _command_result(command, timeout, capture):
     except BaseException as error:
         failure = error
     finally:
-        # Also end a descendant that keeps a pipe after its immediate parent exits.
+        cancellation_failed = False
+        # Linux retains the waitable leader until the entire group is confirmed
+        # ended. macOS never sends cancellation to a reaped leader's group.
         if process.returncode is None:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-        for stream in (process.stdout, process.stderr):
-            stream.close()
+            except OSError:
+                cancellation_failed = True
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+        cancellation_deadline = min(deadline, time.monotonic() + 1)
         try:
-            process.wait(timeout=max(0, min(1, deadline - time.monotonic())))
-        except subprocess.TimeoutExpired as error:
+            if not hasattr(os, "waitid"):
+                process.wait(timeout=max(0, cancellation_deadline - time.monotonic()))
+            while command_group_running(process.pid, cancellation_deadline):
+                if time.monotonic() >= cancellation_deadline:
+                    raise CommandNotStopped(name, process)
+                time.sleep(min(0.01, max(0, cancellation_deadline - time.monotonic())))
+            process.wait(timeout=max(0, cancellation_deadline - time.monotonic()))
+            if cancellation_failed:
+                raise CommandNotStopped(name, process)
+        except (OSError, subprocess.TimeoutExpired, UpdateError) as error:
+            if isinstance(error, CommandNotStopped):
+                raise
             raise CommandNotStopped(name, process) from error
     if failure is not None:
         raise failure
+    if binary:
+        return bytes(answer)
     try:
         return answer.decode("utf-8").strip()
     except UnicodeDecodeError as error:
@@ -1075,6 +1142,12 @@ def run_command(command, timeout=300):
 
 def read_command(command, timeout=10):
     return _command_result(command, timeout, True)
+
+
+def capture_command(command, timeout=30, *, input=b"", limit=65536):
+    """Return bounded bytes after the complete owned process group has ended."""
+    return _command_result(command, timeout, True, input_bytes=input,
+                           output_limit=limit, answer_limit=limit, binary=True)
 
 
 def runtime_interfaces(config):
@@ -1783,6 +1856,7 @@ def tree_entries(source, budget, *, links=False, ignore=(), max_bytes=None, max_
     maximum_entries = MAX_SNAPSHOT_ENTRIES if max_entries is None else max_entries
     stack = [(Path(source), Path("."), 0)]
     count = total = 0
+    discovered = 1
     while stack:
         budget.check()
         path, relative, depth = stack.pop()
@@ -1813,8 +1887,9 @@ def tree_entries(source, budget, *, links=False, ignore=(), max_bytes=None, max_
                         budget.check()
                         if relative == Path(".") and entry.name in ignore:
                             continue
-                        if len(children) + count > maximum_entries:
+                        if discovered >= maximum_entries:
                             raise UpdateError("the recovery snapshot has too many entries")
+                        discovered += 1
                         children.append((Path(entry.path), relative / entry.name, depth + 1))
                 stack.extend(sorted(children, reverse=True))
             except FileNotFoundError:
@@ -2252,29 +2327,7 @@ def command_still_running(record, budget):
         raise UpdateError("the unfinished command record is invalid")
     if record.get("boot") != _current_boot():
         return False
-    if not Path("/proc").is_dir():
-        try:
-            os.killpg(record["group"], 0)
-            return True
-        except ProcessLookupError:
-            return False
-    count = 0
-    with os.scandir("/proc") as entries:
-        for entry in entries:
-            budget.check()
-            if not entry.name.isdigit():
-                continue
-            count += 1
-            if count > 65536:
-                raise UpdateError("too many processes to check unfinished update work")
-            try:
-                with (Path(entry.path) / "stat").open() as handle:
-                    fields = handle.read(4096).rsplit(")", 1)[1].split()
-                if fields[0] != "Z" and int(fields[2]) == record["group"]:
-                    return True
-            except (OSError, ValueError, IndexError):
-                continue
-    return False
+    return command_group_running(record["group"], budget.deadline)
 
 
 def healthy(*, config=CONFIG_ROOT, run=run_command, port=8080, budget=None):
@@ -2327,6 +2380,8 @@ def healthy(*, config=CONFIG_ROOT, run=run_command, port=8080, budget=None):
                     and data.get("helper_reachable") is True)
         finally:
             connection.close()
+    except CommandNotStopped:
+        raise
     except (OSError, ValueError, StopIteration, UpdateError, http.client.HTTPException):
         return False
 
@@ -2415,6 +2470,8 @@ def apply_update(
                      runtime_interfaces(config)[1]],
                     10,
                 )
+            except CommandNotStopped:
+                raise
             except (UpdateError, OSError):
                 # An unknown state must never restart the running Wi-Fi.
                 wifi = "jittersim-ap"
@@ -2429,6 +2486,8 @@ def apply_update(
                 for action, *names in NAME_STEPS:
                     try:
                         run(["systemctl", action, *names], 120)
+                    except CommandNotStopped:
+                        raise
                     except UpdateError:
                         break
 
@@ -2522,6 +2581,8 @@ def apply_update(
                         keep = unit in (WIFI_UNIT, "jittersim-update.service")
                         try:
                             run(["systemctl", "disable", *([] if keep else ["--now"]), unit], 60)
+                        except CommandNotStopped:
+                            raise
                         except UpdateError:
                             pass
                     destination.unlink()

@@ -117,7 +117,8 @@ def test_command_group_is_only_signalled_while_its_leader_is_owned(monkeypatch):
 
     def cancel(group, sig):
         process = next(item for item in owned if item.pid == group)
-        assert process.returncode is None, "a reaped leader's group number may have been reused"
+        if sig != 0:
+            assert process.returncode is None, "a reaped leader's group number may have been reused"
         return kill(group, sig)
 
     monkeypatch.setattr(updates.subprocess, "Popen", start)
@@ -602,3 +603,142 @@ def test_successful_failure_recovery_also_bounds_complete_copy_retention(pi):
     assert updates.read_json(pi.root / "status.json")["phase"] == "rolled-back"
     complete = [path for path in pi.root.iterdir() if path.is_dir() and (path / "complete.json").exists()]
     assert len(complete) == 2
+
+
+def test_snapshot_entry_limit_includes_paths_waiting_to_be_visited(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    branch = source
+    for _ in range(5):
+        for index in range(3):
+            (branch / ("z" + str(index))).write_text("x")
+        branch = branch / "a"
+        branch.mkdir()
+    maximum = 12
+    monkeypatch.setattr(updates, "MAX_SNAPSHOT_ENTRIES", maximum)
+    original = updates.os.scandir
+    discovered = []
+
+    class Directory:
+        def __init__(self, path):
+            self.handle = original(path)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.handle.close()
+
+        def __iter__(self):
+            for entry in self.handle:
+                discovered.append(entry.path)
+                yield entry
+
+    monkeypatch.setattr(updates.os, "scandir", Directory)
+    with pytest.raises(updates.UpdateError, match="entries"):
+        updates.snapshot_size(source, updates.UpdateBudget())
+    assert len(discovered) <= maximum, "pending paths must consume the finite entry allowance"
+
+
+def test_an_unconfirmed_descendant_keeps_command_ownership(monkeypatch):
+    monkeypatch.setattr(updates, "command_group_running", lambda *args: True, raising=False)
+    with pytest.raises(updates.CommandNotStopped):
+        updates.run_command([sys.executable, "-c", "pass"], timeout=0.3)
+
+
+@pytest.mark.skipif(not hasattr(os, "waitid"), reason="Linux retains the waitable group leader")
+def test_cancelled_leader_does_not_hide_a_live_owned_child(tmp_path, monkeypatch):
+    pid_file = tmp_path / "descendant.pid"
+    child = "import os, pathlib, sys, time; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(60)"
+    parent = ("import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', "
+              + json.dumps(child) + ", " + json.dumps(str(pid_file)) + "]); time.sleep(60)")
+    real_killpg = os.killpg
+    pid = None
+
+    def incomplete_cancel(group, sig):
+        if sig == signal.SIGKILL:
+            os.kill(group, sig)
+            return
+        return real_killpg(group, sig)
+
+    monkeypatch.setattr(updates.os, "killpg", incomplete_cancel)
+    try:
+        with pytest.raises(updates.CommandNotStopped):
+            updates.run_command([sys.executable, "-c", parent], timeout=0.3)
+        pid = int(pid_file.read_text())
+        os.kill(pid, 0)
+    finally:
+        if pid is None and pid_file.exists():
+            pid = int(pid_file.read_text())
+        if pid is not None:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@pytest.mark.parametrize("boundary", ["wifi-query", "name-step", "health"])
+def test_best_effort_paths_do_not_swallow_unknown_command_ownership(pi, boundary):
+    class StillOwned:
+        pid = 123456789
+
+    def unknown():
+        raise updates.CommandNotStopped("controlled-command", StillOwned())
+
+    def run(command, timeout):
+        if boundary == "name-step" and command[:2] == ["systemctl", "enable"] and command[-1] == updates.NAME_UNIT:
+            unknown()
+        if boundary == "health" and command[:2] == ["systemctl", "is-active"]:
+            unknown()
+
+    def query(command, timeout):
+        if boundary == "wifi-query":
+            unknown()
+        return pi.wifi
+
+    with patch.object(updates.time, "sleep"), pytest.raises(updates.CommandNotStopped):
+        pi.apply(run, None if boundary == "health" else lambda: True, query=query)
+    request = updates.read_json(pi.root / "request.json")
+    assert request["command_pending"]["group"] == StillOwned.pid
+    assert updates.read_json(pi.root / "status.json")["phase"] == "failed"
+
+
+def test_rollback_unit_removal_preserves_unknown_command_ownership(pi):
+    class StillOwned:
+        pid = 123456789
+
+    (pi.units / updates.NAME_UNIT).unlink()
+    pi.apply(lambda *args: None, lambda: True)
+    updates.request_update("", rollback=True, root=pi.root, code=pi.code, config=pi.config,
+                           run=lambda *args: None)
+    commands = []
+
+    def run(command, timeout):
+        commands.append(command)
+        if command[:2] == ["systemctl", "disable"] and command[-1] == updates.NAME_UNIT:
+            raise updates.CommandNotStopped("systemctl", StillOwned())
+
+    with pytest.raises(updates.CommandNotStopped):
+        pi.apply(run, lambda: True)
+    assert updates.read_json(pi.root / "request.json")["command_pending"]["group"] == StillOwned.pid
+    disable = next(index for index, command in enumerate(commands) if command[:2] == ["systemctl", "disable"])
+    assert not commands[disable + 1:], "unknown unit-removal work must block further recovery actions"
+
+
+def test_captured_command_handles_binary_input_and_output_without_decoding():
+    raw = bytes(range(256)) * 200
+    answer = updates.capture_command([sys.executable, "-c", "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"],
+                                     timeout=5, input=raw, limit=65536)
+    assert answer == raw
+
+
+def test_captured_command_caps_combined_output_while_draining():
+    script = "import sys; sys.stderr.buffer.write(b'x'*40000); sys.stdout.buffer.write(b'y'*40000)"
+    with pytest.raises(updates.UpdateError, match="output"):
+        updates.capture_command([sys.executable, "-c", script], timeout=5, limit=65536)
+
+
+def test_captured_command_retains_unknown_group_completion(monkeypatch):
+    monkeypatch.setattr(updates, "command_group_running", lambda *args: True)
+    with pytest.raises(updates.CommandNotStopped):
+        updates.capture_command([sys.executable, "-c", "pass"], timeout=0.3, limit=65536)
