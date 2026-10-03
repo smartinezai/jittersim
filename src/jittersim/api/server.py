@@ -4121,6 +4121,9 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                 service = read_status()
             except HelperClientError:
                 service["message"] = "Ad-blocking status could not be confirmed."
+        if getattr(self, "_ad_blocking_sync_pending", False):
+            service["ready"] = False
+            service["message"] = "Saved ad-blocking choices could not be confirmed. Retry after reconnecting the Pi helper."
         return {
             "mac_addresses": list(self.repository.list_ad_blocking_devices()),
             "allowed_domains": list(self.repository.list_ad_blocking_allowances()),
@@ -4128,11 +4131,13 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         }
 
     def _sync_ad_blocking(self, *, update=False, resume=False, control_revision=None):
+        self._ad_blocking_sync_pending = True
         configure = getattr(self.helper_client, "configure_ad_blocking", None)
         selected = self.repository.list_ad_blocking_devices()
         if configure is None:
             if selected:
                 raise HelperClientError("Install the current Pi services to use ad blocking.")
+            self._ad_blocking_sync_pending = False
             return None
         if control_revision is None:
             reader = getattr(self.helper_client, "control_revision", None)
@@ -4142,13 +4147,16 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             arguments = {"update": update, "resume": resume}
             if control_revision is not None:
                 arguments["control_revision"] = control_revision
-            return configure(selected, self.repository.list_ad_blocking_allowances(), **arguments)
+            result = configure(selected, self.repository.list_ad_blocking_allowances(), **arguments)
         except HelperClientError as error:
             if not selected and str(error) in {
                 "unknown action", "Install the current Pi release to use ad blocking.",
             }:
+                self._ad_blocking_sync_pending = False
                 return None
             raise
+        self._ad_blocking_sync_pending = False
+        return result
 
     def _change_ad_blocking(self, payload: dict, *, control_intent=None):
         if control_intent is None:
@@ -4915,12 +4923,12 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         return (HTTPStatus.SERVICE_UNAVAILABLE if error else HTTPStatus.CONFLICT,
                 "application/json", _json_bytes(body))
 
-    def _reset_network(self) -> Tuple[int, str, bytes]:
+    def _reset_network(self, *, automatic_recovery=False) -> Tuple[int, str, bytes]:
         operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
         with operation:
-            return self._reset_network_locked()
+            return self._reset_network_locked(automatic_recovery=automatic_recovery)
 
-    def _reset_network_locked(self) -> Tuple[int, str, bytes]:
+    def _reset_network_locked(self, *, automatic_recovery=False) -> Tuple[int, str, bytes]:
         if self.helper_client is None:
             return (
                 HTTPStatus.SERVICE_UNAVAILABLE,
@@ -4938,7 +4946,8 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             last_error=None,
         )
         try:
-            result = self.helper_client.reset()
+            recover = getattr(self.helper_client, "recover_reset", None) if automatic_recovery else None
+            result = recover() if callable(recover) else self.helper_client.reset()
         except HelperClientError as error:
             LOGGER.error("network helper reset failed: %s", error)
             state = self.repository.update_runtime_state(
@@ -4976,6 +4985,10 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         if not self._wait_for_helper():
             LOGGER.error("network helper did not answer, so network state was not recovered")
             return
+        try:
+            self._sync_ad_blocking()
+        except (HelperClientError, StorageError):
+            LOGGER.warning("saved ad-blocking choices could not be confirmed during dashboard startup")
         if not self._sync_gateway_persistence():
             return
         try:
@@ -5008,7 +5021,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                     self.scheduler.require_recovery()
                 LOGGER.error("saved recovery remains unconfirmed. Retry Panic before Start")
                 return
-            status, _, _ = self._reset_network()
+            status, _, _ = self._reset_network(automatic_recovery=True)
             kind, message = "reset", "Network reset again after the dashboard restarted"
         else:
             status, _, _ = self._apply_configuration()

@@ -73,7 +73,7 @@ MAX_HELPER_CONNECTIONS = 8
 # Reads never wait so a dashboard poll cannot make Panic fail. Normal access is the
 # Panic action and waits like Reset. Access apply carries Block globally, Unblock,
 # Apply access rules and the device quick action so a poll must not refuse it either.
-WRITE_ACTIONS = ("apply", "apply-experiment", "reset", "normal-access", "access-apply", "ad-blocking-configure")
+WRITE_ACTIONS = ("apply", "apply-experiment", "reset", "recover-reset", "normal-access", "access-apply", "ad-blocking-configure")
 WRITE_LOCK_WAIT_SECONDS = 3.0
 WIFI_ACTIONS = ("configure-ap", "router-sync-ap", "router-preview-ap", "wifi-reset")
 ROUTER_ACTIONS = (
@@ -470,8 +470,8 @@ class HelperService:
                 return {"ok": False, "error": "Pi networking is busy. Try again later.",
                         "reason": "helper-busy"}
             try:
-                if action == "reset":
-                    return self._handle_reset()
+                if action in ("reset", "recover-reset"):
+                    return self._handle_reset(pause_ad_blocking=action == "reset")
                 refused = self._control_refusal(payload)
                 if refused is not None:
                     return refused
@@ -1442,9 +1442,9 @@ class HelperService:
                 router.close()
         return {"ok": True, "action": "router-check"}
 
-    def _handle_reset(self) -> Dict[str, Any]:
+    def _handle_reset(self, *, pause_ad_blocking: bool = True) -> Dict[str, Any]:
         blocking_failed = False
-        if self._ad_blocking_store is not None:
+        if pause_ad_blocking and self._ad_blocking_store is not None:
             try:
                 self._ad_blocking_store.pause()
             except (OSError, ValueError, CommandExecutionError):
@@ -2056,6 +2056,16 @@ class HelperClient:
         """Ask the helper to remove project-owned network state."""
 
         return self._request({"action": "reset"})
+
+    def recover_reset(self) -> Dict[str, Any]:
+        """Repeat profile cleanup without changing existing ad permission."""
+
+        try:
+            return self._request({"action": "recover-reset"})
+        except HelperClientError as error:
+            if str(error) == "unknown action":
+                return self.reset()
+            raise
 
     def apply_experiment(self, *, plan: NetworkPlan, control_revision: Optional[str] = None) -> Dict[str, Any]:
         """Change scheduled effects without activating pending access-rule edits."""

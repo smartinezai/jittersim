@@ -977,7 +977,7 @@ PANIC_APPROVED_SOURCES = ({
     "src/jittersim/networking/access.py": "1d4edebe57877e6db6bbbcd0d1adaecfd9fa48573c0f8830b10a2dcdaaf04ec6",
 }, {
     'src/jittersim/panic_guard.py': "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
-    'src/jittersim/networking/helper.py': "86333f109d8acc0dee4743c6d43de525808f2470f81d90fa7ba2e8773c323f69",
+    'src/jittersim/networking/helper.py': "83d57fd505d6ff5bf79c763ff8fd38f0283a0234466d521c1b7d7bbfca189d7c",
     'src/jittersim/networking/access.py': "048c13f63e32c862a0d829715ee4259c47d2a2664be17a2ca65b78e21344ab77",
 },)
 

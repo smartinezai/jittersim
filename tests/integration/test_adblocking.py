@@ -3,7 +3,7 @@
 import json
 import socket
 import threading
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from unittest.mock import Mock
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -339,6 +339,106 @@ def test_queued_enable_cannot_reverse_panic_but_a_fresh_enable_can(tmp_path, pan
             assert store.read()["running"]
         finally:
             server.server_close()
+
+
+@pytest.mark.parametrize("helper_restart", [False, True])
+@pytest.mark.parametrize("later_stop", [None, "no_enable", "reset", "panic", "failed_panic", "during_startup", "protection_removed", "sync_refused"])
+def test_dashboard_restart_preserves_only_a_later_deliberate_ad_enable(tmp_path, later_stop, helper_restart):
+    guard = provision_guard(tmp_path)
+    store = AdStore(
+        AdRouting("wlan0", FakeExecutor()), path=tmp_path / "policy",
+        lock_path=tmp_path / "lock", active_path=tmp_path / "active",
+        status_path=tmp_path / "status", intent_path=tmp_path / "intent", panic_guard=guard,
+    )
+    manager = AccessManager(
+        executor=AccessExecutor(tmp_path), topology=Topology("eth0", "wlan0"),
+        directory=tmp_path / "access", runtime_path=tmp_path / "access-policy",
+        ad_blocking_store=store,
+    )
+    def service(applier):
+        return HelperService(applier, ad_blocking_store=store, access_manager=manager, panic_guard=guard)
+
+    with ExitStack() as helpers, ConfigRepository(tmp_path / "config.db") as repo:
+        client, _ = helpers.enter_context(serving(service))
+        repo.save_unaffected_device(UnaffectedDevice(ALICE, "Alice", 1))
+        server = ControlServer(("127.0.0.1", 0), repo, helper_client=client, admin_token="fixture-token")
+        try:
+            if later_stop != "protection_removed":
+                assert server._reset_network()[0] == 200
+            if later_stop != "no_enable":
+                assert write(server, {"mac_address": ALICE, "enabled": True})[0] == 200
+                assert store.read()["running"]
+            if later_stop == "reset":
+                assert server._reset_network()[0] == 200
+            elif later_stop == "panic":
+                assert client.normal_access()["ok"]
+            elif later_stop == "failed_panic":
+                manager.disable = Mock(side_effect=ValueError("unconfirmed household recovery"))
+                with pytest.raises(HelperClientError):
+                    client.normal_access()
+            elif later_stop == "protection_removed":
+                repo.delete_unaffected_device(ALICE)
+                assert repo.list_ad_blocking_devices() == ()
+        finally:
+            server.server_close()
+        permission = store.intent_path.read_bytes()
+        if helper_restart:
+            helpers.close()
+            client, _ = helpers.enter_context(serving(service))
+            assert store.intent_path.read_bytes() == permission
+        if later_stop == "during_startup":
+            configure = client.configure_ad_blocking
+
+            def panic_before_copy(*args, **kwargs):
+                client.normal_access()
+                return configure(*args, **kwargs)
+
+            client.configure_ad_blocking = panic_before_copy
+        elif later_stop == "sync_refused":
+            client.configure_ad_blocking = Mock(side_effect=HelperClientError("helper busy"))
+            client.ad_blocking_status = Mock(return_value={"available": True, "ready": True,
+                                                           "message": "Ad blocking is active."})
+        restarted = ControlServer(("127.0.0.1", 0), repo, helper_client=client, admin_token="fixture-token")
+        try:
+            restarted.recover_saved_network_state()
+            assert store.read()["running"] is (later_stop in (None, "protection_removed", "sync_refused"))
+            if later_stop != "during_startup":
+                assert store.intent_path.read_bytes() == permission
+            else:
+                assert client.gateway_status()["panic_stop_latched"]
+                assert json.loads(store.intent_path.read_bytes())["running"] is False
+            choices = () if later_stop in ("no_enable", "protection_removed") else (ALICE,)
+            assert repo.list_ad_blocking_devices() == choices
+            assert store.read()["mac_addresses"] == choices
+            assert repo.get_runtime_state().last_action == (None if later_stop == "protection_removed" else "reset")
+            assert repo.get_runtime_state().last_result == (None if later_stop == "protection_removed" else "success")
+            if later_stop == "sync_refused":
+                status = json.loads(restarted.response_for("/api/ad-blocking")[2])["service"]
+                assert not status["ready"] and "could not be confirmed" in status["message"]
+        finally:
+            restarted.server_close()
+
+
+@pytest.mark.parametrize("error,reason", [("unknown action", None), ("busy", "helper-busy"), ("failed", None)])
+def test_automatic_reset_falls_back_only_after_explicit_unknown_action(error, reason):
+    requests = []
+
+    class EarlierHelper(HelperService):
+        def _handle_payload(self, payload):
+            requests.append(payload["action"])
+            if payload["action"] == "recover-reset":
+                return {"ok": False, "error": error, "reason": reason}
+            return super()._handle_payload(payload)
+
+    with serving(EarlierHelper) as (client, _):
+        if error == "unknown action":
+            assert client.recover_reset()["action"] == "reset"
+            assert requests == ["recover-reset", "reset"]
+        else:
+            with pytest.raises(HelperClientError) as failure:
+                client.recover_reset()
+            assert str(failure.value) == error and failure.value.reason == reason
+            assert requests == ["recover-reset"]
 
 
 def test_household_changes_preserve_only_current_permission_and_start_renews_after_guard(tmp_path):

@@ -271,3 +271,43 @@ The authenticated helper can reconstruct a damaged settings cache from the
 complete validated database selection. Reconstruction does not publish run
 permission. A separate explicit enable still validates the current Panic
 record before publishing permission.
+
+## Dashboard restart repair
+
+The frozen version passed 5,312 host Python tests with 40 platform skips.
+A separate real-helper reproduction found that Reset followed by a fresh
+ad enable was undone by dashboard startup. Startup repeats the saved profile
+Reset, which also paused the later ad choice. The saved switch remained on.
+That result is a defect despite the passing suite.
+
+Preserve the existing startup cleanup of profile state. Give that automatic
+cleanup a separate helper action which leaves existing ad permission alone.
+It must never create, renew or resume permission. Deliberate Reset and Panic
+continue to pause ads. The current private Panic witness still invalidates
+permission after a later stop, an older helper write or damaged stop state.
+Keep all cleanup under the existing helper network lock and timeout.
+
+Older helpers do not offer this action and do not own ad blocking. Fall back
+to their ordinary Reset only for their explicit unknown-action response.
+Connection failures and busy replies must retain their current error.
+No dashboard endpoint exposes the automatic cleanup action.
+
+Add actual helper-socket coverage for Reset, fresh enable and dashboard
+restart. Check unchanged run-permission bytes as well as saved settings.
+Repeat after a later deliberate Reset and after helper Panic. Preserve the
+earlier failed reproduction and successful frozen suite as historical
+evidence. Review the changed helper source before updating its exact approved
+digest. Freeze a clean successor for independent review before Linux release
+checks or publication. Installer ordering and rollback remain unchanged.
+
+A second real-helper reproduction found a stale selected-device cache when
+protected-device settings changed while the dashboard was stopped. Startup
+returned before copying the current database selection to the helper.
+Reconcile the complete bounded selection and allowances before startup's
+early returns, with resume disabled. This also covers returning from an older
+release that edited protection without knowing the ad cache. A failed copy
+must be reported without preventing ordinary profile recovery. Add a removal
+regression and verify that reconciliation never changes run-permission bytes.
+If synchronization fails, retain a visible unconfirmed status even if a later
+helper status read reports that its older configuration is active. A later
+successful settings copy clears that warning. No status read applies settings.
