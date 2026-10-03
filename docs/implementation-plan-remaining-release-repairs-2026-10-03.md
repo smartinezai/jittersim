@@ -111,3 +111,11 @@ state conditionally that a restored backup replaces later changes. This changes 
 before confirmation, not admission, saved requests or recovery behavior.
 Verify JavaScript syntax and the existing actual browser update checks. The
 final complete workflow still applies.
+# Linux release test image
+
+The full Linux workflow runs the stable release tests inside the Wi-Fi image.
+Those tests create real Git repositories and sign archives with ssh-keygen.
+Add Git, the OpenSSH client and OpenSSL to that image so the configured command has its
+required tools. Rebuild the image without cache and run its full test command.
+This changes the test image only. Retain the missing-tool finding in the release
+evidence and verify the exact final source before publication.
