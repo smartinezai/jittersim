@@ -3,32 +3,38 @@ name: Pi release checks
 on:
   pull_request:
   push:
-    branches: [feat/service-profiles-and-pi-hardening]
+    branches: [main, feat/service-profiles-and-pi-hardening]
 
 permissions:
   contents: read
 
 jobs:
   tests:
+    name: Python ${{ matrix.python-version }}
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      max-parallel: 3
       matrix:
         python-version: ['3.9', '3.11', '3.13']
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Build and verify the locked release packages
+        run: python deploy/raspberry-pi/prepare-locked-wheels.py --source . --output "$RUNNER_TEMP/locked-wheels"
       - run: pip install '.[dev]'
       - run: python -m pytest -q
       - run: ruff check --select E9,F63,F7,F82,F811 src tests
 
   linux:
+    name: Pi Linux release checks
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - run: docker build -f tests/wifi/Dockerfile -t jittersim-wifi-release .
       - run: docker run --rm jittersim-wifi-release python tests/integration/linux_installer_permissions.py
       - run: docker run --rm --cap-add NET_ADMIN jittersim-wifi-release python tests/integration/linux_dashboard_peer_identity.py
@@ -44,12 +50,13 @@ jobs:
       - run: docker run --rm --cap-add NET_ADMIN --cap-add NET_RAW jittersim-wifi-release python tests/integration/linux_dashboard_access_packets.py
 
   browser:
+    name: Pi browser journeys
     runs-on: ubuntu-latest
     # The phone layout journey checks three phone sizes twice (normal and wide fonts).
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'
       - run: pip install . 'playwright==1.63.0'
@@ -76,7 +83,7 @@ jobs:
       - run: python -m tests.browser.dns_failure
       - run: python -m tests.browser.page_polling
       - run: python -m tests.browser.update_status_recovery
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         if: always()
         with:
           name: wifi-browser-results

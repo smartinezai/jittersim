@@ -1,0 +1,20 @@
+{
+  "format": 1,
+  "repository": "smartinezai/jittersim",
+  "workflows": {
+    ".github/workflows/tests.yml": [
+      "Lint",
+      "Linux datapath",
+      "Browser journeys",
+      "Homepage reference",
+      "GUI baseline"
+    ],
+    ".github/workflows/wifi-recovery.yml": [
+      "Python 3.9",
+      "Python 3.11",
+      "Python 3.13",
+      "Pi Linux release checks",
+      "Pi browser journeys"
+    ]
+  }
+}
