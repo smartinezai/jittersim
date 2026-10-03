@@ -300,6 +300,7 @@ async function openDevice(id) {
   }
   workspaceDevice = id;
   previousWorkspaceTraffic = null;
+  ['workspace-runs', 'workspace-usage', 'workspace-timeline'].forEach(key => delete element(key).dataset.renderKey);
   showTab('devices');
   element('device-workspace').hidden = false;
   populateWorkflowMenus();
@@ -314,30 +315,37 @@ async function loadWorkspace() {
   const id = workspaceDevice;
   workspaceRequest = (async () => {
     const data = await request('/api/device-workspace/' + encodeURIComponent(id), 'GET');
-    const traffic = await request('/api/traffic', 'GET');
+    // The graph page reads the counters every 2 seconds, so a fresh reading is reused here.
+    const traffic = await readTraffic(1500);
     if (id !== workspaceDevice) return;
     const list = element('workspace-runs');
-    list.replaceChildren();
-    data.timers.forEach(timer => list.append(textNode('p', 'Timer: ' + timer.profile_name + ' · ' + formatTimerRemaining(timer.remaining_seconds)),
-      actionButton('Stop timer', async button => { await cancelTimer(timer.id, button); await loadConditions(); })));
-    data.runs.forEach(run => list.append(textNode('p', 'Scenario: ' + (run.scenario_name || run.scenario_id)),
-      actionButton('Stop scenario', async () => { await request('/api/scenarios/stop', 'POST', {id:run.id}); refreshAfterSuccess('Scenario stopped.'); })));
-    data.progressions.forEach(run => list.append(textNode('p', 'Progression: ' + run.start_profile_name + ' → ' + run.end_profile_name),
-      actionButton('Stop progression', button => stopProgression(run.id, button))));
-    if (!list.children.length) list.append(textNode('p', 'No temporary runs.'));
+    replaceIfChanged(list, JSON.stringify([data.timers, data.runs, data.progressions]), () => {
+      list.replaceChildren();
+      data.timers.forEach(timer => list.append(textNode('p', 'Timer: ' + timer.profile_name + ' · ' + formatTimerRemaining(timer.remaining_seconds)),
+        actionButton('Stop timer', async button => { await cancelTimer(timer.id, button); await loadConditions(); })));
+      data.runs.forEach(run => list.append(textNode('p', 'Scenario: ' + (run.scenario_name || run.scenario_id)),
+        actionButton('Stop scenario', async () => { await request('/api/scenarios/stop', 'POST', {id:run.id}); refreshAfterSuccess('Scenario stopped.'); })));
+      data.progressions.forEach(run => list.append(textNode('p', 'Progression: ' + run.start_profile_name + ' → ' + run.end_profile_name),
+        actionButton('Stop progression', button => stopProgression(run.id, button))));
+      if (!list.children.length) list.append(textNode('p', 'No temporary runs.'));
+    });
     const usage = element('workspace-usage');
-    usage.replaceChildren();
-    [...data.data_limits, ...data.group_data_limits, ...data.service_quotas].forEach(limit => usage.append(textNode('p',
-      (limit.name || (limit.group_id ? 'Shared data limit' : 'Device data limit')) + ': ' +
-      (limit.used_bytes / 1048576).toFixed(1) + ' / ' + (limit.limit_bytes / 1048576).toFixed(1) + ' MB' + (limit.enabled ? '' : ' · Disabled'))));
-    data.time_quotas.forEach(limit => usage.append(textNode('p', limit.name + ': ' + Math.floor(limit.used_seconds / 60) + ' / ' + Math.floor(limit.limit_seconds / 60) + ' minutes')));
-    if (!usage.children.length) usage.append(textNode('p', 'No usage limits for this device.'));
+    replaceIfChanged(usage, JSON.stringify([data.data_limits, data.group_data_limits, data.service_quotas, data.time_quotas]), () => {
+      usage.replaceChildren();
+      [...data.data_limits, ...data.group_data_limits, ...data.service_quotas].forEach(limit => usage.append(textNode('p',
+        (limit.name || (limit.group_id ? 'Shared data limit' : 'Device data limit')) + ': ' +
+        (limit.used_bytes / 1048576).toFixed(1) + ' / ' + (limit.limit_bytes / 1048576).toFixed(1) + ' MB' + (limit.enabled ? '' : ' · Disabled'))));
+      data.time_quotas.forEach(limit => usage.append(textNode('p', limit.name + ': ' + Math.floor(limit.used_seconds / 60) + ' / ' + Math.floor(limit.limit_seconds / 60) + ' minutes')));
+      if (!usage.children.length) usage.append(textNode('p', 'No usage limits for this device.'));
+    });
     const timeline = element('workspace-timeline');
-    const entries = data.timeline.changes.map(change => textNode('li', new Date(change.at * 1000).toLocaleString() +
-      ' · ' + change.profile + ' · ' + change.reason + (change.overridden_schedules.length ? ' · Takes priority over: ' + change.overridden_schedules.join(', ') : '')));
-    timeline.replaceChildren(...entries.slice(0,6));
-    element('workspace-timeline-later').replaceChildren(...entries.slice(6));
-    element('workspace-later').hidden = entries.length <= 6;
+    replaceIfChanged(timeline, JSON.stringify(data.timeline), () => {
+      const entries = data.timeline.changes.map(change => textNode('li', new Date(change.at * 1000).toLocaleString() +
+        ' · ' + change.profile + ' · ' + change.reason + (change.overridden_schedules.length ? ' · Takes priority over: ' + change.overridden_schedules.join(', ') : '')));
+      timeline.replaceChildren(...entries.slice(0,6));
+      element('workspace-timeline-later').replaceChildren(...entries.slice(6));
+      element('workspace-later').hidden = entries.length <= 6;
+    });
     element('timeline-note').textContent = (deviceConditions.applied ? '' : 'Saved rules preview. These settings are not confirmed active. ') + data.timeline.note + (data.timeline.truncated ? ' Showing the first 32 changes.' : ' Next 24 hours.');
     const counters = traffic.devices && traffic.devices[id];
     const now = traffic.sampled_at;

@@ -23,8 +23,8 @@ def served_functions():
         + block("const privateDataPanelIds =", "function setDashboardUnlocked(")
         + block("function setPrivateDataPanels(", "async function loadPrivateDataPanel(")
         + block("let helperConfigured =", "let profiles =")
-        + block("async function request(", "const adminTokenHelp =")
-        + block("async function checkAdminToken()", "async function refresh()")
+        + block("const PI_NOT_ANSWERING", "const adminTokenHelp =")
+        + block("async function checkAdminToken()", "async function refresh(")
         + block(
             'element("check-admin-token").addEventListener("click",',
             'element("traffic-rate-form").addEventListener("submit",',
@@ -46,12 +46,13 @@ const assert = require("node:assert/strict");
 const nodes = new Map();
 const messages = [];
 const document = {activeElement: null, documentElement: {style: {setProperty() {}}},
-                  addEventListener() {}};
+                  addEventListener() {}, getElementById: (id) => element(id)};
 const storage = new Map();
 let storageBroken = false;
 const blocked = () => {if (storageBroken) throw new Error("storage blocked")};
 const windowListeners = new Map();
-const window = {innerHeight: 800, setInterval() {}, confirm() {return true},
+const window = {innerHeight: 800, setInterval() {}, setTimeout() {return 1}, clearTimeout() {},
+  confirm() {return true},
   addEventListener(type, callback) {windowListeners.set(type, callback)}, localStorage: {
   getItem(key) {blocked(); return storage.has(key) ? storage.get(key) : null},
   setItem(key, value) {blocked(); storage.set(key, String(value))},

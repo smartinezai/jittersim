@@ -16,9 +16,9 @@ def served_functions():
         return script[script.index(start) : script.index(end, script.index(start))]
 
     return (
-        block("async function request(", "async function show(")
+        block("const PI_NOT_ANSWERING", "async function show(")
         + block("function renderMode(", "function renderRuntimeSummary(")
-        + block("function setActionBusy(", 'element("scan-observations").addEventListener')
+        + block("const runningActions = new Set();", 'element("scan-observations").addEventListener')
     )
 
 
@@ -43,7 +43,25 @@ let adminTokenVerified = true;
 let adminTokenRevision = 0;
 let adminTokenChecking = false;
 let pendingFormSubmitButton = null;
+const timers = [];
+const document = {getElementById: (id) => element(id)};
+function renderRuntimeText() {}
+const nativeSetTimeout = setTimeout;
+// Request timeouts are kept for a case to fire. The one-second wait between Panic tries runs.
+const window = {
+  setTimeout(callback, milliseconds) {
+    if (milliseconds === 1000) nativeSetTimeout(callback, 0);
+    else timers.push({callback, milliseconds});
+    return timers.length;
+  },
+  clearTimeout() {}
+};
+const answer = (status, body) => ({ok: status < 400, status, json: async () => body});
+const PANIC_OK = {state: {observed_state: "reset"}};
 let network = async () => ({ok: true, json: async () => ({state: {observed_state: "reset"}})});
+globalThis.setTimeout = (callback, milliseconds) => milliseconds === 0
+  ? nativeSetTimeout(callback, 0) : window.setTimeout(callback, milliseconds);
+globalThis.clearTimeout = id => window.clearTimeout(id);
 function element(id) {
   if (!nodes.has(id)) nodes.set(id, {
     id, value: "", textContent: "", className: "", disabled: false,
@@ -64,7 +82,7 @@ function renderSavedProfiles() {}
 const refreshedPanels = [];
 async function loadPrivateDataPanel(panelId) {refreshedPanels.push(panelId)}
 async function loadState() {}
-async function fetch(path, options) {networkCalls.push({path, options}); return await network()}
+async function fetch(path, options) {networkCalls.push({path, options}); return await network(options)}
 function deferred() {
   let resolve;
   const promise = new Promise(done => {resolve = done});
@@ -242,21 +260,99 @@ CASES = {
         "No device profiles or service lists are saved yet. Access rules apply."
       );
     """,
-    "locks_every_action_while_running": r"""
+    "locks_apply_and_reset_but_not_panic_while_running": r"""
       element("admin-token").value = "fixture token";
       const pending = deferred();
       network = () => pending.promise;
       press("panic-button");
       await flush();
-      for (const id of ACTION_BUTTONS) assert.equal(element(id).disabled, true, id);
+      // Panic is the way out of a change that goes wrong, so it is never locked.
+      assert.equal(element("panic-button").disabled, false);
+      assert.equal(element("apply-button").disabled, true);
+      assert.equal(element("reset-button").disabled, true);
       assert.equal(element("panic-button").getAttribute("aria-busy"), "true");
       press("panic-button");
       await flush();
-      assert.equal(networkCalls.length, 1);
-      pending.resolve({ok: true, json: async () => ({state: {observed_state: "reset"}})});
+      assert.equal(networkCalls.length, 1, "a second press while Panic runs sends nothing");
+      pending.resolve(answer(200, PANIC_OK));
       await flush();
       for (const id of ACTION_BUTTONS) assert.equal(element(id).disabled, false, id);
       assert.equal(element("panic-button").getAttribute("aria-busy"), "false");
+    """,
+    "panic_is_sent_at_once_while_an_apply_is_running": r"""
+      element("admin-token").value = "fixture token";
+      const apply = deferred();
+      const answers = {"/api/apply": apply.promise};
+      network = () => answers[networkCalls.at(-1).path] || Promise.resolve(answer(200, PANIC_OK));
+      press("apply-button");
+      await flush();
+      assert.equal(element("panic-button").disabled, false);
+      press("panic-button");
+      await flush();
+      assert.deepEqual(networkCalls.map(call => call.path), ["/api/apply", "/api/normal-access"]);
+      assert.match(messages.find(m => /Panic is sent now/.test(m.text)).text, /as soon as the Pi can take it/);
+      // The apply is still running so the page stays busy after Panic is done.
+      assert.equal(element("apply-button").disabled, true);
+      assert.equal(element("apply-button").getAttribute("aria-busy"), "true");
+      apply.resolve(answer(200, {state: {observed_state: "applied", running: true}}));
+      await flush();
+      for (const id of ACTION_BUTTONS) assert.equal(element(id).disabled, false, id);
+    """,
+    "panic_tries_again_when_the_helper_answers_503": r"""
+      element("admin-token").value = "fixture token";
+      const replies = [answer(503, {error: "Normal access was not fully restored. Automation is paused. Retry the panic button."}),
+                       answer(200, PANIC_OK)];
+      network = async () => replies.shift();
+      press("panic-button");
+      await flush(); await flush();
+      assert.equal(networkCalls.length, 2);
+      assert.equal(refreshMessages.length, 1);
+      assert.ok(messages.some(m => m.text === "The Pi has not taken Panic yet, trying again"));
+      assert.ok(!messages.some(m => m.kind === "error"));
+    """,
+    "panic_gives_up_after_three_tries_and_shows_the_servers_words": r"""
+      element("admin-token").value = "fixture token";
+      network = async () => answer(503, {error: "A current networking helper is required to restore normal access."});
+      press("panic-button");
+      await flush(); await flush(); await flush();
+      assert.equal(networkCalls.length, 3);
+      assert.equal(messages.at(-1).kind, "error");
+      assert.match(messages.at(-1).text, /networking helper is required/);
+      assert.equal(refreshMessages.length, 0);
+      for (const id of ACTION_BUTTONS) assert.equal(element(id).disabled, false, id);
+    """,
+    "panic_does_not_repeat_an_answer_that_is_not_about_waiting": r"""
+      element("admin-token").value = "fixture token";
+      for (const status of [400, 401, 409, 423, 502]) {
+        networkCalls.length = 0;
+        network = async () => answer(status, {error: "nope " + status});
+        press("panic-button");
+        await flush(); await flush();
+        assert.equal(networkCalls.length, 1, "status " + status);
+        assert.equal(messages.at(-1).text, "nope " + status);
+      }
+    """,
+    "panic_tries_again_once_after_the_request_times_out": r"""
+      element("admin-token").value = "fixture token";
+      let first = true;
+      network = (options) => {
+        if (!first) return Promise.resolve(answer(200, PANIC_OK));
+        first = false;
+        return new Promise((resolve, reject) => {
+          options.signal.addEventListener("abort", () => reject(new Error("aborted")));
+        });
+      };
+      press("panic-button");
+      await flush();
+      // Panic is allowed the long wait that applying and resetting get.
+      const wait = timers.find(timer => timer.milliseconds === 45000);
+      assert.ok(wait, "Panic has the 45 second timeout");
+      wait.callback();
+      await flush(); await flush(); await flush();
+      assert.equal(networkCalls.length, 2);
+      assert.equal(element("runtime-summary").textContent, "");  // answered at last, so the note is gone
+      assert.equal(refreshMessages.length, 1);
+      assert.ok(!messages.some(m => m.kind === "error"));
     """,
     "asks_for_the_admin_token": r"""
       press("panic-button");

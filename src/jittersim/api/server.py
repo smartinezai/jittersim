@@ -873,6 +873,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     .sidebar span { display: block; }
     .sidebar .runtime-summary { margin: 0; font-size: 0.78rem; }
     .sidebar .action-message { min-height: 0; padding: 0.4rem 0.55rem; font-size: 0.78rem; }
+    .visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); border: 0; }
     .sidebar .panic-button { min-height: 3rem; font-weight: 600; }
     .content { min-width: 0; max-width: 84rem; padding: 1.5rem 1.75rem 4rem; }
     .page > .card:first-child { margin-top: 0; }
@@ -1121,8 +1122,11 @@ DASHBOARD_HTML = r"""<!doctype html>
       Kept in this page only unless you choose Remember. Closing this panel keeps your entries.
     </p>
     <h3>Admin token</h3>
+    <form id="admin-token-form" autocomplete="on">
+    <!-- A name next to the password lets the Mac Keychain and password managers keep the token. -->
+    <input class="visually-hidden" type="text" name="username" value="dashboard" autocomplete="username" tabindex="-1" aria-hidden="true">
     <label>Admin token
-      <input id="admin-token" type="password" autocomplete="off" aria-describedby="token-check-status">
+      <input id="admin-token" name="password" type="password" autocomplete="current-password" aria-describedby="token-check-status">
     </label>
     <label class="remember-choice">
       <input id="remember-admin-token" type="checkbox" autocomplete="off"> Remember for
@@ -1134,9 +1138,10 @@ DASHBOARD_HTML = r"""<!doctype html>
     </label>
     <p id="remember-admin-token-note" class="credential-note remember-note" role="status"></p>
     <div class="credential-actions">
-      <button id="check-admin-token" class="primary" type="button">Check token</button>
+      <button id="check-admin-token" class="primary" type="submit">Check token</button>
       <button id="clear-admin-token" type="button">Clear token</button>
     </div>
+    </form>
     <p id="token-check-status" class="token-check-status" aria-live="off">Enter the token and choose Check token to load diagnostics.</p>
     <p id="remember-length-note" class="credential-note">Longer is less safe on a shared computer: anyone who can use this browser can open the dashboard until the time is up. Choose Clear token to forget it sooner.</p>
     <details class="credential-help">
@@ -2465,6 +2470,64 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     syncScheduleDays();
 
+    // True while a person is using something inside the container, a focused button, field or
+    // link or an open menu. Drawing it again then would take the focus away or swallow a click.
+    function interactionInside(container) {
+      const active = document.activeElement;
+      if (active && active !== document.body && container.contains(active)) return true;
+      return !!container.querySelector("details[open], [aria-expanded='true']");
+    }
+
+    // Draws a container again only when what it shows changed and nobody is using it. The key
+    // stays as it was when the drawing is put off, so the next poll tries again.
+    function replaceIfChanged(container, key, draw) {
+      if (container.dataset.renderKey === key || interactionInside(container)) return false;
+      container.dataset.renderKey = key;
+      draw();
+      return true;
+    }
+
+    const PI_NOT_ANSWERING = "Pi not answering, retrying";
+
+    const REQUEST_TIMEOUT_MS = 15000;
+
+    const SLOW_REQUEST_TIMEOUT_MS = 45000;
+
+    // Applying, resetting and anything that talks to the router or Wi-Fi can take a while.
+    const SLOW_REQUEST_PATHS = /^\/api\/(apply|reset|normal-access|general-profile|router|wifi|release|import)/;
+
+    function requestTimeoutMs(path, method) {
+      const slow = SLOW_REQUEST_PATHS.test(path) && (method !== "GET" || /^\/api\/(router|wifi)/.test(path));
+      return slow ? SLOW_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+    }
+
+    // The requests the Pi has not answered in time. The note stays until each has been answered.
+    const unansweredPaths = new Set();
+
+    function showPiNotAnswering() {
+      const summary = document.getElementById("runtime-summary");
+      if (!summary) return;
+      if (unansweredPaths.size) {
+        summary.textContent = PI_NOT_ANSWERING;
+        summary.className = "runtime-summary unknown";
+      } else if (summary.textContent === PI_NOT_ANSWERING) {
+        summary.textContent = "";
+        renderRuntimeText();
+      }
+    }
+
+    function notePiNotAnswering(path) {
+      unansweredPaths.add(path);
+      showPiNotAnswering();
+    }
+
+    function notePiAnswered(path) {
+      if (unansweredPaths.delete(path)) showPiNotAnswering();
+    }
+
+    // The saved paths since the last refresh decide which parts of the page are read again.
+    const recentWrites = new Set();
+
     async function request(path, method, body, options = {}) {
       const headers = {};
       const token = element("admin-token").value.trim();
@@ -2489,12 +2552,14 @@ DASHBOARD_HTML = r"""<!doctype html>
       const submittedDraft = submitForm && drafts ? drafts.get(submitForm.id) : null;
       if (method !== "GET") pendingFormSubmitButton = null;
       const controller = new AbortController();
+      let timedOut = false;
       const abortRequest = () => controller.abort();
       if (options.signal) {
         if (options.signal.aborted) controller.abort();
         else options.signal.addEventListener("abort", abortRequest, {once: true});
       }
-      const timeout = setTimeout(abortRequest, options.timeoutMs || (method === "GET" ? 30000 : 210000));
+      const timeout = setTimeout(() => { timedOut = true; controller.abort(); },
+        options.timeoutMs || requestTimeoutMs(path, method));
       try {
         let response;
         let data;
@@ -2529,6 +2594,8 @@ DASHBOARD_HTML = r"""<!doctype html>
           if (waitingForRejoin) error.transient = true;
           throw error;
         }
+        notePiAnswered(path);
+        if (method !== "GET") recentWrites.add(path);
         if (response.status !== 202 && submitForm && drafts && drafts.get(submitForm.id) === submittedDraft) {
           drafts.delete(submitForm.id);
           const formNote = submitForm.querySelector(".form-error");
@@ -2538,6 +2605,12 @@ DASHBOARD_HTML = r"""<!doctype html>
         if (method === "GET" && typeof recordRead === "function") recordRead(path, null);
         return data;
       } catch (error) {
+        if (timedOut && tokenRevision === adminTokenRevision) {
+          error = typeof lostConnectionError === "function"
+            ? lostConnectionError(new Error(PI_NOT_ANSWERING)) : new Error(PI_NOT_ANSWERING);
+          error.timeout = true;
+          notePiNotAnswering(path);
+        }
         if (tokenRevision === adminTokenRevision && method === "GET" && typeof recordRead === "function") recordRead(path, error);
         if (tokenRevision === adminTokenRevision && typeof formError === "function") formError(submitForm, error.message);
         throw error;
@@ -3253,6 +3326,8 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     let lastConnectedData = null;
 
+    let connectedRenderKey = null;
+
     let connectedClientsAvailable = false;
 
     const connectedDrafts = new Map();
@@ -3343,10 +3418,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     function stopTrafficSampling(message) {
       trafficSamplingAllowed = false;
-      if (trafficPollTimer !== null) {
-        window.clearInterval(trafficPollTimer);
-        trafficPollTimer = null;
-      }
+      clearTrafficTimer();
       resetTrafficHistory();
       element("traffic-status").textContent = message;
     }
@@ -3806,11 +3878,61 @@ DASHBOARD_HTML = r"""<!doctype html>
       };
     }
 
+    // The counters are only worth reading while somebody can see the graph.
+    function trafficGraphShown() {
+      return !document.hidden && currentPage() === "traffic";
+    }
+
+    function clearTrafficTimer() {
+      if (trafficPollTimer !== null) window.clearTimeout(trafficPollTimer);
+      trafficPollTimer = null;
+    }
+
+    function scheduleTrafficPoll() {
+      clearTrafficTimer();
+      if (!trafficSamplingAllowed || !trafficGraphShown()) return;
+      trafficPollTimer = window.setTimeout(async () => {
+        trafficPollTimer = null;
+        try {
+          await pollTraffic();
+        } finally {
+          scheduleTrafficPoll();
+        }
+      }, TRAFFIC_POLL_INTERVAL_MS);
+    }
+
+    // One reading of the counters serves the graph and the device workspace alike. Asking
+    // again within maxAgeMs gives the reading already in hand, and asking while one is on its
+    // way waits for that one.
+    let latestTrafficReading = null;
+
+    let trafficReadingInFlight = null;
+
+    function readTraffic(maxAgeMs) {
+      if (latestTrafficReading && Date.now() - latestTrafficReading.at < maxAgeMs) {
+        return Promise.resolve(latestTrafficReading.data);
+      }
+      if (trafficReadingInFlight) return trafficReadingInFlight;
+      const revision = adminTokenRevision;
+      trafficReadingInFlight = request("/api/traffic", "GET").then((data) => {
+        if (revision === adminTokenRevision) latestTrafficReading = {data: data, at: Date.now()};
+        return data;
+      }).finally(() => { trafficReadingInFlight = null; });
+      return trafficReadingInFlight;
+    }
+
+    let trafficFailures = 0;
+
+    // The graph and the numbers stay as they are for two failed readings in a row. The third
+    // clears them, because by then they no longer show what is happening.
+    const TRAFFIC_FAILURES_BEFORE_CLEARING = 3;
+
     async function pollTraffic() {
-      if (trafficRequestInFlight || !trafficSamplingAllowed || document.hidden) return;
+      if (trafficRequestInFlight || !trafficSamplingAllowed || !trafficGraphShown()) return;
       trafficRequestInFlight = true;
       try {
-        const data = await request("/api/traffic", "GET");
+        const data = await readTraffic(0);
+        trafficFailures = 0;
         if (!trafficSamplingAllowed) return;
         if (!data.available) {
           stopTrafficSampling(data.message || "Live traffic counters are unavailable in this mode.");
@@ -3870,12 +3992,19 @@ DASHBOARD_HTML = r"""<!doctype html>
         drawTrafficChart();
       } catch (error) {
         if (!trafficSamplingAllowed) return;
-        resetTrafficHistory();
         if (error.status === 401) {
+          resetTrafficHistory();
           stopTrafficSampling("The admin token was rejected. Check it again to restart live traffic sampling.");
-        } else {
+          return;
+        }
+        trafficFailures += 1;
+        if (trafficFailures >= TRAFFIC_FAILURES_BEFORE_CLEARING) {
+          resetTrafficHistory();
           element("traffic-status").textContent =
             "Live traffic update failed: " + error.message + ". Retrying in 2 seconds.";
+        } else {
+          element("traffic-status").textContent =
+            "Updating… the last reading is kept while the Pi catches up.";
         }
       } finally {
         trafficRequestInFlight = false;
@@ -3884,24 +4013,41 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     async function startTrafficSampling() {
       trafficSamplingAllowed = true;
-      if (trafficPollTimer !== null) {
-        window.clearInterval(trafficPollTimer);
-        trafficPollTimer = null;
-      }
+      trafficFailures = 0;
+      clearTrafficTimer();
       resetTrafficHistory();
-      if (document.hidden) {
-        element("traffic-status").textContent = "Sampling will start when this tab is visible.";
+      if (!trafficGraphShown()) {
+        element("traffic-status").textContent = document.hidden
+          ? "Sampling will start when this tab is visible."
+          : "Sampling starts when the Traffic page is open.";
         return;
       }
       await pollTraffic();
-      if (trafficSamplingAllowed && trafficPollTimer === null) {
-        trafficPollTimer = window.setInterval(pollTraffic, TRAFFIC_POLL_INTERVAL_MS);
+      scheduleTrafficPoll();
+    }
+
+    // Called when the page changes or the tab is hidden or shown.
+    function syncTrafficSampling() {
+      if (!trafficSamplingAllowed) return;
+      if (!trafficGraphShown()) {
+        if (trafficPollTimer === null && previousTrafficSample === null) return;
+        clearTrafficTimer();
+        resetTrafficHistory();
+        element("traffic-status").textContent = document.hidden
+          ? "Sampling paused while this tab is hidden."
+          : "Sampling starts when the Traffic page is open.";
+        return;
       }
+      if (trafficPollTimer !== null || trafficRequestInFlight) return;
+      element("traffic-status").textContent = "Resuming live traffic sampling...";
+      pollTraffic().then(scheduleTrafficPoll);
     }
 
     function refreshAfterSuccess(message) {
       showMessage(message, "success");
-      refresh().then(() => {
+      const written = Array.from(recentWrites);
+      recentWrites.clear();
+      refresh(readsAfterWrites(written)).then(() => {
         if (adminTokenVerified && helperConfigured && !trafficSamplingAllowed) {
           return startTrafficSampling();
         }
@@ -3972,6 +4118,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     element("toast").addEventListener("focusout", () => window.setTimeout(scheduleToastDismissal, 0));
 
     document.addEventListener("submit", (event) => {
+      // Checking the token has its own progress note and never saves anything.
+      if (event.target.id === "admin-token-form") return;
       const label = event.submitter ? event.submitter.textContent.trim() : "Save";
       const saving = label.toLowerCase().startsWith("save ")
         ? "Saving " + label.slice(5) + "..."
@@ -3999,7 +4147,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         : "Configuration-only mode is active. Changes are saved but live network actions are unavailable.";
       element("apply-button").disabled = networkActionBusy || !helperConfigured;
       element("reset-button").disabled = networkActionBusy || !helperConfigured;
-      element("panic-button").disabled = networkActionBusy || !helperConfigured;
+      element("panic-button").disabled = !helperConfigured;
       element("scan-observations").disabled = !helperConfigured;
       element("reset-wifi-name").disabled = !helperConfigured || wifiResetPending;
       updateGeneralProfileControls();
@@ -4782,6 +4930,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         }
       );
       const summary = element("runtime-summary");
+      if (unansweredPaths.size) return;
       setTextIfChanged(summary, status.text);
       const className = "runtime-summary " + lastRuntimeState.observed_state + " tone-" + status.tone;
       if (summary.className !== className) summary.className = className;
@@ -4829,6 +4978,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     function renderConnectedDevices(data) {
       const profileLabels = profileOptionLabels(profiles);
+      connectedRenderKey = null;
       lastConnectedDevices = data;
       const container = element("connected-devices");
       const count = element("connected-count");
@@ -5300,16 +5450,20 @@ DASHBOARD_HTML = r"""<!doctype html>
       });
     }
 
+    // A busy helper answers 502 for a moment. The list stays as it was, with a note, until the
+    // third answer in a row fails or the server itself says the information is unavailable.
+    const CONNECTED_FAILURES_BEFORE_UNAVAILABLE = 3;
+
+    let connectedFailures = 0;
+
     async function loadConnectedDevices() {
       if (connectedDevicesRequestInFlight) return null;
       const container = element("connected-devices");
-      const activeElement = document.activeElement;
-      if (
-        activeElement && container.contains(activeElement) &&
-        activeElement.matches("input, select")
-      ) return null;
+      // Typing, choosing from a menu or pressing a button must not be interrupted.
+      if (interactionInside(container)) return null;
       connectedDevicesRequestInFlight = true;
       let data;
+      let keptLastList = false;
       try {
         const [connectedResult, labelsResult] = await Promise.allSettled([
           request("/api/connected-devices", "GET"),
@@ -5317,26 +5471,44 @@ DASHBOARD_HTML = r"""<!doctype html>
         ]);
         const savedLabels = labelsResult.status === "fulfilled"
           ? labelsResult.value.labels || []
-          : [];
+          : lastConnectedData && lastConnectedData.saved_labels || [];
         if (connectedResult.status === "rejected") {
-          data = {
-            available: false,
-            devices: [],
-            saved_labels: savedLabels,
-            message: connectedResult.reason.message
-          };
+          connectedFailures += 1;
+          const haveList = !!lastConnectedData && lastConnectedData.available !== false;
+          if (haveList && connectedFailures < CONNECTED_FAILURES_BEFORE_UNAVAILABLE) {
+            data = lastConnectedData;
+            keptLastList = true;
+          } else {
+            data = {
+              available: false,
+              devices: [],
+              saved_labels: savedLabels,
+              message: connectedResult.reason.message
+            };
+          }
         } else {
+          connectedFailures = 0;
           connectedDataHooks.forEach((hook) => hook(connectedResult.value));
           data = { ...connectedResult.value, saved_labels: savedLabels };
         }
-        renderConnectedDevices(data);
+        if (!keptLastList) {
+          // The same answer again changes nothing on screen, so the rows are left alone.
+          const key = JSON.stringify(data);
+          if (key !== connectedRenderKey && !interactionInside(container)) {
+            renderConnectedDevices(data);
+            connectedRenderKey = key;
+          }
+        }
       } catch (error) {
         data = { available: false, devices: [], message: error.message };
+        connectedRenderKey = null;
         renderConnectedDevices(data);
       } finally {
         connectedDevicesRequestInFlight = false;
       }
-      element("connected-refresh-status").textContent = data.available
+      element("connected-refresh-status").textContent = keptLastList
+        ? "Updating… showing the last list while the Pi catches up."
+        : data.available
         ? "Updated " + new Date().toLocaleTimeString("en-GB") + ". Refreshes every 5 seconds."
         : "Could not update: " + (data.message || "connected-client information is unavailable");
       return data;
@@ -7365,14 +7537,23 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
     }
 
-    async function refresh() {
+    // Which parts the next refresh reads: undefined for none waiting, null for everything.
+    let refreshWanted;
+
+    async function refresh(only) {
+      const scope = only === undefined ? null : only;
+      refreshWanted = refreshWanted === undefined || refreshWanted === null || scope === null
+        ? (refreshWanted === undefined ? scope : null)
+        : new Set([...refreshWanted, ...scope]);
       refreshAgain = true;
       if (dashboardRefresh) return dashboardRefresh;
       dashboardRefresh = (async () => {
         if (dashboardPoll) await dashboardPoll;
         do {
           refreshAgain = false;
-          try { await refreshDashboard(); } finally { restoreDrafts(); }
+          const wanted = refreshWanted;
+          refreshWanted = undefined;
+          try { await refreshDashboard(wanted); } finally { restoreDrafts(); }
         } while (refreshAgain);
       })();
       try {
@@ -7382,40 +7563,75 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
     }
 
+    // Panic can start while another change is still running, so every running action is
+    // remembered by its path and the page is busy until the last one finishes.
+    const runningActions = new Set();
+
     function setActionBusy(busy, path) {
+      if (busy) runningActions.add(path);
+      else runningActions.delete(path);
+      busy = runningActions.size > 0;
       networkActionBusy = busy;
       if (busy) networkActionRevision += 1;
       const applyButton = element("apply-button");
       const resetButton = element("reset-button");
       applyButton.disabled = busy || !helperConfigured;
       resetButton.disabled = busy || !helperConfigured;
-      applyBusy = busy && path === "/api/apply";
+      applyBusy = runningActions.has("/api/apply");
       applyButton.setAttribute("aria-busy", String(applyBusy));
-      resetButton.setAttribute("aria-busy", String(busy && path === "/api/reset"));
+      resetButton.setAttribute("aria-busy", String(runningActions.has("/api/reset")));
       applyButton.textContent = applyBusy ? "Applying…" : currentApplyLabel();
-      resetButton.textContent = busy && path === "/api/reset" ? "Resetting..." : "Reset network";
+      resetButton.textContent = runningActions.has("/api/reset") ? "Resetting..." : "Reset network";
       const panicButton = element("panic-button");
-      const panicking = busy && path === "/api/normal-access";
-      panicButton.disabled = busy || !helperConfigured;
+      const panicking = runningActions.has("/api/normal-access");
+      // Panic stays available: it is the way out when a change goes wrong.
+      panicButton.disabled = !helperConfigured;
       panicButton.setAttribute("aria-busy", String(panicking));
       element("panic-state").textContent = panicking ? "Working..." : "Turn profiles and blocking off";
       updateGeneralProfileControls();
+      const generalBusy = Array.from(runningActions).some((running) => running.startsWith("/api/general-profile"));
       ["general-profile-apply", "general-profile-stop"].forEach((id) => {
-        element(id).setAttribute("aria-busy", String(busy && path.startsWith("/api/general-profile")));
+        element(id).setAttribute("aria-busy", String(generalBusy));
       });
     }
 
+    const PANIC_QUEUED = "Panic is sent now. It runs as soon as the Pi can take it";
+
+    const PANIC_RETRYING = "The Pi has not taken Panic yet, trying again";
+
+    // Panic has a reserved request worker but still depends on helper availability.
+    // Retry at most three times after an unknown timeout or a temporary busy reply.
+    // Repeating Panic releases the network again. Never repeat an ordinary save here.
+    const PANIC_RETRY_STATUSES = [429, 503];
+
+    const PANIC_ATTEMPTS = 3;
+
+    async function requestPanic(path) {
+      for (let attempt = 1; ; attempt += 1) {
+        try {
+          return await request(path, "POST", {});
+        } catch (error) {
+          const again = error.timeout === true || PANIC_RETRY_STATUSES.includes(error.status);
+          if (!again || attempt >= PANIC_ATTEMPTS) throw error;
+          showMessage(PANIC_RETRYING, "working");
+          await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        }
+      }
+    }
+
     async function runAction(path, successMessage, workingMessage) {
-      if (networkActionBusy) return;
+      const panic = path === "/api/normal-access";
+      if (runningActions.has(path) || (networkActionBusy && !panic)) return;
       if (!helperConfigured) {
         showMessage("Network actions are unavailable in configuration-only mode.", "error");
         return;
       }
       const wasRunning = !!lastRuntimeState && lastRuntimeState.running === true;
+      const queued = panic && networkActionBusy;
       setActionBusy(true, path);
-      showMessage(workingMessage, "working");
+      showMessage(queued ? PANIC_QUEUED : workingMessage, "working");
       try {
-        const data = await request(path, "POST", {});
+        const data = panic ? await requestPanic(path) : await request(path, "POST", {});
         if (data.state) renderRuntimeSummary(data.state);
         const done = typeof successMessage === "function"
           ? successMessage(data, wasRunning) : successMessage;
@@ -8050,6 +8266,15 @@ DASHBOARD_HTML = r"""<!doctype html>
       await checkAdminToken();
       syncRememberedCredentials("admin");
     });
+    // Enter in the field presses the Check token button, which runs the check above. The form
+    // itself never leaves the page.
+    element("admin-token-form").addEventListener("submit", (event) => event.preventDefault());
+    // A pasted token is checked straight away. Typing it is checked with the button.
+    element("admin-token").addEventListener("paste", () => {
+      window.setTimeout(() => {
+        if (element("admin-token").value.trim() && !adminTokenChecking) element("check-admin-token").click();
+      }, 0);
+    });
     element("traffic-rate-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       const button = event.currentTarget.querySelector("button[type='submit']");
@@ -8101,23 +8326,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     setupTrafficChartInspection();
 
     document.addEventListener("visibilitychange", () => {
-      if (document.hidden) {
-        if (trafficPollTimer !== null) {
-          window.clearInterval(trafficPollTimer);
-          trafficPollTimer = null;
-        }
-        resetTrafficHistory();
-        if (trafficSamplingAllowed) element("traffic-status").textContent = "Sampling paused while this tab is hidden.";
-        return;
-      }
-      if (trafficSamplingAllowed) {
-        element("traffic-status").textContent = "Resuming live traffic sampling...";
-        pollTraffic().then(() => {
-          if (trafficSamplingAllowed && trafficPollTimer === null) {
-            trafficPollTimer = window.setInterval(pollTraffic, TRAFFIC_POLL_INTERVAL_MS);
-          }
-        });
-      }
+      syncTrafficSampling();
       drawTrafficChart();
     });
 
@@ -8690,15 +8899,60 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     element("random-website-refresh").addEventListener("click", loadRandomWebsiteAnalytics);
 
-    function pollLiveStatus() {
-      if (!adminTokenVerified || networkActionBusy) return;
-      loadConnectedDevices();
-      loadPrivateDataPanel("general-profile-status", loadGeneralProfile);
-      // Another tab or the command line can reset the network so the state is read again.
-      if (!document.hidden) loadPrivateDataPanel("state", loadState);
+    // Each look is planned when the last one is over, so a slow Pi is never asked twice at
+    // once. A hidden tab plans nothing and looks again as soon as it is shown.
+    function makePoller(job, delay) {
+      let timer = null;
+      let running = false;
+
+      function schedule(wait) {
+        if (timer !== null) window.clearTimeout(timer);
+        timer = null;
+        if (document.hidden) return;
+        timer = window.setTimeout(run, wait);
+      }
+
+      async function run() {
+        timer = null;
+        if (running || document.hidden) return;
+        running = true;
+        try {
+          await job();
+        } catch (error) {
+          // The job shows its own errors. The next look is planned all the same.
+        } finally {
+          running = false;
+          schedule(delay);
+        }
+      }
+
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) schedule(0);
+        else run();
+      });
+      schedule(delay);
+      return run;
     }
 
-    window.setInterval(pollLiveStatus, 5000);
+    const LIVE_POLL_MS = 5000;
+
+    // Reads the live status once, or only the part named. A hidden tab skips the state.
+    function pollLiveStatus(only) {
+      if (!adminTokenVerified || networkActionBusy) return Promise.resolve([]);
+      const jobs = [];
+      if (!only || only === "devices") jobs.push(loadConnectedDevices());
+      if (!only || only === "general") jobs.push(loadPrivateDataPanel("general-profile-status", loadGeneralProfile));
+      // Another tab or the command line can reset the network so the state is read again.
+      if ((!only || only === "state") && !document.hidden) jobs.push(loadPrivateDataPanel("state", loadState));
+      return Promise.allSettled(jobs);
+    }
+
+    // The three are polled apart so that one the Pi does not answer does not hold back the others.
+    makePoller(() => pollLiveStatus("devices"), LIVE_POLL_MS);
+
+    makePoller(() => pollLiveStatus("general"), LIVE_POLL_MS);
+
+    makePoller(() => pollLiveStatus("state"), LIVE_POLL_MS);
 
     function slugify(value) {
       return value.toLowerCase()
@@ -10337,38 +10591,88 @@ DASHBOARD_HTML = r"""<!doctype html>
       return element("mode-notice");
     }
 
-    async function refreshDashboard() {
-      await loadPrivateDataPanel("profiles-json", loadProfiles);
-      await loadHealth();
-      await loadObservations();
+    // The page is read again in parts. A save names the parts it can have changed, through the
+    // paths it wrote, and the page being shown is always read too. Signing in, importing,
+    // restoring a version and any save this table does not know read everything.
+    const READ_AFTER_WRITE = [
+      // Starting, stopping and the general profile change what is running.
+      [/^\/api\/(apply|reset|normal-access|general-profile)/,
+        ["state", "general", "conditions", "plan", "health", "connected", "activity", "uplink"]],
+      // A profile is offered as "Add to" on the observed names, so those are read too.
+      [/^\/api\/profiles/, ["profiles", "general", "plan", "state", "conditions", "everyoneElse",
+        "devicesForSchedule", "devices", "scenarios", "serviceAssignments", "observations",
+        "activity", "settingsHistory"]],
+      // A protected device is no longer watched, so its observed names go with it.
+      [/^\/api\/(devices|unaffected-devices|groups|connected-devices)/,
+        ["devicesForSchedule", "devices", "groups", "plan", "state", "conditions", "connected",
+         "unaffected", "observations", "activity", "settingsHistory"]],
+      [/^\/api\/(schedules|timers|progressions|scenarios|data-limits|group-data-limits|time-quotas|service-quotas|everyone-else)/,
+        ["schedules", "timers", "progressions", "scenarios", "quotas", "everyoneElse", "plan",
+         "state", "conditions", "devicesForSchedule", "activity", "settingsHistory"]],
+      [/^\/api\/(service-lists|service-assignments|observations)/,
+        ["serviceLists", "serviceAssignments", "profiles", "plan", "observations", "activity",
+         "settingsHistory"]]
+      // Device names (connected-device-labels) are not listed: they show on most pages, so a
+      // save of one reads everything.
+    ];
+
+    function readsAfterWrites(paths) {
+      if (!paths.length) return null;
+      const names = new Set();
+      for (const path of paths) {
+        const known = READ_AFTER_WRITE.find(([pattern]) => pattern.test(path));
+        if (!known) return null;
+        known[1].forEach((name) => names.add(name));
+      }
+      return names;
+    }
+
+    // The diagnostics text and the website choices cost several reads and sit on two pages.
+    const ADMIN_TOOLS_PAGES = ["traffic", "diagnostics"];
+
+    let adminToolsStale = false;
+
+    async function refreshDashboard(only) {
+      // only is null for everything, otherwise the names of the parts to read again.
+      const page = currentPage();
+      const pageJobs = only
+        ? new Set([...pagePollJobs(page), ...(ADMIN_TOOLS_PAGES.includes(page) ? [loadAdminTools] : [])])
+        : null;
+      const wanted = (name, job) => !only || only.has(name) || pageJobs.has(job);
+      const run = (name, job, call) => wanted(name, job) ? call() : null;
+      // A save elsewhere leaves them as they were. The first visit to either page reads them.
+      adminToolsStale = !wanted("adminTools", loadAdminTools);
+      if (wanted("profiles", null)) await loadPrivateDataPanel("profiles-json", loadProfiles);
+      if (wanted("health", loadHealth)) await loadHealth();
+      if (wanted("observations", loadObservations)) await loadObservations();
       // Device and group names are needed by the schedule list and the device table.
-      await loadDevicesForSchedule();
+      if (wanted("devicesForSchedule", loadDevicesForSchedule)) await loadDevicesForSchedule();
       const results = await Promise.allSettled([
-        loadPrivateDataPanel("devices-json", () => show("/api/devices", "devices-json", "devices")),
-        loadPrivateDataPanel("plan", () => show("/api/plan", "plan", "plan")),
-        loadPrivateDataPanel("state", loadState),
-        loadPrivateDataPanel("general-profile-status", loadGeneralProfile),
-        loadGroups(),
-        loadSchedules(),
-        loadTimers(),
-        loadScenarios(),
-        loadActivity(),
-        loadProgressions(),
-        loadPrivateDataPanel("policies", loadPolicies),
-        loadConnectedDevices(),
-        loadUnaffectedDevices(),
-        loadUplink(),
-        loadGatewayPersistence(),
-        loadQuotas(),
-        loadServiceAssignments(),
-        loadServiceLists(),
-        loadConditions(),
-        loadEveryoneElse(),
-        loadAdminTools(),
-        loadDashboardAccessList(),
-        loadTestSessions(),
-        loadSettingsHistory()
-      ]);
+        run("devices", null, () => loadPrivateDataPanel("devices-json", () => show("/api/devices", "devices-json", "devices"))),
+        run("plan", null, () => loadPrivateDataPanel("plan", () => show("/api/plan", "plan", "plan"))),
+        run("state", null, () => loadPrivateDataPanel("state", loadState)),
+        run("general", null, () => loadPrivateDataPanel("general-profile-status", loadGeneralProfile)),
+        run("groups", loadGroups, loadGroups),
+        run("schedules", loadSchedules, loadSchedules),
+        run("timers", loadTimers, loadTimers),
+        run("scenarios", loadScenarios, loadScenarios),
+        run("activity", loadActivity, loadActivity),
+        run("progressions", loadProgressions, loadProgressions),
+        run("policies", null, () => loadPrivateDataPanel("policies", loadPolicies)),
+        run("connected", loadConnectedDevices, loadConnectedDevices),
+        run("unaffected", loadUnaffectedDevices, loadUnaffectedDevices),
+        run("uplink", loadUplink, loadUplink),
+        run("gateway", loadGatewayPersistence, loadGatewayPersistence),
+        run("quotas", loadQuotas, loadQuotas),
+        run("serviceAssignments", loadServiceAssignments, loadServiceAssignments),
+        run("serviceLists", loadServiceLists, loadServiceLists),
+        run("conditions", loadConditions, loadConditions),
+        run("everyoneElse", loadEveryoneElse, loadEveryoneElse),
+        run("adminTools", loadAdminTools, loadAdminTools),
+        run("access", loadDashboardAccessList, loadDashboardAccessList),
+        run("testSessions", loadTestSessions, loadTestSessions),
+        run("settingsHistory", loadSettingsHistory, loadSettingsHistory)
+      ].filter((started) => started !== null));
       const failed = results.find((result) => result.status === "rejected");
       if (failed) throw failed.reason;
       // The saved update preference is read once the token has opened the page.
@@ -10378,6 +10682,13 @@ DASHBOARD_HTML = r"""<!doctype html>
       populateWorkflowMenus();
       populateAccessTargets();
       await loadWorkspace();
+    }
+
+    function readOldAdminTools(page) {
+      if (!adminToolsStale || !adminTokenVerified || !dashboardLoaded) return;
+      if (!ADMIN_TOOLS_PAGES.includes(page)) return;
+      adminToolsStale = false;
+      loadAdminTools().catch(() => { adminToolsStale = true; });
     }
 
     function startEditing(prefix, label) {
@@ -10431,23 +10742,27 @@ DASHBOARD_HTML = r"""<!doctype html>
       renderTargetMenus();
     }
 
+    // What changes by itself on each page, read every few seconds while the page is shown.
+    function pagePollJobs(page) {
+      const jobs = [];
+      if (page === "devices") jobs.push(loadDevicesForSchedule, loadConditions, loadWorkspace, loadAccessStatus);
+      if (page === "schedules") jobs.push(loadTimers, loadScenarios, loadProgressions, loadSchedules, loadQuotas, loadServiceLists);
+      if (page === "traffic") jobs.push(loadObservations);
+      if (page === "access") jobs.push(loadObservations, loadAccessStatus);
+      if (page === "activity") jobs.push(loadActivity);
+      if (page === "measurements") jobs.push(loadTestSessions);
+      if (page === "router") jobs.push(loadUplink, loadGatewayPersistence);
+      if (page === "updates") jobs.push(pollReleaseProgress);
+      return jobs;
+    }
+
     async function pollDashboard() {
       if (document.hidden || !adminTokenVerified || !dashboardLoaded || dashboardRefresh || dashboardPoll) return;
       dashboardPoll = (async () => {
         // Only read changing data on the visible page. Do not overwrite forms.
-        const page = currentPage();
-        const jobs = [loadHealth];
-        if (page === "devices") jobs.push(loadDevicesForSchedule, loadConditions, loadWorkspace, loadAccessStatus);
-        // Service lists are read again for the random outage they may be in now.
-        if (page === "schedules") jobs.push(loadTimers, loadScenarios, loadProgressions, loadSchedules, loadQuotas, loadServiceLists);
-        if (page === "traffic") jobs.push(loadObservations);
-        if (page === "access") jobs.push(loadObservations, loadAccessStatus);
-        if (page === "activity") jobs.push(loadActivity);
-        if (page === "measurements") jobs.push(loadTestSessions);
-        if (page === "router") jobs.push(loadUplink, loadGatewayPersistence);
-        if (page === "updates") jobs.push(pollReleaseProgress);
+        const jobs = [loadHealth, ...pagePollJobs(currentPage())];
         const results = await Promise.allSettled(jobs.map((job) => job()));
-        if (results.some((result) => result.status === "rejected")) {
+        if (!unansweredPaths.size && results.some((result) => result.status === "rejected")) {
           element("runtime-summary").textContent = "Some status updates could not load. Retrying shortly.";
         }
       })();
@@ -10645,9 +10960,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     element("gateway-persistence-save").addEventListener("click", saveGatewayPersistence);
 
-    window.setInterval(pollDashboard, 5000);
-
-    document.addEventListener("visibilitychange", () => { if (!document.hidden) pollDashboard(); });
+    makePoller(pollDashboard, 5000);
 
     element("unaffected-picker").addEventListener("change", fillUnaffectedFromPicker);
 
@@ -10841,6 +11154,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
       revealNavLink(id);
       // A chart drawn while its page was hidden has no size, so draw it again.
+      if (typeof syncTrafficSampling === "function") syncTrafficSampling();
+      if (typeof readOldAdminTools === "function") readOldAdminTools(id);
       if (id === "traffic" && typeof drawTrafficChart === "function") drawTrafficChart();
       if (id === "measurements" && typeof drawMeasurementChart === "function") drawMeasurementChart();
       if (userInitiated && typeof pollDashboard === "function") pollDashboard();

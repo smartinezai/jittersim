@@ -330,6 +330,7 @@ let groupsLoaded = true;
 let unaffectedMacs = [];
 let accessRulesSaved = false;
 let applyBusy = false;
+const unansweredPaths = new Set();
 """
 
 
