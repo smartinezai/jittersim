@@ -1214,3 +1214,53 @@ UUID, interface, AP mode, SAE security and disabled automatic connection.
 Recover the saved credentials or remove only that confirmed incomplete profile
 before running setup again. Do not remove an unrelated profile or the shared
 update lock file.
+
+
+### Optional ad blocking for protected devices
+
+Each protected device has a separate **Block ads** switch that starts off.
+It reduces advertising domains without putting the device back under
+profiles or quotas. Existing household access rules still apply.
+The sidecar Unbound listener uses port 5354 and preserves household global,
+per-device and allow-only rules before applying the shared ad list.
+Ad-blocking allowances do not override those rules.
+
+The installer enables `jittersim-adblocking.service` with the helper.
+It needs no extra DNS package beyond the Unbound already installed for
+household rules. The DNS child drops root identity. Query and reply logging
+are disabled. The service stores settings, the public domain list and
+bounded health state. It does not save browsing history or per-device query
+counts. Upstream DNS still sees forwarded names.
+
+Only selected MAC addresses sending ordinary DNS to `192.168.50.1` use
+this listener. The managed browser proxy checks the same expiring policy
+before opening new connections. Encrypted DNS, VPNs, cached answers and ads
+sharing useful content domains can reduce coverage. Blocking is not an
+ad-free guarantee.
+
+The routing set expires after five seconds unless the controller confirms
+working DNS. A stopped or stalled controller therefore restores normal DNS
+rules without requiring the dashboard. Reset and Panic clear the routing
+set and pause blocking while retaining switches. Explicit Start or enabling
+Block ads resumes it. Automatic profile refresh does not resume it.
+Household rule changes suspend ads until the new rules finish applying.
+
+The list comes from the fixed [StevenBlack hosts source](https://github.com/StevenBlack/hosts).
+Downloads have an 8 MiB limit, a 200,000-domain limit and one worker.
+The resolver uses one shared advertising tree, bounded caches and 256
+concurrent query slots. Updates replace a validated list atomically and
+retain the last list on download failure. After three failed automatic
+attempts they wait until the next day. Allowed domains are limited to 256.
+No arbitrary remote source URL is accepted.
+
+Removing protection also removes the device's switch. The configuration
+database and root settings are covered by existing recovery copies.
+The downloaded list is a reproducible cache in `/var/lib/jittersim-adblocking`.
+The updater includes the new unit in stop, health and rollback handling.
+Recovery to a release without the feature removes the added unit while
+preserving compatibility with older recovery metadata. The five-second
+expiry remains the fallback if a process dies during an update.
+
+Before live deployment verify Ethernet or independent management Wi-Fi.
+Physical Wi-Fi isolation, device reconnection, Pi memory and throughput
+still require acceptance on the actual hardware.

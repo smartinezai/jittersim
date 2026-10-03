@@ -13,6 +13,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Sequence, Tuple, Union
 
+from .adblocking import allowed_domains, blocking_macs
 from .device_labels import (
     MAX_SAVED_CONNECTED_DEVICE_LABELS,
     normalize_device_display_name,
@@ -294,6 +295,13 @@ class ConfigRepository:
                 mac_address TEXT PRIMARY KEY,
                 display_name TEXT NOT NULL,
                 device_type TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS ad_blocking_devices (
+                mac_address TEXT PRIMARY KEY REFERENCES unaffected_devices(mac_address)
+                    ON DELETE CASCADE ON UPDATE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS ad_blocking_allowances (
+                domain TEXT PRIMARY KEY
             );
             CREATE TABLE IF NOT EXISTS traffic_rate_settings (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -1384,6 +1392,38 @@ class ConfigRepository:
                 "DELETE FROM address_moves WHERE old_mac = ?", (normalize_exempt_mac(old_mac),)
             )
             return bool(cursor.rowcount)
+
+    def list_ad_blocking_devices(self) -> tuple:
+        return blocking_macs(tuple(row['mac_address'] for row in self._connection.execute(
+            'SELECT mac_address FROM ad_blocking_devices ORDER BY mac_address LIMIT 257'
+        )))
+
+    def set_ad_blocking(self, mac_address: str, enabled: bool) -> None:
+        mac = normalize_exempt_mac(mac_address)
+        if type(enabled) is not bool:
+            raise ValueError('Choose whether ad blocking is on or off')
+        with self.transaction():
+            if self._connection.execute('SELECT 1 FROM unaffected_devices WHERE mac_address = ?',
+                                        (mac,)).fetchone() is None:
+                raise ValueError('Protect this device before enabling ad blocking')
+            if enabled:
+                self._connection.execute('INSERT OR IGNORE INTO ad_blocking_devices VALUES (?)', (mac,))
+            else:
+                self._connection.execute('DELETE FROM ad_blocking_devices WHERE mac_address = ?', (mac,))
+            self._bump_configuration_version()
+
+    def list_ad_blocking_allowances(self) -> tuple:
+        return allowed_domains(tuple(row['domain'] for row in self._connection.execute(
+            'SELECT domain FROM ad_blocking_allowances ORDER BY domain LIMIT 257'
+        )))
+
+    def set_ad_blocking_allowances(self, values) -> None:
+        domains = allowed_domains(values)
+        with self.transaction():
+            self._connection.execute('DELETE FROM ad_blocking_allowances')
+            self._connection.executemany('INSERT INTO ad_blocking_allowances VALUES (?)',
+                                         ((domain,) for domain in domains))
+            self._bump_configuration_version()
 
     def rebase_time_quota_sample(self, quota_id: str, *, now: int) -> None:
         self._connection.execute(

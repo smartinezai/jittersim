@@ -291,6 +291,21 @@
       </div>
     </div>
     <div id="unaffected-devices" class="connected-list" aria-live="polite">Check the admin token to view saved devices.</div>
+    <p id="ad-blocking-status" class="form-note" role="status"></p>
+    <p class="form-note">Block ads is optional for each saved device. It checks domain names without saving browsing history. Some ads share a website’s domain or use encrypted DNS so they can still appear. Changes affect new lookups and connections. Reset and Panic pause ad blocking.</p>
+    <details>
+      <summary>Ad-blocking options</summary>
+      <form id="ad-blocking-form">
+        <label>Allowed domains, one per line
+          <textarea id="ad-blocking-allowances" rows="4" maxlength="65536" placeholder="example.com"></textarea>
+        </label>
+        <p class="form-note">Allowing a domain also allows its subdomains for every device with Block ads enabled. Household access rules still apply. Use this if a site stops working.</p>
+        <div class="connected-actions">
+          <button type="submit">Save allowed domains</button>
+          <button id="ad-blocking-update" type="button">Update ad list</button>
+        </div>
+      </form>
+    </details>
     <details>
       <summary>Add an offline device</summary>
       <form id="unaffected-form">

@@ -210,6 +210,18 @@ class AddressMoveServerTests(unittest.TestCase):
         self.assertEqual(self.server.undo_device_address_move(MAC, PEER)[0], 200)
         self.assertEqual(self.protected(), {MAC})
 
+    def test_move_and_undo_carry_the_current_ad_blocking_choice(self):
+        self.helper.configure_ad_blocking = lambda *args, **kwargs: {"available": True}
+        self.helper.ad_blocking_status = lambda: {"available": True}
+        self.repository.set_ad_blocking(OLD, True)
+        self.assertEqual(self.server.move_device_address(OLD, MAC, access_moved=False)[0], 200)
+        self.assertEqual(self.repository.list_ad_blocking_devices(), (MAC,))
+        # A switch change after the move belongs to the device when undoing too.
+        self.repository.set_ad_blocking(MAC, False)
+        self.assertEqual(self.server.undo_device_address_move(OLD, PEER)[0], 200)
+        self.assertEqual(self.protected(), {OLD})
+        self.assertEqual(self.repository.list_ad_blocking_devices(), ())
+
     def test_undo_refuses_protection_saved_independently_even_with_identical_fields(self):
         self.server.move_device_address(OLD, MAC, access_moved=False)
         moved = self.repository.list_unaffected_devices()[0]

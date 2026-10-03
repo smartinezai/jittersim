@@ -23,6 +23,7 @@ jittersim-dashboard = "jittersim.api.server:main"
 jittersim-helper = "jittersim.networking.helper:main"
 jittersim-browser-proxy = "jittersim.networking.browser_proxy:main"
 jittersim-service-watch = "jittersim.networking.dns_watch:main"
+jittersim-adblocking = "jittersim.networking.adblocking:main"
 jittersim-reset = "jittersim.cli:reset_main"
 jittersim-access-restore = "jittersim.networking.access:main"
 

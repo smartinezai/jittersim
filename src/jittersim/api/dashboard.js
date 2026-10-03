@@ -3037,8 +3037,19 @@
 
     async function loadUnaffectedDevices() {
       const container = element("unaffected-devices");
+      if (container.contains(document.activeElement)) return;
+      const tokenRevision = adminTokenRevision;
       try {
         const data = await request("/api/unaffected-devices", "GET");
+        if (tokenRevision !== adminTokenRevision || !adminTokenVerified) return;
+        const ads = data.ad_blocking;
+        const service = ads.service;
+        element("ad-blocking-status").textContent = service.paused
+          ? "Ad blocking is paused. Start saved settings to resume."
+          : service.message || (service.ready ? "Ad blocking is active." : "Ad blocking is off.");
+        if (document.activeElement !== element("ad-blocking-allowances")) {
+          element("ad-blocking-allowances").value = ads.allowed_domains.join("\n");
+        }
         unaffectedMacs = data.devices.map((device) => device.mac_address);
         renderApplySummary();
         container.replaceChildren();
@@ -3051,23 +3062,57 @@
           const name = document.createElement("div");
           const title = document.createElement("p");
           title.className = "connected-address";
-          title.textContent = device.display_name || device.mac_address;
+          title.textContent = device.display_name || "Unnamed device";
           const mac = document.createElement("p");
           mac.className = "connected-meta";
           mac.textContent = device.mac_address;
           name.append(title, mac);
           const button = document.createElement("button");
           button.type = "button";
-          button.textContent = "Stop protecting";
-          button.setAttribute("aria-label", "Stop protecting for " + (device.display_name || device.mac_address));
-          button.addEventListener("click", () => connectedControlAction("/api/unaffected-devices/delete", {mac_address: device.mac_address}, button, "Stopped protecting this device. Saved profiles can apply again."));
-          row.append(name, button);
+          button.textContent = "Remove protection";
+          button.setAttribute("aria-label", "Remove protection for " + (device.display_name || device.mac_address));
+          button.addEventListener("click", () => connectedControlAction("/api/unaffected-devices/delete", {mac_address: device.mac_address}, button, "Protection and this device’s ad-blocking choice were removed. Saved profiles can apply again."));
+          const actions = document.createElement("div");
+          actions.className = "connected-actions";
+          const adsLabel = document.createElement("label");
+          adsLabel.className = "ad-blocking-choice";
+          const adsSwitch = document.createElement("input");
+          adsSwitch.type = "checkbox";
+          adsSwitch.checked = device.ad_blocking;
+          adsSwitch.setAttribute("aria-label", "Block ads for " + (device.display_name || device.mac_address));
+          adsSwitch.addEventListener("change", () => saveAdBlocking({mac_address: device.mac_address, enabled: adsSwitch.checked}, adsSwitch));
+          adsLabel.append(adsSwitch, document.createTextNode(" Block ads"));
+          actions.append(adsLabel, button);
+          row.append(name, actions);
           container.appendChild(row);
         });
       } catch (error) {
         container.textContent = "Could not load protection: " + error.message;
       }
     }
+
+    async function saveAdBlocking(payload, control) {
+      control.disabled = true;
+      try {
+        const result = await request("/api/ad-blocking", "POST", payload);
+        if (control.type === "checkbox") {
+          control.checked = result.ad_blocking.mac_addresses.includes(payload.mac_address);
+        }
+        element("ad-blocking-status").textContent = result.message;
+        showMessage(result.message, "success");
+      } catch (error) {
+        if (control.type === "checkbox") control.checked = !payload.enabled;
+        showMessage(error.message, "error");
+      } finally {
+        control.disabled = false;
+        await loadUnaffectedDevices();
+      }
+    }
+
+    privateDataLockHooks.push(() => {
+      element("ad-blocking-allowances").value = "";
+      element("ad-blocking-status").textContent = "";
+    });
 
     function updateGroupMemberOptions() {
       const select = element("group-devices");
@@ -5904,6 +5949,15 @@
         mac_address: element("unaffected-mac").value,
         display_name: element("unaffected-name").value
       }, event.currentTarget.querySelector("button"), "Protection saved and applied.");
+    });
+
+    element("ad-blocking-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const domains = element("ad-blocking-allowances").value.split(/\s+/).filter(Boolean);
+      await saveAdBlocking({allowed_domains: domains}, event.currentTarget.querySelector("button"));
+    });
+    element("ad-blocking-update").addEventListener("click", (event) => {
+      saveAdBlocking({update_list: true}, event.currentTarget);
     });
 
     element("group-form").addEventListener("submit", async (event) => {

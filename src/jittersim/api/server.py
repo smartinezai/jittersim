@@ -39,6 +39,7 @@ from jittersim.api.access import ACCESS_WRITES, read_access_api, write_access_ap
 from jittersim.api.trust import TRUST_DOWNLOADS, dashboard_name_report, easy_address, read_trust_api
 from jittersim.localname import read_local_name
 from jittersim.api.workflows import WORKFLOW_WRITES, machine_health, read_workflow, write_workflow
+from jittersim.config.adblocking import MAX_STATE_BYTES as MAX_AD_BLOCKING_BODY_BYTES
 from jittersim.config.device_labels import (
     DeviceLabelError,
     guess_device_type,
@@ -172,6 +173,7 @@ WRITE_PATHS = frozenset(
         "/api/general-profile/stop",
         "/api/profiles/delete",
         "/api/devices",
+        "/api/ad-blocking",
         "/api/unaffected-devices",
         "/api/unaffected-devices/delete",
         "/api/connected-devices/group",
@@ -208,6 +210,7 @@ WRITE_PATHS = frozenset(
         "/api/time-quotas/stop",
         "/api/policies",
         "/api/everyone-else",
+        "/api/ad-blocking",
         "/api/unaffected-devices",
         "/api/unaffected-devices/delete",
         "/api/access-point",
@@ -1327,10 +1330,15 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                 for device in self.repository.list_devices()
             ]
             return HTTPStatus.OK, "application/json", _json_bytes({"devices": devices})
+        if path == "/api/ad-blocking":
+            return HTTPStatus.OK, "application/json", _json_bytes(self._ad_blocking_payload())
         if path == "/api/unaffected-devices":
+            blocking = set(self.repository.list_ad_blocking_devices())
             return HTTPStatus.OK, "application/json", _json_bytes({
-                "devices": [asdict(device) for device in self.repository.list_unaffected_devices()],
+                "devices": [{**asdict(device), "ad_blocking": device.mac_address in blocking}
+                            for device in self.repository.list_unaffected_devices()],
                 "limit": 256,
+                "ad_blocking": self._ad_blocking_payload(),
             })
         if path == "/api/groups":
             labels_by_mac = self.repository.list_connected_device_labels()
@@ -2193,6 +2201,8 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         if path in ("/api/general-profile", "/api/general-profile/stop"):
             return self._change_general_profile(payload, stop=path.endswith("/stop"))
 
+        if path == "/api/ad-blocking":
+            return self._change_ad_blocking(payload)
         if path in ("/api/unaffected-devices", "/api/unaffected-devices/delete"):
             return self._change_unaffected_device(payload, remove=path.endswith("/delete"))
 
@@ -3923,10 +3933,13 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                         raise ValueError("These addresses have an unfinished move.")
                     superseded = self._address_return_history(old, new, record.move_id)
                     if move_protection:
+                        blocking = old in self.repository.list_ad_blocking_devices()
                         self.repository.save_unaffected_device(
                             UnaffectedDevice(new, name, int(time.time()))
                         )
                         self.repository.claim_address_move_protection(new, record.move_id)
+                        if blocking:
+                            self.repository.set_ad_blocking(new, True)
                         self.repository.delete_unaffected_device(old)
                         self.repository.delete_domain_observations(purge, [new])
                     for prior in superseded:
@@ -3963,6 +3976,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
 
     def _address_saved_response(self, fields: dict):
         try:
+            self._sync_ad_blocking()
             return self._saved_control_response(fields)
         except (HelperClientError, PlanError, StorageError, sqlite3.Error):
             return (
@@ -4062,10 +4076,13 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                         raise ValueError("Settings changed during Undo. Nothing was overwritten.")
                     self._check_address_protection_ownership(record)
                     if record.moved_protection:
+                        blocking = record.new_mac in self.repository.list_ad_blocking_devices()
                         self.repository.delete_unaffected_device(record.new_mac)
                         self.repository.save_unaffected_device(
                             UnaffectedDevice(record.old_mac, record.name, int(time.time()))
                         )
+                        if blocking:
+                            self.repository.set_ad_blocking(record.old_mac, True)
                         if any(
                             move.move_id == record.previous_protection_owner
                             for move in self.repository.list_address_moves()
@@ -4091,6 +4108,93 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             if not record.moved_protection:
                 return HTTPStatus.OK, "application/json", _json_bytes(fields)
             return self._address_saved_response(fields)
+
+    def _ad_blocking_payload(self) -> dict:
+        service = {
+            "available": False, "ready": False, "paused": False,
+            "message": "Install the current Pi services to use ad blocking.",
+            "query_history_saved": False,
+        }
+        read_status = getattr(self.helper_client, "ad_blocking_status", None)
+        if read_status is not None:
+            try:
+                service = read_status()
+            except HelperClientError:
+                service["message"] = "Ad-blocking status could not be confirmed."
+        return {
+            "mac_addresses": list(self.repository.list_ad_blocking_devices()),
+            "allowed_domains": list(self.repository.list_ad_blocking_allowances()),
+            "service": service,
+        }
+
+    def _sync_ad_blocking(self, *, update=False, resume=False, control_revision=None):
+        configure = getattr(self.helper_client, "configure_ad_blocking", None)
+        selected = self.repository.list_ad_blocking_devices()
+        if configure is None:
+            if selected:
+                raise HelperClientError("Install the current Pi services to use ad blocking.")
+            return None
+        if control_revision is None:
+            reader = getattr(self.helper_client, "control_revision", None)
+            if callable(reader):
+                control_revision = reader()
+        try:
+            arguments = {"update": update, "resume": resume}
+            if control_revision is not None:
+                arguments["control_revision"] = control_revision
+            return configure(selected, self.repository.list_ad_blocking_allowances(), **arguments)
+        except HelperClientError as error:
+            if not selected and str(error) in {
+                "unknown action", "Install the current Pi release to use ad blocking.",
+            }:
+                return None
+            raise
+
+    def _change_ad_blocking(self, payload: dict):
+        generation = getattr(self.scheduler, "apply_generation", getattr(self.scheduler, "halt_count", 0))
+        refused, revision = self._capture_control_intent(generation)
+        if refused is not None:
+            return refused
+        operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
+        with operation:
+            try:
+                fields = set(payload)
+                if not fields or fields - {"mac_address", "enabled", "allowed_domains", "update_list"}:
+                    raise ValueError("Choose a protected device or change the allowed domains")
+                if ("mac_address" in fields) != ("enabled" in fields):
+                    raise ValueError("Choose a protected device and whether to block ads")
+                update = payload.get("update_list", False)
+                if type(update) is not bool:
+                    raise ValueError("The list update choice must be true or false")
+                with self.repository.transaction():
+                    if "mac_address" in fields:
+                        self.repository.set_ad_blocking(payload["mac_address"], payload["enabled"])
+                    if "allowed_domains" in fields:
+                        self.repository.set_ad_blocking_allowances(payload["allowed_domains"])
+            except (KeyError, TypeError, ValueError, StorageError) as error:
+                return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
+            try:
+                service = self._sync_ad_blocking(
+                    update=update, resume=payload.get("enabled") is True, control_revision=revision,
+                )
+            except HelperClientError:
+                service = None
+            if service is None:
+                message = "Saved but ad blocking could not be confirmed. Start saved settings after reconnecting the Pi helper."
+            elif service.get("paused"):
+                message = "Saved. Ad blocking is paused after Reset or Panic. Start saved settings to resume."
+            elif not self.repository.list_ad_blocking_devices():
+                message = (
+                    "Saved. The ad list will update when Block ads is enabled for a device."
+                    if update else "Saved. Ad blocking is off."
+                )
+            elif service.get("ready"):
+                message = "Ad-blocking settings applied."
+            else:
+                message = "Saved. Ad blocking will start when the domain list and DNS service are ready."
+            return HTTPStatus.OK, "application/json", _json_bytes({
+                "ad_blocking": self._ad_blocking_payload(), "message": message,
+            })
 
     def _change_unaffected_device(self, payload: dict, *, remove: bool):
         operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
@@ -4125,7 +4229,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                     self._validate_saved_plan()
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
-            return self._saved_control_response(
+            return self._address_saved_response(
                 {
                     "devices": [
                         asdict(device) for device in self.repository.list_unaffected_devices()
@@ -4641,6 +4745,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                 arguments["control_revision"] = control_revision
             if explicit_apply:
                 arguments["explicit_apply"] = True
+            self._sync_ad_blocking(control_revision=control_revision)
             result = self.helper_client.apply(**arguments)
         except HelperClientError as error:
             rejected = self._control_rejected(error)
@@ -5110,6 +5215,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
                 max_bytes=(
                     MAX_IMPORT_BODY_BYTES
                     if path in ("/api/import", "/api/test-sessions/save")
+                    else MAX_AD_BLOCKING_BODY_BYTES if path == "/api/ad-blocking"
                     else (8192 if path.startswith("/api/homepage/") else MAX_JSON_BODY_BYTES)
                 ),
             )

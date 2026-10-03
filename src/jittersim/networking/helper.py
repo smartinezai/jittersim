@@ -40,6 +40,7 @@ from jittersim.panic_guard import PANIC_GUARD_FORMAT, PanicGuard
 from jittersim.request_workers import RequestWorkers, WorkersStillRunning
 from jittersim.socket_deadlines import DeadlineReader, read_line
 
+from .adblocking import AdRouting, AdStore
 from .access import AccessManager
 from .applier import MAX_PROTECTED_MACS, ApplyError, NetworkApplier
 from .dashboard_access import (
@@ -72,7 +73,7 @@ MAX_HELPER_CONNECTIONS = 8
 # Reads never wait so a dashboard poll cannot make Panic fail. Normal access is the
 # Panic action and waits like Reset. Access apply carries Block globally, Unblock,
 # Apply access rules and the device quick action so a poll must not refuse it either.
-WRITE_ACTIONS = ("apply", "apply-experiment", "reset", "normal-access", "access-apply")
+WRITE_ACTIONS = ("apply", "apply-experiment", "reset", "normal-access", "access-apply", "ad-blocking-configure")
 WRITE_LOCK_WAIT_SECONDS = 3.0
 WIFI_ACTIONS = ("configure-ap", "router-sync-ap", "router-preview-ap", "wifi-reset")
 ROUTER_ACTIONS = (
@@ -170,9 +171,11 @@ class HelperService:
         access_manager: Optional[AccessManager] = None,
         panic_guard: Optional[PanicGuard] = None,
         homepage_database: Optional[Path] = None,
+        ad_blocking_store: Optional[AdStore] = None,
     ) -> None:
         self._applier = applier
         self._homepage_database = homepage_database
+        self._ad_blocking_store = ad_blocking_store
         self._active_plan_path = active_plan_path
         self._active_plan: Optional[NetworkPlan] = None
         # A new boot nonce and a count of applied plans tell the dashboard when the
@@ -407,10 +410,38 @@ class HelperService:
                 "general_profile": True,
                 "service_lists": True,
                 "service_list_outages": True,
+                "ad_blocking": self._ad_blocking_store is not None,
                 "protected_dns_capture": True,
                 "identified_release_uploads": True,
                 "homepage_policy_version": 1,
             }
+        if action in ("ad-blocking", "ad-blocking-configure"):
+            if self._ad_blocking_store is None:
+                return {"ok": False, "error": "Install the current Pi release to use ad blocking."}
+            acquired = False
+            try:
+                if action == "ad-blocking-configure":
+                    acquired = self._network_lock.acquire(timeout=WRITE_LOCK_WAIT_SECONDS)
+                    if not acquired:
+                        return {"ok": False, "error": "Pi networking is busy. Try again later.",
+                                "reason": "helper-busy"}
+                    refused = self._control_refusal(payload)
+                    if refused is not None:
+                        return refused
+                    if payload.get("resume") and self._panic_recovery_failed:
+                        return {"ok": False, "error": "Retry Panic before resuming ad blocking."}
+                status = (
+                    self._ad_blocking_store.configure(
+                        payload.get("mac_addresses"), payload.get("allowed_domains"),
+                        update=payload.get("update", False), resume=payload.get("resume", False),
+                    ) if action == "ad-blocking-configure" else self._ad_blocking_store.status()
+                )
+                return {"ok": True, "ad_blocking": status}
+            except (OSError, ValueError, CommandExecutionError):
+                return {"ok": False, "error": "Ad-blocking settings could not be applied. Try again."}
+            finally:
+                if acquired:
+                    self._network_lock.release()
         if action == "dashboard-access":
             if not self._access_lock.acquire(blocking=False):
                 return {"ok": False, "error": "Device verification is busy. Try again.",
@@ -1166,6 +1197,11 @@ class HelperService:
                 except (OSError, ValueError, CommandExecutionError):
                     LOGGER.exception("household cleanup failed after Panic state save failure")
             return {"ok": False, "error": "gateway recovery state could not be saved safely"}
+        if self._ad_blocking_store is not None and explicit_apply:
+            try:
+                self._ad_blocking_store.resume()
+            except (OSError, ValueError, CommandExecutionError):
+                LOGGER.warning("Profiles started but ad-blocking resume could not be confirmed.")
         return {"ok": True, "action": "apply", "commands_run": report.commands_run}
 
     def _write_active_plan(self, plan: NetworkPlan) -> None:
@@ -1395,6 +1431,12 @@ class HelperService:
         return {"ok": True, "action": "router-check"}
 
     def _handle_reset(self) -> Dict[str, Any]:
+        blocking_failed = False
+        if self._ad_blocking_store is not None:
+            try:
+                self._ad_blocking_store.pause()
+            except (OSError, ValueError, CommandExecutionError):
+                blocking_failed = True
         self._active_plan = None
         try:
             commands_run = self._applier.reset()
@@ -1406,6 +1448,8 @@ class HelperService:
         self._recovery_pending = False
         self._outage_observed = False
         self._write_gateway_state()
+        if blocking_failed:
+            return {"ok": False, "error": "Profiles are off but ad-blocking bypass could not be confirmed. Retry Panic."}
         return {"ok": True, "action": "reset", "commands_run": commands_run}
 
     def _forget_changed_lists(self, plan: NetworkPlan) -> None:
@@ -1788,6 +1832,17 @@ class HelperClient:
         """Check whether the helper is accepting requests."""
 
         return self._request({"action": "ping"})
+
+    def ad_blocking_status(self) -> Dict[str, Any]:
+        return self._request({"action": "ad-blocking"})["ad_blocking"]
+
+    def configure_ad_blocking(self, mac_addresses, allowed_domains, *, update=False, resume=False,
+                             control_revision=None):
+        revision = self.control_revision() if control_revision is None else control_revision
+        payload = {"action": "ad-blocking-configure", "mac_addresses": list(mac_addresses),
+                   "allowed_domains": list(allowed_domains), "update": update, "resume": resume,
+                   "expected_control_revision": revision}
+        return self._request(payload)["ad_blocking"]
 
     def dashboard_access(self, operation: str = "status", *, peer: Optional[str] = None,
                          mac_address: Optional[str] = None, name: str = "",
@@ -2503,8 +2558,11 @@ def run_helper(
     except (WifiError, CommandExecutionError):
         LOGGER.warning("Pending Wi-Fi recovery failed. Repair jittersim-ap through management access.")
     gateway_state_path = socket_path.parent / "gateway-state.json"
+    ad_blocking = AdStore(AdRouting(topology.test_interface),
+                          group_id=grp.getgrnam("jittersim").gr_gid)
     access = AccessManager(executor=SubprocessExecutor(timeout_seconds=20), topology=topology,
-                           runtime_path=socket_path.parent / "access-policy.json")
+                           runtime_path=socket_path.parent / "access-policy.json",
+                           ad_blocking_store=ad_blocking)
     service = HelperService(
         applier,
         router_factory=router_factory,
@@ -2512,6 +2570,7 @@ def run_helper(
         access_store=AccessStore(ACCESS_FILE, group_id=grp.getgrnam("jittersim").gr_gid),
         gateway_state_path=gateway_state_path,
         access_manager=access,
+        ad_blocking_store=ad_blocking,
         panic_guard=PanicGuard(),
         homepage_database=homepage_database,
     )

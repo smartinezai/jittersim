@@ -8,13 +8,13 @@ The owner has also confirmed the priority: deliver effective ad blocking with as
 
 The feature blocks known advertising domains during DNS lookups. DNS turns website names into internet addresses. Describe the benefit as fewer ads rather than an ad-free guarantee. Some ads share a domain with useful content. Encrypted DNS and VPNs can also bypass local filtering.
 
-Evaluate the already installed dnsmasq as a separate filtering service first. It supports domain blocking without a new DNS protocol implementation. Use Pi-hole if the disposable test shows that dnsmasq cannot meet the required blocking behavior. JitterSim already uses NetworkManager's shared Wi-Fi connection with its own DNS and address allocation. The blocker must fit alongside that setup without taking over the connection or changing other devices' lookups. The browser proxy also resolves names on the Pi so filtering client DNS alone does not cover every browsing path.
+Use a separate Unbound listener alongside the existing shared-network DNS service. Reuse the household DNS rules from the current release. Keep one shared advertising list and preserve the household rules ahead of ad-blocking allowances. The managed browser proxy uses the same expiring preference so it also blocks selected devices while profiles are stopped.
 
 The main risks are interrupted browsing when the blocker fails, filtering the wrong device after an address change and retaining more browsing information than blocking needs. The measured design restores ordinary DNS when its temporary routing permission expires after five seconds. No query logs or browsing history are saved. The monitoring explanation describes the domain checks required for optional blocking.
 
 **Working risk: high** because DNS changes can interrupt internet access. No pull request template was found under `.github` in the inspected checkout. Technical plan review and human feedback are complete. Implementation is authorized. The release requires complete local checks, final source review and a separate feature pull request.
 
-The internal technical review below is complete. The disposable Linux proof selected a separate dnsmasq service, packet-by-packet DNS port rewriting and five-second routing expiry. The fixed StevenBlack hosts source supplies the blocklist. Reset and Panic pause blocking while keeping saved switches. The first version covers protected devices on JitterSim Wi-Fi only.
+The technical plan review and human feedback are complete. An initial disposable proof verified packet-by-packet DNS port rewriting and five-second routing expiry. Adaptation to the newer release selected its existing Unbound software to preserve household rules. The fixed StevenBlack hosts source supplies the blocklist. Reset and Panic pause blocking while keeping saved switches. The first version covers protected devices on JitterSim Wi-Fi only.
 
 ## Confirmed choice and proposed behavior
 
@@ -44,7 +44,7 @@ These are observations from the local checkout on 3 October 2026. No live Pi con
 
 ## Internal technical plan review: 3 October 2026
 
-This is a review of the proposed design and current local source. The feature has not been implemented or tested. The following gaps must be resolved before release.
+This is a review of the proposed design and current local source. This section records the initial review before implementation. Its recovery and privacy requirements still apply. The final integration decision is recorded below.
 
 1. **Preserve existing DNS.** The installer already installs dnsmasq and uses NetworkManager's shared access point. A normal Pi-hole installation could compete with that DNS listener or address allocation. First test a separate dnsmasq listener on an unused port with its own bounded configuration. Only enabled protected devices should be routed there. Do not change the shared resolver into a filtered upstream for everyone. Dnsmasq documents domain blocking and multiple listeners in its [manual](https://thekelleys.org.uk/dnsmasq/docs/dnsmasq-man.html).
 2. **Test existing connections during recovery.** Removing a DNS redirect rule does not necessarily remove mappings already created for existing connections. Test repeated UDP lookups from the same client socket and persistent TCP DNS while killing or stalling the blocker and its controller. Do not promise a recovery time based only on a health-check interval or an expiring device set. Any cleanup must affect only this feature's DNS connections. The [nftables documentation](https://wiki.nftables.org/wiki-nftables/index.php/Performing_Network_Address_Translation_(NAT)) explains that established flows reuse their original mapping.
@@ -116,36 +116,62 @@ Rollback must first restore ordinary DNS and remove only feature-owned routing. 
 
 ## Status
 
-The owner has authorized taking over the feature and approved the reviewed sequence. The optional switch and the preference for effective ad blocking over an absolute no-monitoring promise are confirmed. Implementation is proceeding in an isolated checkout from the protected-device development branch. A pull request and merge are authorized. If CI cannot run solely because of billing errors, the complete local checks may be used before merging.
+The owner has authorized taking over the feature and approved the reviewed sequence. The optional switch and the preference for effective ad blocking over an absolute no-monitoring promise are confirmed. Implementation is proceeding in an isolated checkout and is being adapted to the reviewed release source before publication. A pull request and merge are authorized. If CI cannot run solely because of billing errors, the complete local checks may be used before merging.
 
 ## Implementation checkpoint
 
-The separate dnsmasq service uses port 5354 and forwards allowed names to
-the Pi's existing DNS listener. Only selected source MAC addresses sending
-DNS to the Pi are routed to the blocker. Routing permissions expire after
-five seconds and are refreshed after a successful DNS probe. The managed
-browser proxy reads the same expiring policy. Neither path records query
-history. A shared file lock and settings generation prevent a stale health
-check from reversing Panic or a settings change.
+The separate Unbound service listens on port 5354. It uses the existing
+household per-device rules before checking one shared advertising tree.
+Allowed ad domains cannot bypass household denials or allow-only rules.
+Household changes temporarily bypass ads until the new rules are installed.
+The existing household DNS failure setting also applies to this listener.
+
+Only selected source MAC addresses sending DNS to the Pi are routed to the
+blocker. Routing permissions expire after five seconds and are refreshed
+after a successful DNS probe. The managed browser proxy reads the same
+expiring policy. Neither path records query history. Shared file locking,
+settings generations and control revisions prevent a stale health check or
+queued switch change from reversing Panic. Reset and Panic pause ads without
+deleting switches. Explicit Start or enabling a switch can resume blocking.
+Automatic profile refresh cannot resume it.
 
 Domain downloads have fixed byte, domain, worker and retry limits. The
 current public list was accepted with 72,233 domains in 2,220,527 bytes.
-Allowed domains are limited to 256. The database uses separate tables so
-old protection queries remain compatible. Backups retain the choices.
-Removing protection deletes the device choice through a database reference.
+Downloads are limited to 8 MiB and 200,000 domains. One worker downloads a
+fixed HTTPS source with no redirects. Three failed automatic attempts defer
+further attempts for a day. The last validated list is retained on failure.
+There are at most 256 allowed domains and 256 selected devices. Root state
+files are limited to 128 KiB. DNS caches and concurrent work are bounded.
+The advertising tree is stored once rather than copied into every view.
 
-The original development baseline passed all 2,236 Python checks. The new
-desktop and phone journey passed. A native DNS proof passed its functional
-checks for UDP, TCP, record types, changed MAC identity, allowed domains,
-pause, resume and removal. DNS death and controller stall both restored
-ordinary DNS using the same UDP socket. The DNS child ran without root
-identity and the test found no browsing history in the service files.
-Its final cleanup command failed after namespace removal had already
-removed the virtual interface. Cleanup is corrected and a zero-exit replay
-remains required. This is not yet a completed release receipt.
+The database uses separate tables tied to protected identities. Names can
+change without losing switches. Removing protection deletes the choice.
+Moving a private address or undoing that move carries the current choice.
+Database recovery copies retain preferences. The downloaded list is a
+rebuildable cache outside the release recovery copy. Installer operations
+are repeatable. The updater backs up and restores the new service unit and
+continues to support a recovery copy from a release without ad blocking.
 
-Adapt the feature to the final verified main before publication. The newer
-release has extracted dashboard assets, priority Panic handling and a
-transactional updater. Review those owning implementations before changing
-their service lists or control behavior. No live Pi deployment is included
-until independent management recovery is verified.
+The original development baseline passed all 2,236 Python checks. The
+adapted desktop and phone journey passed with keyboard controls and saved
+choices. Focused checks cover the household rule order, bounded state,
+concurrent Panic, protection removal and updater compatibility.
+
+The initial dnsmasq proof passed its functional checks for UDP, TCP, record
+types, changed MAC identity, allowances, pause, resume and removal. DNS death
+and controller stall restored ordinary DNS on the same UDP socket. It found
+no saved browsing history and confirmed a non-root DNS child. Its cleanup
+returned a failure after namespace removal had already removed the virtual
+interface. Cleanup is corrected. This historical proof is not a final
+receipt for the adapted Unbound implementation.
+
+A final native Unbound proof, full release checks and final source review
+remain release gates. The first adapted proof attempt could not run because
+the prepared images lacked required network or DNS tools. The owned test
+containers were removed. No unrelated containers were changed.
+
+Publish a separate feature pull request after the reviewed base is on main.
+If CI is blocked solely by billing, merge only after all local equivalents
+pass. Do not bypass actual code or test failures. No live Pi deployment is
+included until independent management recovery is verified. Actual Pi
+memory, throughput and physical multi-client acceptance remain unverified.
