@@ -679,8 +679,10 @@ def test_a_missing_key_or_an_option_like_key_is_refused(fakes, tmp_path):
     assert "does not exist" in result.stderr
     result, calls = deploy(fakes, "--key", "-oProxyCommand=x")
     assert result.returncode == 2 and calls == []
-    result, calls = deploy(fakes, "--key", str(tmp_path))
+    result, calls = deploy(fakes, "--ssh", "--key", str(tmp_path))
     assert result.returncode == 2 and calls == []
+    assert "does not exist" in result.stderr
+    assert list(fakes["copies"].iterdir()) == []
 
 
 @pytest.mark.parametrize("ref", ["-x", "--output=/tmp/x", ""])
