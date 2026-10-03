@@ -13,6 +13,8 @@ table inet jittersim_control {
             192.168.0.0/16
         } tcp dport 8080 accept
         tcp dport 8080 counter drop comment "keep dashboard on private management paths"
+        iifname "@TEST_INTERFACE@" ip daddr 192.168.50.1 tcp dport 8443 accept
+        tcp dport 8443 drop comment "keep homepage policy on test Wi-Fi"
         # Port 5353 is mDNS only. The filtered resolver listens on 5335 and test
         # clients reach it through the access table's redirect from port 53.
         iifname "@TEST_INTERFACE@" udp dport 5353 counter drop comment "deny mDNS queries from test Wi-Fi"

@@ -246,11 +246,14 @@ def test_actual_startup_entry_never_restores_old_enabled_household_policy(
         )
         monkeypatch.setattr(NetworkApplier, "recover_wifi", lambda self: None)
         monkeypatch.setattr(helper_module.HelperService, "monitor_gateway_once", lambda self: None)
-        monkeypatch.setattr(
-            helper_module.UnixHelperServer,
-            "serve_forever",
-            lambda self: (_ for _ in ()).throw(KeyboardInterrupt()),
-        )
+        serve_policy = helper_module.UnixHelperServer.serve_forever
+
+        def stop_control_server(server):
+            if server.policy_only:
+                return serve_policy(server)
+            raise KeyboardInterrupt()
+
+        monkeypatch.setattr(helper_module.UnixHelperServer, "serve_forever", stop_control_server)
         helper_module.run_helper(
             socket_path=tmp_path / "helper.sock",
             topology=Topology("eth0", "wlan0"),

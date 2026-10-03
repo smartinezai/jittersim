@@ -51,6 +51,9 @@ def interpolate_profile(*, start: Profile, end: Profile, factor: float) -> Profi
             end.reroll_interval_randomness,
             bounded_factor,
         ),
+        homepage_bounce_percent=_interpolate_integer(
+            start.homepage_bounce_percent, end.homepage_bounce_percent, bounded_factor
+        ),
         outage_probability=_interpolate_integer(
             start.outage_probability,
             end.outage_probability,

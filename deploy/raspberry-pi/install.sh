@@ -245,6 +245,15 @@ install -m 0644 -o root -g root \
 install -m 0644 -o root -g root \
     "$SOURCE_DIR/deploy/raspberry-pi/jittersim-dashboard.service" \
     /etc/systemd/system/jittersim-dashboard.service
+# Keep this compatibility hook across a rollback to an older dashboard unit.
+install -m 0644 -o root -g root \
+    "$SOURCE_DIR/deploy/raspberry-pi/homepage-profile-compat.py" \
+    /usr/local/lib/jittersim-profile-compat.py
+install -d -m 0755 -o root -g root /etc/systemd/system/jittersim-dashboard.service.d
+install -m 0644 -o root -g root \
+    "$SOURCE_DIR/deploy/raspberry-pi/homepage-compat.conf" \
+    /etc/systemd/system/jittersim-dashboard.service.d/homepage-compat.conf
+
 install -m 0644 -o root -g root \
     "$SOURCE_DIR/deploy/raspberry-pi/jittersim-browser-proxy.service" \
     /etc/systemd/system/jittersim-browser-proxy.service

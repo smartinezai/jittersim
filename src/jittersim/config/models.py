@@ -215,6 +215,7 @@ class Profile:
     outage_duration_randomness: Randomness = Randomness()
     outage_interval_seconds: int = 0
     outage_interval_randomness: Randomness = Randomness()
+    homepage_bounce_percent: int = 0
     website_mode: str = "unrestricted"
     website_domains: Tuple[str, ...] = ()
     website_randomness: Randomness = Randomness()
@@ -230,6 +231,9 @@ class Profile:
             _validate_number(self.random_seed, "random_seed", 0, 2**63 - 1)
         _validate_number(self.reroll_interval_seconds, "reroll_interval_seconds", 0, 604_800)
         _validate_percent(self.outage_probability, "outage_probability")
+        if type(self.homepage_bounce_percent) is not int:
+            raise ValidationError("homepage_bounce_percent must be an integer")
+        _validate_percent(self.homepage_bounce_percent, "homepage_bounce_percent")
         _validate_number(self.outage_duration_seconds, "outage_duration_seconds", 0, 604_800)
         _validate_number(self.outage_interval_seconds, "outage_interval_seconds", 0, 604_800)
         for value, field_name in (

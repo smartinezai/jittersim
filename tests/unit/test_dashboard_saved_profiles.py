@@ -321,6 +321,7 @@ def every_field_set_profile(profile_id="every-field", name="Every field", other=
         reroll_interval_randomness=Randomness(
             variation_percent=9 if other else 7, enabled_probability=55 if other else 80
         ),
+        homepage_bounce_percent=37,
         outage_probability=12,
         outage_duration_seconds=33,
         outage_duration_randomness=Randomness(

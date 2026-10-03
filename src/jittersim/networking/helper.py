@@ -169,13 +169,16 @@ class HelperService:
         gateway_state_path: Optional[Path] = None,
         access_manager: Optional[AccessManager] = None,
         panic_guard: Optional[PanicGuard] = None,
+        homepage_database: Optional[Path] = None,
     ) -> None:
         self._applier = applier
+        self._homepage_database = homepage_database
         self._active_plan_path = active_plan_path
         self._active_plan: Optional[NetworkPlan] = None
         # A new boot nonce and a count of applied plans tell the dashboard when the
         # queues were replaced even if the settings stayed the same.
         self._boot_nonce = secrets.token_hex(4)
+        self._homepage_epoch = secrets.token_bytes(16).hex()
         self._plan_count = 0
         self._queue_read_error: Optional[str] = None
         self._service_addresses = ServiceAddressBook(clock=service_address_clock)
@@ -374,6 +377,9 @@ class HelperService:
             except (OSError, ValueError):
                 LOGGER.exception("online release check could not be handled")
                 return {"ok": False, "error": "online release check could not be completed"}
+        if action in ("homepage-snapshot", "homepage-confirm"):
+            from .homepage import helper_confirm, helper_snapshot
+            return helper_confirm(self, payload) if action == "homepage-confirm" else helper_snapshot(self, payload)
         if action == "ping":
             return {"ok": True, "action": "ping"}
         if action == "capabilities":
@@ -386,6 +392,7 @@ class HelperService:
                 "service_list_outages": True,
                 "protected_dns_capture": True,
                 "identified_release_uploads": True,
+                "homepage_policy_version": 1,
             }
         if action == "dashboard-access":
             if not self._access_lock.acquire(blocking=False):
@@ -1500,6 +1507,15 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
             self._send_response({"ok": False, "error": "request must be valid JSON"})
             return
         action = payload.get("action") if isinstance(payload, dict) else None
+        if self.server.policy_only:
+            if action not in ("homepage-snapshot", "homepage-confirm"):
+                self._send_response({"ok": False, "error": "action unavailable"})
+            else:
+                self._send_response(self.server.service.handle_payload(payload))
+            return
+        if action in ("homepage-snapshot", "homepage-confirm"):
+            self._send_response({"ok": False, "error": "use the policy socket"})
+            return
         if action in ("ping", "control-revision", "dashboard-access", "update-retry") or action in WIFI_ACTIONS or action in ROUTER_ACTIONS:
             self._send_response(self.server.service.handle_payload(payload))
             return
@@ -1537,13 +1553,14 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
 class UnixHelperServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     """Serve the helper protocol through a filesystem-protected Unix socket."""
 
-    def __init__(self, socket_path: Path, service: HelperService) -> None:
+    def __init__(self, socket_path: Path, service: HelperService, *, policy_only: bool = False) -> None:
         self.socket_path = socket_path
+        self.policy_only = policy_only
         self.service = service
         self.operation_lock = threading.Lock()
         self.release_stage_lock = threading.Lock()
-        self._request_slots = threading.BoundedSemaphore(MAX_HELPER_CONNECTIONS)
-        self._request_workers = RequestWorkers("jittersim-helper-request", daemon=False)
+        self._request_slots = threading.BoundedSemaphore(2 if policy_only else MAX_HELPER_CONNECTIONS)
+        self._request_workers = RequestWorkers("jittersim-helper-request", daemon=policy_only)
         self._prepare_socket_path()
         try:
             super().__init__(str(socket_path), HelperRequestHandler)
@@ -1771,7 +1788,7 @@ class HelperClient:
         return self._request(
             {
                 "action": "apply",
-                "plan": plan_to_payload(plan),
+                "plan": self._homepage_wire_plan(plan),
                 "explicit_apply": explicit_apply,
                 "expected_control_revision": revision,
             },
@@ -1798,6 +1815,42 @@ class HelperClient:
         if required:
             raise HelperClientError("Normal access recovery is not confirmed. Retry Panic before Start.")
         return revision
+
+    def _homepage_wire_plan(self, plan: NetworkPlan) -> Dict[str, Any]:
+        payload = plan_to_payload(plan)
+        rules = plan.mark_rules + plan.service_list_rules + plan.service_assignment_rules + plan.service_quota_rules
+        rules += tuple(rule for rule in (plan.general_profile, plan.everyone_else) if rule)
+        supported = False
+        if any(rule.homepage_bounce_percent for rule in rules):
+            try:
+                capabilities = self._request({"action": "capabilities"})
+                supported = capabilities.get("homepage_policy_version") == 1
+            except HelperClientError as error:
+                if error.reason == "helper-busy":
+                    raise
+        if not supported:
+            payload.pop("homepage_policy_version", None)
+            for name in ("mark_rules", "service_list_rules", "service_assignment_rules", "service_quota_rules"):
+                for rule in payload[name]:
+                    rule.pop("homepage_bounce_percent", None)
+            for name in ("general_profile", "everyone_else"):
+                if payload[name] is not None:
+                    payload[name].pop("homepage_bounce_percent", None)
+        return payload
+
+    def homepage_snapshot(self, *, peer: str, host=None, addresses=(), expected=None) -> dict:
+        """Use separate admission and a total socket deadline for policy reads."""
+        from .homepage import policy_request
+        return policy_request(Path(str(self.socket_path) + ".homepage"), {
+            "action": "homepage-snapshot", "peer": peer, "host": host,
+            "addresses": list(addresses), "expected": expected,
+        })
+
+    def homepage_confirm(self, receipt: dict) -> bool:
+        from .homepage import policy_request
+        return policy_request(Path(str(self.socket_path) + ".homepage"), {
+            "action": "homepage-confirm", "receipt": receipt,
+        }).get("verified") is True
 
     def gateway_status(self) -> Dict[str, Any]:
         """Read the helper's bounded gateway and persistence state."""
@@ -1914,7 +1967,7 @@ class HelperClient:
         revision = self.control_revision() if control_revision is None else control_revision
         self._check_plan_support(plan)
         return self._request(
-            {"action": "apply-experiment", "plan": plan_to_payload(plan), "expected_control_revision": revision}, timeout_seconds=60
+            {"action": "apply-experiment", "plan": self._homepage_wire_plan(plan), "expected_control_revision": revision}, timeout_seconds=60
         )
 
     def normal_access(self) -> Dict[str, Any]:
@@ -2406,6 +2459,7 @@ def run_helper(
     timeout_seconds: float = 10.0,
     enable_hardware: bool = False,
     router_factory: Optional[Callable[[str, str], TG3442DERouter]] = None,
+    homepage_database: Path = Path("/var/lib/jittersim/jittersim.db"),
 ) -> None:
     """Run the helper only after an explicit hardware-mode opt-in."""
 
@@ -2430,6 +2484,7 @@ def run_helper(
         gateway_state_path=gateway_state_path,
         access_manager=access,
         panic_guard=PanicGuard(),
+        homepage_database=homepage_database,
     )
     restored = restore_access_at_start(access, panic_stopped=service._panic_stop_latched)
     if not restored and service._panic_stop_latched:
@@ -2482,6 +2537,20 @@ def run_helper(
         name="gateway-persistence",
     )
     gateway_worker.start()
+    policy_server = None
+    policy_worker = None
+    try:
+        policy_server = UnixHelperServer(Path(str(socket_path) + ".homepage"), service, policy_only=True)
+        policy_worker = threading.Thread(target=policy_server.serve_forever, daemon=True, name="homepage-helper")
+        policy_worker.start()
+    except (HelperError, RuntimeError):
+        if policy_server is not None:
+            if policy_worker is not None and policy_worker.is_alive():
+                policy_server.shutdown()
+            policy_server.server_close()
+        policy_server = None
+        policy_worker = None
+        LOGGER.warning("Homepage helper socket unavailable. Control socket remains available.")
     with UnixHelperServer(socket_path, service) as server:
         try:
             server.serve_forever()
@@ -2489,6 +2558,10 @@ def run_helper(
             pass
         finally:
             stopped.set()
+            if policy_server is not None:
+                policy_server.shutdown()
+                policy_server.server_close()
+                policy_worker.join(timeout=1)
             worker.join(timeout=5)
             gateway_worker.join(timeout=5)
             release_worker.join(timeout=5)
@@ -2501,6 +2574,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--test-interface", required=True)
     parser.add_argument("--timeout-seconds", type=float, default=10.0)
     parser.add_argument("--enable-hardware", action="store_true")
+    parser.add_argument("--homepage-database", type=Path, default=Path("/var/lib/jittersim/jittersim.db"))
     return parser
 
 
@@ -2511,6 +2585,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     run_helper(
         socket_path=arguments.socket,
+        homepage_database=arguments.homepage_database,
         topology=Topology(
             uplink_interface=arguments.uplink,
             test_interface=arguments.test_interface,
