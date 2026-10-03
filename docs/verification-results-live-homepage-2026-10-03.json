@@ -122,5 +122,7 @@
   ],
   "remote_changes": false,
   "live_pi_changes": false,
-  "docker_changes": false
+  "docker_changes": false,
+  "compatibility_scope": "The hook preserves supported values and other tables in its input database. Approved explicit updater rollback restores the selected complete recovery copy so later ordinary profile, protection and access edits can revert. Current trust/token/floor/CA/Panic safety use separately reviewed preservation rules.",
+  "rollback_contract_source": "61f65d83df5af0d3fee057cdc5bf6259875e75a4:src/jittersim/updates.py:2748"
 }

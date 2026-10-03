@@ -22,9 +22,17 @@ the older branch. Resolve overlaps with the update owner and main reviewer.
 Keep reviewed control-handler ordering and authentication fixes.
 
 The update overlap adds a retained compatibility helper and dashboard
-ExecStartPre drop-in. Preserve the update owner's stopped-service backup,
-current-data rollback and retained trust, signer and manager handling. An old
-whole-configuration snapshot is not a substitute for this conversion.
+ExecStartPre drop-in. Preserve the update owner's stopped-service complete
+backup and deliberate restore of the selected copy. That restore can revert
+profile, protection and household access edits made after the copy. Current
+trust, token, release floor, CA and Panic safety stay separate under their
+reviewed rules. The fixed recovery manager is retained.
+
+Run the compatibility hook on the database presented after restoration.
+It preserves supported values in that database while removing only the
+unsupported homepage field. This does not promise that later ordinary edits
+survive an explicit rollback. No change to the approved restore design is
+part of this homepage implementation.
 The extension lives outside the Python wheel and must be delivered from the
 reviewed release source. The new CI step tests its actual code using the
 existing locked Node Playwright dependency.
@@ -83,7 +91,9 @@ The retained /usr/local/lib/jittersim-profile-compat.py runs with the target
 package's Python before its dashboard starts. If that target supports the
 field it does nothing. Otherwise it validates every candidate with the target
 reader before removing only homepage_bounce_percent. It preserves supported
-current settings and every other table. Configuration version advances once.
+settings and every other table in the database presented to it. Configuration
+version advances once. The updater can present the selected recovery-copy
+database rather than the latest pre-rollback database.
 
 Before any conversion, the hook makes a consistent SQLite backup at
 /var/lib/jittersim/homepage-profile-compat.sqlite with mode 0600. File and
@@ -118,3 +128,8 @@ enrolled inputs when token or device access changes. Its request owner checks
 protect success, error, expiry and control cleanup after every wait. It does
 not replace the shared request or sign-in functions. Failure-first and fresh
 installed dashboard checks are saved in the private UI verification report.
+
+The selected-copy restore contract was verified at combined source
+61f65d83df5af0d3fee057cdc5bf6259875e75a4 in updates.py:2748. The update
+preparation plan states that explicit rollback uses the selected complete copy.
+The converter and retained drop-in are unchanged by this clarification.
