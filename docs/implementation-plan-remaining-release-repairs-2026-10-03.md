@@ -105,8 +105,9 @@ Explicit rollback uses the selected complete recovery copy. Later ordinary
 profiles, protection, access and usage edits can revert. The compatibility
 hook preserves supported values in the presented database. It does not make
 rollback preserve the newest database. Retain the existing dashboard restore
-warning. Show the same warning when retrying an actual restore and in the
-command-line restore confirmation. This changes only the words presented
+warning. Show the same warning for a rollback retry and in the command-line
+restore confirmation. Other recovery retries may only restart services, so
+state conditionally that a restored backup replaces later changes. This changes only the words presented
 before confirmation, not admission, saved requests or recovery behavior.
 Verify JavaScript syntax and the existing actual browser update checks. The
 final complete workflow still applies.

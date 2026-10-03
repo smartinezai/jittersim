@@ -135,7 +135,7 @@ def run():
                 state["operation"]["retry"]["recovering"] = True
                 page.evaluate("loadReleaseStatus({force:true})")
                 page.locator("#release-retry").click()
-                expect(page.locator("dialog")).to_contain_text("Changes after that backup will be replaced.")
+                expect(page.locator("dialog")).to_contain_text("If recovery restores the saved backup, later changes will be replaced.")
                 page.locator("dialog").get_by_role("button", name="Cancel", exact=True).click()
                 assert counts[("POST", "api/updates/retry")] == 0
                 checks.append("recovery retry warns about replaced edits before cancellation without a write")
