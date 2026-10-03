@@ -686,15 +686,33 @@ release and restore the previous installation. The Pi stores no GitHub
 credentials. The owner transfers the release over the existing SSH path. See
 [Signed releases](#signed-releases) for the key that approves a release.
 
-Build and sign a bundle from a reviewed tag or commit on the Mac:
+Releases have version numbers: MAJOR.MINOR.PATCH. A new feature raises
+MINOR and a fix raises PATCH. A change that needs a reinstall with the installer
+or breaks saved settings raises MAJOR. Put the number in `pyproject.toml` and in
+`src/jittersim/__init__.py` then mark the reviewed commit with
+`git tag vMAJOR.MINOR.PATCH`. A test fails when the tag and the files disagree.
+
+Build a bundle from the tag on the development machine:
 
 ```sh
-./deploy/raspberry-pi/build-release.sh RELEASE_REF /tmp/jittersim-release.tar.gz ~/.ssh/jittersim_release_ed25519
+./deploy/raspberry-pi/build-release.sh vMAJOR.MINOR.PATCH /tmp ~/.ssh/jittersim_release_ed25519
 ```
 
-It writes the archive and its signature `/tmp/jittersim-release.tar.gz.sig`.
-Transfer both to the Pi using the existing SSH account then stage the archive
-as root:
+The bundle is named `jittersim-MAJOR.MINOR.PATCH.tar.gz` and the script prints
+the version it built. A commit without a tag builds a test build named
+`NUMBER.dev+COMMIT` that never looks like a release. A second argument that ends
+in `.tar.gz` names the file yourself. `build-release.sh --version REF` only prints the version
+the commit would build.
+
+The archive includes the signed source commit, version and release order.
+The separate signature is saved beside it with `.sig` added to its name.
+Save the printed SHA-256 checksum with the release record.
+The update refuses to install an older number over a newer one. Use Restore previous
+installation to go back on purpose. Transfer the exact archive and its signature
+to the Pi using the existing SSH account then stage it as root.
+An older signed manager cannot read the new development label. Use
+`deploy-from-mac.sh --use-installer` once for the first upgrade. Later updates
+use the ordinary one-command signed route.
 
 ```sh
 sudo jittersim update stage /tmp/jittersim-release.tar.gz

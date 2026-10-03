@@ -1,6 +1,7 @@
 """Exercise version labels through actual signed archives and update admission."""
 
 import json
+import shutil
 import subprocess
 import tarfile
 from pathlib import Path
@@ -23,10 +24,10 @@ def git(repo, *args):
 def release_repo(tmp_path):
     repo = tmp_path / "repo"
     (repo / "src/jittersim/api").mkdir(parents=True)
-    (repo / "deploy").mkdir()
+    shutil.copytree(BUILD.parents[1], repo / "deploy")
     (repo / "src/jittersim/api/server.py").write_text("pass\n")
     (repo / "src/jittersim/updates.py").write_text("pass\n")
-    (repo / "deploy/readme").write_text("release\n")
+    (repo / "src/jittersim/__init__.py").write_text('__version__ = "0.2.0"\n')
     (repo / "README.md").write_text("release\n")
     (repo / "pyproject.toml").write_text('[project]\nname="jittersim"\nversion = "0.2.0"\n')
     git(repo, "init", "-q")
@@ -68,6 +69,50 @@ def test_tag_mismatch_is_refused_before_archive_creation(release_repo, tmp_path)
     assert result.returncode != 0
     assert "does not match" in result.stderr
     assert not archive.exists()
+
+
+def test_package_and_project_numbers_must_agree(release_repo, tmp_path):
+    (release_repo / "src/jittersim/__init__.py").write_text('__version__ = "0.3.0"\n')
+    git(release_repo, "-c", "user.name=t", "-c", "user.email=t@example.com",
+        "commit", "-qam", "Change the package number")
+    archive = tmp_path / "release.tar.gz"
+    result = subprocess.run(["sh", str(BUILD), "HEAD", str(archive)], cwd=release_repo,
+                            capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "package version" in result.stderr
+    assert not archive.exists()
+
+
+def test_stable_release_is_not_replaced_by_its_development_build(tmp_path):
+    private, public = make_key(tmp_path / "keys")
+    root, config, code = (tmp_path / name for name in ("updates", "config", "code"))
+    config.mkdir()
+    code.mkdir()
+    updates.trust_key(public, config=config, root=root)
+    updates.atomic_json(code / ".jittersim-release.json", {"version": "0.2.0", "sequence": 100})
+    archive = signed_release(tmp_path, private, version="0.2.0.dev+0123456", sequence=101)
+    updates.stage_release(archive, root=root, code=code, config=config)
+    with pytest.raises(updates.UpdateError, match="older number"):
+        updates.request_update("0.2.0.dev+0123456", root=root, code=code, config=config,
+                               run=lambda *args: None)
+
+
+def test_root_execution_rechecks_the_installed_number(tmp_path):
+    private, public = make_key(tmp_path / "keys")
+    root, config, code = (tmp_path / name for name in ("updates", "config", "code"))
+    config.mkdir()
+    code.mkdir()
+    updates.trust_key(public, config=config, root=root)
+    archive = signed_release(tmp_path, private, version="0.2.0", sequence=101)
+    updates.stage_release(archive, root=root, code=code, config=config)
+    updates.request_update("0.2.0", root=root, code=code, config=config, run=lambda *args: None)
+    updates.atomic_json(code / ".jittersim-release.json", {"version": "0.3.0", "sequence": 100})
+    commands = []
+    with pytest.raises(updates.UpdateError, match="older number"):
+        updates.apply_update(root=root, code=code, config=config,
+                             run=lambda *args: commands.append(args))
+    assert commands == []
+    assert updates.update_status(root=root, code=code, config=config)["phase"] == "failed"
 
 
 def test_newer_sequence_cannot_install_a_lower_number(tmp_path):

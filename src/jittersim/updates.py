@@ -163,7 +163,24 @@ IMPORT_CHECK = (
     "jittersim.networking.access, jittersim.dashboard_access_cli"
 )
 INTERFACE = re.compile(r"[A-Za-z0-9_.:-]{1,15}\Z")
-VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+# A release is MAJOR.MINOR.PATCH. A build that is not tagged is NUMBER.dev+COMMIT.
+# Keep safe earlier labels readable during the first upgrade and recovery.
+VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+\-]{0,63}\Z")
+SEMANTIC_VERSION = re.compile(
+    r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\.dev\+[0-9a-f]{7,40})?\Z"
+)
+
+
+def version_key(version):
+    """Order versions by number. A dev build comes before the release of its number."""
+
+    if not isinstance(version, str) or len(version) > 64:
+        return None
+    match = SEMANTIC_VERSION.fullmatch(version)
+    if match is None:
+        return None
+    major, minor, patch, dev = match.groups()
+    return (int(major), int(minor), int(patch), 0 if dev else 1)
 
 
 def release_files(*, code, units, dispatcher):
@@ -735,6 +752,13 @@ def staged_problem(record, signers, *, root=UPDATE_ROOT, code=CODE_ROOT):
         return "The key that signed the staged release is no longer trusted."
     if record["sequence"] <= release_floor(root=root, code=code):
         return "The staged release is not newer than the installed release."
+    staged_key = version_key(record.get("version"))
+    installed_key = version_key(_record(code / ".jittersim-release.json").get("version"))
+    if staged_key is not None and installed_key is not None and staged_key < installed_key:
+        return (
+            "The staged release is an older number than the installed one. "
+            "Use Restore previous installation to go back."
+        )
     return None
 
 
