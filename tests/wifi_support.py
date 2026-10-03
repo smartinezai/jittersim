@@ -57,6 +57,10 @@ class WifiExecutor(FakeExecutor):
         args = command.arguments
         if "-g" in args:
             fields = args[args.index("-g") + 1].split(",")
+            if command.sensitive and command.expected_stdout is not None:
+                if self.settings[fields[0]] + "\n" != command.expected_stdout:
+                    raise CommandExecutionError("private networking command failed")
+                return CommandResult(0)
             if fields == ["GENERAL.CONNECTION"]:
                 return CommandResult(0, stdout=(self.active if args[-1] == "wlan0" else "") + "\n")
             name = args[-1]
@@ -66,7 +70,7 @@ class WifiExecutor(FakeExecutor):
             if values is None or (name == "jittersim-ap" and not self.exists):
                 raise CommandExecutionError("missing fixture profile")
             return CommandResult(0, stdout="".join(values.get(field, "") + "\n" for field in fields))
-        operation = next(name for name in ("modify", "down", "up", "clone", "delete") if name in args)
+        operation = next(name for name in ("modify", "down", "up", "clone", "delete", "edit") if name in args)
         self.calls[operation] = self.calls.get(operation, 0) + 1
         if (operation, self.calls[operation]) in self.failures:
             raise CommandExecutionError("fixture-wifi-password", stderr="fixture-wifi-password")
@@ -83,6 +87,8 @@ class WifiExecutor(FakeExecutor):
                 self.exists = False
             else:
                 self.backups.pop(args[-1], None)
+        elif operation == "edit":
+            self.settings["802-11-wireless-security.psk"] = command.stdin.splitlines()[1]
         elif operation == "modify":
             name = args[args.index("id") + 1]
             values = self.settings if name == "jittersim-ap" else self.backups[name]

@@ -1,6 +1,6 @@
 """Structured commands used by the networking execution boundary."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
 
@@ -15,10 +15,12 @@ class Command:
     executable: str
     arguments: Tuple[str, ...]
     purpose: str
-    stdin: Optional[str] = None
+    stdin: Optional[str] = field(default=None, repr=False)
     ignore_failure: bool = False
     timeout_seconds: Optional[float] = None
     timeout_is_success: bool = False
+    sensitive: bool = False
+    expected_stdout: Optional[str] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not self.executable or "/" in self.executable or " " in self.executable:
@@ -33,6 +35,13 @@ class Command:
             raise CommandError("timeout_seconds must be greater than 0 and no more than 60")
         if self.timeout_is_success and self.timeout_seconds is None:
             raise CommandError("timeout_is_success requires timeout_seconds")
+        if self.sensitive and (self.timeout_is_success or self.ignore_failure):
+            raise CommandError("sensitive commands must fail on errors or timeout")
+        if self.expected_stdout is not None and (
+            not self.sensitive or self.stdin is not None
+            or not 1 <= len(self.expected_stdout.encode()) <= 4096
+        ):
+            raise CommandError("expected output requires a bounded sensitive command")
 
     @property
     def argv(self) -> Tuple[str, ...]:
