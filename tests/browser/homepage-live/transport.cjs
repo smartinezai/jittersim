@@ -30,15 +30,17 @@ exports.startDocumentTransport = async () => {
     const publicKey = new X509Certificate(cert).publicKey.export({ type: "spki", format: "der" });
     const fingerprint = createHash("sha256").update(publicKey).digest("base64");
     const reads = [];
+    let admitted = 0;
     server = https.createServer({ key: await fs.readFile(key), cert, handshakeTimeout: 3000, maxHeaderSize: 8192 },
       (request, response) => {
         if (request.method !== "GET" || request.headers.host !== "example.org" ||
-            !["/", "/article"].includes(request.url) || reads.length >= 64) {
+            !["/", "/article"].includes(request.url) || admitted >= 64) {
           response.writeHead(404, { "Connection": "close" });
           response.end();
           return;
         }
-        reads.push(request.url);
+        admitted += 1;
+        response.once("finish", () => reads.push(request.url));
         response.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-store" });
         response.end("<h1>Controlled HTTPS test page</h1>");
       });
