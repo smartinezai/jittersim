@@ -30,7 +30,7 @@ from tests.unit.test_helper_access import apply_payload
 
 
 @contextmanager
-def helper(directory):
+def helper(directory, *, panic_guard=None):
     topology = Topology("eth0", "wlan0")
     manager = AccessManager(
         executor=AccessExecutor(directory),
@@ -38,13 +38,14 @@ def helper(directory):
         directory=directory,
         runtime_path=directory / "access-runtime.json",
     )
-    assert restore_access_at_start(manager)
     service = HelperService(
         NetworkApplier(executor=FakeExecutor(), topology=topology),
         active_plan_path=directory / "active-plan.json",
         access_manager=manager,
         gateway_state_path=directory / "gateway.json",
+        panic_guard=panic_guard,
     )
+    assert restore_access_at_start(manager, panic_stopped=service._panic_stop_latched)
     server = UnixHelperServer(directory / "helper.sock", service)
     thread = threading.Thread(target=server.serve_forever)
     thread.start()

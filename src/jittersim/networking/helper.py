@@ -25,6 +25,7 @@ from jittersim.config.models import ValidationError, normalize_domain
 from jittersim.engine.access import AccessPlan, access_from_payload
 from jittersim.engine.codec import PlanCodecError, plan_from_payload, plan_to_payload
 from jittersim.engine.plan import EVERYONE_ELSE_QUEUE_ID, NetworkPlan
+from jittersim.panic_guard import PanicGuard
 from jittersim.updates import UpdateError, request_update, stage_upload, update_status
 from jittersim.release_uploads import UploadBusy, prepare_lock
 from jittersim.request_workers import RequestWorkers, WorkersStillRunning
@@ -156,6 +157,7 @@ class HelperService:
         service_address_clock: Callable[[], float] = time.monotonic,
         gateway_state_path: Optional[Path] = None,
         access_manager: Optional[AccessManager] = None,
+        panic_guard: Optional[PanicGuard] = None,
     ) -> None:
         self._applier = applier
         self._active_plan_path = active_plan_path
@@ -194,6 +196,24 @@ class HelperService:
         self._next_reset_retry_at = 0.0
         self._gateway_state_error = False
         self._load_gateway_state()
+        self._panic_guard = panic_guard
+        self._panic_guard_error = False
+        if panic_guard is not None:
+            try:
+                guard = panic_guard.provision(gateway_state_path)
+                self._panic_stop_latched = guard["panic_stop_latched"]
+                self._panic_recovery_failed = guard["panic_recovery_failed"]
+                self._control_revision_required = guard["control_revision_required"]
+                if (self._panic_stop_latched and self._active_plan_path is not None
+                        and self._active_plan_path.exists()):
+                    self._reset_pending = True
+                    self._next_reset_retry_at = 0.0
+            except OSError:
+                LOGGER.exception("persistent Panic stop state could not be read")
+                self._panic_stop_latched = True
+                self._panic_recovery_failed = True
+                self._control_revision_required = True
+                self._panic_guard_error = True
         self._router_factory = router_factory or (
             lambda address, password: TG3442DERouter(address=address, password=password)
         )
@@ -230,6 +250,7 @@ class HelperService:
                     self._control_revision_required = True
                     self._panic_stop_latched = True
                     self._panic_recovery_failed = True
+                self._write_panic_guard()
                 self._write_gateway_state(durable=True)
                 reset = self._handle_reset()
                 access_ok = False
@@ -242,8 +263,11 @@ class HelperService:
                     LOGGER.exception("could not disable household restrictions")
                 failed = not reset["ok"] or not access_ok
                 saved = self._write_gateway_state(durable=True, panic_recovery_failed=failed)
+                saved = self._write_panic_guard(panic_recovery_failed=failed or not saved) and saved
                 with self._revision_lock:
                     self._panic_recovery_failed = failed or not saved
+                if not saved:
+                    self._write_panic_guard()
             finally:
                 self._network_lock.release()
             if not saved:
@@ -318,7 +342,6 @@ class HelperService:
                 "service_list_outages": True,
                 "protected_dns_capture": True,
                 "identified_release_uploads": True,
-                "control_intent_fence": True,
             }
         if action == "dashboard-access":
             if not self._access_lock.acquire(blocking=False):
@@ -644,6 +667,25 @@ class HelperService:
                     "reason": "control-changed"}
         return None
 
+    def _write_panic_guard(self, *, panic_recovery_failed=None):
+        if self._panic_guard is None:
+            return True
+        try:
+            self._panic_guard.write({
+                "version": 1,
+                "panic_stop_latched": self._panic_stop_latched,
+                "panic_recovery_failed": (self._panic_recovery_failed
+                                          if panic_recovery_failed is None
+                                          else panic_recovery_failed),
+                "control_revision_required": self._control_revision_required,
+            })
+            self._panic_guard_error = False
+            return True
+        except OSError:
+            self._panic_guard_error = True
+            LOGGER.exception("persistent Panic stop state could not be saved")
+            return False
+
     def _gateway_status(self) -> Dict[str, Any]:
         return {
             "mode_enabled": self._persistence_enabled,
@@ -656,7 +698,7 @@ class HelperService:
             "panic_recovery_failed": self._panic_recovery_failed,
             "reset_pending": self._reset_pending,
             "recovery_pending": self._recovery_pending,
-            "state_error": self._gateway_state_error,
+            "state_error": self._gateway_state_error or self._panic_guard_error,
             "control_revision": self._control_revision,
         }
 
@@ -1029,13 +1071,20 @@ class HelperService:
             self._gateway_state_error = False
         self._recovery_pending = False
         self._write_gateway_state(durable=explicit_apply)
-        if self._gateway_state_error and explicit_apply:
+        guard_saved = self._write_panic_guard() if explicit_apply else True
+        if (self._gateway_state_error or not guard_saved) and explicit_apply:
             self._panic_stop_latched = True
             self._panic_recovery_failed = True
             self._outage_stop_latched = True
             self._reset_pending = True
             self._next_reset_retry_at = 0.0
+            self._write_panic_guard()
             self._attempt_gateway_reset()
+            if self._access_manager is not None:
+                try:
+                    self._access_manager.disable()
+                except (OSError, ValueError, CommandExecutionError):
+                    LOGGER.exception("household cleanup failed after Panic state save failure")
             return {"ok": False, "error": "gateway recovery state could not be saved safely"}
         return {"ok": True, "action": "apply", "commands_run": report.commands_run}
 
@@ -2262,7 +2311,7 @@ def _clean_queue_impairment(raw: Any) -> Dict[str, Any]:
     return clean
 
 
-def restore_access_at_start(access: AccessManager) -> bool:
+def restore_access_at_start(access: AccessManager, *, panic_stopped=False) -> bool:
     """Restore the saved access rules and keep the helper alive when that fails.
 
     A failed restore leaves the test network closed behind the guard table. The
@@ -2270,7 +2319,10 @@ def restore_access_at_start(access: AccessManager) -> bool:
     """
 
     try:
-        access.restore()
+        if panic_stopped:
+            access.disable()
+        else:
+            access.restore()
     except Exception:
         LOGGER.exception(
             "Saved access rules were not restored. The test network stays closed. "
@@ -2303,7 +2355,6 @@ def run_helper(
     gateway_state_path = socket_path.parent / "gateway-state.json"
     access = AccessManager(executor=SubprocessExecutor(timeout_seconds=20), topology=topology,
                            runtime_path=socket_path.parent / "access-policy.json")
-    restore_access_at_start(access)
     service = HelperService(
         applier,
         router_factory=router_factory,
@@ -2311,7 +2362,13 @@ def run_helper(
         access_store=AccessStore(ACCESS_FILE, group_id=grp.getgrnam("jittersim").gr_gid),
         gateway_state_path=gateway_state_path,
         access_manager=access,
+        panic_guard=PanicGuard(),
     )
+    restored = restore_access_at_start(access, panic_stopped=service._panic_stop_latched)
+    if not restored and service._panic_stop_latched:
+        service._panic_recovery_failed = True
+        service._write_panic_guard()
+        service._write_gateway_state(durable=True)
     stopped = threading.Event()
 
     def maintain_access():
