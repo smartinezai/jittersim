@@ -36,9 +36,35 @@ function makeNode(tag) {
   return {
     tag, id: "", value: "", textContent: "", className: "", checked: false, title: "",
     type: "", disabled: false, children: [], listeners: new Map(), attributes: new Map(),
-    append(...items) {this.children.push(...items)},
-    appendChild(item) {this.children.push(item); return item},
-    replaceChildren(...items) {this.children = items},
+    append(...items) {items.forEach((item) => this.appendChild(item))},
+    appendChild(item) {
+      if (item.parentElement) item.remove();
+      item.parentElement = this;
+      this.children.push(item);
+      return item;
+    },
+    prepend(item) {this.insertBefore(item, this.children[0] || null)},
+    insertBefore(item, before) {
+      if (item.parentElement) item.remove();
+      item.parentElement = this;
+      const index = before === null ? this.children.length : this.children.indexOf(before);
+      assert.ok(index >= 0);
+      this.children.splice(index, 0, item);
+      return item;
+    },
+    remove() {
+      if (!this.parentElement) return;
+      const siblings = this.parentElement.children;
+      siblings.splice(siblings.indexOf(this), 1);
+      this.parentElement = null;
+    },
+    replaceChildren(...items) {
+      this.children.forEach((child) => {child.parentElement = null});
+      this.children = [];
+      this.append(...items);
+    },
+    querySelector(tag) {return this.children.find((child) => child.tag === tag) || null},
+    get lastChild() {return this.children[this.children.length - 1] || null},
     addEventListener(kind, callback) {this.listeners.set(kind, callback)},
     scrollIntoView() {},
     querySelectorAll(selector) {

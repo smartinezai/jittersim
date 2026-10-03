@@ -5795,42 +5795,66 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     function renderServiceCatalogue() {
       const container = element("service-list-catalogue");
-      const checked = new Set(
-        Array.from(container.querySelectorAll("input:checked")).map((input) => input.value)
-      );
-      container.replaceChildren();
-      const legend = document.createElement("legend");
-      legend.textContent = "Services";
-      container.appendChild(legend);
-      serviceCatalogue.forEach((service) => {
-        const label = document.createElement("label");
-        label.className = "quota-check";
-        const input = document.createElement("input");
-        input.type = "checkbox";
-        input.value = service.key;
-        input.checked = checked.has(service.key);
-        label.title = service.domains.join(", ");
-        label.append(input, document.createTextNode(" " + service.name));
-        container.appendChild(label);
+      const previous = Array.from(container.querySelectorAll("input"));
+      const active = previous.includes(document.activeElement) ? document.activeElement : null;
+      const activeIndex = previous.indexOf(active);
+      const existing = new Map(previous.map((input) => [input.value, input.parentElement]));
+      const retained = new Set(serviceCatalogue.map((service) => service.key));
+      previous.forEach((input) => {
+        if (!retained.has(input.value)) input.parentElement.remove();
       });
+      let legend = container.querySelector("legend");
+      if (!legend) {
+        legend = document.createElement("legend");
+        legend.textContent = "Services";
+        container.prepend(legend);
+      }
+      serviceCatalogue.forEach((service, index) => {
+        let label = existing.get(service.key);
+        if (!label) {
+          label = document.createElement("label");
+          label.className = "quota-check";
+          const input = document.createElement("input");
+          input.type = "checkbox";
+          input.value = service.key;
+          label.append(input, document.createTextNode(""));
+        }
+        const title = service.domains.join(", ");
+        if (label.title !== title) label.title = title;
+        const name = " " + service.name;
+        if (label.lastChild.textContent !== name) label.lastChild.textContent = name;
+        const position = container.children[index + 1] || null;
+        if (position !== label) container.insertBefore(label, position);
+      });
+      if (active) {
+        const current = Array.from(container.querySelectorAll("input"));
+        const target = active.isConnected ? active :
+          current[Math.min(activeIndex, current.length - 1)] || element("service-list-hostnames");
+        if (document.activeElement !== target) target.focus({ preventScroll: true });
+      }
     }
 
     function renderServiceListObserved() {
       const select = element("service-list-observed");
-      const names = observedNames;
       const previous = select.value;
-      select.replaceChildren();
-      const first = document.createElement("option");
-      first.value = "";
-      first.textContent = names.size ? "Choose a name" : "No names seen yet";
-      select.appendChild(first);
-      Array.from(names).sort().forEach((name) => {
-        const option = document.createElement("option");
-        option.value = name;
-        option.textContent = name;
-        select.appendChild(option);
+      const names = Array.from(observedNames).sort();
+      const retained = new Set(["", ...names]);
+      const existing = new Map(Array.from(select.options).map((option) => [option.value, option]));
+      Array.from(select.options).forEach((option) => {
+        if (!retained.has(option.value)) option.remove();
       });
-      if (names.has(previous)) select.value = previous;
+      ["", ...names].forEach((name, index) => {
+        let option = existing.get(name);
+        if (!option) {
+          option = document.createElement("option");
+          option.value = name;
+        }
+        const text = name || (names.length ? "Choose a name" : "No names seen yet");
+        if (option.textContent !== text) option.textContent = text;
+        const position = select.options[index] || null;
+        if (position !== option) select.insertBefore(option, position);
+      });
+      select.value = retained.has(previous) ? previous : "";
     }
 
     function renderServiceLists(data) {

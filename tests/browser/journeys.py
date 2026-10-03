@@ -11,7 +11,7 @@ from pathlib import Path
 from playwright.sync_api import expect, sync_playwright
 
 from tests.browser.phone import close_controls, sidebar_control
-
+from tests.browser.service_list_focus import check_service_list_contexts
 
 ROUTER_LINK = re.compile("^Router and Wi-Fi")
 DEVICES_LINK = re.compile("^Devices")
@@ -577,6 +577,7 @@ def run():
                 page.screenshot(
                     path="test-results/experience-overview-phone.png", full_page=False
                 )
+                check_service_list_contexts(browser, f"http://127.0.0.1:{port}/")
                 check_wifi_recovery(page)
                 page.set_viewport_size({"width": 1440, "height": 1000})
                 page.screenshot(path="test-results/wifi-recovery-desktop.png", full_page=True)
