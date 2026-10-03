@@ -119,3 +119,8 @@ Add Git, the OpenSSH client and OpenSSL to that image so the configured command 
 required tools. Rebuild the image without cache and run its full test command.
 This changes the test image only. Retain the missing-tool finding in the release
 evidence and verify the exact final source before publication.
+
+The root test image also needs the jittersim role group that the production
+installer creates. Declare it in the image and create it only if absent in
+isolated root matrix environments. Keep the real certificate owner and mode
+checks. Ordinary non-root CI does not require this role setup.
