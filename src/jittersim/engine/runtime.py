@@ -810,7 +810,7 @@ class RuntimeScheduler:
                 self._last_device_counters = dict.fromkeys(self._last_device_counters, 0)
                 self._log_plan_recovery(self._clear_plan_failure())
                 if not active_repository.record_schedule_result(success=True):
-                    self._honor_external_reset(repository=active_repository, now=current_time)
+                    self.pause()
                     return False
                 self._record_activity(repository=active_repository, states=states, now=current_time)
                 return True
@@ -818,6 +818,8 @@ class RuntimeScheduler:
             accepted, applied = self.publish_if_current(halts_at_start, publish)
             if not accepted and self.halt_count != halts_at_start:
                 self._undo_overtaken_apply(active_repository)
+            elif accepted and not applied:
+                self._honor_external_reset(repository=active_repository, now=current_time)
             return bool(accepted and applied)
         except (HelperClientError, PlanError, StorageError, OSError) as error:
             if not self.can_apply(halts_at_start):

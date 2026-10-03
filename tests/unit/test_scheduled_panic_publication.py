@@ -71,3 +71,43 @@ def test_failed_scheduled_apply_after_panic_cannot_publish_schedule_failure():
         assert state.last_action == "reset" and state.last_result == "success"
         assert helper.resets == 1
         assert not scheduler.is_active
+
+
+def test_external_reset_helper_wait_does_not_hold_panic_admission_lock():
+    import threading
+
+    with ConfigRepository(":memory:") as repository:
+        helper = LateHelper()
+        scheduler = RuntimeScheduler(database_path=":memory:", helper_client=helper)
+        helper.scheduler = scheduler
+        entered, release, halted = threading.Event(), threading.Event(), threading.Event()
+        results = []
+
+        def reset():
+            entered.set()
+            assert release.wait(3)
+            return {"commands_run": 1}
+
+        def run():
+            results.append(scheduler.tick(repository=repository))
+
+        with (
+            patch.object(scheduler, "start"),
+            patch.object(repository, "record_schedule_result", return_value=False),
+            patch.object(helper, "reset", side_effect=reset),
+        ):
+            scheduler.activate(applied_payload=None)
+            worker = threading.Thread(target=run)
+            worker.start()
+            assert entered.wait(1)
+            panic = threading.Thread(target=lambda: (scheduler.halt(), halted.set()))
+            panic.start()
+            try:
+                assert halted.wait(0.3), "Panic waited for external helper I/O under its state lock"
+                assert not scheduler.is_active
+            finally:
+                release.set()
+                worker.join(3)
+                panic.join(3)
+            assert not worker.is_alive() and not panic.is_alive()
+        assert results == [False]
