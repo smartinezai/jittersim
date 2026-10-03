@@ -293,10 +293,25 @@
     const privateDataPanelIds = [
       "profiles-json", "devices-json", "plan", "state", "policies",
       "connected-devices", "unaffected-devices", "uplink-details", "general-profile-status",
-      "saved-profiles", "device-table"
+      "saved-profiles", "device-table", "diagnostics-json", "action-history",
+      "random-website-status"
     ];
 
     const privateDataLockHooks = [];
+
+    function clearAdminToolsUi() {
+      randomWebsiteAnalyticsRequestVersion += 1;
+      element("random-website-rows").replaceChildren();
+      const devices = element("random-website-device");
+      devices.replaceChildren();
+      const allDevices = document.createElement("option");
+      allDevices.value = "";
+      allDevices.textContent = "All devices";
+      devices.appendChild(allDevices);
+      element("random-website-status").className = "analytics-status";
+    }
+
+    privateDataLockHooks.push(clearAdminToolsUi);
 
     function setDashboardUnlocked(allowed) {
       element("private-dashboard").hidden = !allowed;

@@ -29,6 +29,8 @@ def test_token_checks_and_edits_release_all_private_loading_states():
       const assert = require("node:assert/strict");
       const nodes = new Map();
       const listeners = new Map();
+      const document = {createElement: tag => ({tagName: tag.toUpperCase()})};
+      let randomWebsiteAnalyticsRequestVersion = 0;
       let adminTokenVerified = false;
       let adminTokenRevision = 0;
       let messageSerial = 0;  // showMessage is stubbed here so nothing else ever speaks
@@ -41,7 +43,9 @@ def test_token_checks_and_edits_release_all_private_loading_states():
       function element(id) {
         if (!nodes.has(id)) nodes.set(id, {
           value: "", textContent: "pending", className: "", disabled: false,
-          attributes: new Map(),
+          attributes: new Map(), children: [{textContent: "private result"}],
+          replaceChildren() {this.children = []; this.textContent = ""},
+          appendChild(child) {this.children.push(child)},
           focus() {},
           setAttribute(key, value) {this.attributes.set(key, value)},
           removeAttribute(key) {this.attributes.delete(key)},
@@ -70,8 +74,12 @@ def test_token_checks_and_edits_release_all_private_loading_states():
         const message = element("profiles-json").textContent;
         assert.ok(message.length > 0);
         for (const id of ["devices-json", "plan", "state", "policies",
-                          "connected-devices", "unaffected-devices", "uplink-details"])
+                          "connected-devices", "unaffected-devices", "uplink-details",
+                          "diagnostics-json", "action-history", "random-website-status"])
           assert.equal(element(id).textContent, message, id);
+        assert.equal(element("random-website-rows").children.length, 0);
+        assert.deepEqual(element("random-website-device").children.map(child => child.textContent),
+                         ["All devices"]);
         assert.equal(element("runtime-summary").textContent, message);
         assert.ok(element("runtime-summary").className.includes("unknown"));
         for (const id of ["connected-count", "uplink-state"])
