@@ -5,6 +5,7 @@ import re
 import selectors
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
@@ -157,19 +158,25 @@ def check_page_loaded_during_the_outage(page):
 
 def check_lost_acceptance_is_confirmed_without_another_write(page):
     writes = []
+    completed = []
     def lose_reply(route):
         writes.append(route.request.post_data_json)
         response = route.fetch(timeout=5000, max_retries=0)
         assert response.status == 202
         assert response.json()["operation_id"] == route.request.post_data_json["request_id"]
         route.abort("connectionfailed")
+        completed.append(True)
     page.route("**/api/access-point/reset-name", lose_reply)
     page.once("dialog", lambda dialog: dialog.accept())
     page.locator("#reset-wifi-name").click()
     expect(page.locator("#wifi-change-banner")).to_contain_text("Wi-Fi change finished", timeout=15000)
+    deadline = time.monotonic() + 5
+    while not completed and time.monotonic() < deadline:
+        page.wait_for_timeout(50)
+    assert completed == [True], "The accepted write reply was not dropped completely"
     assert len(writes) == 1
     assert writes[0]["request_id"]
-    page.unroute("**/api/access-point/reset-name")
+    page.unroute("**/api/access-point/reset-name", lose_reply)
     page.locator("#wifi-change-banner").get_by_role("button", name="Dismiss").click()
 
 
