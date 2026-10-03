@@ -122,10 +122,17 @@
     function featureRandomness(prefix, feature) {
       const variation = element(prefix + "-" + feature + "-random-variation");
       const enabled = element(prefix + "-" + feature + "-random-enabled");
-      return variation && enabled ? {
+      const mode = element(prefix + "-" + feature + "-random-mode");
+      const result = variation && enabled ? {
         variation_percent: Number(variation.value),
         enabled_probability: Number(enabled.value)
       } : { variation_percent: 0, enabled_probability: 100 };
+      if (mode && mode.value === "range") {
+        result.mode = "range";
+        result.minimum = optionalNumber(prefix + "-" + feature + "-random-minimum");
+        result.maximum = optionalNumber(prefix + "-" + feature + "-random-maximum");
+      }
+      return result;
     }
 
     function impairment(prefix) {
@@ -5625,6 +5632,7 @@
           if (typeof syncImpact === "function") syncImpact();
           if (typeof loadBrand === "function") loadBrand();
           if (typeof resumeWifiChangeNotice === "function") resumeWifiChangeNotice();
+          if (typeof scheduleProfileRangePreview === "function") scheduleProfileRangePreview();
         } else {
           adminTokenVerified = false;
           adminTokenRejected = true;
@@ -6023,8 +6031,12 @@
           const randomness = direction[feature + "_randomness"];
           set(prefix + "-" + feature + "-random-variation", randomness.variation_percent);
           set(prefix + "-" + feature + "-random-enabled", randomness.enabled_probability);
+          set(prefix + "-" + feature + "-random-mode", randomness.mode || "relative");
+          set(prefix + "-" + feature + "-random-minimum", randomness.minimum);
+          set(prefix + "-" + feature + "-random-maximum", randomness.maximum);
         });
       });
+      if (typeof scheduleProfileRangePreview === "function") scheduleProfileRangePreview();
     }
 
     let patternHistoryRequest = 0;
@@ -6089,6 +6101,7 @@
         random_mode: element("profile-random-mode").value,
         reroll_interval_seconds: Number(element("profile-reroll").value),
         reroll_interval_randomness: {
+          ...keep("reroll_interval_randomness"),
           variation_percent: Number(element("profile-reroll-variation").value),
           enabled_probability: base ? base.reroll_interval_randomness.enabled_probability : 100
         },
@@ -6101,6 +6114,7 @@
         website_mode: element("profile-website-mode").value,
         website_domains: commaList("profile-website-domains"),
         website_randomness: {
+          ...keep("website_randomness"),
           variation_percent: base ? base.website_randomness.variation_percent : 0,
           enabled_probability: Number(element("profile-website-enabled").value)
         }
@@ -6374,6 +6388,135 @@
       element("profile-form").reset();
       resetProfileEditing();
     });
+
+
+    const profileRangeFeatures = ["delay", "jitter", "loss", "bandwidth", "reorder", "duplicate", "corrupt"];
+    let profileRangeTimer = null;
+    let profileRangeRequest = 0;
+    let profileRangeValues = null;
+
+    function profileRangeText(value, unit) {
+      if (value === null) return "no bandwidth limit";
+      return new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(value)
+        + (unit === "%" ? "%" : " " + unit);
+    }
+
+    function updateProfileRangeControls() {
+      const off = Number(element("profile-reroll").value) <= 0;
+      element("profile-reroll-variation").disabled = off;
+      element("profile-website-enabled").disabled = off;
+      ["upload", "download"].forEach((direction) => {
+        profileRangeFeatures.forEach((feature) => {
+          const stem = direction + "-" + feature + "-random";
+          const modeControl = element(stem + "-mode");
+          const mode = modeControl.value;
+          const custom = mode === "range";
+          const minimum = element(stem + "-minimum");
+          const maximum = element(stem + "-maximum");
+          if (custom && modeControl.dataset.previousMode !== "range"
+              && minimum.value === "" && maximum.value === "") {
+            const cached = profileRangeValues && profileRangeValues[direction][feature];
+            const base = element(direction + "-" + feature).value;
+            const matching = cached && cached.mode === "relative" && cached.base === (base === "" ? null : Number(base))
+              && cached.variation_percent === Number(element(stem + "-variation").value);
+            if (matching && cached.minimum !== null) {
+              minimum.value = cached.minimum;
+              maximum.value = cached.maximum;
+            } else if (base !== "") {
+              minimum.value = base;
+              maximum.value = base;
+            }
+          }
+          modeControl.dataset.previousMode = mode;
+          minimum.required = custom;
+          maximum.required = custom;
+          element(stem + "-bounds").hidden = !custom;
+          element(stem + "-relative-label").hidden = custom;
+          ["mode", "variation", "enabled", "minimum", "maximum"].forEach((field) => {
+            element(stem + "-" + field).disabled = off || (field === "variation" && custom)
+              || ((field === "minimum" || field === "maximum") && !custom);
+          });
+          minimum.setCustomValidity(custom && Number(minimum.value) > Number(maximum.value)
+            ? "Minimum must not exceed maximum." : "");
+        });
+      });
+    }
+
+    async function refreshProfileRangePreview(requestNumber) {
+      if (!adminTokenVerified) return;
+      try {
+        const data = await request("/api/profiles/ranges", "POST", {
+          upload: impairment("upload"), download: impairment("download")
+        });
+        if (requestNumber !== profileRangeRequest || !adminTokenVerified) return;
+        profileRangeValues = data.ranges;
+        const off = Number(element("profile-reroll").value) <= 0;
+        ["upload", "download"].forEach((direction) => {
+          profileRangeFeatures.forEach((feature) => {
+            const value = data.ranges[direction][feature];
+            const output = element(direction + "-" + feature + "-random-preview");
+            const base = profileRangeText(value.base, value.unit);
+            let message;
+            if (off) {
+              message = "Rerolls off. Base value: " + base + ". Saved randomness returns when rerolls are enabled.";
+            } else if (value.enabled_probability === 0 || value.minimum === null) {
+              message = "Starts at " + base + ". After the first reroll: off.";
+            } else {
+              const range = value.minimum === value.maximum
+                ? "fixed at " + profileRangeText(value.minimum, value.unit)
+                : profileRangeText(value.minimum, value.unit) + "–" + profileRangeText(value.maximum, value.unit);
+              message = "Starts at " + base + ". After the first reroll: " + range + ". "
+                + value.enabled_probability + "% chance active per interval. Step "
+                + profileRangeText(value.step, value.unit) + ".";
+              if (value.minimum === value.maximum && element(direction + "-" + feature + "-random-mode").value !== "range"
+                  && Number(element(direction + "-" + feature + "-random-variation").value) > 0) {
+                message += " Variation is too small to change this value.";
+              }
+            }
+            if (feature === "reorder") message += " Applies only while delay is above 0 ms.";
+            if (output.textContent !== message) output.textContent = message;
+          });
+        });
+        element("profile-range-status").textContent = off
+          ? "Rerolls are off for ordinary profiles. Saved settings are preserved."
+          : "Value ranges updated.";
+      } catch (error) {
+        if (requestNumber !== profileRangeRequest || !adminTokenVerified) return;
+        element("profile-range-status").textContent = "Check the value range settings.";
+        ["upload", "download"].forEach((direction) => {
+          profileRangeFeatures.forEach((feature) => {
+            element(direction + "-" + feature + "-random-preview").textContent = "Check the values: " + error.message;
+          });
+        });
+      }
+    }
+
+    function scheduleProfileRangePreview() {
+      updateProfileRangeControls();
+      if (!adminTokenVerified) {
+        element("profile-range-status").textContent = "Sign in to preview value ranges.";
+        return;
+      }
+      element("profile-range-status").textContent = "Updating value ranges…";
+      ["upload", "download"].forEach((direction) => {
+        profileRangeFeatures.forEach((feature) => {
+          element(direction + "-" + feature + "-random-preview").textContent = "Updating value range…";
+        });
+      });
+      clearTimeout(profileRangeTimer);
+      const requestNumber = ++profileRangeRequest;
+      profileRangeTimer = setTimeout(() => refreshProfileRangePreview(requestNumber), 250);
+    }
+
+    element("profile-form").addEventListener("input", scheduleProfileRangePreview);
+    element("profile-form").addEventListener("change", scheduleProfileRangePreview);
+    element("profile-form").addEventListener("reset", () => {
+      profileRangeValues = null;
+      ++profileRangeRequest;
+      clearTimeout(profileRangeTimer);
+      setTimeout(scheduleProfileRangePreview, 0);
+    });
+    scheduleProfileRangePreview();
 
     element("device-form").addEventListener("submit", async (event) => {
       event.preventDefault();

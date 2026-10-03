@@ -1,6 +1,8 @@
 """Validated domain objects used by the jittersim control plane."""
 
+import math
 import re
+from decimal import Decimal
 from dataclasses import dataclass
 from hashlib import sha256
 from ipaddress import AddressValueError, IPv4Address, IPv4Network, ip_address
@@ -22,6 +24,17 @@ _RFC1918_NETWORKS = (
     IPv4Network("192.168.0.0/16"),
 )
 IPv4Input = Union[str, IPv4Address]
+Number = Union[int, float]
+# Field, lower bound, upper bound, decimal places and displayed unit.
+FEATURE_LIMITS = {
+    "delay": ("delay_ms", 0, 60_000, 0, "ms"),
+    "jitter": ("jitter_ms", 0, 60_000, 0, "ms"),
+    "bandwidth": ("bandwidth_kbit", 1, 1_000_000, 0, "kbit/s"),
+    "loss": ("loss_percent", 0, 100, 0, "%"),
+    "reorder": ("reorder_percent", 0, 100, 0, "%"),
+    "duplicate": ("duplicate_percent", 0, 100, 0, "%"),
+    "corrupt": ("corrupt_percent", 0, 100, 0, "%"),
+}
 
 
 def time_quota_counter_id(quota_id: str) -> str:
@@ -60,6 +73,18 @@ def _validate_number(
 
 def _validate_percent(value: int, field_name: str) -> int:
     return _validate_number(value, field_name, minimum=0, maximum=100)
+
+
+def _validate_decimal_number(value: Number, field_name: str, minimum: int,
+                             maximum: int, places: int = 2) -> Number:
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not minimum <= value <= maximum or not math.isfinite(value)):
+        raise ValidationError(f"{field_name} must be a finite number between {minimum} and {maximum}")
+    scaled = Decimal(str(value)) * (10 ** places)
+    if scaled != scaled.to_integral_value():
+        step = "a whole number" if places == 0 else "in steps of 0.01"
+        raise ValidationError(f"{field_name} must be {step}")
+    return value
 
 
 def _normalize_string_list(values: Tuple[str, ...], field_name: str) -> Tuple[str, ...]:
@@ -136,12 +161,25 @@ def _normalize_domain_list(values: Tuple[str, ...], field_name: str) -> Tuple[st
 class Randomness:
     """Variation and enablement controls for one periodically rerolled value."""
 
-    variation_percent: int = 0
+    variation_percent: Number = 0
     enabled_probability: int = 100
+    mode: str = "relative"
+    minimum: Optional[Number] = None
+    maximum: Optional[Number] = None
 
     def __post_init__(self) -> None:
-        _validate_percent(self.variation_percent, "variation_percent")
+        _validate_decimal_number(self.variation_percent, "variation_percent", 0, 100)
         _validate_percent(self.enabled_probability, "enabled_probability")
+        if self.mode not in ("relative", "range"):
+            raise ValidationError("randomness mode must be relative or range")
+        if self.mode == "relative":
+            if self.minimum is not None or self.maximum is not None:
+                raise ValidationError("relative variation cannot also contain range endpoints")
+        else:
+            _validate_decimal_number(self.minimum, "range minimum", 0, 1_000_000)
+            _validate_decimal_number(self.maximum, "range maximum", 0, 1_000_000)
+            if self.minimum > self.maximum:
+                raise ValidationError("range minimum must not exceed maximum")
 
 
 def _parse_test_address(value: IPv4Input) -> IPv4Address:
@@ -197,6 +235,10 @@ class Impairment:
         ):
             if not isinstance(value, Randomness):
                 raise ValidationError(f"{field_name} must be a Randomness")
+            if value.mode == "range":
+                _, lower, upper, places, _ = FEATURE_LIMITS[field_name.removesuffix("_randomness")]
+                _validate_decimal_number(value.minimum, f"{field_name} minimum", lower, upper, places)
+                _validate_decimal_number(value.maximum, f"{field_name} maximum", lower, upper, places)
 
 
 @dataclass(frozen=True)
@@ -249,6 +291,8 @@ class Profile:
         ):
             if not isinstance(value, Randomness):
                 raise ValidationError(f"{field_name} must be a Randomness")
+            if value.mode != "relative":
+                raise ValidationError(f"{field_name} does not support a custom value range")
         if self.website_mode not in ("unrestricted", "allow_only"):
             raise ValidationError("website_mode is not supported")
         object.__setattr__(self, "website_domains", _normalize_domain_list(self.website_domains, "website_domains"))

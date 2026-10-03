@@ -3,12 +3,13 @@
 import json
 import sqlite3
 import threading
-from dataclasses import asdict, replace
+from dataclasses import replace
 
 import pytest
 
 from jittersim.api.server import ControlServer
 from jittersim.config.models import Impairment, Profile
+from jittersim.config.payloads import profile_payload
 from jittersim.config.storage import ConfigRepository, StorageError
 from jittersim.config.workflows import WorkflowStore
 
@@ -79,7 +80,7 @@ def test_stale_allowlist_action_requires_confirmation_without_changing_saved_sta
 
     assert status == 409
     assert data["code"] == "allow_only_confirmation_required"
-    assert data["profile"] == json.loads(json.dumps(asdict(before[0])))
+    assert data["profile"] == json.loads(json.dumps(profile_payload(before[0])))
     assert snapshot(repository) == before
 
 
@@ -96,7 +97,7 @@ def test_deliberate_confirmation_restricts_the_profile_and_preserves_other_field
         names += ("second.example",)
     expected = replace(PROFILE, website_mode="allow_only", website_domains=names)
     assert repository.get_profile("slow") == expected
-    assert data["profile"] == json.loads(json.dumps(asdict(expected)))
+    assert data["profile"] == json.loads(json.dumps(profile_payload(expected)))
     assert repository.get_runtime_state().configuration_version == (
         before[1].configuration_version + 1
     )

@@ -4,6 +4,7 @@ from collections import Counter
 from dataclasses import asdict, replace
 from typing import Any, Dict, Iterable
 
+from .payloads import profile_payload
 from .models import MAX_UNAFFECTED_DEVICES, SavedSettings
 from .adblocking import allowed_domains, blocking_macs
 
@@ -39,7 +40,7 @@ def settings_to_payload(settings: SavedSettings, *, exported_at: int) -> Dict[st
         "persist_profiles_after_gateway_outage": (
             settings.persist_profiles_after_gateway_outage
         ),
-        "profiles": [_json_values({key: value for key, value in asdict(profile).items()
+        "profiles": [_json_values({key: value for key, value in profile_payload(profile).items()
             if key != "homepage_bounce_percent" or value != 0}) for profile in settings.profiles],
         "devices": [
             {

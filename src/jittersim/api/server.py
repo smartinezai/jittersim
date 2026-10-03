@@ -55,6 +55,8 @@ from jittersim.config.device_names import (
 )
 from jittersim.config.domain_labels import group_domain, label_domain, seen_with
 from jittersim.config.exemptions import AddressMove, UnaffectedDevice, normalize_exempt_mac
+from jittersim.config.payloads import impairment_payload, profile_payload
+from jittersim.engine.randomizer import impairment_range_preview
 from jittersim.config.models import (
     MAX_LISTED_DOMAINS,
     AccessOptions,
@@ -169,6 +171,7 @@ WRITE_PATHS = frozenset(
         "/api/homepage/pairing-code",
         "/api/homepage/revoke",
         "/api/profiles",
+        "/api/profiles/ranges",
         "/api/general-profile",
         "/api/general-profile/stop",
         "/api/profiles/delete",
@@ -368,11 +371,11 @@ DASHBOARD_CONTENT_SECURITY_POLICY = "; ".join(
 
 
 def _impairment_payload(impairment: Impairment) -> Dict[str, Any]:
-    return asdict(impairment)
+    return impairment_payload(impairment)
 
 
 def _profile_payload(profile: Profile) -> Dict[str, Any]:
-    return asdict(profile)
+    return profile_payload(profile)
 
 
 def _device_display_name(
@@ -1937,6 +1940,8 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
 
     def write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
+        if path == "/api/profiles/ranges":
+            return self._write_response_for(path, payload)
         control_intent = None
         live_access = path in ACCESS_WRITES and path not in (
             "/api/normal-access", "/api/site-blocks", "/api/site-blocks/delete"
@@ -1977,6 +1982,16 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
 
     def _write_response_for(self, path: str, payload: Dict[str, Any], *, control_intent=None) -> Tuple[int, str, bytes]:
         """Handle one supported configuration or network action request."""
+
+        if path == "/api/profiles/ranges":
+            try:
+                ranges = {
+                    direction: impairment_range_preview(_impairment_from_payload(payload.get(direction)))
+                    for direction in ("upload", "download")
+                }
+            except (TypeError, ValueError) as error:
+                return _bad_request("invalid value range", error)
+            return HTTPStatus.OK, "application/json", _json_bytes({"ranges": ranges})
 
         if path == "/api/gateway-persistence":
             enabled = payload.get("persistence_enabled")

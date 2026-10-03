@@ -397,6 +397,9 @@
          The grid has as many columns as fit and a fixed width could run past the card edge. */
       .fields > label > .field-label .help-icon::after { right: 0; width: auto; }
     }
+    .range-preview { overflow-wrap: anywhere; }
+    .randomness-field > label { display: block; margin-bottom: 12px; }
+    .randomness-field > label > select { display: block; width: 100%; margin-top: 6px; }
     .randomness-fields {
       display: grid;
       gap: 0.75rem;

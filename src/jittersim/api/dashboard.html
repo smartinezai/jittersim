@@ -367,7 +367,7 @@
             <input id="upload-jitter" type="number" min="0" value="0" required>
           </label>
           <label><span class="field-label">Loss (%)<span class="help-icon" tabindex="0" role="img" aria-label="Upload loss help" data-help="The chance that a packet is lost on the way. 5% means about 1 packet in 20 never arrives. Many apps notice and send it again which slows them down.">?</span></span>
-            <input id="upload-loss" type="number" min="0" max="100" value="0" required>
+            <input id="upload-loss" type="number" min="0" max="100" value="0" required step="1">
           </label>
           <label>
             <span class="field-label">Loss bursts (packets)<span
@@ -390,7 +390,7 @@
             <input id="download-jitter" type="number" min="0" value="0" required>
           </label>
           <label><span class="field-label">Loss (%)<span class="help-icon" tabindex="0" role="img" aria-label="Download loss help" data-help="The chance that a packet is lost on the way. 5% means about 1 packet in 20 never arrives. Many apps notice and send it again which slows them down.">?</span></span>
-            <input id="download-loss" type="number" min="0" max="100" value="0" required>
+            <input id="download-loss" type="number" min="0" max="100" value="0" required step="1">
           </label>
           <label>
             <span class="field-label">Loss bursts (packets)<span
@@ -406,13 +406,13 @@
         </div>
         <details>
           <summary>Randomness, outages and website access</summary>
-          <p class="form-note">Values are rerolled at each interval. Hover a question mark for an explanation. A 200 ms value with 30% variation can be rerolled anywhere from 140 to 260 ms. Enabled chance controls whether that feature is active for the interval.</p>
+          <p class="form-note">Choose a relative variation or a value range for each feature. A 200 ms value with 30% variation gives a range of 140 to 260 ms. Ordinary profiles start with their base values and choose new values after the first reroll interval. A reroll interval of 0 keeps their base values fixed. Progressions calculate changing values separately.</p>
           <div class="fields">
             <label><span class="field-label">Reroll every (seconds)<span class="help-icon" tabindex="0" role="img" aria-label="Reroll interval help" data-help="The base time between new random values. Set this to 0 to keep the saved values fixed.">?</span></span>
               <input id="profile-reroll" type="number" min="0" value="0">
             </label>
             <label><span class="field-label">Interval variation (%)<span class="help-icon" tabindex="0" role="img" aria-label="Interval variation help" data-help="The reroll interval can move this percentage below or above the base interval. For example, 20% of 5 minutes means 4 to 6 minutes.">?</span></span>
-              <input id="profile-reroll-variation" type="number" min="0" max="100" value="0">
+              <input id="profile-reroll-variation" type="number" min="0" max="100" step="0.01" value="0">
             </label>
             <label><span class="field-label">Homepage bounce chance (%)<span class="help-icon" tabindex="0" role="img" aria-label="Homepage bounce help" data-help="The chance that an explicit test action in a paired Chrome extension opens the same site’s home page. Saving does not change an applied effect. Apply the profile after saving.">?</span></span>
               <input id="profile-homepage-chance" type="number" min="0" max="100" step="1" value="0">
@@ -450,119 +450,204 @@
               <input id="profile-website-enabled" type="number" min="0" max="100" value="100">
             </label>
           </div>
+          <p class="form-note" id="profile-range-status" role="status">Rerolls are off for ordinary profiles.</p>
           <h3>Upload variation</h3>
-          <p class="form-note">Each card controls one feature. Value variation changes the base value. Enabled chance decides whether the feature is used after a reroll.</p>
+          <p class="form-note">Each card shows the values it can apply. Chance active decides whether the feature applies for the whole interval. Packet percentages support steps of 0.01%.</p>
           <div class="fields">
-            <label><span class="field-label">Reorder (%)<span class="help-icon" tabindex="0" role="img" aria-label="Upload reorder help" data-help="The chance that a packet skips the delay and arrives ahead of packets sent before it. It does nothing unless the Delay in the same direction is above 0. Jitter alone is not enough.">?</span></span> <input id="upload-reorder" type="number" min="0" max="100" value="0"></label>
-            <label><span class="field-label">Duplicate (%)<span class="help-icon" tabindex="0" role="img" aria-label="Upload duplicate help" data-help="The chance that a packet is delivered twice. Real networks do this occasionally and some apps handle it badly.">?</span></span> <input id="upload-duplicate" type="number" min="0" max="100" value="0"></label>
-            <label><span class="field-label">Corrupt (%)<span class="help-icon" tabindex="0" role="img" aria-label="Upload corrupt help" data-help="The chance that a packet arrives with one damaged bit. Most devices spot the damage and throw the packet away so it behaves much like loss.">?</span></span> <input id="upload-corrupt" type="number" min="0" max="100" value="0"></label>
+            <label><span class="field-label">Reorder (%)<span class="help-icon" tabindex="0" role="img" aria-label="Upload reorder help" data-help="The chance that a packet skips the delay and arrives ahead of packets sent before it. It does nothing unless the Delay in the same direction is above 0. Jitter alone is not enough.">?</span></span> <input id="upload-reorder" type="number" min="0" max="100" value="0" step="1"></label>
+            <label><span class="field-label">Duplicate (%)<span class="help-icon" tabindex="0" role="img" aria-label="Upload duplicate help" data-help="The chance that a packet is delivered twice. Real networks do this occasionally and some apps handle it badly.">?</span></span> <input id="upload-duplicate" type="number" min="0" max="100" value="0" step="1"></label>
+            <label><span class="field-label">Corrupt (%)<span class="help-icon" tabindex="0" role="img" aria-label="Upload corrupt help" data-help="The chance that a packet arrives with one damaged bit. Most devices spot the damage and throw the packet away so it behaves much like loss.">?</span></span> <input id="upload-corrupt" type="number" min="0" max="100" value="0" step="1"></label>
           </div>
           <div class="randomness-fields">
-            <div class="randomness-field">
-              <div class="randomness-title">Delay <span class="help-icon" tabindex="0" role="img" aria-label="Delay randomness help" data-help="Variation changes the base delay up or down. Enabled chance controls whether delay is active for the interval.">?</span></div>
+            <div class="randomness-field" id="upload-delay-random-card">
+              <div class="randomness-title">Delay <span class="help-icon" tabindex="0" role="img" aria-label="Delay randomness help" data-help="Relative variation changes the base delay up or down. Chance active controls whether delay is active for the interval.">?</span></div>
+              <label>Value method<select id="upload-delay-random-mode" aria-describedby="upload-delay-random-preview"><option value="relative">Percentage variation</option><option value="range">Custom range</option></select></label>
               <div class="randomness-inputs">
-                <label>Value variation (%)<input id="upload-delay-random-variation" type="number" min="0" max="100" value="0"></label>
-                <label>Enabled chance (%)<input id="upload-delay-random-enabled" type="number" min="0" max="100" value="100"></label>
+                <label id="upload-delay-random-relative-label">Variation ± (% of base)<input id="upload-delay-random-variation" aria-describedby="upload-delay-random-preview" type="number" min="0" max="100" step="0.01" value="0"></label>
+                <label>Chance active per interval (%)<input id="upload-delay-random-enabled" aria-describedby="upload-delay-random-preview" type="number" min="0" max="100" value="100"></label>
               </div>
+              <div class="randomness-inputs" id="upload-delay-random-bounds" hidden>
+                <label>Minimum (ms)<input id="upload-delay-random-minimum" aria-describedby="upload-delay-random-preview" type="number" min="0" max="60000" step="1"></label>
+                <label>Maximum (ms)<input id="upload-delay-random-maximum" aria-describedby="upload-delay-random-preview" type="number" min="0" max="60000" step="1"></label>
+              </div>
+              <p class="form-note range-preview" id="upload-delay-random-preview" >Rerolls off. The base value applies.</p>
             </div>
-            <div class="randomness-field">
-              <div class="randomness-title">Jitter <span class="help-icon" tabindex="0" role="img" aria-label="Jitter randomness help" data-help="Variation changes the base jitter up or down. Enabled chance controls whether jitter is active for the interval.">?</span></div>
+            <div class="randomness-field" id="upload-jitter-random-card">
+              <div class="randomness-title">Jitter <span class="help-icon" tabindex="0" role="img" aria-label="Jitter randomness help" data-help="Relative variation changes the base jitter up or down. Chance active controls whether jitter is active for the interval.">?</span></div>
+              <label>Value method<select id="upload-jitter-random-mode" aria-describedby="upload-jitter-random-preview"><option value="relative">Percentage variation</option><option value="range">Custom range</option></select></label>
               <div class="randomness-inputs">
-                <label>Value variation (%)<input id="upload-jitter-random-variation" type="number" min="0" max="100" value="0"></label>
-                <label>Enabled chance (%)<input id="upload-jitter-random-enabled" type="number" min="0" max="100" value="100"></label>
+                <label id="upload-jitter-random-relative-label">Variation ± (% of base)<input id="upload-jitter-random-variation" aria-describedby="upload-jitter-random-preview" type="number" min="0" max="100" step="0.01" value="0"></label>
+                <label>Chance active per interval (%)<input id="upload-jitter-random-enabled" aria-describedby="upload-jitter-random-preview" type="number" min="0" max="100" value="100"></label>
               </div>
+              <div class="randomness-inputs" id="upload-jitter-random-bounds" hidden>
+                <label>Minimum (ms)<input id="upload-jitter-random-minimum" aria-describedby="upload-jitter-random-preview" type="number" min="0" max="60000" step="1"></label>
+                <label>Maximum (ms)<input id="upload-jitter-random-maximum" aria-describedby="upload-jitter-random-preview" type="number" min="0" max="60000" step="1"></label>
+              </div>
+              <p class="form-note range-preview" id="upload-jitter-random-preview" >Rerolls off. The base value applies.</p>
             </div>
-            <div class="randomness-field">
-              <div class="randomness-title">Loss <span class="help-icon" tabindex="0" role="img" aria-label="Loss randomness help" data-help="Variation changes the base packet-loss percentage up or down. Enabled chance controls whether loss is active for the interval.">?</span></div>
+            <div class="randomness-field" id="upload-loss-random-card">
+              <div class="randomness-title">Loss <span class="help-icon" tabindex="0" role="img" aria-label="Loss randomness help" data-help="Relative variation changes the base packet-loss percentage up or down. Chance active controls whether loss is active for the interval.">?</span></div>
+              <label>Value method<select id="upload-loss-random-mode" aria-describedby="upload-loss-random-preview"><option value="relative">Percentage variation</option><option value="range">Custom range</option></select></label>
               <div class="randomness-inputs">
-                <label>Value variation (%)<input id="upload-loss-random-variation" type="number" min="0" max="100" value="0"></label>
-                <label>Enabled chance (%)<input id="upload-loss-random-enabled" type="number" min="0" max="100" value="100"></label>
+                <label id="upload-loss-random-relative-label">Variation ± (% of base)<input id="upload-loss-random-variation" aria-describedby="upload-loss-random-preview" type="number" min="0" max="100" step="0.01" value="0"></label>
+                <label>Chance active per interval (%)<input id="upload-loss-random-enabled" aria-describedby="upload-loss-random-preview" type="number" min="0" max="100" value="100"></label>
               </div>
+              <div class="randomness-inputs" id="upload-loss-random-bounds" hidden>
+                <label>Minimum (%)<input id="upload-loss-random-minimum" aria-describedby="upload-loss-random-preview" type="number" min="0" max="100" step="1"></label>
+                <label>Maximum (%)<input id="upload-loss-random-maximum" aria-describedby="upload-loss-random-preview" type="number" min="0" max="100" step="1"></label>
+              </div>
+              <p class="form-note range-preview" id="upload-loss-random-preview" >Rerolls off. The base value applies.</p>
             </div>
-            <div class="randomness-field">
-              <div class="randomness-title">Bandwidth <span class="help-icon" tabindex="0" role="img" aria-label="Bandwidth randomness help" data-help="Variation changes the base speed limit up or down. Enabled chance controls whether the speed limit is active for the interval.">?</span></div>
+            <div class="randomness-field" id="upload-bandwidth-random-card">
+              <div class="randomness-title">Bandwidth <span class="help-icon" tabindex="0" role="img" aria-label="Bandwidth randomness help" data-help="Relative variation changes the base speed limit up or down. Chance active controls whether the speed limit is active for the interval.">?</span></div>
+              <label>Value method<select id="upload-bandwidth-random-mode" aria-describedby="upload-bandwidth-random-preview"><option value="relative">Percentage variation</option><option value="range">Custom range</option></select></label>
               <div class="randomness-inputs">
-                <label>Value variation (%)<input id="upload-bandwidth-random-variation" type="number" min="0" max="100" value="0"></label>
-                <label>Enabled chance (%)<input id="upload-bandwidth-random-enabled" type="number" min="0" max="100" value="100"></label>
+                <label id="upload-bandwidth-random-relative-label">Variation ± (% of base)<input id="upload-bandwidth-random-variation" aria-describedby="upload-bandwidth-random-preview" type="number" min="0" max="100" step="0.01" value="0"></label>
+                <label>Chance active per interval (%)<input id="upload-bandwidth-random-enabled" aria-describedby="upload-bandwidth-random-preview" type="number" min="0" max="100" value="100"></label>
               </div>
+              <div class="randomness-inputs" id="upload-bandwidth-random-bounds" hidden>
+                <label>Minimum (kbit/s)<input id="upload-bandwidth-random-minimum" aria-describedby="upload-bandwidth-random-preview" type="number" min="1" max="1000000" step="1"></label>
+                <label>Maximum (kbit/s)<input id="upload-bandwidth-random-maximum" aria-describedby="upload-bandwidth-random-preview" type="number" min="1" max="1000000" step="1"></label>
+              </div>
+              <p class="form-note range-preview" id="upload-bandwidth-random-preview" >Rerolls off. The base value applies.</p>
             </div>
-            <div class="randomness-field">
-              <div class="randomness-title">Reorder <span class="help-icon" tabindex="0" role="img" aria-label="Reorder randomness help" data-help="Variation changes the base packet-reorder percentage up or down. Enabled chance controls whether reorder is active for the interval.">?</span></div>
+            <div class="randomness-field" id="upload-reorder-random-card">
+              <div class="randomness-title">Reorder <span class="help-icon" tabindex="0" role="img" aria-label="Reorder randomness help" data-help="Relative variation changes the base packet-reorder percentage up or down. Chance active controls whether reorder is active for the interval.">?</span></div>
+              <label>Value method<select id="upload-reorder-random-mode" aria-describedby="upload-reorder-random-preview"><option value="relative">Percentage variation</option><option value="range">Custom range</option></select></label>
               <div class="randomness-inputs">
-                <label>Value variation (%)<input id="upload-reorder-random-variation" type="number" min="0" max="100" value="0"></label>
-                <label>Enabled chance (%)<input id="upload-reorder-random-enabled" type="number" min="0" max="100" value="100"></label>
+                <label id="upload-reorder-random-relative-label">Variation ± (% of base)<input id="upload-reorder-random-variation" aria-describedby="upload-reorder-random-preview" type="number" min="0" max="100" step="0.01" value="0"></label>
+                <label>Chance active per interval (%)<input id="upload-reorder-random-enabled" aria-describedby="upload-reorder-random-preview" type="number" min="0" max="100" value="100"></label>
               </div>
+              <div class="randomness-inputs" id="upload-reorder-random-bounds" hidden>
+                <label>Minimum (%)<input id="upload-reorder-random-minimum" aria-describedby="upload-reorder-random-preview" type="number" min="0" max="100" step="1"></label>
+                <label>Maximum (%)<input id="upload-reorder-random-maximum" aria-describedby="upload-reorder-random-preview" type="number" min="0" max="100" step="1"></label>
+              </div>
+              <p class="form-note range-preview" id="upload-reorder-random-preview" >Rerolls off. The base value applies.</p>
             </div>
-            <div class="randomness-field">
-              <div class="randomness-title">Duplicate <span class="help-icon" tabindex="0" role="img" aria-label="Duplicate randomness help" data-help="Variation changes the base packet-duplicate percentage up or down. Enabled chance controls whether duplicate is active for the interval.">?</span></div>
+            <div class="randomness-field" id="upload-duplicate-random-card">
+              <div class="randomness-title">Duplicate <span class="help-icon" tabindex="0" role="img" aria-label="Duplicate randomness help" data-help="Relative variation changes the base packet-duplicate percentage up or down. Chance active controls whether duplicate is active for the interval.">?</span></div>
+              <label>Value method<select id="upload-duplicate-random-mode" aria-describedby="upload-duplicate-random-preview"><option value="relative">Percentage variation</option><option value="range">Custom range</option></select></label>
               <div class="randomness-inputs">
-                <label>Value variation (%)<input id="upload-duplicate-random-variation" type="number" min="0" max="100" value="0"></label>
-                <label>Enabled chance (%)<input id="upload-duplicate-random-enabled" type="number" min="0" max="100" value="100"></label>
+                <label id="upload-duplicate-random-relative-label">Variation ± (% of base)<input id="upload-duplicate-random-variation" aria-describedby="upload-duplicate-random-preview" type="number" min="0" max="100" step="0.01" value="0"></label>
+                <label>Chance active per interval (%)<input id="upload-duplicate-random-enabled" aria-describedby="upload-duplicate-random-preview" type="number" min="0" max="100" value="100"></label>
               </div>
+              <div class="randomness-inputs" id="upload-duplicate-random-bounds" hidden>
+                <label>Minimum (%)<input id="upload-duplicate-random-minimum" aria-describedby="upload-duplicate-random-preview" type="number" min="0" max="100" step="1"></label>
+                <label>Maximum (%)<input id="upload-duplicate-random-maximum" aria-describedby="upload-duplicate-random-preview" type="number" min="0" max="100" step="1"></label>
+              </div>
+              <p class="form-note range-preview" id="upload-duplicate-random-preview" >Rerolls off. The base value applies.</p>
             </div>
-            <div class="randomness-field">
-              <div class="randomness-title">Corrupt <span class="help-icon" tabindex="0" role="img" aria-label="Corrupt randomness help" data-help="Variation changes the base packet-corruption percentage up or down. Enabled chance controls whether corruption is active for the interval.">?</span></div>
+            <div class="randomness-field" id="upload-corrupt-random-card">
+              <div class="randomness-title">Corrupt <span class="help-icon" tabindex="0" role="img" aria-label="Corrupt randomness help" data-help="Relative variation changes the base packet-corruption percentage up or down. Chance active controls whether corruption is active for the interval.">?</span></div>
+              <label>Value method<select id="upload-corrupt-random-mode" aria-describedby="upload-corrupt-random-preview"><option value="relative">Percentage variation</option><option value="range">Custom range</option></select></label>
               <div class="randomness-inputs">
-                <label>Value variation (%)<input id="upload-corrupt-random-variation" type="number" min="0" max="100" value="0"></label>
-                <label>Enabled chance (%)<input id="upload-corrupt-random-enabled" type="number" min="0" max="100" value="100"></label>
+                <label id="upload-corrupt-random-relative-label">Variation ± (% of base)<input id="upload-corrupt-random-variation" aria-describedby="upload-corrupt-random-preview" type="number" min="0" max="100" step="0.01" value="0"></label>
+                <label>Chance active per interval (%)<input id="upload-corrupt-random-enabled" aria-describedby="upload-corrupt-random-preview" type="number" min="0" max="100" value="100"></label>
               </div>
+              <div class="randomness-inputs" id="upload-corrupt-random-bounds" hidden>
+                <label>Minimum (%)<input id="upload-corrupt-random-minimum" aria-describedby="upload-corrupt-random-preview" type="number" min="0" max="100" step="1"></label>
+                <label>Maximum (%)<input id="upload-corrupt-random-maximum" aria-describedby="upload-corrupt-random-preview" type="number" min="0" max="100" step="1"></label>
+              </div>
+              <p class="form-note range-preview" id="upload-corrupt-random-preview" >Rerolls off. The base value applies.</p>
             </div>
           </div>
           <h3>Download variation</h3>
           <div class="fields">
-            <label><span class="field-label">Reorder (%)<span class="help-icon" tabindex="0" role="img" aria-label="Download reorder help" data-help="The chance that a packet skips the delay and arrives ahead of packets sent before it. It does nothing unless the Delay in the same direction is above 0. Jitter alone is not enough.">?</span></span> <input id="download-reorder" type="number" min="0" max="100" value="0"></label>
-            <label><span class="field-label">Duplicate (%)<span class="help-icon" tabindex="0" role="img" aria-label="Download duplicate help" data-help="The chance that a packet is delivered twice. Real networks do this occasionally and some apps handle it badly.">?</span></span> <input id="download-duplicate" type="number" min="0" max="100" value="0"></label>
-            <label><span class="field-label">Corrupt (%)<span class="help-icon" tabindex="0" role="img" aria-label="Download corrupt help" data-help="The chance that a packet arrives with one damaged bit. Most devices spot the damage and throw the packet away so it behaves much like loss.">?</span></span> <input id="download-corrupt" type="number" min="0" max="100" value="0"></label>
+            <label><span class="field-label">Reorder (%)<span class="help-icon" tabindex="0" role="img" aria-label="Download reorder help" data-help="The chance that a packet skips the delay and arrives ahead of packets sent before it. It does nothing unless the Delay in the same direction is above 0. Jitter alone is not enough.">?</span></span> <input id="download-reorder" type="number" min="0" max="100" value="0" step="1"></label>
+            <label><span class="field-label">Duplicate (%)<span class="help-icon" tabindex="0" role="img" aria-label="Download duplicate help" data-help="The chance that a packet is delivered twice. Real networks do this occasionally and some apps handle it badly.">?</span></span> <input id="download-duplicate" type="number" min="0" max="100" value="0" step="1"></label>
+            <label><span class="field-label">Corrupt (%)<span class="help-icon" tabindex="0" role="img" aria-label="Download corrupt help" data-help="The chance that a packet arrives with one damaged bit. Most devices spot the damage and throw the packet away so it behaves much like loss.">?</span></span> <input id="download-corrupt" type="number" min="0" max="100" value="0" step="1"></label>
           </div>
           <div class="randomness-fields">
-            <div class="randomness-field">
-              <div class="randomness-title">Delay <span class="help-icon" tabindex="0" role="img" aria-label="Delay randomness help" data-help="Variation changes the base delay up or down. Enabled chance controls whether delay is active for the interval.">?</span></div>
+            <div class="randomness-field" id="download-delay-random-card">
+              <div class="randomness-title">Delay <span class="help-icon" tabindex="0" role="img" aria-label="Delay randomness help" data-help="Relative variation changes the base delay up or down. Chance active controls whether delay is active for the interval.">?</span></div>
+              <label>Value method<select id="download-delay-random-mode" aria-describedby="download-delay-random-preview"><option value="relative">Percentage variation</option><option value="range">Custom range</option></select></label>
               <div class="randomness-inputs">
-                <label>Value variation (%)<input id="download-delay-random-variation" type="number" min="0" max="100" value="0"></label>
-                <label>Enabled chance (%)<input id="download-delay-random-enabled" type="number" min="0" max="100" value="100"></label>
+                <label id="download-delay-random-relative-label">Variation ± (% of base)<input id="download-delay-random-variation" aria-describedby="download-delay-random-preview" type="number" min="0" max="100" step="0.01" value="0"></label>
+                <label>Chance active per interval (%)<input id="download-delay-random-enabled" aria-describedby="download-delay-random-preview" type="number" min="0" max="100" value="100"></label>
               </div>
+              <div class="randomness-inputs" id="download-delay-random-bounds" hidden>
+                <label>Minimum (ms)<input id="download-delay-random-minimum" aria-describedby="download-delay-random-preview" type="number" min="0" max="60000" step="1"></label>
+                <label>Maximum (ms)<input id="download-delay-random-maximum" aria-describedby="download-delay-random-preview" type="number" min="0" max="60000" step="1"></label>
+              </div>
+              <p class="form-note range-preview" id="download-delay-random-preview" >Rerolls off. The base value applies.</p>
             </div>
-            <div class="randomness-field">
-              <div class="randomness-title">Jitter <span class="help-icon" tabindex="0" role="img" aria-label="Jitter randomness help" data-help="Variation changes the base jitter up or down. Enabled chance controls whether jitter is active for the interval.">?</span></div>
+            <div class="randomness-field" id="download-jitter-random-card">
+              <div class="randomness-title">Jitter <span class="help-icon" tabindex="0" role="img" aria-label="Jitter randomness help" data-help="Relative variation changes the base jitter up or down. Chance active controls whether jitter is active for the interval.">?</span></div>
+              <label>Value method<select id="download-jitter-random-mode" aria-describedby="download-jitter-random-preview"><option value="relative">Percentage variation</option><option value="range">Custom range</option></select></label>
               <div class="randomness-inputs">
-                <label>Value variation (%)<input id="download-jitter-random-variation" type="number" min="0" max="100" value="0"></label>
-                <label>Enabled chance (%)<input id="download-jitter-random-enabled" type="number" min="0" max="100" value="100"></label>
+                <label id="download-jitter-random-relative-label">Variation ± (% of base)<input id="download-jitter-random-variation" aria-describedby="download-jitter-random-preview" type="number" min="0" max="100" step="0.01" value="0"></label>
+                <label>Chance active per interval (%)<input id="download-jitter-random-enabled" aria-describedby="download-jitter-random-preview" type="number" min="0" max="100" value="100"></label>
               </div>
+              <div class="randomness-inputs" id="download-jitter-random-bounds" hidden>
+                <label>Minimum (ms)<input id="download-jitter-random-minimum" aria-describedby="download-jitter-random-preview" type="number" min="0" max="60000" step="1"></label>
+                <label>Maximum (ms)<input id="download-jitter-random-maximum" aria-describedby="download-jitter-random-preview" type="number" min="0" max="60000" step="1"></label>
+              </div>
+              <p class="form-note range-preview" id="download-jitter-random-preview" >Rerolls off. The base value applies.</p>
             </div>
-            <div class="randomness-field">
-              <div class="randomness-title">Loss <span class="help-icon" tabindex="0" role="img" aria-label="Loss randomness help" data-help="Variation changes the base packet-loss percentage up or down. Enabled chance controls whether loss is active for the interval.">?</span></div>
+            <div class="randomness-field" id="download-loss-random-card">
+              <div class="randomness-title">Loss <span class="help-icon" tabindex="0" role="img" aria-label="Loss randomness help" data-help="Relative variation changes the base packet-loss percentage up or down. Chance active controls whether loss is active for the interval.">?</span></div>
+              <label>Value method<select id="download-loss-random-mode" aria-describedby="download-loss-random-preview"><option value="relative">Percentage variation</option><option value="range">Custom range</option></select></label>
               <div class="randomness-inputs">
-                <label>Value variation (%)<input id="download-loss-random-variation" type="number" min="0" max="100" value="0"></label>
-                <label>Enabled chance (%)<input id="download-loss-random-enabled" type="number" min="0" max="100" value="100"></label>
+                <label id="download-loss-random-relative-label">Variation ± (% of base)<input id="download-loss-random-variation" aria-describedby="download-loss-random-preview" type="number" min="0" max="100" step="0.01" value="0"></label>
+                <label>Chance active per interval (%)<input id="download-loss-random-enabled" aria-describedby="download-loss-random-preview" type="number" min="0" max="100" value="100"></label>
               </div>
+              <div class="randomness-inputs" id="download-loss-random-bounds" hidden>
+                <label>Minimum (%)<input id="download-loss-random-minimum" aria-describedby="download-loss-random-preview" type="number" min="0" max="100" step="1"></label>
+                <label>Maximum (%)<input id="download-loss-random-maximum" aria-describedby="download-loss-random-preview" type="number" min="0" max="100" step="1"></label>
+              </div>
+              <p class="form-note range-preview" id="download-loss-random-preview" >Rerolls off. The base value applies.</p>
             </div>
-            <div class="randomness-field">
-              <div class="randomness-title">Bandwidth <span class="help-icon" tabindex="0" role="img" aria-label="Bandwidth randomness help" data-help="Variation changes the base speed limit up or down. Enabled chance controls whether the speed limit is active for the interval.">?</span></div>
+            <div class="randomness-field" id="download-bandwidth-random-card">
+              <div class="randomness-title">Bandwidth <span class="help-icon" tabindex="0" role="img" aria-label="Bandwidth randomness help" data-help="Relative variation changes the base speed limit up or down. Chance active controls whether the speed limit is active for the interval.">?</span></div>
+              <label>Value method<select id="download-bandwidth-random-mode" aria-describedby="download-bandwidth-random-preview"><option value="relative">Percentage variation</option><option value="range">Custom range</option></select></label>
               <div class="randomness-inputs">
-                <label>Value variation (%)<input id="download-bandwidth-random-variation" type="number" min="0" max="100" value="0"></label>
-                <label>Enabled chance (%)<input id="download-bandwidth-random-enabled" type="number" min="0" max="100" value="100"></label>
+                <label id="download-bandwidth-random-relative-label">Variation ± (% of base)<input id="download-bandwidth-random-variation" aria-describedby="download-bandwidth-random-preview" type="number" min="0" max="100" step="0.01" value="0"></label>
+                <label>Chance active per interval (%)<input id="download-bandwidth-random-enabled" aria-describedby="download-bandwidth-random-preview" type="number" min="0" max="100" value="100"></label>
               </div>
+              <div class="randomness-inputs" id="download-bandwidth-random-bounds" hidden>
+                <label>Minimum (kbit/s)<input id="download-bandwidth-random-minimum" aria-describedby="download-bandwidth-random-preview" type="number" min="1" max="1000000" step="1"></label>
+                <label>Maximum (kbit/s)<input id="download-bandwidth-random-maximum" aria-describedby="download-bandwidth-random-preview" type="number" min="1" max="1000000" step="1"></label>
+              </div>
+              <p class="form-note range-preview" id="download-bandwidth-random-preview" >Rerolls off. The base value applies.</p>
             </div>
-            <div class="randomness-field">
-              <div class="randomness-title">Reorder <span class="help-icon" tabindex="0" role="img" aria-label="Reorder randomness help" data-help="Variation changes the base packet-reorder percentage up or down. Enabled chance controls whether reorder is active for the interval.">?</span></div>
+            <div class="randomness-field" id="download-reorder-random-card">
+              <div class="randomness-title">Reorder <span class="help-icon" tabindex="0" role="img" aria-label="Reorder randomness help" data-help="Relative variation changes the base packet-reorder percentage up or down. Chance active controls whether reorder is active for the interval.">?</span></div>
+              <label>Value method<select id="download-reorder-random-mode" aria-describedby="download-reorder-random-preview"><option value="relative">Percentage variation</option><option value="range">Custom range</option></select></label>
               <div class="randomness-inputs">
-                <label>Value variation (%)<input id="download-reorder-random-variation" type="number" min="0" max="100" value="0"></label>
-                <label>Enabled chance (%)<input id="download-reorder-random-enabled" type="number" min="0" max="100" value="100"></label>
+                <label id="download-reorder-random-relative-label">Variation ± (% of base)<input id="download-reorder-random-variation" aria-describedby="download-reorder-random-preview" type="number" min="0" max="100" step="0.01" value="0"></label>
+                <label>Chance active per interval (%)<input id="download-reorder-random-enabled" aria-describedby="download-reorder-random-preview" type="number" min="0" max="100" value="100"></label>
               </div>
+              <div class="randomness-inputs" id="download-reorder-random-bounds" hidden>
+                <label>Minimum (%)<input id="download-reorder-random-minimum" aria-describedby="download-reorder-random-preview" type="number" min="0" max="100" step="1"></label>
+                <label>Maximum (%)<input id="download-reorder-random-maximum" aria-describedby="download-reorder-random-preview" type="number" min="0" max="100" step="1"></label>
+              </div>
+              <p class="form-note range-preview" id="download-reorder-random-preview" >Rerolls off. The base value applies.</p>
             </div>
-            <div class="randomness-field">
-              <div class="randomness-title">Duplicate <span class="help-icon" tabindex="0" role="img" aria-label="Duplicate randomness help" data-help="Variation changes the base packet-duplicate percentage up or down. Enabled chance controls whether duplicate is active for the interval.">?</span></div>
+            <div class="randomness-field" id="download-duplicate-random-card">
+              <div class="randomness-title">Duplicate <span class="help-icon" tabindex="0" role="img" aria-label="Duplicate randomness help" data-help="Relative variation changes the base packet-duplicate percentage up or down. Chance active controls whether duplicate is active for the interval.">?</span></div>
+              <label>Value method<select id="download-duplicate-random-mode" aria-describedby="download-duplicate-random-preview"><option value="relative">Percentage variation</option><option value="range">Custom range</option></select></label>
               <div class="randomness-inputs">
-                <label>Value variation (%)<input id="download-duplicate-random-variation" type="number" min="0" max="100" value="0"></label>
-                <label>Enabled chance (%)<input id="download-duplicate-random-enabled" type="number" min="0" max="100" value="100"></label>
+                <label id="download-duplicate-random-relative-label">Variation ± (% of base)<input id="download-duplicate-random-variation" aria-describedby="download-duplicate-random-preview" type="number" min="0" max="100" step="0.01" value="0"></label>
+                <label>Chance active per interval (%)<input id="download-duplicate-random-enabled" aria-describedby="download-duplicate-random-preview" type="number" min="0" max="100" value="100"></label>
               </div>
+              <div class="randomness-inputs" id="download-duplicate-random-bounds" hidden>
+                <label>Minimum (%)<input id="download-duplicate-random-minimum" aria-describedby="download-duplicate-random-preview" type="number" min="0" max="100" step="1"></label>
+                <label>Maximum (%)<input id="download-duplicate-random-maximum" aria-describedby="download-duplicate-random-preview" type="number" min="0" max="100" step="1"></label>
+              </div>
+              <p class="form-note range-preview" id="download-duplicate-random-preview" >Rerolls off. The base value applies.</p>
             </div>
-            <div class="randomness-field">
-              <div class="randomness-title">Corrupt <span class="help-icon" tabindex="0" role="img" aria-label="Corrupt randomness help" data-help="Variation changes the base packet-corruption percentage up or down. Enabled chance controls whether corruption is active for the interval.">?</span></div>
+            <div class="randomness-field" id="download-corrupt-random-card">
+              <div class="randomness-title">Corrupt <span class="help-icon" tabindex="0" role="img" aria-label="Corrupt randomness help" data-help="Relative variation changes the base packet-corruption percentage up or down. Chance active controls whether corruption is active for the interval.">?</span></div>
+              <label>Value method<select id="download-corrupt-random-mode" aria-describedby="download-corrupt-random-preview"><option value="relative">Percentage variation</option><option value="range">Custom range</option></select></label>
               <div class="randomness-inputs">
-                <label>Value variation (%)<input id="download-corrupt-random-variation" type="number" min="0" max="100" value="0"></label>
-                <label>Enabled chance (%)<input id="download-corrupt-random-enabled" type="number" min="0" max="100" value="100"></label>
+                <label id="download-corrupt-random-relative-label">Variation ± (% of base)<input id="download-corrupt-random-variation" aria-describedby="download-corrupt-random-preview" type="number" min="0" max="100" step="0.01" value="0"></label>
+                <label>Chance active per interval (%)<input id="download-corrupt-random-enabled" aria-describedby="download-corrupt-random-preview" type="number" min="0" max="100" value="100"></label>
               </div>
+              <div class="randomness-inputs" id="download-corrupt-random-bounds" hidden>
+                <label>Minimum (%)<input id="download-corrupt-random-minimum" aria-describedby="download-corrupt-random-preview" type="number" min="0" max="100" step="1"></label>
+                <label>Maximum (%)<input id="download-corrupt-random-maximum" aria-describedby="download-corrupt-random-preview" type="number" min="0" max="100" step="1"></label>
+              </div>
+              <p class="form-note range-preview" id="download-corrupt-random-preview" >Rerolls off. The base value applies.</p>
             </div>
           </div>
         </details>

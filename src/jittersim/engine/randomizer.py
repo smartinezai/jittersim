@@ -3,92 +3,77 @@
 import hashlib
 import random
 from dataclasses import replace
-from typing import List, Optional, Tuple
+from decimal import Decimal, ROUND_HALF_EVEN
+from typing import List, Optional, Tuple, Union
 
-from jittersim.config.models import Impairment, Profile, Randomness
+from jittersim.config.models import FEATURE_LIMITS, Impairment, Number, Profile, Randomness
 
 
 def _is_enabled(randomness: Randomness, generator: random.Random) -> bool:
     return generator.random() * 100 < randomness.enabled_probability
 
 
-def _reroll_integer(
-    value: Optional[int],
-    *,
-    randomness: Randomness,
-    generator: random.Random,
-    minimum: int,
-    maximum: int,
-) -> Optional[int]:
-    if value is None or not _is_enabled(randomness, generator):
+def quantize_value(value: Union[Number, Decimal], places: int) -> Number:
+    """Use one rounding rule for selection, interpolation and displayed bounds."""
+
+    rounded = Decimal(str(value)).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_EVEN)
+    return int(rounded) if rounded == rounded.to_integral_value() else float(rounded)
+
+
+def feature_range(impairment: Impairment, feature: str) -> Optional[Tuple[Number, Number]]:
+    """Return precisely the supported endpoints used by this feature's selector."""
+
+    field, lower, upper, places, _ = FEATURE_LIMITS[feature]
+    randomness = getattr(impairment, feature + "_randomness")
+    value = getattr(impairment, field)
+    if randomness.mode == "range":
+        low, high = randomness.minimum, randomness.maximum
+    elif value is None:
         return None
-    variation = value * randomness.variation_percent / 100
-    rerolled = round(generator.uniform(value - variation, value + variation))
-    return max(minimum, min(maximum, rerolled))
+    else:
+        base = Decimal(str(value))
+        variation = base * Decimal(str(randomness.variation_percent)) / 100
+        low, high = base - variation, base + variation
+    return (
+        max(lower, min(upper, quantize_value(low, places))),
+        max(lower, min(upper, quantize_value(high, places))),
+    )
+
+
+def impairment_range_preview(impairment: Impairment) -> dict:
+    """Describe the active range without storing or applying a profile."""
+
+    result = {}
+    for feature, (field, _, _, places, unit) in FEATURE_LIMITS.items():
+        bounds = feature_range(impairment, feature)
+        result[feature] = {
+            "base": getattr(impairment, field),
+            "mode": getattr(impairment, feature + "_randomness").mode,
+            "variation_percent": getattr(impairment, feature + "_randomness").variation_percent,
+            "minimum": bounds[0] if bounds else None,
+            "maximum": bounds[1] if bounds else None,
+            "step": 10 ** -places,
+            "unit": unit,
+            "enabled_probability": getattr(impairment, feature + "_randomness").enabled_probability,
+        }
+    return result
 
 
 def reroll_impairment(*, impairment: Impairment, generator: random.Random) -> Impairment:
     """Reroll all enabled impairment values from one seeded random generator."""
 
-    bandwidth = _reroll_integer(
-        impairment.bandwidth_kbit,
-        randomness=impairment.bandwidth_randomness,
-        generator=generator,
-        minimum=1,
-        maximum=1_000_000,
-    )
-    return Impairment(
-        delay_ms=_reroll_integer(
-            impairment.delay_ms,
-            randomness=impairment.delay_randomness,
-            generator=generator,
-            minimum=0,
-            maximum=60_000,
-        )
-        or 0,
-        jitter_ms=_reroll_integer(
-            impairment.jitter_ms,
-            randomness=impairment.jitter_randomness,
-            generator=generator,
-            minimum=0,
-            maximum=60_000,
-        )
-        or 0,
-        loss_percent=_reroll_integer(
-            impairment.loss_percent,
-            randomness=impairment.loss_randomness,
-            generator=generator,
-            minimum=0,
-            maximum=100,
-        )
-        or 0,
-        bandwidth_kbit=bandwidth,
-        reorder_percent=_reroll_integer(
-            impairment.reorder_percent,
-            randomness=impairment.reorder_randomness,
-            generator=generator,
-            minimum=0,
-            maximum=100,
-        )
-        or 0,
-        duplicate_percent=_reroll_integer(
-            impairment.duplicate_percent,
-            randomness=impairment.duplicate_randomness,
-            generator=generator,
-            minimum=0,
-            maximum=100,
-        )
-        or 0,
-        corrupt_percent=_reroll_integer(
-            impairment.corrupt_percent,
-            randomness=impairment.corrupt_randomness,
-            generator=generator,
-            minimum=0,
-            maximum=100,
-        )
-        or 0,
-        loss_burst_packets=impairment.loss_burst_packets,
-    )
+    selected = {}
+    # Keep the established draw order so adding fields does not reorder seed use.
+    for feature in ("bandwidth", "delay", "jitter", "loss", "reorder", "duplicate", "corrupt"):
+        field, _, _, places, _ = FEATURE_LIMITS[feature]
+        bounds = feature_range(impairment, feature)
+        randomness = getattr(impairment, feature + "_randomness")
+        if bounds is None or not _is_enabled(randomness, generator):
+            selected[field] = None if feature == "bandwidth" else 0
+        else:
+            low, high = bounds
+            selected[field] = quantize_value(generator.uniform(low, high), places)
+    return Impairment(**selected, loss_burst_packets=impairment.loss_burst_packets)
 
 
 def reroll_profile(

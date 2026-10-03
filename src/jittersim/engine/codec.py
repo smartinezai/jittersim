@@ -1,11 +1,12 @@
 """Encode and validate network plans for the control-plane wire format."""
 
 import re
-from dataclasses import asdict, replace
+from dataclasses import replace
 from ipaddress import AddressValueError, IPv4Address
 from typing import Any, Dict, List, Mapping, Set
 
 from jittersim.config.exemptions import MAX_UNAFFECTED_DEVICES, normalize_exempt_mac
+from jittersim.config.payloads import impairment_payload
 from jittersim.config.models import (
     Device,
     Impairment,
@@ -111,7 +112,7 @@ def plan_to_payload(plan: NetworkPlan) -> Dict[str, Any]:
                 "device_id": queue.device_id,
                 "direction": queue.direction.value,
                 "mark": queue.mark,
-                "impairment": asdict(queue.impairment),
+                "impairment": impairment_payload(queue.impairment),
             }
             for queue in plan.queues
         ],
@@ -142,8 +143,8 @@ def plan_to_payload(plan: NetworkPlan) -> Dict[str, Any]:
                 "device_ip": str(rule.device_ip),
                 "destination_addresses": [str(address) for address in rule.destination_addresses],
                 "mark": rule.mark,
-                "upload_impairment": asdict(rule.upload_impairment),
-                "download_impairment": asdict(rule.download_impairment),
+                "upload_impairment": impairment_payload(rule.upload_impairment),
+                "download_impairment": impairment_payload(rule.download_impairment),
                 "active": rule.active,
             }
             for rule in plan.service_quota_rules
@@ -155,8 +156,8 @@ def plan_to_payload(plan: NetworkPlan) -> Dict[str, Any]:
                 "device_ip": str(rule.device_ip),
                 "domains": list(rule.domains),
                 "mark": rule.mark,
-                "upload_impairment": asdict(rule.upload_impairment),
-                "download_impairment": asdict(rule.download_impairment),
+                "upload_impairment": impairment_payload(rule.upload_impairment),
+                "download_impairment": impairment_payload(rule.download_impairment),
             }
             for rule in plan.service_assignment_rules
         ],
@@ -165,8 +166,8 @@ def plan_to_payload(plan: NetworkPlan) -> Dict[str, Any]:
                 "list_id": rule.list_id,
                 "domains": list(rule.domains),
                 "mark": rule.mark,
-                "upload_impairment": asdict(rule.upload_impairment),
-                "download_impairment": asdict(rule.download_impairment),
+                "upload_impairment": impairment_payload(rule.upload_impairment),
+                "download_impairment": impairment_payload(rule.download_impairment),
                 "outage_active": rule.outage_active,
             }
             for rule in plan.service_list_rules
@@ -176,8 +177,8 @@ def plan_to_payload(plan: NetworkPlan) -> Dict[str, Any]:
             if plan.everyone_else is None
             else {
                 "mark": plan.everyone_else.mark,
-                "upload_impairment": asdict(plan.everyone_else.upload_impairment),
-                "download_impairment": asdict(plan.everyone_else.download_impairment),
+                "upload_impairment": impairment_payload(plan.everyone_else.upload_impairment),
+                "download_impairment": impairment_payload(plan.everyone_else.download_impairment),
                 "unaffected_macs": list(plan.everyone_else.unaffected_macs),
                 "blocked": plan.everyone_else.blocked,
             }

@@ -23,6 +23,7 @@ from .device_labels import (
 from .exemptions import (
     MAX_ADDRESS_MOVES, MAX_UNAFFECTED_DEVICES, AddressMove, UnaffectedDevice, normalize_exempt_mac,
 )
+from .payloads import impairment_payload, profile_payload
 from .models import (
     AccessOptions,
     DataLimit,
@@ -106,7 +107,7 @@ _SCHEDULES_TABLE_SQL = """
 
 
 def _serialize_impairment(impairment: Impairment) -> str:
-    return json.dumps(asdict(impairment), sort_keys=True)
+    return json.dumps(impairment_payload(impairment), sort_keys=True)
 
 
 def _deserialize_randomness(data: dict, field_name: str) -> None:
@@ -139,7 +140,7 @@ def _deserialize_impairment(value: str) -> Impairment:
 
 
 def _serialize_profile_settings(profile: Profile) -> str:
-    settings = asdict(profile)
+    settings = profile_payload(profile)
     for field_name in ("id", "name", "upload", "download", "random_seed"):
         settings.pop(field_name, None)
     if profile.homepage_bounce_percent == 0:

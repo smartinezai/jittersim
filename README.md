@@ -208,7 +208,14 @@ See
 - Progression sessions that move from a starting profile to an ending profile
   over time, after a DNS-query target or after a device-data target, then
   recover automatically.
-- Random value variation such as `200 ± 30%`.
+- Relative variation such as `200 ms ± 30%` or a custom minimum and maximum.
+- Relative variation can use steps of 0.01%. Applied packet percentages
+  stay whole. A base of 6% with 7% variation rounds to a fixed 6%. Use a
+  custom range for 0% to 13%.
+- Previews use the same rounding and limits as the selected values. Delay
+  and jitter use whole milliseconds. Bandwidth uses whole kbit/s.
+- Ordinary profiles use their base values until the first reroll. Setting
+  **Reroll every** to 0 keeps those base values and preserves saved ranges.
 - Random feature enablement, reroll timing and short connection outages.
 - Fresh patterns per target or repeatable saved seeds with bounded history.
 - Inline help in the dashboard for the variation settings.

@@ -11,6 +11,7 @@ import pytest
 
 from jittersim.api.server import DASHBOARD_HTML
 from jittersim.config.models import Impairment, Profile, Randomness
+from jittersim.config.payloads import profile_payload
 
 SCRIPT = re.search(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL).group(1)
 HTML = DASHBOARD_HTML.split("<script>")[0]
@@ -80,6 +81,7 @@ class FakeNode {
     this.hidden = false;
     this.readOnly = false;
   }
+  setCustomValidity(message) { this.validationMessage = message; }
   append(...nodes) { this.children.push(...nodes); }
   appendChild(node) { this.children.push(node); return node; }
   replaceChildren(...nodes) { this.children = nodes; }
@@ -478,7 +480,7 @@ def every_field_set_profile(profile_id="every-field", name="Every field", other=
 
 
 def as_json(profile):
-    data = json.loads(json.dumps(asdict(profile)))
+    data = json.loads(json.dumps(profile_payload(profile)))
     if data["website_mode"] == "allow_only":
         # The model lowercases domains. The form must keep what the server sends in order.
         data["website_domains"] = list(UNSORTED_DOMAINS)
