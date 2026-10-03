@@ -4,7 +4,6 @@ import http.client
 import json
 import sqlite3
 import threading
-import time
 import unittest
 from unittest.mock import patch
 
@@ -65,6 +64,53 @@ class AccessApiTests(unittest.TestCase):
         self.assertTrue(
             self.access_manager.applied.permits_host("192.168.50.10", "sub.example.com")
         )
+
+    def test_panic_then_start_keeps_saved_mac_blocks_disabled(self):
+        blocked = "02:00:00:00:00:01"
+        policy = MacPolicy("denylist", (), (blocked,))
+        self.repository.save_access_policies(policy, WebsitePolicy())
+        self.assertEqual(self.write("/api/apply")[0], 200)
+        self.assertTrue(self.access_manager.applied.options.enabled)
+
+        self.assertEqual(self.write("/api/normal-access")[0], 200)
+        self.assertFalse(self.repository.get_access_options().enabled)
+        self.assertEqual(self.repository.get_mac_policy(), policy)
+        self.assertEqual(self.write("/api/apply")[0], 200)
+
+        self.assertFalse(self.access_manager.applied.options.enabled)
+        self.assertEqual(self.access_manager.applied.mac, policy)
+        published = json.loads(self.active_plan_path.read_text())
+        self.assertFalse(published["access"]["options"]["enabled"])
+        self.assertEqual(published["mac_policy"]["denylist"], [blocked])
+        rules = next(
+            command.stdin
+            for command in reversed(self.helper_executor.commands)
+            if command.executable == "nft" and command.stdin
+        )
+        self.assertNotIn("deny listed test client", rules)
+
+    def test_household_disable_leaves_running_profile_and_queues_unchanged(self):
+        blocked = "02:00:00:00:00:01"
+        policy = MacPolicy("denylist", (), (blocked,))
+        self.repository.save_access_policies(policy, WebsitePolicy())
+        self.assertEqual(self.write("/api/apply")[0], 200)
+        published = self.active_plan_path.read_bytes()
+        commands_before = len(self.helper_executor.commands)
+
+        self.assertEqual(self.write("/api/access/disable", {"confirmed": True})[0], 200)
+
+        self.assertEqual(self.active_plan_path.read_bytes(), published)
+        self.assertEqual(len(self.helper_executor.commands), commands_before)
+        self.assertFalse(self.access_manager.applied.options.enabled)
+        self.assertEqual(self.access_manager.applied.mac, policy)
+        self.assertEqual(self.repository.get_mac_policy(), policy)
+        self.assertEqual(self.repository.get_runtime_state().last_action, "apply")
+        rules = next(
+            command.stdin
+            for command in reversed(self.helper_executor.commands)
+            if command.executable == "nft" and command.stdin
+        )
+        self.assertNotIn("deny listed test client", rules)
 
     def test_failed_rule_change_reports_pending_without_replacing_working_policy(self):
         self.write(

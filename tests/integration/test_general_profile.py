@@ -278,8 +278,14 @@ def test_proxy_general_profile_covers_unassigned_clients_and_bypasses_protected(
         protected_mac_addresses=(),
         mac_policy=MacPolicy(mode="denylist", denylist=(AFFECTED,)),
     )
+    assert select_mark(
+        no_protection, client_ip=address, host="example.com", client_mac=AFFECTED
+    ) == (1, "general-profile")
     with pytest.raises(ProxyError):
-        select_mark(no_protection, client_ip=address, host="example.com", client_mac=AFFECTED)
+        select_mark(
+            replace(no_protection, access=None),
+            client_ip=address, host="example.com", client_mac=AFFECTED,
+        )
 
 
 @pytest.mark.parametrize(

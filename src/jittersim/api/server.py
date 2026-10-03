@@ -11,6 +11,7 @@ import os
 import re
 import select
 import socket
+import sqlite3
 import ssl
 import threading
 import time
@@ -114,6 +115,7 @@ from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.scenarios import active_scenario_runs
 from jittersim.engine.schedules import active_schedule
 from jittersim.engine.service import compile_stored_plan
+from jittersim.engine.website import describe_timed_out_names
 from jittersim.networking.applier import MAX_PROTECTED_MACS
 from jittersim.networking.helper import (
     HELPER_OUT_OF_DATE_MESSAGE,
@@ -503,13 +505,12 @@ DASHBOARD_HTML = r"""<!doctype html>
     .traffic-chart-wrap { margin-top: 1rem; padding: 0.65rem; border: 1px solid #2b435f; border-radius: 0.65rem; background: #0b1727; }
     #traffic-chart { display: block; width: 100%; height: 16rem; }
     .traffic-legend { display: flex; flex-wrap: wrap; gap: 0.8rem 1rem; margin-top: 0.65rem; color: #91a8c1; font-size: 0.78rem; }
-    .traffic-legend span { display: inline-flex; align-items: center; gap: 0.4rem; }
-    .traffic-key { width: 0.75rem; height: 0.2rem; border-radius: 1rem; background: #70b7ff; }
-    .traffic-key.download { background: #70d7a9; }
-    .traffic-key.isp-upload { height: 0; border-top: 2px dashed #75a9ff; background: transparent; }
-    .traffic-key.isp-download { height: 0; border-top: 2px dashed #75d7c2; background: transparent; }
-    .traffic-key.profile-upload { height: 0; border-top: 2px dotted #ffa76c; background: transparent; }
-    .traffic-key.profile-download { height: 0; border-top: 2px dotted #edc36a; background: transparent; }
+    .traffic-legend button { display: inline-flex; align-items: center; gap: 0.4rem; margin: 0; padding: 0.4rem; min-width: 0; max-width: 100%; text-align: left; color: #c7d7eb; background: transparent; border: 1px solid transparent; }
+    .traffic-legend button.traffic-highlighted { border-color: #91a8c1; color: #edf5ff; }
+    .traffic-legend button.traffic-dimmed { opacity: 0.5; }
+    .traffic-key { display: block; flex: 0 0 2.25rem; width: 2.25rem; height: 0.75rem; }
+    .traffic-chart-detail { margin: 0.65rem 0 0; min-height: 2.8em; color: #edf5ff; font-size: 0.82rem; overflow-wrap: anywhere; }
+    @media (pointer: coarse) { .traffic-legend button { min-height: 44px; } }
     .traffic-note { margin: 0.75rem 0 0; color: #91a8c1; font-size: 0.8rem; }
     .uplink-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.75rem; margin-top: 1rem; }
     .uplink-value { padding: 0.75rem; border: 1px solid #2b435f; border-radius: 0.6rem; background: #0d1b2d; }
@@ -692,7 +693,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
     .router-wifi-label { font-size: 0.85rem; font-weight: 550; }
     .router-wifi-status { margin: 0.2rem 0 0; font-size: 0.78rem; color: #b6c8db; }
-    .router-wifi-copy { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+    .router-wifi-copy { display: grid; gap: 0.5rem; }
+    .router-wifi-copy .router-wifi-status:empty { display: none; }
     .sidebar .router-wifi-copy button { min-height: 2.4rem; padding: 0.35rem 0.5rem; font-size: 0.8rem; text-align: center; }
     .sidebar .router-wifi-toggle {
       display: grid; place-items: center; flex: 0 0 2.8rem; min-height: 2.75rem;
@@ -1134,8 +1136,8 @@ DASHBOARD_HTML = r"""<!doctype html>
           </div>
         </div>
         <div class="router-wifi-copy">
-          <button id="copy-wifi-name" type="button">Copy Wi-Fi name</button>
-          <button id="copy-wifi-password" type="button">Copy Wi-Fi password</button>
+          <button id="sync-router-ap" class="primary" type="button" aria-describedby="router-action-message" disabled>Copy router Wi-Fi to Pi</button>
+          <p id="router-action-message" class="router-wifi-status" role="status" aria-live="polite"></p>
         </div>
       </div>
       <div class="sidebar-credentials">
@@ -1324,7 +1326,7 @@ DASHBOARD_HTML = r"""<!doctype html>
             <label><span class="field-label">Interval variation (%)<span class="help-icon" tabindex="0" role="img" aria-label="Interval variation help" data-help="The reroll interval can move this percentage below or above the base interval. For example, 20% of 5 minutes means 4 to 6 minutes.">?</span></span>
               <input id="profile-reroll-variation" type="number" min="0" max="100" value="0">
             </label>
-            <label><span class="field-label">Outage chance (%)<span class="help-icon" tabindex="0" role="img" aria-label="Outage chance help" data-help="The chance that a device is disconnected when the outage check runs.">?</span></span>
+            <label><span class="field-label">Outage chance (%)<span class="help-icon" tabindex="0" role="img" aria-label="Outage chance help" data-help="The chance that a device is disconnected when the outage check runs. A service list that uses this profile cuts only its listed services for every affected device.">?</span></span>
               <input id="profile-outage-probability" type="number" min="0" max="100" value="0">
             </label>
             <label><span class="field-label">Outage length (seconds)<span class="help-icon" tabindex="0" role="img" aria-label="Outage length help" data-help="How long a selected outage lasts before the device is allowed to use the network again.">?</span></span>
@@ -1333,7 +1335,7 @@ DASHBOARD_HTML = r"""<!doctype html>
             <label><span class="field-label">Outage check interval (seconds)<span class="help-icon" tabindex="0" role="img" aria-label="Outage interval help" data-help="How often JitterSim checks whether to start a new outage. Set this to 0 to use the reroll interval.">?</span></span>
               <input id="profile-outage-interval" type="number" min="0" value="0">
             </label>
-            <label><span class="field-label">Random seed (optional)<span class="help-icon" tabindex="0" role="img" aria-label="Random seed help" data-help="Makes the random changes repeat exactly. The same seed gives a device the same values in the same order every time. Leaving it empty is the same as 0. Pick another number for a different pattern.">?</span></span>
+            <label><span class="field-label">Random seed (optional)<span class="help-icon" tabindex="0" role="img" aria-label="Random seed help" data-help="Makes the random changes repeat exactly. The same seed gives a device or a service list the same values in the same order every time. Leaving it empty is the same as 0. Pick another number for a different pattern.">?</span></span>
               <input id="profile-seed" type="number" min="0">
             </label>
             <label><span class="field-label">Website mode<span class="help-icon" tabindex="0" role="img" aria-label="Website mode help" data-help="Unrestricted puts no site limit on this profile. Allow only listed domains limits the device to the sites named in Profile domains.">?</span></span>
@@ -1785,7 +1787,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         </label>
         <button type="button" id="service-list-add-observed">Add to hostnames</button>
       </div>
-      <p class="form-note">While a list is on, traffic to its services gets the list's profile instead of the device or general profile. Devices in Unaffected by profiles are not touched. Global access rules still apply. A hostname also matches its subdomains and can only be in one enabled list. Matching follows the DNS answers that devices receive from the Pi, so encrypted DNS, VPNs and apps that use fixed addresses are not covered. Other sites on the same server address are shaped the same way. Check the names a real session uses and add any that are missing. The profile's website list and random outages are not used for service lists.</p>
+      <p class="form-note">While a list is on, traffic to its services gets the list's profile instead of the device or general profile. Devices in Unaffected by profiles are not touched. Global access rules still apply. A hostname also matches its subdomains and can only be in one enabled list. Matching follows the DNS answers that devices receive from the Pi, so encrypted DNS, VPNs and apps that use fixed addresses are not covered. Other sites on the same server address are shaped the same way. Check the names a real session uses and add any that are missing. The profile's random variation and random outages apply to the whole list: all affected devices get the same new values and the same outages. During an outage the listed services are unreachable while the Pi's DNS and the dashboard and other sites keep working. The profile's website list is not used for service lists.</p>
       <button class="primary" type="submit">Save service list</button>
     </form>
     <div id="service-list-list" class="quota-list" aria-live="polite">Enter the admin token to view service lists.</div>
@@ -1955,14 +1957,11 @@ DASHBOARD_HTML = r"""<!doctype html>
       <span id="uplink-state" class="count-badge">Check token</span>
     </div>
     <div id="uplink-details" class="uplink-grid" aria-live="polite">Enter the admin token and choose Check token to view the router connection.</div>
-    <p id="uplink-note" class="policy-note">The router controls use the TG3442DE local web interface. The router admin password is used for one request and is not saved.</p>
+    <p id="uplink-note" class="policy-note">The router controls use the TG3442DE local web interface. The Pi signs in with the router admin password when you run a router action.</p>
     <a id="router-settings-link" class="button-link" href="http://192.168.0.1" target="_blank" rel="noreferrer">Open router Wi-Fi settings</a>
     <div class="router-controls">
       <button id="open-router-credentials-inline" type="button" aria-controls="credentials-panel" aria-expanded="false">Enter router password</button>
-      <div class="action-buttons">
-        <button id="sync-router-ap" class="primary" type="button">Copy router Wi-Fi to Pi</button>
-      </div>
-      <p id="router-action-message" class="policy-note" role="status" aria-live="polite">Keep the Pi connected to the router by Ethernet before changing the router Wi-Fi.</p>
+      <p class="policy-note">Use Copy router Wi-Fi to Pi in the left panel to copy the router's name, password and security together. Keep a separate management connection while the Pi Wi-Fi restarts. Keep the Pi connected to the router by Ethernet before changing the router Wi-Fi.</p>
     </div>
   </section>
   <section class="card" data-collapse="closed">
@@ -2039,18 +2038,19 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="traffic-chart-wrap">
       <canvas id="traffic-chart" width="900" height="320" role="img" aria-label="Live upload and download rates at JitterSim with configured ISP and device queue limits over the last 60 seconds">Live traffic chart. Check the admin token to begin sampling.</canvas>
       <div class="traffic-legend" aria-label="Graph legend">
-        <span><i class="traffic-key"></i>Upload rate at Pi</span>
-        <span><i class="traffic-key download"></i>Download rate at Pi</span>
-        <span><i class="traffic-key isp-upload"></i>ISP upload plan</span>
-        <span><i class="traffic-key isp-download"></i>ISP download plan</span>
-        <span id="traffic-profile-upload-legend"><i class="traffic-key profile-upload"></i>Default queue upload limit</span>
-        <span id="traffic-profile-download-legend"><i class="traffic-key profile-download"></i>Default queue download limit</span>
+        <button type="button" data-traffic-series="upload" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
+        <button type="button" data-traffic-series="download" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
+        <button type="button" data-traffic-series="isp_upload" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
+        <button type="button" data-traffic-series="isp_download" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
+        <button type="button" id="traffic-profile-upload-legend" data-traffic-series="profile_upload" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
+        <button type="button" id="traffic-profile-download-legend" data-traffic-series="profile_download" aria-pressed="false" hidden><canvas class="traffic-key" aria-hidden="true"></canvas><span></span></button>
       </div>
+      <p id="traffic-chart-detail" class="traffic-chart-detail">Hover a line or focus its legend label to inspect it. Click or tap a label to keep it highlighted. Escape clears the highlight.</p>
     </div>
     <p id="traffic-profile-status" class="traffic-profile-status" role="status" aria-live="polite">Select one device to show its applied default queue limits.</p>
     <p class="traffic-note">Dropped and waiting show packets JitterSim itself discarded or is still
       delaying, in both directions.</p>
-    <p class="traffic-note">Traffic lines count bytes at JitterSim before its queues. They do not show the speed a device receives. Dashed lines show configured limits. The ISP plan line is shared with household traffic and is not a live measurement of spare capacity. Service-specific queues may use different limits. Only assigned devices are included. Check the admin token to start; sampling pauses when this tab is hidden.</p>
+    <p class="traffic-note">Solid lines show traffic counted at JitterSim before its queues. They do not show the speed a device receives. Dashed lines show ISP plan references. Dotted lines show applied profile limits. Profile limits describe the default queue. Service-specific queues may use different limits. The ISP plan is shared with household traffic and is not a live measurement of spare capacity. Only assigned devices are included. Check the admin token to start. Sampling pauses when this tab is hidden.</p>
   </section>
   <section class="card observations-card" data-collapse="closed">
     <div class="section-heading">
@@ -2373,6 +2373,8 @@ DASHBOARD_HTML = r"""<!doctype html>
             : data.error || response.statusText;
           const error = new Error(applyHint);
           error.status = response.status;
+          error.code = data.code;
+          error.profile = data.profile;
           throw error;
         }
         if (submitForm && drafts && drafts.get(submitForm.id) === submittedDraft) {
@@ -2529,9 +2531,6 @@ DASHBOARD_HTML = r"""<!doctype html>
     let routerPasswordChecking = false;
 
     let routerActionPending = false;
-
-    let routerCopyPending = false;
-
     let routerWifiEnabled = null;
 
     let routerWifiCheckedAt = null;
@@ -2663,6 +2662,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       routerWifiMinimumCheck = 0;
       routerPasswordVerified = false;
       routerPasswordRejected = false;
+      if (!routerActionPending) element("router-action-message").textContent = "";
       updateCredentialStatus();
     });
 
@@ -2888,6 +2888,20 @@ DASHBOARD_HTML = r"""<!doctype html>
       profile_download: null
     };
 
+    const TRAFFIC_SERIES = [
+      { field: "isp_upload", label: "ISP upload plan", color: "#b8a0ff", dash: [8, 6], step: true },
+      { field: "isp_download", label: "ISP download plan", color: "#7bdce5", dash: [8, 6], step: true },
+      { field: "profile_upload", label: "Device upload limit", color: "#ffa76c", dash: [2, 5], step: true },
+      { field: "profile_download", label: "Device download limit", color: "#edc36a", dash: [2, 5], step: true },
+      { field: "upload", label: "Upload traffic", color: "#70b7ff", dash: [], step: false },
+      { field: "download", label: "Download traffic", color: "#70d7a9", dash: [], step: false }
+    ];
+    const TRAFFIC_INSPECTION_HELP = "Hover a line or focus its legend label to inspect it. Click or tap a label to keep it highlighted. Escape clears the highlight.";
+    let trafficProfileScope = null;
+    let trafficReferencesReadAt = null;
+    let trafficInspection = { pointer: null, legend: null, pinned: null };
+    let trafficChartRedraw = null;
+
     function showMessage(message, kind) {
       messageSerial += 1;
       const messageElement = element("message");
@@ -2903,6 +2917,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     function resetTrafficHistory() {
       previousTrafficSample = null;
       trafficSamples = [];
+      trafficInspection = { pointer: null, legend: null, pinned: null };
       [
         "traffic-upload-rate",
         "traffic-download-rate",
@@ -3032,7 +3047,184 @@ DASHBOARD_HTML = r"""<!doctype html>
       const kept = Array.from(select.options).some((option) => option.value === selected);
       select.value = kept ? selected : "@all";
       // The last sample belongs to the choice that went, so start a fresh graph.
-      if (!kept && selected) resetTrafficHistory();
+      if (!kept && selected) resetTrafficView();
+    }
+
+    function trafficSeriesName(series, scope) {
+      if (!series.field.startsWith("profile_")) return series.label;
+      const direction = series.field.endsWith("upload") ? "upload" : "download";
+      const prefix = scope === "shared" ? "Shared profile" : scope === "everyone" ? "Everyone else" : "Device";
+      return prefix + " " + direction + " limit";
+    }
+
+    function trafficSeriesGeometry(samples, references, plot, scaleMax, now, scope) {
+      return TRAFFIC_SERIES.map((definition) => {
+        const series = { ...definition, label: trafficSeriesName(definition, scope), points: [], segments: [] };
+        let previous = null;
+        samples.forEach((sample) => {
+          const value = sample[series.field];
+          if (!Number.isFinite(value)) {
+            previous = null;
+            return;
+          }
+          const point = {
+            x: plot.right - (plot.right - plot.left) * (now - sample.time) / TRAFFIC_WINDOW_MS,
+            y: plot.bottom - (plot.bottom - plot.top) * value / scaleMax,
+            value: value,
+            time: sample.time
+          };
+          series.points.push(point);
+          if (previous) {
+            if (series.step) {
+              const corner = { ...previous, x: point.x };
+              series.segments.push({ from: previous, to: corner });
+              series.segments.push({ from: corner, to: point });
+            } else {
+              series.segments.push({ from: previous, to: point });
+            }
+          }
+          previous = point;
+        });
+        if (!samples.length && series.step && Number.isFinite(references[series.field])) {
+          const value = references[series.field];
+          const y = plot.bottom - (plot.bottom - plot.top) * value / scaleMax;
+          const point = { x: plot.right, y: y, value: value, time: null };
+          series.points.push(point);
+          series.segments.push({ from: { ...point, x: plot.left }, to: point });
+        }
+        return series;
+      }).filter((series) => series.points.length);
+    }
+
+    function trafficSegmentDistance(pointer, segment) {
+      const dx = segment.to.x - segment.from.x;
+      const dy = segment.to.y - segment.from.y;
+      const length = dx * dx + dy * dy;
+      const fraction = length ? Math.max(0, Math.min(1,
+        ((pointer.x - segment.from.x) * dx + (pointer.y - segment.from.y) * dy) / length)) : 0;
+      const x = segment.from.x + fraction * dx;
+      const y = segment.from.y + fraction * dy;
+      return { distance: Math.hypot(pointer.x - x, pointer.y - y), fraction: fraction };
+    }
+
+    function trafficLineHits(series, pointer, plot) {
+      if (!pointer || pointer.x < plot.left || pointer.x > plot.right ||
+          pointer.y < plot.top - 8 || pointer.y > plot.bottom + 8) return [];
+      const hits = series.map((line) => {
+        let best = { field: line.field, distance: Infinity, point: null };
+        line.points.forEach((point) => {
+          const distance = Math.hypot(pointer.x - point.x, pointer.y - point.y);
+          if (distance < best.distance) best = { field: line.field, distance: distance, point: point };
+        });
+        line.segments.forEach((segment) => {
+          const hit = trafficSegmentDistance(pointer, segment);
+          if (hit.distance <= best.distance) {
+            best = { field: line.field, distance: hit.distance,
+              point: hit.fraction < 0.5 ? segment.from : segment.to };
+          }
+        });
+        return best;
+      });
+      const nearest = Math.min(...hits.map((hit) => hit.distance));
+      return hits.filter((hit) => hit.distance <= 8 && hit.distance <= nearest + 2);
+    }
+
+    function trafficAge(time, now) {
+      if (time === null) return "not checked yet";
+      const seconds = Math.max(0, Math.round((now - time) / 1000));
+      return seconds === 0 ? "less than 1 second ago" : seconds + (seconds === 1 ? " second ago" : " seconds ago");
+    }
+
+    function trafficLineDetail(series, point, now) {
+      const value = formatTrafficRate(point.value);
+      if (!series.step) return series.label + ": " + value + " · measured at the Pi over the interval ending " + trafficAge(point.time, now);
+      const kind = series.field.startsWith("isp_") ? "ISP plan reference" : "applied profile limit";
+      const age = point.time === null ? "last read " + trafficAge(trafficReferencesReadAt, now)
+        : "recorded " + trafficAge(point.time, now);
+      const current = Number.isFinite(latestTrafficReferences[series.field]) ? "" : " · no current limit";
+      return series.label + ": " + value + " · " + kind + " · " + age + current;
+    }
+
+    function drawTrafficKey(canvas, series, pixelRatio) {
+      const width = 36;
+      const height = 12;
+      const scaledWidth = Math.round(width * pixelRatio);
+      const scaledHeight = Math.round(height * pixelRatio);
+      if (canvas.width !== scaledWidth || canvas.height !== scaledHeight) {
+        canvas.width = scaledWidth;
+        canvas.height = scaledHeight;
+      }
+      const context = canvas.getContext("2d");
+      if (!context) return;
+      context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+      context.clearRect(0, 0, width, height);
+      context.strokeStyle = series.color;
+      context.lineWidth = 2.5;
+      context.lineCap = "round";
+      context.setLineDash(series.dash);
+      context.beginPath();
+      context.moveTo(2, height / 2);
+      context.lineTo(width - 2, height / 2);
+      context.stroke();
+    }
+
+    function requestTrafficChartDraw() {
+      if (trafficChartRedraw !== null) return;
+      trafficChartRedraw = window.requestAnimationFrame(() => {
+        trafficChartRedraw = null;
+        drawTrafficChart();
+      });
+    }
+
+    function setupTrafficChartInspection() {
+      element("traffic-chart").addEventListener("pointermove", (event) => {
+        if (event.pointerType === "touch") return;
+        trafficInspection.pointer = { clientX: event.clientX, clientY: event.clientY };
+        trafficInspection.legend = null;
+        requestTrafficChartDraw();
+      });
+      element("traffic-chart").addEventListener("pointerleave", () => {
+        trafficInspection.pointer = null;
+        requestTrafficChartDraw();
+      });
+      document.querySelectorAll(".traffic-legend button[data-traffic-series]").forEach((button) => {
+        const inspect = () => {
+          trafficInspection.legend = button.dataset.trafficSeries;
+          trafficInspection.pointer = null;
+          requestTrafficChartDraw();
+        };
+        button.addEventListener("pointerenter", (event) => { if (event.pointerType !== "touch") inspect(); });
+        button.addEventListener("focus", inspect);
+        button.addEventListener("pointerleave", () => {
+          if (document.activeElement !== button && trafficInspection.legend === button.dataset.trafficSeries) {
+            trafficInspection.legend = null;
+            requestTrafficChartDraw();
+          }
+        });
+        button.addEventListener("blur", () => {
+          if (trafficInspection.legend === button.dataset.trafficSeries) trafficInspection.legend = null;
+          requestTrafficChartDraw();
+        });
+        button.addEventListener("click", () => {
+          const field = button.dataset.trafficSeries;
+          trafficInspection.pinned = trafficInspection.pinned === field ? null : field;
+          trafficInspection.legend = null;
+          trafficInspection.pointer = null;
+          requestTrafficChartDraw();
+        });
+      });
+      document.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape" || element("page-traffic").hidden) return;
+        trafficInspection = { pointer: null, legend: null, pinned: null };
+        requestTrafficChartDraw();
+      });
+    }
+
+    function resetTrafficView() {
+      latestTrafficReferences.profile_upload = null;
+      latestTrafficReferences.profile_download = null;
+      trafficProfileScope = null;
+      resetTrafficHistory();
     }
 
     function drawTrafficChart() {
@@ -3052,29 +3244,15 @@ DASHBOARD_HTML = r"""<!doctype html>
       context.clearRect(0, 0, bounds.width, bounds.height);
       const now = performance.now();
       const visibleSamples = trafficSamples.filter((sample) => now - sample.time <= TRAFFIC_WINDOW_MS);
-      const selectedDevice = element("traffic-device").value;
-      const profileSelected = selectedDevice !== "@all";
-      element("traffic-profile-upload-legend").hidden = !profileSelected;
-      element("traffic-profile-download-legend").hidden = !profileSelected;
-      const referenceFields = ["isp_upload", "isp_download", "profile_upload", "profile_download"];
-      const graphValues = visibleSamples.flatMap((sample) => [
-        sample.upload,
-        sample.download,
-        ...referenceFields.map((field) => sample[field])
-      ]).filter((value) => Number.isFinite(value));
+      const graphValues = visibleSamples.flatMap((sample) => TRAFFIC_SERIES.map((series) => sample[series.field]))
+        .filter((value) => Number.isFinite(value));
       graphValues.push(...Object.values(latestTrafficReferences).filter((value) => Number.isFinite(value)));
-      const maxRate = Math.max(0.1, ...graphValues);
-      const scaleMax = Math.pow(10, Math.ceil(Math.log10(maxRate)));
+      const scaleMax = Math.pow(10, Math.ceil(Math.log10(Math.max(0.1, ...graphValues))));
       context.font = "12px system-ui, sans-serif";
       const tickLabels = [0, 1, 2, 3, 4].map((tick) => formatTrafficRate(scaleMax * tick / 4));
-      // Leave room for the widest axis label, such as "100.00 Mbit/s".
       const labelWidth = Math.max(...tickLabels.map((label) => context.measureText(label).width));
-      const plot = {
-        left: Math.max(62, Math.ceil(labelWidth) + 16),
-        right: bounds.width - 14,
-        top: 16,
-        bottom: bounds.height - 34
-      };
+      const plot = { left: Math.max(62, Math.ceil(labelWidth) + 16), right: bounds.width - 14,
+        top: 16, bottom: bounds.height - 34 };
       const plotWidth = plot.right - plot.left;
       const plotHeight = plot.bottom - plot.top;
       context.textBaseline = "middle";
@@ -3097,70 +3275,73 @@ DASHBOARD_HTML = r"""<!doctype html>
         context.textBaseline = "alphabetic";
         context.fillText(fraction === 1 ? "now" : "−" + Math.round((1 - fraction) * TRAFFIC_WINDOW_MS / 1000) + "s", x, bounds.height - 8);
       });
-
-      function drawSeries(series) {
-        context.strokeStyle = series.color;
-        context.lineWidth = series.step ? 1.8 : 2.5;
+      const series = trafficSeriesGeometry(visibleSamples, latestTrafficReferences, plot, scaleMax, now, trafficProfileScope);
+      const present = new Set(series.map((line) => line.field));
+      ["legend", "pinned"].forEach((key) => {
+        if (!present.has(trafficInspection[key])) trafficInspection[key] = null;
+      });
+      const pointer = trafficInspection.pointer ? {
+        x: trafficInspection.pointer.clientX - bounds.left,
+        y: trafficInspection.pointer.clientY - bounds.top
+      } : null;
+      const hits = trafficLineHits(series, pointer, plot);
+      const selected = trafficInspection.legend ? [trafficInspection.legend]
+        : hits.length ? hits.map((hit) => hit.field)
+        : trafficInspection.pinned ? [trafficInspection.pinned] : [];
+      document.querySelectorAll(".traffic-legend button[data-traffic-series]").forEach((button) => {
+        const line = series.find((item) => item.field === button.dataset.trafficSeries);
+        button.hidden = !line;
+        button.setAttribute("aria-pressed", String(trafficInspection.pinned === button.dataset.trafficSeries));
+        button.classList.toggle("traffic-highlighted", selected.includes(button.dataset.trafficSeries));
+        button.classList.toggle("traffic-dimmed", !!selected.length && !selected.includes(button.dataset.trafficSeries));
+        if (!line) return;
+        const label = button.querySelector("span");
+        if (label.textContent !== line.label) label.textContent = line.label;
+        const latest = line.points[line.points.length - 1];
+        button.setAttribute("aria-label", trafficLineDetail(line, latest, now) + ". Keep this line highlighted.");
+        drawTrafficKey(button.querySelector("canvas"), line, pixelRatio);
+      });
+      const detail = element("traffic-chart-detail");
+      if (selected.length > 1) {
+        detail.textContent = "Overlapping lines: " + selected.map((field) => {
+          const line = series.find((item) => item.field === field);
+          const point = hits.find((hit) => hit.field === field).point;
+          return trafficLineDetail(line, point, now);
+        }).join(" | ") + ". Choose a legend label to inspect one.";
+      } else if (selected.length) {
+        const line = series.find((item) => item.field === selected[0]);
+        const hit = !trafficInspection.legend && hits.find((item) => item.field === line.field);
+        detail.textContent = trafficLineDetail(line, hit ? hit.point : line.points[line.points.length - 1], now);
+      } else {
+        detail.textContent = TRAFFIC_INSPECTION_HELP;
+      }
+      const ordered = [...series.filter((line) => !selected.includes(line.field)),
+        ...series.filter((line) => selected.includes(line.field))];
+      ordered.forEach((line) => {
+        const highlighted = selected.includes(line.field);
+        context.strokeStyle = selected.length && !highlighted ? "#64748b" : line.color;
+        context.globalAlpha = selected.length && !highlighted ? 0.4 : 1;
+        context.lineWidth = highlighted ? 3.5 : line.step ? 1.8 : 2.5;
         context.lineJoin = "round";
         context.lineCap = "round";
-        context.setLineDash(series.dash || []);
+        context.setLineDash(line.dash);
         context.beginPath();
-        let started = false;
-        let previousY = 0;
-        visibleSamples.forEach((sample) => {
-          const rate = sample[series.field];
-          if (!Number.isFinite(rate)) {
-            if (series.step) started = false;
-            return;
-          }
-          const age = now - sample.time;
-          const x = plot.right - plotWidth * age / TRAFFIC_WINDOW_MS;
-          const y = plot.bottom - plotHeight * rate / scaleMax;
-          if (!started) {
-            context.moveTo(x, y);
-            started = true;
-          } else if (series.step) {
-            context.lineTo(x, previousY);
-            context.lineTo(x, y);
-          } else {
-            context.lineTo(x, y);
-          }
-          previousY = y;
+        line.segments.forEach((segment) => {
+          context.moveTo(segment.from.x, segment.from.y);
+          context.lineTo(segment.to.x, segment.to.y);
         });
-        if (started) context.stroke();
+        context.stroke();
         context.setLineDash([]);
-      }
-
-      [
-        { field: "isp_upload", color: "#75a9ff", dash: [8, 6], step: true },
-        { field: "isp_download", color: "#75d7c2", dash: [8, 6], step: true },
-        { field: "profile_upload", color: "#ffa76c", dash: [2, 5], step: true },
-        { field: "profile_download", color: "#edc36a", dash: [2, 5], step: true },
-        { field: "upload", color: "#70b7ff" },
-        { field: "download", color: "#70d7a9" }
-      ].forEach(drawSeries);
-
-      if (!visibleSamples.length) {
-        referenceFields.forEach((field) => {
-          const value = latestTrafficReferences[field];
-          if (!Number.isFinite(value)) return;
-          const colors = {
-            isp_upload: "#75a9ff",
-            isp_download: "#75d7c2",
-            profile_upload: "#ffa76c",
-            profile_download: "#edc36a"
-          };
-          context.strokeStyle = colors[field];
-          context.lineWidth = 1.8;
-          context.setLineDash(field.startsWith("isp_") ? [8, 6] : [2, 5]);
-          const y = plot.bottom - plotHeight * value / scaleMax;
+        line.points.forEach((point) => {
+          if (line.points.length !== 1 && line.segments.some((segment) => segment.from === point || segment.to === point)) return;
           context.beginPath();
-          context.moveTo(plot.left, y);
-          context.lineTo(plot.right, y);
-          context.stroke();
+          context.arc(point.x, point.y, highlighted ? 3 : 1.8, 0, Math.PI * 2);
+          context.fillStyle = context.strokeStyle;
+          context.fill();
         });
-        context.setLineDash([]);
-      }
+      });
+      context.globalAlpha = 1;
+      context.setLineDash([]);
       if (!visibleSamples.length) {
         context.fillStyle = "#91a8c1";
         context.textAlign = "center";
@@ -3223,6 +3404,12 @@ DASHBOARD_HTML = r"""<!doctype html>
           stopTrafficSampling(data.message || "Live traffic counters are unavailable in this mode.");
           return;
         }
+        const selectedDevice = element("traffic-device").value;
+        const scope = data.general_profile_limits && selectedDevice === "@all" ? "shared"
+          : selectedDevice === EVERYONE_ELSE_TRAFFIC ? "everyone" : "device";
+        if (trafficProfileScope !== null && trafficProfileScope !== scope) resetTrafficHistory();
+        trafficProfileScope = scope;
+        trafficReferencesReadAt = performance.now();
         latestTrafficReferences = trafficReferencesFromResponse(data);
         const counters = mergedTrafficCounters(data);
         const totals = selectedTrafficTotals(counters.devices);
@@ -4767,6 +4954,37 @@ DASHBOARD_HTML = r"""<!doctype html>
       return { label: label, disabled: disabled, ariaLabel: label + " " + domain };
     }
 
+    // Adding a name to a profile that does not allow only listed sites yet turns it into an
+    // allow list, so every other site stops working for devices on it. The page asks first.
+    function needsAllowOnlyConfirm(profile) {
+      return Boolean(profile) && profile.website_mode !== "allow_only";
+    }
+
+    function allowOnlyConfirmText(subject, profile) {
+      return "Adding " + subject + " turns the profile " + profile.name + " into an allow list. " +
+        "Every other site will stop working for devices on that profile. Continue?";
+    }
+
+    // Callers wait for this only when needsAllowOnlyConfirm says so, so a profile that
+    // already is an allow list adds its names at once and with no pause.
+    async function askAllowOnly(subject, profile) {
+      try {
+        return await confirmWorkflow(allowOnlyConfirmText(subject, profile));
+      } catch (error) {
+        showMessage(error.message, "error");
+        return false;
+      }
+    }
+
+    function showProfileAddError(error, profileId) {
+      if (error.status === 409 && error.code === "allow_only_confirmation_required" &&
+          error.profile && error.profile.id === profileId) {
+        const index = profiles.findIndex((profile) => profile.id === profileId);
+        if (index !== -1) profiles[index] = error.profile;
+      }
+      showMessage(error.message, "error");
+    }
+
     const ENFORCE_NOTE = "It applies on its own while JitterSim is running. " +
       "After Reset or Panic choose Start with saved settings. After Panic also turn household blocking back on.";
 
@@ -5290,18 +5508,22 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     async function addDomainToProfile(domain, profileId, button, onChange) {
       if (!profileId) return;
+      const profile = profiles.find((item) => item.id === profileId);
+      const confirmAllowOnly = needsAllowOnlyConfirm(profile);
+      if (confirmAllowOnly && !await askAllowOnly(domain, profile)) return;
       setButtonBusy(button, true);
       showMessage("Adding " + domain + " to the profile...", "working");
       try {
         const result = await request("/api/observations/add-to-profile", "POST", {
           domain: domain,
-          profile_id: profileId
+          profile_id: profileId,
+          confirm_allow_only: confirmAllowOnly
         });
         const index = profiles.findIndex((profile) => profile.id === profileId);
         if (index !== -1 && result.profile) profiles[index] = result.profile;
         refreshAfterSuccess("Added " + domain + " to the profile.");
       } catch (error) {
-        showMessage(error.message, "error");
+        showProfileAddError(error, profileId);
       } finally {
         setButtonBusy(button, false);
         if (onChange) onChange();
@@ -5349,18 +5571,22 @@ DASHBOARD_HTML = r"""<!doctype html>
       const action = groupProfileAction(group, profile);
       if (action.disabled) return;
       const messages = groupProfileMessages(group, action);
+      const confirmAllowOnly = needsAllowOnlyConfirm(profile);
+      if (confirmAllowOnly &&
+          !await askAllowOnly(groupSubject(group, action.domains.length), profile)) return;
       setButtonBusy(button, true);
       showMessage(messages.busy, "working");
       try {
         const result = await request("/api/observations/add-to-profile", "POST", {
           domains: action.domains,
-          profile_id: profile.id
+          profile_id: profile.id,
+          confirm_allow_only: confirmAllowOnly
         });
         const index = profiles.findIndex((item) => item.id === profile.id);
         if (index !== -1 && result.profile) profiles[index] = result.profile;
         refreshAfterSuccess(messages.done);
       } catch (error) {
-        showMessage(error.message, "error");
+        showProfileAddError(error, profile.id);
       } finally {
         setButtonBusy(button, false);
         if (onChange) onChange();
@@ -5585,42 +5811,66 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     function renderServiceCatalogue() {
       const container = element("service-list-catalogue");
-      const checked = new Set(
-        Array.from(container.querySelectorAll("input:checked")).map((input) => input.value)
-      );
-      container.replaceChildren();
-      const legend = document.createElement("legend");
-      legend.textContent = "Services";
-      container.appendChild(legend);
-      serviceCatalogue.forEach((service) => {
-        const label = document.createElement("label");
-        label.className = "quota-check";
-        const input = document.createElement("input");
-        input.type = "checkbox";
-        input.value = service.key;
-        input.checked = checked.has(service.key);
-        label.title = service.domains.join(", ");
-        label.append(input, document.createTextNode(" " + service.name));
-        container.appendChild(label);
+      const previous = Array.from(container.querySelectorAll("input"));
+      const active = previous.includes(document.activeElement) ? document.activeElement : null;
+      const activeIndex = previous.indexOf(active);
+      const existing = new Map(previous.map((input) => [input.value, input.parentElement]));
+      const retained = new Set(serviceCatalogue.map((service) => service.key));
+      previous.forEach((input) => {
+        if (!retained.has(input.value)) input.parentElement.remove();
       });
+      let legend = container.querySelector("legend");
+      if (!legend) {
+        legend = document.createElement("legend");
+        legend.textContent = "Services";
+        container.prepend(legend);
+      }
+      serviceCatalogue.forEach((service, index) => {
+        let label = existing.get(service.key);
+        if (!label) {
+          label = document.createElement("label");
+          label.className = "quota-check";
+          const input = document.createElement("input");
+          input.type = "checkbox";
+          input.value = service.key;
+          label.append(input, document.createTextNode(""));
+        }
+        const title = service.domains.join(", ");
+        if (label.title !== title) label.title = title;
+        const name = " " + service.name;
+        if (label.lastChild.textContent !== name) label.lastChild.textContent = name;
+        const position = container.children[index + 1] || null;
+        if (position !== label) container.insertBefore(label, position);
+      });
+      if (active) {
+        const current = Array.from(container.querySelectorAll("input"));
+        const target = active.isConnected ? active :
+          current[Math.min(activeIndex, current.length - 1)] || element("service-list-hostnames");
+        if (document.activeElement !== target) target.focus({ preventScroll: true });
+      }
     }
 
     function renderServiceListObserved() {
       const select = element("service-list-observed");
-      const names = observedNames;
       const previous = select.value;
-      select.replaceChildren();
-      const first = document.createElement("option");
-      first.value = "";
-      first.textContent = names.size ? "Choose a name" : "No names seen yet";
-      select.appendChild(first);
-      Array.from(names).sort().forEach((name) => {
-        const option = document.createElement("option");
-        option.value = name;
-        option.textContent = name;
-        select.appendChild(option);
+      const names = Array.from(observedNames).sort();
+      const retained = new Set(["", ...names]);
+      const existing = new Map(Array.from(select.options).map((option) => [option.value, option]));
+      Array.from(select.options).forEach((option) => {
+        if (!retained.has(option.value)) option.remove();
       });
-      if (names.has(previous)) select.value = previous;
+      ["", ...names].forEach((name, index) => {
+        let option = existing.get(name);
+        if (!option) {
+          option = document.createElement("option");
+          option.value = name;
+        }
+        const text = name || (names.length ? "Choose a name" : "No names seen yet");
+        if (option.textContent !== text) option.textContent = text;
+        const position = select.options[index] || null;
+        if (position !== option) select.insertBefore(option, position);
+      });
+      select.value = retained.has(previous) ? previous : "";
     }
 
     function renderServiceLists(data) {
@@ -5645,7 +5895,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         title.textContent = serviceList.name + " (" + serviceList.id + ")";
         const detail = document.createElement("span");
         detail.textContent = "All affected devices → " + serviceList.profile_name +
-          (serviceList.enabled ? "" : " · disabled");
+          (!serviceList.enabled ? " · disabled" : serviceList.outage_now ? " · random outage now" : "");
         heading.append(title, detail);
         const names = serviceCatalogue
           .filter((service) => serviceList.services.includes(service.key))
@@ -7344,11 +7594,13 @@ DASHBOARD_HTML = r"""<!doctype html>
     });
 
     element("traffic-device").addEventListener("change", () => {
+      resetTrafficView();
       if (!trafficSamplingAllowed) return;
-      resetTrafficHistory();
       element("traffic-status").textContent = "Changing the device view...";
       pollTraffic();
     });
+
+    setupTrafficChartInspection();
 
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) {
@@ -7633,148 +7885,19 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
     });
 
-    async function copyText(textOrPromise, env) {
-      const scope = env || {
-        navigator: typeof navigator === "undefined" ? undefined : navigator,
-        document: typeof document === "undefined" ? undefined : document
-      };
-      const clipboard = scope.navigator && scope.navigator.clipboard;
-      const text = Promise.resolve(textOrPromise).then((value) => {
-        if (typeof value !== "string" || value === "") throw new Error("Nothing to copy");
-        return value;
-      });
-      const blob = text.then((value) => new Blob([value], {type: "text/plain"}));
-      blob.catch(() => {});
-      if (clipboard && typeof clipboard.write === "function" && typeof ClipboardItem === "function") {
-        try {
-          await clipboard.write([new ClipboardItem({"text/plain": blob})]);
-          return "clipboard-item";
-        } catch (error) {
-          // Fall through. When the text itself failed the next line throws that error.
-        }
-      }
-      const value = await text;
-      if (clipboard && typeof clipboard.writeText === "function") {
-        try {
-          await clipboard.writeText(value);
-          return "write-text";
-        } catch (error) {
-          // Fall through to the oldest method.
-        }
-      }
-      const doc = scope.document;
-      if (doc && doc.body && typeof doc.createElement === "function" && typeof doc.execCommand === "function") {
-        const area = doc.createElement("textarea");
-        const previous = doc.activeElement;
-        let copied = false;
-        area.setAttribute("readonly", "");
-        area.setAttribute("aria-hidden", "true");
-        area.style.position = "fixed";
-        area.style.left = "-9999px";
-        area.value = value;
-        doc.body.appendChild(area);
-        try {
-          area.select();
-          if (typeof area.setSelectionRange === "function") area.setSelectionRange(0, value.length);
-          copied = doc.execCommand("copy") === true;
-        } catch (error) {
-          copied = false;
-        } finally {
-          area.value = "";
-          doc.body.removeChild(area);
-          if (previous && typeof previous.focus === "function") previous.focus({preventScroll: true});
-        }
-        if (copied) return "exec-command";
-      }
-      throw new Error("Copy failed");
-    }
-
-    function routerCopyState(input) {
-      const needsPassword = !input.hasRouterPassword;
-      const noun = input.kind === "password" ? "password" : "name";
-      let disabled = true;
-      let title = "Copy the router Wi-Fi " + noun;
-      if (!input.adminTokenVerified) title = "Check the admin token first";
-      else if (!input.helperConfigured) title = "Needs the Pi helper";
-      else if (input.routerPasswordRejected) title = "Router password rejected. Enter it again.";
-      else if (input.busy) title = "Working…";
-      else {
-        disabled = false;
-        if (needsPassword) title = "Enter the router password first";
-      }
-      return {disabled: disabled, title: title, needsPassword: needsPassword};
-    }
-
-    function copyRouterWifi(kind) {
-      const wantPassword = kind === "password";
-      const button = element(wantPassword ? "copy-wifi-password" : "copy-wifi-name");
-      if (button.disabled || routerCopyPending || routerActionPending || routerPasswordChecking) return;
-      if (!requireAdminToken(button)) return;
-      const routerPassword = element("router-admin-password").value;
-      if (!routerPassword) {
-        const note = "Enter the router admin password first.";
-        element("credential-router-status").textContent = note;
-        showMessage(note, "error");
-        openCredentials("router", button);
-        return;
-      }
-      if (routerPasswordBlocked(button)) return;
-      const passwordRevision = routerPasswordRevision;
-      const label = wantPassword ? "Copy Wi-Fi password" : "Copy Wi-Fi name";
-      routerCopyPending = true;
-      setButtonBusy(button, true);
-      updateCredentialStatus();
-      // The Wi-Fi value only travels through this promise on its way to the clipboard.
-      const pending = request("/api/router/wifi-credentials", "POST", {
-        admin_password: routerPassword, include_password: wantPassword
-      }).then((response) => wantPassword ? response.result.password : response.result.ssid);
-      return copyText(pending).then(() => {
-        if (passwordRevision === routerPasswordRevision) {
-          routerPasswordVerified = true;
-          routerPasswordRejected = false;
-        }
-        if (button.copiedTimer) window.clearTimeout(button.copiedTimer);
-        button.textContent = "Copied";
-        button.copiedTimer = window.setTimeout(() => {
-          button.textContent = label;
-          button.copiedTimer = null;
-        }, 2000);
-        showMessage(wantPassword ?
-          "Router Wi-Fi password copied. It stays on your clipboard until you copy something else." :
-          "Router Wi-Fi name copied.", "success");
-      }, (error) => {
-        if (passwordRevision === routerPasswordRevision && isRouterLoginFailure(error)) {
-          routerPasswordVerified = false;
-          routerPasswordRejected = true;
-        }
-        const reason = error && error.message === "Copy failed" ? "The browser did not allow it." :
-          (error && error.message) || "Try again.";
-        showMessage("Could not copy. " + reason, "error");
-      }).finally(() => {
-        routerCopyPending = false;
-        setButtonBusy(button, false);
-        updateCredentialStatus();
-      });
-    }
-
     function renderRouterWifi() {
       const button = element("router-wifi-toggle");
       const status = element("router-wifi-status");
       const password = element("router-admin-password").value;
       const fresh = routerWifiCheckedAt && Date.now() / 1000 - routerWifiCheckedAt < 45;
       const known = typeof routerWifiEnabled === "boolean" && fresh && adminTokenVerified && !routerPasswordRejected;
-      const busy = routerActionPending || routerPasswordChecking || routerWifiRemoteBusy || routerWifiPolling ||
-        routerCopyPending;
-      [["copy-wifi-name", "name"], ["copy-wifi-password", "password"]].forEach(([id, kind]) => {
-        const copyState = routerCopyState({
-          helperConfigured: helperConfigured, adminTokenVerified: adminTokenVerified,
-          routerPasswordRejected: routerPasswordRejected, busy: busy,
-          hasRouterPassword: Boolean(password), kind: kind
-        });
-        element(id).disabled = copyState.disabled;
-        element(id).title = copyState.title;
-      });
-      element("sync-router-ap").disabled = busy;
+      const busy = routerActionPending || routerPasswordChecking || routerWifiRemoteBusy || routerWifiPolling;
+      const copyButton = element("sync-router-ap");
+      copyButton.disabled = !adminTokenVerified || !helperConfigured || routerPasswordRejected || busy;
+      copyButton.title = !adminTokenVerified ? "Check the admin token first" :
+        !helperConfigured ? "Needs the Pi helper" :
+        routerPasswordRejected ? "Router password rejected. Enter it again." : busy ? "Working…" :
+        !password ? "Enter the router password first" : "Copy the router Wi-Fi name, password and security to the Pi";
       element("check-router-password").disabled = busy;
       button.disabled = !helperConfigured || !known || busy;
       button.setAttribute("aria-checked", String(known && routerWifiEnabled));
@@ -7792,14 +7915,13 @@ DASHBOARD_HTML = r"""<!doctype html>
       if (routerWifiTimer !== null) window.clearTimeout(routerWifiTimer);
       routerWifiTimer = null;
       if (document.hidden || !adminTokenVerified || !helperConfigured || routerPasswordRejected ||
-          !element("router-admin-password").value || routerActionPending || routerPasswordChecking || routerWifiPolling ||
-          routerCopyPending) return;
+          !element("router-admin-password").value || routerActionPending || routerPasswordChecking || routerWifiPolling) return;
       routerWifiTimer = window.setTimeout(pollRouterWifi, delay);
     }
 
     async function pollRouterWifi() {
       routerWifiTimer = null;
-      if (document.hidden || !adminTokenVerified || routerPasswordRejected || routerActionPending || routerPasswordChecking || routerWifiPolling || routerCopyPending) return;
+      if (document.hidden || !adminTokenVerified || routerPasswordRejected || routerActionPending || routerPasswordChecking || routerWifiPolling) return;
       const password = element("router-admin-password").value;
       if (!password || !helperConfigured) return;
       const passwordRevision = routerPasswordRevision;
@@ -7860,7 +7982,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     async function routerAction(path, body, message, button) {
-      if (routerActionPending || routerPasswordChecking || routerCopyPending) return;
+      if (routerActionPending || routerPasswordChecking) return;
       if (!requireAdminToken(button)) return;
       const passwordRevision = routerPasswordRevision;
       const password = element("router-admin-password").value;
@@ -7942,7 +8064,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     async function checkRouterPassword() {
-      if (routerActionPending || routerPasswordChecking || routerCopyPending) return;
+      if (routerActionPending || routerPasswordChecking) return;
       const button = element("check-router-password");
       const status = element("credential-router-status");
       if (!requireAdminToken(button)) return;
@@ -7988,10 +8110,6 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     element("check-router-password").addEventListener("click", checkRouterPassword);
-
-    element("copy-wifi-name").addEventListener("click", () => copyRouterWifi("name"));
-
-    element("copy-wifi-password").addEventListener("click", () => copyRouterWifi("password"));
 
     element("sync-router-ap").addEventListener("click", (event) => {
       routerAction("/api/router/sync-ap", {}, "Checking the router Wi-Fi security...", event.currentTarget);
@@ -9762,7 +9880,8 @@ DASHBOARD_HTML = r"""<!doctype html>
         const page = currentPage();
         const jobs = [loadHealth];
         if (page === "devices") jobs.push(loadDevicesForSchedule, loadConditions, loadWorkspace, loadAccessStatus);
-        if (page === "schedules") jobs.push(loadTimers, loadScenarios, loadProgressions, loadSchedules, loadQuotas);
+        // Service lists are read again for the random outage they may be in now.
+        if (page === "schedules") jobs.push(loadTimers, loadScenarios, loadProgressions, loadSchedules, loadQuotas, loadServiceLists);
         if (page === "traffic") jobs.push(loadObservations);
         if (page === "access") jobs.push(loadObservations, loadAccessStatus);
         if (page === "activity") jobs.push(loadActivity);
@@ -10629,8 +10748,10 @@ def _service_assignment_payload(
 
 
 def _service_list_payload(
-    service_list: ServiceList, *, repository: ConfigRepository
+    service_list: ServiceList, *, repository: ConfigRepository, outage_now: bool = False
 ) -> Dict[str, Any]:
+    """Describe one list. `outage_now` says the network cuts it for a random outage."""
+
     profile = repository.get_profile(service_list.profile_id)
     return {
         "id": service_list.id,
@@ -10641,6 +10762,7 @@ def _service_list_payload(
         "hostnames": list(service_list.hostnames),
         "domains": list(service_list.domains),
         "enabled": service_list.enabled,
+        "outage_now": service_list.enabled and outage_now,
     }
 
 
@@ -11291,10 +11413,20 @@ class ControlServer(HTTPServer):
                 }
             )
         if path == "/api/service-lists":
+            # Only the plan on the network says whether a list is in an outage now.
+            applied = self.scheduler.applied_plan() if self.scheduler is not None else None
+            outages = {
+                rule.list_id: rule.outage_active
+                for rule in (applied.service_list_rules if applied is not None else ())
+            }
             return HTTPStatus.OK, "application/json", _json_bytes(
                 {
                     "service_lists": [
-                        _service_list_payload(service_list, repository=self.repository)
+                        _service_list_payload(
+                            service_list,
+                            repository=self.repository,
+                            outage_now=outages.get(service_list.id, False),
+                        )
                         for service_list in self.repository.list_service_lists()
                     ],
                     "catalogue": _service_catalogue_payload(),
@@ -12835,18 +12967,38 @@ class ControlServer(HTTPServer):
         try:
             profile_id = payload["profile_id"]
             names = _domains_from_payload(payload)
-            profile = self.repository.get_profile(profile_id)
-            if profile is None:
-                raise ValueError("profile does not exist")
-            listed = tuple(dict.fromkeys(profile.website_domains + names))
-            if len(listed) > MAX_LISTED_DOMAINS:
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "A profile can list %d websites. Remove some first." % MAX_LISTED_DOMAINS}
-                )
-            updated = replace(profile, website_mode="allow_only", website_domains=listed)
-            self.repository.save_profile(updated)
+            confirm_allow_only = payload.get("confirm_allow_only", False)
+            if not isinstance(confirm_allow_only, bool):
+                raise ValueError("confirm_allow_only must be true or false")
+            with self.repository.transaction():
+                profile = self.repository.get_profile(profile_id)
+                if profile is None:
+                    raise ValueError("profile does not exist")
+                if profile.website_mode != "allow_only" and not confirm_allow_only:
+                    return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+                        {
+                            "code": "allow_only_confirmation_required",
+                            "error": (
+                                "This profile no longer allows only listed sites. "
+                                "Nothing was added. Choose Add again to confirm restricting it."
+                            ),
+                            "profile": _profile_payload(profile),
+                        }
+                    )
+                listed = tuple(dict.fromkeys(profile.website_domains + names))
+                if len(listed) > MAX_LISTED_DOMAINS:
+                    return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                        {"error": "A profile can list %d websites. Remove some first." % MAX_LISTED_DOMAINS}
+                    )
+                updated = replace(profile, website_mode="allow_only", website_domains=listed)
+                self.repository.save_profile(updated)
         except (KeyError, TypeError, ValueError, StorageError) as error:
             return _bad_request("could not add domain to profile", error)
+        except sqlite3.Error:
+            LOGGER.exception("could not save observed websites to a profile")
+            return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                {"error": "The profile could not be saved. Try again."}
+            )
         return HTTPStatus.OK, "application/json", _json_bytes(
             {"profile": _profile_payload(updated)}
         )
@@ -13753,11 +13905,9 @@ class ControlServer(HTTPServer):
                     "state": self._runtime_state_with_running(state),
                     "applied": self._applied_summary(plan),
                     "unverified_device_ids": list(plan.unverified_device_ids),
-                    "warning": (
-                        "Profiles were skipped for devices whose current Wi-Fi identity could not be verified: "
-                        + ", ".join(plan.unverified_device_ids)
-                        if plan.unverified_device_ids
-                        else None
+                    "warning": _apply_warning(
+                        plan.unverified_device_ids,
+                        prepared.unresolved_names if prepared is not None else (),
                     ),
                 }
             ),
@@ -14165,6 +14315,25 @@ def _safe_wifi_copy_message(error: HelperClientError) -> str:
     if str(error) == WIFI_DETAILS_MISSING_MESSAGE:
         return WIFI_DETAILS_MISSING_MESSAGE
     return safe_router_check_message(str(error))
+
+
+def _apply_warning(
+    unverified_device_ids: Sequence[str], unresolved_names: Sequence[str]
+) -> Optional[str]:
+    """Say in plain words what an apply left out, or None when it left nothing out."""
+
+    parts = []
+    if unverified_device_ids:
+        parts.append(
+            "Profiles were skipped for devices whose current Wi-Fi identity could not be verified: "
+            + ", ".join(unverified_device_ids)
+        )
+    if unresolved_names:
+        parts.append(
+            "These website names could not be looked up in time and are left out of the rules "
+            "until their lookup works: " + describe_timed_out_names(unresolved_names)
+        )
+    return ". ".join(parts) if parts else None
 
 
 def _bad_request(message: str, error: Exception) -> Tuple[int, str, bytes]:

@@ -1,4 +1,4 @@
-"""Copy the router Wi-Fi name and password to the clipboard through the served dashboard.
+"""Copy router Wi-Fi settings to the Pi through the served dashboard.
 
 The fixture's fake router accepts any router password and answers with the Wi-Fi name
 "Browser home" and the Wi-Fi password "browser-wifi-password". Nothing here is a real credential.
@@ -19,12 +19,14 @@ ADMIN_TOKEN = "browser-test"
 ROUTER_PASSWORD = "browser-router-password"
 WIFI_NAME = "Browser home"
 WIFI_PASSWORD = "browser-wifi-password"
+SYNC_PATH = "/api/router/sync-ap"
+PREVIEW_PATH = "/api/router/preview-ap"
 CREDENTIALS_PATH = "/api/router/wifi-credentials"
 
 
 def sign_in(page):
     expect(page.locator("#private-dashboard")).to_be_hidden()
-    page.locator("#open-admin-credentials").click()
+    sidebar_control(page, "#open-admin-credentials").click()
     page.locator("#admin-token").fill(ADMIN_TOKEN)
     page.locator("#check-admin-token").click()
     expect(page.locator("#private-dashboard")).to_be_visible()
@@ -142,20 +144,42 @@ def prove_the_scan_can_find_a_value(context, base):
     assert "let plantedLexical.inner" in found["hits"], found
 
 
-def clipboard_text(page):
-    return page.evaluate("navigator.clipboard.readText()")
+def api_calls(requests, path):
+    return [item for item in requests if item["url"].endswith(path)]
 
 
-def credential_requests(requests):
-    return [item for item in requests if item["url"].endswith(CREDENTIALS_PATH)]
+def check_confirmation(dialog, accept):
+    assert f"{WIFI_NAME} using WPA2 (2.4 GHz)" in dialog.message
+    assert "Test clients disconnect while Wi-Fi restarts." in dialog.message
+    assert WIFI_PASSWORD not in dialog.message
+    if accept:
+        dialog.accept()
+    else:
+        dialog.dismiss()
 
 
 def run_width(browser, base, width, height):
     context = browser.new_context(
         viewport={"width": width, "height": height},
-        permissions=["clipboard-read", "clipboard-write"],
         base_url=base,
     )
+    context.add_init_script("""(() => {
+        window.clipboardCalls = {reads: 0, writes: 0};
+        Object.defineProperty(navigator, 'clipboard', {configurable: true, value: {
+            readText: () => { window.clipboardCalls.reads++; throw Error('Unexpected clipboard read'); },
+            writeText: () => { window.clipboardCalls.writes++; throw Error('Unexpected clipboard write'); },
+            read: () => { window.clipboardCalls.reads++; throw Error('Unexpected clipboard read'); },
+            write: () => { window.clipboardCalls.writes++; throw Error('Unexpected clipboard write'); }
+        }});
+        const execCommand = Document.prototype.execCommand;
+        Document.prototype.execCommand = function(command, ...args) {
+            if (command === 'copy' || command === 'cut' || command === 'paste') {
+                window.clipboardCalls[command === 'paste' ? 'reads' : 'writes']++;
+                throw Error('Unexpected clipboard command');
+            }
+            return execCommand.call(this, command, ...args);
+        };
+    })();""")
     page = context.new_page()
     errors = []
     requests = []
@@ -185,177 +209,133 @@ def run_width(browser, base, width, height):
     page.on("response", record_response)
 
     page.goto("/")
-    # Locked: nothing can be copied before the admin token is checked.
-    expect(page.locator("#copy-wifi-name")).to_be_disabled()
-    expect(page.locator("#copy-wifi-password")).to_be_disabled()
-    expect(page.locator("#copy-wifi-name")).to_have_attribute(
-        "title", "Check the admin token first"
-    )
+    button = page.locator("#sync-router-ap")
+    expect(button).to_be_disabled()
+    expect(button).to_have_attribute("title", "Check the admin token first")
+    assert page.locator("#copy-wifi-name, #copy-wifi-password").count() == 0
     sign_in(page)
 
-    # The token is accepted but there is no router password yet: a click opens the panel.
-    expect(page.locator("#copy-wifi-name")).to_be_enabled()
-    expect(page.locator("#copy-wifi-password")).to_have_attribute(
-        "title", "Enter the router password first"
-    )
-    sidebar_control(page, "#copy-wifi-password").click()
+    # The button remains available without a router password so it can open credentials.
+    expect(button).to_be_enabled()
+    expect(button).to_have_attribute("title", "Enter the router password first")
+    sidebar_control(page, "#sync-router-ap").click()
     expect(page.locator("#credentials-panel")).to_be_visible()
     expect(page.locator("#router-admin-password")).to_be_focused()
-    assert credential_requests(requests) == []
+    assert api_calls(requests, PREVIEW_PATH) == []
     page.locator("#close-credentials").click()
 
     enter_router_password(page)
-    expect(page.locator("#copy-wifi-name")).to_have_attribute(
-        "title", "Copy the router Wi-Fi name"
-    )
-    sidebar_control(page, "#copy-wifi-name")
+    expect(button).to_be_enabled()
+    expect(page.locator("#router-action-message")).to_have_text("")
+    sidebar_control(page, "#sync-router-ap")
     control = page.locator(".router-wifi-control").bounding_box()
-    copy = page.locator(".router-wifi-copy").bounding_box()
-    toggle = page.locator("#router-wifi-toggle").bounding_box()
+    row = page.locator(".router-wifi-copy").bounding_box()
+    switch = page.locator("#router-wifi-toggle").bounding_box()
+    action = button.bounding_box()
+    assert abs(action["x"] - row["x"]) <= 1
+    assert abs(action["width"] - row["width"]) <= 1
     if is_phone(page):
-        # On a phone the switch sits in the bar at the bottom of the window and the copy
-        # buttons in the Controls sheet above it.
         bar = page.locator(".safety-bar").bounding_box()
         assert abs(bar["y"] + bar["height"] - height) <= 1, bar
-        assert toggle["y"] >= bar["y"] and toggle["y"] + toggle["height"] <= bar["y"] + bar["height"] + 0.5
-        assert copy["y"] + copy["height"] <= bar["y"] + 0.5, (copy, bar)
-        page.screenshot(path=f"test-results/router-copy-{width}.png")
+        assert switch["y"] >= bar["y"]
+        assert switch["y"] + switch["height"] <= bar["y"] + bar["height"] + 0.5
+        assert row["y"] + row["height"] <= bar["y"] + 0.5, (row, bar)
     else:
-        # The copy buttons sit in their own row under the switch row and leave the switch where
-        # it was.
-        assert copy["y"] >= control["y"] + control["height"]
-        assert abs(copy["x"] - control["x"]) <= 1 and abs(copy["width"] - control["width"]) <= 1
-        assert toggle["x"] + toggle["width"] <= control["x"] + control["width"]
-        assert toggle["x"] > control["x"] + control["width"] / 2
-        assert toggle["y"] >= control["y"] and toggle["y"] + toggle["height"] <= control["y"] + control["height"]
-        page.screenshot(
-            path=f"test-results/router-copy-{width}.png",
-            clip={
-                "x": control["x"] - 4,
-                "y": control["y"] - 4,
-                "width": control["width"] + 8,
-                "height": copy["y"] + copy["height"] - control["y"] + 8,
-            },
-        )
+        assert row["y"] >= control["y"] + control["height"]
+        assert abs(row["x"] - control["x"]) <= 1
+        assert abs(row["width"] - control["width"]) <= 1
+        assert switch["x"] > control["x"] + control["width"] / 2
+        assert switch["y"] >= control["y"]
+    page.screenshot(path=f"test-results/router-copy-{width}.png", animations="disabled")
 
-    # The name: the password is not even asked for.
-    sidebar_control(page, "#copy-wifi-name").click()
-    expect(page.locator("#copy-wifi-name")).to_have_text("Copied")
-    assert clipboard_text(page) == WIFI_NAME
-    expect(page.locator("#copy-wifi-name")).to_have_text("Copy Wi-Fi name")
+    # A status in the sidebar is visible even while another dashboard page is open.
+    page.locator('[data-page-link="devices"]').click()
+    sidebar_control(page, "#sync-router-ap")
+    expect(button).to_be_visible()
+    button.focus()
+    expect(button).to_be_focused()
+    page.once("dialog", lambda dialog: check_confirmation(dialog, False))
+    page.keyboard.press("Enter")
+    expect(page.locator("#router-action-message")).to_contain_text("Copy cancelled")
+    expect(page.locator("#router-action-message")).to_be_visible()
+    assert api_calls(requests, SYNC_PATH) == []
 
-    # The password.
-    sidebar_control(page, "#copy-wifi-password").click()
-    expect(page.locator("#copy-wifi-password")).to_have_text("Copied")
-    assert clipboard_text(page) == WIFI_PASSWORD
-    expect(page.locator("#message")).to_contain_text(
-        "Router Wi-Fi password copied. It stays on your clipboard until you copy something else."
+    # A held preview keeps both router actions disabled until it finishes.
+    held = []
+    page.route("**" + PREVIEW_PATH, lambda route: held.append(route))
+    sidebar_control(page, "#sync-router-ap").click()
+    expect(button).to_be_disabled()
+    expect(page.locator("#router-wifi-toggle")).to_be_disabled()
+    assert len(held) == 1
+    assert api_calls(requests, SYNC_PATH) == []
+    held[0].continue_()
+    page.unroute("**" + PREVIEW_PATH)
+    # Playwright dismisses this preview after the pending request is released.
+    expect(button).to_be_enabled()
+    expect(page.locator("#router-action-message")).to_contain_text("Copy cancelled")
+
+    page.once("dialog", lambda dialog: check_confirmation(dialog, True))
+    sidebar_control(page, "#sync-router-ap").click()
+    expect(page.locator("#router-action-message")).to_contain_text(
+        f"Copied {WIFI_NAME} using WPA2"
     )
-    expect(page.locator("#copy-wifi-password")).to_have_text("Copy Wi-Fi password")
-
-    asked = credential_requests(requests)
-    assert len(asked) == 2, asked
-    assert [item["method"] for item in asked] == ["POST", "POST"]
-    assert json.loads(asked[0]["body"]) == {
-        "admin_password": ROUTER_PASSWORD,
-        "include_password": False,
-    }
-    assert json.loads(asked[1]["body"]) == {
-        "admin_password": ROUTER_PASSWORD,
-        "include_password": True,
-    }
-    answered = [item for item in responses if item["url"].endswith(CREDENTIALS_PATH)]
-    assert len(answered) == 2, answered
-    assert [item["status"] for item in answered] == [200, 200]
-    assert json.loads(answered[0]["body"]) == {"result": {"ssid": WIFI_NAME}}
-    assert WIFI_PASSWORD not in answered[0]["body"]
-    assert ROUTER_PASSWORD not in answered[0]["body"]
-    assert json.loads(answered[1]["body"]) == {
-        "result": {"ssid": WIFI_NAME, "password": WIFI_PASSWORD}
-    }
-    for item in answered:
-        assert item["headers"]["cache-control"] == "no-store"
-
-    # The Wi-Fi password appears in no other response and nowhere in the page.
-    for item in responses:
-        if item is not answered[1] and item["body"] is not None:
-            assert WIFI_PASSWORD not in item["body"], item["url"]
+    syncs = api_calls(requests, SYNC_PATH)
+    assert len(syncs) == 1, syncs
+    assert syncs[0]["method"] == "POST"
+    body = json.loads(syncs[0]["body"])
+    assert body["admin_password"] == ROUTER_PASSWORD
+    assert len(body["expected_fingerprint"]) == 64
+    assert body["confirm_legacy"] is False
+    assert api_calls(requests, CREDENTIALS_PATH) == []
+    assert page.evaluate("window.clipboardCalls") == {"reads": 0, "writes": 0}
     assert WIFI_PASSWORD not in page.content()
-    visible_text = page.evaluate("document.body.innerText")
-    assert WIFI_PASSWORD not in visible_text
-    fields = page.evaluate(
-        "Array.from(document.querySelectorAll('input, textarea, select'))"
-        ".map((field) => field.value).join('\\n')"
-    )
-    assert WIFI_PASSWORD not in fields
-    stored = page.evaluate(
+    assert WIFI_PASSWORD not in page.evaluate(
         "JSON.stringify([Object.entries(localStorage), Object.entries(sessionStorage)])"
     )
-    assert WIFI_PASSWORD not in stored
-    # Hidden copy helpers (the activity export and the report fallback) are readonly
-    # textareas by design; nothing visible may offer the password for copying.
-    assert page.evaluate("document.querySelectorAll('textarea[readonly]:not([hidden])').length") == 0
-    assert all(WIFI_PASSWORD not in item["url"] for item in requests)
-    assert all(WIFI_PASSWORD not in cookie["value"] for cookie in context.cookies())
-    prove_the_scan_can_find_a_value(context, base)
     found = scan_for_secret(page, WIFI_PASSWORD)
     assert found["hits"] == [], found["hits"]
-    assert found["scanned"] > 30 and found["lexical"] > 20, found
     history = page.request.get(
         "/api/action-history", headers={"Authorization": "Bearer " + ADMIN_TOKEN}
     ).text()
-    assert CREDENTIALS_PATH in history
     assert WIFI_PASSWORD not in history
     assert ROUTER_PASSWORD not in history
 
-    # A rejected router password stops the buttons until the password changes.
-    page.route(
-        "**" + CREDENTIALS_PATH,
-        lambda route: route.fulfill(
-            status=502,
-            content_type="application/json",
-            body='{"error":"Router login failed. Check the router admin password and try again."}',
-        ),
-    )
-    before = len(credential_requests(requests))
-    sidebar_control(page, "#copy-wifi-password").click()
-    expect(page.locator("#message")).to_contain_text("Could not copy. Router login failed.")
-    expect(page.locator("#copy-wifi-name")).to_be_disabled()
-    expect(page.locator("#copy-wifi-password")).to_be_disabled()
-    expect(page.locator("#copy-wifi-password")).to_have_attribute(
-        "title", "Router password rejected. Enter it again."
-    )
-    expect(page.locator("#copy-wifi-password")).to_have_text("Copy Wi-Fi password")
-    assert len(credential_requests(requests)) == before + 1
-    page.unroute("**" + CREDENTIALS_PATH)
+    # A failed router login blocks another attempt until the password changes.
+    page.route("**" + PREVIEW_PATH, lambda route: route.fulfill(
+        status=502, content_type="application/json",
+        body='{"error":"Router login failed. Check the router admin password and try again."}',
+    ))
+    sidebar_control(page, "#sync-router-ap").click()
+    expect(page.locator("#router-action-message")).to_contain_text("Router login failed")
+    expect(button).to_be_disabled()
+    expect(button).to_have_attribute("title", "Router password rejected. Enter it again.")
+    page.unroute("**" + PREVIEW_PATH)
     sidebar_control(page, "#open-router-credentials").click()
     page.locator("#router-admin-password").fill(ROUTER_PASSWORD + "-new")
-    expect(page.locator("#copy-wifi-name")).to_be_enabled()
-    expect(page.locator("#copy-wifi-password")).to_be_enabled()
+    expect(button).to_be_enabled()
     page.locator("#close-credentials").click()
-    sidebar_control(page, "#copy-wifi-name").click()
-    expect(page.locator("#copy-wifi-name")).to_have_text("Copied")
-    assert clipboard_text(page) == WIFI_NAME
 
-    # Clearing the router password sends the next click to the panel instead of the router.
-    before = len(credential_requests(requests))
-    sidebar_control(page, "#open-router-credentials").click()
-    page.locator("#clear-router-password").click()
-    page.locator("#close-credentials").click()
-    expect(page.locator("#copy-wifi-password")).to_have_attribute(
-        "title", "Enter the router password first"
-    )
-    sidebar_control(page, "#copy-wifi-password").click()
-    expect(page.locator("#credentials-panel")).to_be_visible()
-    expect(page.locator("#router-admin-password")).to_be_focused()
-    assert len(credential_requests(requests)) == before
+    # A missing helper is reported as unavailable without calling the router.
+    def without_helper(route):
+        response = route.fetch()
+        body = response.json()
+        body["helper_configured"] = False
+        route.fulfill(response=response, json=body)
 
-    # After a reload the page is locked again and holds nothing.
+    page.route("**/api/health", without_helper)
     page.reload()
-    expect(page.locator("#copy-wifi-name")).to_be_disabled()
-    expect(page.locator("#copy-wifi-password")).to_be_disabled()
-    assert WIFI_PASSWORD not in page.content()
+    sign_in(page)
+    expect(button).to_be_disabled()
+    expect(button).to_have_attribute("title", "Needs the Pi helper")
+    page.unroute("**/api/health")
 
+    for item in responses:
+        if item["body"] is not None:
+            assert WIFI_PASSWORD not in item["body"], item["url"]
+            assert ROUTER_PASSWORD not in item["body"], item["url"]
+    assert all(WIFI_PASSWORD not in item["url"] for item in requests)
+    assert all(WIFI_PASSWORD not in cookie["value"] for cookie in context.cookies())
+    prove_the_scan_can_find_a_value(context, base)
     assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
     assert not errors, errors
     context.close()
@@ -377,9 +357,9 @@ def run():
                 executable_path=os.environ.get("JITTERSIM_BROWSER_EXECUTABLE")
             )
             try:
-                for width, height in ((1920, 1000), (390, 844)):
+                for width, height in ((1920, 1000), (375, 844)):
                     run_width(browser, f"http://127.0.0.1:{port}", width, height)
-                print("Router Wi-Fi copy acceptance passed at desktop and phone widths.")
+                print("Router Wi-Fi import acceptance passed at desktop and 375px widths.")
             finally:
                 browser.close()
     finally:

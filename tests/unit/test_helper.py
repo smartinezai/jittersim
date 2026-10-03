@@ -1,4 +1,6 @@
+import io
 import json
+import socketserver
 import logging
 import tempfile
 import threading
@@ -31,6 +33,7 @@ from jittersim.networking.helper import (
     HelperClient,
     HelperClientError,
     HelperError,
+    HelperRequestHandler,
     HelperService,
     UnixHelperServer,
     _merge_connected_device_output,
@@ -2431,6 +2434,83 @@ class QueueReadAndWriteTests(unittest.TestCase):
         self.assertTrue(self.executor.gated.wait(5))
         return box, thread
 
+    def assert_completed_reply_does_not_block(self, *, failure, before_write) -> None:
+        self.service._access_manager = FakeAccessManager()
+        transport_entered = threading.Event()
+        first_response = threading.Event()
+        release_transport = threading.Event()
+        original_write = socketserver._SocketWriter.write
+
+        def held_write(writer, response):
+            if first_response.is_set():
+                return original_write(writer, response)
+            first_response.set()
+            if before_write:
+                transport_entered.set()
+                if not release_transport.wait(5):
+                    raise TimeoutError("test did not release response transport")
+            result = original_write(writer, response)
+            if not before_write:
+                transport_entered.set()
+                if not release_transport.wait(5):
+                    raise TimeoutError("test did not release response transport")
+            return result
+
+        payload = {"action": "apply", "plan": None} if failure else {"action": "reset"}
+        with mock.patch.object(socketserver._SocketWriter, "write", held_write):
+            first, first_thread = self.in_thread(lambda: self.client()._request(payload))
+            try:
+                self.assertTrue(transport_entered.wait(5))
+                with self.subTest(operation="read"):
+                    self.assertTrue(self.client().gateway_status()["ok"])
+                with self.subTest(operation="Panic"):
+                    with mock.patch("jittersim.networking.helper.WRITE_LOCK_WAIT_SECONDS", 0.1):
+                        self.assertTrue(self.client().normal_access()["access_disabled"])
+            finally:
+                release_transport.set()
+                first_thread.join(5)
+            self.assertFalse(first_thread.is_alive())
+            if failure:
+                self.assertIn("error", first)
+                self.assertNotEqual(first["error"].reason, "helper-busy")
+            else:
+                self.assertEqual(first["result"]["action"], "reset")
+
+    def test_reads_and_panic_continue_before_a_success_reply_is_sent(self) -> None:
+        self.assert_completed_reply_does_not_block(failure=False, before_write=True)
+
+    def test_reads_and_panic_continue_after_a_success_reply_is_sent(self) -> None:
+        self.assert_completed_reply_does_not_block(failure=False, before_write=False)
+
+    def test_reads_and_panic_continue_before_an_error_reply_is_sent(self) -> None:
+        self.assert_completed_reply_does_not_block(failure=True, before_write=True)
+
+    def test_reads_and_panic_continue_after_an_error_reply_is_sent(self) -> None:
+        self.assert_completed_reply_does_not_block(failure=True, before_write=False)
+
+    def test_operation_lock_is_released_when_a_request_raises(self) -> None:
+        for phase in ("service", "serialization", "transport"):
+            with self.subTest(phase=phase):
+                handler = object.__new__(HelperRequestHandler)
+                handler.server = self.server
+                handler.rfile = io.BytesIO(b'{"action":"capabilities"}\n')
+                handler.wfile = mock.Mock()
+                if phase == "service":
+                    answer = mock.Mock(side_effect=RuntimeError("service failed"))
+                    expected_error = RuntimeError
+                elif phase == "serialization":
+                    answer = mock.Mock(return_value={"ok": True, "invalid": object()})
+                    expected_error = TypeError
+                else:
+                    answer = mock.Mock(return_value={"ok": True})
+                    handler.wfile.write.side_effect = OSError("client disconnected")
+                    expected_error = OSError
+                with mock.patch.object(self.service, "handle_payload", answer):
+                    with self.assertRaises(expected_error):
+                        handler._handle_request()
+                self.assertFalse(self.server.operation_lock.locked())
+                self.assertTrue(self.client().gateway_status()["ok"])
+
     def test_a_reset_that_arrives_during_a_slow_queue_read_waits_and_runs(self) -> None:
         reader, reader_thread = self.hold_a_read()
         writer, writer_thread = self.in_thread(self.client().reset)
@@ -2652,6 +2732,46 @@ def good_queue(**changes):
     return entry
 
 
+class GeneralProfileSupportClientTests(unittest.TestCase):
+    def test_a_busy_helper_is_reported_as_busy_and_not_as_out_of_date(self) -> None:
+        client = RecordingHelperClient(
+            {"ok": True}, capabilities=HelperClientError("helper is busy", reason="helper-busy")
+        )
+
+        with self.assertRaises(HelperClientError) as caught:
+            client.check_general_profile_support()
+
+        self.assertEqual(caught.exception.reason, "helper-busy")
+        self.assertNotIn("Update the Pi helper", str(caught.exception))
+
+    def test_a_helper_that_does_not_know_the_action_is_out_of_date(self) -> None:
+        client = RecordingHelperClient(
+            {"ok": True}, capabilities=HelperClientError("unknown action")
+        )
+
+        with self.assertRaisesRegex(
+            HelperClientError, "Update the Pi helper before applying a general profile"
+        ):
+            client.check_general_profile_support()
+
+    def test_a_helper_without_the_general_profile_capability_is_out_of_date(self) -> None:
+        client = RecordingHelperClient(
+            {"ok": True}, capabilities={"ok": True, "protected_dns_capture": True}
+        )
+
+        with self.assertRaisesRegex(
+            HelperClientError, "Update the Pi helper before applying a general profile"
+        ):
+            client.check_general_profile_support()
+
+    def test_a_helper_with_the_capability_passes(self) -> None:
+        client = RecordingHelperClient(
+            {"ok": True}, capabilities={"ok": True, "general_profile": True}
+        )
+
+        client.check_general_profile_support()
+
+
 class QueueStatsClientTests(unittest.TestCase):
     def read(self, queues):
         client = RecordingHelperClient({"ok": True, "action": "queue-stats", "queues": queues})
@@ -2670,6 +2790,26 @@ class QueueStatsClientTests(unittest.TestCase):
 
         self.assertEqual([q["device_id"] for q in self.read(entries)],
                          ["lab", "general-profile", "quota:abc-1", "servicelist:streaming"])
+
+    def test_accepts_renderer_handles_for_every_supported_mark(self) -> None:
+        entries = [
+            good_queue(handle=queue_handle(mark, kind),
+                       kind="netem" if kind == "duplicate" else kind)
+            for kind in ("netem", "duplicate", "fq_codel")
+            for mark in range(1, MAX_SHAPED_MARKS_PER_PLAN + 1)
+        ]
+
+        result = self.read(entries)
+
+        self.assertEqual([entry["handle"] for entry in result],
+                         [entry["handle"] for entry in entries])
+        self.assertIn("4a:", [entry["handle"] for entry in result])
+        self.assertIn("4f:", [entry["handle"] for entry in result])
+
+    def test_accepts_the_largest_kernel_queue_handle(self) -> None:
+        (entry,) = self.read([good_queue(handle="ffff:")])
+
+        self.assertEqual(entry["handle"], "ffff:")
 
     def test_keeps_only_the_numbers_the_dashboard_uses_from_the_impairment(self) -> None:
         impairment = dict(good_queue()["impairment"], loss_randomness={"variation_percent": 5})
@@ -2690,6 +2830,12 @@ class QueueStatsClientTests(unittest.TestCase):
             "string counter": [good_queue(qlen="3")],
             "bad handle": [good_queue(handle="abc")],
             "long handle": [good_queue(handle="123456:")],
+            "five digit handle": [good_queue(handle="10000:")],
+            "upper case handle": [good_queue(handle="4A:")],
+            "handle with whitespace": [good_queue(handle=" 4a:")],
+            "handle with newline": [good_queue(handle="4a:\n")],
+            "handle with suffix": [good_queue(handle="4a:1")],
+            "non hex handle": [good_queue(handle="4g:")],
             "bad direction": [good_queue(direction="sideways")],
             "bad kind": [good_queue(kind="tbf")],
             "bad id": [good_queue(device_id="Lab Phone")],

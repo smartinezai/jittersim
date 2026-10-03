@@ -1,0 +1,17 @@
+{
+  "name": "axe-core",
+  "version": "4.13.0",
+  "license": "MPL-2.0",
+  "registry": "https://registry.npmjs.org/axe-core/4.13.0",
+  "source": "https://github.com/dequelabs/axe-core/tree/v4.13.0",
+  "artifact_url": "https://registry.npmjs.org/axe-core/-/axe-core-4.13.0.tgz",
+  "file": "axe.min.js",
+  "sha256": "c24f097bd2f451d4f933e8bc7d8d539f8672a2ebcb5cc9f9f3eec8ca9470a0c1",
+  "bytes": 580491,
+  "unmodified": true,
+  "license_files": [
+    "LICENSE.txt",
+    "LICENSE-3RD-PARTY.txt"
+  ],
+  "tarball_sha256": "096912f6e77b4b695fc9304b7be65091db42d98de054da674ae222a11cb33f70"
+}

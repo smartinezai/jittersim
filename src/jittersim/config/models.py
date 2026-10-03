@@ -88,14 +88,24 @@ def normalize_domain(value: str) -> str:
 
 
 def normalize_service_hostname(value: str) -> str:
-    """Require a DNS name rather than a shared server address."""
+    """Require a DNS name of two or more labels rather than an address or a whole top-level domain.
+
+    A name also matches every name under it. A single label such as `com` would
+    therefore match every .com host in the proxy and the DNS watcher.
+    """
 
     domain = normalize_domain(value)
     try:
         ip_address(domain)
     except ValueError:
-        return domain
-    raise ValidationError("browser service domains must be hostnames, not IP addresses")
+        pass
+    else:
+        raise ValidationError("browser service domains must be hostnames, not IP addresses")
+    if "." not in domain:
+        raise ValidationError(
+            "browser service domains must have at least two parts such as example.com"
+        )
+    return domain
 
 
 def normalize_mac_address(value: str) -> str:

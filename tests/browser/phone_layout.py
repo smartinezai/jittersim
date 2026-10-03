@@ -35,7 +35,7 @@ WIDE_FONTS = (
 STRESSES = (("normal fonts", ""), ("wide fonts", WIDE_FONTS))
 SHEET_CONTROLS = (
     "#active-profile-select", "#active-profile-button", "#apply-button", "#reset-button",
-    "#copy-wifi-name", "#copy-wifi-password", "#open-admin-credentials", "#open-router-credentials",
+    "#sync-router-ap", "#open-admin-credentials", "#open-router-credentials",
 )
 
 
@@ -407,10 +407,10 @@ def check_desktop(page, width, height):
         expect(page.locator(selector)).to_be_visible()
     order = [box(page, selector)["y"] for selector in
              ("#active-profile-select", "#active-profile-button", "#apply-button", "#reset-button",
-              "#panic-button", "#router-wifi-toggle", "#copy-wifi-name")]
+              "#panic-button", "#router-wifi-toggle", "#sync-router-ap")]
     assert order == sorted(order), order
-    # The whole switch, Panic and both copy buttons on a laptop screen, not a sliver of them.
-    for selector in ("#router-wifi-toggle", "#panic-button", "#copy-wifi-name", "#copy-wifi-password"):
+    # The whole switch, Panic and copy button on a laptop screen, not a sliver of them.
+    for selector in ("#router-wifi-toggle", "#panic-button", "#sync-router-ap"):
         expect(page.locator(selector)).to_be_in_viewport(ratio=1)
     scrolled = page.evaluate("document.querySelector('.sidebar').scrollTop")
     assert scrolled == 0, scrolled

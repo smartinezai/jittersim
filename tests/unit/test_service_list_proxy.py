@@ -103,6 +103,43 @@ class ServiceListProxyTests(unittest.TestCase):
         with self.assertRaisesRegex(ProxyError, "global access rules"):
             select_mark(plan, client_ip=ALICE, host="netflix.com", client_mac=AFFECTED)
 
+    def test_inactive_saved_mac_lists_do_not_block_browser_traffic(self) -> None:
+        for general in (False, True):
+            for client_mac in (AFFECTED, PROTECTED):
+                for mode in ("disabled", "allowlist"):
+                    policy = MacPolicy(
+                        mode=mode, allowlist=(client_mac,), denylist=(client_mac,)
+                    )
+                    if general:
+                        plan = compile_plan(
+                            devices=(), profiles={"slow": SLOW},
+                            protected_mac_addresses=(PROTECTED,),
+                            general_profile=GeneralProfileRule("slow"), mac_policy=policy,
+                        )
+                    else:
+                        plan = device_plan(
+                            protected_mac_addresses=(PROTECTED,), mac_policy=policy
+                        )
+                    expected = ((0, "unaffected") if client_mac == PROTECTED else
+                                (1, "general-profile" if general else "device"))
+                    with self.subTest(general=general, client_mac=client_mac, mode=mode):
+                        self.assertEqual(
+                            select_mark(plan, client_ip=ALICE, host="example.com",
+                                        client_mac=client_mac),
+                            expected,
+                        )
+
+    def test_active_mac_rules_still_block_protected_browser_clients(self) -> None:
+        policies = (
+            MacPolicy(mode="denylist", denylist=(PROTECTED,)),
+            MacPolicy(mode="allowlist", allowlist=(AFFECTED,)),
+        )
+        for policy in policies:
+            plan = device_plan(protected_mac_addresses=(PROTECTED,), mac_policy=policy)
+            with self.subTest(mode=policy.mode):
+                with self.assertRaisesRegex(ProxyError, "global access rules"):
+                    select_mark(plan, client_ip=ALICE, host="example.com", client_mac=PROTECTED)
+
     def test_the_general_profile_gives_way_to_a_list_even_during_its_outage(self) -> None:
         for outage in (False, True):
             plan = compile_plan(

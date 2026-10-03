@@ -1,0 +1,2 @@
+# Preserve the unmodified upstream third-party license notice.
+tests/browser/vendor/LICENSE-3RD-PARTY.txt whitespace=-blank-at-eol
