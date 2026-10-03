@@ -5,8 +5,9 @@
 Combine the independently reviewed reconnect, device address and update repairs
 with the delivered dashboard at 0a41c2f. Preserve current credentials, signing
 trust, network recovery and saved profile data. Every combined source needs
-its own checks before publication. Main release and Pi deployment require a
-verified management connection and recovery route. Live homepage pairing stays
+its own checks before publication. Reviewed main source may merge after complete
+local workflow equivalents. Pi deployment separately requires a verified
+management connection and recovery route. Live homepage pairing stays
 disabled until trusted HTTPS and physical acceptance are established.
 
 Risk is high. Changes cross the dashboard, privileged helper, SQLite storage,
