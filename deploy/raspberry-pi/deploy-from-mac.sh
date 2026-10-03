@@ -521,7 +521,7 @@ check_release() {
         if report=$(ssh_batch_answer "$CHECK_SECONDS" "$check" 2>"$work/check.err"); then
             installed=$(printf '%s\n' "$report" | sed -n 's/^Installed: //p' | head -n 1)
             if [ "$installed" = "$version" ]; then
-                printf 'The Pi now runs release %s. Compare it with: git rev-parse --short %s\n' \
+                printf 'The Pi now runs release %s. Compare it with: sh deploy/raspberry-pi/build-release.sh --version %s\n' \
                     "$version" "$(quote "$ref")"
                 return 0
             fi
@@ -545,32 +545,34 @@ finish_dry_run() {
 }
 
 if [ "$use_installer" = yes ]; then
-    # Check the copy on the Pi, unpack it as the login user and label it so the installer
-    # records the release in /opt/jittersim/.jittersim-release.json. The unpacked folder
-    # stays in the home folder like a release unpacked by hand.
-    unpack="printf '%s  %s\\n' $(quote "$sha") $(quote "$remote_archive") | sha256sum -c - \
-&& rm -rf $(quote "$release") && mkdir $(quote "$release") \
-&& tar -xzf $(quote "$remote_archive") -C $(quote "$release") \
-&& printf '{\"version\": \"%s\", \"sha256\": \"%s\", \"commit\": \"%s\", \"sequence\": %s}\\n' \
-$(quote "$version") $(quote "$sha") $(quote "$commit") $(quote "$release_sequence") \
-> $(quote "$release/.jittersim-release.json") && rm -f $(quote "$remote_archive")"
+    # Copy to root-private source and verify that exact copy before extracting or
+    # executing candidate code. An earlier source directory is never overwritten.
+    installer_source="/root/jittersim-install-source-$commit"
+    bootstrap_program=$(cat "$script_dir/prepare-installer-source.py") \
+        || fail 'the installer source checker is missing'
+    metadata=$(printf '{"version":"%s","sha256":"%s","commit":"%s","sequence":%s}' \
+        "$version" "$sha" "$commit" "$release_sequence")
+    unpack="$(words sudo /usr/bin/python3 -I -c "$bootstrap_program" "$remote_archive" \
+        "$installer_source" "$sha" "$metadata") && $(words rm -f "$remote_archive")"
+    install_command=$(words sudo sh "$installer_source/deploy/raspberry-pi/install.sh" "$installer_source")
+    if [ "$install" = yes ]; then
+        unpack="$unpack && $install_command"
+    fi
     set +e
-    ssh_batch "$UNPACK_SECONDS" "$unpack"
+    ssh_terminal "$unpack"
     status=$?
     set -e
     if [ "$status" -eq 124 ]; then
         unreachable 124 "Unpacking on the Pi" "$UNPACK_SECONDS"
     elif [ "$status" -ne 0 ]; then
-        fail "checking or unpacking the archive on the Pi failed"
+        fail "preparing or installing the archive on the Pi failed. Read its messages above. An existing root source folder is kept for checking."
     fi
-    install_command=$(words sudo "./$release/deploy/raspberry-pi/install.sh")
     if [ "$install" = no ]; then
         finish_dry_run
-        printf 'Unpacked %s on the Pi. Install it with:\n  %s\n' "$release" \
+        printf 'Prepared root source %s on the Pi. Install it with:\n  %s\n' "$installer_source" \
             "$(words ssh -t -i "$key" -- "$host" "$install_command")"
         exit 0
     fi
-    ssh_terminal "$install_command" || fail "the installer on the Pi failed. Read its messages above."
     check_release "Read the installer messages above."
     finish_dry_run
     exit 0

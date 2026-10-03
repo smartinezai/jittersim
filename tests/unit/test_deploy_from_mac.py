@@ -91,6 +91,12 @@ if remote == "jittersim update check":
     sys.exit(0)
 if "sha256sum -c" in remote:
     sys.exit(int(os.environ.get("FAKE_UNPACK_EXIT", "0")))
+if "def prepare_source" in remote:
+    failure = int(os.environ.get("FAKE_UNPACK_EXIT", "0"))
+    if failure:
+        sys.exit(failure)
+    if "&& sudo sh " not in remote:
+        sys.exit(0)
 sys.exit(int(os.environ.get("FAKE_TERMINAL_EXIT", "0")))
 '''
 
@@ -297,7 +303,7 @@ def test_install_stages_installs_waits_and_compares_the_running_release(fakes):
     ))
     batch_call(calls[3]["argv"], fakes, "jittersim update check")
     assert f"The Pi now runs release {version_head()}." in result.stdout
-    assert "git rev-parse --short HEAD" in result.stdout
+    assert "sh deploy/raspberry-pi/build-release.sh --version HEAD" in result.stdout
     # the command is shown once and its answer is not mixed into the trace
     assert result.stdout.count("'jittersim update check'") == 1
     assert "Installed:" not in result.stdout
@@ -436,11 +442,23 @@ def test_a_failed_sudo_step_is_reported(fakes):
 
 
 def unpack_on_a_stand_in_pi(fakes, home, short, command):
-    if shutil.which("sha256sum") is None:
-        pytest.skip("sha256sum is needed to run the Pi side of the command")
     home.mkdir(exist_ok=True)
     shutil.copy(fakes["copies"] / f"jittersim-release-{short}.tar.gz", home)
-    return subprocess.run(["sh", "-c", command], cwd=home, capture_output=True)
+    parts = shlex.split(command)
+    assert parts[:4] == ["sudo", "/usr/bin/python3", "-I", "-c"]
+    private = home / "private-root"
+    private.mkdir(mode=0o700, exist_ok=True)
+    source = private / Path(parts[6]).name
+    # Run the exact copied-source function as this test user. The CLI's root
+    # check and real sudo terminal are separately covered by the Linux proof.
+    program = ("import sys,json\nnamespace={'__name__':'owned_source_fixture'}\n"
+               "exec(compile(sys.argv[1],'<bootstrap>','exec'),namespace)\n"
+               "namespace['prepare_source'](sys.argv[2],sys.argv[3],sys.argv[4],json.loads(sys.argv[5]))\n")
+    result = subprocess.run([sys.executable, "-I", "-c", program, parts[4], parts[5], str(source),
+                             parts[7], parts[8]], cwd=home, capture_output=True)
+    if result.returncode == 0:
+        (home / parts[5]).unlink()
+    return result
 
 
 def test_installer_mode_checks_unpacks_and_labels_the_copy(fakes, tmp_path):
@@ -451,14 +469,15 @@ def test_installer_mode_checks_unpacks_and_labels_the_copy(fakes, tmp_path):
     batch_call(calls[0]["argv"], fakes, PROBE)
     unpack = calls[2]["argv"]
     sha = printed_sha(result.stdout)
-    batch_call(unpack, fakes, unpack[-1])
-    assert unpack[-1].startswith(f"printf '%s  %s\\n' {sha} jittersim-release-{short}.tar.gz"
-                                 " | sha256sum -c - && ")
-    assert f"'sudo ./jittersim-release-{short}/deploy/raspberry-pi/install.sh'" in result.stdout
+    terminal_call(unpack, fakes, unpack[-1])
+    parts = shlex.split(unpack[-1])
+    assert parts[5] == f"jittersim-release-{short}.tar.gz"
+    assert parts[7] == sha
+    assert "sudo sh /root/jittersim-install-source-" in result.stdout
     # the remote command does what it says in a stand-in home folder
     home = tmp_path / "pi-home"
     assert unpack_on_a_stand_in_pi(fakes, home, short, unpack[-1]).returncode == 0
-    release = home / f"jittersim-release-{short}"
+    release = home / "private-root" / Path(parts[6]).name
     assert (release / "deploy" / "raspberry-pi" / "install.sh").stat().st_mode & stat.S_IXUSR
     with tarfile.open(fakes["copies"] / f"jittersim-release-{short}.tar.gz") as bundle:
         manifest = json.load(bundle.extractfile("deploy/RELEASE"))
@@ -484,7 +503,7 @@ def test_the_installer_label_reaches_the_installed_folder(fakes, tmp_path):
     assert unpack_on_a_stand_in_pi(fakes, home, short, calls[2]["argv"][-1]).returncode == 0
     installed = tmp_path / "opt-jittersim"
     installed.mkdir()
-    release = home / f"jittersim-release-{short}"
+    release = home / "private-root" / Path(shlex.split(calls[2]["argv"][-1])[6]).name
     subprocess.run([sys.executable, str(release / "deploy/raspberry-pi/replace-source.py"),
                     str(release), str(installed)], check=True, capture_output=True)
     assert updates.update_status(root=tmp_path / "none", code=installed)["installed"] == version_head()
@@ -496,10 +515,12 @@ def test_installer_mode_installs_by_default_in_a_terminal(fakes):
     short = short_head()
     result, calls = deploy(fakes, "--use-installer", FAKE_INSTALLED=version_head())
     assert result.returncode == 0, result.stderr
-    assert tools(calls) == ["ssh", "scp", "ssh", "ssh", "ssh"]
-    terminal_call(calls[3]["argv"], fakes,
-                  f"sudo ./jittersim-release-{short}/deploy/raspberry-pi/install.sh")
-    batch_call(calls[4]["argv"], fakes, "jittersim update check")
+    assert tools(calls) == ["ssh", "scp", "ssh", "ssh"]
+    terminal_call(calls[2]["argv"], fakes, calls[2]["argv"][-1])
+    assert calls[2]["argv"][-1].endswith(
+        "sudo sh " + shlex.split(calls[2]["argv"][-1])[6] + "/deploy/raspberry-pi/install.sh " +
+        shlex.split(calls[2]["argv"][-1])[6])
+    batch_call(calls[3]["argv"], fakes, "jittersim update check")
     assert f"The Pi now runs release {version_head()}." in result.stdout
 
 
@@ -513,7 +534,28 @@ def test_installer_mode_reports_a_failed_check_of_the_copy(fakes):
     result, calls = deploy(fakes, "--use-installer", "--install", FAKE_UNPACK_EXIT="1")
     assert result.returncode == 1
     assert tools(calls) == ["ssh", "scp", "ssh"]
-    assert "checking or unpacking the archive on the Pi failed" in result.stderr
+    assert "preparing or installing the archive on the Pi failed" in result.stderr
+
+
+def test_mac_first_install_verifies_a_root_private_copy_before_execution(fakes):
+    result, calls = deploy(fakes, "--use-installer", FAKE_INSTALLED=version_head())
+    assert result.returncode == 0, result.stderr
+    remote = calls[2]["argv"][-1]
+    assert calls[2]["argv"][:1] == ["-t"], "creating root source needs the sudo terminal"
+    parts = shlex.split(remote)
+    assert parts[:4] == ["sudo", "/usr/bin/python3", "-I", "-c"]
+    assert "def prepare_source" in parts[4]
+    assert parts[6].startswith("/root/jittersim-install-source-")
+    assert "&& sudo sh " in remote
+    source = parts[6]
+    assert remote.endswith("sudo sh " + source + "/deploy/raspberry-pi/install.sh " + source)
+    assert "rm -rf" not in remote
+
+
+def test_success_reports_the_same_semantic_version_command_the_builder_uses(fakes):
+    result, _ = deploy(fakes, "--ssh", FAKE_INSTALLED=version_head())
+    assert result.returncode == 0, result.stderr
+    assert "Compare it with: sh deploy/raspberry-pi/build-release.sh --version HEAD" in result.stdout
 
 
 @pytest.fixture
