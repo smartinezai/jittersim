@@ -57,7 +57,8 @@ def test_failed_callback_saves_partial_manifest_without_error_values(tmp_path, m
 
     monkeypatch.setattr(gui_capture, "capture_session", session)
     monkeypatch.setattr(gui_capture, "open_state", state)
-    monkeypatch.setattr(gui_capture, "current_commit", lambda: "a" * 40)
+    monkeypatch.setattr(gui_capture, "source_identity", lambda: {
+        "commit": "a" * 40, "source_dirty": False, "source_identity_method": "supplied"})
     with pytest.raises(ValueError):
         gui_capture.run_matrix(tmp_path, failure, "test")
     raw = (tmp_path / "manifest.json").read_text()
@@ -121,6 +122,18 @@ def test_source_counts_include_declared_text_occurrences():
 
 def test_fixture_malformed_port_always_cleans_process(monkeypatch):
     import io
+    import sys
+    from types import ModuleType
+
+    def unexpected_browser_startup():
+        pytest.fail("Malformed startup must not initialize Playwright")
+
+    playwright = ModuleType("playwright")
+    playwright.__path__ = []
+    sync_api = ModuleType("playwright.sync_api")
+    sync_api.sync_playwright = unexpected_browser_startup
+    monkeypatch.setitem(sys.modules, "playwright", playwright)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api)
 
     class Process:
         stdout = io.StringIO("not-a-port\n")

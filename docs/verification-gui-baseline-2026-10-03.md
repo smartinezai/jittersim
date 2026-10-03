@@ -137,3 +137,32 @@ Reproduction commands and output definitions are in
 `test-results/` or a selected empty directory and are not committed. CI keeps
 available artifacts for seven days. Reverting this scoped test change removes
 the baseline tooling without a data migration or Pi rollback.
+
+## Standard unit environment correction
+
+Final combined verification of
+`dce11298928d160bce0d7b7a7a8a9c518416010a` exposed two test environment
+assumptions. The malformed fixture port test failed without Playwright before
+it could check startup cleanup. The callback failure test still ran
+`git status` after mocking the commit lookup. It failed in the clean Linux
+archive environment where Git was absent.
+
+Both failures were reproduced locally before their respective repairs.
+The first now supplies temporary fake Playwright modules within the single
+unit test. Its browser startup entry point immediately fails if reached.
+The second mocks the complete source identity for its callback failure check.
+The existing rejection, cleanup, failed report and secret omission assertions
+remain unchanged. Dedicated source identity tests also remain unchanged.
+
+All 61 focused tests in `test_gui_capture.py`, `test_gui_axe_report.py` and
+`test_gui_container.py` passed in 0.19 seconds on Python 3.12.13 using the
+standard development environment without Playwright. The process could not
+find a Git executable. After the tests, both temporary Playwright modules were
+absent from the same process and the optional package remained unavailable.
+Required Ruff checks plus import ordering, Python 3.9 syntax and
+`git diff --check` passed.
+
+This isolated repair changes no production source, dependencies or CI jobs.
+The release coordinator must repeat the final combined checks after carrying
+the repair. These focused results do not replace the full Mac, Linux, browser
+or executed CI release gates.

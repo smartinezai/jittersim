@@ -82,3 +82,35 @@ Playwright and dependency versions. Record the wheel hash and image identity.
 Disable pulls and preserve the cached image. The existing fresh-build path
 keeps its original contract. Container execution remains with the release
 coordinator after the shared Docker lock is released.
+
+## Standard unit environment repair
+
+The final combined Mac check found that the malformed fixture port unit test
+requires Playwright even though it never starts a browser. The normal Python
+matrix installs the development dependencies without Playwright. A browser
+test environment hid this dependency during the earlier focused checks.
+The clean Linux run also found that the callback failure test mocks the commit
+lookup but still runs Git to read checkout status. Its purpose is to check the
+partial failure report. The dedicated source identity tests cover metadata.
+
+Start this repair from the frozen combined source
+`dce11298928d160bce0d7b7a7a8a9c518416010a` on a separate
+`codex/gui-unit-isolation` branch. Keep the baseline and focus repair heads
+unchanged. Change only the unit test and its verification record.
+
+1. Reproduce both failures without Playwright or a Git executable.
+2. Obtain an independent review of this addendum before editing the test.
+3. Supply temporary fake Playwright modules within this test only. Their
+   browser startup entry point must fail immediately if reached. Keep the
+   malformed port error and fixture cleanup assertions unchanged.
+4. Mock the complete source identity in the callback failure test. Preserve
+   its partial report assertions and the separate source identity tests.
+5. Run the focused GUI unit tests without Playwright or Git. Check lint and
+   Python 3.9 syntax. Obtain an independent review of the final change.
+6. Give the ready local commit to the release coordinator for the final
+   combined Mac, Linux, browser and CI checks.
+
+No production source, dependency list, browser runner or CI configuration
+changes are needed. The fake modules must be restored after the test so they
+cannot affect later tests. Rollback is a revert of this isolated test change.
+Do not run an extra full suite, container job or remote publication here.
