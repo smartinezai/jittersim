@@ -1,5 +1,7 @@
 .workflow-notice { padding: 1rem; margin: 1rem 0; border: 1px solid #e9ba63; border-radius: 12px; background: #302d25; }
 .workflow-notice button { margin: .5rem 0 0; }
+#draft-links { display: flex; flex-wrap: wrap; gap: .5rem; margin: .75rem 0; }
+#draft-links button { margin: 0; max-width: 100%; min-height: 44px; white-space: normal; overflow-wrap: anywhere; text-align: left; }
 .field-error, .form-error { color: #ffb2b2; display: block; }
 [aria-invalid=true] { outline: 2px solid #ffb2b2; }
 #report-copy-fallback { width: 100%; min-height: 14rem; }
