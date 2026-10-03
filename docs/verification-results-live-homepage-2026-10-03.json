@@ -1,0 +1,126 @@
+{
+  "recorded_at": "2026-10-03T12:46:31.166269+00:00",
+  "implementation_commit": "a80dd59a9c177ca747bc5a64a58f7598a5311be9",
+  "implementation_tree": "0e6b5c79ad72a89fe00829d407e6c6bd01b92f9e",
+  "foundation": "0c8abd4b499900799e0614d2901d2b9eb4078f33",
+  "foundation_merge": "151178d",
+  "branch": "codex/homepage-live-plan-review",
+  "workspace": "/Users/samantha.martinez/.codex/worktrees/homepage-live-plan-review/jittersim",
+  "scope": "Authorized isolated implementation and local verification. Final integration and deployment belong to release owners.",
+  "runtime": {
+    "test_python": "3.12.13",
+    "platform": "macOS-27.0.1-arm64-arm-64bit",
+    "pytest": "8.4.2",
+    "ruff": "0.16.9",
+    "build_python": "3.12.14",
+    "build_setuptools": "84.0.0",
+    "node": "24.19.0",
+    "playwright": "1.62.1"
+  },
+  "full_python": {
+    "path": "/private/tmp/jittersim-homepage-final-pytest.xml",
+    "sha256": "abe0911b38278517e52fb6054884671b0d12135d76d208e4a21107c3c4e9dc81",
+    "command": "PYTHONPATH=src '/Users/samantha.martinez/Github repos/jittersim/.venv/bin/python' -m pytest -oaddopts='' -q --junitxml=/private/tmp/jittersim-homepage-final-pytest.xml",
+    "installation": "isolated source",
+    "tests": 3295,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 39,
+    "passed": 3256,
+    "seconds": 139.794,
+    "skip_reasons": {
+      "requires the privileged Linux test container": 18,
+      "needs root on Linux with JITTERSIM_KERNEL_TESTS=1": 21
+    }
+  },
+  "installed_python": {
+    "path": "/private/tmp/jittersim-homepage-final-installed-pytest.xml",
+    "sha256": "e1935b3d906a838bef3e2eea8fc71ecade4c5b2c16d07c80d6afba5842972352",
+    "command": "PYTHONPATH=/private/tmp/jittersim-homepage-final-installed '/Users/samantha.martinez/Github repos/jittersim/.venv/bin/python' -m pytest -oaddopts='' -q tests/unit/test_homepage*.py tests/integration/test_homepage*.py tests/unit/test_api.py tests/unit/test_runtime.py --junitxml=/private/tmp/jittersim-homepage-final-installed-pytest.xml",
+    "installation": "regular wheel installed with pip --no-deps --target",
+    "tests": 509,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "passed": 509,
+    "seconds": 12.14,
+    "skip_reasons": {}
+  },
+  "wheel": {
+    "path": "/private/tmp/jittersim-homepage-final-wheel/jittersim-0.1.0-py3-none-any.whl",
+    "sha256": "17b9d13b8a3c2b898491c58a4abcaae3af0ce82bea1196b69ff94431783edbdb",
+    "installed_import": "/private/tmp/jittersim-homepage-final-installed/jittersim/api/homepage.py",
+    "matching_source_files": 67,
+    "command": "python3 -m pip wheel --no-deps --no-build-isolation --wheel-dir /private/tmp/jittersim-homepage-final-wheel .",
+    "extension_delivery": "Extension and deployment hooks are outside the wheel in the reviewed release source."
+  },
+  "actual_extension": {
+    "path": "/private/tmp/jittersim-homepage-browser-final.json",
+    "sha256": "6ba2b10c1f3c546fdc4dedd99d1133bf941aa7eeb9189db658d4a264280cde6d",
+    "transport": "substituted",
+    "browser": "148.0.7778.96",
+    "checks": [
+      "Pairing clears the code and stays off",
+      "Off opens only the named page without policy traffic",
+      "A fresh 100 percent approval chooses only the same origin home page",
+      "A fresh zero percent approval preserves the named page",
+      "Off cancels a pending lookup and prevents delayed navigation",
+      "Closing the test tab cancels its request without opening a replacement",
+      "Credential rejection clears pairing and turns the effect off",
+      "The real manifest has only storage and the exact HTTPS policy origin"
+    ]
+  },
+  "actual_older_reader": {
+    "path": "/private/tmp/jittersim-homepage-old-reader.json",
+    "sha256": "a837b9e51e773ec54bb0e0828eb93a06b4ea1e895bef1c1ccbf40a61b02df736",
+    "target_reader": "0c8abd4b499900799e0614d2901d2b9eb4078f33",
+    "result": "passed",
+    "checks": [
+      "actual target reader without the new field",
+      "only the unsupported chance removed",
+      "supported latest name and outage settings preserved",
+      "all other table rows preserved",
+      "configuration version advanced exactly once",
+      "second conversion made no changes",
+      "private backup retained original chance"
+    ]
+  },
+  "verified_tls": "Real Python HTTPS listener with ordinary verification of a disposable certificate, untrusted refusal, origin and credential checks and four idle-handshake slots.",
+  "review_fixes": [
+    "Partial thread starts retain admission until work finishes on HTTPS, policy Unix and ordinary control Unix servers.",
+    "Ordinary control workers preserve their prior shutdown join.",
+    "Native thread-creation failure returns admission once.",
+    "A private compatibility backup has file and directory fsync before profile conversion commits.",
+    "Failed file or directory synchronization leaves chance and configuration version unchanged.",
+    "Read-only SQLite connections close explicitly. Fixed DNS workers cannot block interpreter shutdown."
+  ],
+  "static_checks": {
+    "workflow_ruff": "passed: ruff check --no-cache --select E9,F63,F7,F82,F811 src tests",
+    "new_python_files_ruff": "passed: complete configured Ruff checks for new modules, new tests and compatibility hook",
+    "javascript": "passed: node --check for extension background.js and page.js",
+    "installer": "passed: sh -n deploy/raspberry-pi/install.sh",
+    "diff": "passed: git diff --check and staged diff check after receipt newline normalization"
+  },
+  "normal_chrome_trust": {
+    "result": "failed fixture attempt; installed trust unverified",
+    "receipt": {
+      "path": "docs/homepage-chrome-trust-failure-2026-10-03.txt",
+      "sha256": "ee6e10e612fc6b6f3a0392da167e2f752d6dbd90fb11432625bf898a171f00f5"
+    },
+    "failure": "Timeout waiting for native Chrome certificate-manager filechooser before pairing.",
+    "disposition": "Unsupported fixture removed. Original error retained. No warning bypass or OS trust change."
+  },
+  "unverified": [
+    "Combined newer coordinator source and merge resolutions.",
+    "Hosted CI and the newly registered browser workflow.",
+    "Python 3.9 and other configured versions on this implementation.",
+    "Linux installed-wheel and kernel packet checks on this implementation.",
+    "Real AP route, reachable neighbor and current Wi-Fi station identity.",
+    "Installed normal Chrome trust and real extension fetch.",
+    "Actual startup, access rules, recovery and rollback on the Pi.",
+    "Physical three-device acceptance."
+  ],
+  "remote_changes": false,
+  "live_pi_changes": false,
+  "docker_changes": false
+}
