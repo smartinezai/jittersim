@@ -85,7 +85,7 @@ def test_the_bar_is_pinned_to_the_bottom_with_panic_and_the_router_switch():
     markup = block_of("safety-bar")
     for element_id in ("panic-button", "router-wifi-toggle", "router-wifi-status"):
         assert f'id="{element_id}"' in markup, element_id
-    for element_id in ("copy-wifi-name", "apply-button", "open-admin-credentials"):
+    for element_id in ("sync-router-ap", "apply-button", "open-admin-credentials"):
         assert f'id="{element_id}"' not in markup, element_id
     # Desktop keeps the sidebar: the wrapper gives up its box there.
     assert declarations(CSS.replace(PHONE, ""))[".safety-bar"]["display"] == "contents"

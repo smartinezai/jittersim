@@ -76,7 +76,7 @@ QUEUE_STATS_COUNTERS = (
     "packets", "bytes", "drops", "overlimits", "requeues", "backlog_bytes", "qlen"
 )
 _QUEUE_DEVICE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_:-]{0,127}$")
-_QUEUE_HANDLE_PATTERN = re.compile(r"^[0-9]{1,5}:$")
+_QUEUE_HANDLE_PATTERN = re.compile(r"^[0-9a-f]{1,4}:$")
 _QUEUE_GENERATION_PATTERN = re.compile(r"^[0-9a-f-]{1,24}$")
 _QUEUE_IMPAIRMENT_LIMITS = {
     "delay_ms": 60_000,
@@ -251,6 +251,7 @@ class HelperService:
                 "ok": True,
                 "general_profile": True,
                 "service_lists": True,
+                "service_list_outages": True,
                 "protected_dns_capture": True,
             }
         if action == "dashboard-access":
@@ -1223,13 +1224,19 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
                                  "reason": "helper-busy"})
             return
         try:
-            self._send_response(self.server.service.handle_payload(payload))
+            # Finish the response snapshot before another operation can change state.
+            encoded = self._encode_response(self.server.service.handle_payload(payload))
         finally:
             self.server.operation_lock.release()
+        # A slow client must not hold the lock after its operation has finished.
+        self.wfile.write(encoded)
+
+    @staticmethod
+    def _encode_response(payload: Dict[str, Any]) -> bytes:
+        return (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
 
     def _send_response(self, payload: Dict[str, Any]) -> None:
-        encoded = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
-        self.wfile.write(encoded)
+        self.wfile.write(self._encode_response(payload))
 
 
 class UnixHelperServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
@@ -1385,7 +1392,9 @@ class HelperClient:
         if plan.general_profile is not None:
             self.check_general_profile_support()
         if plan.service_list_rules:
-            self.check_service_list_support()
+            self.check_service_list_support(
+                outages=any(rule.outage_active for rule in plan.service_list_rules)
+            )
 
     def apply(self, *, plan: NetworkPlan, explicit_apply: bool = False) -> Dict[str, Any]:
         """Ask the helper to apply one validated network plan."""
@@ -1431,8 +1440,13 @@ class HelperClient:
             raise HelperClientError("helper could not save gateway recovery state safely")
         return result
 
-    def check_service_list_support(self) -> None:
-        """Reject an older running helper before applying service lists."""
+    def check_service_list_support(self, *, outages: bool = False) -> None:
+        """Reject an older running helper before applying service lists.
+
+        With `outages` the helper must also enforce a list's random outage. An
+        older helper reads the plan without that field and would leave the
+        listed services reachable.
+        """
 
         try:
             capabilities = self._request({"action": "capabilities"})
@@ -1442,6 +1456,10 @@ class HelperClient:
             raise HelperClientError("Update the Pi helper before applying service lists") from error
         if capabilities.get("service_lists") is not True:
             raise HelperClientError("Update the Pi helper before applying service lists")
+        if outages and capabilities.get("service_list_outages") is not True:
+            raise HelperClientError(
+                "Update the Pi helper before a service list can have a random outage"
+            )
 
     def check_protected_dns_capture_support(self) -> None:
         """Reject an older running helper before it can capture protected traffic."""
@@ -1480,6 +1498,9 @@ class HelperClient:
         try:
             capabilities = self._request({"action": "capabilities"})
         except HelperClientError as error:
+            # A busy helper is not an old one, so it keeps its own message.
+            if error.reason == "helper-busy":
+                raise
             raise HelperClientError("Update the Pi helper before applying a general profile") from error
         if capabilities.get("general_profile") is not True:
             raise HelperClientError("Update the Pi helper before applying a general profile")

@@ -167,6 +167,7 @@ def plan_to_payload(plan: NetworkPlan) -> Dict[str, Any]:
                 "mark": rule.mark,
                 "upload_impairment": asdict(rule.upload_impairment),
                 "download_impairment": asdict(rule.download_impairment),
+                "outage_active": rule.outage_active,
             }
             for rule in plan.service_list_rules
         ],
@@ -453,6 +454,10 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
             raise PlanCodecError(f"service_list_rules[{index}].domains is invalid")
         if mark < 1 or mark > MAX_SHAPED_MARKS_PER_PLAN:
             raise PlanCodecError(f"service_list_rules[{index}].mark is outside the safe range")
+        # A plan published before list outages existed has no such field.
+        outage_active = rule_data.get("outage_active", False)
+        if type(outage_active) is not bool:
+            raise PlanCodecError(f"service_list_rules[{index}].outage_active is invalid")
         key = f"servicelist:{list_id}"
         if (
             key in service_marks
@@ -480,6 +485,7 @@ def plan_from_payload(payload: Any) -> NetworkPlan:
                 mark=mark,
                 upload_impairment=upload_impairment,
                 download_impairment=download_impairment,
+                outage_active=outage_active,
             )
         )
     if len(list_domains) > MAX_SERVICE_LIST_DOMAINS_PER_PLAN:

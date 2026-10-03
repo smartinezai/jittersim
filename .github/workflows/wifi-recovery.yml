@@ -38,6 +38,7 @@ jobs:
       - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_many_queues.py
       - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_protected_not_monitored.py
       - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_service_list_packets.py
+      - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_service_list_variation.py
       - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_queue_stats.py
       - run: docker run --rm --privileged jittersim-wifi-release python -m tests.integration.linux_dns_watch
       - run: docker run --rm --cap-add NET_ADMIN --cap-add NET_RAW jittersim-wifi-release python tests/integration/linux_dashboard_access_packets.py
@@ -63,6 +64,8 @@ jobs:
       - run: python -m tests.browser.sidebar_status
       - run: python -m tests.browser.apply_clarity
       - run: python -m tests.browser.router_copy
+      - run: python -m tests.browser.observation_confirmation
+      - run: python -m tests.browser.traffic_chart
       - run: python -m tests.browser.device_names
       - run: python -m tests.browser.phone_layout
       - run: python -m tests.browser.help_icons

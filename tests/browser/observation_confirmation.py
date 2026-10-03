@@ -1,0 +1,280 @@
+"""Exercise observed-site confirmation with two real dashboard tabs."""
+
+import argparse
+import json
+import os
+import selectors
+import subprocess
+import sys
+from pathlib import Path
+
+from playwright.sync_api import expect, sync_playwright
+
+from tests.browser.phone import close_controls, sidebar_control
+
+ADD_PATH = "/api/observations/add-to-profile"
+HEADERS = {"Authorization": "Bearer browser-test"}
+SINGLE_NAME = "config.extension.grammarly.com"
+GROUP_NAMES = (
+    "tracking.immobilienscout24.de",
+    "api.header.immobilienscout24.de",
+    "content.header.immobilienscout24.de",
+    "osa.s24-media.immobilienscout24.de",
+    "sso.immobilienscout24.de",
+    "tenant-network.immobilienscout24.de",
+    "web.chatbot.immobilienscout24.de",
+)
+
+
+def authenticate(page, base):
+    page.goto(base + "/#traffic")
+    sidebar_control(page, "#open-admin-credentials").click()
+    page.locator("#admin-token").fill("browser-test")
+    page.locator("#check-admin-token").click()
+    expect(page.locator("#token-check-status")).to_contain_text(
+        "Token accepted. Diagnostics loaded.", timeout=20000
+    )
+    page.locator("#close-credentials").click()
+    close_controls(page)
+    toggle = page.get_by_role("button", name="Traffic discovery", exact=True)
+    if toggle.get_attribute("aria-expanded") == "false":
+        toggle.click()
+    expect(page.locator("#observations .observation-device").first).to_be_visible()
+
+
+def save_from_other_tab(page, profile):
+    result = page.evaluate(
+        """async profile => {
+          const response = await fetch('/api/profiles', {
+            method: 'POST',
+            headers: {'Authorization': 'Bearer browser-test', 'Content-Type': 'application/json'},
+            body: JSON.stringify(profile)
+          });
+          return {status: response.status, body: await response.json()};
+        }""",
+        profile,
+    )
+    assert result["status"] == 200, result
+
+
+def saved_profile(page, base, profile_id):
+    response = page.request.get(base + "/api/profiles", headers=HEADERS)
+    assert response.ok, response.text()
+    return next(profile for profile in response.json()["profiles"] if profile["id"] == profile_id)
+
+
+def is_add_response(response):
+    return response.request.method == "POST" and response.url.endswith(ADD_PATH)
+
+
+def action_button(page, kind, profile_id):
+    page.wait_for_function("() => !dashboardRefresh")
+    card = page.locator(".observation-device").filter(has_text="192.168.50.124").first
+    card.get_by_label("Profile for discovered domains", exact=True).select_option(profile_id)
+    if kind == "single":
+        return card.get_by_role("button", name="Add to profile " + SINGLE_NAME, exact=True)
+    group = card.locator(".observation-group").filter(has_text="ImmoScout24")
+    return group.locator(".observation-group-profile-button")
+
+
+def assert_no_replay(page, posts, expected):
+    page.wait_for_timeout(250)
+    assert len(posts) == expected, posts
+
+
+def assert_saved_add(page, base, before, names):
+    after = saved_profile(page, base, before["id"])
+    expected = dict(
+        before,
+        website_mode="allow_only",
+        website_domains=list(dict.fromkeys(before["website_domains"] + list(names))),
+    )
+    assert after == expected, (after, expected)
+
+
+def confirm_dialog(page, accepted):
+    dialog = page.get_by_role("dialog")
+    expect(dialog).to_be_visible()
+    expect(dialog).to_contain_text("Every other site will stop working")
+    dialog.get_by_role("button", name="Continue" if accepted else "Cancel", exact=True).click()
+    expect(dialog).to_have_count(0)
+
+
+def check_actions(browser, base, kind, width, evidence):
+    context = browser.new_context(viewport={"width": width, "height": 1000 if width > 768 else 844})
+    context.set_default_timeout(15000)
+    try:
+        editor = context.new_page()
+        authenticate(editor, base)
+        ids = {scenario: f"obs-{kind}-{width}-{scenario}" for scenario in (
+            "stale", "normal", "existing", "failure"
+        )}
+        for scenario, profile_id in ids.items():
+            restricted = scenario in ("stale", "existing")
+            save_from_other_tab(editor, {
+                "id": profile_id,
+                "name": "Observed " + kind + " " + scenario,
+                "upload": {"delay_ms": 37},
+                "download": {"bandwidth_kbit": 1700},
+                "random_seed": 19,
+                "website_mode": "allow_only" if restricted else "unrestricted",
+                "website_domains": ["keep.example"] if restricted else [],
+            })
+        page = context.new_page()
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        authenticate(page, base)
+        posts = []
+        page.on("request", lambda request: posts.append(request.post_data_json)
+                if request.method == "POST" and request.url.endswith(ADD_PATH) else None)
+        names = (SINGLE_NAME,) if kind == "single" else GROUP_NAMES
+        prefix = f"{kind} at {width}px: "
+
+        # The first tab retains the old allow list while another tab saves unrestricted.
+        before = saved_profile(editor, base, ids["stale"])
+        before = dict(before, website_mode="unrestricted", website_domains=[])
+        save_from_other_tab(editor, before)
+        assert page.evaluate(
+            "id => profiles.find(profile => profile.id === id).website_mode", ids["stale"]
+        ) == "allow_only"
+        button = action_button(page, kind, ids["stale"])
+        with page.expect_response(is_add_response) as received:
+            button.click()
+        response = received.value
+        assert response.status == 409, (
+            "A stale observed-site action changed restrictions without acknowledgment",
+            response.status, response.text(),
+        )
+        conflict = response.json()
+        assert conflict["code"] == "allow_only_confirmation_required", conflict
+        assert conflict["profile"] == before, conflict
+        assert posts[0]["confirm_allow_only"] is False, posts
+        assert saved_profile(editor, base, ids["stale"]) == before
+        page.wait_for_function(
+            "id => profiles.find(profile => profile.id === id).website_mode === 'unrestricted'",
+            arg=ids["stale"],
+        )
+        expect(page.locator("#message")).to_contain_text(conflict["error"])
+        expect(button).to_be_enabled()
+        expect(page.get_by_role("dialog")).to_have_count(0)
+        assert_no_replay(page, posts, 1)
+        evidence.append(
+            prefix + "stale conflict preserves settings and updates the page cache without replay"
+        )
+
+        button.click()
+        expect(page.get_by_role("dialog")).to_be_visible()
+        assert len(posts) == 1, posts
+        page.get_by_role("dialog").screenshot(
+            path=f"test-results/observation-confirmation-{kind}-{width}.png"
+        )
+        confirm_dialog(page, False)
+        expect(button).to_be_enabled()
+        assert_no_replay(page, posts, 1)
+        assert saved_profile(editor, base, ids["stale"]) == before
+        evidence.append(prefix + "the next deliberate click asks and declining sends no request")
+
+        button.click()
+        with page.expect_response(is_add_response) as received:
+            confirm_dialog(page, True)
+        assert received.value.status == 200, received.value.text()
+        assert posts[-1]["confirm_allow_only"] is True, posts
+        assert_saved_add(editor, base, before, names)
+        assert_no_replay(page, posts, 2)
+        evidence.append(prefix + "explicit confirmation permits the restrictive transition")
+
+        # A current unrestricted profile asks before its very first mutation.
+        posts.clear()
+        before = saved_profile(editor, base, ids["normal"])
+        button = action_button(page, kind, ids["normal"])
+        button.click()
+        confirm_dialog(page, False)
+        assert_no_replay(page, posts, 0)
+        assert saved_profile(editor, base, ids["normal"]) == before
+        button.click()
+        with page.expect_response(is_add_response) as received:
+            confirm_dialog(page, True)
+        assert received.value.status == 200, received.value.text()
+        assert posts[-1]["confirm_allow_only"] is True, posts
+        assert_saved_add(editor, base, before, names)
+        assert_no_replay(page, posts, 1)
+        evidence.append(
+            prefix + "a current unrestricted profile requires confirmation before its first request"
+        )
+
+        posts.clear()
+        before = saved_profile(editor, base, ids["existing"])
+        button = action_button(page, kind, ids["existing"])
+        with page.expect_response(is_add_response) as received:
+            button.click()
+        assert received.value.status == 200, received.value.text()
+        assert posts[-1]["confirm_allow_only"] is False, posts
+        expect(page.get_by_role("dialog")).to_have_count(0)
+        assert_saved_add(editor, base, before, names)
+        assert_no_replay(page, posts, 1)
+        evidence.append(prefix + "an existing allow list remains usable without another question")
+
+        posts.clear()
+        before = saved_profile(editor, base, ids["failure"])
+        button = action_button(page, kind, ids["failure"])
+        page.route("**" + ADD_PATH, lambda route: route.abort("failed"))
+        try:
+            button.click()
+            confirm_dialog(page, True)
+            expect(page.locator("#message")).to_contain_text("Failed to fetch")
+            expect(button).to_be_enabled()
+            assert_no_replay(page, posts, 1)
+            assert saved_profile(editor, base, ids["failure"]) == before
+            evidence.append(
+                prefix + "transport failure restores the action without retrying its request"
+            )
+        finally:
+            page.unroute("**" + ADD_PATH)
+        assert not errors, errors
+    finally:
+        context.close()
+
+
+def run(*, cases=("single", "group"), widths=(1920, 390)):
+    environment = {**os.environ, "JITTERSIM_BROWSER_TEST_OBSERVATIONS": "1"}
+    process = subprocess.Popen(
+        [sys.executable, "-m", "tests.browser.fixture"],
+        stdout=subprocess.PIPE, text=True, env=environment,
+    )
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            if not selector.select(timeout=15):
+                raise RuntimeError("Observed-site dashboard fixture did not start")
+            port = int(process.stdout.readline().strip())
+        Path("test-results").mkdir(exist_ok=True)
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                executable_path=os.environ.get("JITTERSIM_BROWSER_EXECUTABLE")
+            )
+            try:
+                evidence = []
+                for width in widths:
+                    for kind in cases:
+                        check_actions(browser, f"http://127.0.0.1:{port}", kind, width, evidence)
+                print(json.dumps(
+                    {"result": "passed", "checks": len(evidence), "evidence": evidence}, indent=2
+                ))
+            finally:
+                browser.close()
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=3)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--case", choices=("single", "group"))
+    parser.add_argument("--width", type=int, choices=(1920, 390))
+    arguments = parser.parse_args()
+    run(cases=(arguments.case,) if arguments.case else ("single", "group"),
+        widths=(arguments.width,) if arguments.width else (1920, 390))

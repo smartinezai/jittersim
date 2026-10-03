@@ -10,12 +10,21 @@ from .eligibility import eligible_clients
 from .general import compile_general_plan
 from .plan import EveryoneElseRule, NetworkPlan, ServiceAssignmentRule, ServiceQuotaRule
 from .service_lists import build_service_list_rules
-from .website import build_website_filters, resolve_domains
+from .website import build_website_filters, lookup_session, resolve_domains
 
 
 def compile_stored_plan(*, repository: ConfigRepository, connected_snapshot=None) -> NetworkPlan:
-    """Compile every stored device assignment into one deterministic plan."""
+    """Compile every stored device assignment into one deterministic plan.
 
+    The website lookups share one deadline, so a DNS server that does not answer
+    delays the plan by seconds and not for good.
+    """
+
+    with lookup_session():
+        return _compile_stored_plan(repository=repository, connected_snapshot=connected_snapshot)
+
+
+def _compile_stored_plan(*, repository: ConfigRepository, connected_snapshot=None) -> NetworkPlan:
     general_profile = repository.get_general_profile()
     if general_profile is not None:
         return compile_general_plan(repository=repository, profile=general_profile)
