@@ -378,7 +378,10 @@ def test_a_device_whose_profile_is_paused_is_not_counted():
         console.log(JSON.stringify(element("apply-summary").textContent));
         """
     )
-    assert out == "Saved: 1 device with a profile · 1 protected device stays untouched"
+    assert out == (
+        "Saved: 1 device with a profile · 1 saved device profile needs an identity check"
+        " · 1 protected device stays untouched"
+    )
 
 
 @needs_node

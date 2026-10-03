@@ -4596,6 +4596,11 @@ DASHBOARD_HTML = r"""<!doctype html>
       if (input.serviceLists > 0) {
         parts.push(count(input.serviceLists, "service list", "service lists"));
       }
+      if (input.unverifiedDevices > 0) {
+        parts.push(count(input.unverifiedDevices,
+          "saved device profile needs an identity check",
+          "saved device profiles need an identity check"));
+      }
       if (input.protected > 0) parts.push(protectedDevicesText(input.protected));
       return parts.length ? parts.join(" · ") : "No device profiles or service lists saved yet";
     }
@@ -4612,18 +4617,34 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function savedLine(input) {
-      if (hasProfilesOrLists(input) || input.protected > 0) return "Saved: " + applySummary(input);
+      if (hasProfilesOrLists(input) || input.protected > 0 || input.unverifiedDevices > 0) {
+        return "Saved: " + applySummary(input);
+      }
       // A start also enforces the access rules so an empty line must not hide them.
       const nothing = applySummary({});
       return input.accessRules ? nothing + ". Access rules are saved too." : nothing;
     }
 
+    function skippedDeviceProfilesText(number) {
+      const one = number === 1;
+      return number + (one ? " saved device profile was" : " saved device profiles were") +
+        " skipped because " + (one ? "its device" : "their devices") +
+        " could not be identified. Reconnect " + (one ? "that device" : "those devices") +
+        " and check " + (one ? "its saved profile." : "their saved profiles.");
+    }
+
     function startedText(input, wasRunning) {
       const lead = "Started";
-      if (hasProfilesOrLists(input)) return lead + ": " + applySummary(input) + ".";
+      if (hasProfilesOrLists(input)) {
+        const applied = applySummary({...input, unverifiedDevices: 0});
+        return lead + ": " + applied + "." + (input.unverifiedDevices > 0
+          ? " " + skippedDeviceProfilesText(input.unverifiedDevices) : "");
+      }
       const sentences = [lead + "."];
       if (input.protected > 0) sentences.push(protectedDevicesText(input.protected) + ".");
-      sentences.push("No device profiles or service lists are saved yet.");
+      sentences.push(input.unverifiedDevices > 0
+        ? skippedDeviceProfilesText(input.unverifiedDevices)
+        : "No device profiles or service lists are saved yet.");
       if (input.accessRules) sentences.push("Access rules apply.");
       return sentences.join(" ");
     }
@@ -4706,9 +4727,14 @@ DASHBOARD_HTML = r"""<!doctype html>
             device.effective_state !== "unverified" &&
             (!device.mac_address || !protectedMacs.has(device.mac_address))
         );
+        const unverified = savedDevices.filter(
+          (device) => device.effective_state === "unverified" &&
+            (!device.mac_address || !protectedMacs.has(device.mac_address))
+        );
         const affectedIds = new Set(affected.map((device) => device.id));
         text = savedLine({
           devices: affected.length,
+          unverifiedDevices: unverified.length,
           groups: groups.filter(
             (group) => (group.device_ids || []).some((id) => affectedIds.has(id))
           ).length,
@@ -7387,6 +7413,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
       return startedText({
         devices: applied.devices,
+        unverifiedDevices: Array.isArray(data.unverified_device_ids)
+          ? data.unverified_device_ids.length : 0,
         groups: applied.groups,
         serviceLists: applied.service_lists,
         protected: applied.protected,
