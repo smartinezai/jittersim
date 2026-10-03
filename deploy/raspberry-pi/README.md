@@ -1085,8 +1085,8 @@ key must have signed exactly those bytes and the sequence must be newer than the
 high-water mark. Limits: Content-Length is required, the archive is at most 25 MiB,
 the signature at most 16 KiB and the whole upload must finish within 120 seconds.
 `jittersim remote update status|upload|install` does the same from the command
-line, and `deploy/raspberry-pi/publish-release.sh REF` publishes the two release
-files to GitHub for the online release source.
+line. Publishing stable releases requires the retained signed package and owner
+approval. Follow the [release guide](../../docs/releases/README.md).
 
 ### Who can do what
 

@@ -8,6 +8,9 @@ Wi-Fi.
 Use JitterSim only on equipment and networks that you own or have permission
 to test. It is for experiments, not a replacement for your home router.
 
+Stable versions use tested signed packages with owner approval. See the
+[release guide](docs/releases/README.md) for candidate builds and publication.
+
 ## See it in action
 
 <div align="center">

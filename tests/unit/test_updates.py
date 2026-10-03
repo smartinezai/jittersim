@@ -493,7 +493,12 @@ class UpdateTests(unittest.TestCase):
                     self.assertEqual(self.manager.read_bytes(),
                                      (self.code / "src/jittersim/updates.py").read_bytes())
                 elif re.search(r"deploy/raspberry-pi/[\w.-]+\.py", line):
-                    script = Path(words[1]).name
+                    script = Path(words[2] if words[1] == "-I" else words[1]).name
+                    if script == "prepare-locked-wheels.py":
+                        # This fixture represents a legacy development archive without locks.
+                        # Stable preparation is exercised separately with fixed packages.
+                        self.assertFalse((self.root / "staged/deploy/raspberry-pi/release-locks").exists())
+                        continue
                     if script == "retire-services.py":
                         # It refuses to run while the update service runs and no
                         # unit waits to be retired. A test below keeps that true.
@@ -531,13 +536,15 @@ class UpdateTests(unittest.TestCase):
                     self.assertIn(words, commands)
                     self.assertEqual(words[3:], [
                         "configure", "--uplink", "eth7", "--test-interface", "wlan7"])
-                elif Path(words[0]).name == "pip":
+                elif Path(words[0]).name == "pip" or ("pip" in words and "install" in words):
                     offline = [command for command in commands if command[:4] ==
                                [str(self.code / ".venv/bin/python"), "-m", "pip", "install"]]
                     self.assertEqual(len(offline), 1)
                     self.assertIn("--no-index", offline[0])
                     self.assertIn("--no-deps", offline[0])
                     self.assertTrue(offline[0][-1].endswith(".whl"))
+                elif "pip" in words and words[-1] == "check":
+                    self.assertIn([str(self.code / ".venv/bin/python"), "-m", "pip", "check"], commands)
                 elif words[:2] == ["chmod", "-R"]:
                     self.assertEqual(words[2], "go-w")
                     for entry in [self.code, *self.code.rglob("*")]:
@@ -546,7 +553,7 @@ class UpdateTests(unittest.TestCase):
                     # The update installs into the existing environment as root.
                     continue
                 else:
-                    self.fail("the dashboard update does not do this install.sh step")
+                    self.fail("the dashboard update does not do this install.sh step: " + line)
         self.assertEqual(installed_units, set(UNITS))
 
     def test_the_update_runs_the_installer_service_steps_in_order(self):

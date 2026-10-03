@@ -28,13 +28,14 @@ class Online:
     def __init__(self, base):
         self.pi = Pi(base)
         self.github = FakeGitHub()
-        self.set_release(sequence=500, version="v7")
+        self.set_release(sequence=500, version="0.7.0")
         self.github.start()
         self.run_calls = []
         updates.set_token(TOKEN + "\n", config=self.pi.config)
 
     def set_release(self, **options):
         archive = self.pi.release(**options)
+        self.github.tag = "v" + options.get("version", "0.7.0")
         self.github.files[11] = archive.read_bytes()
         self.github.files[12] = (archive.parent / (archive.name + ".sig")).read_bytes()
 
@@ -175,14 +176,14 @@ def test_the_token_stays_through_a_rollback():
 def test_a_check_downloads_two_assets_and_stages_the_signed_release(online):
     result = online.check()
     assert result["result"] == "staged"
-    assert result["tag"] == "v7" and result["available"] == "v7"
-    assert "v7" in result["message"]
+    assert result["tag"] == "v0.7.0" and result["available"] == "0.7.0"
+    assert "v0.7.0" in result["message"]
     record = online.pi.record()
-    assert record["source"] == "github" and record["tag"] == "v7"
+    assert record["source"] == "github" and record["tag"] == "v0.7.0"
     assert record["sequence"] == 500
     status = online.pi.status()
     assert status["installable"] is True
-    assert status["source"] == "github" and status["tag"] == "v7"
+    assert status["source"] == "github" and status["tag"] == "v0.7.0"
     # Nothing is left of the downloads.
     assert {item.name for item in online.pi.root.iterdir()} <= {
         "lock", "status.json", "staged", "online.lock", "online-seen.json", updates.FLOOR_NAME}
@@ -241,7 +242,7 @@ def test_a_second_check_of_the_same_release_downloads_nothing(online):
 
 
 def test_an_installed_release_is_up_to_date(online):
-    online.pi.installed(sequence=500, version="v7")
+    online.pi.installed(sequence=500, version="0.7.0")
     result = online.check()
     assert result["result"] == "up-to-date"
     assert result["message"].startswith("Already up to date")
@@ -254,7 +255,7 @@ def test_an_installed_release_is_up_to_date(online):
 
 
 def test_an_older_release_is_up_to_date_never_staged(online):
-    online.pi.installed(sequence=900, version="v9")
+    online.pi.installed(sequence=900, version="0.9.0")
     result = online.check()
     assert result["result"] == "up-to-date"
     assert "Already up to date" in result["message"]
@@ -272,10 +273,10 @@ def test_the_installed_tag_is_up_to_date_without_a_download(online):
 
 def test_a_newer_release_replaces_the_staged_one(online):
     online.check()
-    online.github.tag = "v8"
-    online.set_release(sequence=600, version="v8")
+    online.github.tag = "v0.8.0"
+    online.set_release(sequence=600, version="0.8.0")
     assert online.check()["result"] == "staged"
-    assert online.pi.record()["tag"] == "v8" and online.pi.record()["sequence"] == 600
+    assert online.pi.record()["tag"] == "v0.8.0" and online.pi.record()["sequence"] == 600
 
 
 # Refusals
@@ -358,7 +359,7 @@ def test_a_draft_or_prerelease_is_refused(online):
 
 def test_a_release_signed_by_a_key_the_pi_does_not_trust_is_refused(online, tmp_path):
     other, _ = make_key(tmp_path / "other", name="other")
-    archive = signed_release(tmp_path, other, name="x.tar.gz", sequence=700, version="v9")
+    archive = signed_release(tmp_path, other, name="x.tar.gz", sequence=700, version="0.9.0")
     online.github.files[11] = archive.read_bytes()
     online.github.files[12] = (tmp_path / "x.tar.gz.sig").read_bytes()
     refused(online, "release signature is not valid")
@@ -535,9 +536,9 @@ def test_check_online_command_prints_one_line_and_exits_by_result(online, monkey
     monkeypatch.setattr(updates, "default_source", online.source)
     assert updates.main(["check-online"]) == 0
     out = capsys.readouterr().out
-    assert len(out.strip().splitlines()) == 1 and "v7" in out
+    assert len(out.strip().splitlines()) == 1 and "v0.7.0" in out
     assert TOKEN not in out
-    pi.installed(sequence=900, version="v9")
+    pi.installed(sequence=900, version="0.9.0")
     shutil.rmtree(pi.root / "staged")
     assert updates.main(["check-online"]) == 0
     assert capsys.readouterr().out.startswith("Already up to date")
@@ -545,3 +546,20 @@ def test_check_online_command_prints_one_line_and_exits_by_result(online, monkey
     assert updates.main(["check-online"]) == 1
     error = capsys.readouterr().err
     assert "refused the token" in error and "Nothing was changed" in error
+
+
+
+@pytest.mark.parametrize("tag", ["v7", "v0.7.0-rc.1", "v0.7.0.dev+abc", "v00.7.0"])
+def test_online_source_refuses_non_stable_tags_before_downloading(online, tag):
+    online.github.tag = tag
+    assert online.check()["result"] == "failed"
+    assert not (online.pi.root / "staged").exists()
+    assert len(online.github.requests) == 1
+
+
+def test_online_tag_must_match_the_signed_package_version(online):
+    online.set_release(sequence=600, version="0.8.0")
+    online.github.tag = "v0.7.0"
+    result = online.check()
+    assert result["result"] == "failed"
+    assert not (online.pi.root / "staged").exists()

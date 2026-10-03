@@ -381,7 +381,7 @@ def test_build_outputs_exceeding_the_private_allowance_are_refused(tmp_path, mon
 
     with pytest.raises(updates.UpdateError, match="large"):
         updates.prepare_install(source, tmp_path / "prepared", Path(sys.executable),
-                                {"commit": "a" * 40, "version": "0.2.0"},
+                                {"commit": "a" * 40, "version": "0.2.0.dev+aaaaaaa"},
                                 build, updates.UpdateBudget())
 
 
@@ -855,3 +855,38 @@ def test_captured_command_retains_unknown_group_completion(monkeypatch):
     monkeypatch.setattr(updates, "command_group_running", lambda *args: True)
     with pytest.raises(updates.CommandNotStopped):
         updates.capture_command([sys.executable, "-c", "pass"], timeout=0.3, limit=65536)
+
+
+
+def test_stable_source_without_locked_preparation_is_refused_before_commands(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    calls = []
+    with pytest.raises(updates.UpdateError, match="locked"):
+        updates.prepare_install(source, tmp_path / "prepared", Path(sys.executable),
+                                {"commit": "a" * 40, "version": "0.2.0"},
+                                lambda *args: calls.append(args), updates.UpdateBudget())
+    assert not calls
+
+
+
+def test_stable_preparation_uses_locked_builder_then_only_offline_installs(tmp_path):
+    source = tmp_path / "source"
+    scripts = source / "deploy/raspberry-pi"
+    (scripts / "release-locks").mkdir(parents=True)
+    (scripts / "prepare-locked-wheels.py").write_text("# controlled stand-in\n")
+    commands = []
+
+    def run(command, timeout):
+        commands.append(command)
+        if "--source" in command:
+            destination = Path(command[command.index("--output") + 1])
+            (destination / "jittersim-0.2.0-py3-none-any.whl").write_bytes(b"prepared wheel")
+
+    result = updates.prepare_install(source, tmp_path / "prepared", Path(sys.executable),
+                                     {"commit": "a" * 40, "version": "0.2.0"},
+                                     run, updates.UpdateBudget())
+    assert Path(commands[0][2]).name == "prepare-locked-wheels.py"
+    assert not any("wheel" in command for command in commands)
+    assert all("--no-index" in command and "--no-deps" in command for command in commands if "install" in command)
+    assert len(result) == 1

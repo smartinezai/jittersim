@@ -1,0 +1,59 @@
+name: Release candidate
+
+on:
+  workflow_run:
+    workflows: [Tests, Pi release checks]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: release-candidate-${{ github.event.workflow_run.head_sha || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify main checks and prepare development candidate
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_COMMIT: ${{ github.event.workflow_run.head_sha || github.sha }}
+        shell: bash
+        run: |
+          set +e
+          python3 deploy/raspberry-pi/release-system.py candidate \
+            --ref "$CANDIDATE_COMMIT" --output "$RUNNER_TEMP/release-candidate"
+          result=$?
+          set -e
+          if [ "$result" -eq 78 ]; then
+            echo 'ready=false' >> "$GITHUB_OUTPUT"
+          elif [ "$result" -eq 0 ]; then
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          else
+            exit "$result"
+          fi
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        if: steps.prepare.outputs.ready == 'true'
+        with:
+          name: development-${{ github.event.workflow_run.head_sha || github.sha }}
+          path: ${{ runner.temp }}/release-candidate/
+          if-no-files-found: error
+          retention-days: 14
