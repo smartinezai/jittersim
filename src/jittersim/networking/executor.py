@@ -1,6 +1,9 @@
 """Command execution adapters used by simulation and hardware modes."""
 
+import os
+import selectors
 import subprocess
+import time
 from typing import List, Optional, Protocol
 
 from .commands import Command, CommandResult
@@ -74,6 +77,9 @@ class SubprocessExecutor:
                 f"unsupported networking executable: {command.executable}"
             )
 
+        if command.sensitive:
+            return self._run_sensitive(command)
+
         try:
             result = subprocess.run(
                 command.argv,
@@ -117,3 +123,83 @@ class SubprocessExecutor:
                 stderr=result.stderr,
             )
         return command_result
+
+    def _run_sensitive(self, command: Command) -> CommandResult:
+        """Keep private input and checked output inside the process boundary."""
+
+        timeout = command.timeout_seconds or self.timeout_seconds
+        deadline = time.monotonic() + timeout
+        expected = command.expected_stdout.encode() if command.expected_stdout is not None else None
+        process = None
+        failed = False
+        timed_out = False
+        return_code = None
+        try:
+            process = subprocess.Popen(
+                command.argv,
+                stdin=subprocess.PIPE if command.stdin is not None else subprocess.DEVNULL,
+                stdout=subprocess.PIPE if expected is not None else subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env={**os.environ, "HOME": "/dev/null", "XDG_CACHE_HOME": "/dev/null"},
+            )
+            if expected is None:
+                process.communicate(
+                    input=command.stdin.encode() if command.stdin is not None else None,
+                    timeout=max(0.001, deadline - time.monotonic()),
+                )
+            else:
+                # Read at most the expected response plus one excess byte. A
+                # noisy or stalled child cannot grow this private buffer.
+                actual = bytearray()
+                with selectors.DefaultSelector() as selector:
+                    selector.register(process.stdout, selectors.EVENT_READ)
+                    while True:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0 or not selector.select(remaining):
+                            raise subprocess.TimeoutExpired(command.argv, timeout)
+                        chunk = os.read(process.stdout.fileno(), len(expected) + 1 - len(actual))
+                        if not chunk:
+                            break
+                        actual.extend(chunk)
+                        if len(actual) > len(expected):
+                            failed = True
+                            break
+                failed = failed or actual != expected
+                if not failed:
+                    process.wait(timeout=max(0.001, deadline - time.monotonic()))
+            return_code = process.poll()
+            failed = failed or return_code != 0
+        except subprocess.TimeoutExpired:
+            failed = True
+            timed_out = True
+        except OSError:
+            failed = True
+        finally:
+            if process is not None:
+                try:
+                    if process.poll() is None:
+                        process.kill()
+                except OSError:
+                    failed = True
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    failed = True
+                    timed_out = True
+                except OSError:
+                    failed = True
+                for stream in (process.stdin, process.stdout):
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except (OSError, ValueError):
+                            failed = True
+        # Raise outside exception handlers so a child exception cannot retain
+        # private output through an attached exception context.
+        if failed:
+            raise CommandExecutionError(
+                "private networking command failed",
+                return_code=return_code,
+                timed_out=timed_out,
+            )
+        return CommandResult(return_code=0)

@@ -61,9 +61,32 @@ class WifiController:
         for name, value in settings.items():
             if name in (SSID_PROPERTY, *SECURITY_PROPERTIES):
                 arguments.extend((name, value))
-        if password is not None:
-            arguments.extend((PREFIX + "psk", password))
         self._run(tuple(arguments))
+        if password is not None:
+            self._save_password(password)
+
+    def _save_password(self, password: str) -> None:
+        """Save and check the PSK without placing it in process arguments."""
+
+        self.commands_run += 1
+        self.executor.run(Command(
+            executable="nmcli",
+            arguments=("--colors", "no", "connection", "edit", "id", AP_CONNECTION),
+            purpose="save the local Wi-Fi password privately",
+            stdin=f"set {PREFIX}psk\n{password}\nsave persistent\nquit\n",
+            sensitive=True,
+            timeout_seconds=3,
+        ))
+        self.commands_run += 1
+        self.executor.run(Command(
+            executable="nmcli",
+            arguments=("--escape", "no", "--show-secrets", "-g", PREFIX + "psk",
+                       "connection", "show", "id", AP_CONNECTION),
+            purpose="check the saved Wi-Fi password privately",
+            sensitive=True,
+            expected_stdout=password + "\n",
+            timeout_seconds=3,
+        ))
 
     def _activate(self) -> None:
         self._run(("--wait", "2", "connection", "down", "id", AP_CONNECTION),
@@ -172,6 +195,10 @@ class WifiController:
         return True
 
     def configure(self, ssid: str, password: str, security: str = "WPA3") -> int:
+        if (not isinstance(password, str) or not 8 <= len(password) <= 63
+                or not password.isascii()
+                or any(ord(character) < 32 or ord(character) == 127 for character in password)):
+            raise ValueError("password must contain 8 to 63 printable ASCII characters")
         expected = {SSID_PROPERTY: ssid, **security_settings(security)}
         try:
             self.recover_pending()
