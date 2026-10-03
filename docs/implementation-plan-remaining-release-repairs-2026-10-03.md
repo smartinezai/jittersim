@@ -26,6 +26,9 @@ local equivalents when hosted jobs cannot start due to account limits.
 - Address owner provides frozen commits and paired database/root access rules.
 - Update owner provides reviewed signing, CLI, upload, installer, trusted CA,
   release version, polling and optional online-check changes.
+- Dashboard concurrency and shared scans from PR 70 are already present in the
+  local update branch. Independently audit that combined source and repair
+  ownership, emergency access and invalidation defects before integration.
 - Homepage owner provides a separate frozen feature and compatibility review.
   Do not copy an active dirty checkout or infer completion from old tests.
 - Coordinator handles conflicts, combined checks, publication and deployment.
@@ -62,6 +65,7 @@ local equivalents when hosted jobs cannot start due to account limits.
   locks across helper waits and match root receipts before compensation.
 - Upload paths remain descriptor-anchored with real root/dashboard permission
   evidence. Cleanup cannot remove an upload while root processing still owns it.
+  Use separate UID/group identities on Linux for that permission evidence.
 - Preserve current signing trust and consistent backups through install failure,
   rollback failure, uncertain durable writes and mixed helper/server versions.
 - Optional online checks make no HTTP request while disabled. Initial sign-in
@@ -83,7 +87,9 @@ limits honestly. Hosted jobs with zero steps are unavailable rather than green.
 
 Inspect actual branch tips and open PRs before final main/Pi merge. Verify the
 target source, packaged release, installer and rollback against their actual
-deployment paths. Deploy only after management access and recovery are proven.
+deployment paths. The Pi receives only a signed official release built from
+verified main, never a release built from this integration branch. Deploy only
+after management access and recovery are proven.
 Record pre-deployment state privately, keep secrets out of reports and validate
 health, access protection and recovery after deployment. Do not change the Pi's
 radio or management network through the test connection to manufacture access.
