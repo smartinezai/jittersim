@@ -5886,7 +5886,7 @@ class ControlServerTests(unittest.TestCase):
     def test_can_promote_an_observed_domain_to_a_profile_or_global_block(self) -> None:
         status, _, body = self.server.write_response_for(
             "/api/observations/add-to-profile",
-            {"profile_id": "slow", "domain": "Chat.OpenAI.com."},
+            {"profile_id": "slow", "domain": "Chat.OpenAI.com.", "confirm_allow_only": True},
         )
         self.assertEqual(status, 200)
         self.assertEqual(
@@ -6108,7 +6108,7 @@ class ControlServerTests(unittest.TestCase):
 
         status, _, _ = self.server.write_response_for(
             "/api/observations/add-to-profile",
-            {"profile_id": "slow", "domains": ["x.example.com", "y.example.com"]},
+            {"profile_id": "slow", "domains": ["x.example.com", "y.example.com"], "confirm_allow_only": True},
         )
         self.assertEqual(status, 200)
         profile = self.repository.get_profile("slow")
@@ -6117,7 +6117,7 @@ class ControlServerTests(unittest.TestCase):
 
     def test_adding_many_names_to_a_profile_keeps_what_it_has_and_skips_duplicates(self) -> None:
         self.server.write_response_for(
-            "/api/observations/add-to-profile", {"profile_id": "slow", "domain": "one.example.com"}
+            "/api/observations/add-to-profile", {"profile_id": "slow", "domain": "one.example.com", "confirm_allow_only": True}
         )
 
         status, _, _ = self.server.write_response_for(
