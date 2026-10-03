@@ -33,6 +33,7 @@ def stack():
     repository = ConfigRepository(":memory:")
     helper = RetryHelper()
     server = ControlServer(("127.0.0.1", 0), repository, admin_token=TOKEN)
+    original_scheduler = server.scheduler
     server.helper_client = helper
     server.dashboard_access = lambda peer: {"allowed": True}
     worker = threading.Thread(target=server.serve_forever, daemon=True)
@@ -40,6 +41,8 @@ def stack():
     try:
         yield server, helper
     finally:
+        # This route fixture never starts the scheduler used by the real server.
+        server.scheduler = original_scheduler
         server.shutdown()
         worker.join(timeout=2)
         server.server_close()
