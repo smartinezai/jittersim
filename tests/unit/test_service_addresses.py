@@ -413,7 +413,10 @@ class ServiceAddressClientTests(unittest.TestCase):
 
     def test_applying_a_plan_with_lists_needs_a_helper_that_supports_them(self) -> None:
         client = HelperClient(socket_path=self.socket_path)
-        client._request = lambda payload, **kwargs: {"ok": True, "general_profile": True}
+        client._request = lambda payload, **kwargs: (
+            {"ok": True, "control_revision": "a" * 32, "recovery_required": False}
+            if payload["action"] == "control-revision" else {"ok": True, "general_profile": True}
+        )
 
         with self.assertRaisesRegex(HelperClientError, "Update the Pi helper"):
             client.apply(plan=list_plan())

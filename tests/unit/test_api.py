@@ -1015,6 +1015,9 @@ class ControlServerTests(unittest.TestCase):
 
     def test_traffic_endpoint_includes_applied_default_queue_limits(self) -> None:
         class SnapshotScheduler:
+            def begin_shutdown(self):
+                pass
+
             def applied_queue_bandwidth_limits(self):
                 return {
                     "alice": {
@@ -5357,6 +5360,9 @@ class ControlServerTests(unittest.TestCase):
 
         class RecordingScheduler:
             is_active = False
+
+            def begin_shutdown(self):
+                pass
 
             @contextlib.contextmanager
             def exclusive(self):

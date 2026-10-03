@@ -30,6 +30,8 @@ from typing import Any, Collection, Dict, List, Optional, Sequence, Set, Tuple
 from urllib.parse import parse_qs, urlsplit
 
 from jittersim import release_uploads, updates
+from jittersim.request_workers import RequestWorkers, WorkersStillRunning
+from jittersim.socket_deadlines import DeadlineReader as _DeadlineReader
 from jittersim.api.access import ACCESS_WRITES, read_access_api, write_access_api
 from jittersim.api.workflows import WORKFLOW_WRITES, machine_health, read_workflow, write_workflow
 from jittersim.config.device_labels import (
@@ -120,7 +122,7 @@ from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.engine.scenarios import active_scenario_runs
 from jittersim.engine.schedules import active_schedule
 from jittersim.engine.service import compile_stored_plan
-from jittersim.engine.website import describe_timed_out_names
+from jittersim.engine.website import describe_timed_out_names, without_dns
 from jittersim.networking.applier import MAX_PROTECTED_MACS, _validate_access_point_settings
 from jittersim.networking.helper import (
     HELPER_OUT_OF_DATE_MESSAGE,
@@ -11446,7 +11448,7 @@ def _dashboard_page() -> Tuple[bytes, bytes, str]:
     cached = _DASHBOARD_PAGE_CACHE.get("page")
     if cached is None or cached[0] is not DASHBOARD_HTML:
         raw = DASHBOARD_HTML.encode("utf-8")
-        etag = '"' + hashlib.sha256(raw).hexdigest()[:32] + '"'
+        etag = 'W/"' + hashlib.sha256(raw).hexdigest()[:32] + '"'
         cached = (DASHBOARD_HTML, raw, gzip.compress(raw, 6, mtime=0), etag)
         _DASHBOARD_PAGE_CACHE["page"] = cached
     return cached[1], cached[2], cached[3]
@@ -11459,18 +11461,20 @@ def dashboard_page_bytes() -> bytes:
 
 
 def _accepts_gzip(header: str) -> bool:
+    explicit = []
+    wildcard = []
     for part in header.lower().split(","):
         name, _, parameters = part.strip().partition(";")
-        if name.strip() not in ("gzip", "*"):
+        name = name.strip()
+        if name not in ("gzip", "*"):
             continue
-        quality = parameters.strip()
-        if quality.startswith("q="):
-            try:
-                return float(quality[2:]) > 0
-            except ValueError:
-                return False
-        return True
-    return False
+        quality = 1.0
+        if parameters:
+            match = re.fullmatch(r"\s*q\s*=\s*(0(?:\.[0-9]{0,3})?|1(?:\.0{0,3})?)\s*", parameters)
+            quality = float(match.group(1)) if match else 0.0
+        (explicit if name == "gzip" else wildcard).append(quality)
+    choices = explicit if explicit else wildcard
+    return bool(choices) and min(choices) > 0
 
 
 def _inline_source_hashes(tag: str, page: str = DASHBOARD_HTML) -> str:
@@ -12018,43 +12022,6 @@ def _json_bytes(payload: Dict[str, Any]) -> bytes:
     return (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
 
 
-class _DeadlineReader(io.RawIOBase):
-    """Bound all input reads to one deadline, including a slow byte stream."""
-
-    def __init__(self, source: io.RawIOBase, connection: socket.socket, deadline: float,
-                 prefix: bytes = b"") -> None:
-        super().__init__()
-        self._source = source
-        self._connection = connection
-        self._deadline = deadline
-        self._prefix = prefix
-
-    def readable(self) -> bool:
-        return True
-
-    def readinto(self, buffer: Any) -> Optional[int]:
-        remaining = self._deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("dashboard request input timed out")
-        self._connection.settimeout(remaining)
-        if self._prefix:
-            count = min(len(buffer), len(self._prefix))
-            buffer[:count] = self._prefix[:count]
-            self._prefix = self._prefix[count:]
-            return count
-        return self._source.readinto(buffer)
-
-    def extend_to(self, deadline: float) -> None:
-        """Give a long upload its own, later deadline once its request was accepted."""
-        self._deadline = deadline
-
-    def close(self) -> None:
-        try:
-            self._source.close()
-        finally:
-            super().close()
-
-
 @dataclass
 class _PendingConnection:
     address: Any
@@ -12079,6 +12046,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
     # Browsers open several connections at once. The default queue of five resets the rest.
     request_queue_size = 64
     request_timeout_seconds = 5.0
+    shutdown_timeout_seconds = 5.0
     # Where an uploaded release waits for the root helper (see jittersim.updates.stage_upload).
     release_spool = updates.UPLOAD_SPOOL
     release_upload_lock = release_uploads.LOCK_PATH
@@ -12126,6 +12094,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         self._stop_connections = threading.Event()
         self._workers_lock = threading.Lock()
         self._active_workers = 0
+        self._request_workers = RequestWorkers("jittersim-request", self._uncertain_worker_start)
         self._reserved_requests: Set[socket.socket] = set()
         super().__init__(server_address, ControlRequestHandler)
 
@@ -12133,10 +12102,12 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
     def active_workers(self) -> int:
         """Return how many requests are being handled right now."""
 
+        self._request_workers.reap()
         with self._workers_lock:
             return self._active_workers
 
     def process_request(self, request: socket.socket, client_address: Any) -> None:
+        self._request_workers.reap()
         with self._workers_lock:
             accepted = self._active_workers < MAX_DASHBOARD_WORKERS + RESERVED_PANIC_WORKERS
             if accepted:
@@ -12148,28 +12119,29 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             self._refuse_request(request)
             return
         try:
-            threading.Thread(
-                target=self._serve_request, args=(request, client_address),
-                name="jittersim-request", daemon=True,
-            ).start()
-        except BaseException:
-            with self._workers_lock:
-                self._active_workers -= 1
-            self.shutdown_request(request)
-            raise
+            self._request_workers.start(
+                lambda: self.process_request_thread(request, client_address),
+                abandon=lambda: self.shutdown_request(request), release=self._release_worker,
+            )
+        except Exception:
+            # The worker manager retains ambiguous ownership. The accept loop must
+            # not close a socket that a started worker may still be handling.
+            LOGGER.exception("dashboard worker startup failed")
+
+    def _release_worker(self) -> None:
+        with self._workers_lock:
+            self._active_workers -= 1
+
+    def _uncertain_worker_start(self) -> None:
+        self._stop_connections.set()
+        if self.scheduler is not None:
+            self.scheduler.halt()
 
     def is_reserved_request(self, request: socket.socket) -> bool:
         """Tell whether this request runs in a slot that is kept for Panic."""
 
         with self._workers_lock:
             return request in self._reserved_requests
-
-    def _serve_request(self, request: socket.socket, client_address: Any) -> None:
-        try:
-            self.process_request_thread(request, client_address)
-        finally:
-            with self._workers_lock:
-                self._active_workers -= 1
 
     def _refuse_request(self, request: socket.socket) -> None:
         """Tell a client over the limit to retry instead of leaving it hanging."""
@@ -12261,6 +12233,10 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         connection.close()
 
     def service_actions(self) -> None:
+        if any(owner.startup_uncertain for owner in (
+            self._request_workers, self.router_operations._workers, self.wifi_operations._workers,
+        )):
+            raise WorkersStillRunning("Dashboard worker startup is unresolved. Restart the service.")
         if self._pending_connections and not self._stop_connections.is_set():
             self._handle_request_noblock()
 
@@ -13840,13 +13816,26 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
 
     def server_close(self) -> None:
+        deadline = time.monotonic() + self.shutdown_timeout_seconds
+        if self.scheduler is not None:
+            self.scheduler.begin_shutdown()
         self._stop_connections.set()
+        self._request_workers.stop_admission()
+        self.router_operations.begin_shutdown()
+        self.wifi_operations.begin_shutdown()
         for connection in tuple(self._pending_connections):
             self._close_pending(connection)
-        self._request_inputs.clear()
-        self.router_operations.close()
-        self.wifi_operations.close()
+        # The listener can close at once. Shared state must outlive every owner.
         super().server_close()
+        unresolved = []
+        for owner in (self._request_workers, self.router_operations, self.wifi_operations):
+            try:
+                owner.close(timeout=max(0.0, deadline - time.monotonic()))
+            except WorkersStillRunning as error:
+                unresolved.append(error)
+        if unresolved:
+            raise unresolved[0]
+        self._request_inputs.clear()
 
     def _record_wifi_outcome(self) -> None:
         outcome = self.wifi_operations.completed_action()
@@ -14302,6 +14291,10 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         the addresses of each listed name within a second while JitterSim runs.
         """
 
+        generation = getattr(self.scheduler, "apply_generation", 0)
+        refused, revision = self._capture_control_intent(generation)
+        if refused is not None:
+            return refused
         settings = self.repository.access_settings()
         if (
             not settings.access_options.enabled
@@ -14310,8 +14303,22 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         ):
             return None
         try:
-            self.helper_client.apply_access(build_access_plan(settings))
-        except (HelperClientError, ValidationError):
+            arguments = {"control_revision": revision} if revision is not None else {}
+            refused = self._apply_refused(generation)
+            if refused is not None:
+                return refused
+            self.helper_client.apply_access(build_access_plan(settings), **arguments)
+            refused = self._apply_refused(generation, undo=True)
+            if refused is not None:
+                return refused
+        except (HelperClientError, ValidationError) as error:
+            if isinstance(error, HelperClientError):
+                rejected = self._control_rejected(error)
+                if rejected is not None:
+                    return rejected
+            refused = self._apply_refused(generation, undo=True)
+            if refused is not None:
+                return refused
             LOGGER.warning("the global block list did not reach the filtered resolver")
             return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
                 {
@@ -14376,6 +14383,11 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             return self._apply_saved_change("deleted_id", list_id)
 
     def _validate_saved_plan(self) -> None:
+        # Saving checks structure atomically. Applying resolves live addresses later.
+        with without_dns():
+            self._validate_saved_structure()
+
+    def _validate_saved_structure(self) -> None:
         if self.repository.get_general_profile() is not None:
             compile_stored_plan(repository=self.repository)
             return
@@ -15563,6 +15575,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                 gateway_status = None
             if gateway_status and (
                 gateway_status.get("outage_stop_latched") is True
+                or gateway_status.get("panic_stop_latched") is True
                 or gateway_status.get("state_error") is True
             ):
                 return HTTPStatus.OK, "application/json", _json_bytes(
@@ -15591,7 +15604,10 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                 "application/json",
                 _json_bytes({"error": "network helper is not configured"}),
             )
-        halts_at_start = getattr(self.scheduler, "halt_count", 0)
+        halts_at_start = getattr(self.scheduler, "apply_generation", getattr(self.scheduler, "halt_count", 0))
+        refused, control_revision = self._capture_control_intent(halts_at_start)
+        if refused is not None:
+            return refused
         try:
             prepared = (
                 self.scheduler.prepare_plan(
@@ -15617,32 +15633,37 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                 "application/json",
                 _json_bytes({"error": "stored configuration cannot be applied"}),
             )
-        self.repository.update_runtime_state(
-            observed_state="applying",
-            last_action="apply",
-            last_result=None,
-            last_error=None,
-        )
+        accepted, _ = self._publish_apply(halts_at_start, lambda: self.repository.update_runtime_state(
+            observed_state="applying", last_action="apply", last_result=None, last_error=None,
+        ))
+        if not accepted:
+            return self._apply_refused(halts_at_start)
         if self.scheduler is not None and sample_usage:
             # Applying recreates the helper counters, so record their traffic first.
             self.scheduler.sample_usage(repository=self.repository)
-        if self._panic_since(halts_at_start):
-            return self._stopped_by_panic(undo=False)
+        refused = self._apply_refused(halts_at_start)
+        if refused is not None:
+            return refused
         try:
+            arguments = {"plan": plan}
+            if control_revision is not None:
+                arguments["control_revision"] = control_revision
             if explicit_apply:
-                result = self.helper_client.apply(plan=plan, explicit_apply=True)
-            else:
-                result = self.helper_client.apply(plan=plan)
+                arguments["explicit_apply"] = True
+            result = self.helper_client.apply(**arguments)
         except HelperClientError as error:
+            rejected = self._control_rejected(error)
+            if rejected is not None:
+                return rejected
             LOGGER.error("network helper apply failed: %s", error)
             if self.scheduler is not None:
                 self.scheduler.invalidate_applied_plan()
-            state = self.repository.update_runtime_state(
-                observed_state="error",
-                last_action="apply",
-                last_result="failure",
+            accepted, state = self._publish_apply(halts_at_start, lambda: self.repository.update_runtime_state(
+                observed_state="error", last_action="apply", last_result="failure",
                 last_error="network helper apply failed",
-            )
+            ))
+            if not accepted:
+                return self._apply_refused(halts_at_start, undo=True)
             return (
                 HTTPStatus.BAD_GATEWAY,
                 "application/json",
@@ -15658,22 +15679,18 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                     }
                 ),
             )
-        if self._panic_since(halts_at_start):
-            return self._stopped_by_panic(undo=True)
-        self.repository.rebase_quota_counters(now=int(time.time()))
-        state = self.repository.update_runtime_state(
-            observed_state="applied",
-            last_action="apply",
-            last_result="success",
-            last_error=None,
-        )
-        if self.scheduler is not None:
-            self.scheduler.activate_plan(repository=self.repository, prepared=prepared)
-            if self._panic_since(halts_at_start):
-                # Panic landed after the last check. It paused the scheduler and
-                # the activation above started it again, and the state written
-                # above hides Panic's own. Back out the same way as before.
-                return self._stopped_by_panic(undo=True)
+        def publish():
+            self.repository.rebase_quota_counters(now=int(time.time()))
+            state = self.repository.update_runtime_state(
+                observed_state="applied", last_action="apply", last_result="success", last_error=None,
+            )
+            if self.scheduler is not None:
+                self.scheduler.activate_plan(repository=self.repository, prepared=prepared)
+            return state
+
+        accepted, state = self._publish_apply(halts_at_start, publish)
+        if not accepted:
+            return self._apply_refused(halts_at_start, undo=True)
         return (
             HTTPStatus.OK,
             "application/json",
@@ -15694,25 +15711,88 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
     def _panic_since(self, halts_at_start: int) -> bool:
         return getattr(self.scheduler, "halt_count", 0) != halts_at_start
 
-    def _stopped_by_panic(self, *, undo: bool) -> Tuple[int, str, bytes]:
-        """Back out of an apply that Panic overtook, so Panic stays the last word."""
+    def _control_rejected(self, error):
+        if error.reason != "control-changed":
+            return None
+        if self.scheduler is not None:
+            self.scheduler.halt()
+            self.scheduler.require_recovery()
+        return HTTPStatus.CONFLICT, "application/json", _json_bytes({
+            "error": "Network control changed before this action. Reload and retry Panic before choosing Start.",
+        })
 
+    def _capture_control_intent(self, generation):
+        refused = self._apply_refused(generation)
+        if refused is not None:
+            return refused, None
+        reader = getattr(self.helper_client, "control_revision", None)
+        try:
+            revision = reader() if callable(reader) else None
+        except HelperClientError as error:
+            return (HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes({"error": str(error)})), None
+        return self._apply_refused(generation), revision
+
+    def _publish_apply(self, generation, publish):
+        if self.scheduler is not None and hasattr(self.scheduler, "publish_if_current"):
+            return self.scheduler.publish_if_current(generation, publish)
+        return True, publish()
+
+    def _apply_refused(self, generation, *, undo=False):
+        if self._panic_since(generation):
+            return self._stopped_by_panic(undo=undo)
+        if self.scheduler is not None and hasattr(self.scheduler, "can_apply"):
+            if not self.scheduler.can_apply(generation):
+                message = (
+                    "The dashboard is stopping. Retry after it restarts."
+                    if self.scheduler.shutting_down else
+                    "Normal access recovery is not confirmed. Retry Panic before choosing Start."
+                )
+                return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes({"error": message})
+        return None
+
+    def _stopped_by_panic(self, *, undo: bool) -> Tuple[int, str, bytes]:
+        """Preserve Panic's result and report unconfirmed late cleanup honestly."""
+
+        error = None
+        state = None
         if undo and self.helper_client is not None:
-            # The helper already applied this plan after Panic released the network.
+            ticket = self.scheduler.begin_recovery(cancel=False) if self.scheduler else None
             try:
                 restore = getattr(self.helper_client, "normal_access", self.helper_client.reset)
                 restore()
             except HelperClientError:
                 LOGGER.error("could not undo an apply that Panic overtook")
-        if self.scheduler is not None:
-            self.scheduler.pause()
-        state = self.repository.update_runtime_state(
-            observed_state="reset", last_action="reset", last_result="success", last_error=None,
-        )
-        return HTTPStatus.CONFLICT, "application/json", _json_bytes({
-            "error": "Panic stopped this apply. Choose Start with saved settings when it is safe.",
-            "state": self._runtime_state_with_running(state),
-        })
+                error = "Normal access was not fully restored after Panic. Retry Panic before choosing Start."
+            except BaseException:
+                if ticket:
+                    self.scheduler.abandon_recovery(ticket)
+                raise
+
+            def publish(overlap_failed=False):
+                nonlocal error
+                if overlap_failed and error is None:
+                    error = "Another Panic cleanup failed during this recovery. Retry Panic before choosing Start."
+                try:
+                    state = self.repository.update_runtime_state(
+                        observed_state="error" if error else "reset", last_action="reset",
+                        last_result="failure" if error else "success", last_error=error,
+                    )
+                except (StorageError, sqlite3.Error):
+                    error = "Panic cleanup could not be saved. Retry Panic before choosing Start."
+                    return None, False
+                return state, error is None
+
+            state = self.scheduler.finish_recovery(ticket, publish, failed=error is not None) if ticket else publish()[0]
+        if state is None:
+            try:
+                state = self.repository.get_runtime_state()
+            except (StorageError, sqlite3.Error):
+                pass
+        body = {"error": error or "Panic stopped this apply. Choose Start with saved settings when it is safe."}
+        if state is not None:
+            body["state"] = self._runtime_state_with_running(state)
+        return (HTTPStatus.SERVICE_UNAVAILABLE if error else HTTPStatus.CONFLICT,
+                "application/json", _json_bytes(body))
 
     def _reset_network(self) -> Tuple[int, str, bytes]:
         operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
@@ -15783,9 +15863,16 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             LOGGER.error("gateway recovery state was unavailable during dashboard startup")
             return
         if (gateway_status.get("outage_stop_latched") is True
+                or gateway_status.get("panic_stop_latched") is True
                 or gateway_status.get("state_error") is True):
             if self.scheduler is not None:
-                self.scheduler.pause()
+                saved = self.repository.get_runtime_state()
+                if (gateway_status.get("panic_stop_latched") is True
+                        and (saved.last_action != "reset" or saved.last_result != "success"
+                             or gateway_status.get("panic_recovery_failed") is True)):
+                    self.scheduler.require_recovery()
+                else:
+                    self.scheduler.pause()
             self._record_activity(
                 "outage",
                 "Profiles remain stopped after a router gateway outage",
@@ -15795,6 +15882,11 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         if state.last_action not in {"reset", "apply", "schedule"}:
             return
         if state.last_action == "reset":
+            if state.last_result != "success":
+                if self.scheduler is not None:
+                    self.scheduler.require_recovery()
+                LOGGER.error("saved recovery remains unconfirmed. Retry Panic before Start")
+                return
             status, _, _ = self._reset_network()
             kind, message = "reset", "Network reset again after the dashboard restarted"
         else:
@@ -16132,15 +16224,17 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
     ) -> None:
         cache_control = "no-store"
         page_headers: Dict[str, str] = {}
-        raw_page, packed_page, page_etag = _dashboard_page()
-        if status == HTTPStatus.OK and body is raw_page:
+        page_html = getattr(getattr(self, "server", None), "dashboard_page_html", None)
+        raw_page, packed_page, page_etag = _dashboard_page(page_html) if page_html is not None else _dashboard_page()
+        if status == HTTPStatus.OK and content_type.startswith("text/html") and body == raw_page:
             # The page only changes with a new release: a reload asks with its ETag and an
             # unchanged page answers 304. Browsers that accept gzip get about a fifth of it.
             request_headers = getattr(self, "headers", None) or {}
             cache_control = "no-cache"
             page_headers = {"ETag": page_etag, "Vary": "Accept-Encoding"}
             asked = [tag.strip() for tag in (request_headers.get("If-None-Match") or "").split(",")]
-            if page_etag in asked or "*" in asked:
+            if "*" in asked or any(tag.removeprefix("W/") == page_etag.removeprefix("W/")
+                                    for tag in asked):
                 status, body = HTTPStatus.NOT_MODIFIED, b""
             elif _accepts_gzip(request_headers.get("Accept-Encoding") or ""):
                 body = packed_page
@@ -16983,28 +17077,39 @@ def run_server(
             timeout_seconds=helper_timeout_seconds,
         )
     )
-    with ConfigRepository(database_path) as repository:
-        scheduler = RuntimeScheduler(
-            database_path=database_path,
-            helper_client=helper_client,
+    repository = ConfigRepository(database_path)
+    scheduler = RuntimeScheduler(database_path=database_path, helper_client=helper_client)
+    try:
+        server = ControlServer(
+            (host, port), repository, admin_token=admin_token, helper_client=helper_client,
+            scheduler=scheduler, tls_certfile=tls_certfile, tls_keyfile=tls_keyfile,
         )
-        with ControlServer(
-            (host, port),
-            repository,
-            admin_token=admin_token,
-            helper_client=helper_client,
-            scheduler=scheduler,
-            tls_certfile=tls_certfile,
-            tls_keyfile=tls_keyfile,
-        ) as server:
-            LOGGER.info("jittersim dashboard listening on %s:%s", host, port)
-            try:
-                server.recover_saved_network_state()
-                server.serve_forever()
-            except KeyboardInterrupt:
-                pass
-            finally:
-                scheduler.stop()
+    except BaseException:
+        repository.close()
+        raise
+    LOGGER.info("jittersim dashboard listening on %s:%s", host, port)
+    try:
+        server.recover_saved_network_state()
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        scheduler.begin_shutdown()
+        unresolved = []
+        try:
+            server.server_close()
+        except WorkersStillRunning as error:
+            unresolved.append(error)
+        try:
+            scheduler.stop()
+        except WorkersStillRunning as error:
+            unresolved.append(error)
+        if unresolved:
+            # A failing service exit lets the process stop its remaining daemon
+            # workers. Do not dispose of resources that they may still be using.
+            LOGGER.critical("dashboard shutdown is incomplete, shared state remains owned")
+            raise unresolved[0]
+        repository.close()
 
 
 def _build_parser() -> argparse.ArgumentParser:
