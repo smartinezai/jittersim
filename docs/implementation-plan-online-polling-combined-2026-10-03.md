@@ -53,3 +53,16 @@ clean Linux builds and every configured browser/kernel/release/GUI command.
 Billing-blocked hosted jobs are recorded honestly and replaced locally under
 human authorization. Main publication is separate from physical Pi deployment
 and its independent recovery requirement.
+
+## Concrete independent review requirements
+
+Every asynchronous success, error handler and final control cleanup must check
+its credential revision and current accepted device access before changing
+private state, controls or starting a following request. Hold old promises
+through replacement credentials and access revocation in regression checks.
+Check late rejection and final cleanup as well as a late successful answer.
+
+A successful availability read only establishes connectivity. Keep a timed-out
+save outcome explicitly unconfirmed. Its POST count remains one through
+recovery, page changes and subsequent status reads. No read marks the save as
+successful and no recovery path repeats it.
