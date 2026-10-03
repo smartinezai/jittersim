@@ -13,6 +13,7 @@ import fcntl
 import gzip
 import hashlib
 import http.client
+import io
 import json
 import logging
 import math
@@ -2507,6 +2508,43 @@ def healthy(*, config=CONFIG_ROOT, run=run_command, port=8080, budget=None):
             raise UpdateError("the dashboard health check timed out")
         return allowance
 
+    class DeadlineReader(io.RawIOBase):
+        def __init__(self, transport):
+            super().__init__()
+            self.transport = transport
+            self.received = 0
+            # HTTPConnection closes its socket early for HTTP/1.0 responses.
+            # Retain the usual socket-file reference until the response closes.
+            self.keep_open = transport.makefile("rb", buffering=0)
+
+        def readable(self):
+            return True
+
+        def close(self):
+            if not self.closed and hasattr(self, "keep_open"):
+                self.keep_open.close()
+            super().close()
+
+        def readinto(self, buffer):
+            self.transport.settimeout(remaining())
+            size = self.transport.recv_into(buffer)
+            self.received += size
+            remaining()
+            if self.received > 128 * 1024:
+                raise UpdateError("the dashboard health response is too large")
+            return size
+
+    class DeadlineSocket:
+        def __init__(self, transport):
+            self.transport = transport
+
+        def makefile(self, mode):
+            return io.BufferedReader(DeadlineReader(self.transport))
+
+    class DeadlineResponse(http.client.HTTPResponse):
+        def __init__(self, transport, *args, **kwargs):
+            super().__init__(DeadlineSocket(transport), *args, **kwargs)
+
     try:
         for service in SERVICES:
             run(["systemctl", "is-active", "--quiet", service], min(5, remaining()))
@@ -2519,6 +2557,7 @@ def healthy(*, config=CONFIG_ROOT, run=run_command, port=8080, budget=None):
         hostname = socket.gethostname().split(".")[0] + ".local"
         context = ssl.create_default_context(cafile=str(config / "dashboard.crt"))
         connection = http.client.HTTPSConnection(hostname, port, timeout=remaining(), context=context)
+        connection.response_class = DeadlineResponse
         try:
             transport = socket.create_connection(("127.0.0.1", port), timeout=remaining())
             transport.settimeout(remaining())
