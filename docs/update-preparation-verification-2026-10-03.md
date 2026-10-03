@@ -35,3 +35,17 @@ package inputs work without relying on source imports or a warmed installation.
 Linux command ownership and a copied standalone manager receive separate checks
 before the final handoff. Final source review and the complete configured test
 matrix remain required. No live Pi deployment is established by these fixtures.
+
+The frozen command source passed an installed-wheel Linux 3.11.17 check,
+including the real child that remains alive when only its leader is cancelled.
+Twelve command and quota cases passed. Five signing fixtures skipped because
+that intermediate image lacked ssh-keygen. This is a focused process proof.
+
+Explicit retry keeps one public operation identity, attempt and pinned recovery
+copy. Failure reproductions cover changed intent, unknown unit state, abandoned
+queue publication, service start before lock release and unknown probe ownership.
+Waiting for an identified operation reads its progress without starting it again.
+The retry probe also checks pending systemd jobs. The actual Job display uses an
+empty value for zero and a number for a pending job, as implemented in the
+[systemd property printer](https://github.com/systemd/systemd/blob/main/src/systemctl/systemctl-show.c).
+The supported Linux client receives a separate format check before release.

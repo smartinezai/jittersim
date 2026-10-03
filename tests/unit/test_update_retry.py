@@ -1,6 +1,9 @@
 """Explicit retry follows one retained operation without replaying new work."""
 
 import re
+import subprocess
+import sys
+import time
 from unittest.mock import patch
 
 import pytest
@@ -9,7 +12,7 @@ from jittersim import cli, updates
 from jittersim.command import main as jittersim
 
 
-STOPPED = "ActiveState=failed\nMainPID=0\nControlPID=0\nTasksCurrent=0\n"
+STOPPED = "ActiveState=failed\nMainPID=0\nControlPID=0\nTasksCurrent=0\nJob=\n"
 
 
 @pytest.fixture
@@ -82,6 +85,115 @@ def test_retry_rechecks_intent_after_stopped_unit_probe(failed):
     with patch.object(updates, "run_command") as run, pytest.raises(updates.UpdateError, match="changed"):
         updates.retry_update(retry_id, root=root, code=code, config=config, query=replaced, run=run)
     run.assert_not_called()
+
+
+def test_retry_rechecks_status_after_stopped_unit_probe(failed):
+    root, code, config, _ = failed
+    retry_id = status(failed)["retry"]["id"]
+
+    def changed(command, timeout):
+        record = updates.read_json(root / "status.json")
+        updates.atomic_json(root / "status.json", {**record, "phase": "installing"})
+        return STOPPED
+
+    with patch.object(updates, "run_command") as run, pytest.raises(updates.UpdateError, match="changed"):
+        updates.retry_update(retry_id, root=root, code=code, config=config, query=changed, run=run)
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize("phase", ["queued", "preparing", "stopping", "backing-up",
+                                    "installing", "checking", "rolling-back"])
+def test_orphaned_operation_is_retryable_only_after_confirmed_stop(failed, phase):
+    root, code, config, request = failed
+    record = updates.read_json(root / "status.json")
+    updates.atomic_json(root / "status.json", {**record, "phase": phase})
+    before = (root / "status.json").read_bytes()
+    view = status(failed)
+    assert view["phase"] == "failed" and view["retry"]
+    assert view["request_id"] == request["request_id"]
+    assert (root / "status.json").read_bytes() == before
+    busy = status(failed, lambda *args: STOPPED.replace("ActiveState=failed", "ActiveState=activating"))
+    assert busy["phase"] == phase and busy["retry"] is None
+    calls = []
+    queued = updates.retry_update(view["retry"]["id"], root=root, code=code, config=config,
+                                  query=lambda *args: STOPPED, run=lambda *args: calls.append(args))
+    assert len(calls) == 1 and queued["request_id"] == request["request_id"]
+
+
+def test_apply_waits_for_the_queue_owner_to_release_its_lock(failed):
+    root, _, _, _ = failed
+    # No application work is requested. This isolates the real entry-point lock.
+    (root / "request.json").unlink()
+    source = ("from pathlib import Path; from jittersim.updates import apply_update; "
+              "import sys; apply_update(root=Path(sys.argv[1]))")
+    process = None
+    try:
+        with updates.update_lock(root):
+            process = subprocess.Popen([sys.executable, "-c", source, str(root)],
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            time.sleep(0.2)
+            assert process.poll() is None, "the update unit exited before the queue owner released its lock"
+        process.communicate(timeout=5)
+        assert process.returncode == 0
+    finally:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.communicate(timeout=5)
+
+
+def test_update_lock_wait_has_a_finite_allowance(failed):
+    root, _, _, _ = failed
+    start = time.monotonic()
+    with updates.update_lock(root), pytest.raises(updates.UpdateError, match="already running"):
+        with updates.update_lock(root, wait=0.05):
+            pytest.fail("another writer already owns the lock")
+    assert time.monotonic() - start < 0.5
+
+
+def test_pending_start_job_is_future_work_even_with_no_processes(failed):
+    root, _, _, _ = failed
+    record = updates.read_json(root / "status.json")
+    updates.atomic_json(root / "status.json", {**record, "phase": "queued"})
+
+    def queued_job(command, timeout):
+        return STOPPED.replace("Job=\n", "Job=12\n") if "--property=Job" in command else STOPPED.replace("Job=\n", "")
+
+    view = status(failed, queued_job)
+    assert view["phase"] == "queued" and view["retry"] is None
+
+
+def test_admission_refuses_a_job_queued_after_first_unit_answer(failed):
+    root, code, config, _ = failed
+    retry_id = status(failed)["retry"]["id"]
+    answers = iter((STOPPED, STOPPED.replace("Job=\n", "Job=12\n")))
+    with patch.object(updates, "run_command") as run, pytest.raises(updates.UpdateError):
+        updates.retry_update(retry_id, root=root, code=code, config=config,
+                             query=lambda *args: next(answers), run=run)
+    run.assert_not_called()
+
+
+def test_unknown_status_probe_remains_owned_before_another_probe(failed, monkeypatch):
+    class Pending:
+        pid = 123
+
+        def wait(self, timeout):
+            return 0
+
+    queries = []
+    alive = [True]
+    monkeypatch.setattr(updates, "command_still_running", lambda *args: alive[0])
+
+    def query(command, timeout):
+        queries.append(command)
+        if len(queries) == 1:
+            raise updates.CommandNotStopped("controlled status probe", Pending())
+        return STOPPED
+
+    assert status(failed, query)["retry"] is None
+    assert status(failed, query)["retry"] is None
+    assert len(queries) == 1, "unknown probe completion must retain the single probe reservation"
+    alive[0] = False
+    assert status(failed, query)["retry"]
 
 
 @pytest.mark.parametrize("answer", [

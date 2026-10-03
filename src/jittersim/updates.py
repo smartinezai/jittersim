@@ -256,13 +256,20 @@ def _private_folder(root):
 
 
 @contextmanager
-def update_lock(root=UPDATE_ROOT):
+def update_lock(root=UPDATE_ROOT, *, wait=0):
+    if not isinstance(wait, (int, float)) or not math.isfinite(wait) or not 0 <= wait <= 15:
+        raise UpdateError("update lock wait is invalid")
+    deadline = time.monotonic() + wait
     _private_folder(root)
     with (root / "lock").open("a") as handle:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise UpdateError("an update operation is already running") from error
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as error:
+                if time.monotonic() >= deadline:
+                    raise UpdateError("an update operation is already running") from error
+                time.sleep(min(0.02, max(0, deadline - time.monotonic())))
         yield
 
 
@@ -912,7 +919,7 @@ def stage_upload(upload_id=None, *, spool=UPLOAD_SPOOL, lock=None, root=UPDATE_R
         return stage_release(archive, signature=signature, root=root, code=code, config=config)
 
 
-def update_status(*, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT, query=None):
+def update_status(*, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT, query=None, retry_probe=True):
     installed = read_json(code / ".jittersim-release.json")
     staged = _record(root / "staged" / ".jittersim-release.json")
     status = read_json(root / "status.json")
@@ -934,12 +941,14 @@ def update_status(*, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT, query
     except UpdateError as error:
         rollback_available = False
         recovery_problem = str(error)
-    retry, retry_reason = _retry_info(root, status, query or read_command)
+    retry, retry_reason = _retry_info(root, status, query or read_command) if retry_probe else (None, None)
+    orphaned = retry is not None and status.get("phase") != "failed"
     return {
         "installed": installed.get("version", "Unversioned installation"),
         "available": staged.get("version"),
-        "phase": status.get("phase", "idle"),
-        "message": status.get("message", "No approved release has been staged on this Pi."),
+        "phase": "failed" if orphaned else status.get("phase", "idle"),
+        "message": "The update stopped before it finished. Retry when you are ready." if orphaned else
+                   status.get("message", "No approved release has been staged on this Pi."),
         "rollback_available": rollback_available,
         "recovery_problem": recovery_problem,
         "installable": bool(staged) and reason is None,
@@ -1156,6 +1165,15 @@ def capture_command(command, timeout=30, *, input=b"", limit=65536):
 
 PUBLIC_REQUEST = re.compile(r"[0-9a-f]{32}\Z")
 RETRY_ID = re.compile(r"[0-9a-f]{64}\Z")
+RETRY_PHASES = {"failed", "queued", "preparing", "stopping", "backing-up",
+                "installing", "checking", "rolling-back"}
+RETRY_PROBE_LOCK = threading.Lock()
+RETRY_PROBE_PENDING = None
+
+
+def _retry_identity(request, status):
+    return hashlib.sha256(json.dumps({"request": request, "status": status},
+                                     sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def _operation_fields(record):
@@ -1177,12 +1195,36 @@ def _identify_request(request):
     return fields
 
 
-def _retry_info(root, status, query, *, budget=None):
+def _retry_info(root, status, query, *, budget=None, admission=False):
     """Inspect retained work without queueing or changing an update record."""
-    if status.get("phase") != "failed" or not (root / "request.json").exists():
+    global RETRY_PROBE_PENDING
+    if status.get("phase") not in RETRY_PHASES or not (root / "request.json").exists():
         return None, None
     budget = budget or UpdateBudget()
     budget.deadline = min(budget.deadline, budget.started + 2)
+    reason = "The failed update is still busy or could not be checked. Try again shortly."
+    if not RETRY_PROBE_LOCK.acquire(blocking=False):
+        return None, reason
+    try:
+        if RETRY_PROBE_PENDING is not None:
+            process, record = RETRY_PROBE_PENDING
+            if command_still_running(record, budget):
+                raise CommandNotStopped("update status probe", process)
+            process.wait(timeout=budget.limit(0.1))
+            RETRY_PROBE_PENDING = None
+        return _inspect_retry(root, status, query, budget, admission)
+    except CommandNotStopped as error:
+        RETRY_PROBE_PENDING = (error.process, pending_command(error.process))
+        if admission:
+            raise
+        return None, reason
+    except (OSError, ValueError, UpdateError, subprocess.TimeoutExpired):
+        return None, reason
+    finally:
+        RETRY_PROBE_LOCK.release()
+
+
+def _inspect_retry(root, status, query, budget, admission):
     try:
         budget.check()
         request = _recovery_record(root / "request.json")
@@ -1204,25 +1246,31 @@ def _retry_info(root, status, query, *, budget=None):
             if not isinstance(request.get("recovery"), dict):
                 raise UpdateError("the failed update recovery copy needs to be checked")
             recovery_backup(root, pinned=request["recovery"])
-        answer = query(["systemctl", "show", "--property=ActiveState", "--property=MainPID",
-                        "--property=ControlPID", "--property=TasksCurrent",
-                        "jittersim-update.service"], budget.limit(2))
-        budget.check()
-        if not isinstance(answer, str) or len(answer.encode("utf-8")) > MAX_COMMAND_ANSWER:
-            raise UpdateError("The update service has not been confirmed stopped.")
-        rows = answer.splitlines()
-        if len(rows) != 4 or any("=" not in row for row in rows):
-            raise UpdateError("The update service has not been confirmed stopped.")
-        state = dict(row.split("=", 1) for row in rows)
-        if (set(state) != {"ActiveState", "MainPID", "ControlPID", "TasksCurrent"}
-                or state["ActiveState"] not in ("inactive", "failed")
-                or any(state[name] != "0" for name in ("MainPID", "ControlPID", "TasksCurrent"))):
-            raise UpdateError("The update service has not been confirmed stopped.")
-        fingerprint = hashlib.sha256(json.dumps(request, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        fingerprint = _retry_identity(request, status)
+        for _ in range(2 if admission else 1):
+            answer = query(["systemctl", "show", "--all", "--property=ActiveState", "--property=MainPID",
+                            "--property=ControlPID", "--property=TasksCurrent", "--property=Job",
+                            "jittersim-update.service"], budget.limit(2))
+            budget.check()
+            if not isinstance(answer, str) or len(answer.encode("utf-8")) > MAX_COMMAND_ANSWER:
+                raise UpdateError("The update service has not been confirmed stopped.")
+            rows = answer.splitlines()
+            if len(rows) != 5 or any("=" not in row for row in rows):
+                raise UpdateError("The update service has not been confirmed stopped.")
+            state = dict(row.split("=", 1) for row in rows)
+            if (set(state) != {"ActiveState", "MainPID", "ControlPID", "TasksCurrent", "Job"}
+                    or state["ActiveState"] not in ("inactive", "failed") or state["Job"] != ""
+                    or any(state[name] != "0" for name in ("MainPID", "ControlPID", "TasksCurrent"))):
+                raise UpdateError("The update service has not been confirmed stopped.")
+            if fingerprint != _retry_identity(_recovery_record(root / "request.json"),
+                                              _recovery_record(root / "status.json")):
+                return None, "The update changed. Check its state before retrying."
         budget.check()
         return {"id": fingerprint, "request_id": fields["request_id"],
                 "kind": fields["request_kind"], "version": fields["request_version"],
                 "recovering": bool(request.get("rollback") or request.get("restart_only"))}, None
+    except CommandNotStopped:
+        raise
     except (OSError, ValueError, UpdateError):
         return None, "The failed update is still busy or could not be checked. Try again shortly."
 
@@ -1234,13 +1282,13 @@ def retry_update(retry_id, *, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_RO
         raise UpdateError("check the failed update again before retrying")
     with update_lock(root):
         status = read_json(root / "status.json")
-        retry, reason = _retry_info(root, status, query)
+        retry, reason = _retry_info(root, status, query, admission=True)
         if retry is None:
             raise UpdateError(reason or "there is no failed update to retry")
         if not secrets.compare_digest(retry["id"], retry_id):
             raise UpdateError("the failed update changed; check it again before retrying")
         request = _recovery_record(root / "request.json")
-        current_id = hashlib.sha256(json.dumps(request, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        current_id = _retry_identity(request, _recovery_record(root / "status.json"))
         if not secrets.compare_digest(current_id, retry_id):
             raise UpdateError("the failed update changed; check it again before retrying")
         fields = _identify_request(request)
@@ -1253,7 +1301,7 @@ def retry_update(retry_id, *, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_RO
                 atomic_json(root / "request.json", request)
             atomic_json(root / "status.json", {"phase": "failed", "message": "The retry could not be confirmed. Check the update state.", **fields})
             raise
-        return update_status(root=root, code=code, config=config, query=query)
+        return update_status(root=root, code=code, config=config, query=query, retry_probe=False)
 
 
 def runtime_interfaces(config):
@@ -1333,7 +1381,7 @@ def request_update(
                 {"phase": "failed", "message": "The update service could not start.", **fields},
             )
             raise
-        return update_status(root=root, code=code, config=config)
+        return update_status(root=root, code=code, config=config, retry_probe=False)
 
 
 # The online release source. Only root runs it (see docs/implementation-plan-online-release-
@@ -2539,7 +2587,8 @@ def apply_update(
         return result
 
     health = health or (lambda: healthy(config=config, run=run, budget=budget))
-    with update_lock(root):
+    with update_lock(root, wait=budget.limit(15)):
+        budget.check()
         request = read_json(root / "request.json")
         if not request:
             return

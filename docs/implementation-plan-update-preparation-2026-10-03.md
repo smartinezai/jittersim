@@ -226,6 +226,21 @@ clearing only that attempt's incomplete inputs. Preserve failed intent after an
 unknown start answer. Require failing backend and public-command tests before
 implementation, then review the complete source and integration evidence.
 
+The source review also requires finite entry waiting for the one-shot service.
+Only `apply_update` may wait up to 15 seconds for the queue dispatcher to release
+the update lock. This waiting belongs to the existing total operation allowance.
+Other update callers continue to refuse a held lock immediately.
+
+If a retained queued or running phase is orphaned, a read-only probe may show
+failure and offer the same retry only after confirming stopped processes and no
+pending systemd job. Query the explicit Job property with empty values included.
+Refuse a missing property or positive job number. Recheck the request and status
+fingerprint plus the unit before admission. Preserve the actual queued response
+immediately after starting rather than performing an orphan probe in that reply.
+Keep one process-owned probe reservation if cancellation cannot be confirmed.
+Later status reads may inspect it but cannot launch another probe until it ends.
+Explicit admission propagates unknown completion. It never starts mutable work.
+
 ## Preserving current stopped shaping and household state
 
 The helper owner provides a separate strict root-owned persistent safety guard
