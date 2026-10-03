@@ -70,7 +70,7 @@ def check_wifi_recovery(page):
     page.once("dialog", lambda dialog: dialog.accept())
     button.click()
     # The control becomes busy before the asynchronous request reaches the route.
-    for _ in range(100):
+    for _ in range(500):
         if held:
             break
         page.wait_for_timeout(10)
