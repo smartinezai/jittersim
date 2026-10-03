@@ -41,3 +41,7 @@ The acknowledgment records permission to make this restrictive transition. It is
 No schema migration, backfill, dependency or shared build configuration changes are needed. The existing package and deployment paths carry the server and embedded page together. A stale cached page is safely rejected after upgrade until reloaded or updated from the conflict response. Rollback is an ordinary package rollback and restores the older behavior, so release checks must include the safety regressions.
 
 The additional work is one short transaction and one bounded conflict response. It creates no background task, unbounded retry, queue or extra request. The same rule applies across concurrent tabs and independent database connections. GitHub CI is currently blocked before job steps by account billing. This external block is not test evidence and remains a mandatory merge gate.
+
+## Commit failure review
+
+Independent transaction review reproduced a SQLite commit failure using a real second-connection read lock. The endpoint returned 503 while its connection retained the uncommitted restrictive profile. A later unrelated save could commit that rejected change. Extend the existing transaction helper so a failed outer commit rolls back before raising. Add real-lock regressions proving the failed profile, version and history stay unchanged and a later save cannot preserve them. This is necessary for the new atomic transition to remain safe on failure. No update or deployment code changes are included.
