@@ -14,10 +14,13 @@ import hashlib
 import http.client
 import json
 import logging
+import math
 import os
 import re
 import secrets
+import selectors
 import shutil
+import signal
 import socket
 import ssl
 import stat
@@ -941,36 +944,125 @@ def update_status(*, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT):
     }
 
 
-def run_command(command, timeout=300):
+MAX_COMMAND_OUTPUT = 1024 * 1024
+MAX_COMMAND_DIAGNOSTIC = 16 * 1024
+MAX_COMMAND_ANSWER = 4096
+
+
+class CommandNotStopped(UpdateError):
+    """A command still owns its work after cancellation was requested."""
+
+    def __init__(self, name, process):
+        super().__init__("release command did not stop: " + name)
+        self.process = process
+
+
+def _command_environment():
+    environment = dict(os.environ)
+    for name in tuple(environment):
+        if name.startswith("PIP_") or "TOKEN" in name or "PASSWORD" in name:
+            environment.pop(name)
+    # This special pip setting disables system and user configuration too.
+    environment["PIP_CONFIG_FILE"] = os.devnull
+    return environment
+
+
+def _command_result(command, timeout, capture):
+    name = next((part for part in command[1:2] if part.endswith(".py")), command[0])
+    name = Path(name).name
+    if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+        raise UpdateError("release command has no time remaining: " + name)
+    deadline = time.monotonic() + timeout
+    # Leave a short part of the caller's allowance to cancel and reap our process.
+    work_deadline = deadline - min(0.1, timeout / 5)
     try:
-        subprocess.run(
-            command,
-            check=True,
-            timeout=timeout,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+        process = subprocess.Popen(
+            command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True, env=_command_environment(), bufsize=0,
         )
-    except (subprocess.SubprocessError, OSError) as error:
-        # Name the release script rather than the Python that ran it.
-        name = next((part for part in command[1:2] if part.endswith(".py")), command[0])
-        raise UpdateError("release command failed: " + Path(name).name) from error
+    except OSError as error:
+        raise UpdateError("release command could not start: " + name) from error
+    answer = bytearray()
+    diagnostic = bytearray()
+    total = 0
+    failure = None
+    returncode = None
+
+    def finished():
+        nonlocal returncode
+        if hasattr(os, "waitid"):
+            # Linux keeps the group leader waitable until we have cancelled its
+            # descendants. Its group number cannot refer to another process.
+            outcome = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            if outcome is None:
+                return False
+            returncode = outcome.si_status if outcome.si_code == os.CLD_EXITED else -outcome.si_status
+        else:
+            returncode = process.poll()
+        return returncode is not None
+
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+            selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+            while selector.get_map() or not finished():
+                remaining = work_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise UpdateError("release command timed out: " + name)
+                for key, _ in selector.select(timeout=min(remaining, 0.1)):
+                    block = os.read(key.fd, 65536)
+                    if not block:
+                        selector.unregister(key.fileobj)
+                        continue
+                    total += len(block)
+                    if total > MAX_COMMAND_OUTPUT:
+                        raise UpdateError("release command produced too much output: " + name)
+                    if key.data == "stdout" and capture:
+                        answer.extend(block)
+                        if len(answer) > MAX_COMMAND_ANSWER:
+                            raise UpdateError("release command answer has too much output: " + name)
+                    elif key.data == "stderr":
+                        diagnostic.extend(block[:max(0, MAX_COMMAND_DIAGNOSTIC - len(diagnostic))])
+        if time.monotonic() >= work_deadline:
+            raise UpdateError("release command timed out: " + name)
+        if returncode:
+            # Tool output may contain a credential. Only a known category is exposed.
+            category = "not enough free space" if b"no space left on device" in diagnostic.lower() else (
+                "exit status " + str(returncode)
+            )
+            raise UpdateError("release command failed: " + name + " (" + category + ")")
+    except OSError as error:
+        failure = UpdateError("release command could not finish: " + name)
+        failure.__cause__ = error
+    except BaseException as error:
+        failure = error
+    finally:
+        # Also end a descendant that keeps a pipe after its immediate parent exits.
+        if process.returncode is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        for stream in (process.stdout, process.stderr):
+            stream.close()
+        try:
+            process.wait(timeout=max(0, min(1, deadline - time.monotonic())))
+        except subprocess.TimeoutExpired as error:
+            raise CommandNotStopped(name, process) from error
+    if failure is not None:
+        raise failure
+    try:
+        return answer.decode("utf-8").strip()
+    except UnicodeDecodeError as error:
+        raise UpdateError("release command answer is not readable: " + name) from error
+
+
+def run_command(command, timeout=300):
+    _command_result(command, timeout, False)
 
 
 def read_command(command, timeout=10):
-    try:
-        result = subprocess.run(
-            command,
-            check=True,
-            timeout=timeout,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-    except (subprocess.SubprocessError, OSError) as error:
-        raise UpdateError("release command failed: " + Path(command[0]).name) from error
-    return result.stdout.strip()
+    return _command_result(command, timeout, True)
 
 
 def runtime_interfaces(config):

@@ -97,6 +97,26 @@ def test_command_diagnostic_drain_has_a_byte_limit():
                             timeout=5)
 
 
+def test_command_group_is_only_signalled_while_its_leader_is_owned(monkeypatch):
+    create = updates.subprocess.Popen
+    kill = updates.os.killpg
+    owned = []
+
+    def start(*args, **kwargs):
+        process = create(*args, **kwargs)
+        owned.append(process)
+        return process
+
+    def cancel(group, sig):
+        process = next(item for item in owned if item.pid == group)
+        assert process.returncode is None, "a reaped leader's group number may have been reused"
+        return kill(group, sig)
+
+    monkeypatch.setattr(updates.subprocess, "Popen", start)
+    monkeypatch.setattr(updates.os, "killpg", cancel)
+    updates.run_command([sys.executable, "-c", "pass"], timeout=5)
+
+
 def test_timeout_ends_a_child_that_retains_the_output_pipe(tmp_path):
     pid_file = tmp_path / "child.pid"
     child = "import os, pathlib, sys, time; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(60)"
@@ -116,6 +136,13 @@ def test_timeout_ends_a_child_that_retains_the_output_pipe(tmp_path):
                 os.kill(pid, 0)
             except ProcessLookupError:
                 alive = False
+            if alive and sys.platform.startswith("linux"):
+                # A container's PID 1 may retain a terminated orphan as a zombie.
+                state = Path("/proc") / str(pid) / "stat"
+                try:
+                    alive = state.read_text().rsplit(")", 1)[1].split()[0] != "Z"
+                except FileNotFoundError:
+                    alive = False
             if alive:
                 time.sleep(0.02)
         assert not alive, "the owned child must not survive its command deadline"
@@ -127,3 +154,28 @@ def test_timeout_ends_a_child_that_retains_the_output_pipe(tmp_path):
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+def test_trickling_output_does_not_extend_the_command_deadline():
+    start = time.monotonic()
+    script = "import sys, time\nwhile True:\n print('x', flush=True)\n time.sleep(0.03)"
+    with pytest.raises(updates.UpdateError, match="timed out"):
+        updates.run_command([sys.executable, "-c", script], timeout=0.3)
+    assert time.monotonic() - start < 2
+
+
+def test_command_environment_refuses_inherited_package_sources(monkeypatch):
+    monkeypatch.setenv("PIP_INDEX_URL", "https://invalid.example/private-index")
+    monkeypatch.setenv("PIP_EXTRA_INDEX_URL", "https://invalid.example/extra-index")
+    monkeypatch.setenv("JITTERSIM_ADMIN_TOKEN", "throwaway-test-value")
+    script = ("import json, os; print(json.dumps({name: value for name, value in os.environ.items() "
+              "if name.startswith('PIP_') or 'TOKEN' in name or 'PASSWORD' in name}))")
+    answer = updates.read_command([sys.executable, "-c", script], timeout=5)
+    assert json.loads(answer) == {"PIP_CONFIG_FILE": os.devnull}
+
+
+def test_failed_command_never_exposes_arbitrary_diagnostics():
+    script = "import sys; sys.stderr.write('throwaway private diagnostic'); sys.exit(3)"
+    with pytest.raises(updates.UpdateError, match="exit status 3") as failure:
+        updates.run_command([sys.executable, "-c", script], timeout=5)
+    assert "private diagnostic" not in str(failure.value)
