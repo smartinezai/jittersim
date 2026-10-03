@@ -951,7 +951,9 @@ async function retryUpdate() {
   renderUpdates();
   try {
     if (!await confirmWorkflow('Retry this failed ' + (chosen.kind === 'rollback' ? 'restore' : 'update') +
-      ' using its saved request and recovery copy? The dashboard and test network may restart. Keep an independent management connection available.')) return;
+      ' using its saved request and recovery copy? ' +
+      (chosen.recovering || chosen.kind === 'rollback' ? 'Changes after that backup will be replaced. ' : '') +
+      'The dashboard and test network may restart. Keep an independent management connection available.')) return;
     if (!updateContextCurrent(context)) return;
     const current = await loadReleaseStatus({force:true});
     if (!updateContextCurrent(context)) return;

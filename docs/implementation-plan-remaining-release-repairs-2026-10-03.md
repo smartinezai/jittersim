@@ -98,3 +98,15 @@ radio or management network through the test connection to manufacture access.
 If management remains unreachable, finish publishable source work and preserve
 the factual deployment blocker. Do not claim live identity, normal HTTPS trust
 or physical phone acceptance from simulated fixtures.
+
+## Recovery confirmation wording
+
+Explicit rollback uses the selected complete recovery copy. Later ordinary
+profiles, protection, access and usage edits can revert. The compatibility
+hook preserves supported values in the presented database. It does not make
+rollback preserve the newest database. Retain the existing dashboard restore
+warning. Show the same warning when retrying an actual restore and in the
+command-line restore confirmation. This changes only the words presented
+before confirmation, not admission, saved requests or recovery behavior.
+Verify JavaScript syntax and the existing actual browser update checks. The
+final complete workflow still applies.
