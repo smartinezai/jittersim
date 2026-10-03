@@ -8,6 +8,8 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.draft_navigation import check_draft_navigation
+
 PAGES = ("devices", "profiles", "schedules", "router", "traffic", "access", "diagnostics")
 
 
@@ -126,7 +128,8 @@ def check_narrow(page):
 
 def run():
     process = subprocess.Popen(
-        [sys.executable, "-m", "tests.browser.fixture"], stdout=subprocess.PIPE, text=True
+        [sys.executable, "-m", "tests.browser.fixture"], stdout=subprocess.PIPE, text=True,
+        env={**os.environ, "JITTERSIM_BROWSER_TEST_SEED": "1"},
     )
     try:
         with selectors.DefaultSelector() as selector:
@@ -152,6 +155,8 @@ def run():
                     check_nothing_floats(page)
                     check_collapsing(page)
                     check_reveal(page)
+                    if width == 1440:
+                        check_draft_navigation(page)
                     page.locator('[data-page-link="devices"]').click()
                     page.screenshot(path=f"test-results/dashboard-devices-{width}.png")
                     if width == 1280:

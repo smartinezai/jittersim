@@ -1,6 +1,43 @@
 // Drafts live only in this page. Credentials are never retained in drafts.
 const formDrafts = new Map();
 let draftSequence = 0;
+let draftTokenRevision = null;
+const draftForms = {
+  'everyone-else-form': ['Everyone else'],
+  'unaffected-form': ['Protected device'],
+  'profile-form': ['Profile', 'profile-name'],
+  'device-form': ['Device assignment', 'device-name'],
+  'group-form': ['Device group', 'group-name'],
+  'schedule-form': ['Scheduled profile'],
+  'timer-form': ['Profile timer'],
+  'scenario-start-form': ['Run a scenario'],
+  'scenario-form': ['Saved scenario', 'scenario-name'],
+  'progression-form': ['Progression mode'],
+  'data-limit-form': ['Device data limit'],
+  'group-data-limit-form': ['Shared group data limit'],
+  'service-list-form': ['Service list', 'service-list-name'],
+  'service-assignment-form': ['Browser service profile'],
+  'service-quota-form': ['Service data limit'],
+  'time-quota-form': ['Service time limit'],
+  'access-point-form': ['Pi access-point settings'],
+  'traffic-rate-form': ['ISP traffic limits'],
+  'policy-form': ['Network access rules'],
+  'workspace-timer-form': ['Device timer'],
+  'workspace-scenario-form': ['Device scenario'],
+  'test-session-form': ['New test session', 'test-session-name'],
+  'test-session-edit': ['Test notes'],
+  'site-rule-form': ['Site blocking rule', 'site-rule-name']
+};
+
+function draftLabel(form) {
+  const description = draftForms[form.id];
+  const name = description ? description[0] : form.closest('.card')?.querySelector('h2')?.textContent || 'Form';
+  let context = description && description[1] ? element(description[1])?.value : '';
+  if (form.id.startsWith('workspace-')) context = element('workspace-title').textContent;
+  if (form.id === 'test-session-edit') context = element('test-session-heading').textContent;
+  context = String(context || '').trim().replace(/\s+/g, ' ');
+  return name + (context ? ': ' + (context.length > 100 ? context.slice(0, 100) + '…' : context) : '');
+}
 
 function draftFields(form) {
   return Array.from(form.querySelectorAll('input, select, textarea, [data-day]'))
@@ -16,7 +53,11 @@ function rememberDraft(form) {
     selected: field.multiple ? Array.from(field.selectedOptions, option => option.value) : null,
     pressed: field.getAttribute('aria-pressed')
   }));
-  formDrafts.set(form.id, { sequence: ++draftSequence, fields });
+  const draft = { sequence: ++draftSequence, fields, label: draftLabel(form) };
+  if (typeof adminTokenRevision !== 'undefined') draftTokenRevision = adminTokenRevision;
+  if (form.id.startsWith('workspace-')) draft.deviceId = workspaceDevice;
+  if (form.id === 'test-session-edit') draft.sessionId = activeTestRecord?.id;
+  formDrafts.set(form.id, draft);
   renderDraftNotice();
 }
 
@@ -55,9 +96,57 @@ function restoreDrafts() {
 function renderDraftNotice() {
   const notice = element('draft-notice');
   if (!notice) return;
+  if (typeof adminTokenVerified !== 'undefined' && !adminTokenVerified) {
+    notice.hidden = true;
+    element('draft-links')?.replaceChildren();
+    return;
+  }
   notice.hidden = formDrafts.size === 0;
   element('draft-count').textContent = formDrafts.size + ' unfinished form' + (formDrafts.size === 1 ? '' : 's') +
     '. Apply uses saved settings. Your edits stay here until saved or discarded.';
+  const links = element('draft-links');
+  if (!links) return;
+  const buttons = new Map();
+  Array.from(links.children).forEach(button => {
+    if (!formDrafts.has(button.dataset.draftForm)) button.remove();
+    else buttons.set(button.dataset.draftForm, button);
+  });
+  formDrafts.forEach((draft, id) => {
+    let button = buttons.get(id);
+    if (!button) {
+      button = document.createElement('button');
+      button.type = 'button';
+      button.dataset.draftForm = id;
+      button.addEventListener('click', () => reviewDraft(id));
+      links.append(button);
+    }
+    const label = 'Review ' + draft.label;
+    if (button.textContent !== label) button.textContent = label;
+  });
+}
+
+function reviewDraft(id) {
+  const draft = formDrafts.get(id);
+  const form = element(id);
+  if (!draft || !form ||
+      (draft.deviceId && !devices.some(device => device.id === draft.deviceId)) ||
+      (draft.sessionId && activeTestRecord?.id !== draft.sessionId)) {
+    showMessage('This unfinished form is no longer available. Your edits are still kept here.', 'error');
+    return;
+  }
+  if (draft.deviceId) {
+    workspaceDevice = draft.deviceId;
+    element('device-workspace').hidden = false;
+    renderWorkspaceState();
+  }
+  if (draft.sessionId) element('test-session-details').hidden = false;
+  setControlsOpen(false, false);
+  revealElement(form);
+  const field = draftFields(form).find(candidate => !candidate.disabled && !candidate.readOnly && candidate.getClientRects().length);
+  const target = field || form;
+  if (!field) form.tabIndex = -1;
+  revealElement(target);
+  target.focus({preventScroll: true});
 }
 
 function formError(form, message) {
@@ -119,6 +208,10 @@ function installDraftControls() {
   notice.hidden = true;
   const text = document.createElement('span');
   text.id = 'draft-count';
+  const links = document.createElement('div');
+  links.id = 'draft-links';
+  links.setAttribute('role', 'group');
+  links.setAttribute('aria-label', 'Unfinished forms');
   const discard = document.createElement('button');
   discard.type = 'button';
   discard.textContent = 'Discard unfinished edits';
@@ -134,7 +227,7 @@ function installDraftControls() {
     renderDraftNotice();
     await refresh();
   });
-  notice.append(text, discard);
+  notice.append(text, links, discard);
   noticeAnchor().before(notice);
   const fallback = document.createElement('textarea');
   fallback.id = 'report-copy-fallback';
@@ -172,6 +265,10 @@ function installDraftControls() {
     }
     note.textContent = field.validationMessage;
   }, true);
+  privateDataLockHooks.push(() => {
+    if (draftTokenRevision !== adminTokenRevision) formDrafts.clear();
+    renderDraftNotice();
+  });
   window.addEventListener('beforeunload', event => {
     if (formDrafts.size) { event.preventDefault(); event.returnValue = ''; }
   });
