@@ -42,7 +42,7 @@ def test_the_page_is_compressed_when_the_browser_accepts_gzip():
     assert gzip.decompress(payload) == server.DASHBOARD_HTML.encode("utf-8")
     assert len(payload) < len(server.DASHBOARD_HTML.encode("utf-8")) / 3
     assert headers["cache-control"] == "no-cache"
-    assert headers["etag"].startswith('"') and headers["etag"].endswith('"')
+    assert headers["etag"].startswith('W/"') and headers["etag"].endswith('"')
     assert "content-security-policy" in headers
 
 
@@ -86,3 +86,32 @@ def test_other_answers_keep_no_store_and_get_no_etag():
     assert headers["cache-control"] == "no-store"
     assert "etag" not in headers and "content-encoding" not in headers
     assert payload == body
+
+
+def test_explicit_gzip_refusal_wins_over_wildcard_in_either_order():
+    for value in ("*;q=1, gzip;q=0", "gzip;q=0, *;q=1"):
+        status, headers, payload = _respond({"Accept-Encoding": value})
+        assert status == 200
+        assert "content-encoding" not in headers
+        assert payload == server.dashboard_page_bytes()
+
+
+def test_gzip_quality_is_bounded_and_accepts_parameter_spacing():
+    for value in ("gzip;q=2", "gzip;q=inf", "gzip;q=NaN", "gzip;q=-1"):
+        assert not server._accepts_gzip(value)
+    assert server._accepts_gzip("gzip; q = 0.5")
+
+
+def test_page_variants_share_only_a_weak_validator_and_use_weak_comparison():
+    _, plain, _ = _respond({})
+    _, compressed, _ = _respond({"Accept-Encoding": "gzip"})
+    assert plain["etag"] == compressed["etag"]
+    assert plain["etag"].startswith("W/")
+    for tag in (plain["etag"], plain["etag"][2:]):
+        status, headers, body = _respond({"If-None-Match": tag, "Accept-Encoding": "gzip"})
+        assert status == 304
+        assert body == b""
+        assert headers["vary"] == "Accept-Encoding"
+        assert headers["cache-control"] == "no-cache"
+        assert headers["x-content-type-options"] == "nosniff"
+        assert "content-security-policy" in headers

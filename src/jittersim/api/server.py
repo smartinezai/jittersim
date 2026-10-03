@@ -10947,7 +10947,7 @@ def _dashboard_page() -> Tuple[bytes, bytes, str]:
     cached = _DASHBOARD_PAGE_CACHE.get("page")
     if cached is None or cached[0] is not DASHBOARD_HTML:
         raw = DASHBOARD_HTML.encode("utf-8")
-        etag = '"' + hashlib.sha256(raw).hexdigest()[:32] + '"'
+        etag = 'W/"' + hashlib.sha256(raw).hexdigest()[:32] + '"'
         cached = (DASHBOARD_HTML, raw, gzip.compress(raw, 6, mtime=0), etag)
         _DASHBOARD_PAGE_CACHE["page"] = cached
     return cached[1], cached[2], cached[3]
@@ -10960,18 +10960,20 @@ def dashboard_page_bytes() -> bytes:
 
 
 def _accepts_gzip(header: str) -> bool:
+    explicit = []
+    wildcard = []
     for part in header.lower().split(","):
         name, _, parameters = part.strip().partition(";")
-        if name.strip() not in ("gzip", "*"):
+        name = name.strip()
+        if name not in ("gzip", "*"):
             continue
-        quality = parameters.strip()
-        if quality.startswith("q="):
-            try:
-                return float(quality[2:]) > 0
-            except ValueError:
-                return False
-        return True
-    return False
+        quality = 1.0
+        if parameters:
+            match = re.fullmatch(r"\s*q\s*=\s*(0(?:\.[0-9]{0,3})?|1(?:\.0{0,3})?)\s*", parameters)
+            quality = float(match.group(1)) if match else 0.0
+        (explicit if name == "gzip" else wildcard).append(quality)
+    choices = explicit if explicit else wildcard
+    return bool(choices) and min(choices) > 0
 
 
 def _inline_source_hashes(tag: str, page: str = DASHBOARD_HTML) -> str:
@@ -15646,7 +15648,8 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             cache_control = "no-cache"
             page_headers = {"ETag": page_etag, "Vary": "Accept-Encoding"}
             asked = [tag.strip() for tag in (request_headers.get("If-None-Match") or "").split(",")]
-            if page_etag in asked or "*" in asked:
+            if "*" in asked or any(tag.removeprefix("W/") == page_etag.removeprefix("W/")
+                                    for tag in asked):
                 status, body = HTTPStatus.NOT_MODIFIED, b""
             elif _accepts_gzip(request_headers.get("Accept-Encoding") or ""):
                 body = packed_page
