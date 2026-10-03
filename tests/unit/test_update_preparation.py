@@ -101,6 +101,28 @@ def test_current_manager_is_published_before_the_first_owned_command(pi):
     pi.apply(run, lambda: True)
 
 
+@pytest.mark.parametrize("boundary", ["configure", "fallback-stop"])
+def test_unknown_name_preparation_never_authorizes_a_later_command(pi, boundary):
+    commands = []
+    failure = updates.OperationOwnershipUnknown("controlled unknown name launch")
+
+    def run(command, timeout):
+        commands.append(list(command))
+        if command[1:4] == ["-m", "jittersim.mdnsname", "configure"]:
+            if boundary == "configure":
+                raise failure
+            raise updates.UpdateError("controlled name configuration failure")
+        if command[:3] == ["systemctl", "stop", "avahi-daemon.service"]:
+            raise failure
+
+    with pytest.raises(updates.OperationOwnershipUnknown) as caught:
+        pi.apply(run, lambda: True)
+    assert caught.value is failure
+    assert commands[-1][1:4] == ["-m", "jittersim.mdnsname", "configure"] if boundary == "configure" else \
+        commands[-1][:3] == ["systemctl", "stop", "avahi-daemon.service"]
+    assert updates.read_json(pi.root / "request.json")
+
+
 def test_interruption_during_replacement_keeps_the_previous_copy_discoverable(pi):
     previous = pi.root / "backup"
     previous.mkdir()
@@ -573,8 +595,13 @@ def test_manager_compatibility_requires_runnable_standalone_source(tmp_path):
         updates.compatible_manager(source)
 
 
-def test_manual_manager_publication_requires_the_shared_lock_and_is_atomic(tmp_path):
+def test_manual_manager_publication_requires_the_shared_lock_and_is_atomic(tmp_path, monkeypatch):
     import fcntl
+    import types
+    # This fixture holds only a format declaration. The real approved guard and
+    # candidate source publication have a separate default-caller check.
+    safety = types.SimpleNamespace(inspect=lambda *args: None, retain=lambda *args: None)
+    monkeypatch.setattr(updates, "PanicProtection", lambda *args, **kwargs: safety)
     root = tmp_path / "updates"
     root.mkdir(mode=0o700)
     destination = tmp_path / "installed.py"

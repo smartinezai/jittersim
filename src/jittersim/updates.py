@@ -961,9 +961,17 @@ def _lock_anchor(descriptor, directory):
 OPERATION_RECORDS = ("operation-pending.json", "installer-pending.json")
 PANIC_SOURCE_FILES = ("src/jittersim/panic_guard.py", "src/jittersim/networking/helper.py",
                       "src/jittersim/networking/access.py")
-# The final assembled, reviewed consumer bundle is installed before publication.
-# An empty list refuses source until that exact review has been completed.
-PANIC_APPROVED_SOURCES = ()
+# The combined consumers were reviewed at 6fc3524. Labels cannot establish
+# compatibility with persistent stop intent.
+PANIC_APPROVED_SOURCES = ({
+    "src/jittersim/panic_guard.py": "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
+    "src/jittersim/networking/helper.py": "e9b0e6070c5bb27d2983711b808e33e541099c762fc562eaf5c73ede3d2045e4",
+    "src/jittersim/networking/access.py": "1d4edebe57877e6db6bbbcd0d1adaecfd9fa48573c0f8830b10a2dcdaaf04ec6",
+},)
+
+
+class PanicProtectionError(UpdateError):
+    """Keep the current installation and retained intent for management recovery."""
 
 
 def owned_source_bytes(source, relative, *, maximum):
@@ -1000,6 +1008,63 @@ def owned_source_bytes(source, relative, *, maximum):
             os.close(directory)
 
 
+@contextmanager
+def identity_modules(source):
+    """Use fixed owned stdlib modules with this exact executing manager."""
+    current = sys.modules.get(__name__)
+    if current is None or current.__dict__ is not globals():
+        raise UpdateError("the executing recovery manager is unavailable")
+    names = ("localname", "localca", "mdnsname")
+    contents = {name: owned_source_bytes(source, "src/jittersim/" + name + ".py",
+                                         maximum=1024 * 1024) for name in names}
+    prefix = "_jittersim_identity_" + secrets.token_hex(16)
+    package = types.ModuleType(prefix)
+    package.__path__ = []
+    installed = {prefix: package, prefix + ".updates": current}
+    result = types.SimpleNamespace()
+    try:
+        sys.modules.update(installed)
+        for name in names:
+            module = types.ModuleType(prefix + "." + name)
+            module.__package__ = prefix
+            module.__file__ = str(source / "src/jittersim" / (name + ".py"))
+            installed[module.__name__] = module
+            sys.modules[module.__name__] = module
+            setattr(package, name, module)
+            exec(compile(contents[name], module.__file__, "exec"), module.__dict__)
+            setattr(result, name, module)
+        yield result
+    finally:
+        for name, module in installed.items():
+            if sys.modules.get(name) is module:
+                del sys.modules[name]
+
+
+def prepare_dashboard_identity(source, config, budget, *, group="jittersim"):
+    """Keep the update owner and total allowance during certificate setup."""
+    budget.check()
+    with identity_modules(source) as modules:
+        try:
+            name, _ = modules.localname.install_config(config, group=group)
+            modules.localca.prepare(config, host_name=socket.gethostname().split(".")[0] + ".local",
+                                    neutral_name=name, ethernet_ip=modules.localca.detect_ethernet_ip(),
+                                    budget=budget)
+            modules.localca.set_permissions(config, group)
+        except (CommandNotStopped, OperationOwnershipUnknown):
+            raise
+        except (OSError, ValueError, modules.localca.TrustError) as error:
+            raise UpdateError("the dashboard identity could not be prepared") from error
+    budget.check()
+
+
+def configure_dashboard_name(source, config):
+    with identity_modules(source) as modules:
+        try:
+            modules.mdnsname.configure_avahi(interfaces=runtime_interfaces(config))
+        except (OSError, ValueError, modules.mdnsname.ConfigureError) as error:
+            raise UpdateError("the dashboard name service could not be prepared") from error
+
+
 def _panic_candidate(source):
     if not 1 <= len(PANIC_APPROVED_SOURCES) <= 32:
         raise UpdateError("the candidate needs reviewed Panic protection")
@@ -1008,13 +1073,72 @@ def _panic_candidate(source):
     observed = {name: hashlib.sha256(raw).hexdigest() for name, raw in contents.items()}
     if not any(bundle == observed for bundle in PANIC_APPROVED_SOURCES):
         raise UpdateError("the candidate needs reviewed Panic protection")
+    return _panic_module(contents[PANIC_SOURCE_FILES[0]], source / PANIC_SOURCE_FILES[0])
+
+
+def _panic_module(raw, path):
+    digest = hashlib.sha256(raw).hexdigest()
+    if not any(bundle.get(PANIC_SOURCE_FILES[0]) == digest for bundle in PANIC_APPROVED_SOURCES):
+        raise UpdateError("the retained producer needs reviewed Panic protection")
     module = types.ModuleType("_jittersim_installer_panic")
-    module.__file__ = str(source / PANIC_SOURCE_FILES[0])
+    module.__file__ = str(path)
     try:
-        exec(compile(contents[PANIC_SOURCE_FILES[0]], module.__file__, "exec"), module.__dict__)
+        exec(compile(raw, module.__file__, "exec"), module.__dict__)
     except (SyntaxError, ValueError) as error:
         raise UpdateError("the candidate stop protection cannot run") from error
+    module._verified_bytes = raw
     return module
+
+
+class PanicProtection:
+    """Inspect before stopping then establish latest intent under quiescence."""
+
+    def __init__(self, source, *, retained=None, guard_path=None, legacy_path=None, owner_uid=None):
+        try:
+            if retained is not None and (retained.exists() or retained.is_symlink()):
+                raw = owned_source_bytes(retained.parent, retained.name, maximum=1024 * 1024)
+                module = _panic_module(raw, retained)
+            else:
+                module = _panic_candidate(source)
+            self.module = module
+            self.guard = module.PanicGuard(guard_path or module.PANIC_GUARD_PATH,
+                                          owner_uid=0 if owner_uid is None else owner_uid)
+            self.legacy = legacy_path or module.PANIC_LEGACY_PATH
+        except (OSError, UpdateError) as error:
+            raise PanicProtectionError("The selected package cannot preserve Panic protection.") from error
+
+    def inspect(self, *sources):
+        try:
+            state = self.guard.inspect_upgrade(self.legacy)
+            for source in sources:
+                self.module.check_panic_candidate(state, source, PANIC_APPROVED_SOURCES,
+                                                  owner_uid=self.guard.owner_uid)
+            return state
+        except OSError as error:
+            raise PanicProtectionError("The selected package cannot preserve current Panic protection.") from error
+
+    def provision(self, *sources):
+        self.inspect(*sources)
+        try:
+            self.guard.provision_upgrade(self.legacy)
+            # An independently established guard wins initialize-only publication.
+            self.inspect(*sources)
+        except OSError as error:
+            raise PanicProtectionError("Current Panic protection could not be saved.") from error
+
+    def retain(self, destination):
+        descriptor, name = tempfile.mkstemp(prefix=".panic-manager-", dir=destination.parent)
+        temporary = Path(name)
+        try:
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(self.module._verified_bytes)
+                output.flush()
+                os.fchmod(output.fileno(), 0o644)
+                os.fsync(output.fileno())
+            temporary.replace(destination)
+            _fsync_folder(destination.parent)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def prepare_manual_install(source, *, descriptor=9, root=UPDATE_ROOT):
@@ -3421,6 +3545,9 @@ def bootstrap_manager(source, destination, *, root=UPDATE_ROOT, descriptor=9):
     try:
         with manual_identity_operation(root, descriptor=descriptor):
             compatible_manager(source)
+            safety = PanicProtection(source.parents[2])
+            safety.inspect(source.parents[2])
+            safety.retain(destination.with_name("jittersim-panic-guard.py"))
             install_manager(source, destination)
     except UpdateError as error:
         raise UpdateError("the installer command has no safe update ownership") from error
@@ -3739,20 +3866,15 @@ def apply_update(
             with its own settings, and the name service is not started.
             """
             try:
-                uplink, test_interface = runtime_interfaces(config)
-                run(
-                    [str(code / ".venv/bin/python"), "-m", "jittersim.mdnsname", "configure",
-                     "--uplink", uplink, "--test-interface", test_interface],
-                    60,
-                )
+                configure_dashboard_name(code, config)
                 run(["systemctl", "restart", "avahi-daemon.service"], 120)
                 return True
-            except CommandNotStopped:
+            except (CommandNotStopped, OperationOwnershipUnknown):
                 raise
             except UpdateError:
                 try:
                     run(["systemctl", "stop", "avahi-daemon.service", "avahi-daemon.socket"], 60)
-                except CommandNotStopped:
+                except (CommandNotStopped, OperationOwnershipUnknown):
                     raise
                 except UpdateError:
                     pass
@@ -3760,6 +3882,7 @@ def apply_update(
 
         def restart_services(prepare_name=False):
             """Run the systemctl steps of install.sh for the units installed now."""
+            panic_safety.inspect(code)
             name_ready = prepare_name_service() if prepare_name else True
             try:
                 wifi = query(
@@ -3839,6 +3962,7 @@ def apply_update(
             if not (backup / "complete.json").exists():
                 raise UpdateError("the recovery copy is incomplete")
             completed = validate_recovery(backup, budget)
+            panic_safety.inspect(backup / "code")
             ownership = completed.get("ownership", {})
             targets = []
             for name in completed.get("managed", ["units/" + unit for unit in LEGACY_UNITS]):
@@ -3856,7 +3980,7 @@ def apply_update(
                 str(request.get("version", "")).encode("utf-8")
             ).hexdigest()
             retained_certificate = prepare_certificate_restore(
-                root, config, transaction, deadline=certificate_deadline
+                root, config, transaction, deadline=certificate_deadline, budget=budget
             )
             keep = keep_trust_settings()
             for name, destination in (("code", code), ("config", config), ("data", data)):
@@ -3874,7 +3998,7 @@ def apply_update(
                         os.chown(entry, uid, gid, follow_symlinks=False)
             put_back_trust_settings(keep)
             restore_certificate_identity(
-                root, config, retained_certificate, deadline=certificate_deadline
+                root, config, retained_certificate, deadline=certificate_deadline, budget=budget
             )
             for name, destination in targets:
                 budget.check()
@@ -3942,6 +4066,12 @@ def apply_update(
             compatible_manager(Path(__file__))
             if Path(__file__).resolve() != manager.resolve():
                 install_manager(Path(__file__), manager)
+            staged = root / "staged"
+            panic_safety = PanicProtection(code if request.get("rollback") else staged,
+                                           retained=manager.with_name("jittersim-panic-guard.py"))
+            selected = (backup / "code",) if request.get("rollback") else (staged, code)
+            panic_safety.inspect(*selected)
+            panic_safety.retain(manager.with_name("jittersim-panic-guard.py"))
             if request.get("rollback"):
                 if "recovery" not in request:
                     request["recovery"] = recovery_identity(root, backup)
@@ -4018,6 +4148,7 @@ def apply_update(
             run(["systemctl", "stop", *names], 60)
             if not writers_stopped(names, query, budget):
                 raise UpdateError("the settings writers did not stop")
+            panic_safety.provision(*selected)
             if request.get("rollback"):
                 progress("rolling-back", "Restoring the previous installation and settings.")
                 restore()
@@ -4026,7 +4157,7 @@ def apply_update(
                 cleanup_generations(root, budget)
                 recovered = True
                 progress("rolled-back", "Previous installation restored and health check passed.")
-                finish_certificate_recovery(root)
+                finish_certificate_recovery(root, budget=budget)
                 keep_request = False
                 return
             progress("backing-up", "Saving the stopped installation and settings.")
@@ -4099,10 +4230,7 @@ def apply_update(
             run([python, str(code / BOOTSTRAP)], 60)
             # Like install.sh: keep the dashboard name setting and the local
             # certificate authority, and renew the dashboard certificates.
-            run([python, "-m", "jittersim.localname", "install",
-                 "--config-dir", str(config), "--group", "jittersim"], 60)
-            run([python, "-m", "jittersim.localca", "ensure",
-                 "--config-dir", str(config), "--group", "jittersim"], 120)
+            prepare_dashboard_identity(code, config, budget)
             link_command(str(code / ".venv/bin/jittersim"), command)
             render_firewall(staged / FIREWALL_TEMPLATE, config / FIREWALL_RULES,
                             uplink, test_interface)
@@ -4126,8 +4254,11 @@ def apply_update(
             install_manager(code / "src/jittersim/updates.py", manager)
             cleanup_generations(root, budget)
             progress("complete", "Release installed. Dashboard and helper health checks passed.")
-            finish_certificate_recovery(config / ".certificate-adoption")
+            finish_certificate_recovery(config / ".certificate-adoption", budget=budget)
             keep_request = False
+        except PanicProtectionError:
+            progress("failed", "Panic protection needs management access. The current package and update intent are kept.")
+            raise
         except OperationOwnershipUnknown:
             progress("failed", "An update command could not be confirmed. Recovery will wait for it.")
             raise
@@ -4188,7 +4319,7 @@ def apply_update(
                 message = "Update or recovery failed. Check the update service log."
             progress("rolled-back" if recovered and needs_recovery else "failed", message)
             if recovered and needs_recovery:
-                finish_certificate_recovery(root)
+                finish_certificate_recovery(root, budget=budget)
             raise
         finally:
             if not keep_request:

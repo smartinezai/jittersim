@@ -11,6 +11,7 @@ import sys
 import tarfile
 import tempfile
 import threading
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -144,7 +145,7 @@ class UpdateTests(unittest.TestCase):
         path, digest = self.archive(sequence=sequence, version=version)
         self.stage_archive(path, sha256=digest)
 
-    def apply(self, run, health, query=None):
+    def apply(self, run, health, query=None, *, isolate_panic=True):
         def package_commands(command, timeout):
             result = run(command, timeout)
             # Only the external package commands are stand-ins. Preparation,
@@ -159,7 +160,29 @@ class UpdateTests(unittest.TestCase):
                 return "ActiveState=inactive\nMainPID=0\nControlPID=0\nTasksCurrent=0"
             return query(command, timeout) if query else self.wifi
 
-        return apply_update(
+        def identity(source, config, budget, **options):
+            # These archive tests use a minimal synthetic package. The verified
+            # in-process identity calls have separate real-source tests.
+            python = str(self.code / ".venv/bin/python")
+            run([python, "-m", "jittersim.localname", "install",
+                 "--config-dir", str(config), "--group", "jittersim"], budget.limit(60))
+            run([python, "-m", "jittersim.localca", "ensure",
+                 "--config-dir", str(config), "--group", "jittersim"], budget.limit(120))
+
+        def name_service(source, config):
+            run([str(self.code / ".venv/bin/python"), "-m", "jittersim.mdnsname", "configure",
+                 "--uplink", "eth7", "--test-interface", "wlan7"], 60)
+
+        from contextlib import nullcontext
+        # The historical recovery fixtures predate the persistent guard. Real
+        # default admission and provisioning are tested with reviewed sources.
+        safety = types.SimpleNamespace(inspect=lambda *args: None, provision=lambda *args: None,
+                                       retain=lambda *args: None)
+        panic = patch.object(updates, "PanicProtection", lambda *args, **kwargs: safety, create=True) \
+            if isolate_panic else nullcontext()
+        with panic, patch.object(updates, "prepare_dashboard_identity", identity), \
+                patch.object(updates, "configure_dashboard_name", name_service):
+            return apply_update(
             root=self.root,
             code=self.code,
             config=self.config,
