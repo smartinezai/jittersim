@@ -319,7 +319,7 @@ def check_one_save_is_small(page, seen):
 
     go_to(page, "profiles")
     advance(page, 2)
-    page.clock.pause_at(page.evaluate("Date.now()"))
+    page.clock.pause_at(page.evaluate("Date.now() / 1000") + 1)
     methods = collections.Counter()
 
     def counted(request):
