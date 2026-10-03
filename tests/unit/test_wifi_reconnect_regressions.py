@@ -348,3 +348,75 @@ def test_request_timeout_aborts_a_stalled_response_body():
     console.log(JSON.stringify({failed,aborted}));
     ''')
     assert result == {'failed':True,'aborted':True}
+
+
+
+def test_finished_exact_outcome_cannot_be_rewritten_by_later_refusal():
+    operations = WifiOperations(delay=0)
+    identifier = issue_request_id()
+    operations.reserve('router-copy', identifier)
+    operations.finish(identifier, WifiOutcome(200, 'copied', ssid='Home', security='WPA2'))
+    before = operations.last(identifier)
+    operations.finish(identifier, WifiOutcome(410, 'router result expired'))
+    assert operations.last(identifier) == before
+    assert operations.completed_action() == ('/api/router/sync-ap', 200)
+    assert operations.completed_action() is None
+
+
+def test_expired_router_repeat_keeps_confirmed_wifi_outcome_without_another_write():
+    import json
+    from jittersim.api.server import ControlServer
+    from jittersim.config.storage import ConfigRepository
+    from tests.unit.test_wifi_operations import GatedHelper
+    repository = ConfigRepository(':memory:')
+    server = ControlServer(('127.0.0.1', 0), repository)
+    helper = GatedHelper()
+    helper.release.set()
+    server.helper_client = helper
+    server.wifi_operations.delay = 0
+    try:
+        identifier = issue_request_id()
+        payload = {'admin_password':'secret','expected_fingerprint':'a'*64,
+                   'background':True,'request_id':identifier}
+        assert server.write_response_for('/api/router/sync-ap', payload)[0] == 202
+        deadline = time.monotonic() + 5
+        while server.router_operations.result(identifier, 'secret')[0] == 202 and time.monotonic() < deadline:
+            time.sleep(.005)
+        assert server.router_operations.result(identifier, 'secret')[0] == 200
+        before = server.wifi_operations.last(identifier)
+        assert before[1]['operation']['state'] == 'succeeded'
+        server.router_operations._requests[identifier]['finished'] -= server.router_operations.RESULT_LIFETIME + 1
+        status, _, body = server.write_response_for('/api/router/sync-ap', payload)
+        assert status == 410 and 'expired' in json.loads(body)['error'].lower()
+        assert server.wifi_operations.last(identifier) == before
+        assert helper.events.count('sync') == 1
+    finally:
+        server.server_close()
+        repository.close()
+
+
+def test_router_copy_refuses_an_identifier_used_for_a_different_action():
+    from jittersim.api.server import ControlServer
+    from jittersim.config.storage import ConfigRepository
+    repository = ConfigRepository(':memory:')
+    server = ControlServer(('127.0.0.1', 0), repository)
+    helper = Mock()
+    helper.preview_router_wifi.return_value = {
+        'ssid':'Home','security':'WPA2','band':'2.4 GHz','fingerprint':'a'*64,'legacy':False}
+    server.helper_client = helper
+    try:
+        identifier = issue_request_id()
+        payload = {'admin_password':'secret','background':True,'request_id':identifier}
+        assert server.write_response_for('/api/router/preview-ap', payload)[0] == 202
+        deadline = time.monotonic() + 5
+        while server.router_operations.result(identifier, 'secret')[0] == 202 and time.monotonic() < deadline:
+            time.sleep(.005)
+        assert server.router_operations.result(identifier, 'secret')[0] == 200
+        status, _, _ = server.write_response_for('/api/router/sync-ap', {**payload,'expected_fingerprint':'a'*64})
+        assert status == 409
+        helper.preview_router_wifi.assert_called_once_with(admin_password='secret')
+        helper.sync_access_point_from_router.assert_not_called()
+        assert not server.wifi_operations.busy()
+    finally:
+        server.server_close()
+        repository.close()

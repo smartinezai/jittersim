@@ -8084,6 +8084,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       if (routerActionPending || routerPasswordChecking) return;
       if (!requireAdminToken(button)) return;
       const passwordRevision = routerPasswordRevision;
+      const tokenRevision = adminTokenRevision;
+      const stillCurrent = () => passwordRevision === routerPasswordRevision && tokenRevision === adminTokenRevision;
       const password = element("router-admin-password").value;
       const status = element("router-action-message");
       if (!password) {
@@ -8106,7 +8108,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         if (path === "/api/router/sync-ap") {
           const previewResponse = await routerRequest("/api/router/preview-ap", { admin_password: password });
           const preview = previewResponse.result;
-          if (passwordRevision !== routerPasswordRevision) throw new Error("Router password changed. Check Wi-Fi security again.");
+          if (!stillCurrent()) return;
           status.textContent = "Router Wi-Fi uses " + preview.security + " on " + preview.band + ".";
           const warning = preview.legacy ? " Older WPA is weak security. Copy it only for compatibility testing." : "";
           if (!window.confirm("Copy " + preview.ssid + " using " + preview.security + " (" + preview.band + ")?" + warning + " The Pi will use the router's Wi-Fi password. " + (typeof WIFI_RESTART_NOTICE === "string" ? WIFI_RESTART_NOTICE : "") + " Keep a separate management connection.")) {
@@ -8117,6 +8119,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           body = { ...body, expected_fingerprint: preview.fingerprint, confirm_legacy: preview.legacy };
         }
         const response = await routerRequest(path, { admin_password: password, ...body });
+        if (!stillCurrent()) return;
         const result = response.result || response;
         if (typeof result.enabled === "boolean") {
           routerWifiEnabled = result.enabled;
@@ -8144,6 +8147,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           routerPasswordRejected = false;
         }
       } catch (error) {
+        if (!stillCurrent()) return;
         if (path === "/api/router/wifi") { routerWifiEnabled = null; routerWifiError = error.message; }
         status.textContent = error.message;
         element("credential-router-status").textContent = status.textContent;
@@ -8153,7 +8157,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           routerPasswordRejected = true;
         }
       } finally {
-        if (typeof clearReconnectFlag === "function") clearReconnectFlag();
+        if (stillCurrent() && typeof clearReconnectFlag === "function") clearReconnectFlag();
         routerActionPending = false;
         ["sync-router-ap", "router-wifi-toggle"].forEach((id) => { element(id).disabled = false; });
         setButtonBusy(button, false);
@@ -12979,7 +12983,7 @@ class ControlServer(HTTPServer):
             reserved = None
             if path == "/api/router/sync-ap":
                 if identifier is not None:
-                    previous_status, previous = self.router_operations.result(identifier, password)
+                    previous_status, previous = self.router_operations.result(identifier, password, expected_path=path)
                     if previous_status != 410:
                         return previous_status, "application/json", _json_bytes(previous)
                 reserved = self.wifi_operations.reserve("router-copy", identifier)

@@ -134,7 +134,7 @@ class WifiOperations:
     def finish(self, identifier: str, outcome: WifiOutcome) -> None:
         with self._lock:
             current = self._current
-            if not current or current["id"] != identifier:
+            if not self._active or not current or current["id"] != identifier:
                 return
             succeeded = outcome.status == 200
             current.update(

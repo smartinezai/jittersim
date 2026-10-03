@@ -130,6 +130,25 @@ function savedEntry(key) {
 
 
 CASES = {
+    "old_router_failure_keeps_new_credential_status": r"""
+      helperConfigured = true;
+      enter("admin-token", "fixture token");
+      adminTokenVerified = true;
+      enter("router-admin-password", "fixture password");
+      const pending = deferred(); network = () => pending.promise;
+      const running = routerAction("/api/router/wifi", {enabled:true}, "Changing", element("router-wifi-toggle"));
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(networkCalls.length, 1);
+      enter("router-admin-password", "replacement password");
+      element("router-action-message").textContent = "New action state";
+      element("credential-router-status").textContent = "New credential state";
+      pending.resolve({ok:false,status:502,json:async()=>({error:"old failure"})});
+      await running;
+      assert.equal(element("router-action-message").textContent, "New action state");
+      assert.equal(element("credential-router-status").textContent, "New credential state");
+      assert.equal(routerWifiError, "");
+      assert.equal(routerActionPending, false);
+    """,
     "lost_diagnostics_keeps_token_and_does_not_reject_it": r"""
       enter("admin-token", "fixture token");
       await checkAdminToken();

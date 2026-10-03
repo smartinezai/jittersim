@@ -159,7 +159,9 @@ def check_lost_acceptance_is_confirmed_without_another_write(page):
     writes = []
     def lose_reply(route):
         writes.append(route.request.post_data_json)
-        route.fetch()
+        response = route.fetch(timeout=5000, max_retries=0)
+        assert response.status == 202
+        assert response.json()["operation_id"] == route.request.post_data_json["request_id"]
         route.abort("connectionfailed")
     page.route("**/api/access-point/reset-name", lose_reply)
     page.once("dialog", lambda dialog: dialog.accept())

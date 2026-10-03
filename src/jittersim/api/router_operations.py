@@ -5,7 +5,7 @@ import json
 import secrets
 import threading
 import time
-from typing import Any, Callable, Dict, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from .wifi_operations import valid_request_id
 
@@ -153,13 +153,15 @@ class RouterOperations:
             return 410, {"error": "Exact router result expired. Check current state before another change."}
         return operation["status"], {**operation["data"], "operation_id": operation["id"]}
 
-    def result(self, identifier: str, password: str) -> Tuple[int, Dict[str, Any]]:
+    def result(self, identifier: str, password: str, expected_path: Optional[str] = None) -> Tuple[int, Dict[str, Any]]:
         context = self._context(password)
         with self._lock:
             self._expire()
             for operation in (self._active, self._completed, self._requests.get(identifier)):
                 if (operation and operation["id"] == identifier
                         and hmac.compare_digest(operation["context"], context)):
+                    if expected_path is not None and operation["path"] != expected_path:
+                        return 409, {"error": "Request identifier belongs to a different router operation."}
                     return self._result(operation)
             return 410, {"error": "Router result expired. Check the current state before another change."}
 
