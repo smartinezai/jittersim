@@ -265,7 +265,15 @@ class BrowserProxyTests(unittest.TestCase):
                     replacement.write_text(json.dumps(plan_to_payload(plan)))
                     replacement.replace(plan_path)
                     client.sendall(b"stale-tunnel")
+                    self.assertEqual(client.recv(4096), b"stale-tunnel")
+                    replacement.write_text(json.dumps(plan_to_payload(replace(
+                        plan, blocked_device_addresses=(device.ipv4_address,)
+                    ))))
+                    replacement.replace(plan_path)
+                    client.sendall(b"blocked-tunnel")
                     self.assertEqual(client.recv(4096), b"")
+                replacement.write_text(json.dumps(plan_to_payload(plan)))
+                replacement.replace(plan_path)
                 with socket.create_connection(proxy.server_address, timeout=3) as client:
                     client.sendall(b"CONNECT other.example:443 HTTP/1.1\r\n\r\n")
                     self.assertIn(b"200 Connection Established", client.recv(4096))

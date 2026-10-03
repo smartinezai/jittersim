@@ -1317,6 +1317,11 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         if path == "/api/profiles":
             profiles = [_profile_payload(profile) for profile in self.repository.list_profiles()]
             return HTTPStatus.OK, "application/json", _json_bytes({"profiles": profiles})
+        if path == "/api/pattern-history":
+            return HTTPStatus.OK, "application/json", _json_bytes({
+                "events": self.repository.list_pattern_events(now=int(time.time())),
+                "limit": 100, "retention_days": 7,
+            })
         if path == "/api/general-profile":
             return HTTPStatus.OK, "application/json", _json_bytes(self._general_profile_status())
         if path == "/api/devices":
@@ -2156,6 +2161,10 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         if path == "/api/profiles":
             try:
                 profile = _profile_from_payload(payload)
+            except ValidationError as error:
+                if str(error) == "Clear the saved seed before choosing a fresh pattern":
+                    return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes({"error": str(error)})
+                return _bad_request("invalid profile configuration", error)
             except (KeyError, TypeError, ValueError) as error:
                 return _bad_request("invalid profile configuration", error)
             self.repository.save_profile(profile)
@@ -4671,12 +4680,14 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                 ),
             )
         def publish():
-            self.repository.rebase_quota_counters(now=int(time.time()))
+            if result.get("counters_preserved") is not True:
+                self.repository.rebase_quota_counters(now=int(time.time()))
             state = self.repository.update_runtime_state(
                 observed_state="applied", last_action="apply", last_result="success", last_error=None,
             )
             if self.scheduler is not None:
-                self.scheduler.activate_plan(repository=self.repository, prepared=prepared)
+                self.scheduler.activate_plan(repository=self.repository, prepared=prepared,
+                                             counters_preserved=result.get("counters_preserved") is True)
             return state
 
         accepted, state = self._publish_apply(halts_at_start, publish)
@@ -5488,6 +5499,7 @@ def _profile_from_payload(payload: Dict[str, Any]) -> Profile:
         upload=_impairment_from_payload(payload.get("upload")),
         download=_impairment_from_payload(payload.get("download")),
         random_seed=payload.get("random_seed"),
+        random_mode=payload.get("random_mode", "repeatable"),
         reroll_interval_seconds=payload.get("reroll_interval_seconds", 0),
         reroll_interval_randomness=_randomness_from_payload(
             payload.get("reroll_interval_randomness")

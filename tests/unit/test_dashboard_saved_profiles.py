@@ -357,7 +357,7 @@ def test_the_round_trip_profile_sets_every_field_to_a_non_default_value():
     default_impairment = as_json(Profile(id="x", name="x"))["upload"]
     assert set(profile) == set(default)
     for key in profile:
-        if key in ("id", "name", "upload", "download"):
+        if key in ("id", "name", "upload", "download", "random_mode"):
             continue
         assert profile[key] != default[key], key
     for side in ("upload", "download"):
@@ -383,6 +383,17 @@ def test_the_round_trip_profile_has_distinct_hidden_values_and_unsorted_mixed_ca
 @NEEDS_NODE
 def test_fill_then_read_returns_the_original_profile():
     profile = as_json(every_field_set_profile())
+    body = (
+        "const profile = " + json.dumps(profile) + ";\n"
+        "fillProfileForm(profile);\n"
+        "console.log(JSON.stringify(profileFormPayload(profile)));\n"
+    )
+    assert run_node(body) == profile
+
+
+@NEEDS_NODE
+def test_fresh_mode_round_trip_clears_the_saved_seed():
+    profile = as_json(Profile("fresh", "Fresh", random_mode="fresh"))
     body = (
         "const profile = " + json.dumps(profile) + ";\n"
         "fillProfileForm(profile);\n"

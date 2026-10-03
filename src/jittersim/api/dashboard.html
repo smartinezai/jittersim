@@ -411,8 +411,15 @@
             <label><span class="field-label">Outage check interval (seconds)<span class="help-icon" tabindex="0" role="img" aria-label="Outage interval help" data-help="How often the Pi checks whether to start a new outage. Set this to 0 to use the reroll interval.">?</span></span>
               <input id="profile-outage-interval" type="number" min="0" value="0">
             </label>
-            <label><span class="field-label">Random seed (optional)<span class="help-icon" tabindex="0" role="img" aria-label="Random seed help" data-help="Makes the random changes repeat exactly. The same seed gives a device or a service list the same values in the same order every time. Leaving it empty is the same as 0. Pick another number for a different pattern.">?</span></span>
+            <label><span class="field-label">Random seed (optional)<span class="help-icon" tabindex="0" role="img" aria-label="Random seed help" data-help="Repeats chosen settings for the same target. Packet timing and app results can differ. For a saved pattern an empty seed means 0. Clear this field when choosing a fresh pattern.">?</span></span>
               <input id="profile-seed" type="number" min="0">
+            </label>
+            <label><span class="field-label">Pattern<span class="help-icon" tabindex="0" role="img" aria-label="Pattern help" data-help="A saved pattern repeats its chosen settings for the same target. A fresh pattern gets a new seed after Stop then Start. Editing settings also starts a new pattern for that target.">?</span></span>
+              <select id="profile-random-mode">
+                <option value="repeatable">Repeat saved pattern</option>
+                <option value="fresh">Fresh pattern</option>
+              </select>
+              <span class="form-note">Clear the seed for a fresh pattern. It changes after Stop then Start or after editing settings. Saved patterns repeat chosen settings. Packet timing and app results can differ.</span>
             </label>
             <label><span class="field-label">Website mode<span class="help-icon" tabindex="0" role="img" aria-label="Website mode help" data-help="Unrestricted puts no site limit on this profile. Allow only listed domains limits the device to the sites named in Profile domains.">?</span></span>
               <select id="profile-website-mode">
@@ -546,6 +553,16 @@
         <button type="submit">Save profile</button>
         <button id="new-profile" type="button" hidden>New profile</button>
       </form>
+      <details>
+        <summary>Recent pattern choices</summary>
+        <p class="form-note">Shows the latest 100 choices. History keeps at most 1000 choices per session and 10000 overall for seven days. A start records the seed for that target. Stop then start a saved pattern with that seed to repeat its choices.</p>
+        <button id="load-pattern-history" type="button">Refresh pattern history</button>
+        <p id="pattern-history-status" role="status"></p>
+        <div class="analytics-table-wrap" tabindex="0" role="region" aria-label="Pattern history"><table>
+          <thead><tr><th scope="col">Time</th><th scope="col">Target</th><th scope="col">Choice</th><th scope="col">Seed</th><th scope="col">Download / connection</th></tr></thead>
+          <tbody id="pattern-history-body"></tbody>
+        </table></div>
+      </details>
     </section>
     <section class="card">
       <h2>Assign a device</h2>

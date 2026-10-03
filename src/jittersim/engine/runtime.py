@@ -1,11 +1,12 @@
 """Background runtime for schedules, randomized rerolls and outages."""
 
 import logging
+import secrets
 import sqlite3
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta
 from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
@@ -165,6 +166,10 @@ class _DeviceRollState:
     next_outage_check_at: float
     outage_until: float
     outage_check_number: int = 0
+    seed: int = 0
+    session_id: str = ""
+    started_at: float = 0.0
+    history_started: bool = False
 
 
 class RuntimeScheduler:
@@ -188,6 +193,9 @@ class RuntimeScheduler:
         self._helper_client = helper_client
         self._poll_seconds = poll_seconds
         self._rolls: Dict[str, _DeviceRollState] = {}
+        self._preview = False
+        self._pending_events: List[dict] = []
+        self._last_pattern_cleanup_at = 0.0
         self._current_payload = None
         self._paused = True
         # Counts Panic requests so an apply that was running meanwhile can tell.
@@ -297,7 +305,7 @@ class RuntimeScheduler:
         if unresolved:
             raise WorkersStillRunning("Scheduler workers did not stop. Their state remains owned.")
 
-    def activate(self, *, applied_payload: object) -> None:
+    def activate(self, *, applied_payload: object, counters_preserved: bool = False) -> None:
         """Resume scheduled work after a successful manual apply."""
 
         with self._lock:
@@ -305,9 +313,9 @@ class RuntimeScheduler:
                 return
             self._current_payload = applied_payload
             self._paused = False
-            # The apply recreated the helper counters, so keep the device
-            # totals and count on from zero.
-            self._last_device_counters = dict.fromkeys(self._last_device_counters, 0)
+            # A replacement restarts the counters. Keep totals and count on from zero.
+            if not counters_preserved:
+                self._last_device_counters = dict.fromkeys(self._last_device_counters, 0)
             # The apply worked, so the next scheduled change does not wait for a retry.
             self._clear_plan_failure()
         self.start()
@@ -319,13 +327,15 @@ class RuntimeScheduler:
             self._current_payload = None
 
     def activate_plan(
-        self, *, repository: ConfigRepository, prepared: PreparedRuntimePlan
+        self, *, repository: ConfigRepository, prepared: PreparedRuntimePlan,
+        counters_preserved: bool = False,
     ) -> None:
         """Record a successful manual apply before starting background work."""
 
         with self._apply_lock:
             self._record_activity(repository=repository, states=prepared.states, now=time.time())
-            self.activate(applied_payload=plan_to_payload(prepared.plan))
+            self._save_patterns(repository, time.time())
+            self.activate(applied_payload=plan_to_payload(prepared.plan), counters_preserved=counters_preserved)
 
     def build_plan(
         self,
@@ -343,6 +353,8 @@ class RuntimeScheduler:
         current_time = time.time() if now is None else now
         with self._apply_lock:
             previous_rolls = self._rolls
+            previous_preview = self._preview
+            self._preview = True
             self._rolls = {key: replace(roll) for key, roll in previous_rolls.items()}
             try:
                 plan, _ = self._build_plan(
@@ -351,6 +363,7 @@ class RuntimeScheduler:
                 return plan
             finally:
                 self._rolls = previous_rolls
+                self._preview = previous_preview
 
     def prepare_plan(
         self,
@@ -484,6 +497,7 @@ class RuntimeScheduler:
         with self._apply_lock, self._lock:
             self._paused = True
             self._rolls.clear()
+            self._pending_events = []
             self._current_payload = None
             self._last_device_counters.clear()
             self._device_traffic_bytes.clear()
@@ -710,6 +724,9 @@ class RuntimeScheduler:
         active_repository = repository or ConfigRepository(self._database_path)
         configuration_version: Optional[int] = None
         helper_attempted = False
+        previous_rolls = {key: replace(roll) for key, roll in self._rolls.items()}
+        self._pending_events = []
+        published = False
         try:
             read_gateway_status = getattr(self._helper_client, "gateway_status", None)
             try:
@@ -794,10 +811,10 @@ class RuntimeScheduler:
                 def publish_unchanged():
                     self._log_plan_recovery(self._clear_plan_failure())
                     self._record_activity(repository=active_repository, states=states, now=current_time)
-                self.publish_if_current(halts_at_start, publish_unchanged)
+                    self._save_patterns(active_repository, current_time)
+                published, _ = self.publish_if_current(halts_at_start, publish_unchanged)
                 return False
-            # Applying recreates the helper's counters at zero, so record the
-            # traffic they hold first.
+            # Record traffic before an apply can replace the helper counters.
             self._sample_quota_usage(repository=active_repository, now=current_time)
             if not self.can_apply(halts_at_start):
                 return False
@@ -805,24 +822,27 @@ class RuntimeScheduler:
             try:
                 apply = getattr(self._helper_client, "apply_experiment", self._helper_client.apply)
                 arguments = {"control_revision": control_revision} if control_revision is not None else {}
-                apply(plan=plan, **arguments)
+                report = apply(plan=plan, **arguments)
             except HelperClientError:
                 # Cleanup may have removed the previous rules too. An active
                 # scheduler must retry even if the desired plan is unchanged.
                 self.invalidate_applied_plan()
                 raise
             def publish():
-                active_repository.rebase_quota_counters(now=int(current_time))
+                if not isinstance(report, dict) or report.get("counters_preserved") is not True:
+                    active_repository.rebase_quota_counters(now=int(current_time))
+                    self._last_device_counters = dict.fromkeys(self._last_device_counters, 0)
                 self._current_payload = payload
-                self._last_device_counters = dict.fromkeys(self._last_device_counters, 0)
                 self._log_plan_recovery(self._clear_plan_failure())
                 if not active_repository.record_schedule_result(success=True):
                     self.pause()
                     return False
                 self._record_activity(repository=active_repository, states=states, now=current_time)
+                self._save_patterns(active_repository, current_time)
                 return True
 
             accepted, applied = self.publish_if_current(halts_at_start, publish)
+            published = bool(accepted and applied)
             if not accepted and self.halt_count != halts_at_start:
                 self._undo_overtaken_apply(active_repository)
             elif accepted and not applied:
@@ -859,6 +879,9 @@ class RuntimeScheduler:
                 LOGGER.exception("could not record scheduled network failure")
             return False
         finally:
+            if not published and not self._paused and self.can_apply(halts_at_start):
+                self._rolls = previous_rolls
+            self._pending_events = []
             if owned_repository:
                 active_repository.close()
 
@@ -1341,11 +1364,6 @@ class RuntimeScheduler:
             active_keys=active_device_ids,
             states=states,
         )
-        self._rolls = {
-            device_id: roll
-            for device_id, roll in self._rolls.items()
-            if device_id in active_device_ids
-        }
         website_policy = repository.get_website_policy()
         global_blocked, website_filters = build_website_filters(
             devices=runtime_devices,
@@ -1358,6 +1376,7 @@ class RuntimeScheduler:
             devices=runtime_devices,
             profiles=profiles,
             now=now,
+            active_keys=active_device_ids,
         )
         # Limits are told apart by ID, so a renamed limit is the same limit.
         limit_labels = {
@@ -1382,6 +1401,9 @@ class RuntimeScheduler:
             profile = profiles.get(assignment.profile_id)
             if device is None or profile is None:
                 raise PlanError(f"service assignment {assignment.id} has a missing reference")
+            key = f"assignment:{assignment.id}"
+            active_device_ids.add(key)
+            profile = self._service_profile(profile, key, now)
             service_assignment_rules.append(
                 ServiceAssignmentRule(
                     assignment_id=assignment.id,
@@ -1394,6 +1416,7 @@ class RuntimeScheduler:
                     homepage_bounce_percent=profile.homepage_bounce_percent,
                 )
             )
+        self._rolls = {key: roll for key, roll in self._rolls.items() if key in active_device_ids}
         plan = compile_plan(
             devices=runtime_devices,
             profiles=runtime_profiles,
@@ -1465,6 +1488,8 @@ class RuntimeScheduler:
         """
 
         def roll(service_list: ServiceList, profile: Profile) -> Tuple[Profile, bool]:
+            if profile.website_mode != "unrestricted":
+                raise PlanError("Service profiles cannot use a profile website allowlist")
             key = SERVICE_LIST_QUEUE_PREFIX + service_list.id
             active_keys.add(key)
             state = self._roll(
@@ -1522,14 +1547,19 @@ class RuntimeScheduler:
                     or selected_profile.reroll_interval_seconds,
                 ),
                 outage_until=0,
+                seed=(secrets.randbits(53) if selected_profile.random_mode == "fresh" and not self._preview else selected_profile.random_seed or 0),
+                session_id=secrets.token_hex(16) if not self._preview else "preview",
+                started_at=now,
             )
             self._rolls[key] = roll
+            self._record_pattern(roll, selected_profile, generator_key, now, "start")
 
         if reroll_each_tick:
             generator = seeded_generator(
                 profile=selected_profile,
                 device_id=generator_key,
                 roll_number=roll.roll_number,
+                session_seed=roll.seed,
             )
             roll.runtime_profile = reroll_profile(
                 profile=selected_profile,
@@ -1541,6 +1571,7 @@ class RuntimeScheduler:
                 profile=selected_profile,
                 device_id=generator_key,
                 roll_number=roll.roll_number,
+                session_seed=roll.seed,
             )
             website_choices: List[Tuple[str, bool]] = []
             roll.runtime_profile = reroll_profile(
@@ -1567,6 +1598,7 @@ class RuntimeScheduler:
                 else:
                     self._analytics_batch_overflowed = True
             roll.roll_number += 1
+            self._record_pattern(roll, selected_profile, generator_key, now, "reroll")
             roll.next_roll_at = now + max(
                 1,
                 reroll_interval_seconds(profile=selected_profile, generator=generator),
@@ -1582,19 +1614,62 @@ class RuntimeScheduler:
                 profile=selected_profile,
                 device_id=generator_key,
                 roll_number=100_000 + roll.outage_check_number,
+                session_seed=roll.seed,
             )
             roll.outage_check_number += 1
-            if outage_is_selected(profile=selected_profile, generator=generator):
+            if outage_is_selected(profile=selected_profile, generator=generator) and now >= roll.outage_until:
                 duration = outage_duration_seconds(
                     profile=selected_profile,
                     generator=generator,
                 )
                 roll.outage_until = now + duration if duration else now
-            roll.next_outage_check_at = now + max(
+            roll.next_outage_check_at = max(now, roll.outage_until) + max(
                 1,
                 outage_interval_seconds(profile=selected_profile, generator=generator),
             )
+            self._record_pattern(roll, selected_profile, generator_key, now, "outage-check")
         return roll
+
+    def _record_pattern(self, roll: _DeviceRollState, profile: Profile, scope: str, now: float, kind: str) -> None:
+        if not self._preview and len(self._pending_events) < 1000:
+            self._pending_events.append({
+                "session_id": roll.session_id, "profile_id": profile.id, "scope": scope,
+                "happened_at": int(now), "kind": kind, "seed": str(roll.seed),
+                "elapsed_seconds": max(0.0, now - roll.started_at),
+                "roll_number": roll.roll_number, "outage_number": roll.outage_check_number,
+                "outage_until": roll.outage_until, "outage_active": roll.outage_until > now,
+                "upload": asdict(roll.runtime_profile.upload), "download": asdict(roll.runtime_profile.download),
+            })
+
+    def _save_patterns(self, repository: ConfigRepository, now: float) -> None:
+        active_sessions = {roll.session_id for roll in self._rolls.values()}
+        self._pending_events = [event for event in self._pending_events if event["session_id"] in active_sessions]
+        starts = {event["session_id"] for event in self._pending_events if event["kind"] == "start"}
+        for key, roll in self._rolls.items():
+            if not roll.history_started and roll.session_id not in starts:
+                scope = GENERAL_QUEUE_ID if key == "@general" else key
+                self._record_pattern(roll, roll.runtime_profile, scope, now, "start")
+        if not self._pending_events and now - self._last_pattern_cleanup_at < 3600:
+            return
+        try:
+            repository.save_pattern_events(self._pending_events, now=int(now))
+            self._last_pattern_cleanup_at = now
+            for roll in self._rolls.values():
+                roll.history_started = True
+        except StorageError:
+            LOGGER.warning("could not save pattern history", exc_info=True)
+        self._pending_events = []
+
+    def _service_profile(self, profile: Profile, key: str, now: float) -> Profile:
+        if profile.website_mode != "unrestricted":
+            raise PlanError("Service profiles cannot use a profile website allowlist")
+        roll = self._roll(key=key, selected_profile=profile, source_key=profile.id,
+                          source_profiles=profile, now=now)
+        if roll.outage_until > now:
+            return replace(roll.runtime_profile,
+                           upload=replace(roll.runtime_profile.upload, loss_percent=100),
+                           download=replace(roll.runtime_profile.download, loss_percent=100))
+        return roll.runtime_profile
 
     def _build_service_quota_rules(
         self,
@@ -1603,6 +1678,7 @@ class RuntimeScheduler:
         devices: Sequence[Device],
         profiles: Dict[str, Profile],
         now: float,
+        active_keys: set,
     ) -> tuple:
         """Resolve enabled service quotas into destination-aware traffic rules."""
 
@@ -1627,6 +1703,10 @@ class RuntimeScheduler:
                     quota.id,
                 )
                 continue
+            if quota.used_bytes >= quota.limit_bytes:
+                key = f"quota:{quota.id}"
+                active_keys.add(key)
+                fallback_profile = self._service_profile(fallback_profile, key, now)
             rules.append(
                 ServiceQuotaRule(
                     quota_id=quota.id,
@@ -1657,6 +1737,10 @@ class RuntimeScheduler:
                     quota.id,
                 )
                 continue
+            if self._time_quota_window_is_active(quota, now) and quota.used_seconds >= quota.limit_seconds:
+                key = f"quota:{time_quota_counter_id(quota.id)}"
+                active_keys.add(key)
+                fallback_profile = self._service_profile(fallback_profile, key, now)
             rules.append(
                 ServiceQuotaRule(
                     quota_id=time_quota_counter_id(quota.id),

@@ -114,10 +114,10 @@ def reroll_profile(
     )
 
 
-def seeded_generator(*, profile: Profile, device_id: str, roll_number: int) -> random.Random:
+def seeded_generator(*, profile: Profile, device_id: str, roll_number: int, session_seed: Optional[int] = None) -> random.Random:
     """Build a stable generator that changes only when the roll number changes."""
 
-    seed = profile.random_seed if profile.random_seed is not None else 0
+    seed = session_seed if session_seed is not None else profile.random_seed or 0
     material = f"{seed}:{device_id}:{roll_number}".encode("utf-8")
     digest = hashlib.sha256(material).digest()
     return random.Random(int.from_bytes(digest[:8], "big"))

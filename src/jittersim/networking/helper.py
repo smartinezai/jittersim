@@ -1142,7 +1142,8 @@ class HelperService:
                 self._active_plan = None
                 return {"ok": False, "error": "network plan state could not be published"}
         self._active_plan = plan
-        self._plan_count += 1
+        if not report.counters_preserved:
+            self._plan_count += 1
         self._list_domains = {rule.list_id: rule.domains for rule in plan.service_list_rules}
         if explicit_apply:
             self._panic_stop_latched = False
@@ -1166,7 +1167,8 @@ class HelperService:
                 except (OSError, ValueError, CommandExecutionError):
                     LOGGER.exception("household cleanup failed after Panic state save failure")
             return {"ok": False, "error": "gateway recovery state could not be saved safely"}
-        return {"ok": True, "action": "apply", "commands_run": report.commands_run}
+        return {"ok": True, "action": "apply", "commands_run": report.commands_run,
+                "counters_preserved": report.counters_preserved}
 
     def _write_active_plan(self, plan: NetworkPlan) -> None:
         path = self._active_plan_path

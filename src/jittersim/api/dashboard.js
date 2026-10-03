@@ -184,6 +184,9 @@
           // A dropped Wi-Fi shows up here. Say so plainly and keep the sign-in untouched.
           throw typeof lostConnectionError === "function" ? lostConnectionError(networkError) : networkError;
         }
+        if (options.isResponseCurrent && !options.isResponseCurrent()) {
+          throw new Error("Request is no longer current.");
+        }
         if (tokenRevision !== adminTokenRevision) {
           throw new Error("Token changed. Choose Check token to load.");
         }
@@ -213,6 +216,7 @@
         if (method === "GET" && typeof recordRead === "function") recordRead(path, null);
         return data;
       } catch (error) {
+        if (options.isResponseCurrent && !options.isResponseCurrent()) throw error;
         if (timedOut && tokenRevision === adminTokenRevision) {
           error = typeof lostConnectionError === "function"
             ? lostConnectionError(new Error(PI_NOT_ANSWERING)) : new Error(PI_NOT_ANSWERING);
@@ -293,7 +297,7 @@
     const privateDataPanelIds = [
       "profiles-json", "devices-json", "plan", "state", "policies",
       "connected-devices", "unaffected-devices", "uplink-details", "general-profile-status",
-      "saved-profiles", "device-table"
+      "saved-profiles", "device-table", "pattern-history-body", "pattern-history-status"
     ];
 
     const privateDataLockHooks = [];
@@ -307,6 +311,7 @@
       element("easy-address").hidden = allowed;
       if (allowed && typeof loadTrustDetails === "function") loadTrustDetails();
       document.body.classList.toggle("dashboard-locked", !allowed);
+      element("load-pattern-history").disabled = !allowed;
     }
 
     function lockDashboardAccess(message) {
@@ -5523,6 +5528,7 @@
       const download = profileDirectionSummary(profile.download);
       const parts = [upload === download ? "↕ " + upload : "↑ " + upload + " · ↓ " + download];
       if (profile.homepage_bounce_percent > 0) parts.push("homepage bounce " + profile.homepage_bounce_percent + "%");
+      if (profile.random_mode === "fresh") parts.push("fresh pattern");
       if (profile.outage_probability > 0) parts.push("outages " + profile.outage_probability + "%");
       if (profile.website_mode === "allow_only") {
         const sites = profile.website_domains.length;
@@ -5555,6 +5561,7 @@
       set("profile-id", profile.id);
       set("profile-name", profile.name);
       set("profile-seed", profile.random_seed);
+      set("profile-random-mode", profile.random_mode || "repeatable");
       set("profile-reroll", profile.reroll_interval_seconds);
       set("profile-reroll-variation", profile.reroll_interval_randomness.variation_percent);
       set("profile-homepage-chance", profile.homepage_bounce_percent || 0);
@@ -5582,6 +5589,55 @@
       });
     }
 
+    let patternHistoryRequest = 0;
+    privateDataLockHooks.push(() => {
+      patternHistoryRequest += 1;
+      element("pattern-history-body").replaceChildren();
+      element("pattern-history-status").textContent = "";
+      element("load-pattern-history").disabled = true;
+    });
+
+    element("load-pattern-history").addEventListener("click", async () => {
+      const button = element("load-pattern-history");
+      const status = element("pattern-history-status");
+      if (!adminTokenVerified || element("private-dashboard").hidden || button.disabled) return;
+      const requestId = ++patternHistoryRequest;
+      const tokenRevision = adminTokenRevision;
+      const isCurrent = () => requestId === patternHistoryRequest &&
+        tokenRevision === adminTokenRevision && adminTokenVerified &&
+        !element("private-dashboard").hidden;
+      button.disabled = true;
+      status.textContent = "Loading pattern choices...";
+      try {
+        const data = await request("/api/pattern-history", "GET", undefined, {isResponseCurrent: isCurrent});
+        if (!isCurrent()) return;
+        const body = element("pattern-history-body");
+        body.replaceChildren();
+        data.events.forEach((event) => {
+          const row = document.createElement("tr");
+          const choice = event.kind === "reroll" ? "new settings" : event.kind.replaceAll("-", " ");
+          const condition = event.outage_active ? "Disconnected until " + new Date(event.outage_until * 1000).toLocaleTimeString() : profileDirectionSummary(event.download);
+          [new Date(event.happened_at * 1000).toLocaleString(), event.scope,
+            choice, event.seed, condition].forEach((value) => {
+            const cell = document.createElement("td");
+            cell.textContent = value;
+            row.appendChild(cell);
+          });
+          body.appendChild(row);
+        });
+        status.textContent = data.events.length ? "Latest choices loaded." : "No pattern choices recorded yet.";
+      } catch (error) {
+        if (!isCurrent()) return;
+        if (error.status === 401 || error.status === 403) {
+          lockDashboardAccess(error.message);
+          return;
+        }
+        status.textContent = error.message;
+      } finally {
+        if (isCurrent()) button.disabled = false;
+      }
+    });
+
     function profileFormPayload(base) {
       const keep = (field) => base
         ? Object.assign({}, base[field])
@@ -5592,6 +5648,7 @@
         upload: impairment("upload"),
         download: impairment("download"),
         random_seed: optionalNumber("profile-seed"),
+        random_mode: element("profile-random-mode").value,
         reroll_interval_seconds: Number(element("profile-reroll").value),
         reroll_interval_randomness: {
           variation_percent: Number(element("profile-reroll-variation").value),
@@ -6829,7 +6886,7 @@
       );
       return Boolean(
         profile.homepage_bounce_percent || profile.reroll_interval_seconds || profile.outage_probability ||
-        profile.random_seed !== null || profile.website_mode !== "unrestricted" ||
+        profile.random_mode === "fresh" || profile.random_seed !== null || profile.website_mode !== "unrestricted" ||
         profile.website_domains.length ||
         advancedImpairment(profile.upload) || advancedImpairment(profile.download)
       );
@@ -7169,6 +7226,7 @@
       fillImpairment("upload", profile.upload);
       fillImpairment("download", profile.download);
       element("profile-seed").value = profile.random_seed === null ? "" : profile.random_seed;
+      element("profile-random-mode").value = profile.random_mode || "repeatable";
       element("profile-reroll").value = profile.reroll_interval_seconds;
       element("profile-reroll-variation").value =
         profile.reroll_interval_randomness.variation_percent;

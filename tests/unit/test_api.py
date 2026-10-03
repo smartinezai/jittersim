@@ -5380,7 +5380,8 @@ class ControlServerTests(unittest.TestCase):
             def sample_usage(self, *, repository):
                 events.append("sample")
 
-            def activate_plan(self, *, repository, prepared):
+            def activate_plan(self, *, repository, prepared, counters_preserved=False):
+                assert not counters_preserved
                 events.append("activate")
 
         class RecordingHelper(FakeHelper):
@@ -7765,5 +7766,4 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(_new_client_name("Sam's 📱 phone", "host", "192.168.50.7"), "Sam's 📱 phone")
         self.assertEqual(_new_client_name(None, "Café-tablet", "192.168.50.7"), "Café-tablet")
-
 

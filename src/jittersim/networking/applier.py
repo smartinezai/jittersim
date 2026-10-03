@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from ipaddress import IPv4Address
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set
 
 from jittersim.config.exemptions import MAX_UNAFFECTED_DEVICES, normalize_exempt_mac
 from jittersim.config.models import ValidationError
@@ -18,6 +18,7 @@ from .renderer import (
     PROJECT_TABLE,
     ROOT_HANDLE,
     render_command_plan,
+    render_live_queue_changes,
     render_reset_commands,
     render_service_address_commands,
 )
@@ -34,6 +35,7 @@ class ApplyReport:
     """Describe a completed apply operation."""
 
     commands_run: int
+    counters_preserved: bool = False
 
 
 class ApplyError(RuntimeError):
@@ -68,6 +70,8 @@ class NetworkApplier:
         self._executor = executor
         self._topology = topology
         self._lease_directory = lease_directory
+        self._installed_plan: Optional[NetworkPlan] = None
+        self._installed_service_addresses: Dict[str, Set[IPv4Address]] = {}
 
     def apply(
         self,
@@ -81,11 +85,13 @@ class NetworkApplier:
         already learned for it, so the new rules never start empty.
         """
 
+        roots_present = True
         try:
             project_roots = {
                 interface: self._root_queue(interface, for_apply=True)
                 for interface in (self._topology.uplink_interface, self._topology.test_interface)
             }
+            roots_present = all(project_roots.values())
             if not plan.queues:
                 # prio needs at least two bands, so remove the project roots.
                 # The nft script replaces the tables in one transaction, so their
@@ -102,13 +108,42 @@ class NetworkApplier:
                 cause=error,
                 cleanup_attempted=False,
             ) from error
-        commands = render_command_plan(
-            plan=plan, topology=self._topology, service_addresses=service_addresses
-        )
+        commands = None
+        if roots_present and self._installed_plan is not None:
+            commands = render_live_queue_changes(
+                previous=self._installed_plan, plan=plan, topology=self._topology
+            )
+        counters_preserved = commands is not None
+        wanted_addresses = {
+            rule.list_id: set((service_addresses or {}).get(rule.list_id, ()))
+            for rule in plan.service_list_rules
+        }
+        if commands is not None:
+            if service_addresses is None:
+                wanted_addresses = {
+                    key: set(values) for key, values in self._installed_service_addresses.items()
+                }
+            commands = tuple(commands) + tuple(render_service_address_commands(
+                plan=plan,
+                additions={
+                    key: tuple(values - self._installed_service_addresses.get(key, set()))
+                    for key, values in wanted_addresses.items()
+                },
+                removals={
+                    key: tuple(values - wanted_addresses.get(key, set()))
+                    for key, values in self._installed_service_addresses.items()
+                },
+            ))
+        if commands is None:
+            commands = render_command_plan(
+                plan=plan, topology=self._topology, service_addresses=service_addresses
+            )
         for command_index, command in enumerate(commands):
             try:
                 self._run_checked(command)
             except CommandExecutionError as error:
+                self._installed_plan = None
+                self._installed_service_addresses = {}
                 reset_error = self._try_reset()
                 if reset_error is not None:
                     raise ApplyError(
@@ -122,7 +157,9 @@ class NetworkApplier:
                     failed_command_index=command_index,
                     cause=error,
                 ) from error
-        return ApplyReport(commands_run=len(commands))
+        self._installed_plan = plan
+        self._installed_service_addresses = wanted_addresses
+        return ApplyReport(commands_run=len(commands), counters_preserved=counters_preserved)
 
     def update_service_addresses(
         self,
@@ -136,13 +173,29 @@ class NetworkApplier:
         commands = render_service_address_commands(
             plan=plan, additions=additions, removals=removals
         )
-        for command in commands:
-            self._run_checked(command)
+        try:
+            for command in commands:
+                self._run_checked(command)
+        except CommandExecutionError:
+            # A partial update leaves the live sets uncertain. Rebuild on the next apply.
+            self._installed_plan = None
+            self._installed_service_addresses = {}
+            raise
+        if self._installed_plan == plan:
+            for rule in plan.service_list_rules:
+                values = self._installed_service_addresses.setdefault(rule.list_id, set())
+                values.update(additions.get(rule.list_id, ()))
+                values.difference_update(removals.get(rule.list_id, ()))
+        else:
+            self._installed_plan = None
+            self._installed_service_addresses = {}
         return len(commands)
 
     def reset(self) -> int:
         """Remove only the nftables table and traffic queues owned by jittersim."""
 
+        self._installed_plan = None
+        self._installed_service_addresses = {}
         commands = render_reset_commands(topology=self._topology)
         project_roots = {
             interface: self._root_queue(interface, for_apply=False)

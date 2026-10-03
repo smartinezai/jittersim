@@ -380,7 +380,8 @@ class ServiceListOutageTests(_SchedulerCase):
         self.repository.save_profile(chancy)
         self.preview_rule(0)
 
-        outcomes = [self.preview_rule(2 + 2 * check).outage_active for check in range(40)]
+        # A selected one-second outage is followed by a two-second recovery interval.
+        outcomes = [self.preview_rule(2 + 3 * check).outage_active for check in range(40)]
 
         self.assertEqual(outcomes, [expected_outage(chancy, check)[0] for check in range(40)])
         self.assertEqual(set(outcomes), {True, False})
@@ -434,7 +435,7 @@ class ServiceListOutageTests(_SchedulerCase):
         self.preview_rule(0)
         outcomes = {"streaming": [], "work": []}
         for check in range(40):
-            plan = self.scheduler.prepare_plan(repository=self.repository, now=2 + 2 * check).plan
+            plan = self.scheduler.prepare_plan(repository=self.repository, now=2 + 3 * check).plan
             for rule in plan.service_list_rules:
                 outcomes[rule.list_id].append(rule.outage_active)
 

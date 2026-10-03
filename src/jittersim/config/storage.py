@@ -49,6 +49,7 @@ from .models import (
     Timer,
     ValidationError,
     WebsitePolicy,
+    time_quota_counter_id,
 )
 
 
@@ -142,6 +143,8 @@ def _serialize_profile_settings(profile: Profile) -> str:
         settings.pop(field_name, None)
     if profile.homepage_bounce_percent == 0:
         settings.pop("homepage_bounce_percent", None)
+    if profile.random_mode == "repeatable":
+        settings.pop("random_mode", None)
     return json.dumps(settings, sort_keys=True)
 
 
@@ -284,6 +287,17 @@ class ConfigRepository:
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 profile_id TEXT REFERENCES profiles(id) ON DELETE RESTRICT
             );
+            CREATE TABLE IF NOT EXISTS pattern_events (
+                id INTEGER PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                scope TEXT NOT NULL,
+                happened_at INTEGER NOT NULL,
+                event_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS pattern_events_session ON pattern_events(session_id, id);
+            CREATE INDEX IF NOT EXISTS pattern_events_time ON pattern_events(happened_at);
+            CREATE INDEX IF NOT EXISTS pattern_events_scope ON pattern_events(scope);
             INSERT OR IGNORE INTO general_profile_setting (id, profile_id) VALUES (1, NULL);
             CREATE TABLE IF NOT EXISTS unaffected_devices (
                 mac_address TEXT PRIMARY KEY,
@@ -609,6 +623,9 @@ class ConfigRepository:
         self._migrate_domain_observations()
         self._commit()
         self._prune_random_website_analytics(now=int(time.time()))
+        self._connection.execute(
+            "DELETE FROM pattern_events WHERE happened_at < ?", (int(time.time()) - 7 * 86400,)
+        )
         self._commit()
 
     def _upgrade_schedules_table(self) -> None:
@@ -1259,6 +1276,14 @@ class ConfigRepository:
                 "address_move_id = ''",
                 (device.mac_address, device.display_name, device.created_at),
             )
+            device_ids = {row[0] for row in self._connection.execute(
+                "SELECT id FROM devices WHERE mac_address = ?", (device.mac_address,)
+            )}
+            scopes = set(device_ids)
+            scopes.update(f"assignment:{item.id}" for item in self.list_service_assignments() if item.device_id in device_ids)
+            scopes.update(f"quota:{item.id}" for item in self.list_service_quotas() if item.device_id in device_ids)
+            scopes.update(f"quota:{time_quota_counter_id(item.id)}" for item in self.list_time_quotas() if item.device_id in device_ids)
+            self._connection.executemany("DELETE FROM pattern_events WHERE scope = ?", ((scope,) for scope in scopes))
             self._bump_configuration_version()
 
     def delete_unaffected_device(self, mac_address: str) -> bool:
@@ -1472,6 +1497,37 @@ class ConfigRepository:
         except sqlite3.Error as error:
             self._rollback()
             raise StorageError("could not remove connected-device label") from error
+
+    def save_pattern_events(self, events: Sequence[dict], *, now: int) -> None:
+        """Retain bounded configuration choices without recording traffic contents."""
+
+        if len(events) > 1000:
+            raise StorageError("Too many pattern events in one update")
+        try:
+            with self.transaction():
+                for event in events:
+                    self._connection.execute(
+                        "INSERT INTO pattern_events (session_id, profile_id, scope, happened_at, event_json) VALUES (?, ?, ?, ?, ?)",
+                        (event["session_id"], event["profile_id"], event["scope"], event["happened_at"], json.dumps(event)),
+                    )
+                self._connection.execute("DELETE FROM pattern_events WHERE happened_at < ?", (now - 7 * 86400,))
+                for session_id in {event["session_id"] for event in events}:
+                    self._connection.execute(
+                        "DELETE FROM pattern_events WHERE session_id = ? AND id NOT IN (SELECT id FROM pattern_events WHERE session_id = ? ORDER BY id DESC LIMIT 1000)",
+                        (session_id, session_id),
+                    )
+                self._connection.execute(
+                    "DELETE FROM pattern_events WHERE id NOT IN (SELECT id FROM pattern_events ORDER BY id DESC LIMIT 10000)"
+                )
+        except sqlite3.Error as error:
+            raise StorageError("Could not save pattern history") from error
+
+    def list_pattern_events(self, *, now: int) -> tuple:
+        rows = self._connection.execute(
+            "SELECT event_json FROM pattern_events WHERE happened_at >= ? ORDER BY id DESC LIMIT 100",
+            (now - 7 * 86400,),
+        ).fetchall()
+        return tuple(json.loads(row[0]) for row in rows)
 
     def list_profiles(self) -> tuple:
         """Return all stored profiles in stable identifier order."""

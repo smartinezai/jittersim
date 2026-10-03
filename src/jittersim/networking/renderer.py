@@ -1,5 +1,6 @@
 """Render a network plan into inspectable Linux command operations."""
 
+from dataclasses import replace
 from ipaddress import IPv4Address
 from typing import List, Mapping, Optional, Sequence
 
@@ -603,6 +604,39 @@ def render_command_plan(
         commands.extend(
             _render_tc_commands(queues=download_queues, interface=topology.test_interface)
         )
+    return tuple(commands)
+
+
+def render_live_queue_changes(*, previous: NetworkPlan, plan: NetworkPlan, topology: Topology):
+    """Return safe in-place changes or None when complete replacement is needed."""
+
+    def classification(value):
+        return replace(
+            value,
+            queues=tuple(replace(queue, impairment=Impairment()) for queue in value.queues),
+            service_list_rules=tuple(replace(rule, upload_impairment=Impairment(), download_impairment=Impairment()) for rule in value.service_list_rules),
+            service_assignment_rules=tuple(replace(rule, upload_impairment=Impairment(), download_impairment=Impairment()) for rule in value.service_assignment_rules),
+            service_quota_rules=tuple(replace(rule, upload_impairment=Impairment(), download_impairment=Impairment()) for rule in value.service_quota_rules),
+        )
+
+    if classification(previous) != classification(plan):
+        return None
+    commands = []
+    for before, after in zip(previous.queues, plan.queues):
+        if before.impairment == after.impairment:
+            continue
+        if (
+            before.impairment == Impairment() or after.impairment == Impairment()
+            or before.impairment.duplicate_percent or after.impairment.duplicate_percent
+        ):
+            return None
+        interface = topology.uplink_interface if after.direction == Direction.UPLOAD else topology.test_interface
+        commands.append(Command(
+            executable="tc",
+            arguments=("qdisc", "change", "dev", interface, "parent", queue_parent(after.mark),
+                       "handle", queue_handle(after.mark), *_format_impairment_arguments(after)),
+            purpose=f"update {after.direction.value} settings for {after.device_id}",
+        ))
     return tuple(commands)
 
 

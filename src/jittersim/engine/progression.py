@@ -80,6 +80,7 @@ def interpolate_profile(*, start: Profile, end: Profile, factor: float) -> Profi
             bounded_factor,
         ),
         random_seed=start.random_seed if bounded_factor < 1 else end.random_seed,
+        random_mode=start.random_mode if bounded_factor < 1 else end.random_mode,
         website_mode=start.website_mode if bounded_factor < 1 else end.website_mode,
         website_domains=start.website_domains if bounded_factor < 1 else end.website_domains,
         website_randomness=_interpolate_randomness(
