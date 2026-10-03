@@ -47,4 +47,4 @@ target-version = "py39"
 select = ["E", "F", "I"]
 
 [tool.setuptools.package-data]
-"jittersim.api" = ["*.js", "*.css"]
+"jittersim.api" = ["*.html", "*.js", "*.css"]
