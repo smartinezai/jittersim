@@ -111,7 +111,8 @@ def main(
             if localname.read_local_name(config / "trust.env") != current:
                 raise updates.UpdateError("the dashboard name changed while confirmation was open")
             localca.prepare(config, host_name=name, neutral_name=name,
-                            ethernet_ip=localca.detect_ethernet_ip() or None, budget=budget, run=runner)
+                            ethernet_ip=localca.detect_ethernet_ip() or None, budget=budget, run=runner,
+                            allow_adoption=False)
             localca.set_permissions(config, GROUP)
             budget.check()
             localname.set_local_name(name, config, GROUP)

@@ -241,6 +241,13 @@ Only a verified inherited descriptor may reuse it. A live command retains the
 lock and a durable record blocks later changes until its entire group ends.
 The update owner supplies and tests this shared policy before final integration.
 
+Manual rename refuses a legacy first adoption or any active adoption before
+changing certificate identity or the saved name. The candidate's durable proof
+includes the original saved-name bytes. Changing them during adoption would
+make recovery correctly refuse an unrelated replacement. Direct prepare defaults
+still allow the verified installer to complete adoption. An inactive completed
+record must allow ordinary renaming under the retained authority.
+
 Every standalone certificate CLI command uses that same operation context,
 including ensure, interrupted-adoption recovery, completion and health checks.
 No public bypass argument is added. The installed command must borrow the

@@ -102,3 +102,40 @@ def test_queued_or_malformed_retained_update_blocks_rename_before_crypto(tmp_pat
     (root / "request.json").write_text("malformed retained operation")
     assert run_cli(config, root, lambda *a, **k: pytest.fail("ran a command"), operation=None) == 1
     assert localname.read_local_name(config / "trust.env") == "netlab.local"
+
+
+@pytest.mark.parametrize("state", ["legacy", "active", "retired"])
+def test_manual_rename_preserves_unfinished_adoption_and_allows_retired_identity(tmp_path, state):
+    from tests.unit.test_ca_recovery import legacy
+
+    config, root = tmp_path / "config", tmp_path / "updates"
+    legacy(config)
+    adoption = config / ".certificate-adoption"
+    if state != "legacy":
+        localca.prepare(config, host_name="ignored.local", neutral_name="bench.local", ethernet_ip="192.168.1.20")
+        if state == "retired":
+            updates.finish_certificate_recovery(adoption)
+    before = identity(config)
+    proof = {str(path.relative_to(adoption)): path.read_bytes()
+             for path in adoption.rglob("*") if path.is_file()}
+    restarted = []
+
+    def owned(command, timeout, **kwargs):
+        if command[0] == "openssl":
+            return updates.capture_command(command, timeout, **kwargs)
+        restarted.append(command[-1])
+        return b""
+
+    result = run_cli(config, root, owned)
+    if state == "retired":
+        assert result == 0
+        assert identity(config)["ca/ca.crt"] == before["ca/ca.crt"]
+        assert localname.read_local_name(config / "trust.env") == "bench.local"
+        assert restarted == ["jittersim-mdns.service", "jittersim-dashboard.service"]
+    else:
+        assert result == 1
+        assert identity(config) == before
+        assert {str(path.relative_to(adoption)): path.read_bytes()
+                for path in adoption.rglob("*") if path.is_file()} == proof
+        assert not restarted
+        assert localname.read_local_name(config / "trust.env") == "old-dashboard.local"

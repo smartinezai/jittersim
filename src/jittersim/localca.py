@@ -505,19 +505,27 @@ def apple_profile(certificate: Path) -> bytes:
 @_bounded_crypto
 @_serialized_prepare
 def prepare(config_dir: Path, *, host_name: str, neutral_name: str,
-            ethernet_ip: Optional[str], budget=None, run=None) -> Tuple[bool, LeafResult]:
+            ethernet_ip: Optional[str], budget=None, run=None,
+            allow_adoption=True) -> Tuple[bool, LeafResult]:
     """Do the installer's work: keep the authority, renew the certificates."""
     neutral = validate_local_name(neutral_name)
     config_dir.mkdir(parents=True, exist_ok=True)
     _check_directory(config_dir)
     from .updates import (
-        UpdateError, _certificate_live_files, publish_certificate_adoption,
+        UpdateError, _certificate_live_files, _certificate_directory, _certificate_pointer,
+        publish_certificate_adoption,
         verify_certificate_identity,
     )
     addresses = [GATEWAY_ADDRESS]
     if ethernet_ip and ethernet_ip != "127.0.0.1":
         addresses.insert(0, ethernet_ip)
     try:
+        if not allow_adoption and os.path.lexists(config_dir / ".certificate-adoption"):
+            root = _certificate_directory(config_dir / ".certificate-adoption", private=True)
+            namespace = _certificate_directory(root / "certificate-recovery", private=True)
+            pointer = _certificate_pointer(namespace)
+            if pointer and pointer["active"]:
+                raise TrustError("finish certificate adoption through the verified installer before changing the dashboard name")
         if os.path.lexists(config_dir / ".certificate-adoption/certificate-recovery/current.json"):
             if publish_certificate_adoption(config_dir, required_names=(neutral,),
                                             required_addresses=(GATEWAY_ADDRESS,), deadline=_CRYPTO_DEADLINE.get()):
@@ -551,6 +559,8 @@ def prepare(config_dir: Path, *, host_name: str, neutral_name: str,
             aliases = tuple(dict.fromkeys((saved_name,) + aliases))
     names = sorted(old_names | {neutral} | set(aliases))
     if kind == "legacy":
+        if not allow_adoption:
+            raise TrustError("adopt the legacy certificate through the verified installer before changing the dashboard name")
         with tempfile.TemporaryDirectory(prefix=".certificate-adoption-stage-", dir=config_dir) as temporary:
             stage = Path(temporary)
             if "trust.env" in files:

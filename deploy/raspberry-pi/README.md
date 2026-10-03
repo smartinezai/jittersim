@@ -160,6 +160,11 @@ and the same remembered sign-in. The Pi's Ethernet address and `192.168.50.1`
 remain as a fallback, and `https://pi.home.arpa:8080` still works on the test
 Wi-Fi for bookmarks made with the earlier name.
 
+Changing the dashboard name requires completed certificate adoption. If the
+command reports an old self-signed identity or an unfinished adoption, complete
+the verified installer route over management access first. A rename does not
+replace an unfinished trust transition.
+
 How it works:
 
 - Avahi publishes an address record on every network unless the record is
