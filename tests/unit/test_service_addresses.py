@@ -9,6 +9,7 @@ from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import compile_plan
 from jittersim.engine.plan import ServiceListRule
 from jittersim.networking.applier import NetworkApplier
+from jittersim.networking.commands import CommandResult
 from jittersim.networking.executor import FakeExecutor
 from jittersim.networking.helper import (
     HelperClient,
@@ -17,6 +18,7 @@ from jittersim.networking.helper import (
     UnixHelperServer,
 )
 from jittersim.networking.service_addresses import ServiceAddressBook
+from jittersim.networking.renderer import ROOT_HANDLE
 from jittersim.networking.topology import Topology
 
 SLOW = Profile(id="slow", name="Slow", upload=Impairment(delay_ms=300))
@@ -150,6 +152,18 @@ class ServiceAddressHelperTests(unittest.TestCase):
     def apply(self, plan):
         response = self.service.handle_payload({"action": "apply", "plan": plan_to_payload(plan)})
         self.assertTrue(response["ok"], response)
+        return response
+
+    def show_owned_roots(self):
+        real_run = self.executor.run
+
+        def run(command):
+            result = real_run(command)
+            if command.arguments[:3] == ("-j", "qdisc", "show"):
+                return CommandResult(return_code=0, stdout=f'[{{"kind":"prio","handle":"{ROOT_HANDLE}"}}]')
+            return result
+
+        self.executor.run = run
 
     def send(self, addresses):
         return self.service.handle_payload({"action": "service-addresses", "addresses": addresses})
@@ -314,6 +328,77 @@ class ServiceAddressHelperTests(unittest.TestCase):
 
         self.assertEqual(self.send({"streaming": ["203.0.113.1"]})["added"], 0)
         self.assertEqual(self.executor.commands, [])
+
+    def test_live_apply_removes_expired_addresses_and_tracks_later_dns_updates(self) -> None:
+        self.show_owned_roots()
+        plan = list_plan()
+        self.apply(plan)
+        self.send({"streaming": ["203.0.113.1"]})
+        self.executor.commands.clear()
+        self.assertTrue(self.apply(plan)["counters_preserved"])
+        self.assertEqual(self.nft_scripts(), [])
+
+        self.clock.now += 6 * 3600 + 1
+        self.executor.commands.clear()
+        self.assertTrue(self.apply(plan)["counters_preserved"])
+        self.assertEqual(self.nft_scripts(), ["delete element inet jittersim svc_2 { 203.0.113.1 }\n"])
+        self.send({"streaming": ["203.0.113.2"]})
+        self.executor.commands.clear()
+        self.assertTrue(self.apply(plan)["counters_preserved"])
+        self.assertEqual(self.nft_scripts(), [])
+        self.clock.now += 6 * 3600 + 1
+        self.executor.commands.clear()
+        self.apply(plan)
+        self.assertEqual(self.nft_scripts(), ["delete element inet jittersim svc_2 { 203.0.113.2 }\n"])
+
+    def test_failed_dns_removal_forces_a_full_apply_after_a_partial_update(self) -> None:
+        self.show_owned_roots()
+        plan = list_plan()
+        self.apply(plan)
+        self.send({"streaming": ["203.0.113.1"]})
+        self.clock.now += 6 * 3600 + 1
+        real_run = self.executor.run
+
+        def failing(command):
+            if command.stdin and "delete element" in command.stdin:
+                self.executor.commands.append(command)
+                return CommandResult(return_code=1, stderr="failed address removal")
+            return real_run(command)
+
+        self.executor.run = failing
+        with self.assertLogs("jittersim.networking.helper", level="ERROR"):
+            self.assertFalse(self.send({"streaming": ["203.0.113.2"]})["ok"])
+        self.executor.run = real_run
+        self.executor.commands.clear()
+        self.assertFalse(self.apply(plan)["counters_preserved"])
+        self.assertIn("add set", self.nft_scripts()[0])
+        self.assertNotIn("203.0.113.1", self.nft_scripts()[0])
+        self.assertNotIn("203.0.113.2", self.nft_scripts()[0])
+
+    def test_failed_expiry_during_apply_cleans_up_and_next_apply_rebuilds(self) -> None:
+        self.show_owned_roots()
+        plan = list_plan()
+        self.apply(plan)
+        self.send({"streaming": ["203.0.113.1"]})
+        self.clock.now += 6 * 3600 + 1
+        real_run = self.executor.run
+
+        def failing(command):
+            if command.stdin and "delete element" in command.stdin:
+                self.executor.commands.append(command)
+                return CommandResult(return_code=1, stderr="failed address removal")
+            return real_run(command)
+
+        self.executor.run = failing
+        with self.assertLogs("jittersim.networking.helper", level="ERROR"):
+            response = self.service.handle_payload({"action": "apply", "plan": plan_to_payload(plan)})
+        self.assertFalse(response["ok"])
+        self.assertIsNone(self.service._applier._installed_plan)
+        self.assertTrue(any(command.arguments[:2] == ("delete", "table") for command in self.executor.commands))
+        self.executor.run = real_run
+        self.executor.commands.clear()
+        self.assertFalse(self.apply(plan)["counters_preserved"])
+        self.assertNotIn("203.0.113.1", self.nft_scripts()[0])
 
     def test_a_restarted_helper_finds_the_plan_that_is_still_applied(self) -> None:
         self.apply(list_plan())
