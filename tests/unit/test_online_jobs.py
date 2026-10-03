@@ -56,9 +56,9 @@ def test_the_unit_runs_the_job_and_the_status_shows_the_result(online):
     assert record["job"] == job and record["state"] == "done" and record["result"] == "staged"
     status = overview(online, job)
     assert status["state"] == "done" and status["result"] == "staged"
-    assert status["available"] == "v7" and status["tag"] == "v7"
+    assert status["available"] == "0.7.0" and status["tag"] == "v0.7.0"
     assert status["checked_at"] == int(online.clock[0])
-    assert "v7" in status["message"]
+    assert "v0.7.0" in status["message"]
     assert not (online.pi.root / updates.ONLINE_REQUEST).exists()
     assert TOKEN not in json.dumps(status)
     assert status["token_set"] is True
@@ -215,7 +215,7 @@ def test_install_automatically_queues_the_normal_install_with_its_recovery_copy(
     record = fetch(online)
     assert record["install_queued"] is True and "install was started" in record["message"]
     queued = json.loads((online.pi.root / "request.json").read_text())
-    assert queued["version"] == "v7" and queued["rollback"] is False
+    assert queued["version"] == "0.7.0" and queued["rollback"] is False
     assert queued["request_kind"] == "install"
     assert len(queued["request_id"]) == 32
     assert updates.read_json(online.pi.root / "status.json")["request_id"] == queued["request_id"]

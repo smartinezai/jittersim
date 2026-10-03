@@ -95,13 +95,13 @@ def test_check_now_returns_a_job_at_once_and_polling_shows_the_result(stack):
     assert status == 200 and running["state"] == "running"
     helper.run_unit()
     status, done = get(server, "/api/updates/check-online/" + answer["job"])
-    assert done["state"] == "done" and done["result"] == "staged" and done["available"] == "v7"
+    assert done["state"] == "done" and done["result"] == "staged" and done["available"] == "0.7.0"
     assert done["checked_at"] and done["message"]
     assert done["settings"] == {"daily_check": False, "install_automatically": False}
     assert get(server, "/api/updates/check-online")[1]["job"] == answer["job"]
     # The release shows in the ordinary update status, ready to install.
     status, release = get(server, "/api/updates")
-    assert release["available"] == "v7" and release["installable"] is True
+    assert release["available"] == "0.7.0" and release["installable"] is True
     assert release["token_set"] is True and release["source"] == "github"
     assert TOKEN not in json.dumps([answer, running, done, release])
 

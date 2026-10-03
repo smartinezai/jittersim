@@ -1756,6 +1756,8 @@ def _check_online(root, code, config, source):
                      MAX_API_ANSWER, deadline, what="answer")
     release = _parse_release(body)
     tag = release["tag"]
+    if not re.fullmatch(r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", tag):
+        raise OnlineError("the newest GitHub release does not have a stable version tag")
     installed = _record(code / ".jittersim-release.json")
     staged_record = _record(root / "staged" / ".jittersim-release.json")
     seen = _record(root / ONLINE_SEEN)
@@ -1784,7 +1786,7 @@ def _check_online(root, code, config, source):
                       "application/octet-stream", limit, deadline, target, what="file")
         try:
             record = stage_release(archive, signature=signature, root=root, code=code,
-                                   config=config, origin="github", tag=tag)
+                                   config=config, origin="github", tag=tag, version=tag[1:])
         except NotNewerError:
             atomic_json(root / ONLINE_SEEN, {"fingerprint": release["fingerprint"],
                                              "outcome": "not-newer"})
@@ -2339,8 +2341,15 @@ def prepare_install(staged, path, python, record, run, budget):
                                    "PIP_NO_CACHE_DIR": "true"}
     COMMAND_CONTEXT.observe = lambda: _check_preparation(path, budget)
     try:
-        run([str(python), "-m", "pip", "wheel", "--no-input", "--disable-pip-version-check",
-             "--no-cache-dir", "--wheel-dir", str(path / "wheels"), str(staged)], budget.limit(300))
+        locked_builder = staged / "deploy/raspberry-pi/prepare-locked-wheels.py"
+        if locked_builder.is_file() and (locked_builder.parent / "release-locks").is_dir():
+            run([str(python), "-I", str(locked_builder), "--source", str(staged),
+                 "--output", str(path / "wheels")], budget.limit(300))
+        else:
+            if re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", record.get("version", "")):
+                raise UpdateError("a stable release must include its locked package preparation")
+            run([str(python), "-m", "pip", "wheel", "--no-input", "--disable-pip-version-check",
+                 "--no-cache-dir", "--wheel-dir", str(path / "wheels"), str(staged)], budget.limit(300))
         budget.check()
         _check_preparation(path, budget)
         rows = []
