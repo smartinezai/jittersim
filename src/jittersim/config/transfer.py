@@ -5,6 +5,7 @@ from dataclasses import asdict, replace
 from typing import Any, Dict, Iterable
 
 from .models import MAX_UNAFFECTED_DEVICES, SavedSettings
+from .adblocking import allowed_domains, blocking_macs
 
 SETTINGS_FORMAT = "jittersim-settings"
 SETTINGS_VERSION = 3
@@ -133,6 +134,8 @@ def settings_to_payload(settings: SavedSettings, *, exported_at: int) -> Dict[st
             ],
         },
         "general_profile_id": settings.general_profile_id,
+        "ad_blocking_devices": list(settings.ad_blocking_devices),
+        "ad_blocking_allowances": list(settings.ad_blocking_allowances),
         "service_lists": [
             {
                 "id": service_list.id,
@@ -148,7 +151,7 @@ def settings_to_payload(settings: SavedSettings, *, exported_at: int) -> Dict[st
 
 
 # Files from main and from older Pi builds do not carry these sections.
-KEPT_WHEN_MISSING = ("general_profile_id", "service_lists")
+KEPT_WHEN_MISSING = ("general_profile_id", "service_lists", "ad_blocking_allowances")
 
 
 def keep_sections_missing_from(
@@ -160,10 +163,13 @@ def keep_sections_missing_from(
     without it leaves the saved section as it is.
     """
 
-    return replace(
-        settings,
-        **{key: getattr(current, key) for key in KEPT_WHEN_MISSING if key not in payload},
-    )
+    retained = {key: getattr(current, key) for key in KEPT_WHEN_MISSING if key not in payload}
+    if "ad_blocking_devices" not in payload:
+        protected = {item.mac_address for item in settings.unaffected_devices}
+        retained["ad_blocking_devices"] = tuple(
+            mac for mac in current.ad_blocking_devices if mac in protected
+        )
+    return replace(settings, **retained)
 
 
 def _require_unique(kind: str, identifiers: Iterable[str]) -> None:
@@ -198,6 +204,10 @@ def check_settings(
     )
     if len(settings.unaffected_devices) > MAX_UNAFFECTED_DEVICES:
         raise ValueError(f"the unaffected list holds at most {MAX_UNAFFECTED_DEVICES} devices")
+    selected = blocking_macs(settings.ad_blocking_devices)
+    allowed_domains(settings.ad_blocking_allowances)
+    if set(selected) - {item.mac_address for item in settings.unaffected_devices}:
+        raise ValueError("Ad blocking needs a protected device")
 
     profile_ids = {profile.id for profile in settings.profiles}
     device_ids = {device.id for device in settings.devices}

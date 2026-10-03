@@ -996,6 +996,8 @@ class SavedSettings:
     persist_profiles_after_gateway_outage: bool = False
     general_profile_id: Optional[str] = None
     service_lists: Tuple[ServiceList, ...] = ()
+    ad_blocking_devices: Tuple[str, ...] = ()
+    ad_blocking_allowances: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.persist_profiles_after_gateway_outage, bool):

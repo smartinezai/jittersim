@@ -13,6 +13,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Sequence, Tuple, Union
 
+from .adblocking import allowed_domains, blocking_macs
 from .device_labels import (
     MAX_SAVED_CONNECTED_DEVICE_LABELS,
     normalize_device_display_name,
@@ -308,6 +309,13 @@ class ConfigRepository:
                 mac_address TEXT PRIMARY KEY,
                 display_name TEXT NOT NULL,
                 device_type TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS ad_blocking_devices (
+                mac_address TEXT PRIMARY KEY REFERENCES unaffected_devices(mac_address)
+                    ON DELETE CASCADE ON UPDATE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS ad_blocking_allowances (
+                domain TEXT PRIMARY KEY
             );
             CREATE TABLE IF NOT EXISTS traffic_rate_settings (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -1410,6 +1418,38 @@ class ConfigRepository:
             )
             return bool(cursor.rowcount)
 
+    def list_ad_blocking_devices(self) -> tuple:
+        return blocking_macs(tuple(row['mac_address'] for row in self._connection.execute(
+            'SELECT mac_address FROM ad_blocking_devices ORDER BY mac_address LIMIT 257'
+        )))
+
+    def set_ad_blocking(self, mac_address: str, enabled: bool) -> None:
+        mac = normalize_exempt_mac(mac_address)
+        if type(enabled) is not bool:
+            raise ValueError('Choose whether ad blocking is on or off')
+        with self.transaction():
+            if self._connection.execute('SELECT 1 FROM unaffected_devices WHERE mac_address = ?',
+                                        (mac,)).fetchone() is None:
+                raise ValueError('Protect this device before enabling ad blocking')
+            if enabled:
+                self._connection.execute('INSERT OR IGNORE INTO ad_blocking_devices VALUES (?)', (mac,))
+            else:
+                self._connection.execute('DELETE FROM ad_blocking_devices WHERE mac_address = ?', (mac,))
+            self._bump_configuration_version()
+
+    def list_ad_blocking_allowances(self) -> tuple:
+        return allowed_domains(tuple(row['domain'] for row in self._connection.execute(
+            'SELECT domain FROM ad_blocking_allowances ORDER BY domain LIMIT 257'
+        )))
+
+    def set_ad_blocking_allowances(self, values) -> None:
+        domains = allowed_domains(values)
+        with self.transaction():
+            self._connection.execute('DELETE FROM ad_blocking_allowances')
+            self._connection.executemany('INSERT INTO ad_blocking_allowances VALUES (?)',
+                                         ((domain,) for domain in domains))
+            self._bump_configuration_version()
+
     def rebase_time_quota_sample(self, quota_id: str, *, now: int) -> None:
         self._connection.execute(
             "UPDATE time_quotas SET last_sample_at = ? WHERE id = ?",
@@ -1674,6 +1714,8 @@ class ConfigRepository:
             ),
             general_profile_id=self._general_profile_id(),
             service_lists=self.list_service_lists(),
+            ad_blocking_devices=self.list_ad_blocking_devices(),
+            ad_blocking_allowances=self.list_ad_blocking_allowances(),
         )
 
     def _general_profile_id(self) -> Optional[str]:
@@ -1773,6 +1815,10 @@ class ConfigRepository:
                     and self.get_runtime_state().configuration_version != expected_version
                 ):
                     raise StorageError("settings changed since the preview")
+                ad_devices = blocking_macs(settings.ad_blocking_devices)
+                ad_allowances = allowed_domains(settings.ad_blocking_allowances)
+                if set(ad_devices) - {item.mac_address for item in settings.unaffected_devices}:
+                    raise ValueError("Ad blocking needs a protected device")
                 usage = {}
                 if preserve_usage:
                     for table, key, columns in (
@@ -1855,6 +1901,9 @@ class ConfigRepository:
                     self.save_service_list(service_list)
                 for unaffected in settings.unaffected_devices:
                     self.save_unaffected_device(unaffected)
+                for mac in ad_devices:
+                    self.set_ad_blocking(mac, True)
+                self.set_ad_blocking_allowances(ad_allowances)
                 self.save_everyone_else_profile_id(settings.everyone_else_profile_id)
                 self.save_general_profile(settings.general_profile_id)
                 if newly_protected:

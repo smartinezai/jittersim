@@ -1,4 +1,5 @@
 import json
+import hashlib
 import socket
 import socketserver
 import tempfile
@@ -9,6 +10,7 @@ from ipaddress import IPv4Address
 from pathlib import Path
 
 from jittersim.config.models import Device, Impairment, MacPolicy, Profile, SiteBlock
+from jittersim.config.adblocking import ActiveBlocking, domain_bytes
 from jittersim.engine.access import AccessPlan
 from jittersim.engine.codec import plan_to_payload
 from jittersim.engine.compiler import compile_plan
@@ -29,6 +31,60 @@ class _EchoHandler(socketserver.BaseRequestHandler):
 
 
 class BrowserProxyTests(unittest.TestCase):
+    def test_ad_identity_survives_a_pattern_change_and_rejects_a_reused_address(self):
+        mac = "02:00:00:00:00:01"
+        device = Device("phone", "Phone", "192.168.50.10", "slow", mac)
+        plan = compile_plan(devices=(device,), profiles={"slow": Profile("slow", "Slow")})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "plan.json"
+            domains = domain_bytes(("advert.example.net",))
+            (root / "domains").write_bytes(domains)
+            (root / "ads.json").write_text(json.dumps({
+                "mac_addresses": [mac], "allowed_domains": [], "expires_at": 105,
+                "list_digest": hashlib.sha256(domains).hexdigest(),
+            }))
+
+            def publish(current):
+                temporary = path.with_suffix(".next")
+                temporary.write_text(json.dumps(plan_to_payload(current)))
+                temporary.replace(path)
+
+            publish(plan)
+            echo = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _EchoHandler)
+            echo.daemon_threads = True
+            threading.Thread(target=echo.serve_forever, daemon=True).start()
+            identity = [mac]
+            proxy = BrowserProxyServer(
+                ("127.0.0.1", 0), active_plan_path=path, client_network="127.0.0.0/8",
+                mark_socket=lambda *_: None, identify_client=lambda _: device.ipv4_address,
+                identify_mac=lambda _: identity[0],
+                resolve_addresses=lambda _: [(socket.AF_INET, socket.SOCK_STREAM, 0, echo.server_address)],
+                ad_blocking=ActiveBlocking(root / "ads.json", root / "domains", clock=lambda: 100),
+            )
+            worker = threading.Thread(target=proxy.serve_forever, daemon=True)
+            worker.start()
+            try:
+                with socket.create_connection(proxy.server_address, timeout=3) as client:
+                    client.sendall(b"CONNECT useful.example.net:443 HTTP/1.1\r\n\r\n")
+                    self.assertIn(b"200 Connection Established", client.recv(4096))
+                    changed = replace(plan, queues=tuple(
+                        replace(queue, impairment=Impairment(delay_ms=200)) for queue in plan.queues
+                    ))
+                    publish(changed)
+                    client.sendall(b"same-ad-client")
+                    self.assertEqual(client.recv(4096), b"same-ad-client")
+                    identity[0] = "02:00:00:00:00:02"
+                    publish(plan)
+                    client.sendall(b"different-client")
+                    self.assertEqual(client.recv(4096), b"")
+            finally:
+                proxy.shutdown()
+                proxy.server_close()
+                worker.join(timeout=3)
+                echo.shutdown()
+                echo.server_close()
+
     def test_general_profile_marks_both_sockets_for_unassigned_clients(self):
         protected_mac = "02:00:00:00:00:01"
         address = IPv4Address("192.168.50.99")

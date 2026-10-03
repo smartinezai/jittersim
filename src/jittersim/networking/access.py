@@ -7,7 +7,7 @@ import logging
 import os
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import Optional
@@ -204,6 +204,17 @@ def render_access_firewall(plan: AccessPlan, topology: Topology) -> str:
             f"ip saddr {TEST_NETWORK} tcp dport {DNS_PORT} ct state new {chance}"
             "counter reject with tcp reset"
         )
+        # Optional ad filtering must preserve the household DNS failure choice.
+        lines.append(
+            f'add rule inet {table} input iifname "{interface}" '
+            f"ip saddr {TEST_NETWORK} udp dport 5354 {chance}"
+            "counter reject with icmpx type port-unreachable"
+        )
+        lines.append(
+            f'add rule inet {table} input iifname "{interface}" '
+            f"ip saddr {TEST_NETWORK} tcp dport 5354 tcp flags & (syn | ack) == syn {chance}"
+            "counter reject with tcp reset"
+        )
     mac = plan.mac
     addresses = mac.allowlist if mac.mode == "allowlist" else mac.denylist
     if mac.mode != "disabled" and addresses:
@@ -328,12 +339,14 @@ class AccessManager:
         directory=ACCESS_DIRECTORY,
         runtime_path=ACCESS_RUNTIME,
         hostapd_path=Path("/run/jittersim-hostapd"),
+        ad_blocking_store=None,
     ):
         self.executor = executor
         self.topology = topology
         self.directory = Path(directory)
         self.runtime_path = Path(runtime_path)
         self.hostapd_path = Path(hostapd_path)
+        self.ad_blocking_store = ad_blocking_store
         self.lock = threading.RLock()
         self.error = None
         self.health_error = None
@@ -537,36 +550,40 @@ class AccessManager:
                 self._nft(render_access_firewall(plan, self.topology), check=True)
             finally:
                 candidate.unlink(missing_ok=True)
-            self._nft(transition_firewall(self.topology))
-            try:
-                self._install(plan)
-                content = json.dumps(plan.payload(), sort_keys=True) + "\n"
-                atomic_write(self.directory / "policy.json", content)
-                atomic_write(self.runtime_path, content)
-                self._nft(transition_firewall(self.topology, clear=True))
-            except Exception:
-                self.error = "Access update failed. Previous rules were restored."
+            transition = (self.ad_blocking_store.access_transition()
+                          if self.ad_blocking_store is not None else nullcontext())
+            with transition:
+                self._nft(transition_firewall(self.topology))
                 try:
-                    if old is None:
-                        raise ValueError("no readable previous access policy")
-                    self._install(old)
-                    content = json.dumps(old.payload(), sort_keys=True) + "\n"
+                    self._install(plan)
+                    content = json.dumps(plan.payload(), sort_keys=True) + "\n"
                     atomic_write(self.directory / "policy.json", content)
                     atomic_write(self.runtime_path, content)
                     self._nft(transition_firewall(self.topology, clear=True))
-                    self.applied = old
                 except Exception:
-                    self.error = (
-                        "Access recovery failed. "
-                        "The test network is closed until recovery succeeds."
-                    )
-                    LOGGER.exception("persistent access recovery failed")
-                raise
-            self.applied = plan
-            self.generation = self._generation()
-            self.error = None
-            self.health_error = None
-            return self.status()
+                    self.error = "Access update failed. Previous rules were restored."
+                    try:
+                        if old is None:
+                            raise ValueError("no readable previous access policy")
+                        self._install(old)
+                        content = json.dumps(old.payload(), sort_keys=True) + "\n"
+                        atomic_write(self.directory / "policy.json", content)
+                        atomic_write(self.runtime_path, content)
+                        self._nft(transition_firewall(self.topology, clear=True))
+                        self.applied = old
+                    except Exception:
+                        self.error = (
+                            "Access recovery failed. "
+                            "The test network is closed until recovery succeeds."
+                        )
+                        LOGGER.exception("persistent access recovery failed")
+                    raise
+                self.applied = plan
+                self.generation = self._generation()
+                self.error = None
+                self.health_error = None
+                return self.status()
+
 
     def restore(self):
         return self.apply(None, force=True)

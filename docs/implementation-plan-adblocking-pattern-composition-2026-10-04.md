@@ -140,3 +140,31 @@ CI may be replaced by complete local counterparts only when actual hosted CI
 is blocked solely by billing. A real test failure, unrun command or unexplained
 skip remains a blocker. Decide whether to use one composed feature pull request
 or two separately verified pull requests after reviewing this composition.
+
+## Preparation record
+
+The original pattern head and ad head remain unchanged in their feature
+branches. Preparation merged maintenance `04c982d6150d225c3be6cc082573afc64a656842`
+as `c5a9e22`. Its one conflict joined the dashboard’s private-panel clearing
+lists so diagnostics and pattern history are both cleared after sign-out.
+
+The ad merge had five conflicted files. The dashboard’s trailing whitespace was
+removed. The API preserves early intent capture for general-profile controls
+and ad controls. The helper retains both counter-generation reporting and ad
+resume after a successful durable Panic record write. The proxy retains a
+verified MAC for ad-filtered clients when pattern queues change. Its focused
+socket regression closes the earlier healthy tunnel without that condition and
+passes with it, including rejection after another MAC takes over the address.
+
+The update registry contains exactly two complete approved tuples: the original
+production bundle and the combined bundle. The combined source review is saved
+in `docs/review-results-adblocking-pattern-consumers-2026-10-04.json` with SHA256
+`6471f561ac1425e2f12e0de477a5e665264ffa177070275122b9b6cfa607bd9f`.
+The Panic producer and access consumer are identical to the reviewed ad head.
+The helper differs only in the two reviewed pattern counter-report changes.
+Unneeded unpublished standalone tuples were removed. This source approval does
+not establish passing combined checks or approve a later changed consumer.
+
+The published main is still pending. No final wheel, Linux composition run,
+remote update or Pi write has been performed during this preparation. Separate
+incoming range and navigation work is outside this composition’s current scope.

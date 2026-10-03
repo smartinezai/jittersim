@@ -130,7 +130,7 @@ fi
 chown -R root:root "$INSTALL_DIR"
 chmod -R go-w "$INSTALL_DIR"
 runuser -u jittersim -- "$INSTALL_DIR/.venv/bin/python" -I -c \
-    'import jittersim.api.server, jittersim.networking.helper, jittersim.networking.browser_proxy, jittersim.networking.dns_watch, jittersim.networking.access, jittersim.dashboard_access_cli'
+    "import jittersim.api.server, jittersim.networking.helper, jittersim.networking.browser_proxy, jittersim.networking.dns_watch, jittersim.networking.access, jittersim.dashboard_access_cli; import importlib.util; importlib.import_module('jittersim.networking.adblocking') if importlib.util.find_spec('jittersim.networking.adblocking') else None"
 "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/deploy/raspberry-pi/bootstrap-dashboard-access.py"
 # `sudo jittersim normal-access` and `sudo jittersim wifi reset` work when the dashboard is down.
 ln -sf "$INSTALL_DIR/.venv/bin/jittersim" /usr/local/bin/jittersim
@@ -295,6 +295,9 @@ install -m 0644 -o root -g root \
 install -m 0644 -o root -g root \
     "$SOURCE_DIR/deploy/raspberry-pi/jittersim-service-watch.service" \
     /etc/systemd/system/jittersim-service-watch.service
+install -m 0644 -o root -g root \
+    "$SOURCE_DIR/deploy/raspberry-pi/jittersim-adblocking.service" \
+    /etc/systemd/system/jittersim-adblocking.service
 
 install -m 0644 -o root -g root \
     "$SOURCE_DIR/deploy/raspberry-pi/jittersim-update.service" \
@@ -348,7 +351,7 @@ restore_access_rules() {
 restore_access_rules
 systemctl enable jittersim-control-firewall.service
 systemctl restart jittersim-control-firewall.service
-systemctl enable jittersim-helper.service jittersim-dashboard.service jittersim-browser-proxy.service jittersim-service-watch.service
+systemctl enable jittersim-helper.service jittersim-dashboard.service jittersim-browser-proxy.service jittersim-adblocking.service jittersim-service-watch.service
 systemctl restart jittersim-helper.service
 if [ "$ap_active_connection" = jittersim-ap ]; then
     if [ "$ap_settings_before" != "$ap_settings_after" ] || [ "$dns_name_changed" = yes ]; then
@@ -361,6 +364,7 @@ else
 fi
 systemctl restart jittersim-browser-proxy.service
 systemctl restart jittersim-service-watch.service
+systemctl restart jittersim-adblocking.service
 systemctl restart jittersim-dashboard.service
 
 setup_dashboard_name_service() {

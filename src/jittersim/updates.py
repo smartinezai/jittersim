@@ -127,6 +127,7 @@ SERVICES = (
     "jittersim-helper.service",
     "jittersim-dashboard.service",
     "jittersim-browser-proxy.service",
+    "jittersim-adblocking.service",
 )
 WATCHER = "jittersim-service-watch.service"
 # The one-shot root unit that runs one online release check for the dashboard.
@@ -140,7 +141,7 @@ UNITS = SERVICES + (
     WATCHER, NAME_UNIT,
 )
 # Recovery copies made before they listed their files covered these units.
-LEGACY_UNITS = tuple(unit for unit in UNITS if unit != NAME_UNIT)
+LEGACY_UNITS = tuple(unit for unit in UNITS if unit not in (NAME_UNIT, "jittersim-adblocking.service"))
 UNIT_NAME = re.compile(r"jittersim-[a-z0-9-]{1,48}\.service\Z")
 # The systemctl calls of install.sh in its order. The test Wi-Fi unit only
 # starts when its connection is down. Nothing restarts or stops it so an update
@@ -157,6 +158,7 @@ SERVICE_STEPS = (
     ("start", WIFI_UNIT),
     ("restart", "jittersim-browser-proxy.service"),
     ("restart", WATCHER),
+    ("restart", "jittersim-adblocking.service"),
     ("restart", "jittersim-dashboard.service"),
 )
 # install.sh publishes the dashboard name as a best effort. A failure only
@@ -177,7 +179,10 @@ FIREWALL_RULES = "jittersim-control-firewall.nft"
 IMPORT_CHECK = (
     "import jittersim.api.server, jittersim.networking.helper, "
     "jittersim.networking.browser_proxy, jittersim.networking.dns_watch, "
-    "jittersim.networking.access, jittersim.dashboard_access_cli"
+    "jittersim.networking.access, jittersim.dashboard_access_cli; "
+    "import importlib.util; "
+    "importlib.import_module('jittersim.networking.adblocking') "
+    "if importlib.util.find_spec('jittersim.networking.adblocking') else None"
 )
 INTERFACE = re.compile(r"[A-Za-z0-9_.:-]{1,15}\Z")
 # A release is MAJOR.MINOR.PATCH. A build that is not tagged is NUMBER.dev+COMMIT.
@@ -202,7 +207,10 @@ def version_key(version):
 
 def release_files(*, code, units, dispatcher):
     """Files install.sh copies from a release as (source, destination, mode)."""
-    files = [(PI + unit, units / unit, 0o644) for unit in UNITS]
+    files = [(PI + unit, units / unit, 0o644) for unit in UNITS
+             if unit != "jittersim-adblocking.service"
+             or (code / PI / unit).is_file()
+             or (code / "src/jittersim/networking/adblocking.py").is_file()]
     files.append((PI + "jittersim-mdns-dispatcher", dispatcher, 0o755))
     return files
 
@@ -968,10 +976,10 @@ PANIC_APPROVED_SOURCES = ({
     "src/jittersim/networking/helper.py": "e9b0e6070c5bb27d2983711b808e33e541099c762fc562eaf5c73ede3d2045e4",
     "src/jittersim/networking/access.py": "1d4edebe57877e6db6bbbcd0d1adaecfd9fa48573c0f8830b10a2dcdaaf04ec6",
 }, {
-    # The counter update was reviewed at 3fc9614 with the same producer and access consumer.
+    # See docs/review-results-adblocking-pattern-consumers-2026-10-04.json.
     "src/jittersim/panic_guard.py": "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
-    "src/jittersim/networking/helper.py": "9d493cfd7304c22459e51401003310db9321cc0dc5486edf7704a933ad88b1d2",
-    "src/jittersim/networking/access.py": "1d4edebe57877e6db6bbbcd0d1adaecfd9fa48573c0f8830b10a2dcdaaf04ec6",
+    "src/jittersim/networking/helper.py": "391624ec30f18e25cff574db157ca53f84b4be6869734154a0d32dd9da9542e5",
+    "src/jittersim/networking/access.py": "048c13f63e32c862a0d829715ee4259c47d2a2664be17a2ca65b78e21344ab77",
 },)
 
 
@@ -3688,7 +3696,7 @@ def command_still_running(record, budget):
     return command_group_running(record["group"], budget.deadline)
 
 
-def healthy(*, config=CONFIG_ROOT, run=run_command, port=8080, budget=None):
+def healthy(*, config=CONFIG_ROOT, run=run_command, port=8080, budget=None, services=None):
     deadline = time.monotonic() + (budget.limit(10) if budget is not None else 10)
 
     def remaining():
@@ -3737,7 +3745,11 @@ def healthy(*, config=CONFIG_ROOT, run=run_command, port=8080, budget=None):
             super().__init__(DeadlineSocket(transport), *args, **kwargs)
 
     try:
-        for service in SERVICES:
+        selected = services if services is not None else [
+            name for name in SERVICES if name != "jittersim-adblocking.service"
+            or (UNITS_ROOT / name).is_file()
+        ]
+        for service in selected:
             run(["systemctl", "is-active", "--quiet", service], min(5, remaining()))
             remaining()
         token = next(
@@ -3828,7 +3840,11 @@ def apply_update(
         budget.check()
         return result
 
-    health = health or (lambda: healthy(config=config, run=run, budget=budget))
+    health = health or (lambda: healthy(
+        config=config, run=run, budget=budget,
+        services=[name for name in SERVICES if name != "jittersim-adblocking.service"
+                  or (units / name).is_file()],
+    ))
     with update_lock(root, wait=budget.limit(15)):
         budget.check()
         request = read_json(root / "request.json")

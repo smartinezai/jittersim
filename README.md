@@ -237,8 +237,9 @@ See
 - Local DNS observations with query counts and plain-language labels. Names that
   belong to one app collapse into a group. Buttons add observed domains to a
   profile or the global block list and show when a name is already blocked.
-- Protected devices are never monitored. They are greyed out and never appear
+- Protected devices stay out of traffic monitoring. They are greyed out and never appear
   in traffic discovery or in the impact check.
+- Optional DNS ad blocking for each protected device without saved browsing history.
 - An impact check in Diagnostics that shows packet loss and speed limits
   actually happening to each device.
 
@@ -636,9 +637,9 @@ you typed always beats one that a device announces. The IP address stays as
 small text under the name. A connected client saved without a name takes its
 announced name instead of `Client <ip>`.
 
-### Protected devices are never monitored
+### Protected devices and privacy
 
-A device in **Unaffected by profiles** is not monitored. Its row says `Traffic
+A device in **Unaffected by profiles** stays out of traffic monitoring. Its row says `Traffic
 is not monitored` and is greyed out with its profile and group controls
 disabled. **Remove protection** and the name and type editor stay active.
 
@@ -651,6 +652,43 @@ disabled. **Remove protection** and the name and type editor stay active.
   the scan refuses to run and asks you to restart the services or reinstall.
 - Protection follows the MAC address. A device that randomises its Wi-Fi address
   looks like a new unprotected device until you add its new address.
+
+### Optional ad blocking
+
+Each saved entry in **Protected devices** has a **Block ads** switch.
+It starts off and works independently from profiles and quotas. The saved
+choice follows the Wi-Fi MAC address even when the device disconnects.
+Removing protection also removes its ad-blocking choice. Adding it again
+starts with the switch off.
+
+Blocking checks requested domain names against an advertising list. It
+does not save query logs, per-device counts or browsing history. Ordinary
+traffic discovery still excludes the device. A small DNS answer cache is
+held in memory so repeated lookups do not need another upstream request.
+
+The first version filters DNS sent to the Pi on JitterSim Wi-Fi and checks
+new connections through the managed browser proxy. Expect fewer ads.
+Encrypted DNS, VPNs, direct IP connections, existing browser connections
+and cached DNS answers can bypass filtering. Ads that share a domain with
+useful content cannot be blocked separately. DNS aliases can also hide an
+advertising destination from the requested-name check.
+
+Open **Ad-blocking options** to allow domains for broken sites. An allowed
+domain includes its subdomains and applies to all devices whose switch is
+on. Existing global access rules still apply. **Update ad list** requests
+an update. Otherwise the service refreshes the list daily while blocking
+is enabled. Failed updates retain the last valid list. Downloads come from
+the fixed [StevenBlack hosts list](https://github.com/StevenBlack/hosts).
+The publisher lists the contributing sources and their licenses.
+
+The dashboard separates the saved choice from whether blocking is active.
+If the DNS blocker dies or its controller stops responding, temporary
+routing expires within five seconds and normal DNS rules resume. A failed
+initial download leaves normal DNS available. **Reset network** and
+**Panic** pause blocking while keeping the saved switches. **Start**
+resumes it. Explicitly enabling a switch also resumes
+blocking. Turning off a switch keeps profile protection.
+Restoring earlier settings preserves a later Panic stop.
 
 ### Traffic discovery
 

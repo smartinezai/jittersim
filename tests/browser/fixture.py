@@ -13,10 +13,12 @@ import jittersim.api.server as server_module
 from jittersim.api.server import ControlServer
 from jittersim.config.exemptions import UnaffectedDevice
 from jittersim.config.models import Device, DomainObservation, Impairment, Profile, Scenario, ScenarioStep
+from tests.adblocking_support import provision_guard
 from jittersim.config.storage import ConfigRepository
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.networking.access import AccessManager
 from jittersim.networking.applier import NetworkApplier
+from jittersim.networking.adblocking import AdRouting, AdStore
 from jittersim.networking.commands import CommandResult
 from jittersim.networking.dashboard_access import AccessStore
 from jittersim.networking.renderer import queue_handle, queue_parent
@@ -296,10 +298,15 @@ def main():
         root = Path(directory)
         executor = DashboardWifiExecutor()
         topology = Topology("eth0", "wlan0")
+        ad_blocking = AdStore(AdRouting("wlan0", executor), path=root / "ad-policy.json",
+                              lock_path=root / "ad-lock", active_path=root / "ad-active.json",
+                              status_path=root / "ad-status.json", intent_path=root / "ad-intent.json",
+                              panic_guard=provision_guard(root))
         # Household access rules run against the same simulated commands.
         access_manager = FixtureAccessManager(
             executor=executor, topology=topology, directory=root / "access",
             runtime_path=root / "access-policy.json", hostapd_path=root / "hostapd",
+            ad_blocking_store=ad_blocking,
         )
         access_store = AccessStore(root / "access.json")
         if os.environ.get("JITTERSIM_BROWSER_TEST_OLD_ADDRESS") == "1":
@@ -308,6 +315,7 @@ def main():
         service = DashboardHelperService(NetworkApplier(executor=executor, topology=topology),
                                          router_factory=lambda *_: DashboardRouter(),
                                          access_store=access_store,
+                                         ad_blocking_store=ad_blocking,
                                          access_manager=access_manager)
         with UnixHelperServer(root / "wifi.sock", service) as helper:
             worker = threading.Thread(target=helper.serve_forever, daemon=True)
