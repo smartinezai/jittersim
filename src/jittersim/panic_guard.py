@@ -314,6 +314,18 @@ class PanicGuard:
         state = self.read()
         if state is not None:
             return state
+        return self.write(self.inspect_upgrade(legacy_path), initialize_only=True)
+
+    def inspect_upgrade(self, legacy_path):
+        """Read proven current intent without creating or changing guard state.
+
+        A caller must stop writers then provision again. This result is a preview
+        and must never replace the producer's fresh read at that boundary.
+        """
+
+        state = self.read()
+        if state is not None:
+            return state
         if legacy_path is None:
             raise PanicGuardError(
                 "The previous installation cannot prove Panic state for this upgrade"
@@ -379,7 +391,7 @@ class PanicGuard:
                     validate_panic_guard(state)
                 except (UnicodeDecodeError, ValueError) as error:
                     raise PanicGuardError("Existing Panic stop record is invalid") from error
-        return self.write(state, initialize_only=True)
+        return state
 
     def provision_upgrade(self, legacy_path):
         """Migrate complete proven old intent without repairing or inventing it."""

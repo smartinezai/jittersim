@@ -101,3 +101,77 @@ def test_actual_producer_cli_reports_only_guard_state_and_refuses_unproven_first
     old.write_text(json.dumps(legacy_state(True)))
     assert module.main(["--provision-upgrade"]) == 0
     assert json.loads(capsys.readouterr().out) == persistent.read()
+
+
+@pytest.mark.parametrize("stopped,failed", [(False, False), (True, False), (True, True)])
+def test_read_only_upgrade_inspection_preserves_proven_flags_without_creating_guard(
+    tmp_path, stopped, failed
+):
+    persistent, old = fixture(tmp_path)
+    before = json.dumps(legacy_state(stopped, failed))
+    old.write_text(before)
+    inspected = persistent.inspect_upgrade(old)
+    assert inspected == {
+        "version": 2,
+        "panic_stop_latched": stopped,
+        "household_stop_latched": stopped,
+        "panic_recovery_failed": failed,
+        "control_revision_required": stopped,
+    }
+    assert not persistent.path.parent.exists()
+    assert old.read_text() == before
+
+
+@pytest.mark.parametrize("damage", ["missing", "old-schema", "boolean-version", "missing-flags"])
+def test_read_only_upgrade_inspection_refuses_unknown_state_without_creating_guard(
+    tmp_path, damage
+):
+    persistent, old = fixture(tmp_path)
+    if damage != "missing":
+        state = legacy_state()
+        if damage == "old-schema":
+            state = {"version": 1}
+        elif damage == "boolean-version":
+            state["version"] = True
+        else:
+            state.pop("panic_stop_latched")
+        old.write_text(json.dumps(state))
+    before = old.read_bytes() if old.exists() else None
+    with pytest.raises(OSError):
+        persistent.inspect_upgrade(old)
+    assert not persistent.path.parent.exists()
+    assert (old.read_bytes() if old.exists() else None) == before
+
+
+def test_producer_rechecks_current_panic_after_read_only_upgrade_inspection(tmp_path):
+    persistent, old = fixture(tmp_path)
+    old.write_text(json.dumps(legacy_state()))
+    assert not persistent.inspect_upgrade(old)["panic_stop_latched"]
+    old.write_text(json.dumps(legacy_state(True, True)))
+    current = persistent.provision_upgrade(old)
+    assert current["panic_stop_latched"] and current["household_stop_latched"]
+    assert current["panic_recovery_failed"] and current["control_revision_required"]
+    assert persistent.read() == current
+
+
+def test_read_only_upgrade_inspection_preserves_established_guard_and_refuses_missing_record(
+    tmp_path,
+):
+    persistent, old = fixture(tmp_path)
+    old.write_text(json.dumps(legacy_state()))
+    current = persistent.write(
+        {
+            "version": 2,
+            "panic_stop_latched": True,
+            "household_stop_latched": True,
+            "panic_recovery_failed": True,
+            "control_revision_required": True,
+        }
+    )
+    before = persistent.path.read_bytes()
+    assert persistent.inspect_upgrade(old) == current
+    assert persistent.path.read_bytes() == before
+    persistent.path.unlink()
+    with pytest.raises(OSError):
+        persistent.inspect_upgrade(old)
+    assert not persistent.path.exists()
