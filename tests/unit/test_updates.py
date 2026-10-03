@@ -273,7 +273,7 @@ class UpdateTests(unittest.TestCase):
         request_update("", rollback=True, root=self.root, code=self.code, config=self.config, run=lambda *args: None)
         self.apply(lambda *args: None, lambda: True)
         self.assertFalse((self.code / "src").exists())
-        self.assertEqual(self.manager.read_text(), "old recovery manager")
+        self.assertEqual(self.manager.read_text(), "new recovery manager")
         self.assertEqual(update_status(root=self.root, code=self.code, config=self.config)["phase"], "rolled-back")
 
     def test_failed_health_check_restores_the_previous_installation(self):
@@ -752,6 +752,213 @@ class UpdateTests(unittest.TestCase):
         # The configuration came back from the recovery copy without any key.
         self.assertIsNone(self.signers())
         self.assertTrue(json.loads((self.root / "request.json").read_text())["rollback"])
+        self.apply(lambda *args: None, lambda: True)
+        self.assertEqual(self.signers(), now)
+
+    def prepare_legacy_trust_recovery(self):
+        old_signers = self.signers()
+        self.install()
+        legacy = self.root / "backup/config"
+        (legacy / updates.SIGNERS_NAME).write_text(old_signers)
+        (legacy / updates.TOKEN_NAME).write_text("toy-old-token\n")
+        (legacy / updates.TOKEN_NAME).chmod(0o600)
+        _, replacement = make_key(self.base / "replacement", comment="replacement")
+        trust_key(replacement, config=self.config, root=self.root)
+        updates.untrust_key("owner@mac", config=self.config, root=self.root,
+                            sudoers=self.base / "sudoers")
+        token = self.config / updates.TOKEN_NAME
+        token.write_text("toy-current-token\n")
+        token.chmod(0o600)
+        request_update("", rollback=True, root=self.root, code=self.code,
+                       config=self.config, run=lambda *args: None)
+        return self.signers()
+
+    def interrupt_trust_recovery(self, boundary):
+        original_tree = updates.shutil.copytree
+        original_file = updates.shutil.copy2
+        failures = []
+
+        def copytree(source, destination, *args, **kwargs):
+            if boundary == "data" and Path(destination) == self.data:
+                failures.append(boundary)
+                raise OSError("test interruption while restoring data")
+            result = original_tree(source, destination, *args, **kwargs)
+            if boundary == "config" and Path(destination) == self.config:
+                failures.append(boundary)
+                raise OSError("test interruption after restoring configuration")
+            return result
+
+        def copy2(source, destination, *args, **kwargs):
+            if boundary == "trust" and Path(source) == self.root / "keep" / updates.TOKEN_NAME:
+                failures.append(boundary)
+                raise OSError("test interruption while restoring current trust")
+            return original_file(source, destination, *args, **kwargs)
+
+        with patch("jittersim.updates.shutil.copytree", copytree), \
+                patch("jittersim.updates.shutil.copy2", copy2), \
+                self.assertRaises(OSError):
+            self.apply(lambda *args: None, lambda: True)
+        # Both the requested restore and its automatic recovery hit the failure.
+        self.assertEqual(failures, [boundary, boundary])
+        self.assertTrue(json.loads((self.root / "request.json").read_text())["rollback"])
+
+    def check_legacy_recovery_retry(self, boundary):
+        now = self.prepare_legacy_trust_recovery()
+        self.interrupt_trust_recovery(boundary)
+        self.assertNotIn("owner@mac", self.signers() or "")
+        kept = self.root / "keep"
+        self.assertEqual((kept / updates.SIGNERS_NAME).read_text(), now)
+        self.assertEqual((kept / updates.TOKEN_NAME).read_text(), "toy-current-token\n")
+        token = self.config / updates.TOKEN_NAME
+        self.assertFalse(token.exists())
+        self.apply(lambda *args: None, lambda: True)
+        self.assertEqual(self.signers(), now)
+        self.assertEqual(token.read_text(), "toy-current-token\n")
+        self.assertEqual(token.stat().st_mode & 0o777, 0o600)
+        self.assertFalse(kept.exists())
+
+    def test_legacy_recovery_keeps_current_trust_after_data_interruption(self):
+        self.check_legacy_recovery_retry("data")
+
+    def test_legacy_recovery_keeps_current_trust_after_config_interruption(self):
+        self.check_legacy_recovery_retry("config")
+
+    def test_legacy_recovery_keeps_current_trust_after_trust_interruption(self):
+        self.check_legacy_recovery_retry("trust")
+
+    def test_interrupted_legacy_recovery_does_not_invent_missing_current_trust(self):
+        self.prepare_legacy_trust_recovery()
+        for name in updates.PRESERVED_CONFIG:
+            (self.config / name).unlink()
+        self.interrupt_trust_recovery("data")
+        self.assertIsNone(self.signers())
+        self.apply(lambda *args: None, lambda: True)
+        self.assertIsNone(self.signers())
+        self.assertFalse((self.config / updates.TOKEN_NAME).exists())
+
+    def test_key_revoked_during_interrupted_recovery_stays_revoked(self):
+        self.prepare_legacy_trust_recovery()
+        self.interrupt_trust_recovery("data")
+        updates.untrust_key("replacement", config=self.config, root=self.root,
+                           sudoers=self.base / "sudoers")
+        self.apply(lambda *args: None, lambda: True)
+        self.assertEqual(updates.trusted_keys(self.config), [])
+        self.assertEqual((self.config / updates.TOKEN_NAME).read_text(), "toy-current-token\n")
+
+    def test_interrupted_trust_snapshot_does_not_keep_a_partial_token(self):
+        now = self.prepare_legacy_trust_recovery()
+        original = updates.shutil.copy2
+
+        def partial_token(source, destination, *args, **kwargs):
+            if Path(source) == self.config / updates.TOKEN_NAME:
+                Path(destination).write_text("partial-toy-token")
+                raise OSError("test interruption while preserving current settings")
+            return original(source, destination, *args, **kwargs)
+
+        with patch("jittersim.updates.shutil.copy2", partial_token), self.assertRaises(OSError):
+            self.apply(lambda *args: None, lambda: True)
+        self.assertEqual(self.signers(), now)
+        self.assertFalse((self.root / "keep" / updates.TOKEN_NAME).exists())
+        self.apply(lambda *args: None, lambda: True)
+        self.assertEqual(self.signers(), now)
+        self.assertEqual((self.config / updates.TOKEN_NAME).read_text(), "toy-current-token\n")
+
+    def test_recovery_key_change_refuses_a_link_in_place_of_the_live_list(self):
+        self.prepare_legacy_trust_recovery()
+        self.interrupt_trust_recovery("data")
+        (self.config / updates.SIGNERS_NAME).symlink_to(self.base / "missing-list")
+        with self.assertRaisesRegex(UpdateError, "regular file"):
+            updates.untrust_key("replacement", config=self.config, root=self.root,
+                               sudoers=self.base / "sudoers")
+
+    def test_key_added_during_interrupted_recovery_keeps_the_other_current_key(self):
+        self.prepare_legacy_trust_recovery()
+        self.interrupt_trust_recovery("data")
+        _, extra = make_key(self.base / "extra", comment="extra")
+        trust_key(extra, config=self.config, root=self.root)
+        self.apply(lambda *args: None, lambda: True)
+        self.assertEqual([key.label for key in updates.trusted_keys(self.config)],
+                         ["replacement", "extra"])
+
+    def test_recovery_refuses_a_link_for_the_saved_current_trust_directory(self):
+        now = self.prepare_legacy_trust_recovery()
+        outside = self.base / "outside"
+        outside.mkdir()
+        (self.root / "keep").symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(UpdateError, "saved current trust directory"):
+            self.apply(lambda *args: None, lambda: True)
+        self.assertEqual(self.signers(), now)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_recovery_refuses_a_saved_current_trust_directory_others_can_change(self):
+        now = self.prepare_legacy_trust_recovery()
+        keep = self.root / "keep"
+        keep.mkdir()
+        keep.chmod(0o777)
+        with self.assertRaisesRegex(UpdateError, "saved current trust directory"):
+            self.apply(lambda *args: None, lambda: True)
+        self.assertEqual(self.signers(), now)
+
+    def test_revocation_survives_interruption_before_the_kept_list_is_removed(self):
+        self.prepare_legacy_trust_recovery()
+        self.interrupt_trust_recovery("data")
+        with patch("jittersim.updates._forget_kept", side_effect=OSError("test interruption")):
+            with self.assertRaises(OSError):
+                updates.untrust_key("replacement", config=self.config, root=self.root,
+                                   sudoers=self.base / "sudoers")
+        self.assertEqual(updates.trusted_keys(self.config), [])
+        self.apply(lambda *args: None, lambda: True)
+        self.assertEqual(updates.trusted_keys(self.config), [])
+
+    def check_unsafe_saved_trust(self, name, change, message):
+        self.prepare_legacy_trust_recovery()
+        self.interrupt_trust_recovery("data")
+        change(self.root / "keep" / name)
+        with patch("jittersim.updates.shutil.copytree", wraps=updates.shutil.copytree) as copying:
+            with self.assertRaisesRegex(UpdateError, message):
+                self.apply(lambda *args: None, lambda: True)
+        copying.assert_not_called()
+        self.assertIsNone(self.signers())
+
+    def test_recovery_refuses_a_saved_signer_list_others_can_change(self):
+        self.check_unsafe_saved_trust(updates.SIGNERS_NAME,
+                                     lambda path: path.chmod(0o666), "writable by others")
+
+    def test_recovery_refuses_a_damaged_saved_signer_list(self):
+        self.check_unsafe_saved_trust(updates.SIGNERS_NAME,
+                                     lambda path: path.write_text("damaged list\n"), "line")
+
+    def test_recovery_refuses_a_saved_token_others_can_read(self):
+        self.check_unsafe_saved_trust(updates.TOKEN_NAME,
+                                     lambda path: path.chmod(0o644), "private")
+
+    def test_recovery_refuses_ambiguous_trust_left_by_an_older_manager(self):
+        now = self.prepare_legacy_trust_recovery()
+        keep = self.root / "keep"
+        keep.mkdir(mode=0o700)
+        for name in updates.PRESERVED_CONFIG:
+            updates.shutil.copy2(self.config / name, keep / name)
+            updates.shutil.copy2(self.root / "backup/config" / name, self.config / name)
+        with patch("jittersim.updates.shutil.copytree", wraps=updates.shutil.copytree) as copying:
+            with self.assertRaisesRegex(UpdateError, "older manager"):
+                self.apply(lambda *args: None, lambda: True)
+        copying.assert_not_called()
+        self.assertEqual((keep / updates.SIGNERS_NAME).read_text(), now)
+        self.assertEqual((keep / updates.TOKEN_NAME).read_text(), "toy-current-token\n")
+
+    def test_interrupted_trust_marker_publication_can_be_retried_safely(self):
+        now = self.prepare_legacy_trust_recovery()
+        original = updates.os.replace
+
+        def interrupted(source, destination):
+            if Path(destination).name == ".trust-format.json":
+                raise OSError("test interruption while publishing recovery format")
+            return original(source, destination)
+
+        with patch("jittersim.updates.os.replace", interrupted), self.assertRaises(OSError):
+            self.apply(lambda *args: None, lambda: True)
+        self.assertEqual(self.signers(), now)
+        self.assertEqual(list((self.root / "keep").iterdir()), [])
         self.apply(lambda *args: None, lambda: True)
         self.assertEqual(self.signers(), now)
 
