@@ -2522,8 +2522,18 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function notePiAnswered(path) {
-      if (unansweredPaths.delete(path)) showPiNotAnswering();
+      // A completed read establishes reachability, not the outcome of an uncertain save.
+      // Read failures retain their individual retry notes until their own read succeeds.
+      if (path === "/api/health") {
+        for (const pending of unansweredPaths) {
+          if (uncertainWritePaths.has(pending)) unansweredPaths.delete(pending);
+        }
+      }
+      const changed = unansweredPaths.delete(path);
+      if (changed || path === "/api/health") showPiNotAnswering();
     }
+
+    const uncertainWritePaths = new Set();
 
     // The saved paths since the last refresh decide which parts of the page are read again.
     const recentWrites = new Set();
@@ -2609,6 +2619,11 @@ DASHBOARD_HTML = r"""<!doctype html>
           error = typeof lostConnectionError === "function"
             ? lostConnectionError(new Error(PI_NOT_ANSWERING)) : new Error(PI_NOT_ANSWERING);
           error.timeout = true;
+          if (method !== "GET") {
+            if (uncertainWritePaths.size >= 64) uncertainWritePaths.delete(uncertainWritePaths.values().next().value);
+            uncertainWritePaths.add(path);
+            error.message += ". The change's result is unknown. Check its saved settings before trying again.";
+          }
           notePiNotAnswering(path);
         }
         if (tokenRevision === adminTokenRevision && method === "GET" && typeof recordRead === "function") recordRead(path, error);
@@ -3417,6 +3432,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function stopTrafficSampling(message) {
+      latestTrafficReading = null;
       trafficSamplingAllowed = false;
       clearTrafficTimer();
       resetTrafficHistory();
@@ -3909,13 +3925,22 @@ DASHBOARD_HTML = r"""<!doctype html>
     let trafficReadingInFlight = null;
 
     function readTraffic(maxAgeMs) {
-      if (latestTrafficReading && Date.now() - latestTrafficReading.at < maxAgeMs) {
+      const revision = adminTokenRevision;
+      if (!adminTokenVerified) return Promise.reject(new Error("Check token to read traffic."));
+      if (latestTrafficReading && latestTrafficReading.revision === revision &&
+          Date.now() - latestTrafficReading.at < maxAgeMs) {
         return Promise.resolve(latestTrafficReading.data);
       }
-      if (trafficReadingInFlight) return trafficReadingInFlight;
-      const revision = adminTokenRevision;
-      trafficReadingInFlight = request("/api/traffic", "GET").then((data) => {
-        if (revision === adminTokenRevision) latestTrafficReading = {data: data, at: Date.now()};
+      if (trafficReadingInFlight) {
+        return trafficReadingInFlight.then(data => {
+          if (revision !== adminTokenRevision || !adminTokenVerified) throw new Error("Token changed. Check token again.");
+          if (!latestTrafficReading || latestTrafficReading.revision !== revision) throw new Error("Traffic belongs to an earlier sign-in. Check again.");
+          return data;
+        });
+      }
+      trafficReadingInFlight = request("/api/traffic", "GET").then(data => {
+        if (revision !== adminTokenRevision || !adminTokenVerified) throw new Error("Token changed. Check token again.");
+        latestTrafficReading = {data, at: Date.now(), revision};
         return data;
       }).finally(() => { trafficReadingInFlight = null; });
       return trafficReadingInFlight;
@@ -3929,11 +3954,12 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     async function pollTraffic() {
       if (trafficRequestInFlight || !trafficSamplingAllowed || !trafficGraphShown()) return;
+      const revision = adminTokenRevision;
       trafficRequestInFlight = true;
       try {
         const data = await readTraffic(0);
         trafficFailures = 0;
-        if (!trafficSamplingAllowed) return;
+        if (revision !== adminTokenRevision || !adminTokenVerified || !trafficSamplingAllowed) return;
         if (!data.available) {
           stopTrafficSampling(data.message || "Live traffic counters are unavailable in this mode.");
           return;
@@ -3991,7 +4017,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         previousTrafficSample = { time: sampledAt, totals: totals, queues: queueTotals };
         drawTrafficChart();
       } catch (error) {
-        if (!trafficSamplingAllowed) return;
+        if (revision !== adminTokenRevision || !adminTokenVerified || !trafficSamplingAllowed) return;
         if (error.status === 401) {
           resetTrafficHistory();
           stopTrafficSampling("The admin token was rejected. Check it again to restart live traffic sampling.");
@@ -5356,10 +5382,14 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     async function applyProfileToDevice(device, profileId, button) {
+      if (networkActionBusy) return;
       if (!profileId) {
         showMessage("Choose a profile before applying it.", "error");
         return;
       }
+      const revision = adminTokenRevision;
+      const intent = ++actionIntentRevision;
+      const current = () => revision === adminTokenRevision && adminTokenVerified && intent === actionIntentRevision;
       setActionBusy(true, "/api/apply");
       setButtonBusy(button, true);
       showMessage("Applying " + profileName(profileId) + " to " + (device.display_name || device.ipv4_address) + "...", "working");
@@ -5369,14 +5399,18 @@ DASHBOARD_HTML = r"""<!doctype html>
           mac_address: device.mac_address,
           profile_id: profileId
         });
+        if (!current()) return;
         clearConnectedDrafts.add(device.mac_address);
         refreshAfterSuccess((result.message || "Profile saved and applied.") + (result.warning ? " " + result.warning : ""));
       } catch (error) {
+        if (!current()) return;
         showMessage(error.message, "error");
         await loadConnectedDevices();
       } finally {
-        setButtonBusy(button, false);
-        setActionBusy(false, "/api/apply");
+        if (revision === adminTokenRevision && adminTokenVerified) {
+          setButtonBusy(button, false);
+          setActionBusy(false, "/api/apply");
+        } else { runningActions.delete("/api/apply"); networkActionBusy = runningActions.size > 0; }
       }
     }
 
@@ -5461,6 +5495,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       const container = element("connected-devices");
       // Typing, choosing from a menu or pressing a button must not be interrupted.
       if (interactionInside(container)) return null;
+      const revision = adminTokenRevision;
       connectedDevicesRequestInFlight = true;
       let data;
       let keptLastList = false;
@@ -5469,6 +5504,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           request("/api/connected-devices", "GET"),
           request("/api/connected-device-labels", "GET")
         ]);
+        if (revision !== adminTokenRevision || !adminTokenVerified) return null;
         const savedLabels = labelsResult.status === "fulfilled"
           ? labelsResult.value.labels || []
           : lastConnectedData && lastConnectedData.saved_labels || [];
@@ -5500,12 +5536,14 @@ DASHBOARD_HTML = r"""<!doctype html>
           }
         }
       } catch (error) {
+        if (revision !== adminTokenRevision || !adminTokenVerified) return null;
         data = { available: false, devices: [], message: error.message };
         connectedRenderKey = null;
         renderConnectedDevices(data);
       } finally {
         connectedDevicesRequestInFlight = false;
       }
+      if (revision !== adminTokenRevision || !adminTokenVerified) return null;
       element("connected-refresh-status").textContent = keptLastList
         ? "Updating… showing the last list while the Pi catches up."
         : data.available
@@ -7426,6 +7464,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       await loadRandomWebsiteAnalytics();
       return {
         ok: true,
+        refreshComplete: actionHistoryLoaded,
         message: actionHistoryLoaded
           ? "Token accepted. Diagnostics loaded."
           : "Token accepted. Diagnostics loaded, but action history could not be loaded."
@@ -7541,6 +7580,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     let refreshWanted;
 
     async function refresh(only) {
+      invalidateAdminTools();
       const scope = only === undefined ? null : only;
       refreshWanted = refreshWanted === undefined || refreshWanted === null || scope === null
         ? (refreshWanted === undefined ? scope : null)
@@ -7553,7 +7593,14 @@ DASHBOARD_HTML = r"""<!doctype html>
           refreshAgain = false;
           const wanted = refreshWanted;
           refreshWanted = undefined;
-          try { await refreshDashboard(wanted); } finally { restoreDrafts(); }
+          try {
+            await refreshDashboard(wanted);
+          } catch (error) {
+            refreshWanted = refreshWanted === undefined ? wanted
+              : refreshWanted === null || wanted === null ? null
+              : new Set([...refreshWanted, ...wanted]);
+            throw error;
+          } finally { restoreDrafts(); }
         } while (refreshAgain);
       })();
       try {
@@ -7566,6 +7613,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     // Panic can start while another change is still running, so every running action is
     // remembered by its path and the page is busy until the last one finishes.
     const runningActions = new Set();
+    let actionIntentRevision = 0;
 
     function setActionBusy(busy, path) {
       if (busy) runningActions.add(path);
@@ -7607,7 +7655,9 @@ DASHBOARD_HTML = r"""<!doctype html>
     const PANIC_ATTEMPTS = 3;
 
     async function requestPanic(path) {
+      const revision = adminTokenRevision;
       for (let attempt = 1; ; attempt += 1) {
+        if (revision !== adminTokenRevision || !adminTokenVerified) throw new Error("Panic sign-in changed. Check token again.");
         try {
           return await request(path, "POST", {});
         } catch (error) {
@@ -7626,22 +7676,28 @@ DASHBOARD_HTML = r"""<!doctype html>
         showMessage("Network actions are unavailable in configuration-only mode.", "error");
         return;
       }
+      const revision = adminTokenRevision;
+      const intent = ++actionIntentRevision;
+      const current = () => revision === adminTokenRevision && adminTokenVerified && intent === actionIntentRevision;
       const wasRunning = !!lastRuntimeState && lastRuntimeState.running === true;
       const queued = panic && networkActionBusy;
       setActionBusy(true, path);
       showMessage(queued ? PANIC_QUEUED : workingMessage, "working");
       try {
         const data = panic ? await requestPanic(path) : await request(path, "POST", {});
+        if (!current()) return;
         if (data.state) renderRuntimeSummary(data.state);
         const done = typeof successMessage === "function"
           ? successMessage(data, wasRunning) : successMessage;
         refreshAfterSuccess(done + (data.warning ? " " + data.warning : ""));
       } catch (error) {
+        if (!current()) return;
         showMessage(error.message, "error");
         // A failed action can still have changed the state so the page reads it again.
         loadPrivateDataPanel("state", loadState);
       } finally {
-        setActionBusy(false, path);
+        if (revision === adminTokenRevision && adminTokenVerified) setActionBusy(false, path);
+        else { runningActions.delete(path); networkActionBusy = runningActions.size > 0; }
       }
     }
 
@@ -7686,20 +7742,27 @@ DASHBOARD_HTML = r"""<!doctype html>
       const profileId = rowProfileId || element("general-profile-select").value;
       if (!stop && !profileId) return;
       const path = stop ? "/api/general-profile/stop" : "/api/general-profile";
+      const revision = adminTokenRevision;
+      const intent = ++actionIntentRevision;
+      const current = () => revision === adminTokenRevision && adminTokenVerified && intent === actionIntentRevision;
       savedProfileBusy = rowProfileId ? { id: rowProfileId, stop: stop } : null;
       setActionBusy(true, path);
       showMessage(stop ? "Stopping the profile for everyone..." : "Applying the profile to all unprotected devices...", "working");
       try {
         await request(path, "POST", stop ? {} : {profile_id: profileId});
+        if (!current()) return;
         refreshAfterSuccess(stop
           ? "Stopped the profile for everyone. Saved device rules resumed."
           : "Profile applied for everyone. Protected devices keep normal access.");
       } catch (error) {
+        if (!current()) return;
         showMessage(error.message, "error");
       } finally {
-        await loadPrivateDataPanel("general-profile-status", loadGeneralProfile);
-        savedProfileBusy = null;
-        setActionBusy(false, path);
+        if (current()) await loadPrivateDataPanel("general-profile-status", loadGeneralProfile);
+        if (revision === adminTokenRevision && adminTokenVerified) {
+          savedProfileBusy = null;
+          setActionBusy(false, path);
+        } else { runningActions.delete(path); networkActionBusy = runningActions.size > 0; }
       }
     }
 
@@ -10596,20 +10659,20 @@ DASHBOARD_HTML = r"""<!doctype html>
     // restoring a version and any save this table does not know read everything.
     const READ_AFTER_WRITE = [
       // Starting, stopping and the general profile change what is running.
-      [/^\/api\/(apply|reset|normal-access|general-profile)/,
+      [/^\/api\/(apply|reset|normal-access|general-profile)(?:\/|$)/,
         ["state", "general", "conditions", "plan", "health", "connected", "activity", "uplink"]],
       // A profile is offered as "Add to" on the observed names, so those are read too.
-      [/^\/api\/profiles/, ["profiles", "general", "plan", "state", "conditions", "everyoneElse",
+      [/^\/api\/profiles(?:\/|$)/, ["profiles", "general", "plan", "state", "conditions", "everyoneElse",
         "devicesForSchedule", "devices", "scenarios", "serviceAssignments", "observations",
         "activity", "settingsHistory"]],
       // A protected device is no longer watched, so its observed names go with it.
-      [/^\/api\/(devices|unaffected-devices|groups|connected-devices)/,
+      [/^\/api\/(devices|unaffected-devices|groups|connected-devices)(?:\/|$)/,
         ["devicesForSchedule", "devices", "groups", "plan", "state", "conditions", "connected",
          "unaffected", "observations", "activity", "settingsHistory"]],
-      [/^\/api\/(schedules|timers|progressions|scenarios|data-limits|group-data-limits|time-quotas|service-quotas|everyone-else)/,
+      [/^\/api\/(schedules|timers|progressions|scenarios|data-limits|group-data-limits|time-quotas|service-quotas|everyone-else)(?:\/|$)/,
         ["schedules", "timers", "progressions", "scenarios", "quotas", "everyoneElse", "plan",
          "state", "conditions", "devicesForSchedule", "activity", "settingsHistory"]],
-      [/^\/api\/(service-lists|service-assignments|observations)/,
+      [/^\/api\/(service-lists|service-assignments|observations)(?:\/|$)/,
         ["serviceLists", "serviceAssignments", "profiles", "plan", "observations", "activity",
          "settingsHistory"]]
       // Device names (connected-device-labels) are not listed: they show on most pages, so a
@@ -10631,6 +10694,35 @@ DASHBOARD_HTML = r"""<!doctype html>
     const ADMIN_TOOLS_PAGES = ["traffic", "diagnostics"];
 
     let adminToolsStale = false;
+    let adminToolsGeneration = 0;
+    let adminToolsRead = null;
+
+    function invalidateAdminTools() {
+      adminToolsGeneration += 1;
+      adminToolsStale = true;
+    }
+
+    function readAdminToolsOnce() {
+      if (adminToolsRead) return adminToolsRead;
+      const generation = adminToolsGeneration;
+      const revision = adminTokenRevision;
+      const pending = (async () => {
+        try {
+          const result = await loadAdminTools();
+          if (revision === adminTokenRevision && adminTokenVerified && generation === adminToolsGeneration) {
+            adminToolsStale = !result || result.ok === false || result.refreshComplete === false;
+          }
+          return result;
+        } catch (error) {
+          if (revision === adminTokenRevision) adminToolsStale = true;
+          throw error;
+        } finally {
+          if (adminToolsRead === pending) adminToolsRead = null;
+        }
+      })();
+      adminToolsRead = pending;
+      return pending;
+    }
 
     async function refreshDashboard(only) {
       // only is null for everything, otherwise the names of the parts to read again.
@@ -10641,7 +10733,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       const wanted = (name, job) => !only || only.has(name) || pageJobs.has(job);
       const run = (name, job, call) => wanted(name, job) ? call() : null;
       // A save elsewhere leaves them as they were. The first visit to either page reads them.
-      adminToolsStale = !wanted("adminTools", loadAdminTools);
+      if (!wanted("adminTools", loadAdminTools)) adminToolsStale = true;
       if (wanted("profiles", null)) await loadPrivateDataPanel("profiles-json", loadProfiles);
       if (wanted("health", loadHealth)) await loadHealth();
       if (wanted("observations", loadObservations)) await loadObservations();
@@ -10668,7 +10760,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         run("serviceLists", loadServiceLists, loadServiceLists),
         run("conditions", loadConditions, loadConditions),
         run("everyoneElse", loadEveryoneElse, loadEveryoneElse),
-        run("adminTools", loadAdminTools, loadAdminTools),
+        run("adminTools", loadAdminTools, readAdminToolsOnce),
         run("access", loadDashboardAccessList, loadDashboardAccessList),
         run("testSessions", loadTestSessions, loadTestSessions),
         run("settingsHistory", loadSettingsHistory, loadSettingsHistory)
@@ -10685,10 +10777,9 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
 
     function readOldAdminTools(page) {
-      if (!adminToolsStale || !adminTokenVerified || !dashboardLoaded) return;
+      if (!adminToolsStale || !adminTokenVerified || !dashboardLoaded || document.hidden) return;
       if (!ADMIN_TOOLS_PAGES.includes(page)) return;
-      adminToolsStale = false;
-      loadAdminTools().catch(() => { adminToolsStale = true; });
+      return readAdminToolsOnce().catch(() => {});
     }
 
     function startEditing(prefix, label) {

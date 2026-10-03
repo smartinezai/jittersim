@@ -39,6 +39,8 @@ HARNESS = r"""
 const called = [];
 let dashboardLoaded = true;
 let adminTokenVerified = true;
+let adminTokenRevision = 0;
+const document = {hidden:false};
 let page = "devices";
 function currentPage() { return page; }
 async function loadPrivateDataPanel(id, job) { called.push("panel:" + id); return job(); }
@@ -53,7 +55,7 @@ CALLED = "called.filter((name) => /^(load|poll)/.test(name))"
 
 def program(body):
     stubs = "\n".join(
-        "async function %s() { called.push(%s); }" % (name, json.dumps(name)) for name in LOADERS
+        "async function %s() { called.push(%s); return {ok:true}; }" % (name, json.dumps(name)) for name in LOADERS
     )
     return (
         HARNESS
@@ -210,10 +212,10 @@ def test_opening_diagnostics_or_traffic_reads_the_old_tools_once():
     result = run(
         "adminToolsStale = true;"
         "readOldAdminTools('devices'); const elsewhere = [adminToolsStale, called.length];"
-        "readOldAdminTools('diagnostics'); const opened = [adminToolsStale, %s];"
-        "readOldAdminTools('traffic'); const again = %s;"
+        "await readOldAdminTools('diagnostics'); const opened = [adminToolsStale, %s];"
+        "await readOldAdminTools('traffic'); const again = %s;"
         "adminToolsStale = true; dashboardLoaded = false;"
-        "readOldAdminTools('traffic'); const beforeLoaded = adminToolsStale;"
+        "await readOldAdminTools('traffic'); const beforeLoaded = adminToolsStale;"
         "console.log(JSON.stringify({elsewhere, opened, again, beforeLoaded}));"
         % (CALLED, CALLED)
     )

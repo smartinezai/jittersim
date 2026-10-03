@@ -100,6 +100,23 @@ const ACTION_BUTTONS = ["panic-button", "apply-button", "reset-button"];
 
 
 CASES = {
+    "token_change_during_panic_retry_sends_no_new_write": r"""
+      element("admin-token").value = "fixture token";
+      network = async () => answer(503, {error:"busy"});
+      const oldTimer = window.setTimeout;
+      window.setTimeout = (callback, milliseconds) => {
+        if (milliseconds === 1000) {
+          adminTokenRevision += 1;
+          element("admin-token").value = "replacement token";
+        }
+        return oldTimer(callback, milliseconds);
+      };
+      press("panic-button");
+      await flush(); await flush();
+      assert.equal(networkCalls.length, 1);
+      assert.equal(runtimeStates.length, 0);
+      assert.equal(refreshMessages.length, 0);
+    """,
     "resets_every_profile_with_one_click": r"""
       element("admin-token").value = "fixture token";
       press("panic-button");
@@ -296,6 +313,9 @@ CASES = {
       assert.equal(element("apply-button").getAttribute("aria-busy"), "true");
       apply.resolve(answer(200, {state: {observed_state: "applied", running: true}}));
       await flush();
+      assert.equal(runtimeStates.length, 1, "late Apply must not replace Panic's state");
+      assert.equal(refreshMessages.length, 1, "late Apply must not replace Panic's result");
+      assert.equal(lastRuntimeState.observed_state, "reset");
       for (const id of ACTION_BUTTONS) assert.equal(element(id).disabled, false, id);
     """,
     "panic_tries_again_when_the_helper_answers_503": r"""
