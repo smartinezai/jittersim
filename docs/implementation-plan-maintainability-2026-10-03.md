@@ -121,11 +121,11 @@ supplies the initial assembled source rather than a separate private page or
 policy that bypasses those inputs. Existing tests replace the server's HTML to
 check ETag changes and replace its policy for phone and wide-font checks.
 
-Preserve the actual comparison rules. At the pinned source the page cache
-invalidates when the HTML text object's identity changes. Response delivery
-recognizes a dashboard body by bytes equality. Do not assume the docstring's
-identity wording describes response recognition. Moving delivery and cache
-ownership is excluded from Ticket 1 and needs a later plan if worthwhile.
+Preserve the actual comparison rules. At final source `6fc3524` the page cache
+invalidates when the HTML text value changes. Response delivery recognizes a
+dashboard body by bytes equality. Do not assume the docstring's identity
+wording describes response recognition. Moving delivery and cache ownership
+is excluded from Ticket 1 and needs a later plan if worthwhile.
 
 Do not split the large JavaScript into independently initialized features in
 this ticket. That requires a separate analysis of shared browser state,
@@ -300,22 +300,72 @@ than an external pull request review.
 | HTTP checks need more than bearer credentials | Later route verification now includes method handling, cross-site requests and special admission paths |
 
 Human feedback: approved on 3 October 2026.
-Implementation: Ticket 1 in progress in `codex/dashboard-source-extraction`.
+Implementation: Ticket 1 source is complete in `codex/dashboard-source-extraction`.
+Publication and merge remain subject to final combined release checks.
 
 ## Ticket 1 implementation base
 
-Published integration source `0a41c2faf2441c8dadcbd029c8a4458cffd89d9f`
-is the clean implementation base. It includes the published foundation and
-dashboard repairs. The separate release-repair working tree remains under its
-existing owner. This extraction targets `integrate/main-into-stack`.
+The final extraction is pinned to the clean release source
+`6fc352463b31befc42312938091dcab87182dcfe`. Its compression, page cache,
+instance rendering, trust behavior and homepage controls remain in place.
+The separate release-repair working tree remains under its existing owner.
+Publish only after checking the shared integration source and merge timing.
 
-This published source has no page compression or ETag cache. Those behaviors
-are present only in later release work. Ticket 1 adds neither and retains
-the published HTTP delivery path. Any later integration must preserve the
-newer delivery and cache behavior while retaining the extracted source.
-
-The assembled baseline is 573,246 UTF-8 bytes with SHA256
-`cfe0a509fd82cf4c96ac9afa174984b134211cb4b3e93d0abc38790ff49709ff`.
+The assembled baseline is 672,689 UTF-8 bytes with SHA256
+`d4938d79741cd64c9e516d0788011b486e8afadb3439d27c1c64a1ac8a08a68e`.
 Its page bytes and content security policy compare exactly after extraction.
-`server.py` shrinks from 15,241 lines to 4,897 lines.
+An AST comparison confirms every other server statement is unchanged.
+`server.py` shrinks from 17,448 lines to 6,158 lines.
 
+The first extraction was verified against published integration source
+`0a41c2faf2441c8dadcbd029c8a4458cffd89d9f`. Its full host suite passed with
+3,245 tests and 39 Linux-only skips. Its installed wheel contained every
+dashboard resource and reproduced its original page and policy. Its browser
+run was stopped after 15 successful modules when the final base changed.
+Those results do not replace verification of the final source.
+
+The final assembler also includes the existing reconnect and trust scripts.
+Their insertion order and scope are preserved. Existing tests continue to
+exercise server page replacements, compression, validators and instance cache
+eviction. Fresh installed-wheel and final workflow checks remain required.
+
+## Ticket 1 source review and handoff
+
+The frozen source commit is
+`b6c44ea3df5421148917b70c4fa3e52a0eadbf94` on top of `6fc3524`.
+It changes only dashboard source, assembly, package-data, source failure tests and architecture
+notes. The separate planning commit is `cdd39a4`. No release, installer,
+network helper, stored configuration or HTTP admission code is changed.
+
+Independent read-only source review approved the final extraction on
+3 October 2026. It independently confirmed the final page bytes, policy,
+deterministic gzip output and every resource in the wheel. It also confirmed
+that all server statements outside the source assignment and assembly import
+are unchanged. The plan's current cache comparison description was corrected
+to text value equality after that review.
+
+Local verification of the frozen extraction:
+
+- Critical lint checks and whitespace checks pass.
+- A fresh isolated build produced an installed `0.2.0` wheel.
+- All 11 presentation resources in that wheel match their source bytes.
+- The installed page and policy match the final baseline exactly.
+- All 26 installed-package checks for damaged source, page transfer,
+  per-instance delivery and neutral sign-in pass.
+- The final host suite stopped after three failures with 1,251 passes and
+  39 Linux-only skips. All three failures reproduce against unchanged
+  `6fc3524` source. They are not introduced by extraction.
+
+The remaining release checks are:
+
+| Check | Current evidence | Required follow-up |
+| --- | --- | --- |
+| Quota accounting after protection changes | The fixture shuts down its scheduler then attempts another configuration write. The newer scheduler refuses writes after shutdown | Review the fixture against the new shutdown contract and retain all accounting assertions |
+| Remembering an accepted token | A source-text expression requires the credential update to be immediately followed by refresh. The trust loader now runs between them | Verify the ordering through behavior while allowing the existing trust call |
+| Wi-Fi firewall scope | The expected list omits the new HTTPS listener restricted to the Pi's test-network address | Update the expected access list while retaining its exact address and port limits |
+
+GitHub check annotations for published `0a41c2f` confirm jobs did not start
+because of billing. Inspect the checks for the final published revision too.
+Use the owner's authorized local fallback only after the configured checks
+pass on the complete combined source. No merge has been performed for this
+slice. Shared Docker resources remain assigned to the active release checks.
