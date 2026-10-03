@@ -609,9 +609,9 @@ def test_quota_usage_excludes_protection_and_does_not_charge_the_exempt_interval
         "devices": {"alice": 10, "bob": 10},
         "services": {"video": 10, time_quota_counter_id("time"): 10},
     }
-    with patch("jittersim.api.server.time.time", return_value=110):
+    # Sample synthetic times directly without starting a background worker.
+    with patch.object(scheduler, "start"), patch("jittersim.api.server.time.time", return_value=110):
         status, _ = write(server, "/api/unaffected-devices", {"mac_address": ALICE})
-    scheduler.stop()
     assert status == 200 and repo.get_data_limit("alice").used_bytes == 40
     helper.counters = {
         "devices": {"alice": 900, "bob": 30},
@@ -625,13 +625,13 @@ def test_quota_usage_excludes_protection_and_does_not_charge_the_exempt_interval
 
     assert server._group_quota_counter("family") == 30
     with (
+        patch.object(scheduler, "start"),
         patch("jittersim.api.server.time.time", return_value=200),
         patch(
             "jittersim.engine.runtime.resolve_domains", return_value=(IPv4Address("203.0.113.10"),)
         ),
     ):
         status, _ = write(server, "/api/unaffected-devices/delete", {"mac_address": ALICE})
-    scheduler.stop()
     assert status == 200
     helper.counters["services"][time_quota_counter_id("time")] = 10
     scheduler._sample_quota_usage_if_needed(repository=repo, now=205)
