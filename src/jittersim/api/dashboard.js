@@ -4598,8 +4598,37 @@
       renderSystemHealth(data);
     }
 
+    let profilesRequestRevision = 0;
+
+    function setDeviceProfileAvailability(message, available = false, retry = false) {
+      element("device-profile").disabled = !available;
+      const save = element("save-device");
+      save.disabled = !available || save.getAttribute("aria-busy") === "true";
+      const note = element("device-profile-note");
+      note.textContent = message;
+      note.hidden = !message;
+      element("device-profile-refresh").hidden = !retry;
+    }
+
+    privateDataLockHooks.push(() => {
+      profilesRequestRevision += 1;
+      element("device-profile").replaceChildren();
+      element("device-profile").value = "";
+      setDeviceProfileAvailability("Check the admin token to load saved profiles.");
+    });
+
     async function loadProfiles() {
-      const data = await request("/api/profiles", "GET");
+      const revision = ++profilesRequestRevision;
+      setDeviceProfileAvailability("Loading saved profiles...");
+      let data;
+      try {
+        data = await request("/api/profiles", "GET");
+      } catch (error) {
+        if (revision !== profilesRequestRevision) return;
+        setDeviceProfileAvailability("Could not load profiles. Choose Refresh profiles to try again.", false, true);
+        throw error;
+      }
+      if (revision !== profilesRequestRevision) return;
       profiles = data.profiles;
       const profileLabels = profileOptionLabels(profiles);
       profilesLoaded = true;
@@ -4608,6 +4637,7 @@
       const emptyLabels = {
         "group-profile": "Use each device profile",
         "general-profile-select": "Choose a saved profile",
+        "device-profile": profiles.length ? "Choose a saved profile" : "No saved profiles",
         "everyone-else-profile": "None: normal connection"
       };
       [
@@ -4623,6 +4653,7 @@
         "group-profile",
         "group-data-limit-profile",
         "general-profile-select",
+        "device-profile",
         "everyone-else-profile"
       ].forEach((selectId) => {
         const profileSelect = element(selectId);
@@ -4644,7 +4675,14 @@
         const known = profiles.some((profile) => profile.id === previousSelection) ||
           (previousSelection === "" && emptyLabels[selectId] !== undefined);
         if (known) profileSelect.value = previousSelection;
-        else if (selectId === "general-profile-select") profileSelect.value = "";
+        else if (selectId === "general-profile-select" || selectId === "device-profile") profileSelect.value = "";
+        if (selectId === "device-profile") {
+          setDeviceProfileAvailability(!profiles.length
+            ? "No saved profiles. Save a profile above first."
+            : previousSelection && !profileSelect.value
+              ? "The selected profile is no longer available. Choose another profile."
+              : "", profiles.length > 0);
+        }
       });
       profilesLoadedHooks.forEach((hook) => hook());
       updateGeneralProfileControls();
@@ -5898,16 +5936,40 @@
     element("device-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
+        const profileSelect = element("device-profile");
+        if (!adminTokenVerified || profileSelect.disabled) {
+          throw new Error(element("device-profile-note").textContent || "Load saved profiles first.");
+        }
+        if (!profiles.some((profile) => profile.id === profileSelect.value)) {
+          throw new Error("Choose a saved profile for this device.");
+        }
         await request("/api/devices", "POST", {
           id: element("device-id").value,
           name: element("device-name").value,
           ipv4_address: element("device-ip").value,
-          profile_id: element("device-profile").value,
+          profile_id: profileSelect.value,
           mac_address: element("device-mac").value.trim() || null,
           ...(editingDeviceSnapshot ? { expected: editingDeviceSnapshot } : {})
         });
         if (!formDrafts.has("device-form")) stopEditing("device");
         refreshAfterSuccess("Device saved.");
+      } catch (error) {
+        showMessage(error.message, "error");
+      } finally {
+        element("save-device").disabled = element("device-profile").disabled;
+      }
+    });
+
+    element("device-profile").addEventListener("change", () => {
+      const select = element("device-profile");
+      if (!select.disabled && profiles.some((profile) => profile.id === select.value)) {
+        setDeviceProfileAvailability("", true);
+      }
+    });
+
+    element("device-profile-refresh").addEventListener("click", async () => {
+      try {
+        await loadProfiles();
       } catch (error) {
         showMessage(error.message, "error");
       }

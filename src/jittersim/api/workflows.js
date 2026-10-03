@@ -38,9 +38,12 @@ function restoreDrafts() {
       if (saved.selected) {
         Array.from(field.options).forEach(option => { option.selected = saved.selected.includes(option.value); });
       } else if (field.tagName === 'SELECT' && !Array.from(field.options).some(option => option.value === saved.value)) {
-        const missing = new Option(saved.value + ' (no longer available)', saved.value);
-        field.add(missing);
-        field.value = saved.value;
+        if (field.hasAttribute('data-require-available-option')) field.value = '';
+        else {
+          const missing = new Option(saved.value + ' (no longer available)', saved.value);
+          field.add(missing);
+          field.value = saved.value;
+        }
       } else field.value = saved.value;
       if (saved.checked !== undefined) field.checked = saved.checked;
       if (saved.pressed !== null) field.setAttribute('aria-pressed', saved.pressed);

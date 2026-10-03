@@ -3173,7 +3173,7 @@ class ControlServerTests(unittest.TestCase):
         for fragment in (
             'id="saved-profiles"',
             'id="device-table"',
-            '<input id="device-profile" required>',
+            '<select id="device-profile" required disabled',
             'id="new-profile"',
             'id="device-cancel-edit"',
             "function fillProfileForm(profile)",
@@ -3583,14 +3583,15 @@ class ControlServerTests(unittest.TestCase):
 
     def test_rebuilt_profile_menus_keep_the_steps_being_edited(self) -> None:
         result = self._run_dashboard_functions(
-            ["profileOptionLabels", "loadProfiles", "followProfileMenus"],
+            ["profileOptionLabels", "setDeviceProfileAvailability", "loadProfiles", "followProfileMenus"],
+            "let profilesRequestRevision = 0;\n"
             "let profiles = [];\n"
             "let profilesLoaded = false;\n"
             "function renderSidebarStatus() {}\n"
             "function updateGeneralProfileControls() {}\n"
             "const profilesLoadedHooks = [followProfileMenus];\n"
             "const everyoneElse = {profile_id: null};\n"
-            "const element = () => ({value: '', options: [], replaceChildren() {this.options=[];}, appendChild(option) {this.options.push(option);}});\n"
+            "const element = () => ({value: '', options: [], getAttribute() {return null;}, replaceChildren() {this.options=[];}, appendChild(option) {this.options.push(option);}});\n"
             "const document = {createElement: () => ({})};\n"
             "async function request() { return {profiles: [{id: 'slow', name: 'Slow'}]}; }\n"
             "function renderProfileTable() {}\n"
@@ -3827,7 +3828,8 @@ class ControlServerTests(unittest.TestCase):
 
     def test_dashboard_profile_menus_keep_the_everyone_else_choice(self) -> None:
         values = self._run_dashboard_functions(
-            ["profileOptionLabels", "loadProfiles", "followProfileMenus"],
+            ["profileOptionLabels", "setDeviceProfileAvailability", "loadProfiles", "followProfileMenus"],
+            "let profilesRequestRevision = 0;\n"
             "let profiles = [];\n"
             "let profilesLoaded = false;\n"
             "function renderSidebarStatus() {}\n"
@@ -3838,6 +3840,7 @@ class ControlServerTests(unittest.TestCase):
             "function element(id) {\n"
             "  elements[id] = elements[id] || {\n"
             "    options: [], value: '',\n"
+            "    getAttribute() { return null; },\n"
             "    replaceChildren() { this.options = []; this.value = ''; },\n"
             "    appendChild(option) {\n"
             "      this.options.push(option);\n"

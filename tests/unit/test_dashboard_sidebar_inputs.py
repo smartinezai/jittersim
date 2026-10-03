@@ -157,7 +157,7 @@ LOAD_CONNECTED = lambda: between(  # noqa: E731
 SERVICE_LISTS = lambda: between("function renderServiceLists(", "function editServiceList(")  # noqa: E731
 # loadGeneralProfile follows loadProfiles in the page so one slice holds both.
 LOAD_PROFILES = lambda: between(  # noqa: E731
-    "async function loadProfiles(", "async function loadDevicesForSchedule("
+    "let profilesRequestRevision = 0;", "async function loadDevicesForSchedule("
 )
 LOAD_STATE = lambda: between("async function loadState(", "function formatUtcDay(")  # noqa: E731
 PRIVATE_PANELS = lambda: (  # noqa: E731

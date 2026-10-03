@@ -81,6 +81,83 @@ def with_delay(profile, delay):
     return dict(profile, upload=dict(profile["upload"], delay_ms=delay))
 
 
+def check_device_profile_picker(page, base, headers, width):
+    picker = page.locator("#device-profile")
+    save = page.locator("#save-device")
+    expect(picker).to_be_enabled()
+    expect(picker).to_have_value("")
+    assert not picker.evaluate("node => node.checkValidity()")
+    page.locator("#device-id").fill(f"picker-device-{width}")
+    page.locator("#device-name").fill("Picker laptop")
+    ip = "192.168.50.230" if width == 1920 else "192.168.50.231"
+    page.locator("#device-ip").fill(ip)
+    picker.select_option(label="Slow office")
+    page.evaluate("loadProfiles()")
+    expect(picker).to_have_value("slow")
+    expect(page.locator("#device-name")).to_have_value("Picker laptop")
+
+    def empty_profiles(route):
+        route.fulfill(status=200, content_type="application/json", json={"profiles": []})
+
+    page.route("**/api/profiles", empty_profiles)
+    page.evaluate("loadProfiles().then(() => restoreDrafts())")
+    expect(picker).to_have_value("")
+    expect(picker).to_be_disabled()
+    expect(save).to_be_disabled()
+    expect(page.locator("#device-profile-note")).to_contain_text("No saved profiles")
+    expect(picker.locator("option")).to_have_count(1)
+    page.unroute("**/api/profiles", empty_profiles)
+
+    def failed_profiles(route):
+        route.fulfill(status=503, content_type="application/json", json={"error": "Fixture failure"})
+
+    page.route("**/api/profiles", failed_profiles)
+    page.evaluate("loadProfiles().catch(() => {})")
+    expect(save).to_be_disabled()
+    expect(page.locator("#device-profile-refresh")).to_be_visible()
+    page.unroute("**/api/profiles", failed_profiles)
+    page.locator("#device-profile-refresh").click()
+    expect(picker).to_be_enabled()
+    expect(picker).to_have_value("")
+
+    # Identical names must still select the intended stored ID.
+    copies = [dict(saved(page, base, headers, key), name="Same name") for key in ("slow", "other")]
+
+    def duplicate_names(route):
+        route.fulfill(status=200, content_type="application/json", json={"profiles": copies})
+
+    page.route("**/api/profiles", duplicate_names)
+    page.evaluate("loadProfiles()")
+    picker.select_option(label="Same name (other)")
+    expect(picker).to_have_value("other")
+    page.unroute("**/api/profiles", duplicate_names)
+    page.evaluate("loadProfiles()")
+    expect(picker).to_have_value("other")
+    assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
+    page.locator("#device-form").screenshot(path=f"test-results/device-profile-picker-{width}.png")
+
+    def missing_profile(route):
+        route.fulfill(status=200, content_type="application/json", json={"profiles": [copies[0]]})
+
+    page.route("**/api/profiles", missing_profile)
+    page.evaluate("loadProfiles().then(() => restoreDrafts())")
+    expect(picker).to_have_value("")
+    expect(page.locator("#device-profile-note")).to_contain_text("no longer available")
+    page.unroute("**/api/profiles", missing_profile)
+    page.evaluate("loadProfiles()")
+    picker.select_option(label="Slow office")
+    expect(page.locator("#device-profile-note")).to_be_hidden()
+    with page.expect_request(
+        lambda sent: sent.method == "POST" and sent.url.endswith("/api/devices")
+    ) as submitted:
+        save.click()
+    assert submitted.value.post_data_json["profile_id"] == "slow"
+    expect(save).to_be_enabled()
+    devices = page.request.get(base + "/api/devices", headers=headers).json()["devices"]
+    device = next(item for item in devices if item["id"] == f"picker-device-{width}")
+    assert device["profile_id"] == "slow"
+
+
 def run():
     process = subprocess.Popen(
         [sys.executable, "-m", "tests.browser.fixture"], stdout=subprocess.PIPE, text=True
@@ -155,6 +232,7 @@ def run():
                     expect(page.locator("#message")).to_have_text("Newer message.")
                     page.locator("#close-credentials").click()
                     expect(page.locator("#page-profiles")).to_be_visible()
+                    check_device_profile_picker(page, base, headers, width)
 
                     def row_of(profile_id):
                         return page.locator(f'.saved-profile-row[data-profile-id="{profile_id}"]')
@@ -366,6 +444,9 @@ def run():
                     # Clearing the token locks the page and clears the form.
                     sidebar_control(page, "#open-admin-credentials").click()
                     page.locator("#admin-token").fill("")
+                    expect(page.locator("#device-profile option")).to_have_count(0)
+                    expect(page.locator("#device-profile")).to_be_disabled()
+                    expect(page.locator("#save-device")).to_be_disabled()
                     for field, empty in (("profile-id", ""), ("profile-name", "")):
                         assert page.evaluate(f"document.getElementById('{field}').value") == empty
                     assert not page.evaluate("document.getElementById('profile-id').readOnly")
