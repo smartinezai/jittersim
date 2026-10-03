@@ -2,6 +2,7 @@
 
 import argparse
 import copy
+import io
 import grp
 import hashlib
 import json
@@ -27,6 +28,7 @@ from jittersim.engine.plan import EVERYONE_ELSE_QUEUE_ID, NetworkPlan
 from jittersim.updates import UpdateError, request_update, stage_upload, update_status
 from jittersim.release_uploads import UploadBusy, prepare_lock
 from jittersim.request_workers import RequestWorkers, WorkersStillRunning
+from jittersim.socket_deadlines import DeadlineReader, read_line
 
 from .access import AccessManager
 from .applier import MAX_PROTECTED_MACS, ApplyError, NetworkApplier
@@ -1287,9 +1289,13 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
     """Read one newline-delimited JSON request from a Unix socket client."""
 
     server: "UnixHelperServer"
+    rbufsize = 0
 
     def handle(self) -> None:
         self.request.settimeout(3)
+        self.rfile = io.BufferedReader(DeadlineReader(
+            self.rfile, self.request, time.monotonic() + 3,
+        ))
         try:
             self._handle_request()
         except (OSError, TimeoutError):
@@ -1297,6 +1303,9 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
 
     def _handle_request(self) -> None:
         line = self.rfile.readline(MAX_MESSAGE_BYTES + 1)
+        if hasattr(self, "request"):
+            # Response transport gets its own bounded allowance after input.
+            self.request.settimeout(3)
         if not line:
             return
         if len(line) > MAX_MESSAGE_BYTES:
@@ -1528,19 +1537,14 @@ class HelperClient:
         client.snapshot_ttl_seconds = self.snapshot_ttl_seconds
         return client
 
-    def invalidate_connected_devices(self, *, keep_recent: bool = False) -> None:
-        """Forget the shared client scan, for example after the network changed.
-
-        `keep_recent` is for a change that has only started: the last good list still
-        describes the network until the change is done.
-        """
+    def invalidate_connected_devices(self) -> None:
+        """Invalidate both current and recent identity before a network change starts."""
 
         with self._snapshots.lock:
             self._snapshots.generation += 1
             self._snapshots.value = None
             self._snapshots.expires_at = 0.0
-            if not keep_recent:
-                self._snapshots.recent = None
+            self._snapshots.recent = None
 
     def recent_connected_devices(self, max_age_seconds: float) -> Optional[Dict[str, Any]]:
         """Return the last good scan if it is young enough and no change has happened since."""
@@ -1813,46 +1817,65 @@ class HelperClient:
         return result
 
     def connected_device_snapshot(self) -> Dict[str, Any]:
-        """Return current client details and whether association status is known.
+        """Deliver a generation-valid scan within this caller's total deadline.
 
-        Callers within `snapshot_ttl_seconds` share one scan, and callers that arrive
-        while a scan runs wait for it. A change to the network starts a fresh scan.
+        One active scan stays owned across invalidation. A newer caller may wait
+        for it then start one fresh scan. An older caller cannot receive identity
+        after the generation it requested has changed.
         """
 
         cache = self._snapshots
+        deadline = time.monotonic() + self.timeout_seconds
         with cache.lock:
-            if cache.value is not None and time.monotonic() < cache.expires_at:
-                return copy.deepcopy(cache.value)
-            flight = cache.flight
-            leader = flight is None or flight.generation != cache.generation
+            requested_generation = cache.generation
+        for _ in range(2):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise HelperClientError("client scan timed out")
+            with cache.lock:
+                if requested_generation != cache.generation:
+                    raise HelperClientError("network changed during client scan", reason="helper-busy")
+                if cache.value is not None and time.monotonic() < cache.expires_at:
+                    return copy.deepcopy(cache.value)
+                flight = cache.flight
+                leader = flight is None
+                if leader:
+                    flight = cache.flight = _SnapshotFlight(cache.generation)
             if leader:
-                flight = cache.flight = _SnapshotFlight(cache.generation)
-        if not leader:
-            flight.done.wait()
-            if flight.error is not None:
-                raise flight.error
-            return copy.deepcopy(flight.value)
-        try:
-            value = self._read_connected_device_snapshot()
-        except BaseException as error:
-            flight.error = error
-            raise
-        else:
-            flight.value = value
+                try:
+                    value = self._read_connected_device_snapshot(timeout_seconds=remaining)
+                    if time.monotonic() >= deadline:
+                        raise HelperClientError("client scan timed out")
+                except BaseException as error:
+                    flight.error = error
+                else:
+                    flight.value = value
+                    with cache.lock:
+                        if flight.generation == cache.generation:
+                            cache.value = value
+                            cache.expires_at = time.monotonic() + self.snapshot_ttl_seconds
+                            cache.recent = (time.monotonic(), copy.deepcopy(value))
+                finally:
+                    with cache.lock:
+                        if cache.flight is flight:
+                            cache.flight = None
+                        flight.done.set()
+            elif not flight.done.wait(timeout=max(0.0, deadline - time.monotonic())):
+                raise HelperClientError("client scan timed out")
             with cache.lock:
-                if flight.generation == cache.generation:
-                    cache.value = value
-                    cache.expires_at = time.monotonic() + self.snapshot_ttl_seconds
-                    cache.recent = (time.monotonic(), copy.deepcopy(value))
-            return copy.deepcopy(value)
-        finally:
-            with cache.lock:
-                if cache.flight is flight:
-                    cache.flight = None
-            flight.done.set()
+                if requested_generation != cache.generation:
+                    raise HelperClientError("network changed during client scan", reason="helper-busy")
+                if flight.generation != cache.generation:
+                    continue
+                if flight.error is not None:
+                    raise flight.error
+                if time.monotonic() >= deadline:
+                    raise HelperClientError("client scan timed out")
+                return copy.deepcopy(flight.value)
+        raise HelperClientError("client scan could not refresh", reason="helper-busy")
 
-    def _read_connected_device_snapshot(self) -> Dict[str, Any]:
-        response = self._request({"action": "clients"})
+    def _read_connected_device_snapshot(self, timeout_seconds=None) -> Dict[str, Any]:
+        response = self._request({"action": "clients"}, timeout_seconds=timeout_seconds)
         devices = response.get("devices")
         association_status_available = response.get("association_status_available")
         if (
@@ -2052,7 +2075,7 @@ class HelperClient:
         if payload.get("action") in READ_ONLY_ACTIONS:
             return self._send(payload, timeout_seconds=timeout_seconds)
         # Anything else may change who is connected, so no earlier scan stays valid.
-        self.invalidate_connected_devices(keep_recent=True)
+        self.invalidate_connected_devices()
         try:
             return self._send(payload, timeout_seconds=timeout_seconds)
         finally:
@@ -2064,14 +2087,18 @@ class HelperClient:
         encoded = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
         if len(encoded) > MAX_MESSAGE_BYTES:
             raise HelperClientError("helper request is too large")
+        seconds = self.timeout_seconds if timeout_seconds is None else timeout_seconds
+        deadline = time.monotonic() + seconds
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-                connection.settimeout(self.timeout_seconds if timeout_seconds is None else timeout_seconds)
+                connection.settimeout(seconds)
                 connection.connect(str(self.socket_path))
-                with connection.makefile("rwb") as stream:
-                    stream.write(encoded)
-                    stream.flush()
-                    response = stream.readline(MAX_MESSAGE_BYTES + 1)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("helper connection deadline expired")
+                connection.settimeout(remaining)
+                connection.sendall(encoded)
+                response = read_line(connection, MAX_MESSAGE_BYTES + 1, deadline)
         except OSError as error:
             raise HelperClientError("could not contact the networking helper") from error
         if not response or len(response) > MAX_MESSAGE_BYTES:

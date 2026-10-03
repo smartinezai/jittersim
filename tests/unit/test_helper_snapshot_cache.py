@@ -124,7 +124,7 @@ class SnapshotCacheTests(unittest.TestCase):
 
     def test_a_scan_that_started_before_a_change_is_not_kept(self):
         self.gate = threading.Event()
-        started = threading.Thread(target=self.client.connected_device_snapshot)
+        started = threading.Thread(target=eligibility.station_snapshot, args=(self.client,))
         started.start()
         time.sleep(0.1)
         self.client.reset()

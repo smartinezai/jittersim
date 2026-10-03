@@ -31,6 +31,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from jittersim import release_uploads, updates
 from jittersim.request_workers import RequestWorkers, WorkersStillRunning
+from jittersim.socket_deadlines import DeadlineReader as _DeadlineReader
 from jittersim.api.access import ACCESS_WRITES, read_access_api, write_access_api
 from jittersim.api.workflows import WORKFLOW_WRITES, machine_health, read_workflow, write_workflow
 from jittersim.config.device_labels import (
@@ -11521,43 +11522,6 @@ def _json_bytes(payload: Dict[str, Any]) -> bytes:
     return (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
 
 
-class _DeadlineReader(io.RawIOBase):
-    """Bound all input reads to one deadline, including a slow byte stream."""
-
-    def __init__(self, source: io.RawIOBase, connection: socket.socket, deadline: float,
-                 prefix: bytes = b"") -> None:
-        super().__init__()
-        self._source = source
-        self._connection = connection
-        self._deadline = deadline
-        self._prefix = prefix
-
-    def readable(self) -> bool:
-        return True
-
-    def readinto(self, buffer: Any) -> Optional[int]:
-        remaining = self._deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("dashboard request input timed out")
-        self._connection.settimeout(remaining)
-        if self._prefix:
-            count = min(len(buffer), len(self._prefix))
-            buffer[:count] = self._prefix[:count]
-            self._prefix = self._prefix[count:]
-            return count
-        return self._source.readinto(buffer)
-
-    def extend_to(self, deadline: float) -> None:
-        """Give a long upload its own, later deadline once its request was accepted."""
-        self._deadline = deadline
-
-    def close(self) -> None:
-        try:
-            self._source.close()
-        finally:
-            super().close()
-
-
 @dataclass
 class _PendingConnection:
     address: Any
@@ -15657,8 +15621,9 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
     ) -> None:
         cache_control = "no-store"
         page_headers: Dict[str, str] = {}
-        raw_page, packed_page, page_etag = _dashboard_page()
-        if status == HTTPStatus.OK and body is raw_page:
+        page_html = getattr(getattr(self, "server", None), "dashboard_page_html", None)
+        raw_page, packed_page, page_etag = _dashboard_page(page_html) if page_html is not None else _dashboard_page()
+        if status == HTTPStatus.OK and content_type.startswith("text/html") and body == raw_page:
             # The page only changes with a new release: a reload asks with its ETag and an
             # unchanged page answers 304. Browsers that accept gzip get about a fifth of it.
             request_headers = getattr(self, "headers", None) or {}
