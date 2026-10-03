@@ -28,6 +28,9 @@ if [ ! -f "$SOURCE_DIR/pyproject.toml" ]; then
     exit 1
 fi
 
+# Refuse source that cannot preserve recovery before changing packages or files.
+python3 -I "$SOURCE_DIR/src/jittersim/updates.py" check-manager "$SOURCE_DIR/src/jittersim/updates.py"
+
 # The passwordless rule is only safe with a trusted release signing key: check it before
 # anything changes.
 if [ "$enable_passwordless_staging" = yes ] \
@@ -234,7 +237,7 @@ install -m 0644 -o root -g root \
 
 # Recovery must run even if an interrupted package install damages the venv.
 install -d -m 0755 -o root -g root /usr/local/lib
-install -m 0644 -o root -g root "$SOURCE_DIR/src/jittersim/updates.py" /usr/local/lib/jittersim-update.py
+python3 -I "$SOURCE_DIR/src/jittersim/updates.py" bootstrap-manager
 systemctl enable jittersim-update.service
 # The update manager writes the sudoers rule itself and checks it with visudo first.
 if [ "$enable_passwordless_staging" = yes ]; then

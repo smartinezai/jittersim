@@ -108,7 +108,7 @@ class UpdateTests(unittest.TestCase):
             "README.md": "Release",
             "deploy/RELEASE": manifest(sequence or self.sequence, version),
             "src/jittersim/api/server.py": "new code",
-            "src/jittersim/updates.py": "new recovery manager",
+            "src/jittersim/updates.py": "# new recovery manager\nRECOVERY_FORMAT = 2\n",
         }
         # The release ships this checkout's Pi files so the installer steps are real.
         files.update(
@@ -137,6 +137,20 @@ class UpdateTests(unittest.TestCase):
         self.stage_archive(path, sha256=digest)
 
     def apply(self, run, health, query=None):
+        def package_commands(command, timeout):
+            result = run(command, timeout)
+            # Only the external package commands are stand-ins. Preparation,
+            # exact hashes, filesystem publication and recovery run real code.
+            if "pip" in command and "wheel" in command:
+                folder = Path(command[command.index("--wheel-dir") + 1])
+                (folder / "jittersim-0.2.0-py3-none-any.whl").write_bytes(b"fixture prepared wheel")
+            return result
+
+        def service_query(command, timeout):
+            if command[:2] == ["systemctl", "show"]:
+                return "ActiveState=inactive\nMainPID=0\nControlPID=0\nTasksCurrent=0"
+            return query(command, timeout) if query else self.wifi
+
         return apply_update(
             root=self.root,
             code=self.code,
@@ -147,10 +161,13 @@ class UpdateTests(unittest.TestCase):
             manager=self.manager,
             dispatcher=self.dispatcher,
             command=self.command,
-            run=run,
-            query=query or (lambda command, timeout: self.wifi),
+            run=package_commands,
+            query=service_query,
             health=health,
         )
+
+    def backup(self, relative=""):
+        return updates.recovery_backup(self.root) / relative
 
     def recorder(self, fail=lambda command: False):
         commands = []
@@ -171,7 +188,8 @@ class UpdateTests(unittest.TestCase):
         return commands
 
     def after_package(self, commands):
-        index = next(i for i, command in enumerate(commands) if "pip" in command)
+        index = next(i for i, command in enumerate(commands) if "pip" in command and "install" in command
+                     and command[0] == str(self.code / ".venv/bin/python"))
         return commands[index + 1 :]
 
     def systemctl(self, commands):
@@ -209,7 +227,7 @@ class UpdateTests(unittest.TestCase):
         request_update("v1", root=self.root, code=self.code, config=self.config, run=lambda *args: None)
 
         def fail_package(command, timeout):
-            if "pip" in command:
+            if "pip" in command and "install" in command and command[0] == str(self.code / ".venv/bin/python"):
                 (self.data / "jittersim.db").write_text("partially migrated")
                 raise UpdateError("package install failed")
 
@@ -242,7 +260,7 @@ class UpdateTests(unittest.TestCase):
         self.stage()
         request_update('v1', root=self.root, code=self.code, config=self.config, run=lambda *args: None)
         def fail(command, timeout):
-            if 'pip' in command:
+            if 'pip' in command and 'install' in command and command[0] == str(self.code / '.venv/bin/python'):
                 policy.write_text('damaged')
                 raise UpdateError('installation failed')
         with self.assertRaises(UpdateError):
@@ -269,11 +287,11 @@ class UpdateTests(unittest.TestCase):
         request_update("v1", root=self.root, code=self.code, config=self.config, run=lambda *args: None)
         self.apply(lambda *args: None, lambda: True)
         self.assertEqual(update_status(root=self.root, code=self.code, config=self.config)["installed"], "v1")
-        self.assertEqual(self.manager.read_text(), "new recovery manager")
+        self.assertIn("RECOVERY_FORMAT = 2", self.manager.read_text())
         request_update("", rollback=True, root=self.root, code=self.code, config=self.config, run=lambda *args: None)
         self.apply(lambda *args: None, lambda: True)
         self.assertFalse((self.code / "src").exists())
-        self.assertEqual(self.manager.read_text(), "new recovery manager")
+        self.assertIn("RECOVERY_FORMAT = 2", self.manager.read_text())
         self.assertEqual(update_status(root=self.root, code=self.code, config=self.config)["phase"], "rolled-back")
 
     def test_failed_health_check_restores_the_previous_installation(self):
@@ -290,7 +308,7 @@ class UpdateTests(unittest.TestCase):
         request_update("v1", root=self.root, code=self.code, config=self.config, run=lambda *args: None)
 
         def interrupted(command, timeout):
-            if "pip" in command:
+            if "pip" in command and "install" in command and command[0] == str(self.code / ".venv/bin/python"):
                 raise KeyboardInterrupt()
 
         # A process interruption leaves recovery intent for the next invocation.
@@ -382,6 +400,14 @@ class UpdateTests(unittest.TestCase):
                             _, placeholder, value, _ = words[index + 1].split("/")
                             expected = expected.replace(placeholder, value)
                     self.assertEqual(Path(words[-1]).read_text(), expected)
+                elif "check-manager" in words:
+                    # The queued path checks the same source before preparation.
+                    updates.compatible_manager(self.root / "staged/src/jittersim/updates.py")
+                elif words[-1:] == ["bootstrap-manager"]:
+                    # Both paths use atomic manager publication. The separate
+                    # ownership/interruption tests exercise the real boundary.
+                    self.assertEqual(self.manager.read_bytes(),
+                                     (self.code / "src/jittersim/updates.py").read_bytes())
                 elif re.search(r"deploy/raspberry-pi/[\w.-]+\.py", line):
                     script = Path(words[1]).name
                     if script == "retire-services.py":
@@ -405,11 +431,12 @@ class UpdateTests(unittest.TestCase):
                     self.assertEqual(words[1], "-sf")
                     self.assertEqual(os.readlink(self.command), words[2])
                 elif Path(words[0]).name == "pip":
-                    self.assertIn(
-                        [str(self.code / ".venv/bin/python"), "-m", "pip", "install",
-                         "--no-input", "--disable-pip-version-check", words[-1]],
-                        commands,
-                    )
+                    offline = [command for command in commands if command[:4] ==
+                               [str(self.code / ".venv/bin/python"), "-m", "pip", "install"]]
+                    self.assertEqual(len(offline), 1)
+                    self.assertIn("--no-index", offline[0])
+                    self.assertIn("--no-deps", offline[0])
+                    self.assertTrue(offline[0][-1].endswith(".whl"))
                 elif words[:2] == ["chmod", "-R"]:
                     self.assertEqual(words[2], "go-w")
                     for entry in [self.code, *self.code.rglob("*")]:
@@ -606,7 +633,7 @@ class UpdateTests(unittest.TestCase):
                 self.assertEqual(publisher.read_text(), "old publisher")
                 for unit in UNITS:
                     self.assertEqual((self.units / unit).read_text(), "old service")
-                self.assertEqual(self.manager.read_text(), "old recovery manager")
+                self.assertIn("RECOVERY_FORMAT = 2", self.manager.read_text())
                 self.assertFalse((self.code / "src").exists())
                 # The recovered installation gets the same service steps.
                 calls = self.systemctl(commands)
@@ -636,17 +663,23 @@ class UpdateTests(unittest.TestCase):
     def test_a_recovery_copy_without_a_file_list_keeps_newer_units(self):
         # Recovery copies from before this release covered only the older units.
         self.install()
-        record = json.loads((self.root / "backup/complete.json").read_text())
+        record = json.loads((self.backup("complete.json")).read_text())
         del record["managed"]
-        atomic_json(self.root / "backup/complete.json", record)
-        (self.root / "backup/units" / NAME_UNIT).unlink()
+        for name in ("format", "trees", "files"):
+            record.pop(name, None)
+        saved = self.backup()
+        atomic_json(saved / "complete.json", record)
+        (saved / "units" / NAME_UNIT).unlink()
+        # A manager from before selectors published a plain recovery directory.
+        (self.root / "backup-current.json").unlink()
+        saved.rename(self.root / "backup")
         request_update("", rollback=True, root=self.root, code=self.code, config=self.config, run=lambda *a: None)
         self.apply(lambda *args: None, lambda: True)
         self.assertEqual((self.units / NAME_UNIT).read_text(), (PI / NAME_UNIT).read_text())
         self.assertTrue(self.dispatcher.exists())
         self.assertEqual((self.units / UNITS[0]).read_text(), "old service")
 
-    def test_failure_before_backup_starts_the_watcher_again(self):
+    def test_low_space_leaves_the_watcher_running(self):
         self.stage()
         request_update("v1", root=self.root, code=self.code, config=self.config, run=lambda *args: None)
         commands, run = self.recorder()
@@ -654,11 +687,7 @@ class UpdateTests(unittest.TestCase):
             disk.return_value.free = 0
             with self.assertRaises(UpdateError):
                 self.apply(run, lambda: True)
-        self.assertEqual(
-            self.systemctl(commands)[-1],
-            "systemctl start jittersim-helper.service jittersim-dashboard.service "
-            "jittersim-browser-proxy.service " + WATCHER,
-        )
+        self.assertFalse(any(command[:1] == ["systemctl"] for command in commands))
 
     def rollback(self, run=None):
         request_update("", rollback=True, root=self.root, code=self.code, config=self.config,
@@ -697,7 +726,7 @@ class UpdateTests(unittest.TestCase):
 
     def test_a_rollback_keeps_the_trusted_keys_and_token_of_now(self):
         self.install()
-        self.assertFalse((self.root / "backup/config" / updates.SIGNERS_NAME).exists())
+        self.assertFalse((self.backup("config") / updates.SIGNERS_NAME).exists())
         # The owner replaces a stolen key and sets a token after the backup was made.
         _, replacement = make_key(self.base / "replacement", comment="replacement")
         trust_key(replacement, config=self.config, root=self.root)
@@ -718,7 +747,7 @@ class UpdateTests(unittest.TestCase):
     def test_a_rollback_never_brings_back_a_key_list_from_an_older_backup(self):
         self.install()
         # A recovery copy that an older manager made holds the old list.
-        (self.root / "backup/config" / updates.SIGNERS_NAME).write_text("old list\n")
+        (self.backup("config") / updates.SIGNERS_NAME).write_text("old list\n")
         updates.untrust_key("owner@mac", config=self.config, root=self.root,
                             sudoers=self.base / "sudoers")
         now = self.signers()
@@ -728,7 +757,7 @@ class UpdateTests(unittest.TestCase):
         self.install_again_and_roll_back_without_a_list()
 
     def install_again_and_roll_back_without_a_list(self):
-        backup_config = self.root / "backup/config"
+        backup_config = self.backup("config")
         (backup_config / updates.SIGNERS_NAME).write_text("old list\n")
         self.rollback()
         # Nothing was trusted before the rollback so nothing is trusted after it.
@@ -743,14 +772,14 @@ class UpdateTests(unittest.TestCase):
         now = self.signers()
         request_update("", rollback=True, root=self.root, code=self.code, config=self.config,
                        run=lambda *args: None)
-        original = updates.shutil.copytree
+        original = updates.snapshot_tree
 
         def broken_data(source, destination, *args, **kwargs):
             if Path(destination) == self.data:
                 raise OSError("disk error")
             return original(source, destination, *args, **kwargs)
 
-        with patch("jittersim.updates.shutil.copytree", broken_data), \
+        with patch("jittersim.updates.snapshot_tree", broken_data), \
                 patch("jittersim.updates.time.sleep"), self.assertRaises(OSError):
             self.apply(lambda *args: None, lambda: True)
         # The configuration came back from the recovery copy without any key.
@@ -762,7 +791,7 @@ class UpdateTests(unittest.TestCase):
     def prepare_legacy_trust_recovery(self):
         old_signers = self.signers()
         self.install()
-        legacy = self.root / "backup/config"
+        legacy = self.backup("config")
         (legacy / updates.SIGNERS_NAME).write_text(old_signers)
         (legacy / updates.TOKEN_NAME).write_text("toy-old-token\n")
         (legacy / updates.TOKEN_NAME).chmod(0o600)
@@ -778,7 +807,7 @@ class UpdateTests(unittest.TestCase):
         return self.signers()
 
     def interrupt_trust_recovery(self, boundary):
-        original_tree = updates.shutil.copytree
+        original_tree = updates.snapshot_tree
         original_file = updates.shutil.copy2
         failures = []
 
@@ -798,7 +827,7 @@ class UpdateTests(unittest.TestCase):
                 raise OSError("test interruption while restoring current trust")
             return original_file(source, destination, *args, **kwargs)
 
-        with patch("jittersim.updates.shutil.copytree", copytree), \
+        with patch("jittersim.updates.snapshot_tree", copytree), \
                 patch("jittersim.updates.shutil.copy2", copy2), \
                 self.assertRaises(OSError):
             self.apply(lambda *args: None, lambda: True)
@@ -918,7 +947,7 @@ class UpdateTests(unittest.TestCase):
         self.prepare_legacy_trust_recovery()
         self.interrupt_trust_recovery("data")
         change(self.root / "keep" / name)
-        with patch("jittersim.updates.shutil.copytree", wraps=updates.shutil.copytree) as copying:
+        with patch("jittersim.updates.snapshot_tree", wraps=updates.snapshot_tree) as copying:
             with self.assertRaisesRegex(UpdateError, message):
                 self.apply(lambda *args: None, lambda: True)
         copying.assert_not_called()
@@ -942,8 +971,8 @@ class UpdateTests(unittest.TestCase):
         keep.mkdir(mode=0o700)
         for name in updates.PRESERVED_CONFIG:
             updates.shutil.copy2(self.config / name, keep / name)
-            updates.shutil.copy2(self.root / "backup/config" / name, self.config / name)
-        with patch("jittersim.updates.shutil.copytree", wraps=updates.shutil.copytree) as copying:
+            updates.shutil.copy2(self.backup("config") / name, self.config / name)
+        with patch("jittersim.updates.snapshot_tree", wraps=updates.snapshot_tree) as copying:
             with self.assertRaisesRegex(UpdateError, "older manager"):
                 self.apply(lambda *args: None, lambda: True)
         copying.assert_not_called()

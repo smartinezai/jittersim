@@ -7,6 +7,7 @@ requests can name only the single release already staged on this Pi.
 """
 
 import argparse
+import ast
 import base64
 import fcntl
 import gzip
@@ -927,12 +928,19 @@ def update_status(*, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT):
             reason = key_problem or staged_problem(staged, signers, root=root, code=code)
         except UpdateError as error:
             reason = str(error)
+    try:
+        rollback_available = (recovery_backup(root) / "complete.json").exists()
+        recovery_problem = None
+    except UpdateError as error:
+        rollback_available = False
+        recovery_problem = str(error)
     return {
         "installed": installed.get("version", "Unversioned installation"),
         "available": staged.get("version"),
         "phase": status.get("phase", "idle"),
         "message": status.get("message", "No approved release has been staged on this Pi."),
-        "rollback_available": (root / "backup" / "complete.json").exists(),
+        "rollback_available": rollback_available,
+        "recovery_problem": recovery_problem,
         "installable": bool(staged) and reason is None,
         "signed_by": staged.get("signer_label") if staged.get("signer") else None,
         "reason": reason,
@@ -964,6 +972,7 @@ def _command_environment():
             environment.pop(name)
     # This special pip setting disables system and user configuration too.
     environment["PIP_CONFIG_FILE"] = os.devnull
+    environment.update(getattr(COMMAND_CONTEXT, "environment", None) or {})
     return environment
 
 
@@ -1006,6 +1015,9 @@ def _command_result(command, timeout, capture):
             selector.register(process.stdout, selectors.EVENT_READ, "stdout")
             selector.register(process.stderr, selectors.EVENT_READ, "stderr")
             while selector.get_map() or not finished():
+                observe = getattr(COMMAND_CONTEXT, "observe", None)
+                if observe is not None:
+                    observe()
                 remaining = work_deadline - time.monotonic()
                 if remaining <= 0:
                     raise UpdateError("release command timed out: " + name)
@@ -1120,7 +1132,10 @@ def request_update(
             raise UpdateError("check the staged release again before installing")
         elif not status["installable"]:
             raise UpdateError(status["reason"] or "the staged release cannot be installed")
-        atomic_json(root / "request.json", {"version": release_version, "rollback": rollback})
+        request = {"version": release_version, "rollback": rollback}
+        if rollback:
+            request["recovery"] = recovery_identity(root, recovery_backup(root))
+        atomic_json(root / "request.json", request)
         atomic_json(
             root / "status.json",
             {"phase": "queued", "message": "Update queued. The dashboard will reconnect."},
@@ -1723,10 +1738,560 @@ def run_fetch_job(*, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT, sourc
                                 now=now)
 
 
-def healthy(*, config=CONFIG_ROOT, run=run_command, port=8080):
+# A copied recovery manager must understand these records before they are published.
+RECOVERY_FORMAT = 2
+ATTEMPT = re.compile(r"[0-9a-f]{32}\Z")
+GENERATION = re.compile(r"backup-[0-9a-f]{32}\Z")
+PREPARATION = re.compile(r"prepare-[0-9a-f]{32}\Z")
+MAX_PREPARATION_BYTES = 512 * 1024 * 1024
+MAX_PREPARATION_ENTRIES = 20000
+MAX_PREPARED_FILE = 256 * 1024 * 1024
+MAX_WHEELS = 64
+MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024 * 1024
+MAX_SNAPSHOT_ENTRIES = 100000
+MAX_TREE_DEPTH = 32
+MAX_GENERATIONS = 16
+SPACE_MARGIN = 100 * 1024 * 1024
+WHEEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+\-]{0,199}\.whl\Z")
+COMMAND_CONTEXT = threading.local()
+
+
+class UpdateBudget:
+    """Share a finite allowance between preparation, installation and recovery."""
+
+    def __init__(self):
+        self.started = time.monotonic()
+        self.deadline = self.started + 600
+        self.recovery_deadline = self.started + 840
+
+    def check(self):
+        if time.monotonic() >= self.deadline:
+            raise UpdateError("the update has no time remaining")
+
+    def limit(self, seconds):
+        self.check()
+        return min(seconds, self.deadline - time.monotonic())
+
+    def recover(self):
+        self.deadline = self.recovery_deadline
+        self.check()
+
+
+def tree_entries(source, budget, *, links=False, ignore=(), max_bytes=None, max_entries=None, live=False):
+    """Enumerate without following links and refuse unsafe or excessive contents."""
+    maximum_bytes = MAX_SNAPSHOT_BYTES if max_bytes is None else max_bytes
+    maximum_entries = MAX_SNAPSHOT_ENTRIES if max_entries is None else max_entries
+    stack = [(Path(source), Path("."), 0)]
+    count = total = 0
+    while stack:
+        budget.check()
+        path, relative, depth = stack.pop()
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            if live and relative != Path("."):
+                continue
+            raise
+        count += 1
+        if count > maximum_entries or depth > MAX_TREE_DEPTH:
+            raise UpdateError("the recovery snapshot has too many entries or nested folders")
+        if stat.S_ISLNK(info.st_mode):
+            if not links or info.st_uid != os.geteuid():
+                raise UpdateError("the recovery snapshot contains an unsafe link")
+        elif stat.S_ISREG(info.st_mode):
+            total += info.st_size
+            if total > maximum_bytes:
+                raise UpdateError("the recovery snapshot is too large")
+        elif not stat.S_ISDIR(info.st_mode):
+            raise UpdateError("the recovery snapshot contains a special file")
+        yield path, relative, info
+        if stat.S_ISDIR(info.st_mode):
+            try:
+                with os.scandir(path) as entries:
+                    children = []
+                    for entry in entries:
+                        budget.check()
+                        if relative == Path(".") and entry.name in ignore:
+                            continue
+                        if len(children) + count > maximum_entries:
+                            raise UpdateError("the recovery snapshot has too many entries")
+                        children.append((Path(entry.path), relative / entry.name, depth + 1))
+                stack.extend(sorted(children, reverse=True))
+            except FileNotFoundError:
+                if not live or relative == Path("."):
+                    raise
+
+
+def snapshot_size(source, budget, *, links=False, ignore=()):
+    return sum(info.st_size for _, _, info in tree_entries(source, budget, links=links, ignore=ignore)
+               if stat.S_ISREG(info.st_mode))
+
+
+def snapshot_requirements(inputs, budget):
+    total = count = 0
+    for name, source in inputs:
+        if not source.exists() and not source.is_symlink():
+            continue
+        ignore = PRESERVED_CONFIG if name == "config" else ("incoming-release",) if name == "data" else ()
+        for _, _, info in tree_entries(source, budget, links=name in ("code", "command"), ignore=ignore):
+            count += 1
+            if stat.S_ISREG(info.st_mode):
+                total += info.st_size
+            if total > MAX_SNAPSHOT_BYTES or count > MAX_SNAPSHOT_ENTRIES:
+                raise UpdateError("the complete recovery snapshot exceeds its size or entry allowance")
+    return total
+
+
+def _copy_snapshot_file(source, destination, info, budget):
+    descriptor = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+            raise UpdateError("a recovery input changed while it was being copied")
+        remaining = info.st_size
+        with os.fdopen(descriptor, "rb", closefd=False) as input_file, destination.open("xb") as output:
+            while remaining:
+                budget.check()
+                block = input_file.read(min(65536, remaining))
+                if not block:
+                    raise UpdateError("a recovery input changed while it was being copied")
+                output.write(block)
+                remaining -= len(block)
+            if input_file.read(1):
+                raise UpdateError("a recovery input grew while it was being copied")
+            output.flush()
+            os.fsync(output.fileno())
+            budget.check()
+        destination.chmod(stat.S_IMODE(info.st_mode))
+        os.utime(destination, ns=(info.st_atime_ns, info.st_mtime_ns), follow_symlinks=False)
+        with destination.open("rb") as copied:
+            os.fsync(copied.fileno())
+        budget.check()
+        current = os.fstat(descriptor)
+        if (current.st_size, current.st_mtime_ns) != (info.st_size, info.st_mtime_ns):
+            raise UpdateError("a recovery input changed while it was being copied")
+    finally:
+        os.close(descriptor)
+
+
+def snapshot_tree(source, destination, budget, *, links=False, ignore=()):
+    # Inspect the entire input before creating a partial destination.
+    snapshot_size(source, budget, links=links, ignore=ignore)
+    directories = []
+    for path, relative, info in tree_entries(source, budget, links=links, ignore=ignore):
+        target = destination if relative == Path(".") else destination / relative
+        if stat.S_ISDIR(info.st_mode):
+            target.mkdir(mode=0o700)
+            directories.append((target, info))
+        elif stat.S_ISLNK(info.st_mode):
+            os.symlink(os.readlink(path), target)
+        else:
+            _copy_snapshot_file(path, target, info, budget)
+    for path, info in reversed(directories):
+        budget.check()
+        path.chmod(stat.S_IMODE(info.st_mode))
+        _fsync_folder(path)
+        budget.check()
+
+
+def tree_digest(source, budget, *, links=False, ignore=()):
+    digest = hashlib.sha256()
+    for path, relative, info in tree_entries(source, budget, links=links, ignore=ignore):
+        digest.update(str(relative).encode("utf-8") + b"\0")
+        digest.update(str(stat.S_IMODE(info.st_mode)).encode("ascii") + b"\0")
+        if stat.S_ISLNK(info.st_mode):
+            digest.update(b"link\0" + os.readlink(path).encode("utf-8") + b"\0")
+        elif stat.S_ISREG(info.st_mode):
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                opened = os.fstat(descriptor)
+                if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                    raise UpdateError("a recovery input changed while it was being checked")
+                remaining = info.st_size
+                with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                    while remaining:
+                        budget.check()
+                        block = handle.read(min(65536, remaining))
+                        if not block:
+                            raise UpdateError("a recovery input changed while it was being checked")
+                        digest.update(block)
+                        remaining -= len(block)
+                    if handle.read(1):
+                        raise UpdateError("a recovery input grew while it was being checked")
+                digest.update(b"\0")
+            finally:
+                os.close(descriptor)
+        else:
+            digest.update(b"directory\0")
+    return digest.hexdigest()
+
+
+def remove_tree(path, budget):
+    # Bound traversal before cleanup and never follow a link into another tree.
+    entries = list(tree_entries(path, budget, links=True))
+    for entry, _, info in reversed(entries):
+        budget.check()
+        if stat.S_ISDIR(info.st_mode):
+            entry.rmdir()
+        else:
+            entry.unlink()
+    budget.check()
+
+
+def _recovery_record(path):
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise UpdateError("the recovery record must be private")
+        value = read_json(path)
+        if not isinstance(value, dict):
+            raise UpdateError("the recovery record is invalid")
+        return value
+    except (OSError, ValueError) as error:
+        raise UpdateError("the recovery record could not be read") from error
+
+
+def recovery_backup(root, *, pinned=None):
+    """Choose only the validated published copy, never an unrelated fallback."""
+    selector = root / "backup-current.json"
+    if pinned is None and not selector.exists() and not selector.is_symlink():
+        return root / "backup"
+    record = pinned if pinned is not None else _recovery_record(selector)
+    name, attempt = record.get("name"), record.get("attempt")
+    if name == "backup" and pinned is not None and attempt is None:
+        backup = root / name
+    elif (record.get("format") == RECOVERY_FORMAT and isinstance(name, str)
+          and GENERATION.fullmatch(name) and isinstance(attempt, str) and ATTEMPT.fullmatch(attempt)
+          and name == "backup-" + attempt):
+        backup = root / name
+    else:
+        raise UpdateError("the recovery selector is invalid")
+    try:
+        info = backup.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or (info.st_mode & 0o077 and backup.name != "backup"):
+            raise UpdateError("the recovery folder must be private")
+        completed = _recovery_record(backup / "complete.json")
+        if attempt is not None and (completed.get("attempt") != attempt
+                                    or completed.get("format") != RECOVERY_FORMAT):
+            raise UpdateError("the recovery copy belongs to another update")
+        if record.get("completion") and hashlib.sha256((backup / "complete.json").read_bytes()).hexdigest() != record["completion"]:
+            raise UpdateError("the pinned recovery copy changed")
+        return backup
+    except OSError as error:
+        raise UpdateError("the selected recovery copy is missing") from error
+
+
+def recovery_identity(root, backup):
+    completed = _recovery_record(backup / "complete.json")
+    return {"format": RECOVERY_FORMAT, "name": backup.name,
+            "attempt": completed.get("attempt") if backup.name != "backup" else None,
+            "completion": hashlib.sha256((backup / "complete.json").read_bytes()).hexdigest()}
+
+
+def cleanup_generations(root, budget, *, candidate=None):
+    selected = recovery_backup(root)
+    generations = []
+    preparations = []
+    scanned = 0
+    with os.scandir(root) as entries:
+        for entry in entries:
+            budget.check()
+            scanned += 1
+            if scanned > 64:
+                raise UpdateError("too many update records need inspection")
+            if entry.name.startswith("backup-") and entry.name != "backup-current.json":
+                if not GENERATION.fullmatch(entry.name):
+                    raise UpdateError("an unknown recovery folder needs inspection")
+                generations.append(Path(entry.path))
+            elif entry.name.startswith("prepare-"):
+                if not PREPARATION.fullmatch(entry.name):
+                    raise UpdateError("an unknown preparation folder needs inspection")
+                preparations.append(Path(entry.path))
+            if len(generations) + len(preparations) > MAX_GENERATIONS:
+                raise UpdateError("too many update folders need inspection")
+    legacy = root / "backup"
+    if legacy.exists() or legacy.is_symlink():
+        info = legacy.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+            raise UpdateError("the legacy recovery folder is unsafe")
+        generations.append(legacy)
+    completed = []
+    for path in generations:
+        info = path.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_mode & (0o022 if path.name == "backup" else 0o077)):
+            raise UpdateError("a recovery folder is unsafe")
+        if (path / "complete.json").exists():
+            created = _recovery_record(path / "complete.json").get("created_at", 0)
+            if type(created) is not int or created < 0:
+                raise UpdateError("the recovery completion time is invalid")
+            completed.append((created, path))
+        elif path != candidate:
+            remove_tree(path, budget)
+    previous = next((path for _, path in sorted(completed, reverse=True) if path != selected), None)
+    for _, path in completed:
+        if path not in (selected, previous, candidate):
+            remove_tree(path, budget)
+    for path in preparations:
+        remove_tree(path, budget)
+
+
+def _check_preparation(path, budget):
+    for _, _, info in tree_entries(path, budget, links=True, max_bytes=MAX_PREPARATION_BYTES,
+                                  max_entries=MAX_PREPARATION_ENTRIES, live=True):
+        if stat.S_ISREG(info.st_mode) and info.st_size > MAX_PREPARED_FILE:
+            raise UpdateError("a prepared input is too large")
+
+
+def prepared_wheels(path, record, budget):
+    manifest = _recovery_record(path / "wheels.json")
+    if manifest.get("commit") != record.get("commit") or manifest.get("version") != record.get("version"):
+        raise UpdateError("prepared packages belong to another release")
+    rows = manifest.get("wheels")
+    if not isinstance(rows, list) or not 1 <= len(rows) <= MAX_WHEELS:
+        raise UpdateError("the prepared package list is invalid")
+    wheels = []
+    names = set()
+    for row in rows:
+        budget.check()
+        if (not isinstance(row, dict) or set(row) != {"name", "size", "sha256"}
+                or not isinstance(row["name"], str) or not WHEEL_NAME.fullmatch(row["name"])
+                or row["name"] in names or type(row["size"]) is not int
+                or not 0 < row["size"] <= MAX_PREPARED_FILE
+                or not isinstance(row["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", row["sha256"])):
+            raise UpdateError("the prepared package list is invalid")
+        wheel = path / "wheels" / row["name"]
+        info = wheel.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size != row["size"]:
+            raise UpdateError("a prepared package changed")
+        digest = hashlib.sha256()
+        with wheel.open("rb") as handle:
+            while True:
+                budget.check()
+                block = handle.read(65536)
+                if not block:
+                    break
+                digest.update(block)
+        if digest.hexdigest() != row["sha256"]:
+            raise UpdateError("a prepared package changed")
+        names.add(row["name"])
+        wheels.append(str(wheel))
+    if {entry.name for entry in (path / "wheels").iterdir()} != names:
+        raise UpdateError("the prepared package folder changed")
+    return wheels
+
+
+def offline_install(python, wheels, run, budget):
+    run([str(python), "-m", "pip", "install", "--no-input", "--disable-pip-version-check",
+         "--no-index", "--no-deps", "--force-reinstall", *wheels], budget.limit(300))
+    budget.check()
+    run([str(python), "-m", "pip", "check"], budget.limit(30))
+    budget.check()
+    run([str(python), "-I", "-c", IMPORT_CHECK], budget.limit(30))
+    budget.check()
+
+
+def prepare_install(staged, path, python, record, run, budget):
+    """Finish builds and test the complete offline dependency set before stopping."""
+    path.mkdir(mode=0o700)
+    (path / "wheels").mkdir(mode=0o700)
+    (path / "tmp").mkdir(mode=0o700)
+    (path / "home").mkdir(mode=0o700)
+    old_environment = getattr(COMMAND_CONTEXT, "environment", None)
+    old_observe = getattr(COMMAND_CONTEXT, "observe", None)
+    COMMAND_CONTEXT.environment = {"TMPDIR": str(path / "tmp"), "HOME": str(path / "home"),
+                                   "PIP_NO_CACHE_DIR": "true"}
+    COMMAND_CONTEXT.observe = lambda: _check_preparation(path, budget)
+    try:
+        run([str(python), "-m", "pip", "wheel", "--no-input", "--disable-pip-version-check",
+             "--no-cache-dir", "--wheel-dir", str(path / "wheels"), str(staged)], budget.limit(300))
+        budget.check()
+        _check_preparation(path, budget)
+        rows = []
+        for wheel in sorted((path / "wheels").iterdir()):
+            budget.check()
+            info = wheel.lstat()
+            if not WHEEL_NAME.fullmatch(wheel.name) or not stat.S_ISREG(info.st_mode):
+                raise UpdateError("package preparation produced an unexpected file")
+            if len(rows) >= MAX_WHEELS or not 0 < info.st_size <= MAX_PREPARED_FILE:
+                raise UpdateError("too many prepared packages or an oversized package")
+            rows.append({"name": wheel.name, "size": info.st_size,
+                         "sha256": hashlib.sha256(wheel.read_bytes()).hexdigest()})
+        atomic_json(path / "wheels.json", {"commit": record["commit"], "version": record["version"], "wheels": rows})
+        wheels = prepared_wheels(path, record, budget)
+        environment = path / "verify"
+        run([str(python), "-m", "venv", str(environment)], budget.limit(60))
+        budget.check()
+        offline_install(environment / "bin/python", wheels, run, budget)
+        _check_preparation(path, budget)
+        return wheels
+    finally:
+        COMMAND_CONTEXT.environment = old_environment
+        COMMAND_CONTEXT.observe = old_observe
+
+
+def compatible_manager(source):
+    # Check syntax and the declared record format without executing future code.
+    try:
+        with source.open("rb") as handle:
+            raw = handle.read(512 * 1024 + 1)
+        if len(raw) > 512 * 1024:
+            raise UpdateError("the release needs a compatible recovery manager")
+        parsed = ast.parse(raw)
+        declared = any(isinstance(node, ast.Assign)
+                       and any(isinstance(target, ast.Name) and target.id == "RECOVERY_FORMAT"
+                               for target in node.targets)
+                       and isinstance(node.value, ast.Constant)
+                       and type(node.value.value) is int and node.value.value == RECOVERY_FORMAT
+                       for node in parsed.body)
+        if not declared:
+            raise UpdateError("the release needs a compatible recovery manager")
+    except (OSError, SyntaxError, ValueError) as error:
+        raise UpdateError("the release needs a runnable recovery manager") from error
+
+
+def bootstrap_manager(source, destination, *, root=UPDATE_ROOT, descriptor=9):
+    """Publish standalone recovery code while the manual installer holds its lock."""
+    directory = None
+    try:
+        directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+        folder = os.fstat(directory)
+        opened = os.fstat(descriptor)
+        named = os.stat("lock", dir_fd=directory, follow_symlinks=False)
+        if (folder.st_uid != os.geteuid() or folder.st_mode & 0o077
+                or not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(named.st_mode)
+                or opened.st_uid != os.geteuid() or opened.st_mode & 0o022 or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)):
+            raise UpdateError("the installer has no safe update ownership")
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        current = os.stat("lock", dir_fd=directory, follow_symlinks=False)
+        if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+            raise UpdateError("the installer has no safe update ownership")
+    except OSError as error:
+        raise UpdateError("the installer has no safe update ownership") from error
+    finally:
+        if directory is not None:
+            os.close(directory)
+    compatible_manager(source)
+    install_manager(source, destination)
+
+
+WRITERS = (WATCHER, *reversed(SERVICES))
+
+
+def writers_stopped(names, query, budget):
+    for name in names:
+        answer = query(["systemctl", "show", "--property=ActiveState", "--property=MainPID",
+                        "--property=ControlPID", "--property=TasksCurrent", name], budget.limit(10))
+        budget.check()
+        state = dict(line.split("=", 1) for line in answer.splitlines() if "=" in line)
+        if (state.get("ActiveState") not in ("inactive", "failed")
+                or state.get("MainPID") != "0" or state.get("ControlPID") != "0"
+                or state.get("TasksCurrent") not in ("0", "[not set]")):
+            return False
+    return True
+
+
+def validate_recovery(backup, budget):
+    """Validate every input before deleting any part of the live installation."""
+    try:
+        completed = _recovery_record(backup / "complete.json")
+        ownership = completed.get("ownership", {})
+        if not isinstance(ownership, dict) or any(
+            name not in ("code", "config", "data", "access")
+            or not isinstance(pair, list) or len(pair) != 2
+            or any(type(value) is not int or not 0 <= value < 2 ** 32 for value in pair)
+            for name, pair in ownership.items()
+        ):
+            raise UpdateError("the recovery ownership record is invalid")
+        names = completed.get("managed", ["units/" + unit for unit in LEGACY_UNITS])
+        if not isinstance(names, list) or len(names) > len(UNITS) + 2 or len(set(names)) != len(names):
+            raise UpdateError("the recovery file list is invalid")
+        for name in names:
+            if not isinstance(name, str) or not (name in ("dispatcher", "command")
+                    or name.startswith("units/") and UNIT_NAME.fullmatch(name[6:])):
+                raise UpdateError("the recovery copy names an unknown file")
+        trees = ["code", "config", "data"]
+        if (backup / "access").exists():
+            trees.append("access")
+        digests = {}
+        for name in trees:
+            if not (backup / name).is_dir() or (backup / name).is_symlink():
+                raise UpdateError("a required recovery folder is missing")
+            digests[name] = tree_digest(backup / name, budget, links=name == "code",
+                                      ignore=PRESERVED_CONFIG if name == "config" else ())
+        snapshot_size(backup, budget, links=True)
+        if completed.get("format") == RECOVERY_FORMAT and completed.get("trees") != digests:
+            raise UpdateError("the recovery snapshot changed")
+        for name in names:
+            saved = backup / name
+            if saved.exists() or saved.is_symlink():
+                digest = tree_digest(saved, budget, links=name == "command")
+                if completed.get("format") == RECOVERY_FORMAT and completed.get("files", {}).get(name) != digest:
+                    raise UpdateError("a managed recovery file changed")
+            elif completed.get("format") == RECOVERY_FORMAT and name in completed.get("files", {}):
+                raise UpdateError("a managed recovery file is missing")
+        return completed
+    except (OSError, ValueError, TypeError) as error:
+        raise UpdateError("the recovery inputs could not be checked") from error
+
+
+def pending_command(process):
+    return {"group": process.pid, "boot": _current_boot()}
+
+
+def _current_boot():
+    path = Path("/proc/sys/kernel/random/boot_id")
+    return path.read_text().strip() if path.exists() else None
+
+
+def command_still_running(record, budget):
+    # Refuse restoration while an unknown cancelled group can still write. No
+    # signals are sent here, so an unrelated reused group can only delay retry.
+    if not isinstance(record, dict) or type(record.get("group")) is not int or record["group"] <= 0:
+        raise UpdateError("the unfinished command record is invalid")
+    if record.get("boot") != _current_boot():
+        return False
+    if not Path("/proc").is_dir():
+        try:
+            os.killpg(record["group"], 0)
+            return True
+        except ProcessLookupError:
+            return False
+    count = 0
+    with os.scandir("/proc") as entries:
+        for entry in entries:
+            budget.check()
+            if not entry.name.isdigit():
+                continue
+            count += 1
+            if count > 65536:
+                raise UpdateError("too many processes to check unfinished update work")
+            try:
+                with (Path(entry.path) / "stat").open() as handle:
+                    fields = handle.read(4096).rsplit(")", 1)[1].split()
+                if fields[0] != "Z" and int(fields[2]) == record["group"]:
+                    return True
+            except (OSError, ValueError, IndexError):
+                continue
+    return False
+
+
+def healthy(*, config=CONFIG_ROOT, run=run_command, port=8080, budget=None):
+    deadline = time.monotonic() + (budget.limit(10) if budget is not None else 10)
+
+    def remaining():
+        if budget is not None:
+            budget.check()
+        allowance = deadline - time.monotonic()
+        if allowance <= 0:
+            raise UpdateError("the dashboard health check timed out")
+        return allowance
+
     try:
         for service in SERVICES:
-            run(["systemctl", "is-active", "--quiet", service], 5)
+            run(["systemctl", "is-active", "--quiet", service], min(5, remaining()))
+            remaining()
         token = next(
             line.split("=", 1)[1].strip()
             for line in (config / "control.env").read_text().splitlines()
@@ -1734,22 +2299,32 @@ def healthy(*, config=CONFIG_ROOT, run=run_command, port=8080):
         )
         hostname = socket.gethostname().split(".")[0] + ".local"
         context = ssl.create_default_context(cafile=str(config / "dashboard.crt"))
-        connection = http.client.HTTPSConnection(hostname, port, timeout=3, context=context)
+        connection = http.client.HTTPSConnection(hostname, port, timeout=remaining(), context=context)
         try:
-            connection.sock = context.wrap_socket(
-                socket.create_connection(("127.0.0.1", port), timeout=3), server_hostname=hostname
-            )
+            transport = socket.create_connection(("127.0.0.1", port), timeout=remaining())
+            transport.settimeout(remaining())
+            connection.sock = context.wrap_socket(transport, server_hostname=hostname)
+            transport = connection.sock
+            transport.settimeout(remaining())
             connection.request("GET", "/api/health", headers={"Authorization": "Bearer " + token})
+            transport.settimeout(remaining())
             result = connection.getresponse()
-            body = result.read(65537)
-            if len(body) > 65536:
-                return False
+            body = bytearray()
+            while True:
+                transport.settimeout(remaining())
+                block = result.read1(min(4096, 65537 - len(body)))
+                remaining()
+                if not block:
+                    break
+                body.extend(block)
+                if len(body) > 65536:
+                    return False
+                if getattr(result, "length", None) == 0:
+                    break
             data = json.loads(body)
-            return (
-                result.status == 200
-                and data.get("status") == "ok"
-                and data.get("helper_reachable") is True
-            )
+            remaining()
+            return (result.status == 200 and data.get("status") == "ok"
+                    and data.get("helper_reachable") is True)
         finally:
             connection.close()
     except (OSError, ValueError, StopIteration, UpdateError, http.client.HTTPException):
@@ -1770,23 +2345,43 @@ def apply_update(
     run=run_command,
     query=read_command,
     health=None,
+    prepare=prepare_install,
 ):
     """Install the staged release with the release steps of install.sh.
 
     The steps that check the Pi run before anything stops. Every file the
     install replaces is in the recovery copy first.
     """
-    health = health or (lambda: healthy(config=config, run=run))
+    budget = UpdateBudget()
+    original_run, original_query = run, query
+
+    def run(arguments, timeout):
+        result = original_run(arguments, budget.limit(timeout))
+        budget.check()
+        return result
+
+    def query(arguments, timeout):
+        result = original_query(arguments, budget.limit(timeout))
+        budget.check()
+        return result
+
+    health = health or (lambda: healthy(config=config, run=run, budget=budget))
     with update_lock(root):
         request = read_json(root / "request.json")
-        previous_phase = read_json(root / "status.json").get("phase")
         if not request:
             return
-        backup = root / "backup"
-        if previous_phase in ("installing", "checking", "rolling-back"):
-            completed = read_json(backup / "complete.json")
-            if completed.get("target_version") == request.get("version"):
-                request["rollback"] = True
+        previous_phase = read_json(root / "status.json").get("phase")
+        backup = recovery_backup(root, pinned=request.get("recovery"))
+        completed = _recovery_record(backup / "complete.json") if (backup / "complete.json").exists() else {}
+        interrupted_current = (request.get("attempt") and completed.get("attempt") == request["attempt"]
+                               and completed.get("target_version") == request.get("version"))
+        interrupted_legacy = (not request.get("attempt") and backup.name == "backup"
+                              and previous_phase in ("installing", "checking", "rolling-back")
+                              and completed.get("target_version") == request.get("version"))
+        if interrupted_current or interrupted_legacy:
+            request["rollback"] = True
+            request["recovery"] = recovery_identity(root, backup)
+            atomic_json(root / "request.json", request)
 
         if request.get("rollback") and (access / "policy.json").exists():
             try:
@@ -1805,6 +2400,8 @@ def apply_update(
                 raise UpdateError(message) from error
 
         def progress(phase, message):
+            if phase != "failed":
+                budget.check()
             atomic_json(root / "status.json", {"phase": phase, "message": message})
 
         def present(names):
@@ -1857,6 +2454,7 @@ def apply_update(
 
         def copy_trust_setting(source, destination):
             """A failed copy must not leave a partial token or key list for retry."""
+            budget.check()
             descriptor, temporary = tempfile.mkstemp(prefix=".trust-", dir=destination.parent)
             os.close(descriptor)
             try:
@@ -1866,6 +2464,7 @@ def apply_update(
                     os.fsync(handle.fileno())
                 os.replace(temporary, destination)
                 _fsync_folder(destination.parent)
+                budget.check()
             finally:
                 Path(temporary).unlink(missing_ok=True)
 
@@ -1877,13 +2476,13 @@ def apply_update(
                     restored.unlink()
                 if (keep / name).is_file():
                     copy_trust_setting(keep / name, restored)
-            shutil.rmtree(keep)
+            remove_tree(keep, budget)
             _fsync_folder(root)
 
         def restore():
             if not (backup / "complete.json").exists():
                 raise UpdateError("the recovery copy is incomplete")
-            completed = read_json(backup / "complete.json")
+            completed = validate_recovery(backup, budget)
             ownership = completed.get("ownership", {})
             targets = []
             for name in completed.get("managed", ["units/" + unit for unit in LEGACY_UNITS]):
@@ -1898,25 +2497,23 @@ def apply_update(
             keep = keep_trust_settings()
             for name, destination in (("code", code), ("config", config), ("data", data)):
                 if destination.exists():
-                    shutil.rmtree(destination)
-                # Older recovery copies contain the signer list and token. They
-                # must never become live even if a later copy is interrupted.
-                ignore = (
-                    lambda folder, names: PRESERVED_CONFIG
-                    if Path(folder) == backup / "config" else ()
-                ) if name == "config" else None
-                shutil.copytree(backup / name, destination, symlinks=True, ignore=ignore)
+                    remove_tree(destination, budget)
+                snapshot_tree(backup / name, destination, budget, links=name == "code",
+                              ignore=PRESERVED_CONFIG if name == "config" else ())
                 if name in ownership:
                     uid, gid = ownership[name]
-                    for entry in [destination, *destination.rglob("*")]:
+                    for entry, _, _ in tree_entries(destination, budget, links=name == "code"):
                         os.chown(entry, uid, gid, follow_symlinks=False)
             put_back_trust_settings(keep)
             for name, destination in targets:
+                budget.check()
                 saved = backup / name
                 if saved.is_symlink():
                     link_command(os.readlink(saved), destination)
                 elif saved.exists():
-                    shutil.copy2(saved, destination)
+                    if destination.is_symlink() or destination.exists():
+                        destination.unlink()
+                    _copy_snapshot_file(saved, destination, saved.lstat(), budget)
                 elif destination.is_symlink() or destination.exists():
                     unit = name[6:] if name.startswith("units/") else None
                     if unit:
@@ -1930,192 +2527,258 @@ def apply_update(
                     destination.unlink()
             if (backup / "access").exists():
                 if access.exists():
-                    shutil.rmtree(access)
-                shutil.copytree(backup / "access", access, symlinks=True)
+                    remove_tree(access, budget)
+                snapshot_tree(backup / "access", access, budget)
                 if "access" in ownership:
                     uid, gid = ownership["access"]
-                    for entry in [access, *access.rglob("*")]:
+                    for entry, _, _ in tree_entries(access, budget):
                         os.chown(entry, uid, gid, follow_symlinks=False)
             # The recovery manager is separate from the application. Rolling it
             # back could undo trust protections needed by later recovery attempts.
             restart_services()
 
         def wait_healthy():
+            until = min(budget.deadline, time.monotonic() + 30)
             for _ in range(30):
-                if health():
+                if time.monotonic() >= until:
+                    return False
+                budget.check()
+                answer = health()
+                budget.check()
+                if time.monotonic() >= until:
+                    return False
+                if answer:
                     return True
-                time.sleep(1)
+                time.sleep(min(1, max(0, until - time.monotonic())))
             return False
 
+        if request.get("command_pending"):
+            try:
+                if command_still_running(request["command_pending"], budget):
+                    raise UpdateError("an unfinished update command must stop before retry")
+            except Exception:
+                progress("failed", "An update command has not stopped. Recovery will wait for it.")
+                raise
+            request.pop("command_pending")
+            atomic_json(root / "request.json", request)
         recovered = False
         keep_request = True
-        backup_taken = False
-        stopped = False
+        stopped = bool(request.get("restart_only"))
         try:
-            if not request.get("rollback"):
+            if request.get("rollback"):
+                if "recovery" not in request:
+                    request["recovery"] = recovery_identity(root, backup)
+                    atomic_json(root / "request.json", request)
+                budget.recover()
+                validate_recovery(backup, budget)
+            else:
+                if stopped:
+                    # A previous invocation stopped writers before publishing a copy.
+                    # Its old source is still live. Never restore an unrelated backup.
+                    budget.recover()
+                    restart_services()
+                    if not wait_healthy():
+                        raise UpdateError("previous services could not restart before retry")
+                    request.pop("restart_only", None)
+                    atomic_json(root / "request.json", request)
+                    stopped = False
+                    budget.deadline = min(budget.deadline, budget.started + 600)
                 staged = root / "staged"
                 record = _record(staged / ".jittersim-release.json")
                 if record.get("version") != request.get("version"):
                     raise UpdateError("staged release changed")
-                # The key may have been removed or another release installed since staging.
                 problem = staged_problem(record, trusted_keys(config), root=root, code=code)
                 if problem:
                     raise UpdateError(problem)
                 uplink, test_interface = runtime_interfaces(config)
-                # Like install.sh, check the Pi with the release's own scripts
-                # before anything changes.
-                progress("stopping", "Checking the Pi network before the update.")
-                run(
-                    [PYTHON, str(staged / PREFLIGHT),
-                     "--uplink", uplink, "--test-interface", test_interface],
-                    60,
-                )
+                compatible_manager(staged / "src/jittersim/updates.py")
+                progress("preparing", "Checking the Pi network and preparing the update.")
+                run([PYTHON, str(staged / PREFLIGHT), "--uplink", uplink,
+                     "--test-interface", test_interface], 60)
                 run([PYTHON, str(staged / EGRESS_CHECK), test_interface], 60)
-            progress("stopping", "Stopping services before the settings backup.")
+                roots = (("code", code), ("config", config), ("data", data), ("access", access))
+                for name, source in roots[:3]:
+                    if not source.is_dir() or source.is_symlink():
+                        raise UpdateError("a required installation folder is missing or unsafe")
+                managed = [("units/" + unit, units / unit) for unit in UNITS]
+                managed += [("dispatcher", dispatcher), ("command", command)]
+                required = snapshot_requirements([*roots, *managed], budget)
+                if shutil.disk_usage(root).free < required + MAX_PREPARATION_BYTES + SPACE_MARGIN:
+                    raise UpdateError("not enough free space for update and recovery")
+                cleanup_generations(root, budget)
+                # Publish new record formats only after the installed recovery manager
+                # can read them. The current fixed manager is also kept on rollback.
+                compatible_manager(Path(__file__))
+                if Path(__file__).resolve() != manager.resolve():
+                    install_manager(Path(__file__), manager)
+                request["attempt"] = secrets.token_hex(16)
+                atomic_json(root / "request.json", request)
+                prepared = root / ("prepare-" + request["attempt"])
+                prepare(staged, prepared, code / ".venv/bin/python", record, run, budget)
+                candidate = root / ("backup-" + request["attempt"])
+                candidate.mkdir(mode=0o700)
+                snapshot_tree(code, candidate / "code", budget, links=True)
+                # Durable restart intent precedes the first possibly successful stop.
+                request["restart_only"] = True
+                atomic_json(root / "request.json", request)
+            progress("stopping", "Stopping services before saving the settings.")
             stopped = True
-            run(["systemctl", "stop", *reversed(SERVICES)], 60)
+            names = present(WRITERS)
+            run(["systemctl", "stop", *names], 60)
+            if not writers_stopped(names, query, budget):
+                raise UpdateError("the settings writers did not stop")
             if request.get("rollback"):
                 progress("rolling-back", "Restoring the previous installation and settings.")
                 restore()
                 if not wait_healthy():
                     raise UpdateError("recovery health check failed")
+                cleanup_generations(root, budget)
                 recovered = True
                 progress("rolled-back", "Previous installation restored and health check passed.")
                 keep_request = False
                 return
-            progress("backing-up", "Backing up the installation and settings.")
-            candidate = root / "backup-next"
-            if candidate.exists():
-                shutil.rmtree(candidate)
-            candidate.mkdir()
-            required = sum(
-                item.stat().st_size
-                for directory in (code, config, data)
-                for item in directory.rglob("*")
-                if item.is_file() and not item.is_symlink()
-            )
-            if shutil.disk_usage(root).free < required * 2 + MAX_EXPANDED:
-                raise UpdateError("not enough free space for update and recovery")
-
-            def trust_settings(folder, names):
-                # A rollback keeps the trust settings as they are then.
-                return [name for name in names if Path(folder) == config and name in PRESERVED_CONFIG]
-
-            for name, source in (("code", code), ("config", config), ("data", data)):
-                shutil.copytree(source, candidate / name, symlinks=True, ignore=trust_settings)
-            if access.exists():
-                shutil.copytree(access, candidate / "access", symlinks=True)
-            (candidate / "units").mkdir()
-            for unit in UNITS:
-                if (units / unit).exists():
-                    shutil.copy2(units / unit, candidate / "units" / unit)
-            for name, path in (("dispatcher", dispatcher), ("command", command)):
+            progress("backing-up", "Saving the stopped installation and settings.")
+            mutable = (("config", config), ("data", data), ("access", access))
+            immutable_size = snapshot_size(candidate / "code", budget, links=True)
+            required = snapshot_requirements([("code", candidate / "code"), *mutable, *managed], budget)
+            if shutil.disk_usage(root).free < required - immutable_size + SPACE_MARGIN:
+                raise UpdateError("not enough free space for the final settings snapshot")
+            for name, source in mutable:
+                if source.exists():
+                    snapshot_tree(source, candidate / name, budget,
+                                  ignore=PRESERVED_CONFIG if name == "config" else
+                                  ("incoming-release",) if name == "data" else ())
+            (candidate / "units").mkdir(mode=0o700)
+            managed = [("units/" + unit, units / unit) for unit in UNITS]
+            managed += [("dispatcher", dispatcher), ("command", command)]
+            files = {}
+            for name, path in managed:
+                budget.check()
                 if path.is_symlink():
+                    if name != "command" or path.lstat().st_uid != os.geteuid():
+                        raise UpdateError("a managed recovery file contains an unsafe link")
                     os.symlink(os.readlink(path), candidate / name)
                 elif path.exists():
-                    shutil.copy2(path, candidate / name)
-            if manager.exists():
-                shutil.copy2(manager, candidate / "manager.py")
-            atomic_json(
-                candidate / "complete.json",
-                {
-                    "created_at": int(time.time()),
-                    "target_version": request.get("version"),
-                    # A missing entry means the file did not exist before.
-                    "managed": ["units/" + unit for unit in UNITS] + ["dispatcher", "command"],
-                    "ownership": {
-                        name: [source.stat().st_uid, source.stat().st_gid]
-                        for name, source in (("code", code), ("config", config), ("data", data), ("access", access))
-                        if source.exists()
-                    },
-                },
-            )
-            if backup.exists():
-                shutil.rmtree(backup)
-            candidate.rename(backup)
-            backup_taken = True
-            progress("installing", "Installing the approved release.")
+                    _copy_snapshot_file(path, candidate / name, path.lstat(), budget)
+                else:
+                    continue
+                files[name] = tree_digest(candidate / name, budget, links=name == "command")
+            trees = {name: tree_digest(candidate / name, budget, links=name == "code",
+                                      ignore=PRESERVED_CONFIG if name == "config" else ())
+                     for name in ("code", "config", "data", "access")
+                     if (candidate / name).exists()}
+            snapshot_size(candidate, budget, links=True)
+            _fsync_folder(candidate / "units")
+            budget.check()
+            atomic_json(candidate / "complete.json", {
+                "format": RECOVERY_FORMAT, "attempt": request["attempt"],
+                "created_at": int(time.time()), "target_version": request["version"],
+                "managed": [name for name, _ in managed], "trees": trees, "files": files,
+                "ownership": {name: [source.stat().st_uid, source.stat().st_gid]
+                              for name, source in (("code", code), *mutable) if source.exists()},
+            })
+            budget.check()
+            atomic_json(root / "backup-current.json", {
+                "format": RECOVERY_FORMAT, "name": candidate.name, "attempt": request["attempt"],
+            })
+            backup = recovery_backup(root)
+            request["recovery"] = recovery_identity(root, backup)
+            atomic_json(root / "request.json", request)
+            progress("installing", "Installing the prepared release.")
+            wheels = prepared_wheels(prepared, record, budget)
             for name in ("src", "deploy"):
                 if (code / name).exists():
-                    shutil.rmtree(code / name)
-                shutil.copytree(staged / name, code / name)
+                    remove_tree(code / name, budget)
+                snapshot_tree(staged / name, code / name, budget)
             for name in ("pyproject.toml", "README.md", ".jittersim-release.json"):
-                shutil.copy2(staged / name, code / name)
-            # Like replace-source.py: an old build folder could put removed
-            # modules back into the package.
+                budget.check()
+                if (code / name).exists():
+                    (code / name).unlink()
+                _copy_snapshot_file(staged / name, code / name, (staged / name).lstat(), budget)
             if (code / "build").exists():
-                shutil.rmtree(code / "build")
-            run(
-                [
-                    str(code / ".venv/bin/python"),
-                    "-m",
-                    "pip",
-                    "install",
-                    "--no-input",
-                    "--disable-pip-version-check",
-                    str(code),
-                ],
-                300,
-            )
-            # The root helper runs this code so only root may change it.
-            for entry in [code, *code.rglob("*")]:
-                if not entry.is_symlink():
-                    entry.chmod(entry.stat().st_mode & ~0o022)
+                remove_tree(code / "build", budget)
             python = str(code / ".venv/bin/python")
+            offline_install(python, wheels, run, budget)
+            # The root helper runs this code, so remove writes by other users.
+            for entry, _, info in tree_entries(code, budget, links=True):
+                if not stat.S_ISLNK(info.st_mode):
+                    entry.chmod(info.st_mode & ~0o022)
             run(["runuser", "-u", "jittersim", "--", python, "-I", "-c", IMPORT_CHECK], 120)
             run([python, str(code / BOOTSTRAP)], 60)
             link_command(str(code / ".venv/bin/jittersim"), command)
-            render_firewall(
-                staged / FIREWALL_TEMPLATE, config / FIREWALL_RULES, uplink, test_interface
-            )
+            render_firewall(staged / FIREWALL_TEMPLATE, config / FIREWALL_RULES,
+                            uplink, test_interface)
             dispatcher.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
-            for source, destination, mode in release_files(
-                code=code, units=units, dispatcher=dispatcher
-            ):
+            for source, destination, mode in release_files(code=code, units=units, dispatcher=dispatcher):
+                budget.check()
                 install_file(staged / source, destination, mode)
             progress("checking", "Restarting services and checking the dashboard and helper.")
             restart_services()
             if not wait_healthy():
                 raise UpdateError("updated services failed their health check")
-            # From now on only a newer release can be staged, also after a rollback.
             _raise_floor(root, record["sequence"])
+            compatible_manager(code / "src/jittersim/updates.py")
             install_manager(code / "src/jittersim/updates.py", manager)
+            cleanup_generations(root, budget)
             progress("complete", "Release installed. Dashboard and helper health checks passed.")
             keep_request = False
+        except CommandNotStopped as error:
+            request["command_pending"] = pending_command(error.process)
+            atomic_json(root / "request.json", request)
+            progress("failed", "An update command has not stopped. Recovery will wait for it.")
+            raise
         except Exception:
-            needs_recovery = request.get("rollback") or backup_taken
+            # replace() may have succeeded even when its directory sync failed.
+            # Choose the actual validated, request-matching publication.
+            needs_recovery = bool(request.get("rollback"))
             try:
+                actual = recovery_backup(root, pinned=request.get("recovery"))
+                completed = _recovery_record(actual / "complete.json") if (actual / "complete.json").exists() else {}
+                if request.get("attempt") and completed.get("attempt") == request["attempt"]:
+                    backup = actual
+                    request["recovery"] = recovery_identity(root, backup)
+                    needs_recovery = True
+                budget.recover()
                 if needs_recovery:
-                    # Persist recovery intent before touching the installation.
                     request["rollback"] = True
                     atomic_json(root / "request.json", request)
                     progress("rolling-back", "Update failed. Restoring the recovery copy.")
-                    run(["systemctl", "stop", *reversed(SERVICES)], 60)
+                    validate_recovery(backup, budget)
+                    names = present(WRITERS)
+                    run(["systemctl", "stop", *names], 60)
+                    if not writers_stopped(names, query, budget):
+                        raise UpdateError("the settings writers did not stop before recovery")
                     restore()
                     recovered = wait_healthy()
                 elif stopped:
-                    # Stopping the helper also stopped the watcher that needs it.
-                    run(["systemctl", "start", *present(SERVICES + (WATCHER,))], 60)
+                    restart_services()
+                    recovered = wait_healthy()
+                else:
+                    recovered = True
+                if recovered and (needs_recovery or stopped):
+                    cleanup_generations(root, budget)
+            except CommandNotStopped as error:
+                request["command_pending"] = pending_command(error.process)
+                atomic_json(root / "request.json", request)
+                recovered = False
             except Exception:
                 recovered = False
-            keep_request = bool(needs_recovery and not recovered)
-            if recovered:
+            keep_request = bool((needs_recovery or stopped or request.get("command_pending")) and not recovered)
+            if recovered and needs_recovery:
                 message = "Update failed. Previous installation restored and checked."
+            elif recovered and stopped:
+                message = "Update stopped. Previous installation restarted and checked."
             elif not stopped:
-                message = (
-                    "Update stopped before it changed anything. "
-                    "Use Ethernet or SSH to inspect the update service log."
-                )
+                message = "Update stopped before it changed anything. Check the update service log."
             else:
-                message = (
-                    "Update or recovery failed. "
-                    "Use Ethernet or SSH to inspect the update service log."
-                )
-            progress("rolled-back" if recovered else "failed", message)
+                message = "Update or recovery failed. Check the update service log."
+            progress("rolled-back" if recovered and needs_recovery else "failed", message)
             raise
         finally:
             if not keep_request:
                 (root / "request.json").unlink(missing_ok=True)
+                _fsync_folder(root)
+
 
 
 def _read_key_file(source):
@@ -2194,6 +2857,9 @@ def main(argv=None, prog=None):
     stage.add_argument("--sha256", help="also require this SHA-256 checksum")
     stage.add_argument("--version", help="also require this release label")
     commands.add_parser("apply", help="run a queued install (the update service runs it)")
+    commands.add_parser("bootstrap-manager", help=argparse.SUPPRESS)
+    manager_check = commands.add_parser("check-manager", help=argparse.SUPPRESS)
+    manager_check.add_argument("source", type=Path)
     trust = commands.add_parser(
         "trust-key", help="trust one ed25519 release signing key (root)",
         description="Add one ssh-ed25519 public key to /etc/jittersim/release-signers.",
@@ -2231,7 +2897,7 @@ def main(argv=None, prog=None):
     )
     args = parser.parse_args(argv)
     name = parser.prog
-    if args.command != "list-keys" and not running_as_root():
+    if args.command not in ("list-keys", "check-manager") and not running_as_root():
         print(f"{name}: this command needs root. Run it with sudo.", file=sys.stderr)
         return 2
     try:
@@ -2242,6 +2908,10 @@ def main(argv=None, prog=None):
             )
             print(f"Staged release {record['version']} signed by {record['signer_label']}. "
                   "Install it with 'sudo jittersim update install' or in the dashboard.")
+        elif args.command == "check-manager":
+            compatible_manager(args.source)
+        elif args.command == "bootstrap-manager":
+            bootstrap_manager(Path(__file__), MANAGER_PATH)
         elif args.command == "apply":
             apply_update(root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT)
         elif args.command == "set-token":
@@ -2298,7 +2968,7 @@ def main(argv=None, prog=None):
                   "Passwordless staging was already off.")
     except UpdateError as error:
         print(f"{name}: {error}", file=sys.stderr)
-        if args.command not in ("apply", "fetch"):
+        if args.command not in ("apply", "fetch", "bootstrap-manager"):
             print("Nothing was changed.", file=sys.stderr)
         return 1
     return 0
