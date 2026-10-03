@@ -2,6 +2,7 @@
 
 import os
 import runpy
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -112,7 +113,15 @@ def test_staging_option_survives_actual_locked_shell_reentry(tmp_path):
         "LOCK_ROOT = Path(" + repr(str(tmp_path / "updates")) + ")"))
     (tmp_path / "pyproject.toml").touch()
     (scripts / "create-ap-profile.py").write_text("pass\n")
-    prefix = (SCRIPT.parent / "install.sh").read_text().split("\nif ! getent", 1)[0]
+    package = tmp_path / "src/jittersim"
+    package.mkdir(parents=True)
+    (package / "updates.py").write_bytes((SCRIPT.parents[2] / "src/jittersim/updates.py").read_bytes())
+    from tests.release_support import ed25519_line
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "release-signers").write_text("jittersim-release " + ed25519_line("fixture") + "\n")
+    prefix = (SCRIPT.parent / "install.sh").read_text().split("\nif ! getent", 1)[0].replace(
+        "CONFIG_DIR=/etc/jittersim", "CONFIG_DIR=" + shlex.quote(str(config)))
     installer = scripts / "install.sh"
     installer.write_text(prefix + '\n[ "$enable_passwordless_staging" = yes ]\n'
                          + '[ "$SOURCE_DIR" = "' + str(tmp_path) + '" ]\n')
