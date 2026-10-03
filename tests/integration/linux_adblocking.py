@@ -22,6 +22,7 @@ from jittersim.networking.adblocking import (
     write_json,
 )
 from jittersim.networking.topology import Topology
+from jittersim.panic_guard import PANIC_GUARD_FIELDS, PANIC_GUARD_FORMAT, PanicGuard
 
 ALICE = "02:00:00:00:00:01"
 BOB = "02:00:00:00:00:02"
@@ -61,11 +62,13 @@ BOUNDED_SERVICE = r"""
 import json, sys, time
 from pathlib import Path
 from jittersim.networking.adblocking import AdController, AdRouting, AdStore
+from jittersim.panic_guard import PanicGuard
 settings = json.loads(sys.argv[1])
 root = Path(settings["directory"])
 store = AdStore(AdRouting("ads0"), path=root/"policy.json", lock_path=root/"lock",
                 active_path=root/"active.json", status_path=root/"status.json",
-                group_id=settings["group_id"], intent_path=root/"intent.json")
+                group_id=settings["group_id"], intent_path=root/"intent.json",
+                panic_guard=PanicGuard(root/"panic-state.json"))
 item = AdController(store, domains_path=root/"domains", info_path=root/"info",
                     config_path=root/"filtered.conf", access_path=root/"access-policy.json")
 item.update_request = store.read()["update_request"]
@@ -122,6 +125,9 @@ def main():
     identity(ALICE)
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
+        guard = PanicGuard(root / "panic-state.json")
+        guard.write({"version": PANIC_GUARD_FORMAT, **dict.fromkeys(PANIC_GUARD_FIELDS, False)},
+                    initialize_only=True)
         ordinary = root / "ordinary.conf"
         ordinary.write_text(
             "port=53\nlisten-address=192.168.50.1\nbind-interfaces\nno-resolv\nno-hosts\n"
@@ -141,6 +147,7 @@ def main():
             status_path=root / "status.json",
             group_id=group_id,
             intent_path=root / "intent.json",
+            panic_guard=guard,
         )
         store.routing.initialize()
         store.configure([ALICE], [], resume=True)

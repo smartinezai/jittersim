@@ -3,6 +3,7 @@
 import argparse
 import fcntl
 import grp
+import hashlib
 import json
 import os
 import pwd
@@ -19,6 +20,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import requests
+
+from jittersim.panic_guard import PanicGuard
 
 from jittersim.config.adblocking import (
     ACTIVE_FILE,
@@ -163,6 +166,7 @@ class AdStore:
         status_path=STATUS_FILE,
         group_id=None,
         intent_path=INTENT_FILE,
+        panic_guard=None,
     ):
         self.routing = routing
         self.path = path
@@ -171,6 +175,7 @@ class AdStore:
         self.status_path = status_path
         self.group_id = group_id
         self.intent_path = intent_path
+        self.panic_guard = panic_guard or PanicGuard()
 
     @contextmanager
     def lock(self):
@@ -212,17 +217,37 @@ class AdStore:
         if not isinstance(value.get("update_request"), str) or len(value["update_request"]) > 32:
             raise ValueError("Invalid blocklist update request")
         # Release recovery restores settings but must never reverse a later stop.
-        intent = read_json(self.intent_path, {"version": 1, "running": False})
+        intent = read_json(self.intent_path, {"version": 2, "running": False})
         if (
-            type(intent.get("version")) is not int or intent["version"] != 1
+            type(intent.get("version")) is not int or intent["version"] not in (1, 2)
             or type(intent.get("running")) is not bool
         ):
             raise ValueError("Invalid ad-blocking stop intent")
-        value["running"] = intent["running"]
+        witness = intent.get("panic_witness")
+        valid_witness = isinstance(witness, str) and re.fullmatch(r"[0-9a-f]{64}", witness)
+        value["running"] = bool(
+            intent["running"] and intent["version"] == 2
+            and valid_witness and witness == self._panic_witness()
+        )
         return value
 
+    def _panic_witness(self):
+        def identity(metadata):
+            return (metadata.st_dev, metadata.st_ino, metadata.st_ctime_ns,
+                    metadata.st_mtime_ns, metadata.st_size)
+
+        before = identity(os.stat(self.panic_guard.path, follow_symlinks=False))
+        state = self.panic_guard.read()
+        after = identity(os.stat(self.panic_guard.path, follow_symlinks=False))
+        if before != after or state is None or state["panic_recovery_failed"]:
+            raise ValueError("Panic state must be confirmed before resuming ad blocking")
+        # Older approved helpers replace this file even for an identical stop.
+        # A saved permission must belong to the current validated file identity.
+        return hashlib.sha256(json.dumps([after, state], sort_keys=True).encode("ascii")).hexdigest()
+
     def _intent(self, running):
-        write_json(self.intent_path, {"version": 1, "running": running})
+        witness = self._panic_witness() if running else None
+        write_json(self.intent_path, {"version": 2, "running": running, "panic_witness": witness})
 
     def _clear(self):
         self.routing.clear()
@@ -237,8 +262,16 @@ class AdStore:
         if type(update) is not bool or type(resume) is not bool:
             raise ValueError("Invalid ad-blocking operation")
         with self.lock():
-            state = self.read()
-            changed = macs != state["mac_addresses"] or allowances != state["allowed_domains"]
+            damaged = False
+            try:
+                state = self.read()
+            except (OSError, ValueError):
+                # The authenticated helper supplies the complete saved selection.
+                # Rebuilding this cache never publishes permission to resume.
+                state = {"mac_addresses": (), "allowed_domains": (), "running": False,
+                         "generation": "", "update_request": "", "suspended": False}
+                damaged = True
+            changed = damaged or macs != state["mac_addresses"] or allowances != state["allowed_domains"]
             if changed or update or resume:
                 state.update(
                     mac_addresses=macs, allowed_domains=allowances, generation=secrets.token_hex(8)
@@ -256,7 +289,11 @@ class AdStore:
     def pause(self):
         with self.lock():
             self._intent(False)
-            state = self.read()
+            try:
+                state = self.read()
+            except (OSError, ValueError):
+                self._clear()
+                return
             state.update(running=False, generation=secrets.token_hex(8))
             write_json(self.path, state, self.group_id)
             self._clear()
@@ -266,18 +303,29 @@ class AdStore:
         """Bypass ads while household DNS rules change without losing saved switches."""
 
         with self.lock():
-            state = self.read()
-            state.update(suspended=True, generation=secrets.token_hex(8))
-            write_json(self.path, state, self.group_id)
+            try:
+                state = self.read()
+            except (OSError, ValueError):
+                self._intent(False)
+                suspended = False
+            else:
+                suspended = True
+                state.update(suspended=True, generation=secrets.token_hex(8))
+                write_json(self.path, state, self.group_id)
             self._clear()
         try:
             yield
         finally:
-            with self.lock():
-                state = self.read()
-                state.update(suspended=False, generation=secrets.token_hex(8))
-                write_json(self.path, state, self.group_id)
-                self._clear()
+            if suspended:
+                with self.lock():
+                    try:
+                        state = self.read()
+                    except (OSError, ValueError):
+                        self._intent(False)
+                    else:
+                        state.update(suspended=False, generation=secrets.token_hex(8))
+                        write_json(self.path, state, self.group_id)
+                    self._clear()
 
     def resume(self):
         with self.lock():

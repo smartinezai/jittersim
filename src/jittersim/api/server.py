@@ -1937,7 +1937,8 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             "/api/normal-access", "/api/site-blocks", "/api/site-blocks/delete"
         )
         live_global = path in ("/api/observations/add-global-block", "/api/observations/remove-global-block")
-        if path == "/api/apply" or live_access or live_global:
+        live_ads = path == "/api/ad-blocking"
+        if path == "/api/apply" or live_access or live_global or live_ads:
             generation = getattr(self.scheduler, "apply_generation", getattr(self.scheduler, "halt_count", 0))
             refused, revision = self._capture_control_intent(generation)
             if refused is not None:
@@ -1962,7 +1963,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                 if workflow is not None:
                     return workflow
                 return (self._write_response_for(path, payload, control_intent=control_intent)
-                        if path == "/api/apply" or live_global else self._write_response_for(path, payload))
+                        if path == "/api/apply" or live_global or live_ads else self._write_response_for(path, payload))
             finally:
                 if self.repository.get_runtime_state().configuration_version != before:
                     WorkflowStore(self.repository).checkpoint(path.removeprefix("/api/").replace("/", " "))
@@ -2201,7 +2202,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             return self._change_general_profile(payload, stop=path.endswith("/stop"))
 
         if path == "/api/ad-blocking":
-            return self._change_ad_blocking(payload)
+            return self._change_ad_blocking(payload, control_intent=control_intent)
         if path in ("/api/unaffected-devices", "/api/unaffected-devices/delete"):
             return self._change_unaffected_device(payload, remove=path.endswith("/delete"))
 
@@ -4149,13 +4150,22 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                 return None
             raise
 
-    def _change_ad_blocking(self, payload: dict):
-        generation = getattr(self.scheduler, "apply_generation", getattr(self.scheduler, "halt_count", 0))
-        refused, revision = self._capture_control_intent(generation)
-        if refused is not None:
-            return refused
+    def _change_ad_blocking(self, payload: dict, *, control_intent=None):
+        if control_intent is None:
+            generation = getattr(self.scheduler, "apply_generation", getattr(self.scheduler, "halt_count", 0))
+            refused, revision = self._capture_control_intent(generation)
+            if refused is not None:
+                return refused
+            control_intent = (generation, revision)
+        generation, revision = control_intent
         operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
         with operation:
+            refused, current_revision = self._capture_control_intent(generation)
+            if refused is not None:
+                return refused
+            if revision is not None and current_revision != revision:
+                return self._control_rejected(HelperClientError(
+                    "Network control changed before saving ad choices", reason="control-changed"))
             try:
                 fields = set(payload)
                 if not fields or fields - {"mac_address", "enabled", "allowed_domains", "update_list"}:
@@ -4165,18 +4175,26 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                 update = payload.get("update_list", False)
                 if type(update) is not bool:
                     raise ValueError("The list update choice must be true or false")
-                with self.repository.transaction():
-                    if "mac_address" in fields:
-                        self.repository.set_ad_blocking(payload["mac_address"], payload["enabled"])
-                    if "allowed_domains" in fields:
-                        self.repository.set_ad_blocking_allowances(payload["allowed_domains"])
+                def save_choices():
+                    with self.repository.transaction():
+                        if "mac_address" in fields:
+                            self.repository.set_ad_blocking(payload["mac_address"], payload["enabled"])
+                        if "allowed_domains" in fields:
+                            self.repository.set_ad_blocking_allowances(payload["allowed_domains"])
+
+                accepted, _ = self._publish_apply(generation, save_choices)
+                if not accepted:
+                    return self._apply_refused(generation)
             except (KeyError, TypeError, ValueError, StorageError) as error:
                 return HTTPStatus.CONFLICT, "application/json", _json_bytes({"error": str(error)})
             try:
                 service = self._sync_ad_blocking(
                     update=update, resume=payload.get("enabled") is True, control_revision=revision,
                 )
-            except HelperClientError:
+            except HelperClientError as error:
+                refused = self._control_rejected(error)
+                if refused is not None:
+                    return refused
                 service = None
             if service is None:
                 message = "Saved but ad blocking could not be confirmed. Start saved settings after reconnecting the Pi helper."
@@ -4566,6 +4584,14 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
     ) -> Tuple[int, str, bytes]:
         """Return a saved change and apply it immediately when hardware is available."""
 
+        if key in ("imported", "restored") and self.helper_client is not None:
+            try:
+                self._sync_ad_blocking()
+            except HelperClientError:
+                return HTTPStatus.OK, "application/json", _json_bytes({
+                    key: value, "live_applied": False,
+                    "message": "Settings saved but ad-blocking choices could not be confirmed. Start saved settings after reconnecting the Pi helper.",
+                })
         if self.helper_client is None:
             return (
                 HTTPStatus.OK,
@@ -5927,6 +5953,9 @@ def _settings_from_payload(payload: Dict[str, Any]) -> SavedSettings:
     persistence = payload.get("persist_profiles_after_gateway_outage", False)
     if not isinstance(persistence, bool):
         raise ValueError("persist_profiles_after_gateway_outage must be true or false")
+    from jittersim.config.adblocking import allowed_domains, blocking_macs
+    ad_devices = blocking_macs(payload.get("ad_blocking_devices", []))
+    ad_allowances = allowed_domains(payload.get("ad_blocking_allowances", []))
     now = int(time.time())
 
     def parse_items(label: str, values: Any, parse: Any) -> tuple:
@@ -6058,6 +6087,8 @@ def _settings_from_payload(payload: Dict[str, Any]) -> SavedSettings:
         unaffected_devices=unaffected_devices,
         general_profile_id=general_profile_id,
         service_lists=service_lists,
+        ad_blocking_devices=ad_devices,
+        ad_blocking_allowances=ad_allowances,
     )
 
 

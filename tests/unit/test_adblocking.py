@@ -3,6 +3,7 @@
 import hashlib
 import sqlite3
 import time
+from dataclasses import replace
 from concurrent.futures import Future, ThreadPoolExecutor
 from unittest.mock import Mock, patch
 
@@ -20,7 +21,9 @@ from jittersim.config.adblocking import (
 )
 from jittersim.config.exemptions import UnaffectedDevice
 from jittersim.config.models import AccessOptions, SiteBlock, WebsitePolicy
+from tests.adblocking_support import provision_guard
 from jittersim.config.storage import ConfigRepository
+from jittersim.config.transfer import check_settings, settings_to_payload
 from jittersim.engine.access import AccessClient, AccessPlan
 from jittersim.networking.access import read_access
 from jittersim.networking.adblocking import (
@@ -48,7 +51,7 @@ def store(tmp_path):
         lock_path=tmp_path / "lock",
         active_path=tmp_path / "active.json",
         status_path=tmp_path / "status.json",
-        intent_path=tmp_path / "intent.json",
+        intent_path=tmp_path / "intent.json", panic_guard=provision_guard(tmp_path),
     )
 
 
@@ -127,6 +130,33 @@ def test_database_upgrade_and_invalid_changes_are_atomic(tmp_path):
             repo.set_ad_blocking(ALICE, True)
             raise RuntimeError("rollback")
         assert repo.list_ad_blocking_devices() == ()
+
+
+def test_saved_settings_roundtrip_keeps_choices_and_invalid_replacement_is_atomic(tmp_path):
+    with ConfigRepository(tmp_path / "settings.db") as repo:
+        repo.save_unaffected_device(UnaffectedDevice(ALICE, "Alice", 1))
+        repo.set_ad_blocking(ALICE, True)
+        repo.set_ad_blocking_allowances(["working.example.net"])
+        saved = repo.saved_settings()
+        payload = settings_to_payload(saved, exported_at=0)
+        assert payload["ad_blocking_devices"] == [ALICE]
+        assert payload["ad_blocking_allowances"] == ["working.example.net"]
+        assert not any("intent" in key or "running" in key for key in payload)
+        repo.replace_settings(saved)
+        assert repo.list_ad_blocking_devices() == (ALICE,)
+        assert repo.list_ad_blocking_allowances() == ("working.example.net",)
+        for invalid in (
+            replace(saved, ad_blocking_devices=(BOB,)),
+            replace(saved, ad_blocking_devices=(ALICE,) * 257),
+            replace(saved, ad_blocking_allowances=("evil\nconfig",)),
+            replace(saved, ad_blocking_allowances=("working.example.net",) * 257),
+        ):
+            with pytest.raises(ValueError):
+                check_settings(invalid, max_traffic_classes=256, max_service_domains=512)
+            with pytest.raises(ValueError):
+                repo.replace_settings(invalid)
+            assert repo.list_ad_blocking_devices() == (ALICE,)
+            assert repo.list_ad_blocking_allowances() == ("working.example.net",)
 
 
 @pytest.mark.parametrize(
@@ -269,7 +299,7 @@ def test_restoring_settings_cannot_reverse_a_durable_stop(store, tmp_path):
     restored = AdStore(
         store.routing, path=store.path, lock_path=store.lock_path,
         active_path=store.active_path, status_path=store.status_path,
-        intent_path=store.intent_path,
+        intent_path=store.intent_path, panic_guard=store.panic_guard,
     )
     assert restored.read()["mac_addresses"] == (ALICE,)
     assert restored.read()["allowed_domains"] == ("working.test",)
@@ -297,9 +327,22 @@ def test_invalid_stop_state_never_grants_permission_and_panic_can_replace_it(sto
     # Save stop intent even when unrelated backed-up settings cannot be read.
     store.resume()
     store.path.write_bytes(b"broken settings")
-    with pytest.raises(ValueError):
-        store.pause()
+    store.pause()
     assert read_json(store.intent_path)["running"] is False
+    assert read_json(store.active_path)["expires_at"] == 0
+    assert store.path.read_bytes() == b"broken settings"
+
+
+def test_unreadable_ad_settings_do_not_prevent_household_recovery(store):
+    store.configure([ALICE], [], resume=True)
+    store.path.write_bytes(b"broken settings")
+    entered = False
+    with store.access_transition():
+        entered = True
+        assert read_json(store.intent_path)["running"] is False
+    assert entered
+    assert store.path.read_bytes() == b"broken settings"
+    assert read_json(store.active_path)["expires_at"] == 0
 
 
 def test_settings_restored_during_a_probe_cannot_renew_a_stopped_lease(store, tmp_path):
@@ -322,6 +365,38 @@ def test_settings_restored_during_a_probe_cannot_renew_a_stopped_lease(store, tm
     ):
         item.tick()
     assert store.status()["paused"]
+    assert not store.status()["ready"]
+    assert read_json(store.active_path)["expires_at"] == 0
+    item.close()
+
+
+def test_older_ad_permission_and_invalid_witness_stay_paused_until_explicit_enable(store):
+    store.configure([ALICE], [], resume=True)
+    write_json(store.intent_path, {"version": 1, "running": True})
+    assert not store.read()["running"]
+    store.resume()
+    assert store.read()["running"]
+    for witness in (None, True, 123, "0" * 63, "X" * 64, "0" * 65):
+        write_json(store.intent_path, {"version": 2, "running": True, "panic_witness": witness})
+        assert not store.read()["running"]
+    store.configure([ALICE], [], resume=True)
+    assert store.read()["running"]
+
+
+def test_a_panic_record_replaced_during_probe_cannot_renew_routing(store, tmp_path):
+    store.configure([ALICE], [], resume=True)
+    applied(store, tmp_path)
+    item = controller(store, tmp_path)
+    child = Mock()
+    child.poll.return_value = None
+    state = store.panic_guard.read()
+    with (
+        patch("jittersim.networking.adblocking.subprocess.run"),
+        patch("jittersim.networking.adblocking.subprocess.Popen", return_value=child),
+        patch("jittersim.networking.adblocking.healthy",
+              side_effect=lambda: store.panic_guard.write(state) or True),
+    ):
+        item.tick()
     assert not store.status()["ready"]
     assert read_json(store.active_path)["expires_at"] == 0
     item.close()

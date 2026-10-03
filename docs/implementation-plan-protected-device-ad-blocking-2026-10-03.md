@@ -159,6 +159,12 @@ Database recovery copies retain preferences. The downloaded list is a
 rebuildable cache outside the release recovery copy. Installer operations
 are repeatable. The updater backs up and restores the new service unit and
 continues to support a recovery copy from a release without ad blocking.
+Settings export, import and version history include bounded
+`ad_blocking_devices` and `ad_blocking_allowances` lists. Old files without
+these fields preserve current choices only for devices they still protect.
+An explicit empty field clears that section. Run permission is never copied
+into exported settings or history. Restoring choices synchronizes the helper
+even while profiles are stopped without resuming ad blocking.
 
 The original development baseline passed all 2,236 Python checks. The
 adapted desktop and phone journey passed with keyboard controls and saved
@@ -224,3 +230,44 @@ The switch save journey checks a saved change whose reply is lost. A fresh
 read restores the actual saved choice without repeating the write and keeps
 keyboard focus. Newer notices and signing out take priority over a late
 reply. The desktop and phone browser checks cover these cases.
+
+Source review found that the outer dashboard write queue originally captured
+the helper revision too late. A terminal Panic could therefore be followed
+by an enable request that had already been queued. The request now captures
+both control values at entry and carries them unchanged across the wait.
+It checks them again before saving. A later helper refusal is reported as a
+refusal rather than a successful pending change. Real helper and dashboard
+Panic regressions cover the queued request plus a fresh explicit enable after
+confirmed recovery.
+
+Risk is high because the change touches privileged DNS routing, Panic and
+recovery. No pull request risk template is present in this repository.
+Complete source review, bounded native packet and service-permission checks,
+the complete supported Python matrix and existing browser workflows remain
+required before publication. The observation note now separates exclusion
+from traffic discovery from optional domain inspection without saved history.
+
+The cross-version stop repair keeps the existing Panic producer and format.
+Version 2 ad permission carries a fixed-size witness of the validated private
+Panic file identity and state. Any replacement by an older approved helper
+invalidates that permission even when it writes identical stop flags.
+Stable metadata before and after the bounded safe read prevents granting
+permission from a changing record. Missing, invalid or unconfirmed Panic
+state cannot grant permission. Version 1 ad permission starts paused.
+The controller checks the witness again immediately before renewing routing.
+An explicit Start publishes new ad permission after its durable Panic write.
+A household rule change preserves only ad permission that was valid when
+that action began, under the same helper control lock. It publishes the
+replacement permission after saving the new stop record. Failure keeps ads
+paused without preventing household recovery.
+Verify the actual archived original helper through Panic, upgrade, fresh
+enable and a repeated identical Panic. Also verify ordinary household edits
+and Start so conservative invalidation does not silently disable them.
+Unreadable ad settings must not prevent Panic from stopping profiles and
+household rules. Persist the separate stop choice and clear feature routing
+without needing those settings. Keep damaged preferences available for
+repair rather than replacing them during emergency cleanup.
+The authenticated helper can reconstruct a damaged settings cache from the
+complete validated database selection. Reconstruction does not publish run
+permission. A separate explicit enable still validates the current Panic
+record before publishing permission.

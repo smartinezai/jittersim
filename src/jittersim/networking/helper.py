@@ -314,6 +314,12 @@ class HelperService:
                         return refused
                     if self._panic_recovery_failed:
                         return {"ok": False, "error": "Retry Panic before applying access rules."}
+                    ad_was_running = False
+                    if self._ad_blocking_store is not None:
+                        try:
+                            ad_was_running = self._ad_blocking_store.read()["running"]
+                        except (OSError, ValueError):
+                            LOGGER.warning("Ad permission could not be confirmed before household changes.")
                     result = self._access_manager.apply(access_from_payload(payload.get("policy")))
                     self._household_stop_latched = False
                     saved = self._write_gateway_state(durable=True)
@@ -328,6 +334,11 @@ class HelperService:
                         self._write_panic_guard()
                         self._write_gateway_state(durable=True)
                         return {"ok": False, "error": "Household recovery state could not be saved. Retry Panic."}
+                    if ad_was_running:
+                        try:
+                            self._ad_blocking_store.resume()
+                        except (OSError, ValueError, CommandExecutionError):
+                            LOGGER.warning("Household rules applied but ad permission could not be renewed.")
                 return {"ok": True, **result}
             except (OSError, ValueError, CommandExecutionError):
                 LOGGER.exception("persistent access operation failed")

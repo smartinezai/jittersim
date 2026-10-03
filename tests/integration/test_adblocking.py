@@ -3,6 +3,7 @@
 import json
 import socket
 import threading
+from contextlib import contextmanager
 from unittest.mock import Mock
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -12,7 +13,11 @@ import pytest
 from jittersim.api.server import ControlServer
 from jittersim.config.adblocking import ActiveBlocking
 from jittersim.config.exemptions import UnaffectedDevice
+from tests.adblocking_support import provision_guard
 from jittersim.config.storage import ConfigRepository
+from jittersim.config.workflows import WorkflowStore
+from jittersim.engine.runtime import RuntimeScheduler
+from jittersim.engine.access import AccessPlan
 from jittersim.networking.access import AccessManager
 from jittersim.networking.adblocking import AdRouting, AdStore, atomic_write, write_json
 from jittersim.networking.browser_proxy import BrowserProxyServer
@@ -21,6 +26,7 @@ from jittersim.networking.helper import HelperClientError, HelperService
 from jittersim.networking.topology import Topology
 from tests.access_support import AccessExecutor
 from tests.helper_support import serving
+from tests.unit.test_helper_access import apply_payload
 from tests.integration.test_device_management import ClientsHelper
 from tests.unit.test_adblocking import ALICE, BOB, applied
 
@@ -34,7 +40,7 @@ def control(tmp_path):
         lock_path=tmp_path / "lock",
         active_path=tmp_path / "active",
         status_path=tmp_path / "status",
-        intent_path=tmp_path / "intent",
+        intent_path=tmp_path / "intent", panic_guard=provision_guard(tmp_path),
     )
 
     class Helper(ClientsHelper):
@@ -44,6 +50,9 @@ def control(tmp_path):
 
         def ad_blocking_status(self):
             return store.status()
+
+        def set_gateway_persistence(self, *, enabled):
+            return {"persist_profiles_after_gateway_outage": enabled}
 
         def reset(self):
             store.pause()
@@ -131,6 +140,78 @@ def test_removal_syncs_policy_and_start_recovers_failed_helper_write(control):
     assert repo.list_ad_blocking_devices() == ()
 
 
+def test_export_import_into_a_fresh_installation_keeps_ad_choices(control, tmp_path):
+    repo, _, _, server = control
+    repo.save_unaffected_device(UnaffectedDevice(ALICE, "Alice", 1))
+    assert write(server, {"mac_address": ALICE, "enabled": True})[0] == 200
+    assert write(server, {"allowed_domains": ["working.example.net"]})[0] == 200
+    payload = json.loads(server.response_for("/api/export")[2])
+    with ConfigRepository(tmp_path / "imported.db") as target:
+        imported = ControlServer(("127.0.0.1", 0), target, admin_token="fixture-token")
+        try:
+            assert imported.write_response_for("/api/import", payload)[0] == 200
+            assert target.list_ad_blocking_devices() == (ALICE,)
+            assert target.list_ad_blocking_allowances() == ("working.example.net",)
+            assert json.loads(imported.response_for("/api/export")[2])["ad_blocking_devices"] == [ALICE]
+        finally:
+            imported.server_close()
+
+
+@pytest.mark.parametrize("version", [1, 2, 3])
+def test_legacy_import_preserves_choices_only_for_retained_protected_devices(control, version):
+    repo, store, _, server = control
+    for mac in (ALICE, BOB):
+        repo.save_unaffected_device(UnaffectedDevice(mac, "", 1))
+        repo.set_ad_blocking(mac, True)
+    repo.set_ad_blocking_allowances(["working.example.net"])
+    payload = json.loads(server.response_for("/api/export")[2])
+    payload["version"] = version
+    payload.pop("ad_blocking_devices")
+    payload.pop("ad_blocking_allowances")
+    payload["everyone_else"]["unaffected_devices"] = [{"mac_address": ALICE, "name": "Alice"}]
+    assert server._reset_network()[0] == 200
+    assert server.write_response_for("/api/import", payload)[0] == 200
+    assert repo.list_ad_blocking_devices() == (ALICE,)
+    assert repo.list_ad_blocking_allowances() == ("working.example.net",)
+    assert store.read()["mac_addresses"] == (ALICE,)
+    assert not store.read()["running"]
+    payload["ad_blocking_devices"] = []
+    payload["ad_blocking_allowances"] = []
+    assert server.write_response_for("/api/import", payload)[0] == 200
+    assert repo.list_ad_blocking_devices() == ()
+    assert repo.list_ad_blocking_allowances() == ()
+    assert store.read()["mac_addresses"] == ()
+    assert not store.read()["running"]
+
+
+@pytest.mark.parametrize("restore_route", ["import", "history"])
+def test_settings_restore_keeps_preferences_and_the_later_stop(control, restore_route):
+    repo, store, _, server = control
+    repo.save_unaffected_device(UnaffectedDevice(ALICE, "Alice", 1))
+    write(server, {"mac_address": ALICE, "enabled": True})
+    write(server, {"allowed_domains": ["working.example.net"]})
+    payload = json.loads(server.response_for("/api/export")[2])
+    history = WorkflowStore(repo)
+    history.checkpoint("Ad blocking enabled")
+    identifier = history.history()[0]["id"]
+    write(server, {"mac_address": ALICE, "enabled": False, "allowed_domains": []})
+    assert server._reset_network()[0] == 200
+    stopped_intent = store.intent_path.read_bytes()
+    if restore_route == "import":
+        assert server.write_response_for("/api/import", payload)[0] == 200
+    else:
+        preview = json.loads(server.write_response_for("/api/history/preview", {"id": identifier})[2])
+        assert server.write_response_for("/api/history/restore", {
+            "id": identifier, "current_version": preview["current_version"],
+        })[0] == 200
+    assert repo.list_ad_blocking_devices() == (ALICE,)
+    assert repo.list_ad_blocking_allowances() == ("working.example.net",)
+    assert store.read()["mac_addresses"] == (ALICE,)
+    assert store.read()["allowed_domains"] == ("working.example.net",)
+    assert not store.read()["running"]
+    assert store.intent_path.read_bytes() == stopped_intent
+
+
 def test_ad_controls_require_owner_token_for_reads_and_writes(control):
     _, _, _, server = control
     url = f"http://127.0.0.1:{server.server_address[1]}/api/ad-blocking"
@@ -161,7 +242,7 @@ def test_helper_rejects_injection_and_panic_pauses_saved_policy(tmp_path):
         lock_path=tmp_path / "lock",
         active_path=tmp_path / "active",
         status_path=tmp_path / "status",
-        intent_path=tmp_path / "intent",
+        intent_path=tmp_path / "intent", panic_guard=provision_guard(tmp_path),
     )
     manager = AccessManager(
         executor=AccessExecutor(tmp_path),
@@ -192,6 +273,119 @@ def test_helper_rejects_injection_and_panic_pauses_saved_policy(tmp_path):
         assert store.read()["running"] is True
 
 
+@pytest.mark.parametrize("panic_route", ["helper", "dashboard"])
+def test_queued_enable_cannot_reverse_panic_but_a_fresh_enable_can(tmp_path, panic_route):
+    store = AdStore(
+        AdRouting("wlan0", FakeExecutor()), path=tmp_path / "policy",
+        lock_path=tmp_path / "lock", active_path=tmp_path / "active",
+        status_path=tmp_path / "status", intent_path=tmp_path / "intent", panic_guard=provision_guard(tmp_path),
+    )
+    manager = AccessManager(
+        executor=AccessExecutor(tmp_path), topology=Topology("eth0", "wlan0"),
+        directory=tmp_path / "access", runtime_path=tmp_path / "access-policy",
+        ad_blocking_store=store,
+    )
+    queued = threading.Event()
+
+    class ObservedScheduler(RuntimeScheduler):
+        @contextmanager
+        def exclusive(self):
+            if threading.current_thread().name == "queued-ad-enable":
+                queued.set()
+            with super().exclusive():
+                yield
+
+    with (
+        serving(lambda applier: HelperService(
+            applier, ad_blocking_store=store, access_manager=manager,
+        )) as (client, _),
+        ConfigRepository(tmp_path / "config.db") as repo,
+    ):
+        repo.save_unaffected_device(UnaffectedDevice(ALICE, "Alice", 1))
+        repo.set_ad_blocking(ALICE, True)
+        client.configure_ad_blocking([ALICE], [], resume=True)
+        scheduler = ObservedScheduler(database_path=tmp_path / "config.db", helper_client=client)
+        server = ControlServer(
+            ("127.0.0.1", 0), repo, helper_client=client,
+            scheduler=scheduler, admin_token="fixture-token",
+        )
+        replies = []
+
+        def enable():
+            replies.append(write(server, {
+                "mac_address": ALICE, "enabled": True,
+                "allowed_domains": ["new.example.net"],
+            }))
+
+        try:
+            with scheduler.exclusive():
+                worker = threading.Thread(target=enable, name="queued-ad-enable")
+                worker.start()
+                assert queued.wait(2)
+                if panic_route == "helper":
+                    client.normal_access()
+                    assert scheduler.halt_count == 0
+                else:
+                    assert server.write_response_for("/api/normal-access", {})[0] == 200
+                assert not store.read()["running"]
+            worker.join(timeout=5)
+            assert not worker.is_alive()
+            assert replies and replies[0][0] == 409
+            assert not store.read()["running"]
+            assert repo.list_ad_blocking_allowances() == ()
+            # Confirm recovery before choosing a new deliberate enable.
+            assert server.write_response_for("/api/normal-access", {})[0] == 200
+            assert write(server, {"mac_address": ALICE, "enabled": True})[0] == 200
+            assert store.read()["running"]
+        finally:
+            server.server_close()
+
+
+def test_household_changes_preserve_only_current_permission_and_start_renews_after_guard(tmp_path):
+    guard = provision_guard(tmp_path)
+    store = AdStore(
+        AdRouting("wlan0", FakeExecutor()), path=tmp_path / "policy",
+        lock_path=tmp_path / "lock", active_path=tmp_path / "active",
+        status_path=tmp_path / "status", intent_path=tmp_path / "intent", panic_guard=guard,
+    )
+    manager = AccessManager(
+        executor=AccessExecutor(tmp_path), topology=Topology("eth0", "wlan0"),
+        directory=tmp_path / "access", runtime_path=tmp_path / "access-policy",
+        ad_blocking_store=store,
+    )
+    with serving(lambda applier: HelperService(
+        applier, ad_blocking_store=store, access_manager=manager, panic_guard=guard,
+    )) as (client, _):
+        client.configure_ad_blocking([ALICE], [], resume=True)
+        before = json.loads(store.intent_path.read_bytes())["panic_witness"]
+        client.apply_access(AccessPlan())
+        assert store.read()["running"]
+        after = json.loads(store.intent_path.read_bytes())["panic_witness"]
+        assert after != before and after == store._panic_witness()
+        client.normal_access()
+        client.configure_ad_blocking([ALICE], [], resume=True)
+        client.apply_access(AccessPlan())
+        assert store.read()["running"]
+        client.normal_access()
+        assert not store.read()["running"]
+        client.apply_access(AccessPlan())
+        assert not store.read()["running"]
+        payload = {**apply_payload(AccessPlan()), "explicit_apply": True,
+                   "expected_control_revision": client.control_revision()}
+        assert client._request(payload)["ok"]
+        assert store.read()["running"]
+        assert json.loads(store.intent_path.read_bytes())["panic_witness"] == store._panic_witness()
+        store.path.write_bytes(b"broken ad settings")
+        assert client.normal_access()["ok"]
+        assert not manager.applied.options.enabled
+        assert json.loads(store.intent_path.read_bytes())["running"] is False
+        client.configure_ad_blocking([ALICE], ["working.example.net"])
+        assert store.read()["mac_addresses"] == (ALICE,)
+        assert not store.read()["running"]
+        client.configure_ad_blocking([ALICE], ["working.example.net"], resume=True)
+        assert store.read()["running"]
+
+
 def test_removal_after_explicit_enable_while_profiles_are_stopped_clears_blocking(control):
     repo, store, helper, server = control
     repo.save_unaffected_device(UnaffectedDevice(ALICE, "Alice", 1))
@@ -215,7 +409,7 @@ def test_proxy_blocks_before_lookup_only_for_selected_identity_without_active_pr
         lock_path=tmp_path / "lock",
         active_path=tmp_path / "active",
         status_path=tmp_path / "status",
-        intent_path=tmp_path / "intent",
+        intent_path=tmp_path / "intent", panic_guard=provision_guard(tmp_path),
     )
     state = applied(store, tmp_path)
     active = ActiveBlocking(store.active_path, tmp_path / "domains")

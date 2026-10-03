@@ -13,6 +13,7 @@ import jittersim.api.server as server_module
 from jittersim.api.server import ControlServer
 from jittersim.config.exemptions import UnaffectedDevice
 from jittersim.config.models import Device, DomainObservation, Impairment, Profile, Scenario, ScenarioStep
+from tests.adblocking_support import provision_guard
 from jittersim.config.storage import ConfigRepository
 from jittersim.engine.runtime import RuntimeScheduler
 from jittersim.networking.access import AccessManager
@@ -299,7 +300,8 @@ def main():
         topology = Topology("eth0", "wlan0")
         ad_blocking = AdStore(AdRouting("wlan0", executor), path=root / "ad-policy.json",
                               lock_path=root / "ad-lock", active_path=root / "ad-active.json",
-                              status_path=root / "ad-status.json", intent_path=root / "ad-intent.json")
+                              status_path=root / "ad-status.json", intent_path=root / "ad-intent.json",
+                              panic_guard=provision_guard(root))
         # Household access rules run against the same simulated commands.
         access_manager = FixtureAccessManager(
             executor=executor, topology=topology, directory=root / "access",

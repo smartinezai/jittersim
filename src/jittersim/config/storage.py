@@ -1658,6 +1658,8 @@ class ConfigRepository:
             ),
             general_profile_id=self._general_profile_id(),
             service_lists=self.list_service_lists(),
+            ad_blocking_devices=self.list_ad_blocking_devices(),
+            ad_blocking_allowances=self.list_ad_blocking_allowances(),
         )
 
     def _general_profile_id(self) -> Optional[str]:
@@ -1757,6 +1759,10 @@ class ConfigRepository:
                     and self.get_runtime_state().configuration_version != expected_version
                 ):
                     raise StorageError("settings changed since the preview")
+                ad_devices = blocking_macs(settings.ad_blocking_devices)
+                ad_allowances = allowed_domains(settings.ad_blocking_allowances)
+                if set(ad_devices) - {item.mac_address for item in settings.unaffected_devices}:
+                    raise ValueError("Ad blocking needs a protected device")
                 usage = {}
                 if preserve_usage:
                     for table, key, columns in (
@@ -1839,6 +1845,9 @@ class ConfigRepository:
                     self.save_service_list(service_list)
                 for unaffected in settings.unaffected_devices:
                     self.save_unaffected_device(unaffected)
+                for mac in ad_devices:
+                    self.set_ad_blocking(mac, True)
+                self.set_ad_blocking_allowances(ad_allowances)
                 self.save_everyone_else_profile_id(settings.everyone_else_profile_id)
                 self.save_general_profile(settings.general_profile_id)
                 if newly_protected:
