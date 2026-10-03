@@ -8,6 +8,7 @@ import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from .wifi_operations import valid_request_id
+from jittersim.request_workers import RequestWorkers
 
 
 class RouterOperations:
@@ -30,6 +31,7 @@ class RouterOperations:
         self._snapshot = None
         self._next_read = 0.0
         self._closed = False
+        self._workers = RequestWorkers("router-operation", self._uncertain_start)
 
     def _context(self, password: str) -> bytes:
         return hmac.digest(self._key, (self._identity + "\0" + password).encode(), "sha256")
@@ -60,7 +62,7 @@ class RouterOperations:
     def status(self, password: str) -> Dict[str, Any]:
         context = self._context(password)
         with self._lock:
-            if not self._closed and self._active is None and time.monotonic() >= self._next_read:
+            if not self._closed and self._active is None and not self._workers.has_workers and time.monotonic() >= self._next_read:
                 self._next_read = time.monotonic() + self.READ_INTERVAL
                 self._start("/api/router/status", {"admin_password": password}, context)
             return self._view(context)
@@ -77,7 +79,7 @@ class RouterOperations:
                 return self._result(previous)
             if identifier is not None and (not valid_request_id(identifier) or len(self._requests) >= self.MAX_REQUESTS):
                 return 409, {"error": "Router outcome store is full or request identifier expired. Check current state."}
-            if self._closed or self._active is not None:
+            if self._closed or self._active is not None or self._workers.has_workers:
                 return 409, {"error": "Another router operation is running. Try again shortly."}
             if path == "/api/router/wifi":
                 self._snapshot = None
@@ -92,10 +94,9 @@ class RouterOperations:
         if "request_id" in payload:
             self._requests[operation["id"]] = operation
         self._active = operation
-        worker = threading.Thread(target=self._run, args=(operation, payload), daemon=True,
-                                  name="router-operation")
         try:
-            worker.start()
+            self._workers.start(lambda: self._run(operation, payload),
+                                abandon=payload.clear, release=lambda: None)
         except RuntimeError:
             # _start holds the lock. A partially created worker cannot pass admission yet.
             operation.update(cancelled=True, status=503,
@@ -174,8 +175,16 @@ class RouterOperations:
                 return operation["path"], operation["status"]
         return None
 
-    def close(self) -> None:
+    def _uncertain_start(self) -> None:
+        self._closed = True
+
+    def begin_shutdown(self) -> None:
+        self._workers.stop_admission()
         with self._lock:
             self._closed = True
             self._snapshot = None
             self._completed = None
+
+    def close(self, timeout: float = 5.0) -> None:
+        self.begin_shutdown()
+        self._workers.close(timeout)

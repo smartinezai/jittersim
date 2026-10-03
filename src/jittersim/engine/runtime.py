@@ -35,6 +35,7 @@ from jittersim.config.storage import (
     StorageError,
 )
 from jittersim.networking.helper import HelperClient, HelperClientError
+from jittersim.request_workers import WorkersStillRunning
 
 from .access import build_access_plan
 from .activity import Source, TargetState, activity_records
@@ -190,6 +191,7 @@ class RuntimeScheduler:
         self._paused = True
         # Counts Panic requests so an apply that was running meanwhile can tell.
         self._halt_count = 0
+        self._closed = False
         self._lock = threading.RLock()
         # Held while a plan is built and applied, so pause() and manual applies
         # never interleave with a scheduled apply.
@@ -239,33 +241,63 @@ class RuntimeScheduler:
         if self._helper_client is None:
             return
         with self._lock:
+            if self._closed:
+                return
             if self._thread is not None and self._thread.is_alive():
                 return
             self._stop_event.clear()
-            self._thread = threading.Thread(
-                target=self._run,
-                name="jittersim-scheduler",
-                daemon=True,
-            )
-            self._thread.start()
+            try:
+                self._thread = threading.Thread(
+                    target=self._run, name="jittersim-scheduler", daemon=True,
+                )
+                self._thread.start()
+            except BaseException:
+                self._closed = True
+                self._paused = True
+                self._stop_event.set()
+                raise
             if self._service_addresses is not None:
                 self._service_addresses.start()
 
-    def stop(self) -> None:
-        """Stop the loop and wait briefly for its current tick to finish."""
+    def begin_shutdown(self) -> None:
+        """Permanently stop admission before draining any shared-state owner."""
 
-        self._stop_event.set()
+        with self._lock:
+            self._closed = True
+            self._paused = True
+            self._stop_event.set()
+        if self._service_addresses is not None:
+            self._service_addresses.begin_shutdown()
+
+    def stop(self, timeout: float = 5.0) -> None:
+        """Drain actual workers or keep their handles and report incomplete shutdown."""
+
+        self.begin_shutdown()
+        deadline = time.monotonic() + timeout
+        unresolved = False
         thread = self._thread
         if thread is not None:
-            thread.join(timeout=5)
-        self._thread = None
+            try:
+                thread.join(timeout=max(0.0, deadline - time.monotonic()))
+                unresolved = thread.is_alive()
+            except RuntimeError:
+                unresolved = True
+            if not unresolved:
+                self._thread = None
         if self._service_addresses is not None:
-            self._service_addresses.stop()
+            try:
+                self._service_addresses.stop(timeout=max(0.0, deadline - time.monotonic()))
+            except WorkersStillRunning:
+                unresolved = True
+        if unresolved:
+            raise WorkersStillRunning("Scheduler workers did not stop. Their state remains owned.")
 
     def activate(self, *, applied_payload: object) -> None:
         """Resume scheduled work after a successful manual apply."""
 
         with self._lock:
+            if self._closed:
+                return
             self._current_payload = applied_payload
             self._paused = False
             # The apply recreated the helper counters, so keep the device

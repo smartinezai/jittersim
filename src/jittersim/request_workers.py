@@ -23,12 +23,25 @@ class _Owner:
 class RequestWorkers:
     """Track physical workers, including an interrupted startup."""
 
-    def __init__(self, name: str, uncertain: Callable = lambda: None) -> None:
+    def __init__(self, name: str, uncertain: Callable = lambda: None, *, daemon: bool = True) -> None:
         self._name = name
         self._uncertain = uncertain
+        self._daemon = daemon
         self._condition = threading.Condition()
         self._owners = set()
         self._closing = False
+        self._startup_uncertain = False
+
+    @property
+    def startup_uncertain(self) -> bool:
+        with self._condition:
+            return self._startup_uncertain
+
+    @property
+    def has_workers(self) -> bool:
+        self.reap()
+        with self._condition:
+            return bool(self._owners)
 
     def reap(self) -> None:
         """Return capacity only after a completed thread has actually exited."""
@@ -52,7 +65,7 @@ class RequestWorkers:
             return
         try:
             owner.thread = threading.Thread(target=self._run, args=(owner, work),
-                                            name=self._name, daemon=True)
+                                            name=self._name, daemon=self._daemon)
         except BaseException:
             # No start was attempted, so no native worker can own this request.
             self._never_started(owner)
@@ -68,6 +81,7 @@ class RequestWorkers:
                     # process stops. Never infer ownership from exception text.
                     owner.cancelled = True
                     self._closing = True
+                    self._startup_uncertain = True
             if uncertain:
                 self._uncertain()
             self.reap()

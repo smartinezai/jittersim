@@ -30,7 +30,7 @@ from typing import Any, Collection, Dict, List, Optional, Sequence, Set, Tuple
 from urllib.parse import parse_qs, urlsplit
 
 from jittersim import release_uploads, updates
-from jittersim.request_workers import RequestWorkers
+from jittersim.request_workers import RequestWorkers, WorkersStillRunning
 from jittersim.api.access import ACCESS_WRITES, read_access_api, write_access_api
 from jittersim.api.workflows import WORKFLOW_WRITES, machine_health, read_workflow, write_workflow
 from jittersim.config.device_labels import (
@@ -11582,6 +11582,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
     # Browsers open several connections at once. The default queue of five resets the rest.
     request_queue_size = 64
     request_timeout_seconds = 5.0
+    shutdown_timeout_seconds = 5.0
     # Where an uploaded release waits for the root helper (see jittersim.updates.stage_upload).
     release_spool = updates.UPLOAD_SPOOL
     release_upload_lock = release_uploads.LOCK_PATH
@@ -11768,6 +11769,10 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         connection.close()
 
     def service_actions(self) -> None:
+        if any(owner.startup_uncertain for owner in (
+            self._request_workers, self.router_operations._workers, self.wifi_operations._workers,
+        )):
+            raise WorkersStillRunning("Dashboard worker startup is unresolved. Restart the service.")
         if self._pending_connections and not self._stop_connections.is_set():
             self._handle_request_noblock()
 
@@ -13347,14 +13352,26 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
 
     def server_close(self) -> None:
+        deadline = time.monotonic() + self.shutdown_timeout_seconds
+        if self.scheduler is not None:
+            self.scheduler.begin_shutdown()
         self._stop_connections.set()
+        self._request_workers.stop_admission()
+        self.router_operations.begin_shutdown()
+        self.wifi_operations.begin_shutdown()
         for connection in tuple(self._pending_connections):
             self._close_pending(connection)
-        self._request_inputs.clear()
-        self.router_operations.close()
-        self.wifi_operations.close()
-        self._request_workers.close()
+        # The listener can close at once. Shared state must outlive every owner.
         super().server_close()
+        unresolved = []
+        for owner in (self._request_workers, self.router_operations, self.wifi_operations):
+            try:
+                owner.close(timeout=max(0.0, deadline - time.monotonic()))
+            except WorkersStillRunning as error:
+                unresolved.append(error)
+        if unresolved:
+            raise unresolved[0]
+        self._request_inputs.clear()
 
     def _record_wifi_outcome(self) -> None:
         outcome = self.wifi_operations.completed_action()
@@ -16492,28 +16509,39 @@ def run_server(
             timeout_seconds=helper_timeout_seconds,
         )
     )
-    with ConfigRepository(database_path) as repository:
-        scheduler = RuntimeScheduler(
-            database_path=database_path,
-            helper_client=helper_client,
+    repository = ConfigRepository(database_path)
+    scheduler = RuntimeScheduler(database_path=database_path, helper_client=helper_client)
+    try:
+        server = ControlServer(
+            (host, port), repository, admin_token=admin_token, helper_client=helper_client,
+            scheduler=scheduler, tls_certfile=tls_certfile, tls_keyfile=tls_keyfile,
         )
-        with ControlServer(
-            (host, port),
-            repository,
-            admin_token=admin_token,
-            helper_client=helper_client,
-            scheduler=scheduler,
-            tls_certfile=tls_certfile,
-            tls_keyfile=tls_keyfile,
-        ) as server:
-            LOGGER.info("jittersim dashboard listening on %s:%s", host, port)
-            try:
-                server.recover_saved_network_state()
-                server.serve_forever()
-            except KeyboardInterrupt:
-                pass
-            finally:
-                scheduler.stop()
+    except BaseException:
+        repository.close()
+        raise
+    LOGGER.info("jittersim dashboard listening on %s:%s", host, port)
+    try:
+        server.recover_saved_network_state()
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        scheduler.begin_shutdown()
+        unresolved = []
+        try:
+            server.server_close()
+        except WorkersStillRunning as error:
+            unresolved.append(error)
+        try:
+            scheduler.stop()
+        except WorkersStillRunning as error:
+            unresolved.append(error)
+        if unresolved:
+            # A failing service exit lets the process stop its remaining daemon
+            # workers. Do not dispose of resources that they may still be using.
+            LOGGER.critical("dashboard shutdown is incomplete, shared state remains owned")
+            raise unresolved[0]
+        repository.close()
 
 
 def _build_parser() -> argparse.ArgumentParser:

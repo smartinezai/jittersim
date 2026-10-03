@@ -26,7 +26,7 @@ from jittersim.engine.codec import PlanCodecError, plan_from_payload, plan_to_pa
 from jittersim.engine.plan import EVERYONE_ELSE_QUEUE_ID, NetworkPlan
 from jittersim.updates import UpdateError, request_update, stage_upload, update_status
 from jittersim.release_uploads import UploadBusy, prepare_lock
-from jittersim.request_workers import RequestWorkers
+from jittersim.request_workers import RequestWorkers, WorkersStillRunning
 
 from .access import AccessManager
 from .applier import MAX_PROTECTED_MACS, ApplyError, NetworkApplier
@@ -1351,7 +1351,7 @@ class UnixHelperServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServe
         self.operation_lock = threading.Lock()
         self.release_stage_lock = threading.Lock()
         self._request_slots = threading.BoundedSemaphore(MAX_HELPER_CONNECTIONS)
-        self._request_workers = RequestWorkers("jittersim-helper-request")
+        self._request_workers = RequestWorkers("jittersim-helper-request", daemon=False)
         self._prepare_socket_path()
         try:
             super().__init__(str(socket_path), HelperRequestHandler)
@@ -1395,6 +1395,10 @@ class UnixHelperServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServe
             if not chunk or b"\n" in chunk:
                 return
             remaining -= len(chunk)
+
+    def service_actions(self) -> None:
+        if self._request_workers.startup_uncertain:
+            raise WorkersStillRunning("Helper worker startup is unresolved. Restart the service.")
 
     def server_close(self) -> None:
         """Close the socket and remove it only when it is still a socket."""
