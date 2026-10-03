@@ -2,6 +2,7 @@
 
 import argparse
 import copy
+import io
 import grp
 import hashlib
 import json
@@ -35,6 +36,9 @@ from jittersim.updates import (
     stage_upload,
     update_status,
 )
+from jittersim.panic_guard import PanicGuard
+from jittersim.request_workers import RequestWorkers, WorkersStillRunning
+from jittersim.socket_deadlines import DeadlineReader, read_line
 
 from .access import AccessManager
 from .applier import MAX_PROTECTED_MACS, ApplyError, NetworkApplier
@@ -164,6 +168,7 @@ class HelperService:
         service_address_clock: Callable[[], float] = time.monotonic,
         gateway_state_path: Optional[Path] = None,
         access_manager: Optional[AccessManager] = None,
+        panic_guard: Optional[PanicGuard] = None,
     ) -> None:
         self._applier = applier
         self._active_plan_path = active_plan_path
@@ -190,6 +195,11 @@ class HelperService:
         self._gateway_state = "unknown"
         self._outage_observed = False
         self._outage_stop_latched = False
+        self._panic_stop_latched = False
+        self._panic_recovery_failed = False
+        self._control_revision = secrets.token_bytes(16).hex()
+        self._revision_lock = threading.Lock()
+        self._control_revision_required = False
         self._reset_pending = False
         self._recovery_pending = False
         self._consecutive_failures = 0
@@ -197,6 +207,24 @@ class HelperService:
         self._next_reset_retry_at = 0.0
         self._gateway_state_error = False
         self._load_gateway_state()
+        self._panic_guard = panic_guard
+        self._panic_guard_error = False
+        if panic_guard is not None:
+            try:
+                guard = panic_guard.provision(gateway_state_path)
+                self._panic_stop_latched = guard["panic_stop_latched"]
+                self._panic_recovery_failed = guard["panic_recovery_failed"]
+                self._control_revision_required = guard["control_revision_required"]
+                if (self._panic_stop_latched and self._active_plan_path is not None
+                        and self._active_plan_path.exists()):
+                    self._reset_pending = True
+                    self._next_reset_retry_at = 0.0
+            except OSError:
+                LOGGER.exception("persistent Panic stop state could not be read")
+                self._panic_stop_latched = True
+                self._panic_recovery_failed = True
+                self._control_revision_required = True
+                self._panic_guard_error = True
         self._router_factory = router_factory or (
             lambda address, password: TG3442DERouter(address=address, password=password)
         )
@@ -219,11 +247,22 @@ class HelperService:
         if not isinstance(payload, dict):
             return {"ok": False, "error": "request must be an object"}
         action = payload.get("action")
+        if action == "control-revision":
+            with self._revision_lock:
+                return {"ok": True, "control_revision": self._control_revision,
+                        "recovery_required": self._panic_recovery_failed}
         if action == "normal-access":
             if not self._network_lock.acquire(timeout=WRITE_LOCK_WAIT_SECONDS):
                 return {"ok": False, "error": "Pi networking is busy. Try again later.",
                         "reason": "helper-busy"}
             try:
+                with self._revision_lock:
+                    self._control_revision = secrets.token_bytes(16).hex()
+                    self._control_revision_required = True
+                    self._panic_stop_latched = True
+                    self._panic_recovery_failed = True
+                self._write_panic_guard()
+                self._write_gateway_state(durable=True)
                 reset = self._handle_reset()
                 access_ok = False
                 try:
@@ -233,8 +272,18 @@ class HelperService:
                     access_ok = True
                 except (OSError, ValueError, CommandExecutionError):
                     LOGGER.exception("could not disable household restrictions")
+                failed = not reset["ok"] or not access_ok
+                saved = self._write_gateway_state(durable=True, panic_recovery_failed=failed)
+                saved = self._write_panic_guard(panic_recovery_failed=failed or not saved) and saved
+                with self._revision_lock:
+                    self._panic_recovery_failed = failed or not saved
+                if not saved:
+                    self._write_panic_guard()
             finally:
                 self._network_lock.release()
+            if not saved:
+                return {"ok": False, "error": "normal access recovery state could not be saved",
+                        "experiments_stopped": reset["ok"], "access_disabled": access_ok}
             if not reset["ok"] or not access_ok:
                 return {"ok": False, "error": "normal access was not fully restored",
                         "experiments_stopped": reset["ok"], "access_disabled": access_ok}
@@ -242,13 +291,27 @@ class HelperService:
         if action in ("access-status", "access-apply"):
             if self._access_manager is None:
                 return {"ok": False, "error": "persistent access controls are unavailable"}
+            acquired = False
             try:
-                result = (self._access_manager.status() if action == "access-status" else
-                          self._access_manager.apply(access_from_payload(payload.get("policy"))))
+                if action == "access-status":
+                    result = self._access_manager.status()
+                else:
+                    acquired = self._network_lock.acquire(timeout=WRITE_LOCK_WAIT_SECONDS)
+                    if not acquired:
+                        return {"ok": False, "error": "Pi networking is busy. Try again later.", "reason": "helper-busy"}
+                    refused = self._control_refusal(payload)
+                    if refused is not None:
+                        return refused
+                    if self._panic_recovery_failed:
+                        return {"ok": False, "error": "Retry Panic before applying access rules."}
+                    result = self._access_manager.apply(access_from_payload(payload.get("policy")))
                 return {"ok": True, **result}
             except (OSError, ValueError, CommandExecutionError):
                 LOGGER.exception("persistent access operation failed")
                 return {"ok": False, "error": self._access_failure_message()}
+            finally:
+                if acquired:
+                    self._network_lock.release()
         if action in ("update-status", "update-install", "update-rollback"):
             try:
                 if action != "update-status":
@@ -257,6 +320,24 @@ class HelperService:
             except (OSError, ValueError, UpdateError):
                 LOGGER.exception("release operation failed")
                 return {"ok": False, "error": "release operation could not be completed"}
+        if action == "update-retry":
+            identifier = payload.get("retry_id")
+            if (set(payload) != {"action", "retry_id"} or not isinstance(identifier, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", identifier) is None):
+                return {"ok": False, "error": "Check the failed update again before retrying.",
+                        "reason": "update-retry-refused"}
+            try:
+                # A replaced helper with an older backend must refuse this action.
+                from jittersim.updates import retry_update
+            except ImportError:
+                return {"ok": False, "error": "The Pi network helper needs an update before retrying."}
+            try:
+                return {"ok": True, **retry_update(identifier)}
+            except UpdateError as error:
+                return {"ok": False, "error": str(error), "reason": "update-retry-refused"}
+            except (OSError, ValueError):
+                LOGGER.exception("update retry could not be confirmed")
+                return {"ok": False, "error": "The update retry could not be confirmed. Check update status."}
         if action in ("update-stage-upload", "update-stage-identified-upload"):
             # The dashboard has streamed an uploaded release into its spool folder. This
             # root helper copies it away, checks the signature and stages it. The refusal
@@ -324,6 +405,9 @@ class HelperService:
             try:
                 if action == "reset":
                     return self._handle_reset()
+                refused = self._control_refusal(payload)
+                if refused is not None:
+                    return refused
                 return self._handle_apply(
                     payload.get("plan"),
                     update_access=action == "apply",
@@ -577,6 +661,16 @@ class HelperService:
                 or not 0 <= successes <= GATEWAY_SUCCESSES_TO_UP
             ):
                 raise ValueError("gateway probe count is invalid")
+            for field in ("panic_stop_latched", "panic_recovery_failed", "control_revision_required"):
+                if field in state and not isinstance(state[field], bool):
+                    raise ValueError("Panic recovery state is invalid")
+            self._panic_stop_latched = state.get("panic_stop_latched", False)
+            self._panic_recovery_failed = state.get("panic_recovery_failed", False)
+            self._control_revision_required = state.get("control_revision_required", self._panic_stop_latched)
+            if self._panic_stop_latched:
+                self._control_revision_required = True
+            if self._panic_recovery_failed and not self._panic_stop_latched:
+                raise ValueError("Panic recovery state is inconsistent")
             self._persistence_enabled = state["persistence_enabled"]
             self._persistence_mode_initialized = True
             self._gateway_state = state["gateway_state"]
@@ -587,7 +681,7 @@ class HelperService:
             self._consecutive_failures = failures
             self._consecutive_successes = successes
             active_plan_needs_cleanup = (
-                self._outage_stop_latched
+                (self._outage_stop_latched or self._panic_stop_latched)
                 and self._active_plan_path is not None
                 and self._active_plan_path.is_file()
             )
@@ -601,8 +695,40 @@ class HelperService:
             self._gateway_state = "unknown"
             self._persistence_mode_initialized = True
             self._outage_stop_latched = True
+            self._panic_stop_latched = True
+            self._panic_recovery_failed = True
+            self._control_revision_required = True
             self._reset_pending = True
             self._gateway_state_error = True
+
+    def _control_refusal(self, payload):
+        expected = payload.get("expected_control_revision")
+        if expected is None and "expected_control_revision" not in payload and not self._control_revision_required:
+            return None
+        if (not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{32}", expected) is None
+                or not secrets.compare_digest(expected, self._control_revision)):
+            return {"ok": False, "error": "Network control changed. Reload before choosing a fresh action.",
+                    "reason": "control-changed"}
+        return None
+
+    def _write_panic_guard(self, *, panic_recovery_failed=None):
+        if self._panic_guard is None:
+            return True
+        try:
+            self._panic_guard.write({
+                "version": 1,
+                "panic_stop_latched": self._panic_stop_latched,
+                "panic_recovery_failed": (self._panic_recovery_failed
+                                          if panic_recovery_failed is None
+                                          else panic_recovery_failed),
+                "control_revision_required": self._control_revision_required,
+            })
+            self._panic_guard_error = False
+            return True
+        except OSError:
+            self._panic_guard_error = True
+            LOGGER.exception("persistent Panic stop state could not be saved")
+            return False
 
     def _gateway_status(self) -> Dict[str, Any]:
         return {
@@ -611,21 +737,30 @@ class HelperService:
             "gateway_state": self._gateway_state,
             "outage_observed": self._outage_observed,
             "outage_stop_latched": self._outage_stop_latched,
+            "panic_stop_latched": self._panic_stop_latched,
+            "control_revision_required": self._control_revision_required,
+            "panic_recovery_failed": self._panic_recovery_failed,
             "reset_pending": self._reset_pending,
             "recovery_pending": self._recovery_pending,
-            "state_error": self._gateway_state_error,
+            "state_error": self._gateway_state_error or self._panic_guard_error,
+            "control_revision": self._control_revision,
         }
 
-    def _write_gateway_state(self) -> None:
+    def _write_gateway_state(self, *, durable: bool = False,
+                             panic_recovery_failed: Optional[bool] = None) -> bool:
         path = self._gateway_state_path
         if path is None:
-            return
+            return True
         state = {
             "version": 1,
             "persistence_enabled": self._persistence_enabled,
             "gateway_state": self._gateway_state,
             "outage_observed": self._outage_observed,
             "outage_stop_latched": self._outage_stop_latched,
+            "panic_stop_latched": self._panic_stop_latched,
+            "control_revision_required": self._control_revision_required,
+            "panic_recovery_failed": (self._panic_recovery_failed if panic_recovery_failed is None
+                                      else panic_recovery_failed),
             "reset_pending": self._reset_pending,
             "recovery_pending": self._recovery_pending,
             "consecutive_failures": self._consecutive_failures,
@@ -637,7 +772,16 @@ class HelperService:
             with os.fdopen(descriptor, "w", encoding="utf-8") as output:
                 json.dump(state, output, sort_keys=True)
                 output.write("\n")
+                if durable:
+                    output.flush()
+                    os.fsync(output.fileno())
             os.replace(temporary, path)
+            if durable:
+                parent = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(parent)
+                finally:
+                    os.close(parent)
             self._gateway_state_error = False
         except OSError:
             self._gateway_state_error = True
@@ -647,6 +791,7 @@ class HelperService:
                 temporary.unlink()
             except OSError:
                 pass
+        return not self._gateway_state_error
 
     def _handle_gateway_persistence(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         enabled = payload.get("enabled")
@@ -700,7 +845,8 @@ class HelperService:
                     self._gateway_state = "available"
                     if was_unavailable or self._outage_observed:
                         self._outage_observed = False
-                        if self._persistence_enabled and not self._outage_stop_latched:
+                        if (self._persistence_enabled and not self._outage_stop_latched
+                                and not self._panic_stop_latched):
                             self._recovery_pending = self._has_active_plan()
             else:
                 self._consecutive_successes = 0
@@ -873,6 +1019,10 @@ class HelperService:
             plan = plan_from_payload(payload)
         except PlanCodecError:
             return {"ok": False, "error": "invalid network plan"}
+        if self._panic_recovery_failed:
+            return {"ok": False, "error": "Normal access recovery is not confirmed. Retry Panic before Start."}
+        if self._panic_stop_latched and not explicit_apply:
+            return {"ok": False, "error": "Panic stopped profiles. Choose Start explicitly when it is safe."}
         if self._outage_stop_latched:
             if not explicit_apply:
                 return {
@@ -958,17 +1108,27 @@ class HelperService:
         self._plan_count += 1
         self._list_domains = {rule.list_id: rule.domains for rule in plan.service_list_rules}
         if explicit_apply:
+            self._panic_stop_latched = False
             self._outage_stop_latched = False
             self._reset_pending = False
             self._outage_observed = False
             self._gateway_state_error = False
         self._recovery_pending = False
-        self._write_gateway_state()
-        if self._gateway_state_error and explicit_apply:
+        self._write_gateway_state(durable=explicit_apply)
+        guard_saved = self._write_panic_guard() if explicit_apply else True
+        if (self._gateway_state_error or not guard_saved) and explicit_apply:
+            self._panic_stop_latched = True
+            self._panic_recovery_failed = True
             self._outage_stop_latched = True
             self._reset_pending = True
             self._next_reset_retry_at = 0.0
+            self._write_panic_guard()
             self._attempt_gateway_reset()
+            if self._access_manager is not None:
+                try:
+                    self._access_manager.disable()
+                except (OSError, ValueError, CommandExecutionError):
+                    LOGGER.exception("household cleanup failed after Panic state save failure")
             return {"ok": False, "error": "gateway recovery state could not be saved safely"}
         return {"ok": True, "action": "apply", "commands_run": report.commands_run}
 
@@ -1312,9 +1472,13 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
     """Read one newline-delimited JSON request from a Unix socket client."""
 
     server: "UnixHelperServer"
+    rbufsize = 0
 
     def handle(self) -> None:
         self.request.settimeout(3)
+        self.rfile = io.BufferedReader(DeadlineReader(
+            self.rfile, self.request, time.monotonic() + 3,
+        ))
         try:
             self._handle_request()
         except (OSError, TimeoutError):
@@ -1322,6 +1486,9 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
 
     def _handle_request(self) -> None:
         line = self.rfile.readline(MAX_MESSAGE_BYTES + 1)
+        if hasattr(self, "request"):
+            # Response transport gets its own bounded allowance after input.
+            self.request.settimeout(3)
         if not line:
             return
         if len(line) > MAX_MESSAGE_BYTES:
@@ -1333,7 +1500,7 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
             self._send_response({"ok": False, "error": "request must be valid JSON"})
             return
         action = payload.get("action") if isinstance(payload, dict) else None
-        if action in ("ping", "dashboard-access") or action in WIFI_ACTIONS or action in ROUTER_ACTIONS:
+        if action in ("ping", "control-revision", "dashboard-access", "update-retry") or action in WIFI_ACTIONS or action in ROUTER_ACTIONS:
             self._send_response(self.server.service.handle_payload(payload))
             return
         # Apply and reset wait a moment for a read so a poll never refuses Panic. Every
@@ -1376,6 +1543,7 @@ class UnixHelperServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServe
         self.operation_lock = threading.Lock()
         self.release_stage_lock = threading.Lock()
         self._request_slots = threading.BoundedSemaphore(MAX_HELPER_CONNECTIONS)
+        self._request_workers = RequestWorkers("jittersim-helper-request", daemon=False)
         self._prepare_socket_path()
         try:
             super().__init__(str(socket_path), HelperRequestHandler)
@@ -1385,6 +1553,7 @@ class UnixHelperServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServe
             raise HelperError("could not create the helper socket") from error
 
     def process_request(self, request, client_address) -> None:
+        self._request_workers.reap()
         if not self._request_slots.acquire(blocking=False):
             try:
                 self._drain_rejected_request(request)
@@ -1397,10 +1566,12 @@ class UnixHelperServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServe
                 self.shutdown_request(request)
             return
         try:
-            super().process_request(request, client_address)
-        except BaseException:
-            self._request_slots.release()
-            raise
+            self._request_workers.start(
+                lambda: self.process_request_thread(request, client_address),
+                abandon=lambda: self.shutdown_request(request), release=self._request_slots.release,
+            )
+        except Exception:
+            LOGGER.exception("helper worker startup failed")
 
     @staticmethod
     def _drain_rejected_request(request) -> None:
@@ -1417,15 +1588,14 @@ class UnixHelperServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServe
                 return
             remaining -= len(chunk)
 
-    def process_request_thread(self, request, client_address) -> None:
-        try:
-            super().process_request_thread(request, client_address)
-        finally:
-            self._request_slots.release()
+    def service_actions(self) -> None:
+        if self._request_workers.startup_uncertain:
+            raise WorkersStillRunning("Helper worker startup is unresolved. Restart the service.")
 
     def server_close(self) -> None:
         """Close the socket and remove it only when it is still a socket."""
 
+        self._request_workers.close()
         super().server_close()
         self._remove_socket_path()
 
@@ -1499,7 +1669,7 @@ def _validated_queues(raw_queues: Any) -> Dict[str, Any]:
 
 # Helper actions that only read, so they leave a recent client scan valid.
 READ_ONLY_ACTIONS = frozenset((
-    "ping", "dashboard-access", "gateway-status", "capabilities", "access-status",
+    "ping", "control-revision", "dashboard-access", "gateway-status", "capabilities", "access-status",
     "update-status", "clients", "uplink-info", "observe-dns", "queue-stats", "traffic-counters",
     "router-preview-ap", "router-status", "router-check", "router-wifi-credentials",
 ))
@@ -1550,19 +1720,14 @@ class HelperClient:
         client.snapshot_ttl_seconds = self.snapshot_ttl_seconds
         return client
 
-    def invalidate_connected_devices(self, *, keep_recent: bool = False) -> None:
-        """Forget the shared client scan, for example after the network changed.
-
-        `keep_recent` is for a change that has only started: the last good list still
-        describes the network until the change is done.
-        """
+    def invalidate_connected_devices(self) -> None:
+        """Invalidate both current and recent identity before a network change starts."""
 
         with self._snapshots.lock:
             self._snapshots.generation += 1
             self._snapshots.value = None
             self._snapshots.expires_at = 0.0
-            if not keep_recent:
-                self._snapshots.recent = None
+            self._snapshots.recent = None
 
     def recent_connected_devices(self, max_age_seconds: float) -> Optional[Dict[str, Any]]:
         """Return the last good scan if it is young enough and no change has happened since."""
@@ -1597,9 +1762,10 @@ class HelperClient:
                 outages=any(rule.outage_active for rule in plan.service_list_rules)
             )
 
-    def apply(self, *, plan: NetworkPlan, explicit_apply: bool = False) -> Dict[str, Any]:
+    def apply(self, *, plan: NetworkPlan, explicit_apply: bool = False, control_revision: Optional[str] = None) -> Dict[str, Any]:
         """Ask the helper to apply one validated network plan."""
 
+        revision = self.control_revision() if control_revision is None else control_revision
         self._check_plan_support(plan)
         # Applying waits for the kernel and the access policy, so allow longer.
         return self._request(
@@ -1607,9 +1773,31 @@ class HelperClient:
                 "action": "apply",
                 "plan": plan_to_payload(plan),
                 "explicit_apply": explicit_apply,
+                "expected_control_revision": revision,
             },
             timeout_seconds=60,
         )
+
+    def control_revision(self) -> str:
+        """Capture one immutable helper intent before any plan or saved change."""
+
+        try:
+            result = self._request({"action": "control-revision"})
+        except HelperClientError as error:
+            if str(error) == "unknown action":
+                raise HelperClientError(HELPER_OUT_OF_DATE_MESSAGE) from error
+            raise
+        revision = result.get("control_revision")
+        if revision is None:
+            raise HelperClientError(HELPER_OUT_OF_DATE_MESSAGE)
+        if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{32}", revision) is None:
+            raise HelperClientError("helper returned an invalid control revision")
+        required = result.get("recovery_required")
+        if not isinstance(required, bool):
+            raise HelperClientError(HELPER_OUT_OF_DATE_MESSAGE)
+        if required:
+            raise HelperClientError("Normal access recovery is not confirmed. Retry Panic before Start.")
+        return revision
 
     def gateway_status(self) -> Dict[str, Any]:
         """Read the helper's bounded gateway and persistence state."""
@@ -1627,6 +1815,15 @@ class HelperClient:
         ):
             if not isinstance(result.get(field), bool):
                 raise HelperClientError("helper returned invalid gateway persistence state")
+        for field in ("panic_stop_latched", "panic_recovery_failed"):
+            if field in result and not isinstance(result[field], bool):
+                raise HelperClientError("helper returned invalid Panic recovery state")
+        if "control_revision" in result:
+            revision = result["control_revision"]
+            if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{32}", revision) is None:
+                raise HelperClientError("helper returned an invalid control revision")
+        if "control_revision_required" in result and not isinstance(result["control_revision_required"], bool):
+            raise HelperClientError("helper returned invalid control intent state")
         return result
 
     def set_gateway_persistence(self, *, enabled: bool) -> Dict[str, Any]:
@@ -1711,12 +1908,13 @@ class HelperClient:
 
         return self._request({"action": "reset"})
 
-    def apply_experiment(self, *, plan: NetworkPlan) -> Dict[str, Any]:
+    def apply_experiment(self, *, plan: NetworkPlan, control_revision: Optional[str] = None) -> Dict[str, Any]:
         """Change scheduled effects without activating pending access-rule edits."""
 
+        revision = self.control_revision() if control_revision is None else control_revision
         self._check_plan_support(plan)
         return self._request(
-            {"action": "apply-experiment", "plan": plan_to_payload(plan)}, timeout_seconds=60
+            {"action": "apply-experiment", "plan": plan_to_payload(plan), "expected_control_revision": revision}, timeout_seconds=60
         )
 
     def normal_access(self) -> Dict[str, Any]:
@@ -1726,10 +1924,11 @@ class HelperClient:
     def access_status(self) -> Dict[str, Any]:
         return self._request({"action": "access-status"})
 
-    def apply_access(self, policy: AccessPlan) -> Dict[str, Any]:
+    def apply_access(self, policy: AccessPlan, control_revision: Optional[str] = None) -> Dict[str, Any]:
         # DNS restart and recovery can take longer than a status read.
+        revision = self.control_revision() if control_revision is None else control_revision
         client = self._with_timeout(60)
-        return client._request({"action": "access-apply", "policy": policy.payload()})
+        return client._request({"action": "access-apply", "policy": policy.payload(), "expected_control_revision": revision})
 
     def configure_access_point(self, *, ssid: str, password: str) -> Dict[str, Any]:
         """Set the local test AP credentials through the privileged helper."""
@@ -1794,6 +1993,19 @@ class HelperClient:
     def install_release(self, *, version: str, rollback: bool = False) -> Dict[str, Any]:
         return self._request({"action": "update-rollback" if rollback else "update-install", "version": version})
 
+    def retry_update(self, *, retry_id: str) -> Dict[str, Any]:
+        """Send one explicit retry and leave a lost response to a status read."""
+
+        if not isinstance(retry_id, str) or re.fullmatch(r"[0-9a-f]{64}", retry_id) is None:
+            raise HelperClientError("Check the failed update again before retrying.",
+                                    reason="update-retry-refused")
+        result = self._request({"action": "update-retry", "retry_id": retry_id}, timeout_seconds=20)
+        public_id = result.get("request_id")
+        if (not isinstance(public_id, str) or re.fullmatch(r"[0-9a-f]{32}", public_id) is None
+                or result.get("request_kind") not in ("install", "rollback")):
+            raise HelperClientError("The update retry could not be confirmed. Check update status.")
+        return result
+
     def set_router_wifi(self, *, admin_password: str, enabled: bool) -> Dict[str, Any]:
         """Enable or disable the upstream router's primary Wi-Fi radios."""
 
@@ -1845,46 +2057,65 @@ class HelperClient:
         return result
 
     def connected_device_snapshot(self) -> Dict[str, Any]:
-        """Return current client details and whether association status is known.
+        """Deliver a generation-valid scan within this caller's total deadline.
 
-        Callers within `snapshot_ttl_seconds` share one scan, and callers that arrive
-        while a scan runs wait for it. A change to the network starts a fresh scan.
+        One active scan stays owned across invalidation. A newer caller may wait
+        for it then start one fresh scan. An older caller cannot receive identity
+        after the generation it requested has changed.
         """
 
         cache = self._snapshots
+        deadline = time.monotonic() + self.timeout_seconds
         with cache.lock:
-            if cache.value is not None and time.monotonic() < cache.expires_at:
-                return copy.deepcopy(cache.value)
-            flight = cache.flight
-            leader = flight is None or flight.generation != cache.generation
+            requested_generation = cache.generation
+        for _ in range(2):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise HelperClientError("client scan timed out")
+            with cache.lock:
+                if requested_generation != cache.generation:
+                    raise HelperClientError("network changed during client scan", reason="helper-busy")
+                if cache.value is not None and time.monotonic() < cache.expires_at:
+                    return copy.deepcopy(cache.value)
+                flight = cache.flight
+                leader = flight is None
+                if leader:
+                    flight = cache.flight = _SnapshotFlight(cache.generation)
             if leader:
-                flight = cache.flight = _SnapshotFlight(cache.generation)
-        if not leader:
-            flight.done.wait()
-            if flight.error is not None:
-                raise flight.error
-            return copy.deepcopy(flight.value)
-        try:
-            value = self._read_connected_device_snapshot()
-        except BaseException as error:
-            flight.error = error
-            raise
-        else:
-            flight.value = value
+                try:
+                    value = self._read_connected_device_snapshot(timeout_seconds=remaining)
+                    if time.monotonic() >= deadline:
+                        raise HelperClientError("client scan timed out")
+                except BaseException as error:
+                    flight.error = error
+                else:
+                    flight.value = value
+                    with cache.lock:
+                        if flight.generation == cache.generation:
+                            cache.value = value
+                            cache.expires_at = time.monotonic() + self.snapshot_ttl_seconds
+                            cache.recent = (time.monotonic(), copy.deepcopy(value))
+                finally:
+                    with cache.lock:
+                        if cache.flight is flight:
+                            cache.flight = None
+                        flight.done.set()
+            elif not flight.done.wait(timeout=max(0.0, deadline - time.monotonic())):
+                raise HelperClientError("client scan timed out")
             with cache.lock:
-                if flight.generation == cache.generation:
-                    cache.value = value
-                    cache.expires_at = time.monotonic() + self.snapshot_ttl_seconds
-                    cache.recent = (time.monotonic(), copy.deepcopy(value))
-            return copy.deepcopy(value)
-        finally:
-            with cache.lock:
-                if cache.flight is flight:
-                    cache.flight = None
-            flight.done.set()
+                if requested_generation != cache.generation:
+                    raise HelperClientError("network changed during client scan", reason="helper-busy")
+                if flight.generation != cache.generation:
+                    continue
+                if flight.error is not None:
+                    raise flight.error
+                if time.monotonic() >= deadline:
+                    raise HelperClientError("client scan timed out")
+                return copy.deepcopy(flight.value)
+        raise HelperClientError("client scan could not refresh", reason="helper-busy")
 
-    def _read_connected_device_snapshot(self) -> Dict[str, Any]:
-        response = self._request({"action": "clients"})
+    def _read_connected_device_snapshot(self, timeout_seconds=None) -> Dict[str, Any]:
+        response = self._request({"action": "clients"}, timeout_seconds=timeout_seconds)
         devices = response.get("devices")
         association_status_available = response.get("association_status_available")
         if (
@@ -2084,7 +2315,7 @@ class HelperClient:
         if payload.get("action") in READ_ONLY_ACTIONS:
             return self._send(payload, timeout_seconds=timeout_seconds)
         # Anything else may change who is connected, so no earlier scan stays valid.
-        self.invalidate_connected_devices(keep_recent=True)
+        self.invalidate_connected_devices()
         try:
             return self._send(payload, timeout_seconds=timeout_seconds)
         finally:
@@ -2096,14 +2327,18 @@ class HelperClient:
         encoded = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
         if len(encoded) > MAX_MESSAGE_BYTES:
             raise HelperClientError("helper request is too large")
+        seconds = self.timeout_seconds if timeout_seconds is None else timeout_seconds
+        deadline = time.monotonic() + seconds
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-                connection.settimeout(self.timeout_seconds if timeout_seconds is None else timeout_seconds)
+                connection.settimeout(seconds)
                 connection.connect(str(self.socket_path))
-                with connection.makefile("rwb") as stream:
-                    stream.write(encoded)
-                    stream.flush()
-                    response = stream.readline(MAX_MESSAGE_BYTES + 1)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("helper connection deadline expired")
+                connection.settimeout(remaining)
+                connection.sendall(encoded)
+                response = read_line(connection, MAX_MESSAGE_BYTES + 1, deadline)
         except OSError as error:
             raise HelperClientError("could not contact the networking helper") from error
         if not response or len(response) > MAX_MESSAGE_BYTES:
@@ -2116,7 +2351,7 @@ class HelperClient:
             raise HelperClientError("helper returned an invalid response object")
         if not decoded.get("ok", False):
             reason = decoded.get("reason")
-            if reason not in ("wifi-busy", "helper-busy", "wifi-failed",
+            if reason not in ("control-changed", "update-retry-refused", "wifi-busy", "helper-busy", "wifi-failed",
                               "wifi-restored", "wifi-restore-failed", "release-refused"):
                 reason = None
             raise HelperClientError(str(decoded.get("error", "helper request failed")), reason=reason)
@@ -2143,7 +2378,7 @@ def _clean_queue_impairment(raw: Any) -> Dict[str, Any]:
     return clean
 
 
-def restore_access_at_start(access: AccessManager) -> bool:
+def restore_access_at_start(access: AccessManager, *, panic_stopped=False) -> bool:
     """Restore the saved access rules and keep the helper alive when that fails.
 
     A failed restore leaves the test network closed behind the guard table. The
@@ -2151,7 +2386,10 @@ def restore_access_at_start(access: AccessManager) -> bool:
     """
 
     try:
-        access.restore()
+        if panic_stopped:
+            access.disable()
+        else:
+            access.restore()
     except Exception:
         LOGGER.exception(
             "Saved access rules were not restored. The test network stays closed. "
@@ -2184,7 +2422,6 @@ def run_helper(
     gateway_state_path = socket_path.parent / "gateway-state.json"
     access = AccessManager(executor=SubprocessExecutor(timeout_seconds=20), topology=topology,
                            runtime_path=socket_path.parent / "access-policy.json")
-    restore_access_at_start(access)
     service = HelperService(
         applier,
         router_factory=router_factory,
@@ -2192,7 +2429,13 @@ def run_helper(
         access_store=AccessStore(ACCESS_FILE, group_id=grp.getgrnam("jittersim").gr_gid),
         gateway_state_path=gateway_state_path,
         access_manager=access,
+        panic_guard=PanicGuard(),
     )
+    restored = restore_access_at_start(access, panic_stopped=service._panic_stop_latched)
+    if not restored and service._panic_stop_latched:
+        service._panic_recovery_failed = True
+        service._write_panic_guard()
+        service._write_gateway_state(durable=True)
     stopped = threading.Event()
 
     def maintain_access():

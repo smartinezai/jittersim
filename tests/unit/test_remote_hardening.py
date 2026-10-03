@@ -146,7 +146,7 @@ def test_status_shows_the_rest_when_the_device_list_fails(dashboard, capsys):
     code, out, _, _ = run(dashboard, capsys, "status")
     assert code == 0
     assert "Connected devices unavailable" in out
-    assert "General profile: Slow connection · active" in out
+    assert "Everyone: Slow connection · active" in out
     assert "Running." in out
 
 

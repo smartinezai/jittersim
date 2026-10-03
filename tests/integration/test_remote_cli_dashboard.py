@@ -117,8 +117,8 @@ def test_every_remote_command_against_the_live_dashboard(dashboard, capsys):
 
     code, out, _ = run(capsys, "status")
     assert code == 0
-    assert "JitterSim is not running. Choose Start with saved settings." in out
-    assert "General profile: none" in out
+    assert "Nothing is running. Choose Start." in out
+    assert "Everyone: none" in out
     # The fixture's helper answers the release status like a Pi without a release label.
     assert out.splitlines()[1] == "Release on the Pi: Unversioned installation"
 
@@ -170,7 +170,7 @@ def test_every_remote_command_against_the_live_dashboard(dashboard, capsys):
     assert "tags-eu.tiqcdn.com" in out
     code, out, _ = run(capsys, "traffic", "block", "tags-eu.tiqcdn.com")
     assert code == 0
-    assert "It applies on its own while JitterSim is running." in out
+    assert "It applies on its own while profiles are running." in out
     code, out, _ = run(capsys, "traffic", "--blocked")
     assert "tags-eu.tiqcdn.com" in out and "Blocked" in out and "netflix" not in out
     code, out, _ = run(capsys, "traffic", "unblock", "tags-eu.tiqcdn.com")

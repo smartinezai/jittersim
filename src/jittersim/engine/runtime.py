@@ -1,6 +1,7 @@
 """Background runtime for schedules, randomized rerolls and outages."""
 
 import logging
+import sqlite3
 import threading
 import time
 from contextlib import contextmanager
@@ -35,6 +36,7 @@ from jittersim.config.storage import (
     StorageError,
 )
 from jittersim.networking.helper import HelperClient, HelperClientError
+from jittersim.request_workers import WorkersStillRunning
 
 from .access import build_access_plan
 from .activity import Source, TargetState, activity_records
@@ -190,10 +192,15 @@ class RuntimeScheduler:
         self._paused = True
         # Counts Panic requests so an apply that was running meanwhile can tell.
         self._halt_count = 0
+        self._closed = False
         self._lock = threading.RLock()
         # Held while a plan is built and applied, so pause() and manual applies
         # never interleave with a scheduled apply.
         self._apply_lock = threading.RLock()
+        self._apply_intent = threading.local()
+        self._recoveries = set()
+        self._recovery_required = False
+        self._recovery_failures = 0
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_traffic_sample_at = 0.0
@@ -239,33 +246,63 @@ class RuntimeScheduler:
         if self._helper_client is None:
             return
         with self._lock:
+            if self._closed:
+                return
             if self._thread is not None and self._thread.is_alive():
                 return
             self._stop_event.clear()
-            self._thread = threading.Thread(
-                target=self._run,
-                name="jittersim-scheduler",
-                daemon=True,
-            )
-            self._thread.start()
+            try:
+                self._thread = threading.Thread(
+                    target=self._run, name="jittersim-scheduler", daemon=True,
+                )
+                self._thread.start()
+            except BaseException:
+                self._closed = True
+                self._paused = True
+                self._stop_event.set()
+                raise
             if self._service_addresses is not None:
                 self._service_addresses.start()
 
-    def stop(self) -> None:
-        """Stop the loop and wait briefly for its current tick to finish."""
+    def begin_shutdown(self) -> None:
+        """Permanently stop admission before draining any shared-state owner."""
 
-        self._stop_event.set()
+        with self._lock:
+            self._closed = True
+            self._paused = True
+            self._stop_event.set()
+        if self._service_addresses is not None:
+            self._service_addresses.begin_shutdown()
+
+    def stop(self, timeout: float = 5.0) -> None:
+        """Drain actual workers or keep their handles and report incomplete shutdown."""
+
+        self.begin_shutdown()
+        deadline = time.monotonic() + timeout
+        unresolved = False
         thread = self._thread
         if thread is not None:
-            thread.join(timeout=5)
-        self._thread = None
+            try:
+                thread.join(timeout=max(0.0, deadline - time.monotonic()))
+                unresolved = thread.is_alive()
+            except RuntimeError:
+                unresolved = True
+            if not unresolved:
+                self._thread = None
         if self._service_addresses is not None:
-            self._service_addresses.stop()
+            try:
+                self._service_addresses.stop(timeout=max(0.0, deadline - time.monotonic()))
+            except WorkersStillRunning:
+                unresolved = True
+        if unresolved:
+            raise WorkersStillRunning("Scheduler workers did not stop. Their state remains owned.")
 
     def activate(self, *, applied_payload: object) -> None:
         """Resume scheduled work after a successful manual apply."""
 
         with self._lock:
+            if not self.can_apply(self.apply_generation):
+                return
             self._current_payload = applied_payload
             self._paused = False
             # The apply recreated the helper counters, so keep the device
@@ -304,7 +341,7 @@ class RuntimeScheduler:
         """
 
         current_time = time.time() if now is None else now
-        with self._apply_lock, self._lock:
+        with self._apply_lock:
             previous_rolls = self._rolls
             self._rolls = {key: replace(roll) for key, roll in previous_rolls.items()}
             try:
@@ -335,10 +372,100 @@ class RuntimeScheduler:
 
     @contextmanager
     def exclusive(self) -> Iterator[None]:
-        """Hold off scheduled applies while a manual apply runs."""
+        """Keep the original intent while waiting for earlier manual work."""
 
-        with self._apply_lock:
-            yield
+        outer = getattr(self._apply_intent, "generation", None)
+        generation = self.halt_count if outer is None else outer
+        self._apply_intent.generation = generation
+        try:
+            with self._apply_lock:
+                yield
+        finally:
+            if outer is None:
+                del self._apply_intent.generation
+            else:
+                self._apply_intent.generation = outer
+
+    @property
+    def apply_generation(self) -> int:
+        return getattr(self._apply_intent, "generation", self.halt_count)
+
+    @property
+    def shutting_down(self) -> bool:
+        with self._lock:
+            return self._closed
+
+    def can_apply(self, generation: int) -> bool:
+        with self._lock:
+            return (not self._closed and generation == self._halt_count
+                    and not self._recoveries and not self._recovery_required)
+
+    def publish_if_current(self, generation: int, publish):
+        """Publish a short local result under the same fence that Panic changes."""
+
+        with self._lock:
+            if not self.can_apply(generation):
+                return False, None
+            value = publish()
+            return self.can_apply(generation), value
+
+    def require_recovery(self) -> None:
+        with self._lock:
+            self._recovery_required = True
+            self._paused = True
+            self._current_payload = None
+
+    def begin_recovery(self, *, cancel: bool = True):
+        """Block new work until emergency cleanup has a known saved result."""
+
+        with self._lock:
+            if cancel:
+                self.halt()
+            ticket = (self._halt_count, object(), self._recovery_failures)
+            self._recoveries.add(ticket)
+            self._recovery_required = True
+            self._paused = True
+            self._current_payload = None
+            return ticket
+
+    def publish_recovery(self, ticket, publish):
+        """Keep older initial writes from replacing a newer recovery result."""
+
+        with self._lock:
+            if ticket[0] != self._halt_count:
+                return False, None
+            return True, publish()
+
+    def abandon_recovery(self, ticket) -> None:
+        with self._lock:
+            self._recovery_failures += 1
+            self._recovery_required = True
+            self._recoveries.discard(ticket)
+
+    def finish_recovery(self, ticket, publish, *, failed: bool = False):
+        """Ignore older recovery results while retaining every pending owner."""
+
+        with self._lock:
+            try:
+                if ticket[0] != self._halt_count:
+                    if failed:
+                        self._recovery_failures += 1
+                        self._recovery_required = True
+                        publish(False)
+                    return None
+                overlap_failed = ticket[2] != self._recovery_failures
+                result, success = publish(overlap_failed)
+                self._recovery_required = not success
+                if not success:
+                    self._recovery_failures += 1
+                self.finish_halt()
+                return result
+            except BaseException:
+                self._recovery_failures += 1
+                self._recovery_required = True
+                raise
+            finally:
+                self._recoveries.discard(ticket)
 
     @property
     def is_active(self) -> bool:
@@ -561,11 +688,12 @@ class RuntimeScheduler:
     ) -> bool:
         """Recompute and apply a changed runtime plan once."""
 
-        with self._apply_lock:
+        with self.exclusive():
             with self._lock:
-                if self._paused or self._helper_client is None:
+                if (self._paused or self._helper_client is None
+                        or not self.can_apply(self.apply_generation)):
                     return False
-                halts_at_start = self._halt_count
+                halts_at_start = self.apply_generation
             return self._tick(repository=repository, now=now, halts_at_start=halts_at_start)
 
     def _tick(
@@ -581,6 +709,7 @@ class RuntimeScheduler:
         owned_repository = repository is None
         active_repository = repository or ConfigRepository(self._database_path)
         configuration_version: Optional[int] = None
+        helper_attempted = False
         try:
             read_gateway_status = getattr(self._helper_client, "gateway_status", None)
             try:
@@ -590,6 +719,7 @@ class RuntimeScheduler:
                 LOGGER.warning("could not read the gateway state", exc_info=True)
                 return False
             if (gateway_status.get("outage_stop_latched") is True
+                    or gateway_status.get("panic_stop_latched") is True
                     or gateway_status.get("state_error") is True):
                 self.pause()
                 self._record(
@@ -598,6 +728,12 @@ class RuntimeScheduler:
                     current_time,
                 )
                 return False
+            control_revision = None
+            reader = getattr(self._helper_client, "control_revision", None)
+            if callable(reader):
+                control_revision = gateway_status.get("control_revision")
+                if control_revision is None:
+                    control_revision = reader()
             recovery_pending = (
                 gateway_status.get("recovery_pending") is True
                 and gateway_status.get("gateway_state") == "available"
@@ -655,43 +791,52 @@ class RuntimeScheduler:
             if unchanged:
                 # The network already runs this plan, for example one the
                 # dashboard applied after a saved change.
-                self._log_plan_recovery(self._clear_plan_failure())
-                self._record_activity(repository=active_repository, states=states, now=current_time)
+                def publish_unchanged():
+                    self._log_plan_recovery(self._clear_plan_failure())
+                    self._record_activity(repository=active_repository, states=states, now=current_time)
+                self.publish_if_current(halts_at_start, publish_unchanged)
                 return False
             # Applying recreates the helper's counters at zero, so record the
             # traffic they hold first.
             self._sample_quota_usage(repository=active_repository, now=current_time)
+            if not self.can_apply(halts_at_start):
+                return False
+            helper_attempted = True
             try:
                 apply = getattr(self._helper_client, "apply_experiment", self._helper_client.apply)
-                apply(plan=plan)
+                arguments = {"control_revision": control_revision} if control_revision is not None else {}
+                apply(plan=plan, **arguments)
             except HelperClientError:
                 # Cleanup may have removed the previous rules too. An active
                 # scheduler must retry even if the desired plan is unchanged.
                 self.invalidate_applied_plan()
                 raise
-            with self._lock:
-                overtaken = self._halt_count != halts_at_start
-            if overtaken:
-                # Panic does not wait for an apply, so it may have run before this one
-                # reached the helper. Panic stays the last word.
-                try:
-                    self._helper_client.reset()
-                except HelperClientError:
-                    LOGGER.error("could not undo a scheduled apply that Panic overtook", exc_info=True)
-                self.invalidate_applied_plan()
-                return False
-            active_repository.rebase_quota_counters(now=int(current_time))
-            with self._lock:
+            def publish():
+                active_repository.rebase_quota_counters(now=int(current_time))
                 self._current_payload = payload
                 self._last_device_counters = dict.fromkeys(self._last_device_counters, 0)
-            self._log_plan_recovery(self._clear_plan_failure())
-            if not active_repository.record_schedule_result(success=True):
-                # A reset was recorded while this plan was being applied.
+                self._log_plan_recovery(self._clear_plan_failure())
+                if not active_repository.record_schedule_result(success=True):
+                    self.pause()
+                    return False
+                self._record_activity(repository=active_repository, states=states, now=current_time)
+                return True
+
+            accepted, applied = self.publish_if_current(halts_at_start, publish)
+            if not accepted and self.halt_count != halts_at_start:
+                self._undo_overtaken_apply(active_repository)
+            elif accepted and not applied:
                 self._honor_external_reset(repository=active_repository, now=current_time)
-                return False
-            self._record_activity(repository=active_repository, states=states, now=current_time)
-            return True
+            return bool(accepted and applied)
         except (HelperClientError, PlanError, StorageError, OSError) as error:
+            if isinstance(error, HelperClientError) and error.reason == "control-changed":
+                self.halt()
+                self.require_recovery()
+                return False
+            if not self.can_apply(halts_at_start):
+                if helper_attempted and self.halt_count != halts_at_start:
+                    self._undo_overtaken_apply(active_repository)
+                return False
             is_new_reason, wait = self._note_plan_failure(
                 error, now=current_time, configuration_version=configuration_version
             )
@@ -709,13 +854,42 @@ class RuntimeScheduler:
                     exc_info=True,
                 )
             try:
-                active_repository.record_schedule_result(success=False)
+                self.publish_if_current(halts_at_start, lambda: active_repository.record_schedule_result(success=False))
             except StorageError:
                 LOGGER.exception("could not record scheduled network failure")
             return False
         finally:
             if owned_repository:
                 active_repository.close()
+
+    def _undo_overtaken_apply(self, repository: ConfigRepository) -> None:
+        ticket = self.begin_recovery(cancel=False)
+        error = None
+        try:
+            restore = getattr(self._helper_client, "normal_access", self._helper_client.reset)
+            restore()
+        except HelperClientError:
+            LOGGER.error("could not undo a scheduled apply that Panic overtook", exc_info=True)
+            error = "Normal access was not fully restored after Panic. Retry Panic before choosing Start."
+        except BaseException:
+            self.abandon_recovery(ticket)
+            raise
+
+        def publish(overlap_failed=False):
+            nonlocal error
+            if overlap_failed and error is None:
+                error = "Another Panic cleanup failed during this recovery. Retry Panic before choosing Start."
+            try:
+                repository.update_runtime_state(
+                    observed_state="error" if error else "reset", last_action="reset",
+                    last_result="failure" if error else "success", last_error=error,
+                )
+            except (StorageError, sqlite3.Error):
+                LOGGER.exception("could not save scheduled Panic cleanup")
+                return None, False
+            return None, error is None
+
+        self.finish_recovery(ticket, publish, failed=error is not None)
 
     @staticmethod
     def _log_plan_recovery(failed_tries: int) -> None:

@@ -8,6 +8,7 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple
+from jittersim.request_workers import RequestWorkers
 
 ACTION_PATHS = {
     "reset-name": "/api/access-point/reset-name",
@@ -76,6 +77,7 @@ class WifiOperations:
         self._closed = False
         self._closing = threading.Event()
         self._entered = False
+        self._workers = RequestWorkers("wifi-operation", self._uncertain_start)
 
     def _expire(self):
         now = self._elapsed_clock()
@@ -88,7 +90,7 @@ class WifiOperations:
 
     def busy(self) -> bool:
         with self._lock:
-            return self._active
+            return self._active or self._workers.has_workers
 
     def _create(self, kind: str, request_id=None) -> Optional[Dict[str, Any]]:
         with self._lock:
@@ -99,7 +101,7 @@ class WifiOperations:
                     return dict(previous) if previous["kind"] == kind else None
                 if not valid_request_id(request_id, self._request_clock()) or len(self._results) >= self.MAX_RESULTS:
                     return None
-            if self._closed or self._active:
+            if self._closed or self._active or self._workers.has_workers:
                 return None
             self._active = True
             self._entered = False
@@ -160,8 +162,8 @@ class WifiOperations:
                 return operation
             current["scheduled"] = True
         try:
-            threading.Thread(target=self._run, args=(operation["id"], work), daemon=True,
-                             name="wifi-operation").start()
+            self._workers.start(lambda: self._run(operation["id"], work),
+                                abandon=lambda: None, release=lambda: None)
         except RuntimeError:
             with self._lock:
                 # Cancel queued admission even if thread creation partly succeeded.
@@ -200,7 +202,12 @@ class WifiOperations:
             outcome, self._unrecorded = self._unrecorded, None
             return outcome
 
-    def close(self) -> None:
+    def _uncertain_start(self) -> None:
+        self._closed = True
+        self._closing.set()
+
+    def begin_shutdown(self) -> None:
+        self._workers.stop_admission()
         self._closing.set()
         with self._lock:
             self._closed = True
@@ -211,3 +218,7 @@ class WifiOperations:
                                      _finished_elapsed=self._elapsed_clock(),
                                      message="Service stopped before the Wi-Fi change began. Check current settings.")
                 self._active = False
+
+    def close(self, timeout: float = 5.0) -> None:
+        self.begin_shutdown()
+        self._workers.close(timeout)

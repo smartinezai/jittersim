@@ -15,6 +15,7 @@ from concurrent.futures import wait as wait_for_futures
 from ipaddress import IPv4Address
 from typing import Callable, Dict, List, Optional, Sequence
 
+from jittersim.request_workers import WorkersStillRunning
 from jittersim.networking.helper import HelperClientError
 
 from .lookup_pool import BoundedLookupPool
@@ -55,6 +56,8 @@ class ServiceAddressRefresher:
         self._last_sent: Dict[str, List[IPv4Address]] = {}
         self._last_sent_at = 0.0
         self._stop_event = threading.Event()
+        self._lifecycle_lock = threading.RLock()
+        self._closed = False
         self._thread: Optional[threading.Thread] = None
 
     @property
@@ -62,20 +65,36 @@ class ServiceAddressRefresher:
         return self._thread is not None and self._thread.is_alive()
 
     def start(self) -> None:
-        if self.running:
-            return
-        self._stop_event.clear()
-        self._thread = threading.Thread(
-            target=self._run, name="jittersim-service-addresses", daemon=True
-        )
-        self._thread.start()
+        with self._lifecycle_lock:
+            if self._closed or self.running:
+                return
+            self._stop_event.clear()
+            self._thread = threading.Thread(
+                target=self._run, name="jittersim-service-addresses", daemon=True
+            )
+            try:
+                self._thread.start()
+            except BaseException:
+                self._closed = True
+                self._stop_event.set()
+                raise
 
-    def stop(self) -> None:
-        self._stop_event.set()
+    def begin_shutdown(self) -> None:
+        with self._lifecycle_lock:
+            self._closed = True
+            self._stop_event.set()
+
+    def stop(self, timeout: float = RESOLVE_WAIT_SECONDS + 5) -> None:
+        self.begin_shutdown()
         thread = self._thread
         if thread is not None:
-            thread.join(timeout=RESOLVE_WAIT_SECONDS + 5)
-        self._thread = None
+            try:
+                thread.join(timeout=timeout)
+            except RuntimeError as error:
+                raise WorkersStillRunning("Service address worker startup is unresolved.") from error
+            if thread.is_alive():
+                raise WorkersStillRunning("Service address worker did not stop. Its handle remains owned.")
+            self._thread = None
 
     def _run(self) -> None:
         while not self._stop_event.wait(self._poll_seconds):
@@ -87,6 +106,8 @@ class ServiceAddressRefresher:
     def refresh(self) -> bool:
         """Resolve and send when the lists or answers changed. Return whether it sent."""
 
+        if self._closed:
+            return False
         plan = self._applied_plan()
         # Every apply publishes a new plan object and starts the sets over, so
         # send again even when the answers have not changed.
@@ -115,6 +136,8 @@ class ServiceAddressRefresher:
             return False
         send = getattr(self._helper_client, "service_addresses", None)
         if send is None:
+            return False
+        if self._closed:
             return False
         try:
             send(answers)

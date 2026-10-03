@@ -23,8 +23,8 @@ def served_functions():
         + block("const privateDataPanelIds =", "function setDashboardUnlocked(")
         + block("function setPrivateDataPanels(", "async function loadPrivateDataPanel(")
         + block("let helperConfigured =", "let profiles =")
-        + block("async function request(", "const adminTokenHelp =")
-        + block("async function checkAdminToken()", "async function refresh()")
+        + block("const PI_NOT_ANSWERING", "const adminTokenHelp =")
+        + block("async function checkAdminToken()", "async function refresh(")
         + block(
             'element("check-admin-token").addEventListener("click",',
             'element("traffic-rate-form").addEventListener("submit",',
@@ -46,12 +46,13 @@ const assert = require("node:assert/strict");
 const nodes = new Map();
 const messages = [];
 const document = {activeElement: null, documentElement: {style: {setProperty() {}}},
-                  addEventListener() {}};
+                  addEventListener() {}, getElementById: (id) => element(id)};
 const storage = new Map();
 let storageBroken = false;
 const blocked = () => {if (storageBroken) throw new Error("storage blocked")};
 const windowListeners = new Map();
-const window = {innerHeight: 800, setInterval() {}, confirm() {return true},
+const window = {innerHeight: 800, setInterval() {}, setTimeout() {return 1}, clearTimeout() {},
+  confirm() {return true},
   addEventListener(type, callback) {windowListeners.set(type, callback)}, localStorage: {
   getItem(key) {blocked(); return storage.has(key) ? storage.get(key) : null},
   setItem(key, value) {blocked(); storage.set(key, String(value))},
@@ -989,7 +990,7 @@ def test_diagnostics_failures_report_their_http_status():
         pytest.skip("Node.js is required to exercise the served dashboard")
     script = re.search(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL).group(1)
     real = script[
-        script.index("async function loadAdminTools()") : script.index(
+        script.index("let adminToolsPhysicalRead =") : script.index(
             "async function checkAdminToken()"
         )
     ]
@@ -998,6 +999,7 @@ def test_diagnostics_failures_report_their_http_status():
 const assert = require("node:assert/strict");
 const nodes = new Map();
 let randomWebsiteAnalyticsRequestVersion = 0;
+let adminTokenRevision=0,adminToolsGeneration=0,adminTokenVerified=true,adminTokenChecking=false;
 let failure = null;
 function element(id) {
   if (!nodes.has(id)) nodes.set(id, {value: "fixture token", textContent: "", className: "",

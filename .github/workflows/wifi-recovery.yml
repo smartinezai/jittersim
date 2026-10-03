@@ -74,6 +74,8 @@ jobs:
       - run: python -m tests.browser.help_icons
       - run: python -m tests.browser.token_remember
       - run: python -m tests.browser.dns_failure
+      - run: python -m tests.browser.page_polling
+      - run: python -m tests.browser.update_status_recovery
       - uses: actions/upload-artifact@v5
         if: always()
         with:

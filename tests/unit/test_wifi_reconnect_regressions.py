@@ -4,8 +4,19 @@ import threading
 import time
 from unittest.mock import Mock
 
+import pytest
+
+from jittersim.request_workers import WorkersStillRunning
+
 from jittersim.api.wifi_operations import WifiOperations, WifiOutcome, issue_request_id
 from tests.unit.test_dashboard_reconnect import run_node
+
+
+def request_support_source():
+    from tests.unit.test_dashboard_reconnect import SCRIPT
+    start = SCRIPT.index('    const PI_NOT_ANSWERING =')
+    end = SCRIPT.index('    function showPiNotAnswering(', start)
+    return SCRIPT[start:end] + "\nconst recentWrites = new Set();\nfunction notePiNotAnswering() {}\nfunction notePiAnswered() {}\n"
 
 
 def test_retry_budget_includes_time_inside_requests():
@@ -163,7 +174,7 @@ def test_acceptance_keeps_draft_and_late_write_reply_cannot_clear_it():
     let locks=0; const lockDashboardAccess=()=>locks++;
     const recordRead=()=>{}; const renderDraftNotice=()=>{};
     let fetch=async()=>({ok:true,status:202,json:async()=>({pending:true})});
-    ''' + function_source('request') + '''
+    ''' + request_support_source() + function_source('request') + '''
     await request("/api/access-point","POST",{});
     const retained=formDrafts.get("ap")===draft;
     pendingFormSubmitButton={form};
@@ -212,11 +223,11 @@ def test_unexpired_pre_restart_identifier_is_refused_by_fresh_generation(monkeyp
     assert fresh.reserve('reset-name', issue_request_id()) is not None
 
 
-def test_thread_start_failure_records_failure_and_releases_slot(monkeypatch):
+def test_thread_constructor_failure_records_failure_and_releases_slot(monkeypatch):
     operations = WifiOperations(delay=0)
     identifier = issue_request_id()
     work = Mock(return_value=WifiOutcome(200, 'done'))
-    monkeypatch.setattr(threading.Thread, 'start', Mock(side_effect=RuntimeError('cannot create thread')))
+    monkeypatch.setattr(threading, 'Thread', Mock(side_effect=RuntimeError('constructor failed')))
     result = operations.start('reset-name', work, request_id=identifier)
     assert result['state'] == 'failed'
     assert operations.last(identifier)[1]['operation']['status'] == 503
@@ -234,10 +245,15 @@ def test_partial_start_cancels_queued_worker_before_replacement(monkeypatch):
     work = Mock(return_value=WifiOutcome(200, 'old'))
     monkeypatch.setattr(threading.Thread, 'start', partial_start)
     operations.start('reset-name', work, request_id=issue_request_id())
+    assert operations.busy(), 'physical worker still owns capacity while queued admission is cancelled'
+    assert operations.reserve('access-point') is None
+    deadline = time.monotonic() + 1
+    while operations.busy() and time.monotonic() < deadline:
+        time.sleep(.005)
     assert not operations.busy()
     assert operations.reserve('access-point') is not None
-    time.sleep(.06)
     work.assert_not_called()
+    operations.close()
 
 
 def test_partial_start_after_admission_keeps_slot_until_helper_finishes(monkeypatch):
@@ -256,9 +272,11 @@ def test_partial_start_after_admission_keeps_slot_until_helper_finishes(monkeypa
     operations.start('reset-name', work)
     assert operations.busy()
     assert operations.reserve('access-point') is None
-    operations.close()
+    with pytest.raises(WorkersStillRunning):
+        operations.close(timeout=.01)
     assert operations.last()[1]['operation']['state'] == 'uncertain'
     release.set()
+    operations.close()
     deadline = time.monotonic() + 1
     while operations.busy() and time.monotonic() < deadline:
         time.sleep(.005)
@@ -276,12 +294,12 @@ def test_wall_clock_rollback_does_not_extend_outcome_retention():
 
 
 
-def test_router_worker_start_failure_leaves_exact_failed_result_and_no_busy_slot(monkeypatch):
+def test_router_worker_constructor_failure_leaves_exact_failed_result_and_no_busy_slot(monkeypatch):
     from jittersim.api.router_operations import RouterOperations
     work = Mock()
     operations = RouterOperations(work, 'test-router')
     identifier = issue_request_id()
-    monkeypatch.setattr(threading.Thread, 'start', Mock(side_effect=RuntimeError('thread creation failed')))
+    monkeypatch.setattr(threading, 'Thread', Mock(side_effect=RuntimeError('constructor failed')))
     status, result = operations.start('/api/router/sync-ap', {'admin_password':'secret','request_id':identifier})
     assert status == 503
     assert result['operation_id'] == identifier
@@ -319,7 +337,7 @@ def test_router_creation_failure_releases_reserved_wifi_slot(monkeypatch):
     server = ControlServer(('127.0.0.1', 0), repository)
     try:
         server.helper_client = Mock()
-        monkeypatch.setattr(threading.Thread, 'start', Mock(side_effect=RuntimeError('cannot create worker')))
+        monkeypatch.setattr(threading, 'Thread', Mock(side_effect=RuntimeError('constructor failed')))
         identifier = issue_request_id()
         status, _, body = server.write_response_for('/api/router/sync-ap', {
             'admin_password':'secret','expected_fingerprint':'a'*64,'background':True,'request_id':identifier})
@@ -342,7 +360,7 @@ def test_request_timeout_aborts_a_stalled_response_body():
     const fetch=async(path,options)=>({ok:true,status:200,json:()=>new Promise((resolve,reject)=>{
       options.signal.addEventListener("abort",()=>{aborted=true;reject(new Error("aborted body"));});
     })});
-    ''' + function_source('request') + '''
+    ''' + request_support_source() + function_source('request') + '''
     const failed=await request("/api/wifi-operation?id=exact","GET",undefined,{timeoutMs:10})
       .then(()=>false,error=>error.connectionLost===true);
     console.log(JSON.stringify({failed,aborted}));

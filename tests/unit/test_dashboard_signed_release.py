@@ -23,6 +23,8 @@ function element(id) {
   return elements[id];
 }
 let onlineView = null;
+let onlinePolling=false;
+let adminTokenRevision=0,adminTokenVerified=true;
 function currentPage() { return "updates"; }
 const document = {hidden: false};
 const answer = %(answer)s;
@@ -47,7 +49,7 @@ async function request(path, method) {
 def release_source():
     source = WORKFLOWS.read_text(encoding="utf-8")
     start = source.index("let releaseState = null;")
-    return source[start: source.index("async function loadUpdateCheckPreference(")]
+    return source[start: source.index("function loadUpdateCheckPreference(")]
 
 
 def show(answer):

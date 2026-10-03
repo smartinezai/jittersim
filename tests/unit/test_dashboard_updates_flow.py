@@ -20,6 +20,8 @@ const assert = require("node:assert/strict");
 let fakeNow = 1000000;
 Date.now = () => fakeNow;
 const calls = [];
+let adminTokenRevision=0,adminTokenVerified=true;
+const privateDataLockHooks=[];
 const confirmations = [];
 let tick = 0;
 let onTick = () => {};
@@ -181,7 +183,7 @@ def test_check_find_confirm_install_restart_and_reconnect():
   await install;
   assert.equal(confirmations.length, 1);
   assert.match(confirmations[0], /v1\.1\.0/);
-  assert.match(confirmations[0], /few seconds/);
+  assert.match(confirmations[0], /restart/);
   const installs = calls.filter(c => c[1] === "/api/updates/install");
   assert.equal(installs.length, 1);
   assert.deepEqual(installs[0][2], {version: "1.1.0", confirm: true});
@@ -191,7 +193,7 @@ def test_check_find_confirm_install_restart_and_reconnect():
   let sawRestart = false;
   await waitFor(() => {
     if (/restart/i.test(element("update-progress").textContent)) sawRestart = true;
-    return /Updated to v1\.1\.0/.test(element("update-progress").textContent);
+    return /Updated to 1\.1\.0/.test(element("update-progress").textContent);
   });
   assert.ok(sawRestart, "says the dashboard is restarting while requests fail");
   assert.equal(element("sidebar-update-link").hidden, true);
@@ -210,13 +212,15 @@ def test_without_a_token_check_reads_staged_releases_and_explains_set_token():
   assert.equal(calls.filter(c => c[1] === "/api/updates/check-online" && c[0] === "POST").length, 0);
   assert.ok(calls.some(c => c[0] === "GET" && c[1] === "/api/updates"));
   assert.equal(element("github-access-hint").hidden, false);
-  assert.match(element("github-access-hint").textContent, /sudo jittersim update set-token/);
+  assert.match(element("github-access-hint").textContent, /setup command in The GitHub token/);
 """)
 
 
 @NODE
 def test_hidden_pages_and_hidden_tabs_make_no_requests():
     run(r"""
+  await loadOnlineStatus();
+  calls.length = 0;
   page = "diagnostics";
   const before = calls.length;
   await pollReleaseProgress();
@@ -227,9 +231,9 @@ def test_hidden_pages_and_hidden_tabs_make_no_requests():
   let ticks = 0;
   onTick = n => { if (n === 6) page = "updates"; };
   await check;
-  const gets = calls.filter(c => c[0] === "GET" && c[1].startsWith("/api/updates/check-online/"));
+  const gets = calls.filter(c => c[0] === "GET" && c[1] === "/api/updates/check-online");
   assert.ok(gets.length >= 2, "polling continues once the page is visible again");
-  const firstGet = calls.findIndex(c => c[0] === "GET" && c[1].startsWith("/api/updates/check-online/"));
+  const firstGet = calls.findIndex(c => c[0] === "GET" && c[1] === "/api/updates/check-online");
   assert.ok(tick >= 6, "it waited at least six ticks while hidden before the first poll: " + tick);
   assert.ok(firstGet > 0);
 """)
@@ -261,7 +265,7 @@ def test_a_failed_install_is_reported_not_called_updated():
   pi.staged = {version: "1.1.0", tag: "v1.1.0"}; pi.endPhase = "rolled-back";
   await loadReleaseStatus({force: true});
   await element("release-install").click();
-  await waitFor(() => /did not finish|failed/i.test(element("update-progress").textContent));
+  await waitFor(() => /not confirmed|failed/i.test(element("update-progress").textContent));
   assert.doesNotMatch(element("update-progress").textContent, /Updated to/);
   assert.equal(element("release-check").disabled, false);
 """)
