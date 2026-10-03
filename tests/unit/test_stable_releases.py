@@ -467,6 +467,28 @@ def test_closed_pipe_descendants_cannot_outlive_a_command(release, tmp_path, exi
     assert marker.exists() == existed_at_completion, "A descendant acted after command completion"
 
 
+@pytest.mark.parametrize("kind", [tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.GNUTYPE_LONGNAME])
+def test_oversized_extensions_are_refused_before_tar_parser_allocation(release, tmp_path, kind):
+    import gzip
+    import tracemalloc
+    path = tmp_path / "extension.tar.gz"
+    extension = tarfile.TarInfo("metadata")
+    extension.type = kind
+    extension.size = 8 * 1024 * 1024
+    with gzip.open(path, "wb") as stream:
+        stream.write(extension.tobuf())
+        for _ in range(128):
+            stream.write(b"x" * 65536)
+        stream.write(b"\0" * 1024)
+    tracemalloc.start()
+    try:
+        with pytest.raises(release.ReleaseError):
+            release.archive_record(path)
+        assert tracemalloc.get_traced_memory()[1] < 2 * 1024 * 1024
+    finally:
+        tracemalloc.stop()
+
+
 def test_successful_closed_pipe_child_finishes_before_command_returns(release, tmp_path):
     import sys
     marker = tmp_path / "finished"
@@ -474,6 +496,72 @@ def test_successful_closed_pipe_child_finishes_before_command_returns(release, t
     parent = "import subprocess,sys; subprocess.Popen([sys.executable,'-c'," + repr(child) + "])"
     assert release.command([sys.executable, "-c", parent], timeout=2) == b""
     assert marker.exists(), "Completion must wait for the owned group"
+
+
+def test_archive_descriptor_rejects_replacement_between_stat_and_open(release, tmp_path, monkeypatch):
+    path = archive(release, tmp_path / "original.tar.gz")
+    changed = archive(release, tmp_path / "changed.tar.gz", number="0.3.0", package="0.3.0")
+    opening = release.os.open
+
+    def replace_before_open(target, flags, *args):
+        if Path(target) == path:
+            changed.replace(path)
+        return opening(target, flags, *args)
+
+    monkeypatch.setattr(release.os, "open", replace_before_open)
+    with pytest.raises(release.ReleaseError, match="identity"):
+        release.archive_record(path)
+
+
+def test_bundle_verifies_signature_before_parsing_archive(release, signed, monkeypatch):
+    folder, key, _ = signed
+    (folder / (release.ASSET + ".sig")).write_bytes(b"not a signature")
+    record = release.read_json(folder / "release.json")
+    record["signature_sha256"] = release.digest(folder / (release.ASSET + ".sig"), 16384)
+    release.write_json(folder / "release.json", record)
+    monkeypatch.setattr(release, "archive_record", lambda *args, **kwargs: pytest.fail("An unverified archive was parsed"))
+    with pytest.raises(release.ReleaseError):
+        release.bundle(folder, str(key) + ".pub")
+
+
+@pytest.mark.parametrize("kind", ["size_override", "sparse", "chain", "truncated", "raw_limit"])
+def test_raw_archive_boundaries_are_enforced_before_member_parsing(release, tmp_path, kind, monkeypatch):
+    import gzip
+    path = tmp_path / "unsafe.tar.gz"
+    with gzip.open(path, "wb") as stream:
+        if kind == "size_override":
+            payload = b"17 size=99999999\n"
+            member = tarfile.TarInfo("metadata")
+            member.type = tarfile.XHDTYPE
+            member.size = len(payload)
+            stream.write(member.tobuf())
+            stream.write(payload + b"\0" * ((-len(payload)) % 512))
+        elif kind == "sparse":
+            member = tarfile.TarInfo("src/sparse")
+            member.type = tarfile.GNUTYPE_SPARSE
+            stream.write(member.tobuf())
+        elif kind == "chain":
+            for _ in range(3):
+                member = tarfile.TarInfo("metadata")
+                member.type = tarfile.XHDTYPE
+                member.size = 12
+                stream.write(member.tobuf())
+                stream.write(b"12 path=src\n" + b"\0" * 500)
+        else:
+            member = tarfile.TarInfo("src/data")
+            member.size = 8192
+            stream.write(member.tobuf())
+            if kind == "raw_limit":
+                monkeypatch.setattr(release, "MAX_EXPANDED", 4096)
+                stream.write(b"x" * 8192)
+        stream.write(b"\0" * 1024)
+    with pytest.raises(release.ReleaseError):
+        release.archive_record(path)
+
+
+def test_ordinary_pax_long_paths_remain_supported(release, tmp_path):
+    path = archive(release, tmp_path / "long.tar.gz", extra={"src/" + "a" * 150 + ".py": "long path"})
+    assert release.archive_record(path)["version"] == "0.2.0"
 
 
 def test_command_cancellation_never_signals_a_reaped_guardian(release, tmp_path, monkeypatch):
@@ -494,6 +582,34 @@ def test_command_cancellation_never_signals_a_reaped_guardian(release, tmp_path,
     monkeypatch.setattr(release.os, "killpg", cancel)
     with pytest.raises(release.ReleaseError):
         release.command([sys.executable, "-c", "import time; time.sleep(60)"], timeout=0.2)
+
+
+def test_bundle_uses_the_same_verified_bytes_for_metadata(release, signed, monkeypatch):
+    folder, key, record = signed
+    verify = release.verify_signature
+
+    def replace_after_verification(path, signature, trusted, *args, **kwargs):
+        result = verify(path, signature, trusted, *args, **kwargs)
+        if Path(path).name == release.ASSET:
+            Path(path).write_bytes(b"changed after verification")
+        return result
+
+    monkeypatch.setattr(release, "verify_signature", replace_after_verification)
+    assert release.bundle(folder, str(key) + ".pub") == record
+    with pytest.raises(release.ReleaseError, match="changed"):
+        release.bundle(folder, str(key) + ".pub")
+
+
+@pytest.mark.parametrize("kind", ["link", "pipe"])
+def test_archive_entrypoint_refuses_non_regular_files(release, tmp_path, kind):
+    import os
+    source = tmp_path / "source"
+    if kind == "link":
+        source.symlink_to(archive(release, tmp_path / "actual.tar.gz"))
+    else:
+        os.mkfifo(source)
+    with pytest.raises(release.ReleaseError, match="regular file"):
+        release.archive_record(source)
 
 
 def test_unconfirmed_group_is_refused_without_reaping_its_guardian(release, monkeypatch):

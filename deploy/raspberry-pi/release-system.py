@@ -5,6 +5,8 @@ import argparse
 import contextlib
 import fcntl
 import hashlib
+import gzip
+import io
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -50,11 +52,18 @@ def version(value):
 
 
 def read_bytes(path, limit):
-    checked(stat.S_ISREG(Path(path).lstat().st_mode), "A release input is not a regular file.")
+    before = Path(path).lstat()
+    checked(stat.S_ISREG(before.st_mode), "A release input is not a regular file.")
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor, "rb") as stream:
-        checked(stat.S_ISREG(os.fstat(stream.fileno()).st_mode), "A release input changed its file type.")
-        value = stream.read(limit + 1)
+        opened = os.fstat(stream.fileno())
+        checked(stat.S_ISREG(opened.st_mode) and (opened.st_dev, opened.st_ino) == (before.st_dev, before.st_ino),
+                "A release input changed its file identity.")
+        checked(opened.st_size <= limit, "A release input exceeds its size limit.")
+        value = stream.read(min(limit + 1, opened.st_size + 1))
+        after = os.fstat(stream.fileno())
+        checked((opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) ==
+                (after.st_size, after.st_mtime_ns, after.st_ctime_ns), "A release input changed while being read.")
     checked(len(value) <= limit, "A release input exceeds its size limit.")
     return value
 
@@ -99,6 +108,8 @@ def write_json(path, value):
             os.unlink(temporary)
 
 
+# The guardian stays waitable until the controller confirms its group has ended.
+# Command descendants cannot keep or forge the controller's status/lease pipes.
 GUARDIAN = """
 import os, signal, subprocess, sys
 status, lease = int(sys.argv[1]), int(sys.argv[2])
@@ -406,10 +417,100 @@ def retire(git, number):
         write_json(path, value)
 
 
-def archive_record(path):
-    checked(Path(path).stat().st_size <= MAX_ARCHIVE, "The archive exceeds the Pi download limit.")
+MAX_EXPANDED = 256 * 1024 * 1024
+MAX_EXTENSION = 16 * 1024
+MAX_EXTENSION_TOTAL = 64 * 1024
+PAX_FIELDS = {b"path", b"linkpath", b"mtime", b"atime", b"ctime", b"uid", b"gid",
+              b"uname", b"gname", b"comment", b"hdrcharset"}
+
+
+def check_pax(payload):
+    offset, count = 0, 0
+    while offset < len(payload):
+        count += 1
+        checked(count <= 128, "Too many archive extension fields.")
+        end = payload.find(b" ", offset, offset + 8)
+        checked(end > offset and payload[offset:end].isdigit(), "Invalid archive extension field.")
+        length = int(payload[offset:end])
+        checked(length > end - offset + 3 and offset + length <= len(payload),
+                "Invalid archive extension field.")
+        record = payload[end + 1:offset + length]
+        key, separator, value = record[:-1].partition(b"=")
+        checked(record.endswith(b"\n") and separator and key in PAX_FIELDS and len(value) <= 4096,
+                "Unsupported or oversized archive extension field.")
+        offset += length
+
+
+@contextlib.contextmanager
+def bounded_tar(compressed):
+    """Scan physical headers before tarfile can read or apply extension metadata."""
+    checked(isinstance(compressed, bytes) and len(compressed) <= MAX_ARCHIVE,
+            "The archive exceeds the Pi download limit.")
+    deadline = time.monotonic() + 30
+    total, headers, extension_total, chain = 0, 0, 0, 0
+    with tempfile.TemporaryFile() as plain:
+        try:
+            with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as stream:
+                def read(size):
+                    nonlocal total
+                    checked(time.monotonic() < deadline, "Archive inspection exceeded its deadline.")
+                    block = stream.read(size)
+                    total += len(block)
+                    checked(total <= MAX_EXPANDED, "The raw archive exceeds its expanded limit.")
+                    plain.write(block)
+                    return block
+
+                while True:
+                    header = read(512)
+                    checked(len(header) == 512, "The archive has a truncated header.")
+                    if header == b"\0" * 512:
+                        checked(chain == 0 and read(512) == b"\0" * 512, "The archive has an invalid ending.")
+                        while True:
+                            padding = read(65536)
+                            if not padding:
+                                break
+                            checked(not padding.strip(b"\0"), "The archive has unexpected trailing data.")
+                        break
+                    headers += 1
+                    checked(headers <= 5000, "The raw archive has too many headers.")
+                    member = tarfile.TarInfo.frombuf(header, encoding="utf-8", errors="strict")
+                    checked(0 <= member.size <= MAX_EXPANDED - total,
+                            "The raw archive entry exceeds its expanded limit.")
+                    extended = member.type in {tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.GNUTYPE_LONGNAME}
+                    checked(extended or member.type in {tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE},
+                            "The archive contains unsupported physical entries.")
+                    if extended:
+                        chain += 1
+                        extension_total += member.size
+                        checked(chain <= 2 and member.size <= MAX_EXTENSION
+                                and extension_total <= MAX_EXTENSION_TOTAL,
+                                "The archive extension exceeds its limit.")
+                        payload = read(member.size)
+                        checked(len(payload) == member.size, "The archive extension is truncated.")
+                        if member.type in {tarfile.XHDTYPE, tarfile.XGLTYPE}:
+                            check_pax(payload)
+                        else:
+                            checked(member.size <= 4096, "The archive name exceeds its limit.")
+                    else:
+                        chain = 0
+                        checked(member.type != tarfile.DIRTYPE or member.size == 0,
+                                "An archive directory has unexpected content.")
+                        remaining = member.size
+                        while remaining:
+                            block = read(min(65536, remaining))
+                            checked(block, "The archive entry is truncated.")
+                            remaining -= len(block)
+                    padding = (-member.size) % 512
+                    checked(len(read(padding)) == padding, "The archive padding is truncated.")
+            plain.seek(0)
+            yield plain
+        except (gzip.BadGzipFile, EOFError, tarfile.HeaderError, UnicodeError):
+            raise ReleaseError("The release archive is invalid or exceeds its limits.") from None
+
+def archive_record(path, *, archive_bytes=None):
+    compressed = read_bytes(path, MAX_ARCHIVE) if archive_bytes is None else archive_bytes
     selected, names, total = {}, set(), 0
-    with tarfile.open(path, "r|gz") as archive:
+    with bounded_tar(compressed) as plain, tarfile.open(fileobj=plain, mode="r|") as archive:
         for member in archive:
             name = PurePosixPath(member.name)
             total += member.size
@@ -442,14 +543,20 @@ def archive_record(path):
     return manifest
 
 
-def verify_signature(path, signature, trusted_key, namespace="jittersim-release"):
+def verify_signature(path, signature, trusted_key, namespace="jittersim-release", *, payload=None, signature_bytes=None):
     key = read_bytes(trusted_key, 4096).decode().strip().split()
     checked(len(key) >= 2 and key[0] == "ssh-ed25519", "Use a trusted Ed25519 public key.")
+    raw = read_bytes(path, MAX_ARCHIVE) if payload is None else payload
+    signature_raw = read_bytes(signature, 16384) if signature_bytes is None else signature_bytes
+    checked(isinstance(raw, bytes) and len(raw) <= MAX_ARCHIVE
+            and isinstance(signature_raw, bytes) and len(signature_raw) <= 16384, "Signature input exceeds its allowance.")
     with tempfile.TemporaryDirectory(prefix="jittersim-verify-") as folder:
         allowed = Path(folder) / "signers"
         allowed.write_text(f'release namespaces="{namespace}" {key[0]} {key[1]}\n')
+        retained_signature = Path(folder) / "signature"
+        retained_signature.write_bytes(signature_raw)
         command(["ssh-keygen", "-Y", "verify", "-f", str(allowed), "-I", "release", "-n", namespace,
-                 "-s", str(signature)], input_bytes=read_bytes(path, MAX_ARCHIVE))
+                 "-s", str(retained_signature)], input_bytes=raw)
 
 
 def candidate(git, ref, output, github):
@@ -502,10 +609,11 @@ def prepare(git, ref, number, output, key, github):
             command(["git", "checkout", "--quiet", "--detach", commit], cwd=checkout)
             command(["sh", "deploy/raspberry-pi/build-release.sh", tag, str(archive), str(key)],
                     cwd=checkout, env=environment, timeout=180)
-        record = archive_record(archive)
+        archive_raw = read_bytes(archive, MAX_ARCHIVE)
+        verify_signature(archive, str(archive) + ".sig", str(key) + ".pub", payload=archive_raw)
+        record = archive_record(archive, archive_bytes=archive_raw)
         checked(record["commit"] == commit and record["version"] == number and record["sequence"] == row["sequence"],
                 "The built archive differs from its reservation.")
-        verify_signature(archive, str(archive) + ".sig", str(key) + ".pub")
         record.update(format=1, archive_sha256=digest(archive), signature_sha256=digest(str(archive) + ".sig", 16384), checks=receipts)
         write_json(output / "release.json", record)
         evidence = {"format": 1, "commit": commit, "archive_sha256": record["archive_sha256"],
@@ -518,12 +626,15 @@ def prepare(git, ref, number, output, key, github):
 def bundle(folder, trusted_key):
     folder = Path(folder)
     record = read_json(folder / "release.json")
-    manifest = archive_record(folder / ASSET)
-    checked(all(record.get(name) == value for name, value in manifest.items()), "The release record differs from the archive.")
-    checked(record.get("archive_sha256") == digest(folder / ASSET)
-            and record.get("signature_sha256") == digest(folder / (ASSET + ".sig"), 16384),
+    raw = read_bytes(folder / ASSET, MAX_ARCHIVE)
+    signature = read_bytes(folder / (ASSET + ".sig"), 16384)
+    checked(record.get("archive_sha256") == hashlib.sha256(raw).hexdigest()
+            and record.get("signature_sha256") == hashlib.sha256(signature).hexdigest(),
             "The retained package changed.")
-    verify_signature(folder / ASSET, folder / (ASSET + ".sig"), trusted_key)
+    verify_signature(folder / ASSET, folder / (ASSET + ".sig"), trusted_key,
+                     payload=raw, signature_bytes=signature)
+    manifest = archive_record(folder / ASSET, archive_bytes=raw)
+    checked(all(record.get(name) == value for name, value in manifest.items()), "The release record differs from the archive.")
     return record
 
 
@@ -567,8 +678,11 @@ def approve(git, folder, evidence, key, confirm, github):
 def approved(git, folder, trusted_key, github):
     record = bundle(folder, trusted_key)
     path = Path(folder) / "approval.json"
-    verify_signature(path, str(path) + ".sig", trusted_key, "jittersim-stable-approval")
-    approval = read_json(path)
+    raw = read_bytes(path, MAX_JSON)
+    signature = read_bytes(str(path) + ".sig", 16384)
+    verify_signature(path, str(path) + ".sig", trusted_key, "jittersim-stable-approval",
+                     payload=raw, signature_bytes=signature)
+    approval = loads(raw)
     checked(approval.get("format") == 1 and approval.get("release") == record
             and approval.get("approved_by") == REPOSITORY.split("/")[0],
             "Approval does not name this exact release.")
