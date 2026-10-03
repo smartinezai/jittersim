@@ -105,7 +105,7 @@ applying access rules, so run `sudo jittersim access apply` after changing it.
 Run `sudo jittersim --help` for the command list. More examples are in the
 [Pi installation and recovery guide](deploy/raspberry-pi/README.md).
 
-Use **Reset Wi-Fi name** on Setup or run `sudo jittersim wifi reset` on the Pi.
+Use **Reset Wi-Fi name** on Router and Wi-Fi or run `sudo jittersim wifi reset` on the Pi.
 It restores `JitterSim` and keeps the current password. Confirming the reset
 restarts test Wi-Fi, so its clients need to reconnect. Add `--yes` when running
 without a prompt. This command needs the local helper but not the dashboard or
@@ -125,21 +125,21 @@ echo 'export PATH="$HOME/.jittersim-cli/bin:$PATH"' >> ~/.zshrc
 
 Open a new terminal afterwards so `jittersim` is found.
 
-Copy `/etc/jittersim/dashboard.crt` from the Pi through a connection you
+Copy `/etc/jittersim/ca/ca.crt` from the Pi through a connection you
 already trust and compare its SHA-256 fingerprint with the one the installer
 printed. Then save the address and the certificate path once:
 
 ```sh
-jittersim connect --url https://192.168.0.17:8080 --ca-cert ~/jittersim-dashboard.crt
+jittersim connect --url https://192.168.0.17:8080 --ca-cert ~/jittersim-ca.crt
 ```
 
-`connect` checks that the dashboard presents exactly that certificate and saves
+`connect` checks the dashboard certificate against that authority and saves
 only the address and the certificate path in `~/.config/jittersim/cli.json`.
 The certificate file decides where the token goes, so it must belong to you and
 must not be writable by others. If the check fails the command says why: an
 unknown certificate (compare the fingerprint), an address the certificate does
-not cover (for example after the Pi got a new address: run the installer again
-and copy the new certificate) or an expired certificate.
+not cover (for example after the Pi got a new address: use its covered name or
+renew the leaf through the verified update route) or an expired certificate.
 
 Every other command asks for the **admin token** with a hidden prompt each time.
 The token is never saved and never accepted as an argument. Scripts may set
@@ -164,7 +164,10 @@ Add `--json` to any of them for machine-readable output (a failure is then
 On the Pi itself `sudo jittersim status` still shows the local helper status
 and `sudo jittersim wifi reset` still runs there.
 
-To put a new release on the Pi from the Mac, run
+For this appliance deploy only a signed release from the verified official
+`main` after its required checks are complete. This is the deployment policy,
+not a guarantee provided by an arbitrary `--ref` value. To put that release on
+the Pi from the Mac run
 `deploy/raspberry-pi/deploy-from-mac.sh` in a checkout. It runs on the Mac and
 needs git, ssh-keygen, ssh, scp, curl, tar, shasum and Python 3. It builds the
 release archive of a commit, signs it with your release signing key and
@@ -312,10 +315,22 @@ requires the router network or a local Pi terminal.
 
 ### Dashboard access from Pi Wi-Fi
 
-Open the HTTPS dashboard using the Pi address covered by its certificate,
-for example `https://192.168.0.17:8080`. Choose **Admin token** then **Check
+On the Pi Wi-Fi open `https://netlab.local:8080`, the same address that works
+on the router's Wi-Fi. The Pi announces this neutral name on the test Wi-Fi
+itself, so it needs no router and no Ethernet cable. Change it with
+`sudo jittersim dashboard-name set <name>.local` (see the Pi deployment guide).
+You can also use an address covered by the certificate, for example
+`https://192.168.50.1:8080`. A browser keeps its remembered sign-in per
+address, so use the one address on both networks to sign in once. Choose **Admin token** then **Check
 token** and **Allow this device**. This registers the actual requesting
 computer. The dashboard lists saved devices and supports removal.
+
+The first visit shows a certificate warning. After signing in, **Trust this Pi**
+offers the Pi's local certificate as a `.crt` file and as an Apple profile with
+three short steps for a Mac and an iPhone. Once installed, the warning is gone.
+The certificate permits local `.local` and `home.arpa` names and the configured
+network address ranges. Check its fingerprint against the installer output
+before installing it on your device.
 
 Only dashboard traffic avoids simulated loss and client blocks. Your ordinary
 internet traffic still follows its profile. The separate unaffected-device
@@ -329,16 +344,16 @@ register their own device. Changed private Wi-Fi addresses need registration
 again. If current device observations cannot be verified, reconnect and retry.
 
 From your **Mac**, with JitterSim installed and a trusted copy of the Pi's
-public dashboard certificate:
+public authority certificate (`/etc/jittersim/ca/ca.crt`):
 
 ```sh
 jittersim dashboard-access allow-self --url https://192.168.0.17:8080 \
-  --ca-cert ~/jittersim-dashboard.crt --name 'My Mac'
+  --ca-cert ~/jittersim-ca.crt --name 'My Mac'
 ```
 
 The hidden prompt asks for the **JitterSim admin token**. Certificate checks
 stay enabled. No `sudo` or Linux firewall command is needed on the Mac. Copy
-`/etc/jittersim/dashboard.crt` through a previously trusted Pi connection.
+`/etc/jittersim/ca/ca.crt` through a previously trusted Pi connection, or download it from **Trust this Pi**.
 Do not copy the private key or accept an unverified replacement certificate.
 
 From a **Pi terminal**, root recovery works while the dashboard is stopped:
@@ -786,15 +801,31 @@ through the Pi. The [Pi guide](deploy/raspberry-pi/README.md#remote-control-with
 has setup, access rules, checks and removal steps. Tailscale's Personal plan
 is [free for eligible home use](https://tailscale.com/pricing).
 
-On the Pi, open the dashboard over HTTPS at `https://jittersim.local:8080` or
-the Pi's Ethernet address. The installer publishes the local name through
-Avahi on the management network. If the router does not carry local name
-traffic between Ethernet and Wi-Fi, use the Ethernet address. The installer
-creates a local certificate and prints its SHA-256 fingerprint. Verify that
-fingerprint before trusting the certificate in your browser. A DHCP address
-change may require a new certificate. HTTPS protects the browser-to-Pi
-connection, but the TG3442DE's own local web interface still uses HTTP between
-the Pi and router.
+Open the dashboard at one address on every network: `https://netlab.local:8080`.
+The Pi announces this neutral name with mDNS on the home router's network and on
+the test Wi-Fi. The same address works whether the computer is on the router's
+Wi-Fi or on the Pi's test Wi-Fi, so a browser keeps one remembered sign-in
+instead of one per network. Bookmark it once. The Pi's Ethernet address and
+`192.168.50.1` can be used when covered by the installed certificate if name
+lookup fails.
+
+The name is one word followed by `.local` and never contains the product name,
+because anyone on the test Wi-Fi can read it before signing in. Only that one
+address record is announced on the test Wi-Fi: no host name, no SSH or other
+services. To use another name run `sudo jittersim dashboard-name set
+bench.local` (and `jittersim dashboard-name` to see the address and whether it
+is announced). Browsers keep a remembered sign-in per address, so a new name
+needs one fresh sign-in. If another device on the network already uses the
+name, `sudo jittersim diagnostics` and the dashboard say so and what to run.
+
+The installer creates a local certificate authority once and prints its SHA-256
+fingerprint. An existing valid authority is retained. Verify its fingerprint
+through a trusted management connection before installing its public certificate
+on your device. The browser's leaf certificate has a different fingerprint. A
+DHCP address change on Ethernet is handled by the name itself: the Pi announces
+the new address, and the certificate is renewed by the next update. HTTPS
+protects the browser-to-Pi connection, but the TG3442DE's own local web
+interface still uses HTTP between the Pi and router.
 
 ## Set up the Pi
 
@@ -802,15 +833,15 @@ the Pi and router.
    available as a recovery path.
 2. Use Raspberry Pi OS with NetworkManager 1.50 or newer. Set the correct
    wireless country for the Pi before starting its access point.
-3. From the project folder run:
+3. From the verified official release folder run:
 
    ```sh
    sudo deploy/raspberry-pi/install.sh
    ```
 
-4. Open `https://<pi-name>.local:8080` or use the Pi's Ethernet address.
-   Check the certificate fingerprint printed by the installer before trusting
-   it in your browser.
+4. Open `https://netlab.local:8080` or use an IP address covered by its
+   certificate. Verify the public authority fingerprint through the Pi or an
+   independent management connection before following **Trust this Pi**.
 5. Open **Admin token** in the sidebar, enter the admin token and choose
    **Check token**. On the Pi, run
    `sudo grep JITTERSIM_ADMIN_TOKEN /etc/jittersim/control.env` to read it.

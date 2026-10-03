@@ -4,7 +4,9 @@ import argparse
 import base64
 import gzip
 import hashlib
+import html
 import hmac
+import ipaddress
 import io
 import json
 import logging
@@ -33,6 +35,8 @@ from jittersim import release_uploads, updates
 from jittersim.request_workers import RequestWorkers, WorkersStillRunning
 from jittersim.socket_deadlines import DeadlineReader as _DeadlineReader
 from jittersim.api.access import ACCESS_WRITES, read_access_api, write_access_api
+from jittersim.api.trust import TRUST_DOWNLOADS, dashboard_name_report, easy_address, read_trust_api
+from jittersim.localname import read_local_name
 from jittersim.api.workflows import WORKFLOW_WRITES, machine_health, read_workflow, write_workflow
 from jittersim.config.device_labels import (
     DeviceLabelError,
@@ -1151,6 +1155,9 @@ DASHBOARD_HTML = r"""<!doctype html>
     <p id="remember-length-note" class="credential-note">Longer is less safe on a shared computer: anyone who can use this browser can open the dashboard until the time is up. Choose Clear token to forget it sooner.</p>
     <details class="credential-help">
       <summary>How to get the admin token</summary>
+      <p id="sign-in-address" class="credential-note">Open the dashboard at <strong>@@EASY_ADDRESS@@</strong>
+        on the router Wi-Fi or on the test Wi-Fi. It is the same address on both, so one saved sign-in
+        covers both.</p>
       <pre id="admin-token-help"></pre>
     </details>
     <div id="router-credentials">
@@ -1295,6 +1302,32 @@ DASHBOARD_HTML = r"""<!doctype html>
     </details>
     <div id="dashboard-access-list" hidden></div>
     <div id="address-move-replaced" hidden></div>
+    <p id="easy-address" class="form-note">One address works on the router Wi-Fi and on the test Wi-Fi:
+      <strong>@@EASY_ADDRESS@@</strong>. After signing in, Trust this Pi removes the certificate warning.</p>
+  <div id="one-address" class="one-address" role="group" aria-labelledby="one-address-title" hidden>
+    <h3 id="one-address-title">One address for both networks</h3>
+    <p class="one-address-text">Bookmark <strong id="one-address-url">@@EASY_ADDRESS@@</strong>, it works on both networks.</p>
+    <p id="one-address-nudge" class="form-note" hidden>You opened this page at <span id="one-address-current"></span>.
+      <a id="one-address-link" href="@@EASY_ADDRESS@@/">Open it at the one address</a>.
+      A remembered sign-in belongs to one address, so enter the admin token once there.</p>
+    <p id="one-address-problem" class="form-note" role="status" hidden></p>
+  </div>
+  <div id="trust-pi" aria-labelledby="trust-pi-title" role="group" hidden>
+    <h3 id="trust-pi-title">Trust this Pi</h3>
+    <p>Install the Pi's certificate on this device once and the dashboard opens without a certificate warning.
+      Use the one address <strong id="trust-address">...</strong> on either network.</p>
+    <div class="action-buttons">
+      <button id="trust-download-profile" class="primary" type="button">Download Apple profile (.mobileconfig)</button>
+      <button id="trust-download-crt" type="button">Download certificate (.crt)</button>
+    </div>
+    <h4>Mac</h4>
+    <ol id="trust-steps-mac" class="getting-started-steps"></ol>
+    <h4>iPhone and iPad</h4>
+    <ol id="trust-steps-iphone" class="getting-started-steps"></ol>
+    <p id="trust-status" class="form-note" role="status">Checking the certificate...</p>
+    <p class="form-note">Certificate fingerprint (SHA-256): <span id="trust-fingerprint">unknown</span>.
+      Only install it if it matches the fingerprint printed by the installer on the Pi.</p>
+  </div>
   </section>
   <div id="private-dashboard" hidden>
   <p id="mode-notice" class="notice" role="status">Checking control mode...</p>
@@ -2724,6 +2757,10 @@ DASHBOARD_HTML = r"""<!doctype html>
       element("private-dashboard").hidden = !allowed;
       element("dashboard-access-list").hidden = !allowed;
       if (typeof applyBrand === "function") applyBrand(allowed);
+      element("trust-pi").hidden = !allowed;
+      element("one-address").hidden = !allowed;
+      element("easy-address").hidden = allowed;
+      if (allowed && typeof loadTrustDetails === "function") loadTrustDetails();
       document.body.classList.toggle("dashboard-locked", !allowed);
     }
 
@@ -7581,6 +7618,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           // Remember an accepted token now. The refresh below can take seconds and a
           // reload in between would otherwise forget it.
           updateCredentialStatus();
+          if (typeof loadTrustDetails === "function") loadTrustDetails();
           await refresh();
           if (tokenRevision !== adminTokenRevision) return;
           if (!adminTokenVerified) {
@@ -11552,22 +11590,23 @@ DASHBOARD_HTML = DASHBOARD_HTML.replace("    startDashboard();", Path(__file__).
 _DASHBOARD_PAGE_CACHE: Dict[str, Tuple[str, bytes, bytes, str]] = {}
 
 
-def _dashboard_page() -> Tuple[bytes, bytes, str]:
+def _dashboard_page(page_html: Optional[str] = None) -> Tuple[bytes, bytes, str]:
     """Return the page bytes, a gzip copy and an ETag, made once for each page text."""
 
+    page = DASHBOARD_HTML if page_html is None else page_html
     cached = _DASHBOARD_PAGE_CACHE.get("page")
-    if cached is None or cached[0] is not DASHBOARD_HTML:
-        raw = DASHBOARD_HTML.encode("utf-8")
+    if cached is None or cached[0] != page:
+        raw = page.encode("utf-8")
         etag = 'W/"' + hashlib.sha256(raw).hexdigest()[:32] + '"'
-        cached = (DASHBOARD_HTML, raw, gzip.compress(raw, 6, mtime=0), etag)
+        cached = (page, raw, gzip.compress(raw, 6, mtime=0), etag)
         _DASHBOARD_PAGE_CACHE["page"] = cached
     return cached[1], cached[2], cached[3]
 
 
-def dashboard_page_bytes() -> bytes:
+def dashboard_page_bytes(page_html: Optional[str] = None) -> bytes:
     """The page as sent without compression. _send_response recognises this exact object."""
 
-    return _dashboard_page()[0]
+    return _dashboard_page(page_html)[0]
 
 
 def _accepts_gzip(header: str) -> bool:
@@ -11585,6 +11624,9 @@ def _accepts_gzip(header: str) -> bool:
         (explicit if name == "gzip" else wildcard).append(quality)
     choices = explicit if explicit else wildcard
     return bool(choices) and min(choices) > 0
+
+
+DASHBOARD_HTML = DASHBOARD_HTML.replace("    startDashboard();", Path(__file__).with_name("trust.js").read_text(encoding="utf-8") + "\n    startDashboard();")
 
 
 def _inline_source_hashes(tag: str, page: str = DASHBOARD_HTML) -> str:
@@ -12177,22 +12219,38 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         homepage_host: Optional[str] = None,
         homepage_port: int = 8443,
         homepage_certfile: Path = Path("/etc/jittersim/dashboard-wifi.crt"),
+        tls_wifi_certfile: Optional[Path] = None,
+        tls_wifi_network: str = "192.168.50.0/24",
+        trust_ca_path: Optional[Path] = None,
+        local_name: Optional[str] = None,
+        name_status_path: Optional[Path] = None,
     ) -> None:
         if admin_token == "":
             raise ValueError("admin_token must not be empty")
         if (tls_certfile is None) != (tls_keyfile is None):
             raise ValueError("TLS certificate and key must be provided together")
         tls_context = None
+        wifi_context = None
         if tls_certfile is not None and tls_keyfile is not None:
             tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             tls_context.minimum_version = ssl.TLSVersion.TLSv1_2
             tls_context.load_cert_chain(str(tls_certfile), str(tls_keyfile))
+            if tls_wifi_certfile is not None:
+                # Devices on the test Wi-Fi see a certificate that names only the
+                # neutral name and the gateway, before they sign in.
+                wifi_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                wifi_context.minimum_version = ssl.TLSVersion.TLSv1_2
+                wifi_context.load_cert_chain(str(tls_wifi_certfile), str(tls_keyfile))
+        wifi_network = ipaddress.ip_network(tls_wifi_network)
         bind_host = server_address[0]
         if tls_context is None and bind_host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValueError("TLS is required when the dashboard listens beyond this device")
         self.repository = repository
         WorkflowStore(repository).checkpoint("Initial settings")
         self.admin_token = admin_token
+        self.trust_ca_path = trust_ca_path
+        self.local_name = local_name or read_local_name()
+        self.name_status_path = name_status_path
         self.helper_client = helper_client
         self.scheduler = scheduler
         self.router_operations = RouterOperations(
@@ -12202,6 +12260,8 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         self.wifi_operations = WifiOperations()
         self.secure_transport = tls_context is not None
         self._tls_context = tls_context
+        self._tls_wifi_context = wifi_context
+        self._tls_wifi_network = wifi_network
         self._pending_connections: Dict[socket.socket, _PendingConnection] = {}
         self._request_inputs: Dict[socket.socket, Tuple[bytes, float]] = {}
         self._stop_connections = threading.Event()
@@ -12237,6 +12297,9 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                 if 'store' in locals():
                     store.close()
                 LOGGER.warning("Homepage pairing listener unavailable. Dashboard controls remain available.")
+        self.dashboard_page_html = DASHBOARD_HTML.replace(
+            "@@EASY_ADDRESS@@", html.escape(easy_address(self), quote=True)
+        )
 
     @property
     def active_workers(self) -> int:
@@ -12347,6 +12410,22 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                     self._close_pending(connection)
         raise OSError("dashboard is stopping")
 
+    def tls_context_for(self, local_address: str, peer_address: str) -> Optional[ssl.SSLContext]:
+        """The certificate set for one connection.
+
+        A client on the test Wi-Fi gets the neutral certificate, whichever of the
+        Pi's addresses it reached (the firewall lets it reach the dashboard port
+        on the Ethernet address too), so it never reads the other names.
+        """
+        if self._tls_wifi_context is not None:
+            for text in (peer_address, local_address):
+                try:
+                    if ipaddress.ip_address(str(text).split("%")[0]) in self._tls_wifi_network:
+                        return self._tls_wifi_context
+                except ValueError:
+                    continue
+        return self._tls_context
+
     def _accept_connection(self) -> None:
         connection, address = self.socket.accept()
         if len(self._pending_connections) >= MAX_PENDING_DASHBOARD_CONNECTIONS:
@@ -12355,7 +12434,8 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         try:
             connection.setblocking(False)
             if self._tls_context is not None:
-                connection = self._tls_context.wrap_socket(
+                context = self.tls_context_for(connection.getsockname()[0], address[0])
+                connection = context.wrap_socket(
                     connection, server_side=True, do_handshake_on_connect=False)
             now = time.monotonic()
             self._pending_connections[connection] = _PendingConnection(
@@ -12484,6 +12564,9 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         workflow = read_workflow(self, path)
         if workflow is not None:
             return workflow
+        trust = read_trust_api(self, path)
+        if trust is not None:
+            return trust
         if path == "/api/wifi-operation/request-id":
             identifier = issue_request_id()
             return HTTPStatus.OK, "application/json", _json_bytes({"request_id": identifier})
@@ -12493,7 +12576,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             status, data = self.wifi_operations.last(identifier)
             return status, "application/json", _json_bytes(data)
         if path == "/":
-            return HTTPStatus.OK, "text/html; charset=utf-8", dashboard_page_bytes()
+            return HTTPStatus.OK, "text/html; charset=utf-8", dashboard_page_bytes(self.dashboard_page_html)
         if path == "/favicon.ico":
             return HTTPStatus.OK, "image/x-icon", NEUTRAL_ICON
         if path == "/api/brand":
@@ -13114,6 +13197,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                     else None
                 ),
                 "warnings": [],
+                "dashboard_name": dashboard_name_report(self),
             }
             if self.helper_client is not None:
                 try:
@@ -16220,6 +16304,7 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         downloads = {
             "/api/backup": "jittersim-backup.db",
             "/api/export": "jittersim-settings.json",
+            **{trust_path: trust_file for trust_path, (_, trust_file) in TRUST_DOWNLOADS.items()},
         }
         headers = (
             {"Content-Disposition": f'attachment; filename="{downloads[path]}"'}
@@ -17266,6 +17351,8 @@ def run_server(
     tls_keyfile: Optional[Path] = None,
     homepage_host: Optional[str] = None,
     homepage_certfile: Path = Path("/etc/jittersim/dashboard-wifi.crt"),
+    tls_wifi_certfile: Optional[Path] = None,
+    trust_ca_path: Optional[Path] = None,
 ) -> None:
     """Run the dashboard until the process receives Ctrl-C."""
 
@@ -17284,6 +17371,7 @@ def run_server(
             (host, port), repository, admin_token=admin_token, helper_client=helper_client,
             scheduler=scheduler, tls_certfile=tls_certfile, tls_keyfile=tls_keyfile,
             homepage_host=homepage_host, homepage_certfile=homepage_certfile,
+            tls_wifi_certfile=tls_wifi_certfile, trust_ca_path=trust_ca_path,
         )
     except BaseException:
         repository.close()
@@ -17325,6 +17413,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--homepage-cert", type=Path, default=Path("/etc/jittersim/dashboard-wifi.crt"))
     parser.add_argument("--homepage-host", choices=("192.168.50.1",),
                         default=os.environ.get("JITTERSIM_HOMEPAGE_HOST"))
+    parser.add_argument("--tls-cert-wifi", type=Path,
+                        help="certificate for test Wi-Fi clients (neutral names only)")
+    parser.add_argument("--trust-ca", type=Path,
+                        help="public certificate of the local authority offered for download")
     parser.add_argument(
         "--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO"
     )
@@ -17350,5 +17442,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         tls_keyfile=arguments.tls_key,
         homepage_host=arguments.homepage_host,
         homepage_certfile=arguments.homepage_cert,
+        tls_wifi_certfile=arguments.tls_cert_wifi,
+        trust_ca_path=arguments.trust_ca,
     )
     return 0
