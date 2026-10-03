@@ -14,6 +14,7 @@ from tests.browser.phone import close_controls, sidebar_control
 from tests.browser.service_list_focus import check_service_list_contexts
 
 ROUTER_LINK = re.compile("^Router and Wi-Fi")
+UPDATES_LINK = re.compile("^Updates")
 DEVICES_LINK = re.compile("^Devices")
 
 
@@ -254,11 +255,11 @@ def run():
                 )
                 expect(page.locator("#release-status")).to_contain_text("candidate-release")
                 expect(
-                    page.get_by_role("link", name="Router and Wi-Fi, release staged", exact=True)
+                    page.get_by_role("link", name="Updates, update available", exact=True)
                 ).to_be_visible()
                 assert len(release_checks) == 1, release_checks
                 assert not release_installs, release_installs
-                page.get_by_role("link", name="Router and Wi-Fi, release staged", exact=True).click()
+                page.get_by_role("link", name="Updates, update available", exact=True).click()
                 automatic_check = page.locator("#check-staged-updates-on-open")
                 expect(automatic_check).to_be_checked()
                 automatic_check.uncheck()
@@ -270,7 +271,7 @@ def run():
                     "Automatic checking is off."
                 )
                 assert len(release_checks) == 1, release_checks
-                page.get_by_role("link", name=ROUTER_LINK).click()
+                page.get_by_role("link", name=UPDATES_LINK).click()
                 page.get_by_role("button", name="Check for updates", exact=True).click()
                 expect(page.locator("#release-status")).to_contain_text("candidate-release")
                 assert len(release_checks) == 2, release_checks
@@ -279,7 +280,7 @@ def run():
                 expect(page.locator("#update-preference-status")).to_contain_text(
                     "Automatic checking is on."
                 )
-                expect(page.locator("#staged-release-badge")).to_be_visible()
+                expect(page.locator("#update-available-badge")).to_be_visible()
                 assert len(release_checks) == 3, release_checks
                 page.route(
                     "**/api/update-preferences",
@@ -435,6 +436,7 @@ def run():
                 page.locator(
                     "#page-router section", has=page.locator("#gateway-persistence-save")
                 ).first.screenshot(path="test-results/router-outage-persistence-desktop.png")
+                page.get_by_role("link", name=UPDATES_LINK).click()
                 page.get_by_role("button", name="Check for updates", exact=True).click()
                 expect(page.locator("#release-status")).to_contain_text("test-release")
                 expect(page.locator("#release-status")).to_contain_text(
@@ -461,7 +463,7 @@ def run():
                     ),
                 )
                 page.get_by_role("button", name="Check for updates", exact=True).click()
-                expect(page.locator("#staged-release-badge")).to_be_hidden()
+                expect(page.locator("#update-available-badge")).to_be_hidden()
                 expect(page.locator("#release-install")).to_be_disabled()
                 page.unroute("**/api/updates")
                 page.route(
@@ -498,7 +500,7 @@ def run():
                 expect(page.locator("#release-status")).to_contain_text(
                     "Installed: Unknown · Available: None staged"
                 )
-                expect(page.locator("#staged-release-badge")).to_be_hidden()
+                expect(page.locator("#update-available-badge")).to_be_hidden()
                 expect(page.locator("#release-install")).to_be_disabled()
                 page.unroute("**/api/updates")
                 release_phases = ["installing", "done"]

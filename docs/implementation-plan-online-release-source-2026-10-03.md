@@ -1,7 +1,9 @@
 # Online release source (design note, 2026-10-03)
 
-Status: designed, not built. It builds on signed releases (`feat/signed-releases`). Build it in a
-branch of its own after that one is merged.
+Status: the Pi side is built (branch `feat/online-release-check`, draft PR against
+`feat/signed-releases`). `publish-release.sh` on the Mac is not built yet. Owner decision
+2026-10-02: the Pi keeps a read-only fine-grained token for `smartinezai/jittersim` only
+(Contents read) in `/etc/jittersim/update-token`.
 
 ## What
 
@@ -65,3 +67,23 @@ release on GitHub and stage it without the Mac. The dashboard then shows
 - **Tests.** A fake GitHub server over TLS in the test (redirects, size limits, bad signature,
   wrong asset names, a token that never appears in logs or errors) plus mutation tests such
   as "Authorization sent on redirect" and "token logged".
+
+## As built (Pi side)
+
+- **Commands.** `sudo jittersim update set-token` (standard input only), `clear-token`,
+  `check --online` (root, runs the check in this process and never installs on its own). `check`
+  prints `Online check token: set` or `not set`.
+- **Dashboard flow.** `POST /api/updates/check-online` asks the helper, the helper writes
+  `/var/lib/jittersim-updates/online-request.json` and starts `jittersim-update-fetch.service`
+  (root, one-shot, runs only while that file exists) and the answer returns at once with a job id.
+  `GET /api/updates/check-online/JOB` follows the job. The dashboard process never reads the token.
+- **Cache.** Without `force` a check that ended less than 10 minutes ago is answered from its record.
+  Check now sends `force: true`. A running check is joined, never doubled.
+- **Settings.** `daily_check` and `install_automatically` (both off) live in the root-only
+  `/var/lib/jittersim-updates/online-settings.json` and change through the helper, not in the
+  dashboard database, so the root unit never trusts a file the dashboard user can write. The
+  helper looks every 15 minutes whether the daily check is due. Turning Install automatically on
+  needs `confirm: true`. A release whose automatic install failed once is not tried again by itself.
+- **Redirect rules in code.** At most two redirects, `https` only, no login part, port 443, host on
+  the allow list. The `Authorization` header is dropped on every redirect. The asset URL is built
+  from the asset id and never taken from GitHub's answer.

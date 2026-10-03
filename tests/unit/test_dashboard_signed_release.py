@@ -22,6 +22,9 @@ function element(id) {
   }
   return elements[id];
 }
+let onlineView = null;
+function currentPage() { return "updates"; }
+const document = {hidden: false};
 const answer = %(answer)s;
 async function request(path, method) {
   assert.equal(path, "/api/updates");
@@ -34,7 +37,7 @@ async function request(path, method) {
   console.log(JSON.stringify({
     status: element("release-status").textContent,
     install: element("release-install").disabled,
-    badge: !element("staged-release-badge").hidden,
+    badge: !element("update-available-badge").hidden,
   }));
   console.log("CASE-COMPLETE");
 })();

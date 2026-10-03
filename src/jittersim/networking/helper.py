@@ -24,8 +24,17 @@ from jittersim.config.models import ValidationError, normalize_domain
 from jittersim.engine.access import AccessPlan, access_from_payload
 from jittersim.engine.codec import PlanCodecError, plan_from_payload, plan_to_payload
 from jittersim.engine.plan import EVERYONE_ELSE_QUEUE_ID, NetworkPlan
-from jittersim.updates import UpdateError, request_update, stage_upload, update_status
 from jittersim.release_uploads import UploadBusy, prepare_lock
+from jittersim.updates import (
+    UpdateError,
+    online_overview,
+    request_online_check,
+    request_update,
+    scheduled_online_check,
+    set_online_settings,
+    stage_upload,
+    update_status,
+)
 
 from .access import AccessManager
 from .applier import MAX_PROTECTED_MACS, ApplyError, NetworkApplier
@@ -92,6 +101,8 @@ _QUEUE_IMPAIRMENT_LIMITS = {
 }
 _SERVICE_LIST_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 GATEWAY_CHECK_INTERVAL_SECONDS = 5.0
+# How often the helper looks whether the daily online release check is due.
+ONLINE_CHECK_INTERVAL_SECONDS = 15 * 60
 GATEWAY_FAILURES_TO_DOWN = 3
 GATEWAY_SUCCESSES_TO_UP = 2
 GATEWAY_RESET_RETRY_SECONDS = 30.0
@@ -267,6 +278,21 @@ class HelperService:
             except (OSError, ValueError):
                 LOGGER.exception("uploaded release could not be staged")
                 return {"ok": False, "error": "the uploaded release could not be staged"}
+        if action in ("update-online-check", "update-online-status", "update-online-settings"):
+            # The root fetch unit holds the token and does the download. The answer here is only
+            # state: a job, a result and two settings.
+            try:
+                if action == "update-online-check":
+                    request_online_check(force=payload.get("force") is True)
+                elif action == "update-online-settings" and payload.get("changes") is not None:
+                    set_online_settings(payload.get("changes"))
+                job = payload.get("job")
+                return {"ok": True, **online_overview(job if isinstance(job, str) else None)}
+            except UpdateError as error:
+                return {"ok": False, "error": str(error)}
+            except (OSError, ValueError):
+                LOGGER.exception("online release check could not be handled")
+                return {"ok": False, "error": "online release check could not be completed"}
         if action == "ping":
             return {"ok": True, "action": "ping"}
         if action == "capabilities":
@@ -1755,6 +1781,16 @@ class HelperClient:
                 raise HelperClientError(message) from None
             raise
 
+    def online_check(self, *, force: bool = False) -> Dict[str, Any]:
+        """Start an online release check in the root fetch unit and return its job."""
+        return self._request({"action": "update-online-check", "force": bool(force)})
+
+    def online_status(self, job: Optional[str] = None) -> Dict[str, Any]:
+        return self._request({"action": "update-online-status", "job": job})
+
+    def online_settings(self, changes: Optional[Dict[str, bool]] = None) -> Dict[str, Any]:
+        return self._request({"action": "update-online-settings", "changes": changes})
+
     def install_release(self, *, version: str, rollback: bool = False) -> Dict[str, Any]:
         return self._request({"action": "update-rollback" if rollback else "update-install", "version": version})
 
@@ -2173,6 +2209,19 @@ def run_helper(
     worker = threading.Thread(target=maintain_access, daemon=True, name="access-addresses")
     worker.start()
 
+    def start_daily_release_check():
+        # Off unless the owner turned it on. The root fetch unit does the check.
+        while not stopped.wait(ONLINE_CHECK_INTERVAL_SECONDS):
+            try:
+                scheduled_online_check()
+            except Exception:
+                LOGGER.exception("could not start the daily release check")
+
+    release_worker = threading.Thread(
+        target=start_daily_release_check, daemon=True, name="daily-release-check"
+    )
+    release_worker.start()
+
     def monitor_gateway():
         while not stopped.is_set():
             started_at = time.monotonic()
@@ -2199,6 +2248,7 @@ def run_helper(
             stopped.set()
             worker.join(timeout=5)
             gateway_worker.join(timeout=5)
+            release_worker.join(timeout=5)
 
 
 def _build_parser() -> argparse.ArgumentParser:

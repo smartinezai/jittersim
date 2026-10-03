@@ -238,7 +238,7 @@ WRITE_PATHS = (WRITE_PATHS | WORKFLOW_WRITES | ACCESS_WRITES | {"/api/schedules/
                | {RELEASE_UPLOAD_PATH})
 ACTION_PATHS = frozenset(
     ("/api/apply", "/api/reset", "/api/observations/scan", "/api/update-preferences",
-     "/api/access-point/reset-name")
+     "/api/access-point/reset-name", "/api/updates/check-online")
 )
 PUBLIC_READ_PATHS = frozenset(("/", "/api/health"))
 # Panic runs ahead of other writes: it never waits for the write lock of an apply in flight.
@@ -1032,6 +1032,18 @@ DASHBOARD_HTML = r"""<!doctype html>
     .update-auto-check input { flex: 0 0 auto; width: 1.1rem; height: 1.1rem; margin: 0; accent-color: #70b7ff; }
     .update-auto-check span { flex: 1; min-width: 0; }
     .update-preference-status { margin-top: 0.45rem; color: #a8c7e8; }
+    .update-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0.6rem 1rem; margin: 0.8rem 0; }
+    .update-facts div { min-width: 0; }
+    .update-facts dt { color: #a8c7e8; font-size: 0.78rem; }
+    .update-facts dd { margin: 0.1rem 0 0; overflow-wrap: anywhere; font-weight: 600; }
+    .update-progress { margin-top: 0.8rem; padding: 0.6rem 0.8rem; border: 1px solid #4777a5; border-radius: 6px; background: #14324e; color: #d9ecff; }
+    .sidebar-version { display: grid; gap: 0.35rem; }
+    .sidebar-version-text { margin: 0; color: #a8c7e8; font-size: 0.78rem; }
+    .sidebar-update-link {
+      display: block; padding: 0.45rem 0.6rem; border: 1px solid #4777a5; border-radius: 6px;
+      background: #14324e; color: #d9ecff; font-weight: 600; text-align: center; text-decoration: none;
+    }
+    .sidebar-update-link[hidden] { display: none; }
     #release-actions { display: flex; flex-wrap: wrap; gap: 0.55rem; margin-top: 0.6rem; }
     #release-actions button { margin-top: 0.45rem; }
     .table-wrap { overflow-x: auto; }
@@ -1161,12 +1173,13 @@ DASHBOARD_HTML = r"""<!doctype html>
         <li><a href="#devices" data-page-link="devices">Devices <span id="nav-devices-count" class="nav-chip" hidden></span></a></li>
         <li><a href="#profiles" data-page-link="profiles">Profiles</a></li>
         <li><a href="#schedules" data-page-link="schedules">Schedules and limits</a></li>
-        <li><a href="#router" data-page-link="router" id="setup-tab-link">Router and Wi-Fi <span id="staged-release-badge" class="update-badge" hidden>Release staged</span></a></li>
+        <li><a href="#router" data-page-link="router" id="setup-tab-link">Router and Wi-Fi</a></li>
         <li><a href="#traffic" data-page-link="traffic">Traffic</a></li>
         <li><a href="#measurements" data-page-link="measurements">Measurements</a></li>
         <li><a href="#activity" data-page-link="activity">Activity</a></li>
         <li><a href="#access" data-page-link="access">Access and rules</a></li>
         <li><a href="#diagnostics" data-page-link="diagnostics">Diagnostics</a></li>
+        <li><a href="#updates" data-page-link="updates" id="updates-tab-link">Updates <span id="update-available-badge" class="update-badge" hidden>Update available</span></a></li>
       </ul>
     </nav>
     <button id="status-strip" class="status-strip" type="button" aria-expanded="false"
@@ -1228,6 +1241,10 @@ DASHBOARD_HTML = r"""<!doctype html>
           <button id="sync-router-ap" class="primary" type="button" aria-describedby="router-action-message" disabled>Copy router Wi-Fi to Pi</button>
           <p id="router-action-message" class="router-wifi-status" role="status" aria-live="polite"></p>
         </div>
+      </div>
+      <div class="sidebar-version">
+        <p id="sidebar-version" class="sidebar-version-text">Version unknown</p>
+        <a id="sidebar-update-link" class="sidebar-update-link" href="#updates" hidden></a>
       </div>
       <div class="sidebar-credentials">
         <button id="open-admin-credentials" type="button" aria-controls="credentials-panel" aria-expanded="false">
@@ -2103,6 +2120,10 @@ DASHBOARD_HTML = r"""<!doctype html>
     </div>
     <p id="gateway-persistence-state" class="token-check-status" role="status" aria-live="polite">Checking the router connection...</p>
   </section>
+  <section class="card" data-collapse="open">
+    <h2>Updates</h2>
+    <p class="policy-note">Checking for and installing new releases has its own page. <a id="router-updates-link" href="#updates">Open Updates</a></p>
+  </section>
   </section><!-- /page:router -->
   <section class="page" id="page-traffic" data-page="traffic" aria-label="Traffic" tabindex="-1" hidden>
   <section class="card traffic-card" data-collapse="open" aria-labelledby="traffic-title">
@@ -2369,6 +2390,8 @@ DASHBOARD_HTML = r"""<!doctype html>
         of them.</p>
     </section>
   </section><!-- /page:diagnostics -->
+  <section class="page" id="page-updates" data-page="updates" aria-label="Updates" tabindex="-1" hidden>
+  </section><!-- /page:updates -->
   </div>
   </main>
   </div>
@@ -10274,7 +10297,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       rules: "schedules",
       measurements: "measurements",
       setup: "router",
-      diagnostics: "diagnostics"
+      diagnostics: "diagnostics",
+      updates: "updates"
     };
 
     function tabPanel(name) {
@@ -10420,7 +10444,8 @@ DASHBOARD_HTML = r"""<!doctype html>
         if (page === "access") jobs.push(loadObservations, loadAccessStatus);
         if (page === "activity") jobs.push(loadActivity);
         if (page === "measurements") jobs.push(loadTestSessions);
-        if (page === "router") jobs.push(loadUplink, loadGatewayPersistence, pollReleaseProgress);
+        if (page === "router") jobs.push(loadUplink, loadGatewayPersistence);
+        if (page === "updates") jobs.push(pollReleaseProgress);
         const results = await Promise.allSettled(jobs.map((job) => job()));
         if (results.some((result) => result.status === "rejected")) {
           element("runtime-summary").textContent = "Some status updates could not load. Retrying shortly.";
@@ -10662,7 +10687,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   <script>
     const PAGES = [
       "devices", "profiles", "schedules", "router", "traffic", "measurements", "activity",
-      "access", "diagnostics"
+      "access", "diagnostics", "updates"
     ];
 
     function pageFromHash(hash) {
