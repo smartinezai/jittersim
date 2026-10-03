@@ -109,3 +109,12 @@ The central comprehension topic is why current saved protection must be
 checked again after peer identity even when the applied plan is unchanged.
 It was deferred during the authorized direct implementation and should be
 revisited once before the pull request readiness review.
+
+## Pairing private view correction
+
+Include the follow-up commit aa0d73134cbe6ee12fee46561974a22389a7c9bb before
+combined verification. Its pairing-owned cleanup hook clears codes and
+enrolled inputs when token or device access changes. Its request owner checks
+protect success, error, expiry and control cleanup after every wait. It does
+not replace the shared request or sign-in functions. Failure-first and fresh
+installed dashboard checks are saved in the private UI verification report.

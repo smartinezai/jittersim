@@ -37,3 +37,10 @@ Exact commands, runtimes, artifact hashes, skip reasons and remaining gaps
 are saved in [the machine-readable report](verification-results-live-homepage-2026-10-03.json).
 Deployment choices and integration overlap are in
 [the release handoff](live-homepage-release-handoff-2026-10-03.md).
+
+## Private code lifetime follow-up
+
+The frozen implementation required a later private code cleanup correction.
+The earlier results above keep their original source scope. Current response
+ownership, failure-first evidence and installed dashboard checks are in
+[the follow-up verification](verification-homepage-private-ui-2026-10-03.md).

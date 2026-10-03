@@ -1,0 +1,85 @@
+{
+  "recorded_at": "2026-10-03T13:21:04.718983+00:00",
+  "implementation_commit": "aa0d73134cbe6ee12fee46561974a22389a7c9bb",
+  "baseline_commit": "64c3e932fda879a3dbf8a50d58518471a611dd11",
+  "consumer_contract_source": "cc58b78c59807570be0ec5fe005b8756badcaee3",
+  "contract": "Pairing-owned generation advances through privateDataLockHooks. Replies require the captured token revision, accepted private access and matching current request owner.",
+  "changed_production_file": "src/jittersim/api/server.py",
+  "shared_request_and_sign_in_changed": false,
+  "before": {
+    "path": "docs/homepage-private-ui-before-2026-10-03.json",
+    "sha256": "535a9ebea25a131693b19b34f5f96de2c2cddb2c1032707f0bf984cb7e57a246",
+    "failed": 36,
+    "passed": 0,
+    "source": "Frozen 64c3e93 before the production correction."
+  },
+  "after": {
+    "path": "docs/homepage-private-ui-after-2026-10-03.json",
+    "sha256": "4a6530142b1e56390370bb05d6fe45ab8f8b8fd89a95ea60908a5adaaaaaef93",
+    "failed": 0,
+    "passed": 36
+  },
+  "installed_dashboard": {
+    "path": "docs/homepage-private-ui-installed-2026-10-03.json",
+    "sha256": "4a6530142b1e56390370bb05d6fe45ab8f8b8fd89a95ea60908a5adaaaaaef93",
+    "failed": 0,
+    "passed": 36,
+    "import_path": "/private/tmp/jittersim-homepage-ui-installed/jittersim/api/server.py"
+  },
+  "python": {
+    "path": "/private/tmp/jittersim-homepage-ui-followup-pytest.xml",
+    "sha256": "1fb89228d20444cc5243e152b1a830ad425bfce4b12e0a809acd989bb473bb70",
+    "tests": 475,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 18.373,
+    "command": "PYTHONPATH=src '/Users/samantha.martinez/Github repos/jittersim/.venv/bin/python' -m pytest -oaddopts='' -q tests/unit/test_homepage*.py tests/integration/test_homepage*.py tests/unit/test_dashboard_saved_profiles.py tests/unit/test_api.py --junitxml=/private/tmp/jittersim-homepage-ui-followup-pytest.xml"
+  },
+  "browser_command": "node tests/browser/homepage-live/dashboard.cjs",
+  "browser_environment": {
+    "JITTERSIM_PYTHON_EXECUTABLE": "/Users/samantha.martinez/Github repos/jittersim/.venv/bin/python",
+    "JITTERSIM_PLAYWRIGHT_MODULE": "/Users/samantha.martinez/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright",
+    "JITTERSIM_BROWSER_EXECUTABLE": "/private/tmp/jittersim-playwright-browsers/chromium-1223/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+    "source_PYTHONPATH": "src",
+    "installed_PYTHONPATH": "/private/tmp/jittersim-homepage-ui-installed"
+  },
+  "runtimes": {
+    "python": "3.12.13",
+    "build_python": "3.12.14",
+    "node": "24.19.0",
+    "playwright": "1.62.1",
+    "browser": "148.0.7778.96"
+  },
+  "wheel": {
+    "path": "/private/tmp/jittersim-homepage-ui-wheel/jittersim-0.1.0-py3-none-any.whl",
+    "sha256": "6d3cbbd80aca61578490c18ac11d677145ca887c46cbd8d477d50e28815bde9b",
+    "matching_code_and_asset_files": 67
+  },
+  "checks": [
+    "Existing pairing code and enrolled fields clear after token input.",
+    "Existing pairing code and enrolled fields clear after actual fixture access removal and a real registration-required read.",
+    "Create and revoke responses cannot write after access loss while locked.",
+    "Create and revoke responses cannot write after sign-in is restored.",
+    "Earlier errors do not appear in the changed private session.",
+    "Earlier completions do not unlock controls held by a newer request.",
+    "Old code-expiry callbacks cannot write after private cleanup.",
+    "Two controlled page lines produce two separate enrollment values.",
+    "Actual desktop and phone controls are used at 1440px and 390px."
+  ],
+  "static_checks": [
+    "workflow Ruff passed",
+    "git diff --check passed",
+    "Node syntax passed"
+  ],
+  "verification_limits": [
+    "Homepage HTTP responses are deliberately substituted to control ordering and failures.",
+    "Wi-Fi commands are simulated. Access removal and the registration-required response use the real fixture server.",
+    "The prior 3256 full source and 509 installed checks cover a80dd59, not this follow-up head.",
+    "Normal installed Chrome TLS trust remains unverified.",
+    "Newer combined source review and configured Linux/other-Python workflows remain separate release gates.",
+    "The new dashboard browser step is registered but hosted CI has not run."
+  ],
+  "remote_changes": false,
+  "live_pi_changes": false
+}
