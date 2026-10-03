@@ -28,6 +28,8 @@ before editing the journey under the existing 24-hour implementation authority.
 4. Match actual release failure messages and retained installed-version behavior.
    Use the current identified installing/complete protocol for completion checks.
    Keep confirmation, request identity, page errors, phone and desktop checks.
+   Preserve the Wi-Fi reset's one-request check with a bounded wait for its
+   asynchronous route callback and use the current default network name TestNet.
 5. Execute the actual served complete journey and the update recovery/polling
    browser modules. Review the complete test diff independently before freezing.
 6. Build the final wheel and run all configured browser, Linux, Python-version,
