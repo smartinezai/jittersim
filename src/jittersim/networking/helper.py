@@ -1229,10 +1229,14 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
             return
         # Apply and reset wait a moment for a read so a poll never refuses Panic. Every
         # read answers helper-busy at once.
+        # Signed staging only changes release files. It must not hold network
+        # ownership while verifying an archive or copying it from the dashboard.
+        lock = (self.server.release_stage_lock if action == "update-stage-upload"
+                else self.server.operation_lock)
         if action in WRITE_ACTIONS:
-            acquired = self.server.operation_lock.acquire(timeout=WRITE_LOCK_WAIT_SECONDS)
+            acquired = lock.acquire(timeout=WRITE_LOCK_WAIT_SECONDS)
         else:
-            acquired = self.server.operation_lock.acquire(blocking=False)
+            acquired = lock.acquire(blocking=False)
         if not acquired:
             self._send_response({"ok": False, "error": "The networking helper is busy. Try again later.",
                                  "reason": "helper-busy"})
@@ -1241,7 +1245,7 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
             # Finish the response snapshot before another operation can change state.
             encoded = self._encode_response(self.server.service.handle_payload(payload))
         finally:
-            self.server.operation_lock.release()
+            lock.release()
         # A slow client must not hold the lock after its operation has finished.
         self.wfile.write(encoded)
 
@@ -1260,6 +1264,7 @@ class UnixHelperServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServe
         self.socket_path = socket_path
         self.service = service
         self.operation_lock = threading.Lock()
+        self.release_stage_lock = threading.Lock()
         self._request_slots = threading.BoundedSemaphore(MAX_HELPER_CONNECTIONS)
         self._prepare_socket_path()
         try:
