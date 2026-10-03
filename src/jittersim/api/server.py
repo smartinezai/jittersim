@@ -12491,6 +12491,17 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
 
     def write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
+        control_intent = None
+        live_access = path in ACCESS_WRITES and path not in (
+            "/api/normal-access", "/api/site-blocks", "/api/site-blocks/delete"
+        )
+        live_global = path in ("/api/observations/add-global-block", "/api/observations/remove-global-block")
+        if path == "/api/apply" or live_access or live_global:
+            generation = getattr(self.scheduler, "apply_generation", getattr(self.scheduler, "halt_count", 0))
+            refused, revision = self._capture_control_intent(generation)
+            if refused is not None:
+                return refused
+            control_intent = (generation, revision)
         # Panic skips the write lock so it never queues behind an apply in flight.
         operation = (
             self.scheduler.exclusive()
@@ -12500,16 +12511,22 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         with operation:
             before = self.repository.get_runtime_state().configuration_version
             try:
-                access_response = write_access_api(self, path, payload)
+                access_response = (
+                    write_access_api(self, path, payload, control_intent=control_intent)
+                    if live_access else write_access_api(self, path, payload)
+                )
                 if access_response is not None:
                     return access_response
                 workflow = write_workflow(self, path, payload, _settings_from_payload)
-                return workflow if workflow is not None else self._write_response_for(path, payload)
+                if workflow is not None:
+                    return workflow
+                return (self._write_response_for(path, payload, control_intent=control_intent)
+                        if path == "/api/apply" or live_global else self._write_response_for(path, payload))
             finally:
                 if self.repository.get_runtime_state().configuration_version != before:
                     WorkflowStore(self.repository).checkpoint(path.removeprefix("/api/").replace("/", " "))
 
-    def _write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
+    def _write_response_for(self, path: str, payload: Dict[str, Any], *, control_intent=None) -> Tuple[int, str, bytes]:
         """Handle one supported configuration or network action request."""
 
         if path == "/api/gateway-persistence":
@@ -13290,10 +13307,12 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             return self._add_observation_to_profile(payload)
 
         if path == "/api/observations/add-global-block":
-            return self._add_observation_to_global_block(payload)
+            arguments = {"control_intent": control_intent} if control_intent is not None else {}
+            return self._add_observation_to_global_block(payload, **arguments)
 
         if path == "/api/observations/remove-global-block":
-            return self._remove_observation_from_global_block(payload)
+            arguments = {"control_intent": control_intent} if control_intent is not None else {}
+            return self._remove_observation_from_global_block(payload, **arguments)
 
         if path == "/api/activity/clear":
             self.repository.clear_activity()
@@ -13302,7 +13321,8 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         # Saved changes apply the plan too, but only these buttons count as
         # an Apply or a Reset in the activity log.
         if path == "/api/apply":
-            status, content_type, body = self._apply_configuration(explicit_apply=True)
+            arguments = {"control_intent": control_intent} if control_intent is not None else {}
+            status, content_type, body = self._apply_configuration(explicit_apply=True, **arguments)
             if status == HTTPStatus.OK:
                 self._record_activity("apply", "Configuration applied")
             return status, content_type, body
@@ -13737,7 +13757,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         )
 
     def _add_observation_to_global_block(
-        self, payload: Dict[str, Any]
+        self, payload: Dict[str, Any], *, control_intent=None
     ) -> Tuple[int, str, bytes]:
         try:
             names = _domains_from_payload(payload)
@@ -13754,7 +13774,8 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             self.repository.save_website_policy(updated)
         except (KeyError, TypeError, ValueError, StorageError) as error:
             return _bad_request("could not add domain to global block list", error)
-        failed = self._apply_household_block_list()
+        arguments = {"control_intent": control_intent} if control_intent is not None else {}
+        failed = self._apply_household_block_list(**arguments)
         if failed is not None:
             return failed
         return HTTPStatus.OK, "application/json", _json_bytes(
@@ -13762,7 +13783,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         )
 
     def _remove_observation_from_global_block(
-        self, payload: Dict[str, Any]
+        self, payload: Dict[str, Any], *, control_intent=None
     ) -> Tuple[int, str, bytes]:
         try:
             names = _domains_from_payload(payload)
@@ -13774,14 +13795,15 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
                 {"error": "could not remove domain from global block list"}
             )
-        failed = self._apply_household_block_list()
+        arguments = {"control_intent": control_intent} if control_intent is not None else {}
+        failed = self._apply_household_block_list(**arguments)
         if failed is not None:
             return failed
         return HTTPStatus.OK, "application/json", _json_bytes(
             {"policies": _policies_payload(self.repository)}
         )
 
-    def _apply_household_block_list(self) -> Optional[Tuple[int, str, bytes]]:
+    def _apply_household_block_list(self, *, control_intent=None) -> Optional[Tuple[int, str, bytes]]:
         """Bring the filtered resolver in line with a changed global block list.
 
         Block globally and Unblock act at once like main's device quick action. Main's
@@ -13791,8 +13813,12 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
         the addresses of each listed name within a second while JitterSim runs.
         """
 
-        generation = getattr(self.scheduler, "apply_generation", 0)
-        refused, revision = self._capture_control_intent(generation)
+        if control_intent is None:
+            generation = getattr(self.scheduler, "apply_generation", 0)
+            refused, revision = self._capture_control_intent(generation)
+        else:
+            generation, revision = control_intent
+            refused = self._apply_refused(generation)
         if refused is not None:
             return refused
         settings = self.repository.access_settings()
@@ -15089,14 +15115,20 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                 )
         return self._apply_configuration()
 
-    def _apply_configuration(self, *, explicit_apply: bool = False) -> Tuple[int, str, bytes]:
+    def _apply_configuration(self, *, explicit_apply: bool = False, control_intent=None) -> Tuple[int, str, bytes]:
+        if control_intent is None:
+            generation = getattr(self.scheduler, "apply_generation", getattr(self.scheduler, "halt_count", 0))
+            refused, revision = self._capture_control_intent(generation)
+            if refused is not None:
+                return refused
+            control_intent = (generation, revision)
         # Scheduled applies, manual applies and resets never interleave.
         operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
         with operation:
-            return self._apply_configuration_locked(explicit_apply=explicit_apply)
+            return self._apply_configuration_locked(explicit_apply=explicit_apply, control_intent=control_intent)
 
     def _apply_configuration_locked(
-        self, connected_snapshot=None, *, sample_usage=True, explicit_apply: bool = False
+        self, connected_snapshot=None, *, sample_usage=True, explicit_apply: bool = False, control_intent=None
     ) -> Tuple[int, str, bytes]:
         if self.helper_client is None:
             return (
@@ -15104,8 +15136,12 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
                 "application/json",
                 _json_bytes({"error": "network helper is not configured"}),
             )
-        halts_at_start = getattr(self.scheduler, "apply_generation", getattr(self.scheduler, "halt_count", 0))
-        refused, control_revision = self._capture_control_intent(halts_at_start)
+        if control_intent is None:
+            halts_at_start = getattr(self.scheduler, "apply_generation", getattr(self.scheduler, "halt_count", 0))
+            refused, control_revision = self._capture_control_intent(halts_at_start)
+        else:
+            halts_at_start, control_revision = control_intent
+            refused = self._apply_refused(halts_at_start)
         if refused is not None:
             return refused
         try:

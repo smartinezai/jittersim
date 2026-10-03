@@ -45,7 +45,7 @@ def helper(directory, *, panic_guard=None):
         gateway_state_path=directory / "gateway.json",
         panic_guard=panic_guard,
     )
-    assert restore_access_at_start(manager, panic_stopped=service._panic_stop_latched)
+    assert restore_access_at_start(manager, panic_stopped=service._household_stop_latched)
     server = UnixHelperServer(directory / "helper.sock", service)
     thread = threading.Thread(target=server.serve_forever)
     thread.start()

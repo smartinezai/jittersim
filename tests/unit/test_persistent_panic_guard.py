@@ -37,11 +37,52 @@ def short_path():
 
 def stopped_state(failed=False):
     return {
-        "version": 1,
+        "version": 2,
         "panic_stop_latched": True,
+        "household_stop_latched": True,
         "panic_recovery_failed": failed,
         "control_revision_required": True,
     }
+
+
+@pytest.mark.parametrize(
+    "stopped,failed,required",
+    [(False, False, False), (False, False, True), (True, False, True), (True, True, True)],
+)
+def test_complete_version_one_guard_conservatively_preserves_both_stop_intents(
+    tmp_path, stopped, failed, required
+):
+    persistent = guard(tmp_path)
+    persistent.path.parent.mkdir(mode=0o700)
+    old = {
+        "version": 1,
+        "panic_stop_latched": stopped,
+        "panic_recovery_failed": failed,
+        "control_revision_required": required,
+    }
+    persistent.path.write_text(json.dumps(old))
+    persistent.path.chmod(0o600)
+    expected = {**old, "version": 2, "household_stop_latched": stopped}
+    assert persistent.read() == expected
+    assert persistent.provision_upgrade(tmp_path / "absent-runtime") == expected
+    persistent.write(expected)
+    assert json.loads(persistent.path.read_text()) == expected
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"household_stop_latched": 1},
+        {"control_revision_required": False},
+        {"panic_recovery_failed": True, "household_stop_latched": False},
+        {"panic_recovery_failed": True, "panic_stop_latched": False},
+    ],
+)
+def test_invalid_independent_intent_is_refused_before_publication(tmp_path, changes):
+    persistent = guard(tmp_path)
+    with pytest.raises(OSError):
+        persistent.write({**stopped_state(), **changes})
+    assert not persistent.path.parent.exists()
 
 
 def test_failed_sqlite_panic_remains_stopped_after_runtime_removal_and_reconstruction():
@@ -160,13 +201,15 @@ def test_first_provision_migrates_retained_panic_and_preserves_concurrent_stop(t
                 "consecutive_failures": 0,
                 "consecutive_successes": 2,
                 **stopped_state(True),
+                "version": 1,
             }
         )
     )
     assert persistent.provision(legacy) == stopped_state(True)
     clear = {
-        "version": 1,
+        "version": 2,
         "panic_stop_latched": False,
+        "household_stop_latched": False,
         "panic_recovery_failed": False,
         "control_revision_required": False,
     }
@@ -189,7 +232,14 @@ def test_sync_interruption_never_acknowledges_guard_durability(tmp_path, monkeyp
 
     monkeypatch.setattr(os, "fsync", sync)
     with pytest.raises(OSError):
-        persistent.provision()
+        persistent.write(
+            {
+                "version": 1,
+                "panic_stop_latched": False,
+                "panic_recovery_failed": False,
+                "control_revision_required": False,
+            }
+        )
     monkeypatch.setattr(os, "fsync", original)
     if failure_at == 1:
         with pytest.raises(FileNotFoundError):
@@ -200,12 +250,15 @@ def test_sync_interruption_never_acknowledges_guard_durability(tmp_path, monkeyp
 
 @pytest.mark.parametrize("entry", ["access-boot", "helper"])
 @pytest.mark.parametrize("corrupt", [False, True])
+@pytest.mark.parametrize("household_stopped", [False, True])
 def test_actual_startup_entry_never_restores_old_enabled_household_policy(
-    short_path, monkeypatch, entry, corrupt
+    short_path, monkeypatch, entry, corrupt, household_stopped
 ):
     tmp_path = short_path
     persistent = guard(tmp_path)
-    persistent.write(stopped_state(corrupt))
+    state = stopped_state(corrupt)
+    state["household_stop_latched"] = household_stopped or corrupt
+    persistent.write(state)
     if corrupt:
         persistent.path.unlink()
     manager = access.AccessManager(
@@ -222,8 +275,11 @@ def test_actual_startup_entry_never_restores_old_enabled_household_policy(
 
     def apply(plan, **kwargs):
         calls.append(plan)
-        assert plan is not None and not plan.options.enabled
-        return original(plan, **kwargs)
+        if household_stopped or corrupt:
+            assert plan is not None and not plan.options.enabled
+        result = original(plan, **kwargs)
+        assert manager.applied.options.enabled is not (household_stopped or corrupt)
+        return result
 
     monkeypatch.setattr(manager, "apply", apply)
     if entry == "access-boot":
@@ -246,18 +302,21 @@ def test_actual_startup_entry_never_restores_old_enabled_household_policy(
         )
         monkeypatch.setattr(NetworkApplier, "recover_wifi", lambda self: None)
         monkeypatch.setattr(helper_module.HelperService, "monitor_gateway_once", lambda self: None)
-        monkeypatch.setattr(
-            helper_module.UnixHelperServer,
-            "serve_forever",
-            lambda self: (_ for _ in ()).throw(KeyboardInterrupt()),
-        )
+        serve_policy = helper_module.UnixHelperServer.serve_forever
+
+        def stop_control_server(server):
+            if getattr(server, "policy_only", False):
+                return serve_policy(server)
+            raise KeyboardInterrupt()
+
+        monkeypatch.setattr(helper_module.UnixHelperServer, "serve_forever", stop_control_server)
         helper_module.run_helper(
             socket_path=tmp_path / "helper.sock",
             topology=Topology("eth0", "wlan0"),
             enable_hardware=True,
         )
     assert len(calls) == 1
-    assert not manager.applied.options.enabled
+    assert manager.applied.options.enabled is not (household_stopped or corrupt)
 
 
 def test_failed_guard_save_keeps_panic_and_fresh_start_unconfirmed(short_path, monkeypatch):
@@ -307,13 +366,20 @@ def test_failed_gateway_save_is_preserved_in_persistent_guard_after_runtime_loss
 
 
 @pytest.mark.parametrize("entry", ["access-boot", "helper"])
-@pytest.mark.parametrize("legacy", [{"version": 1}, {"version": True}])
+@pytest.mark.parametrize("legacy", [{"version": 1}, {"version": True}, "old-schema", None])
 def test_malformed_present_legacy_gateway_never_provisions_clear_or_enables_saved_policy(
     short_path, monkeypatch, entry, legacy
 ):
     persistent = guard(short_path)
     legacy_path = short_path / "gateway-state.json"
-    legacy_path.write_text(json.dumps(legacy))
+    if legacy == "old-schema":
+        from tests.unit.test_panic_upgrade_producer import legacy_state
+
+        legacy = legacy_state()
+        for field in ("panic_stop_latched", "panic_recovery_failed", "control_revision_required"):
+            legacy.pop(field)
+    if legacy is not None:
+        legacy_path.write_text(json.dumps(legacy))
     manager = access.AccessManager(
         executor=AccessExecutor(short_path),
         topology=Topology("eth0", "wlan0"),
