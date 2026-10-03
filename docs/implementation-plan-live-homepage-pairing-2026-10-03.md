@@ -60,3 +60,21 @@ Certificate enrollment, combined update integration and Pi deployment remain
 with their owners. Real normal certificate trust, safe independent management
 recovery and physical device acceptance are required before live activation.
 No live traffic, radio or installed configuration is changed by this work.
+
+## Private dashboard response follow-up
+
+The frozen source review on 3 October found that existing pairing codes are
+not cleared by the shared private-data lock hooks. A delayed create or revoke
+reply can also write after token or device access changes. The original direct
+authorization covers this correction in the isolated checkout.
+
+First reproduce both cases in the served dashboard using a real browser.
+Exercise token edits and actual fixture access removal with delayed create,
+revoke and error responses. Repeat after sign-in is restored to prove that
+a reply cannot enter a new private session.
+
+Use the combined source's admin token revision plus a homepage generation
+invalidated through privateDataLockHooks. Clear the code and enrolled inputs.
+Guard success, failure, expiry and button cleanup by the current request
+owner. Preserve the shared request and sign-in implementations. Run focused
+dashboard checks and record both the original failure and corrected source.

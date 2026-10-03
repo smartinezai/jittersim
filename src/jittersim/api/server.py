@@ -7367,23 +7367,93 @@ DASHBOARD_HTML = r"""<!doctype html>
       if (focusedKey && buttons.has(focusedKey)) buttons.get(focusedKey).focus();
     }
 
+    let homepageUiGeneration = 0;
+    let homepageRequestOwner = null;
+    let homepageRequestPending = false;
+    let homepageCodeTimer = null;
+
+    function clearHomepagePairingUi() {
+      homepageUiGeneration += 1;
+      homepageRequestOwner = null;
+      homepageRequestPending = false;
+      clearTimeout(homepageCodeTimer);
+      homepageCodeTimer = null;
+      element("homepage-code").textContent = "";
+      element("homepage-extension-id").value = "";
+      element("homepage-pages").value = "";
+      element("homepage-create-code").disabled = false;
+      element("homepage-revoke").disabled = false;
+    }
+
+    privateDataLockHooks.push(clearHomepagePairingUi);
+
+    function homepageRequestCurrent(owner) {
+      return owner === homepageRequestOwner && owner.revision === adminTokenRevision &&
+        owner.generation === homepageUiGeneration && adminTokenVerified &&
+        !element("private-dashboard").hidden;
+    }
+
+    function beginHomepageRequest() {
+      if (homepageRequestPending || !adminTokenVerified || element("private-dashboard").hidden) return null;
+      const owner = {revision: adminTokenRevision, generation: homepageUiGeneration,
+        started: performance.now()};
+      homepageRequestOwner = owner;
+      homepageRequestPending = true;
+      clearTimeout(homepageCodeTimer);
+      homepageCodeTimer = null;
+      element("homepage-code").textContent = "";
+      element("homepage-create-code").disabled = true;
+      element("homepage-revoke").disabled = true;
+      return owner;
+    }
+
+    function finishHomepageRequest(owner) {
+      if (!homepageRequestCurrent(owner)) return;
+      homepageRequestPending = false;
+      element("homepage-create-code").disabled = false;
+      element("homepage-revoke").disabled = false;
+    }
+
     element("homepage-create-code").addEventListener("click", async () => {
+      const owner = beginHomepageRequest();
+      if (!owner) return;
       const output = element("homepage-code");
-      output.textContent = "";
       try {
         const result = await request("/api/homepage/pairing-code", "POST", {
           extension_id: element("homepage-extension-id").value.trim(),
           pages: element("homepage-pages").value.split(/\n/).map(value => value.trim()).filter(Boolean)
         });
+        if (!homepageRequestCurrent(owner)) return;
+        if (!result || typeof result.code !== "string" || !/^[a-f0-9]{32}$/.test(result.code) ||
+            !Number.isInteger(result.expires_in) || result.expires_in <= 0 || result.expires_in > 120) {
+          throw new Error("Pairing unavailable. Create a new code.");
+        }
+        const remaining = result.expires_in * 1000 - (performance.now() - owner.started);
+        if (remaining <= 0) {
+          output.textContent = "Code expired.";
+          return;
+        }
         output.textContent = "Pair within two minutes: " + result.code;
-        setTimeout(() => { if (output.textContent.endsWith(result.code)) output.textContent = "Code expired."; }, 120000);
-      } catch (error) { showMessage(error.message, "error"); }
+        homepageCodeTimer = setTimeout(() => {
+          if (!homepageRequestCurrent(owner)) return;
+          output.textContent = "Code expired.";
+          homepageCodeTimer = null;
+        }, remaining);
+      } catch (error) {
+        if (homepageRequestCurrent(owner)) showMessage(error.message, "error");
+      } finally { finishHomepageRequest(owner); }
     });
+
     element("homepage-revoke").addEventListener("click", async () => {
+      const owner = beginHomepageRequest();
+      if (!owner) return;
       try {
         await request("/api/homepage/revoke", "POST", {});
+        if (!homepageRequestCurrent(owner)) return;
         element("homepage-code").textContent = "All homepage pairings revoked.";
-      } catch (error) { showMessage(error.message, "error"); }
+      } catch (error) {
+        if (homepageRequestCurrent(owner)) showMessage(error.message, "error");
+      } finally { finishHomepageRequest(owner); }
     });
     element("profile-form").addEventListener("submit", async (event) => {
       event.preventDefault();
