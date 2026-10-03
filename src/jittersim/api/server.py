@@ -2,6 +2,7 @@
 
 import argparse
 import base64
+import gzip
 import hashlib
 import hmac
 import io
@@ -12,6 +13,7 @@ import re
 import select
 import socket
 import sqlite3
+import socketserver
 import ssl
 import threading
 import time
@@ -22,7 +24,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from ipaddress import IPv4Network
 from pathlib import Path
-from typing import Any, Collection, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Collection, Dict, List, Optional, Sequence, Set, Tuple
 from urllib.parse import parse_qs, urlsplit
 
 from jittersim import updates
@@ -143,6 +145,10 @@ TLS_HANDSHAKE_TIMEOUT_SECONDS = 5.0
 REQUEST_INPUT_TIMEOUT_SECONDS = 10.0
 MAX_PENDING_CONNECTION_LIFETIME_SECONDS = 30.0
 MAX_PENDING_DASHBOARD_CONNECTIONS = 16
+# Requests handled at the same time. A request over the limit gets a clear 503.
+MAX_DASHBOARD_WORKERS = 16
+# Extra threads kept for Panic alone, so it still gets in when every ordinary slot is busy.
+RESERVED_PANIC_WORKERS = 2
 RESPONSE_SEND_TIMEOUT_SECONDS = 5.0
 # A settings export with many profiles is larger than ordinary requests.
 MAX_IMPORT_BODY_BYTES = 1024 * 1024
@@ -230,6 +236,8 @@ ACTION_PATHS = frozenset(
      "/api/access-point/reset-name")
 )
 PUBLIC_READ_PATHS = frozenset(("/", "/api/health"))
+# Panic runs ahead of other writes: it never waits for the write lock of an apply in flight.
+PRIORITY_WRITE_PATHS = frozenset(("/api/normal-access",))
 
 
 # Raw string: JavaScript escapes such as "\n" must reach the browser unchanged.
@@ -10432,6 +10440,42 @@ DASHBOARD_HTML = DASHBOARD_HTML.replace("</style>", Path(__file__).with_name("ph
 DASHBOARD_HTML = DASHBOARD_HTML.replace("    startDashboard();", Path(__file__).with_name("access.js").read_text(encoding="utf-8") + "\n    startDashboard();")
 
 
+_DASHBOARD_PAGE_CACHE: Dict[str, Tuple[str, bytes, bytes, str]] = {}
+
+
+def _dashboard_page() -> Tuple[bytes, bytes, str]:
+    """Return the page bytes, a gzip copy and an ETag, made once for each page text."""
+
+    cached = _DASHBOARD_PAGE_CACHE.get("page")
+    if cached is None or cached[0] is not DASHBOARD_HTML:
+        raw = DASHBOARD_HTML.encode("utf-8")
+        etag = '"' + hashlib.sha256(raw).hexdigest()[:32] + '"'
+        cached = (DASHBOARD_HTML, raw, gzip.compress(raw, 6, mtime=0), etag)
+        _DASHBOARD_PAGE_CACHE["page"] = cached
+    return cached[1], cached[2], cached[3]
+
+
+def dashboard_page_bytes() -> bytes:
+    """The page as sent without compression. _send_response recognises this exact object."""
+
+    return _dashboard_page()[0]
+
+
+def _accepts_gzip(header: str) -> bool:
+    for part in header.lower().split(","):
+        name, _, parameters = part.strip().partition(";")
+        if name.strip() not in ("gzip", "*"):
+            continue
+        quality = parameters.strip()
+        if quality.startswith("q="):
+            try:
+                return float(quality[2:]) > 0
+            except ValueError:
+                return False
+        return True
+    return False
+
+
 def _inline_source_hashes(tag: str, page: str = DASHBOARD_HTML) -> str:
     """Hash every inline <tag> block so the policy allows each of them."""
 
@@ -11023,12 +11067,20 @@ class _PendingConnection:
     want_write: bool = False
 
 
-class ControlServer(HTTPServer):
-    """Serve configuration and plan data from one repository."""
+class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
+    """Serve configuration and plan data from one repository.
+
+    Each request runs on its own daemon thread so one slow request (an apply or a
+    scan or a router call) cannot hold up Panic or the health check. The accept
+    loop still advances every TLS handshake without blocking, and at most
+    `MAX_DASHBOARD_WORKERS` requests run at once.
+    """
 
     allow_reuse_address = True
-    # The server handles one connection at a time, so bound how long an idle or
-    # slow client (such as a browser preconnect) can hold it.
+    daemon_threads = True
+    block_on_close = False
+    # Browsers open several connections at once. The default queue of five resets the rest.
+    request_queue_size = 64
     request_timeout_seconds = 5.0
     # Where an uploaded release waits for the root helper (see jittersim.updates.stage_upload).
     release_spool = updates.UPLOAD_SPOOL
@@ -11072,7 +11124,68 @@ class ControlServer(HTTPServer):
         self._pending_connections: Dict[socket.socket, _PendingConnection] = {}
         self._request_inputs: Dict[socket.socket, Tuple[bytes, float]] = {}
         self._stop_connections = threading.Event()
+        self._workers_lock = threading.Lock()
+        self._active_workers = 0
+        self._reserved_requests: Set[socket.socket] = set()
         super().__init__(server_address, ControlRequestHandler)
+
+    @property
+    def active_workers(self) -> int:
+        """Return how many requests are being handled right now."""
+
+        with self._workers_lock:
+            return self._active_workers
+
+    def process_request(self, request: socket.socket, client_address: Any) -> None:
+        with self._workers_lock:
+            accepted = self._active_workers < MAX_DASHBOARD_WORKERS + RESERVED_PANIC_WORKERS
+            if accepted:
+                if self._active_workers >= MAX_DASHBOARD_WORKERS:
+                    # Only Panic is served from the reserve. The handler refuses the rest.
+                    self._reserved_requests.add(request)
+                self._active_workers += 1
+        if not accepted:
+            self._refuse_request(request)
+            return
+        try:
+            threading.Thread(
+                target=self._serve_request, args=(request, client_address),
+                name="jittersim-request", daemon=True,
+            ).start()
+        except BaseException:
+            with self._workers_lock:
+                self._active_workers -= 1
+            self.shutdown_request(request)
+            raise
+
+    def is_reserved_request(self, request: socket.socket) -> bool:
+        """Tell whether this request runs in a slot that is kept for Panic."""
+
+        with self._workers_lock:
+            return request in self._reserved_requests
+
+    def _serve_request(self, request: socket.socket, client_address: Any) -> None:
+        try:
+            self.process_request_thread(request, client_address)
+        finally:
+            with self._workers_lock:
+                self._active_workers -= 1
+
+    def _refuse_request(self, request: socket.socket) -> None:
+        """Tell a client over the limit to retry instead of leaving it hanging."""
+
+        # The accept loop must never wait for a client, so nothing here blocks.
+        try:
+            request.setblocking(False)
+            request.send(
+                b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\n"
+                b"Content-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            # Read what the client already sent so closing does not reset the reply.
+            request.recv(65536)
+        except (OSError, ssl.SSLError):
+            pass
+        self.shutdown_request(request)
 
     def get_request(self) -> Tuple[socket.socket, Any]:
         """Advance waiting connections without serial waits for idle clients."""
@@ -11143,20 +11256,6 @@ class ControlServer(HTTPServer):
         except OSError:
             connection.close()
 
-    def finish_request(self, request: socket.socket, client_address: Any) -> None:
-        started = time.monotonic()
-        try:
-            super().finish_request(request, client_address)
-        finally:
-            # Waiting clients keep their remaining time while one request runs.
-            finished = time.monotonic()
-            elapsed = max(0.0, finished - started)
-            for connection, pending in tuple(self._pending_connections.items()):
-                if finished >= pending.expires_at:
-                    self._close_pending(connection)
-                else:
-                    pending.deadline = min(pending.expires_at, pending.deadline + elapsed)
-
     def _close_pending(self, connection: socket.socket) -> None:
         self._pending_connections.pop(connection, None)
         connection.close()
@@ -11171,6 +11270,8 @@ class ControlServer(HTTPServer):
 
     def shutdown_request(self, request: socket.socket) -> None:
         self._request_inputs.pop(request, None)
+        with self._workers_lock:
+            self._reserved_requests.discard(request)
         super().shutdown_request(request)
 
     def dashboard_access(self, peer: str, operation: str = "status", **values: Any) -> Dict[str, Any]:
@@ -11268,7 +11369,7 @@ class ControlServer(HTTPServer):
         if workflow is not None:
             return workflow
         if path == "/":
-            return HTTPStatus.OK, "text/html; charset=utf-8", DASHBOARD_HTML.encode("utf-8")
+            return HTTPStatus.OK, "text/html; charset=utf-8", dashboard_page_bytes()
         if path == "/api/health":
             helper_reachable = False
             if self.helper_client is not None:
@@ -11660,10 +11761,13 @@ class ControlServer(HTTPServer):
             )
             return HTTPStatus.OK, "application/json", _json_bytes({"plan": plan_to_payload(plan)})
         if path == "/api/conditions":
-            operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
-            with operation:
-                plan = self.scheduler.applied_plan() if self.scheduler is not None else None
-                sources = self.scheduler.applied_target_states() if self.scheduler is not None else None
+            # Read the applied plan without the apply lock, so this read never waits for an apply.
+            if self.scheduler is None:
+                plan, sources = None, None
+            elif hasattr(self.scheduler, "applied_snapshot"):
+                plan, sources = self.scheduler.applied_snapshot()
+            else:
+                plan, sources = self.scheduler.applied_plan(), self.scheduler.applied_target_states()
             applied = plan is not None
 
             def described_condition(state, target_id):
@@ -11895,7 +11999,12 @@ class ControlServer(HTTPServer):
         return HTTPStatus.NOT_FOUND, "application/json", _json_bytes({"error": "not found"})
 
     def write_response_for(self, path: str, payload: Dict[str, Any]) -> Tuple[int, str, bytes]:
-        operation = self.scheduler.exclusive() if self.scheduler is not None and path not in ACTION_PATHS else nullcontext()
+        # Panic skips the write lock so it never queues behind an apply in flight.
+        operation = (
+            self.scheduler.exclusive()
+            if self.scheduler is not None and path not in ACTION_PATHS and path not in PRIORITY_WRITE_PATHS
+            else nullcontext()
+        )
         with operation:
             before = self.repository.get_runtime_state().configuration_version
             try:
@@ -13295,9 +13404,8 @@ class ControlServer(HTTPServer):
         }
 
     def _general_profile_status(self) -> dict:
-        operation = self.scheduler.exclusive() if self.scheduler else nullcontext()
-        with operation:
-            return self._general_profile_status_locked()
+        # A read: it must not wait behind an apply that holds the write lock.
+        return self._general_profile_status_locked()
 
     def _general_profile_status_locked(self) -> dict:
         profile = self.repository.get_general_profile()
@@ -13838,6 +13946,7 @@ class ControlServer(HTTPServer):
                 "application/json",
                 _json_bytes({"error": "network helper is not configured"}),
             )
+        halts_at_start = getattr(self.scheduler, "halt_count", 0)
         try:
             prepared = (
                 self.scheduler.prepare_plan(
@@ -13872,6 +13981,8 @@ class ControlServer(HTTPServer):
         if self.scheduler is not None and sample_usage:
             # Applying recreates the helper counters, so record their traffic first.
             self.scheduler.sample_usage(repository=self.repository)
+        if self._panic_since(halts_at_start):
+            return self._stopped_by_panic(undo=False)
         try:
             if explicit_apply:
                 result = self.helper_client.apply(plan=plan, explicit_apply=True)
@@ -13902,6 +14013,8 @@ class ControlServer(HTTPServer):
                     }
                 ),
             )
+        if self._panic_since(halts_at_start):
+            return self._stopped_by_panic(undo=True)
         self.repository.rebase_quota_counters(now=int(time.time()))
         state = self.repository.update_runtime_state(
             observed_state="applied",
@@ -13911,6 +14024,11 @@ class ControlServer(HTTPServer):
         )
         if self.scheduler is not None:
             self.scheduler.activate_plan(repository=self.repository, prepared=prepared)
+            if self._panic_since(halts_at_start):
+                # Panic landed after the last check. It paused the scheduler and
+                # the activation above started it again, and the state written
+                # above hides Panic's own. Back out the same way as before.
+                return self._stopped_by_panic(undo=True)
         return (
             HTTPStatus.OK,
             "application/json",
@@ -13927,6 +14045,29 @@ class ControlServer(HTTPServer):
                 }
             ),
         )
+
+    def _panic_since(self, halts_at_start: int) -> bool:
+        return getattr(self.scheduler, "halt_count", 0) != halts_at_start
+
+    def _stopped_by_panic(self, *, undo: bool) -> Tuple[int, str, bytes]:
+        """Back out of an apply that Panic overtook, so Panic stays the last word."""
+
+        if undo and self.helper_client is not None:
+            # The helper already applied this plan after Panic released the network.
+            try:
+                restore = getattr(self.helper_client, "normal_access", self.helper_client.reset)
+                restore()
+            except HelperClientError:
+                LOGGER.error("could not undo an apply that Panic overtook")
+        if self.scheduler is not None:
+            self.scheduler.pause()
+        state = self.repository.update_runtime_state(
+            observed_state="reset", last_action="reset", last_result="success", last_error=None,
+        )
+        return HTTPStatus.CONFLICT, "application/json", _json_bytes({
+            "error": "Panic stopped this apply. Choose Start with saved settings when it is safe.",
+            "state": self._runtime_state_with_running(state),
+        })
 
     def _reset_network(self) -> Tuple[int, str, bytes]:
         operation = self.scheduler.exclusive() if self.scheduler is not None else nullcontext()
@@ -14076,6 +14217,23 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
 
     def version_string(self) -> str:
         return self.server_version
+
+    def parse_request(self) -> bool:
+        if not super().parse_request():
+            return False
+        if self.server.is_reserved_request(self.connection) and not (
+            self.command == "POST" and urlsplit(self.path).path in PRIORITY_WRITE_PATHS
+        ):
+            # Every ordinary slot is busy and this one is kept for Panic.
+            self.close_connection = True
+            self._send_response(
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+                content_type="application/json",
+                body=_json_bytes({"error": "the dashboard is busy, try again"}),
+                headers={"Retry-After": "1"},
+            )
+            return False
+        return True
 
     def do_GET(self) -> None:
         parsed_path = urlsplit(self.path)
@@ -14306,10 +14464,28 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         body: bytes,
         headers: Optional[Dict[str, str]] = None,
     ) -> None:
+        cache_control = "no-store"
+        page_headers: Dict[str, str] = {}
+        raw_page, packed_page, page_etag = _dashboard_page()
+        if status == HTTPStatus.OK and body is raw_page:
+            # The page only changes with a new release: a reload asks with its ETag and an
+            # unchanged page answers 304. Browsers that accept gzip get about a fifth of it.
+            request_headers = getattr(self, "headers", None) or {}
+            cache_control = "no-cache"
+            page_headers = {"ETag": page_etag, "Vary": "Accept-Encoding"}
+            asked = [tag.strip() for tag in (request_headers.get("If-None-Match") or "").split(",")]
+            if page_etag in asked or "*" in asked:
+                status, body = HTTPStatus.NOT_MODIFIED, b""
+            elif _accepts_gzip(request_headers.get("Accept-Encoding") or ""):
+                body = packed_page
+                page_headers["Content-Encoding"] = "gzip"
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        if status != HTTPStatus.NOT_MODIFIED:
+            self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", cache_control)
+        for name, value in page_headers.items():
+            self.send_header(name, value)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")

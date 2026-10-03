@@ -1,6 +1,7 @@
 """Unix-socket boundary for the privileged networking process."""
 
 import argparse
+import copy
 import grp
 import hashlib
 import json
@@ -1381,14 +1382,81 @@ def _validated_queues(raw_queues: Any) -> Dict[str, Any]:
     return queues
 
 
+# Helper actions that only read, so they leave a recent client scan valid.
+READ_ONLY_ACTIONS = frozenset((
+    "ping", "dashboard-access", "gateway-status", "capabilities", "access-status",
+    "update-status", "clients", "uplink-info", "observe-dns", "queue-stats", "traffic-counters",
+    "router-preview-ap", "router-status", "router-check", "router-wifi-credentials",
+))
+
+
+class _SnapshotFlight:
+    """One client scan in progress that other callers wait for."""
+
+    def __init__(self, generation: int) -> None:
+        self.generation = generation
+        self.done = threading.Event()
+        self.value: Optional[Dict[str, Any]] = None
+        self.error: Optional[BaseException] = None
+
+
+class _SnapshotCache:
+    """A short-lived shared client scan, shared by every copy of one client."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.generation = 0
+        self.expires_at = 0.0
+        self.value: Optional[Dict[str, Any]] = None
+        self.flight: Optional[_SnapshotFlight] = None
+        # The last good scan and when it was read, for a short stand-in while the helper is busy.
+        self.recent: Optional[Tuple[float, Dict[str, Any]]] = None
+
+
 class HelperClient:
     """Send bounded requests to a local privileged helper."""
+
+    # The scheduler and many dashboard reads ask for the clients. Within this window
+    # they share one scan, because each scan runs iw and ip on the Pi.
+    snapshot_ttl_seconds = 1.5
 
     def __init__(self, *, socket_path: Path, timeout_seconds: float = 8.0) -> None:
         if timeout_seconds <= 0 or timeout_seconds > 90:
             raise ValueError("timeout_seconds must be greater than 0 and no more than 90")
         self.socket_path = socket_path
         self.timeout_seconds = timeout_seconds
+        self._snapshots = _SnapshotCache()
+
+    def _with_timeout(self, timeout_seconds: float) -> "HelperClient":
+        """Return a client with a longer timeout that shares this client's scan cache."""
+
+        client = HelperClient(socket_path=self.socket_path, timeout_seconds=timeout_seconds)
+        client._snapshots = self._snapshots
+        client.snapshot_ttl_seconds = self.snapshot_ttl_seconds
+        return client
+
+    def invalidate_connected_devices(self, *, keep_recent: bool = False) -> None:
+        """Forget the shared client scan, for example after the network changed.
+
+        `keep_recent` is for a change that has only started: the last good list still
+        describes the network until the change is done.
+        """
+
+        with self._snapshots.lock:
+            self._snapshots.generation += 1
+            self._snapshots.value = None
+            self._snapshots.expires_at = 0.0
+            if not keep_recent:
+                self._snapshots.recent = None
+
+    def recent_connected_devices(self, max_age_seconds: float) -> Optional[Dict[str, Any]]:
+        """Return the last good scan if it is young enough and no change has happened since."""
+
+        with self._snapshots.lock:
+            recent = self._snapshots.recent
+            if recent is None or not 0 <= time.monotonic() - recent[0] <= max_age_seconds:
+                return None
+            return copy.deepcopy(recent[1])
 
     def ping(self) -> Dict[str, Any]:
         """Check whether the helper is accepting requests."""
@@ -1532,7 +1600,7 @@ class HelperClient:
         )
 
     def normal_access(self) -> Dict[str, Any]:
-        client = HelperClient(socket_path=self.socket_path, timeout_seconds=60)
+        client = self._with_timeout(60)
         return client._request({"action": "normal-access"})
 
     def access_status(self) -> Dict[str, Any]:
@@ -1540,13 +1608,13 @@ class HelperClient:
 
     def apply_access(self, policy: AccessPlan) -> Dict[str, Any]:
         # DNS restart and recovery can take longer than a status read.
-        client = HelperClient(socket_path=self.socket_path, timeout_seconds=60)
+        client = self._with_timeout(60)
         return client._request({"action": "access-apply", "policy": policy.payload()})
 
     def configure_access_point(self, *, ssid: str, password: str) -> Dict[str, Any]:
         """Set the local test AP credentials through the privileged helper."""
 
-        client = HelperClient(socket_path=self.socket_path, timeout_seconds=90)
+        client = self._with_timeout(90)
         return client._request(
             {"action": "configure-ap", "ssid": ssid, "password": password}
         )
@@ -1555,7 +1623,7 @@ class HelperClient:
         """Reset only the Pi Wi-Fi name without dashboard or router credentials."""
 
         # Live security checks and one restoration can take up to 75 seconds.
-        client = HelperClient(socket_path=self.socket_path, timeout_seconds=90)
+        client = self._with_timeout(90)
         return client._request({"action": "wifi-reset"})
 
     def preview_router_wifi(self, *, admin_password: str) -> Dict[str, Any]:
@@ -1634,8 +1702,45 @@ class HelperClient:
         return result
 
     def connected_device_snapshot(self) -> Dict[str, Any]:
-        """Return current client details and whether association status is known."""
+        """Return current client details and whether association status is known.
 
+        Callers within `snapshot_ttl_seconds` share one scan, and callers that arrive
+        while a scan runs wait for it. A change to the network starts a fresh scan.
+        """
+
+        cache = self._snapshots
+        with cache.lock:
+            if cache.value is not None and time.monotonic() < cache.expires_at:
+                return copy.deepcopy(cache.value)
+            flight = cache.flight
+            leader = flight is None or flight.generation != cache.generation
+            if leader:
+                flight = cache.flight = _SnapshotFlight(cache.generation)
+        if not leader:
+            flight.done.wait()
+            if flight.error is not None:
+                raise flight.error
+            return copy.deepcopy(flight.value)
+        try:
+            value = self._read_connected_device_snapshot()
+        except BaseException as error:
+            flight.error = error
+            raise
+        else:
+            flight.value = value
+            with cache.lock:
+                if flight.generation == cache.generation:
+                    cache.value = value
+                    cache.expires_at = time.monotonic() + self.snapshot_ttl_seconds
+                    cache.recent = (time.monotonic(), copy.deepcopy(value))
+            return copy.deepcopy(value)
+        finally:
+            with cache.lock:
+                if cache.flight is flight:
+                    cache.flight = None
+            flight.done.set()
+
+    def _read_connected_device_snapshot(self) -> Dict[str, Any]:
         response = self._request({"action": "clients"})
         devices = response.get("devices")
         association_status_available = response.get("association_status_available")
@@ -1831,6 +1936,18 @@ class HelperClient:
         return result
 
     def _request(
+        self, payload: Dict[str, Any], *, timeout_seconds: Optional[float] = None
+    ) -> Dict[str, Any]:
+        if payload.get("action") in READ_ONLY_ACTIONS:
+            return self._send(payload, timeout_seconds=timeout_seconds)
+        # Anything else may change who is connected, so no earlier scan stays valid.
+        self.invalidate_connected_devices(keep_recent=True)
+        try:
+            return self._send(payload, timeout_seconds=timeout_seconds)
+        finally:
+            self.invalidate_connected_devices()
+
+    def _send(
         self, payload: Dict[str, Any], *, timeout_seconds: Optional[float] = None
     ) -> Dict[str, Any]:
         encoded = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")

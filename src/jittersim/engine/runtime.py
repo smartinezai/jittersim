@@ -188,6 +188,8 @@ class RuntimeScheduler:
         self._rolls: Dict[str, _DeviceRollState] = {}
         self._current_payload = None
         self._paused = True
+        # Counts Panic requests so an apply that was running meanwhile can tell.
+        self._halt_count = 0
         self._lock = threading.RLock()
         # Held while a plan is built and applied, so pause() and manual applies
         # never interleave with a scheduled apply.
@@ -416,6 +418,41 @@ class RuntimeScheduler:
             self._reported_failures[kind] = reason
             return True
 
+    def halt(self) -> None:
+        """Stop scheduled reapplication at once, without waiting for an apply in flight.
+
+        Panic uses this so it never queues behind a slow apply. An apply that was
+        running checks `halt_count` before it records its result.
+        """
+
+        with self._lock:
+            self._paused = True
+            self._halt_count += 1
+            self._current_payload = None
+
+    def finish_halt(self) -> None:
+        """Clear the roll state of a halt when no apply is in flight.
+
+        An apply that is in flight backs out on its own and clears it then.
+        """
+
+        if self._apply_lock.acquire(blocking=False):
+            try:
+                self.pause()
+            finally:
+                self._apply_lock.release()
+
+    @property
+    def halt_count(self) -> int:
+        with self._lock:
+            return self._halt_count
+
+    def applied_snapshot(self):
+        """Return the applied plan and its source descriptions without the apply lock."""
+
+        with self._lock:
+            return self.applied_plan(), self.applied_target_states()
+
     def sample_usage(self, *, repository: ConfigRepository) -> None:
         """Record quota and device traffic before the helper counters restart."""
 
@@ -528,10 +565,19 @@ class RuntimeScheduler:
             with self._lock:
                 if self._paused or self._helper_client is None:
                     return False
-            return self._tick(repository=repository, now=now)
+                halts_at_start = self._halt_count
+            return self._tick(repository=repository, now=now, halts_at_start=halts_at_start)
 
-    def _tick(self, *, repository: Optional[ConfigRepository], now: Optional[float]) -> bool:
+    def _tick(
+        self,
+        *,
+        repository: Optional[ConfigRepository],
+        now: Optional[float],
+        halts_at_start: Optional[int] = None,
+    ) -> bool:
         current_time = time.time() if now is None else now
+        if halts_at_start is None:
+            halts_at_start = self.halt_count
         owned_repository = repository is None
         active_repository = repository or ConfigRepository(self._database_path)
         configuration_version: Optional[int] = None
@@ -623,6 +669,17 @@ class RuntimeScheduler:
                 # scheduler must retry even if the desired plan is unchanged.
                 self.invalidate_applied_plan()
                 raise
+            with self._lock:
+                overtaken = self._halt_count != halts_at_start
+            if overtaken:
+                # Panic does not wait for an apply, so it may have run before this one
+                # reached the helper. Panic stays the last word.
+                try:
+                    self._helper_client.reset()
+                except HelperClientError:
+                    LOGGER.error("could not undo a scheduled apply that Panic overtook", exc_info=True)
+                self.invalidate_applied_plan()
+                return False
             active_repository.rebase_quota_counters(now=int(current_time))
             with self._lock:
                 self._current_payload = payload

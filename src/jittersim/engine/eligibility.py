@@ -1,5 +1,6 @@
 """Select verified clients before any profile behavior is chosen."""
 
+import time
 from dataclasses import dataclass, replace
 from ipaddress import IPv4Address
 from typing import Dict, Optional
@@ -57,15 +58,40 @@ def eligible_clients(
     return EligibleClients(tuple(eligible), protected, frozenset(excluded), tuple(unverified))
 
 
+# How long the last good client list stands in for a helper that is busy.
+STALE_SNAPSHOT_SECONDS = 10.0
+
+
 def station_snapshot(helper) -> dict:
-    """Return an explicit unknown state when live identity cannot be checked."""
+    """Return the live clients, or the last good list marked stale, or an unknown state.
+
+    A busy helper must not make the scheduler drop every device profile for a tick,
+    so a recent good list is reused for a bounded time.
+    """
 
     from jittersim.networking.helper import HelperClientError
 
     try:
-        return helper.connected_device_snapshot()
+        snapshot = helper.connected_device_snapshot()
     except (AttributeError, HelperClientError, OSError, TypeError, ValueError):
+        recent_clients = getattr(helper, "recent_connected_devices", None)
+        if callable(recent_clients):
+            # The client remembers its last good scan and forgets it when the network changes.
+            recent = recent_clients(STALE_SNAPSHOT_SECONDS)
+            if isinstance(recent, dict):
+                return {**recent, "stale": True}
+            return {"devices": [], "association_status_available": False}
+        last = getattr(helper, "_last_good_station_snapshot", None)
+        if (isinstance(last, tuple) and len(last) == 2
+                and 0 <= time.monotonic() - last[0] <= STALE_SNAPSHOT_SECONDS):
+            return {**last[1], "stale": True}
         return {"devices": [], "association_status_available": False}
+    if not callable(getattr(helper, "recent_connected_devices", None)):
+        try:
+            helper._last_good_station_snapshot = (time.monotonic(), snapshot)
+        except AttributeError:
+            pass
+    return snapshot
 
 
 def device_protection_states(
