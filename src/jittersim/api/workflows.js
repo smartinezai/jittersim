@@ -215,6 +215,8 @@ const readTimes = new Map();
 let lastSuccessfulRead = null;
 function recordRead(path, error) {
   if (error && error.status && error.status < 500) return;
+  // While the Pi restarts its Wi-Fi the reconnect banner explains it. No second notice.
+  if (error && error.connectionLost && wifiReconnectActive()) return;
   if (error) {
     if (failedReads.size >= 64) failedReads.delete(failedReads.keys().next().value);
     failedReads.set(path, error.message);

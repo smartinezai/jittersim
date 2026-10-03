@@ -3,6 +3,7 @@
 import re
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -15,8 +16,11 @@ def served_functions():
     def block(start, end):
         return script[script.index(start) : script.index(end, script.index(start))]
 
+    reconnect = Path(__file__).resolve().parents[2] / "src/jittersim/api/reconnect.js"
     return (
-        block("const privateDataPanelIds =", "function setDashboardUnlocked(")
+        reconnect.read_text() + "\n"
+        + "hideWifiBanner = () => {}; showWifiBanner = () => {}; resumeWifiChangeNotice = async () => {};\n"
+        + block("const privateDataPanelIds =", "function setDashboardUnlocked(")
         + block("function setPrivateDataPanels(", "async function loadPrivateDataPanel(")
         + block("let helperConfigured =", "let profiles =")
         + block("async function request(", "const adminTokenHelp =")
@@ -89,7 +93,10 @@ function setDashboardUnlocked() {}
 async function refresh() {refreshCalls++}
 async function loadTrafficSettings() {}
 async function startTrafficSampling() {}
-async function fetch(path, options) {networkCalls.push({path, options}); return await network()}
+async function fetch(path, options) {
+  if (path === "/api/wifi-operation/request-id") return {ok:true,json:async()=>({request_id:"fixture-request"})};
+  networkCalls.push({path, options}); return await network();
+}
 function deferred() {
   let resolve;
   const promise = new Promise(done => {resolve = done});
@@ -123,6 +130,18 @@ function savedEntry(key) {
 
 
 CASES = {
+    "lost_diagnostics_keeps_token_and_does_not_reject_it": r"""
+      enter("admin-token", "fixture token");
+      await checkAdminToken();
+      tick("remember-admin-token", true);
+      recheckTokenWhenPiAnswers = () => {};
+      toolResult = {ok:false,message:LOST_CONNECTION_TEXT,connectionLost:true};
+      await checkAdminToken();
+      assert.equal(adminTokenRejected, false);
+      assert.equal(adminTokenVerified, false);
+      assert.equal(element("admin-token").value, "fixture token");
+      assert.equal(savedEntry(ADMIN_KEY).value, "fixture token");
+    """,
     "router_switch_tracks_confirmed_state_and_expires": r"""
       helperConfigured = true;
       enter("admin-token", "fixture token");
@@ -252,6 +271,7 @@ CASES = {
       for (const id of ["sync-router-ap", "router-wifi-toggle"])
         assert.equal(element(id).disabled, true);
       await routerAction("/api/router/wifi", {enabled:true}, "Enabling", element("router-wifi-toggle"));
+      await new Promise(resolve => setImmediate(resolve));
       assert.equal(networkCalls.length, 1);
       enter("router-admin-password", "");
       enter("router-admin-password", "fixture password");
@@ -283,7 +303,7 @@ CASES = {
       assert.equal(networkCalls[0].options.method, "POST");
       assert.equal(networkCalls[0].options.headers.Authorization, "Bearer fixture token");
       assert.deepEqual(
-        JSON.parse(networkCalls[0].options.body), {admin_password:"fixture password", background:true});
+        JSON.parse(networkCalls[0].options.body), {admin_password:"fixture password", background:true, request_id:"fixture-request"});
       assert.equal(element("router-credential-state").textContent, "Accepted");
       assert.equal(element("router-credential-state").className, "credential-state accepted");
       assert.match(element("credential-router-status").textContent, /accepted.*nothing.*changed/i);
@@ -867,17 +887,19 @@ function element(id) {
   return nodes.get(id);
 }
 async function request() {throw failure}
+function isConnectionLost(error) {return error.connectionLost === true}
 async function loadRandomWebsiteAnalytics() {}
 """
         + real
         + r"""
 (async () => {
   failure = Object.assign(new Error("unauthorized"), {status: 401});
-  assert.deepEqual(await loadAdminTools(), {ok: false, message: "unauthorized", status: 401});
-  failure = new Error("Failed to fetch");
+  assert.deepEqual(await loadAdminTools(), {ok: false, message: "unauthorized", status: 401, connectionLost:false});
+  failure = Object.assign(new Error("Lost connection"), {connectionLost:true});
   const network = await loadAdminTools();
   assert.equal(network.ok, false);
   assert.equal(network.status, undefined);
+  assert.equal(network.connectionLost, true);
   console.log("CASE-COMPLETE");
 })().catch(error => {console.error(error); process.exitCode = 1});
 """
