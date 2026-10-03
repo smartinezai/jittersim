@@ -31,6 +31,9 @@ const rendered = [];
 const openedCredentials = [];
 let adminTokenVerified = true;
 let adminTokenChecking = false;
+let adminTokenRevision = 0;
+let adminTokenRejected = false;
+let adminTokenRefused = false;
 let connectedDevicesRequestInFlight = false;
 let tokenChecks = 0;
 let responses = {};
@@ -42,6 +45,7 @@ function element(id) {
     setAttribute(key, value) {this.attributes.set(key, value)},
     removeAttribute(key) {this.attributes.delete(key)},
     getAttribute(key) {return this.attributes.get(key)},
+    replaceChildren(...values) {this.children = values; this.textContent = ""},
     addEventListener(kind, callback) {this.listeners.set(kind, callback)},
     contains() {return false}
   });

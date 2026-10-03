@@ -33,6 +33,7 @@ LOG_SERVICES = {
     "dashboard": "jittersim-dashboard.service",
     "dns": "jittersim-dns.service",
     "helper": "jittersim-helper.service",
+    "name": "jittersim-mdns.service",
     "service-watch": "jittersim-service-watch.service",
     "update": "jittersim-update.service",
 }
@@ -633,6 +634,18 @@ def _service_states():
     }
 
 
+def _print_dashboard_name(config_dir=None, status_path=None) -> None:
+    """The one dashboard address and whether it is announced on both networks."""
+    from jittersim import localname, mdnsname
+
+    name = localname.read_local_name((config_dir or localname.CONFIG_DIR) / "trust.env")
+    print(f"Dashboard address: https://{name}:8080")
+    status = mdnsname.read_status(status_path or mdnsname.STATUS_FILE, name=name)
+    print(f"Dashboard name announcement: {status['state']}")
+    for line in mdnsname.summary_lines(status):
+        print(f"  {line}")
+
+
 def _diagnostics(arguments) -> int:
     repository = _open_repository(arguments.database)
     if repository is None:
@@ -672,6 +685,7 @@ def _diagnostics(arguments) -> int:
             print("Applied access: unavailable")
     except HelperClientError:
         print("Applied access: unavailable")
+    _print_dashboard_name()
     print("Services:")
     service_states = _service_states()
     for short_name in LOG_SERVICES:
@@ -767,12 +781,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "access", "update", "persistence", "diagnostics", "logs"
     ):
         return _run_operations(raw_arguments)
+    if raw_arguments and raw_arguments[0] == "dashboard-name":
+        from jittersim.dashboard_name_cli import main as name_main
+
+        return name_main(raw_arguments[1:])
     if raw_arguments and raw_arguments[0] in ("-h", "--help"):
         parser = _build_parser()
         parser.epilog = (
             "Headless commands on the Pi: access status, access apply, access dns-failure, "
             "persistence show, persistence set on/off, diagnostics, logs, "
-            "update check, update install, update rollback, update stage, update trust-key "
+            "update check, update install, update rollback, dashboard-name, update stage, update trust-key "
             "and wifi reset. "
             "Commands for your Mac through the Pi's HTTPS dashboard: connect, status, "
             "profiles list/apply-all/stop-all, traffic, wifi show and impact. "

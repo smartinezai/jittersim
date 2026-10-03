@@ -42,7 +42,7 @@ def test_the_page_is_compressed_when_the_browser_accepts_gzip():
     assert gzip.decompress(payload) == server.DASHBOARD_HTML.encode("utf-8")
     assert len(payload) < len(server.DASHBOARD_HTML.encode("utf-8")) / 3
     assert headers["cache-control"] == "no-cache"
-    assert headers["etag"].startswith('"') and headers["etag"].endswith('"')
+    assert headers["etag"].startswith('W/"') and headers["etag"].endswith('"')
     assert "content-security-policy" in headers
 
 

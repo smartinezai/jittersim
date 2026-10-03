@@ -13,10 +13,12 @@ table inet jittersim_control {
             192.168.0.0/16
         } tcp dport 8080 accept
         tcp dport 8080 counter drop comment "keep dashboard on private management paths"
-        # Port 5353 is mDNS only. The filtered resolver listens on 5335 and test
-        # clients reach it through the access table's redirect from port 53.
-        iifname "@TEST_INTERFACE@" udp dport 5353 counter drop comment "deny mDNS queries from test Wi-Fi"
-        iifname "@TEST_INTERFACE@" udp sport 5353 counter drop comment "deny mDNS replies from test Wi-Fi"
+        # Port 5353 is mDNS only. The Pi announces its one neutral dashboard name
+        # on the test Wi-Fi and answers name questions there. Avahi publishes
+        # nothing else (see jittersim.mdnsname). The filtered resolver listens on
+        # 5335 and test clients reach it through the access table's redirect from
+        # port 53.
+        iifname "@TEST_INTERFACE@" udp dport 5353 counter accept comment "allow mDNS name queries from test Wi-Fi"
         iifname "@TEST_INTERFACE@" ip saddr 192.168.50.0/24 tcp dport 3128 accept
         tcp dport 3128 counter drop comment "keep browser proxy on test Wi-Fi"
     }
@@ -24,8 +26,7 @@ table inet jittersim_control {
     chain output {
         type filter hook output priority filter; policy accept;
 
-        oifname "@TEST_INTERFACE@" udp dport 5353 counter drop comment "deny mDNS announcements on test Wi-Fi"
-        oifname "@TEST_INTERFACE@" udp sport 5353 counter drop comment "deny mDNS replies on test Wi-Fi"
+        oifname "@TEST_INTERFACE@" udp sport 5353 counter accept comment "allow mDNS answers on test Wi-Fi"
     }
 
     chain forward {
