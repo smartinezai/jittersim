@@ -107,7 +107,13 @@ def run():
                     page.screenshot(path=f"test-results/dashboard-access-{width}.png")
                     assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
                     page.locator('[data-page-link="access"]').click()
-                    page.wait_for_function("adminToolsPhysicalRead === null")
+                    for _ in range(100):
+                        if page.evaluate("() => adminToolsPhysicalRead === null"):
+                            break
+                        page.wait_for_timeout(50)
+                    assert page.evaluate("() => adminToolsPhysicalRead === null"), (
+                        "the previous diagnostics read did not finish within five seconds"
+                    )
                     held_diagnostics = []
 
                     def hold_diagnostics(route):
