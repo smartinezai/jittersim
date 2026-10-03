@@ -43,6 +43,7 @@ class ControlFirewallTests(unittest.TestCase):
 
         self.assertEqual(sorted(re.sub(r" comment .*", "", line) for line in accepted), sorted([
             'iifname "wlan0" tcp dport 8080 counter accept',
+            'iifname "wlan0" ip daddr 192.168.50.1 tcp dport 8443 accept',
             'iifname "wlan0" udp dport 5353 counter accept',
             'iifname "wlan0" ip saddr 192.168.50.0/24 tcp dport 3128 accept',
             'oifname "wlan0" udp sport 5353 counter accept',
@@ -53,6 +54,7 @@ class ControlFirewallTests(unittest.TestCase):
         for line in (
             'iifname "wlan0" tcp dport 22 counter drop comment "deny SSH from test Wi-Fi"',
             'tcp dport 8080 counter drop comment "keep dashboard on private management paths"',
+            'tcp dport 8443 drop comment "keep homepage policy on test Wi-Fi"',
             'tcp dport 3128 counter drop comment "keep browser proxy on test Wi-Fi"',
         ):
             self.assertIn(line, text)
