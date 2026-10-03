@@ -195,3 +195,50 @@ def test_block_help_says_names_under_a_blocked_name_are_blocked_too(capsys):
         main(["traffic", "block", "--help"])
     text = " ".join(capsys.readouterr().out.split())
     assert "example.com also blocks www.example.com" in text
+
+
+CLEARED = (
+    "The list was cleared on 1 October 2026 when JitterSim was upgraded because protected devices exist."
+    " It fills again as devices browse. Names are kept for 30 days from their last sighting."
+)
+EMPTY = {"available": True, "total_domains": 0, "message": None, "devices": []}
+
+
+def test_an_empty_list_after_an_upgrade_says_why(dashboard, capsys):
+    dashboard.answer("GET", "/api/observations",
+                     {**EMPTY, "list_cleared": {"cleared_at": 1, "rows_cleared": 5, "message": CLEARED}})
+    code, out, _, _ = run(dashboard, capsys, "traffic")
+    assert code == 0
+    assert out.strip() == CLEARED
+
+
+def test_an_empty_list_for_another_reason_keeps_the_old_line(dashboard, capsys):
+    for extra in ({}, {"list_cleared": None}, {"list_cleared": {"message": 5}}, {"list_cleared": "x"}):
+        dashboard.answer("GET", "/api/observations", {**EMPTY, **extra})
+        code, out, _, _ = run(dashboard, capsys, "traffic")
+        assert code == 0
+        assert out.strip() == "No DNS observations yet. Connect a device and run a scan."
+
+
+def test_the_blocked_only_line_does_not_change_after_an_upgrade(dashboard, capsys):
+    dashboard.answer("GET", "/api/observations",
+                     {**EMPTY, "list_cleared": {"cleared_at": 1, "rows_cleared": 5, "message": CLEARED}})
+    code, out, _, _ = run(dashboard, capsys, "traffic", "--blocked")
+    assert code == 0
+    assert out.strip() == "No globally blocked names in the list."
+
+
+def test_json_carries_the_record_only_while_the_list_is_cleared(dashboard, capsys):
+    record = {"cleared_at": 1, "rows_cleared": 5, "message": CLEARED}
+    dashboard.answer("GET", "/api/observations", {**EMPTY, "list_cleared": record})
+    code, out, _, _ = run(dashboard, capsys, "traffic", "--json")
+    assert code == 0 and json.loads(out)["list_cleared"] == record
+    dashboard.answer("GET", "/api/observations", OBSERVATIONS)
+    code, out, _, _ = run(dashboard, capsys, "traffic", "--json")
+    assert code == 0 and json.loads(out)["list_cleared"] is None
+
+
+def test_json_ignores_a_record_that_has_no_message(dashboard, capsys):
+    dashboard.answer("GET", "/api/observations", {**EMPTY, "list_cleared": {"cleared_at": 1}})
+    code, out, _, _ = run(dashboard, capsys, "traffic", "--json")
+    assert code == 0 and json.loads(out)["list_cleared"] is None

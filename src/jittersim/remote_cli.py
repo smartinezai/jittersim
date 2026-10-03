@@ -294,6 +294,20 @@ def _release(client: DashboardClient) -> Dict[str, Any]:
             "message": None}
 
 
+def _forced_window_notice(client: DashboardClient) -> Optional[str]:
+    """The sentence the dashboard shows while a forced window keeps the router's Wi-Fi off."""
+
+    try:
+        data = client.get("/api/forced-windows")
+    except RemoteError as error:
+        if error.status in (401, 403):
+            raise
+        # An older dashboard has no forced windows. The rest of the status still counts.
+        return None
+    notice = data.get("notice")
+    return notice if isinstance(notice, str) and notice else None
+
+
 def _release_text(release: Dict[str, Any]) -> str:
     if release["installed"] is None:
         return "Release on the Pi: unknown" + (
@@ -319,6 +333,7 @@ def _status(arguments: argparse.Namespace) -> int:
     profiles = _require(client.get("/api/profiles").get("profiles"), list)
     lists = _require(client.get("/api/service-lists").get("service_lists"), list)
     release = _release(client)
+    window_notice = _forced_window_notice(client)
     clients = _require(connected.get("devices") or [], list)
     clients_available = (connected.get("available") is not False
                          and connected.get("association_status_available") is not False)
@@ -367,11 +382,14 @@ def _status(arguments: argparse.Namespace) -> int:
             "service_lists": enabled_lists,
             "protected_connected_devices": protected,
             "release": {"installed": release["installed"], "staged": release["staged"]},
+            "forced_window_notice": window_notice,
         })
         return 0
     _out(f"Dashboard: {client.url}")
     _out(_release_text(release))
     _out(summary["text"])
+    if window_notice:
+        _out(window_notice)
     if state.get("last_action"):
         result = f" ({state['last_result']})" if state.get("last_result") else ""
         _out(f"Last action: {state['last_action']}{result}")
@@ -635,6 +653,14 @@ def _print_name(row: Dict[str, Any], indent: str) -> None:
     _out(indent + "  ".join(str(piece) for piece in pieces))
 
 
+def _cleared_list_message(data: Dict[str, Any]) -> Optional[str]:
+    """The dashboard's own sentence when an upgrade cleared the list and no name came back yet."""
+
+    cleared = data.get("list_cleared")
+    message = cleared.get("message") if isinstance(cleared, dict) else None
+    return message if isinstance(message, str) and message.strip() else None
+
+
 @register("traffic", _traffic_parser)
 def _traffic(arguments: argparse.Namespace) -> int:
     client = _client(arguments)
@@ -666,6 +692,7 @@ def _traffic(arguments: argparse.Namespace) -> int:
         _print_json({
             "scan": {"captured_observations": scan.get("captured_observations")} if scan else None,
             "total_domains": data.get("total_domains"),
+            "list_cleared": data.get("list_cleared") if _cleared_list_message(data) else None,
             "devices": shown,
             "note": "Labels come from a built-in table. seen_with is a guess.",
         })
@@ -678,7 +705,7 @@ def _traffic(arguments: argparse.Namespace) -> int:
     if not shown:
         _out(
             "No globally blocked names in the list." if arguments.blocked
-            else "No DNS observations yet. Connect a device and run a scan."
+            else _cleared_list_message(data) or "No DNS observations yet. Connect a device and run a scan."
         )
         return 0
     _out(
