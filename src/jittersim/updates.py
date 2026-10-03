@@ -591,7 +591,7 @@ def copy_bounded(source, destination, limit, what):
     flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
              | getattr(os, "O_CLOEXEC", 0))
     try:
-        descriptor = os.open(source, flags)
+        descriptor = os.dup(source) if isinstance(source, int) else os.open(source, flags)
     except OSError as error:
         raise UpdateError(
             f"the {what} could not be opened. Give a regular file that is not a link"
@@ -845,50 +845,23 @@ def _remove_quietly(path):
         pass
 
 
-def stage_upload(*, spool=UPLOAD_SPOOL, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT):
+def stage_upload(upload_id=None, *, spool=UPLOAD_SPOOL, lock=None, root=UPDATE_ROOT,
+                 code=CODE_ROOT, config=CONFIG_ROOT):
     """Stage the release the dashboard received over HTTPS.
 
     The spool belongs to the dashboard's user so nothing in it is trusted. Both files are
-    copied into a folder only root may enter and are removed from the spool at once. Then
+    copied into a folder only root may enter while ownership excludes replacement. Then
     stage_release does the real work: a trusted key must have signed exactly these bytes
     and the release must be newer than every release installed before. So the admin token
     alone can stage only a release the owner signed.
     """
 
-    spool = Path(spool)
-    try:
-        folder_info = spool.lstat()
-    except OSError as error:
-        raise UpdateError("no uploaded release is waiting") from error
-    if not stat.S_ISDIR(folder_info.st_mode):
-        raise UpdateError("the upload folder is not a plain folder")
-    incoming = root / INCOMING_FOLDER
-    try:
-        incoming.mkdir(mode=0o700, parents=True, exist_ok=True)
-        info = incoming.lstat()
-        if not stat.S_ISDIR(info.st_mode) or (
-            hasattr(os, "geteuid") and info.st_uid != os.geteuid()
-        ):
-            raise UpdateError("the incoming folder is not safe to use")
-        incoming.chmod(0o700)
-    except OSError as error:
-        raise UpdateError("the incoming folder could not be prepared") from error
-    archive = incoming / UPLOAD_ARCHIVE
-    signature = incoming / UPLOAD_SIGNATURE
-    for old in (archive, signature):
-        _remove_quietly(old)
-    try:
-        try:
-            copy_bounded(spool / UPLOAD_ARCHIVE, archive, MAX_ARCHIVE, "uploaded release archive")
-            copy_bounded(spool / UPLOAD_SIGNATURE, signature, MAX_SIGNATURE,
-                         "uploaded release signature")
-        finally:
-            for name in (UPLOAD_ARCHIVE, UPLOAD_SIGNATURE):
-                _remove_quietly(spool / name)
+    # The copied standalone manager never needs this dashboard-only module.
+    from jittersim.release_uploads import LOCK_PATH, root_inputs
+
+    with root_inputs(upload_id, spool=spool, lock=LOCK_PATH if lock is None else lock, root=root) as inputs:
+        archive, signature = inputs
         return stage_release(archive, signature=signature, root=root, code=code, config=config)
-    finally:
-        for leftover in (archive, signature):
-            _remove_quietly(leftover)
 
 
 def update_status(*, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT):

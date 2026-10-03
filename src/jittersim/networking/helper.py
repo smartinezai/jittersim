@@ -25,6 +25,7 @@ from jittersim.engine.access import AccessPlan, access_from_payload
 from jittersim.engine.codec import PlanCodecError, plan_from_payload, plan_to_payload
 from jittersim.engine.plan import EVERYONE_ELSE_QUEUE_ID, NetworkPlan
 from jittersim.updates import UpdateError, request_update, stage_upload, update_status
+from jittersim.release_uploads import UploadBusy, prepare_lock
 
 from .access import AccessManager
 from .applier import MAX_PROTECTED_MACS, ApplyError, NetworkApplier
@@ -243,13 +244,21 @@ class HelperService:
             except (OSError, ValueError, UpdateError):
                 LOGGER.exception("release operation failed")
                 return {"ok": False, "error": "release operation could not be completed"}
-        if action == "update-stage-upload":
+        if action in ("update-stage-upload", "update-stage-identified-upload"):
             # The dashboard has streamed an uploaded release into its spool folder. This
             # root helper copies it away, checks the signature and stages it. The refusal
             # text is one of the update manager's plain sentences, never a path or a trace.
             try:
-                record = stage_upload()
+                if action == "update-stage-identified-upload":
+                    identifier = payload.get("upload_id")
+                    if not isinstance(identifier, str) or not re.fullmatch(r"[0-9a-f]{32}", identifier):
+                        raise UpdateError("the uploaded release identifier is invalid")
+                    record = stage_upload(identifier)
+                else:
+                    record = stage_upload()
                 return {"ok": True, "staged_version": record["version"], **update_status()}
+            except UploadBusy as error:
+                return {"ok": False, "error": str(error), "reason": "helper-busy"}
             except UpdateError as error:
                 LOGGER.warning("uploaded release refused: %s", error)
                 return {"ok": False, "error": str(error), "reason": "release-refused"}
@@ -267,6 +276,7 @@ class HelperService:
                 "service_lists": True,
                 "service_list_outages": True,
                 "protected_dns_capture": True,
+                "identified_release_uploads": True,
             }
         if action == "dashboard-access":
             if not self._access_lock.acquire(blocking=False):
@@ -1231,7 +1241,8 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
         # read answers helper-busy at once.
         # Signed staging only changes release files. It must not hold network
         # ownership while verifying an archive or copying it from the dashboard.
-        lock = (self.server.release_stage_lock if action == "update-stage-upload"
+        lock = (self.server.release_stage_lock if action in (
+                    "update-stage-upload", "update-stage-identified-upload")
                 else self.server.operation_lock)
         if action in WRITE_ACTIONS:
             acquired = lock.acquire(timeout=WRITE_LOCK_WAIT_SECONDS)
@@ -1649,9 +1660,22 @@ class HelperClient:
     def release_status(self) -> Dict[str, Any]:
         return self._request({"action": "update-status"})
 
-    def stage_uploaded_release(self) -> Dict[str, Any]:
+    def stage_uploaded_release(self, *, upload_id: Optional[str] = None) -> Dict[str, Any]:
         """Ask the root helper to check and stage the release the dashboard just received."""
-        return self._request({"action": "update-stage-upload"}, timeout_seconds=120.0)
+        if upload_id is None:
+            return self._request({"action": "update-stage-upload"}, timeout_seconds=120.0)
+        message = "The Pi network helper needs an update before uploading a release."
+        try:
+            capabilities = self._request({"action": "capabilities"})
+            if capabilities.get("identified_release_uploads") is not True:
+                raise HelperClientError(message)
+            # A distinct action also refuses an older helper replaced after the read.
+            return self._request({"action": "update-stage-identified-upload", "upload_id": upload_id},
+                                 timeout_seconds=120.0)
+        except HelperClientError as error:
+            if str(error) == "unknown action":
+                raise HelperClientError(message) from None
+            raise
 
     def install_release(self, *, version: str, rollback: bool = False) -> Dict[str, Any]:
         return self._request({"action": "update-rollback" if rollback else "update-install", "version": version})
@@ -2035,6 +2059,7 @@ def run_helper(
 
     if not enable_hardware:
         raise HelperError("hardware mode requires --enable-hardware")
+    prepare_lock(socket_path.parent / "release-upload.lock")
     active_plan_path = socket_path.parent / "active-plan.json"
     applier = NetworkApplier(executor=SubprocessExecutor(timeout_seconds=timeout_seconds),
                              topology=topology)

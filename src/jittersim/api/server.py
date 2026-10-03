@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Collection, Dict, List, Optional, Sequence, Set, Tuple
 from urllib.parse import parse_qs, urlsplit
 
-from jittersim import updates
+from jittersim import release_uploads, updates
 from jittersim.api.access import ACCESS_WRITES, read_access_api, write_access_api
 from jittersim.api.workflows import WORKFLOW_WRITES, machine_health, read_workflow, write_workflow
 from jittersim.config.device_labels import (
@@ -11084,6 +11084,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
     request_timeout_seconds = 5.0
     # Where an uploaded release waits for the root helper (see jittersim.updates.stage_upload).
     release_spool = updates.UPLOAD_SPOOL
+    release_upload_lock = release_uploads.LOCK_PATH
     release_upload_seconds = RELEASE_UPLOAD_SECONDS
     # After a reboot the dashboard can start before the helper's socket exists.
     helper_startup_wait_seconds = 30.0
@@ -14557,86 +14558,72 @@ def handle_release_upload(handler: "ControlRequestHandler") -> None:
         return
 
     spool = Path(server.release_spool)
-    try:
-        spool.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if spool.is_symlink():
-            raise OSError("spool is a link")
-        spool.chmod(0o700)
-        for name in (updates.UPLOAD_ARCHIVE, updates.UPLOAD_SIGNATURE):
-            try:
-                (spool / name).unlink()
-            except FileNotFoundError:
-                pass
-    except OSError:
-        LOGGER.exception("could not prepare the release upload folder")
-        refuse(HTTPStatus.INTERNAL_SERVER_ERROR, "The Pi could not prepare a place for the upload.")
-        return
     reader = handler.rfile.raw if hasattr(handler.rfile, "raw") else None
     deadline = time.monotonic() + server.release_upload_seconds
     if isinstance(reader, _DeadlineReader):
         reader.extend_to(deadline)
     problem: Optional[Tuple[int, str]] = None
+    receipt = None
     try:
-        for name, size in ((updates.UPLOAD_ARCHIVE, archive_size),
-                           (updates.UPLOAD_SIGNATURE, signature_size)):
-            descriptor = os.open(
-                str(spool / name),
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-            with os.fdopen(descriptor, "wb") as output:
-                remaining = size
-                while remaining:
-                    if time.monotonic() > deadline:
-                        raise TimeoutError("release upload took too long")
-                    block = handler.rfile.read(min(65536, remaining))
-                    if not block:
-                        problem = (HTTPStatus.BAD_REQUEST,
-                                   "The upload ended before all of the release arrived.")
-                        break
-                    output.write(block)
-                    remaining -= len(block)
-                output.flush()
-                os.fsync(output.fileno())
-            if problem:
-                break
+        with release_uploads.receiving(spool, server.release_upload_lock,
+                                       seconds=server.release_upload_seconds) as receipt:
+            for name, size in ((updates.UPLOAD_ARCHIVE, archive_size),
+                               (updates.UPLOAD_SIGNATURE, signature_size)):
+                descriptor = os.open(
+                    str(receipt.folder / name),
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+                with os.fdopen(descriptor, "wb") as output:
+                    remaining = size
+                    while remaining:
+                        if time.monotonic() > deadline:
+                            raise TimeoutError("release upload took too long")
+                        block = handler.rfile.read(min(65536, remaining))
+                        if not block:
+                            problem = (HTTPStatus.BAD_REQUEST,
+                                       "The upload ended before all of the release arrived.")
+                            break
+                        output.write(block)
+                        remaining -= len(block)
+                    output.flush()
+                    os.fsync(output.fileno())
+                if problem:
+                    break
+            if not problem:
+                receipt.ready()
+    except release_uploads.UploadBusy as error:
+        problem = (HTTPStatus.CONFLICT, str(error))
     except (TimeoutError, socket.timeout):
         problem = (HTTPStatus.REQUEST_TIMEOUT,
                    "The upload was too slow. It must finish within "
                    + str(int(server.release_upload_seconds)) + " seconds.")
     except (ConnectionError, ssl.SSLError):
-        _clear_spool(spool)
         handler.close_connection = True
         raise
-    except OSError:
+    except (OSError, updates.UpdateError):
         LOGGER.exception("could not write the uploaded release")
         problem = (HTTPStatus.INTERNAL_SERVER_ERROR, "The Pi could not store the upload.")
     if problem:
-        _clear_spool(spool)
         refuse(*problem)
         return
     try:
-        result = server.helper_client.stage_uploaded_release()
+        result = server.helper_client.stage_uploaded_release(upload_id=receipt.identifier)
         status, body = HTTPStatus.OK, {"uploaded": True, **result}
         body.pop("ok", None)
     except HelperClientError as error:
-        status = (HTTPStatus.UNPROCESSABLE_ENTITY if error.reason == "release-refused"
-                  else HTTPStatus.SERVICE_UNAVAILABLE)
+        status = (HTTPStatus.UNPROCESSABLE_ENTITY if error.reason == "release-refused" else
+                  HTTPStatus.CONFLICT if error.reason == "helper-busy" else HTTPStatus.SERVICE_UNAVAILABLE)
         body = {"error": str(error)}
     finally:
-        _clear_spool(spool)
+        try:
+            release_uploads.discard(receipt.identifier, spool=spool, lock=server.release_upload_lock)
+        except (OSError, updates.UpdateError):
+            LOGGER.exception("could not clean up the completed release upload")
     try:
         server.repository.record_action(action=RELEASE_UPLOAD_PATH, status_code=int(status))
     except StorageError:
         LOGGER.exception("could not record action history for the release upload")
     handler._send_response(
         status=status, content_type="application/json", body=_json_bytes(body))
-
-
-def _clear_spool(spool: Path) -> None:
-    for name in (updates.UPLOAD_ARCHIVE, updates.UPLOAD_SIGNATURE):
-        try:
-            (spool / name).unlink()
-        except OSError:
-            pass
 
 
 def _safe_wifi_copy_message(error: HelperClientError) -> str:

@@ -17,7 +17,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from jittersim import updates
+from jittersim import release_uploads, updates
 from jittersim.api import server as api
 from jittersim.config.storage import ConfigRepository
 from jittersim.networking.helper import HelperClientError
@@ -38,12 +38,13 @@ class StagingHelper:
     def ping(self):
         return {"ok": True}
 
-    def stage_uploaded_release(self):
+    def stage_uploaded_release(self, *, upload_id=None):
         self.calls += 1
         owner = self.owner
         try:
             record = updates.stage_upload(
-                spool=owner.spool, root=owner.root, code=owner.code, config=owner.config)
+                upload_id, spool=owner.spool, lock=owner.upload_lock,
+                root=owner.root, code=owner.code, config=owner.config)
         except updates.UpdateError as error:
             raise HelperClientError(str(error), reason="release-refused") from error
         return {"ok": True, "staged_version": record["version"], "available": record["version"],
@@ -71,9 +72,11 @@ class ReleaseUploadTests(unittest.TestCase):
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        base = Path(self.temp.name)
+        base = Path(self.temp.name).resolve()
         self.root, self.code, self.config = base / "updates", base / "code", base / "config"
         self.spool = base / "data" / "incoming-release"
+        self.upload_lock = base / "release-upload.lock"
+        release_uploads.prepare_lock(self.upload_lock)
         for folder in (self.code, self.config):
             folder.mkdir()
         updates.trust_key(self.public, config=self.config, root=self.root)
@@ -87,6 +90,7 @@ class ReleaseUploadTests(unittest.TestCase):
                 ("127.0.0.1", 0), self.repository, admin_token=TOKEN,
                 tls_certfile=self.certificate, tls_keyfile=self.key)
             self.server.release_spool = self.spool
+            self.server.release_upload_lock = self.upload_lock
             self.server.helper_client = self.helper
             ready.set()
             self.server.serve_forever()
@@ -139,7 +143,7 @@ class ReleaseUploadTests(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in self.spool.glob("*")), [])
         incoming = self.root / "incoming"
         self.assertEqual(sorted(path.name for path in incoming.glob("*")) if incoming.exists()
-                         else [], [])
+                         else [], [".copy.lock"] if incoming.exists() else [])
 
     # -- who may upload ------------------------------------------------------------------------
 
@@ -194,6 +198,83 @@ class ReleaseUploadTests(unittest.TestCase):
         self.assertEqual(record["version"], "abc1234")
         self.assert_nothing_left()
         self.assertEqual(oct((self.root / "incoming").stat().st_mode & 0o777), "0o700")
+
+    def test_a_second_upload_cannot_replace_inputs_while_root_is_copying(self):
+        first_archive, first_signature = self.release(sequence=300, version="first")
+        second_archive, second_signature = self.release(sequence=301, version="second",
+                                                       name="second.tar.gz")
+        entered, release = threading.Event(), threading.Event()
+        original = updates.copy_bounded
+        answers = {}
+
+        def held_copy(source, destination, *args):
+            if args[-1] == "uploaded release archive" and not entered.is_set():
+                entered.set()
+                self.assertTrue(release.wait(10))
+            return original(source, destination, *args)
+
+        def first():
+            answers["first"] = self.upload(first_archive, first_signature)
+
+        with patch("jittersim.release_uploads.copy_bounded", held_copy):
+            worker = threading.Thread(target=first)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(3))
+                started = time.monotonic()
+                status, _ = self.upload(second_archive, second_signature)
+                self.assertEqual(status, 409)
+                self.assertLess(time.monotonic() - started, 2)
+            finally:
+                release.set()
+                worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(answers["first"][0], 200, answers)
+        self.assertEqual(answers["first"][1]["staged_version"], "first")
+        self.assertEqual(self.helper.calls, 1)
+        self.assert_nothing_left()
+
+    def test_uncertain_helper_answer_keeps_inputs_until_root_finishes(self):
+        archive, signature = self.release(sequence=300, version="first")
+        entered, release = threading.Event(), threading.Event()
+        original_copy = updates.copy_bounded
+        original_stage = self.helper.stage_uploaded_release
+        answers = {}
+
+        def held_copy(source, destination, *args):
+            if args[-1] == "uploaded release archive":
+                entered.set()
+                self.assertTrue(release.wait(10))
+            return original_copy(source, destination, *args)
+
+        def background(*args, **kwargs):
+            try:
+                answers["result"] = original_stage(*args, **kwargs)
+            except Exception as error:
+                answers["error"] = type(error).__name__
+
+        worker = None
+
+        def uncertain(*args, **kwargs):
+            nonlocal worker
+            worker = threading.Thread(target=background, args=args, kwargs=kwargs)
+            worker.start()
+            self.assertTrue(entered.wait(3))
+            raise HelperClientError("test lost the helper answer")
+
+        with patch("jittersim.release_uploads.copy_bounded", held_copy), \
+                patch.object(self.helper, "stage_uploaded_release", uncertain):
+            try:
+                status, _ = self.upload(archive, signature)
+                self.assertEqual(status, 503)
+                self.assertTrue(list(self.spool.rglob(updates.UPLOAD_ARCHIVE)))
+            finally:
+                release.set()
+                if worker:
+                    worker.join(5)
+        self.assertNotIn("error", answers)
+        self.assertEqual(answers["result"]["staged_version"], "first")
+        self.assert_nothing_left()
 
     # -- refused releases ----------------------------------------------------------------------
 
@@ -325,9 +406,11 @@ class ReleaseUploadTests(unittest.TestCase):
 class StageUploadTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        base = Path(self.temp.name)
+        base = Path(self.temp.name).resolve()
         self.root, self.code, self.config, self.spool = (
             base / "updates", base / "code", base / "config", base / "spool")
+        self.upload_lock = base / "release-upload.lock"
+        release_uploads.prepare_lock(self.upload_lock)
         for folder in (self.code, self.config, self.spool):
             folder.mkdir()
         self.private, self.public = make_key(base / "keys")
@@ -343,14 +426,14 @@ class StageUploadTests(unittest.TestCase):
 
     def stage(self):
         return updates.stage_upload(
-            spool=self.spool, root=self.root, code=self.code, config=self.config)
+            spool=self.spool, lock=self.upload_lock, root=self.root, code=self.code, config=self.config)
 
     def test_a_good_upload_is_staged_and_the_spool_is_emptied(self):
         self.put()
         record = self.stage()
         self.assertEqual(record["version"], "v5")
         self.assertEqual(list(self.spool.iterdir()), [])
-        self.assertEqual(list((self.root / "incoming").iterdir()), [])
+        self.assertEqual([path.name for path in (self.root / "incoming").iterdir()], [".copy.lock"])
 
     def test_a_link_in_the_spool_is_never_followed(self):
         secret = self.spool.parent / "secret"
@@ -372,7 +455,8 @@ class StageUploadTests(unittest.TestCase):
         link = self.spool.parent / "link"
         link.symlink_to(target)
         with self.assertRaises(updates.UpdateError):
-            updates.stage_upload(spool=link, root=self.root, code=self.code, config=self.config)
+            updates.stage_upload(spool=link, lock=self.upload_lock,
+                                 root=self.root, code=self.code, config=self.config)
 
     def test_an_oversized_file_in_the_spool_is_refused(self):
         self.put()

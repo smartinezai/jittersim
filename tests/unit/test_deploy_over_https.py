@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
-from jittersim import updates
+from jittersim import release_uploads, updates
 from jittersim.api import server as api
 from jittersim.config.storage import ConfigRepository
 from jittersim.networking.helper import HelperClientError
@@ -52,6 +52,8 @@ class Pi:
     def __init__(self, base, certificate, key, public):
         self.root, self.code, self.config = base / "updates", base / "code", base / "config"
         self.spool = base / "spool"
+        self.upload_lock = base / "release-upload.lock"
+        release_uploads.prepare_lock(self.upload_lock)
         for folder in (self.code, self.config):
             folder.mkdir()
         updates.trust_key(public, config=self.config, root=self.root)
@@ -66,9 +68,10 @@ class Pi:
                 return {"ok": True, **updates.update_status(
                     root=outer.root, code=outer.code, config=outer.config)}
 
-            def stage_uploaded_release(self):
+            def stage_uploaded_release(self, *, upload_id=None):
                 try:
-                    record = updates.stage_upload(spool=outer.spool, root=outer.root,
+                    record = updates.stage_upload(upload_id, spool=outer.spool,
+                                                  lock=outer.upload_lock, root=outer.root,
                                                   code=outer.code, config=outer.config)
                 except updates.UpdateError as error:
                     raise HelperClientError(str(error), reason="release-refused") from error
@@ -90,6 +93,7 @@ class Pi:
                 ("127.0.0.1", 0), self.repository, admin_token=TOKEN,
                 tls_certfile=certificate, tls_keyfile=key)
             self.server.release_spool = self.spool
+            self.server.release_upload_lock = self.upload_lock
             self.server.helper_client = Helper()
             ready.set()
             self.server.serve_forever()
