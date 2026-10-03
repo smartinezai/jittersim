@@ -385,20 +385,13 @@ def test_package_builds_finish_before_stop_and_outage_installs_only_wheels(pi):
     assert all(command[-1].endswith(".whl") for command in installs)
 
 
-def test_health_body_has_a_total_deadline_even_when_bytes_keep_arriving(monkeypatch):
+def test_health_body_has_a_total_deadline_even_when_bytes_keep_arriving(monkeypatch, tmp_path):
     clock = [100.0]
     monkeypatch.setattr(updates.time, "monotonic", lambda: clock[0])
 
-    class MemoryFile:
-        def read_text(self):
-            return "JITTERSIM_ADMIN_TOKEN=throwaway-health-test\n"
-
-        def __str__(self):
-            return "in-memory-health-fixture"
-
-    class MemoryConfig:
-        def __truediv__(self, name):
-            return MemoryFile()
+    (tmp_path / "control.env").write_text(
+        "JITTERSIM_ADMIN_TOKEN=throwaway-health-test\n", encoding="utf-8"
+    )
 
     class Transport:
         def settimeout(self, value):
@@ -435,7 +428,8 @@ def test_health_body_has_a_total_deadline_even_when_bytes_keep_arriving(monkeypa
     monkeypatch.setattr(updates.ssl, "create_default_context", lambda **kwargs: Context())
     monkeypatch.setattr(updates.socket, "create_connection", lambda *args, **kwargs: Transport())
     monkeypatch.setattr(updates.http.client, "HTTPSConnection", Connection)
-    assert not updates.healthy(config=MemoryConfig(), run=lambda *args: None)
+    assert not updates.healthy(config=tmp_path, run=lambda *args: None)
+    assert clock[0] >= 110, "the fixture must reach the body deadline"
     assert clock[0] <= 112, "continuing body bytes must not reset health's total allowance"
 
 

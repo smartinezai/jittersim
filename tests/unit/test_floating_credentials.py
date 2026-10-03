@@ -426,6 +426,36 @@ CASES = {
       assert.equal(storage.size, 0);
       assert.equal(element("remember-admin-token-note").textContent, "");
     """,
+    "remembers_acceptance_before_a_slow_refresh_finishes": r"""
+      enter("admin-token", "fixture token");
+      tick("remember-admin-token", true);
+      assert.equal(storage.has(ADMIN_KEY), false);
+      const started = deferred();
+      const release = deferred();
+      let trustCalls = 0;
+      globalThis.loadTrustDetails = () => {
+        trustCalls++;
+        assert.equal(JSON.parse(storage.get(ADMIN_KEY)).value, "fixture token");
+      };
+      refresh = async () => {
+        refreshCalls++;
+        started.resolve();
+        await release.promise;
+      };
+      const checking = checkAdminToken();
+      await started.promise;
+      assert.equal(adminTokenVerified, true);
+      assert.equal(refreshCalls, 1);
+      assert.equal(trustCalls, 1);
+      assert.equal(element("check-admin-token").disabled, true);
+      assert.deepEqual(JSON.parse(storage.get(ADMIN_KEY)), {
+        value: "fixture token", expires: clock + DAY
+      });
+      release.resolve();
+      await checking;
+      assert.equal(element("check-admin-token").disabled, false);
+      assert.equal(JSON.parse(storage.get(ADMIN_KEY)).value, "fixture token");
+    """,
     "waits_for_acceptance_and_replaces_the_saved_token": r"""
       tick("remember-admin-token", true);
       enter("admin-token", "first token");

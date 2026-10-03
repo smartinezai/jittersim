@@ -116,12 +116,3 @@ def test_token_checks_and_edits_release_all_private_loading_states():
     assert result.returncode == 0, result.stderr
     # Node exits quietly with code 0 if the case hangs on a promise that never settles.
     assert "CASE-COMPLETE" in result.stdout, "the case never finished"
-
-
-def test_an_accepted_token_is_remembered_before_the_slow_refresh():
-    # A reload during the refresh after Check token must not forget a token the
-    # person asked to remember (the navigation journey reloads right after it).
-    assert re.search(
-        r"adminTokenVerified = true;\s*(?://[^\n]*\n\s*)*updateCredentialStatus\(\);\s*await refresh\(\);",
-        DASHBOARD_HTML,
-    )
