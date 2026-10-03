@@ -272,6 +272,10 @@ def run_width(browser, base, width, height):
     sidebar_control(page, "#sync-router-ap").click()
     expect(button).to_be_disabled()
     expect(page.locator("#router-wifi-toggle")).to_be_disabled()
+    for _ in range(100):
+        if held:
+            break
+        page.wait_for_timeout(50)
     assert len(held) == 1
     assert api_calls(requests, SYNC_PATH) == []
     held[0].continue_()
