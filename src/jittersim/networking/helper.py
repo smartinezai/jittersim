@@ -309,6 +309,24 @@ class HelperService:
             except (OSError, ValueError, UpdateError):
                 LOGGER.exception("release operation failed")
                 return {"ok": False, "error": "release operation could not be completed"}
+        if action == "update-retry":
+            identifier = payload.get("retry_id")
+            if (set(payload) != {"action", "retry_id"} or not isinstance(identifier, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", identifier) is None):
+                return {"ok": False, "error": "Check the failed update again before retrying.",
+                        "reason": "update-retry-refused"}
+            try:
+                # A replaced helper with an older backend must refuse this action.
+                from jittersim.updates import retry_update
+            except ImportError:
+                return {"ok": False, "error": "The Pi network helper needs an update before retrying."}
+            try:
+                return {"ok": True, **retry_update(identifier)}
+            except UpdateError as error:
+                return {"ok": False, "error": str(error), "reason": "update-retry-refused"}
+            except (OSError, ValueError):
+                LOGGER.exception("update retry could not be confirmed")
+                return {"ok": False, "error": "The update retry could not be confirmed. Check update status."}
         if action in ("update-stage-upload", "update-stage-identified-upload"):
             # The dashboard has streamed an uploaded release into its spool folder. This
             # root helper copies it away, checks the signature and stages it. The refusal
@@ -1456,7 +1474,7 @@ class HelperRequestHandler(socketserver.StreamRequestHandler):
             self._send_response({"ok": False, "error": "request must be valid JSON"})
             return
         action = payload.get("action") if isinstance(payload, dict) else None
-        if action in ("ping", "control-revision", "dashboard-access") or action in WIFI_ACTIONS or action in ROUTER_ACTIONS:
+        if action in ("ping", "control-revision", "dashboard-access", "update-retry") or action in WIFI_ACTIONS or action in ROUTER_ACTIONS:
             self._send_response(self.server.service.handle_payload(payload))
             return
         # Apply and reset wait a moment for a read so a poll never refuses Panic. Every
@@ -1939,6 +1957,19 @@ class HelperClient:
     def install_release(self, *, version: str, rollback: bool = False) -> Dict[str, Any]:
         return self._request({"action": "update-rollback" if rollback else "update-install", "version": version})
 
+    def retry_update(self, *, retry_id: str) -> Dict[str, Any]:
+        """Send one explicit retry and leave a lost response to a status read."""
+
+        if not isinstance(retry_id, str) or re.fullmatch(r"[0-9a-f]{64}", retry_id) is None:
+            raise HelperClientError("Check the failed update again before retrying.",
+                                    reason="update-retry-refused")
+        result = self._request({"action": "update-retry", "retry_id": retry_id}, timeout_seconds=20)
+        public_id = result.get("request_id")
+        if (not isinstance(public_id, str) or re.fullmatch(r"[0-9a-f]{32}", public_id) is None
+                or result.get("request_kind") not in ("install", "rollback")):
+            raise HelperClientError("The update retry could not be confirmed. Check update status.")
+        return result
+
     def set_router_wifi(self, *, admin_password: str, enabled: bool) -> Dict[str, Any]:
         """Enable or disable the upstream router's primary Wi-Fi radios."""
 
@@ -2284,7 +2315,7 @@ class HelperClient:
             raise HelperClientError("helper returned an invalid response object")
         if not decoded.get("ok", False):
             reason = decoded.get("reason")
-            if reason not in ("control-changed", "wifi-busy", "helper-busy", "wifi-failed",
+            if reason not in ("control-changed", "update-retry-refused", "wifi-busy", "helper-busy", "wifi-failed",
                               "wifi-restored", "wifi-restore-failed", "release-refused"):
                 reason = None
             raise HelperClientError(str(decoded.get("error", "helper request failed")), reason=reason)
