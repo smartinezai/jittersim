@@ -795,6 +795,8 @@ def run_installer(tmp_path, *arguments):
     """install.sh with a fake id (root) and a fake getent that stops it at the user check, so
     nothing after that check can run on this machine."""
     import subprocess
+    import shlex
+    import sys
 
     fake = tmp_path / "bin"
     fake.mkdir(exist_ok=True)
@@ -802,6 +804,30 @@ def run_installer(tmp_path, *arguments):
     for name, body in (("id", 'echo 0'), ("getent", 'exit 1')):
         (fake / name).write_text(f'#!/bin/sh\necho "{name} $*" >> "{log}"\n{body}\n')
         (fake / name).chmod(0o755)
+    # Keep host ownership probes outside this fixture. Their real descriptor
+    # and process behavior has separate tests. The real shell still reenters
+    # and parses the explicit passwordless choice, then stops at fake getent.
+    dispatch = tmp_path / "installer-python.py"
+    dispatch.write_text("""import os, sys
+from pathlib import Path
+arguments = sys.argv[1:]
+script = Path(arguments[1]).name
+if script == 'install-lock.py':
+    if '--verify' in arguments:
+        raise SystemExit(0)
+    installer = arguments[arguments.index('--installer') + 1]
+    source = arguments[arguments.index('--source') + 1]
+    choices = ['--enable-passwordless-staging'] if '--enable-passwordless-staging' in arguments else []
+    os.environ['JITTERSIM_INSTALL_LOCK_FD'] = '9'
+    os.execv('/bin/sh', ['sh', installer, *choices, source])
+if script == 'create-ap-profile.py' and '--help' in arguments:
+    raise SystemExit(0)
+os.execv(sys.executable, [sys.executable, *arguments])
+""")
+    python = fake / "python3"
+    python.write_text('#!/bin/sh\nexec ' + shlex.quote(sys.executable) + ' '
+                      + shlex.quote(str(dispatch)) + ' "$@"\n')
+    python.chmod(0o755)
     result = subprocess.run(
         ["/bin/sh", str(INSTALLER), *arguments], capture_output=True, text=True, timeout=30,
         env={"PATH": f"{fake}:/usr/bin:/bin", "HOME": str(tmp_path)},
