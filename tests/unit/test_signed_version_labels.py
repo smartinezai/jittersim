@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import tarfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -97,7 +98,7 @@ def test_stable_release_is_not_replaced_by_its_development_build(tmp_path):
                                run=lambda *args: None)
 
 
-def test_root_execution_rechecks_the_installed_number(tmp_path):
+def test_root_execution_rechecks_the_installed_number(tmp_path, monkeypatch):
     private, public = make_key(tmp_path / "keys")
     root, config, code = (tmp_path / name for name in ("updates", "config", "code"))
     config.mkdir()
@@ -107,9 +108,14 @@ def test_root_execution_rechecks_the_installed_number(tmp_path):
     updates.stage_release(archive, root=root, code=code, config=config)
     updates.request_update("0.2.0", root=root, code=code, config=config, run=lambda *args: None)
     updates.atomic_json(code / ".jittersim-release.json", {"version": "0.3.0", "sequence": 100})
+    # This archive has only the version fixture's source. The real Panic
+    # admission and retained-guard paths have separate full-source tests.
+    safety = SimpleNamespace(inspect=lambda *args: None, retain=lambda *args: None,
+                             provision=lambda *args: None)
+    monkeypatch.setattr(updates, "PanicProtection", lambda *args, **kwargs: safety)
     commands = []
     with pytest.raises(updates.UpdateError, match="older number"):
-        updates.apply_update(root=root, code=code, config=config,
+        updates.apply_update(root=root, code=code, config=config, manager=tmp_path / "manager.py",
                              run=lambda *args: commands.append(args))
     assert commands == []
     assert updates.update_status(root=root, code=code, config=config)["phase"] == "failed"

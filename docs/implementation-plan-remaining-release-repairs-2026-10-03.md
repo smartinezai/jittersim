@@ -119,3 +119,14 @@ Add Git, the OpenSSH client and OpenSSL to that image so the configured command 
 required tools. Rebuild the image without cache and run its full test command.
 This changes the test image only. Retain the missing-tool finding in the release
 evidence and verify the exact final source before publication.
+
+The root test image also needs the jittersim role group that must already
+exist on the Pi before installation. Declare it in the image and create it only if absent in
+isolated root matrix environments. Keep the real certificate owner and mode
+checks. Ordinary non-root CI does not require this role setup.
+
+Include curl and sudo so the HTTPS and sudoers tests execute in clean Linux
+images. Run the full test container with an init process so stopped orphan
+children are reaped as they are on a normal CI runner. Keep the cancellation
+tests unchanged. When the upload test receives an early body-send disconnect,
+read the actual HTTP reply and retain every expected status assertion.

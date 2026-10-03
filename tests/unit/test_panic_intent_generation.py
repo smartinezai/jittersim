@@ -57,6 +57,28 @@ class PanicIntentTests(unittest.TestCase):
         assert not self.scheduler.is_active
         assert self.repository.get_runtime_state().last_action == "reset"
 
+    def test_general_profile_queued_before_panic_cannot_save_or_start(self):
+        first, first_thread = self.start_slow_apply()
+        queued, waiting = {}, threading.Event()
+
+        def run():
+            queued["response"] = self.request("POST", "/api/general-profile", {"profile_id": "normal"})
+
+        with patch.object(self.helper, "check_general_profile_support", create=True), patch.object(
+            self.scheduler, "_apply_lock", WaitingLock(self.scheduler._apply_lock, waiting)
+        ):
+            worker = threading.Thread(target=run)
+            self.threads.append(worker)
+            worker.start()
+            assert waiting.wait(2)
+            assert self.request("POST", "/api/normal-access", {})[0] == 200
+            self.helper.release_apply.set()
+            first_thread.join(5)
+            worker.join(5)
+        assert queued["response"][0] == 409
+        assert self.repository.get_general_profile() is None
+        assert not self.scheduler.is_active
+
     def test_failed_late_cleanup_remains_unconfirmed_and_requires_recovery(self):
         result, worker = self.start_slow_apply()
         assert self.request("POST", "/api/normal-access", {})[0] == 200

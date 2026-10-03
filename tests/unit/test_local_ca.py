@@ -8,6 +8,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from jittersim import localca
 
@@ -277,11 +278,12 @@ class LocalAuthorityTests(unittest.TestCase):
         self.assertEqual(localca.certificate_download(self.ca / "ca.crt").count(b"BEGIN CERTIFICATE"), 1)
 
     def test_command_line_prepares_the_files_without_the_secret_in_output(self) -> None:
-        # Use an isolated operation directory. The older import base supplies
-        # only the lock primitive. Combined manager tests cover retained commands.
+        # Isolate both the operation directory and its retained manager.
+        # The real command lease still supervises the OpenSSL children.
         entry = (
             "import runpy, sys; from pathlib import Path; from jittersim import updates; "
             "updates.UPDATE_ROOT = Path(sys.argv[1]); "
+            "updates.MANAGER_PATH = updates.UPDATE_ROOT.parent / 'manager.py'; "
             "updates.manual_identity_operation = getattr(updates, 'manual_identity_operation', updates.update_lock); "
             "sys.argv = ['jittersim.localca'] + sys.argv[2:]; "
             "runpy.run_module('jittersim.localca', run_name='__main__')"
@@ -377,10 +379,21 @@ class LocalAuthorityCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             from jittersim import updates
-            self.assertEqual(localca.main(
-                ["ensure", "--config-dir", str(root), "--host-name", "pi-lab.local",
-                 "--ethernet-ip", "192.168.1.20", "--group", "no-such-group"],
-                operation=updates.update_lock, update_root=root / "operations"), 0)
+            permissions = localca.set_permissions
+
+            def without_root(*args):
+                # Model this permission branch explicitly even when the suite
+                # runs as root. Other real ownership checks keep their identity.
+                with patch.object(localca.os, "geteuid", return_value=1000):
+                    permissions(*args)
+
+            with patch.object(localca, "set_permissions", side_effect=without_root), \
+                    patch.object(localca.shutil, "chown") as chown:
+                self.assertEqual(localca.main(
+                    ["ensure", "--config-dir", str(root), "--host-name", "pi-lab.local",
+                     "--ethernet-ip", "192.168.1.20", "--group", "no-such-group"],
+                    operation=updates.update_lock, update_root=root / "operations"), 0)
+                chown.assert_not_called()
 
             mode = lambda path: path.stat().st_mode & 0o777
             self.assertEqual(mode(root / "ca"), 0o750)

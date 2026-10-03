@@ -32,13 +32,13 @@ jobs:
   linux:
     name: Pi Linux release checks
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - run: docker build -f tests/wifi/Dockerfile -t jittersim-wifi-release .
       - run: docker run --rm jittersim-wifi-release python tests/integration/linux_installer_permissions.py
       - run: docker run --rm --cap-add NET_ADMIN jittersim-wifi-release python tests/integration/linux_dashboard_peer_identity.py
-      - run: docker run --rm --privileged jittersim-wifi-release
+      - run: docker run --rm --init --privileged jittersim-wifi-release
       - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_network_smoke.py
       - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_exemption_packets.py
       - run: docker run --rm --privileged jittersim-wifi-release python tests/integration/linux_many_queues.py

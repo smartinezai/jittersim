@@ -221,7 +221,11 @@ def check_actions(browser, base, kind, width, evidence):
         try:
             button.click()
             confirm_dialog(page, True)
-            expect(page.locator("#message")).to_contain_text("Failed to fetch")
+            message = page.locator("#message")
+            expect(message).to_contain_text("Lost the connection to the Pi")
+            expect(message).to_contain_text("this device rejoins on its own")
+            for raw_error in ("Load failed", "Failed to fetch", "NetworkError"):
+                assert raw_error not in message.text_content()
             expect(button).to_be_enabled()
             assert_no_replay(page, posts, 1)
             assert saved_profile(editor, base, ids["failure"]) == before

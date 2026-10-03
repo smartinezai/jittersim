@@ -257,16 +257,68 @@ class DashboardConcurrencyTests(unittest.TestCase):
                 connection = socket.create_connection(self.server.server_address[:2])
                 connection.sendall(b"G")
                 idle.append(connection)
-            started = time.monotonic()
-            health = self.request("GET", "/api/health")[0]
-            elapsed = time.monotonic() - started
-            for connection in idle:
-                connection.close()
+            try:
+                started = time.monotonic()
+                health = self.request("GET", "/api/health", timeout=FAST * 3)[0]
+                elapsed = time.monotonic() - started
 
-            self.assertEqual(health, 503)
-            self.assertLess(elapsed, 0.2, "refusing idle clients stalled the accept loop")
-            self.helper.release_apply.set()
-            thread.join(5)
+                self.assertEqual(health, 503)
+                self.assertLess(elapsed, FAST, "refusing idle clients stalled the accept loop")
+                self.assertNotIn("response", result, "the apply must still be running")
+            finally:
+                for connection in idle:
+                    connection.close()
+                self.helper.release_apply.set()
+                thread.join(5)
+
+    def _assert_refusal_needs_no_client_progress(self, *, full_buffer=False):
+        import socket
+
+        connection, peer = socket.socketpair()
+        worker = None
+        finished = threading.Event()
+        errors = []
+        try:
+            if full_buffer:
+                connection.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+                connection.setblocking(False)
+                for _ in range(256):
+                    try:
+                        connection.send(b"x" * 4096)
+                    except BlockingIOError:
+                        break
+                else:
+                    self.fail("could not fill the bounded test send buffer")
+            # A refused client has sent no unread bytes and need not read its reply.
+            connection.settimeout(FAST * 3)
+
+            def refuse():
+                try:
+                    self.server._refuse_request(connection)
+                except Exception as error:
+                    errors.append(error)
+                finally:
+                    finished.set()
+
+            worker = threading.Thread(target=refuse)
+            worker.start()
+            self.assertTrue(finished.wait(FAST), "refusal waited for client progress")
+            self.assertEqual(errors, [])
+            if not full_buffer:
+                peer.settimeout(FAST)
+                self.assertTrue(peer.recv(4096).startswith(b"HTTP/1.1 503 Service Unavailable"))
+        finally:
+            peer.close()
+            connection.close()
+            if worker is not None:
+                worker.join(FAST * 3)
+                self.assertFalse(worker.is_alive(), "refusal worker did not stop")
+
+    def test_refusal_does_not_wait_for_another_client_byte(self):
+        self._assert_refusal_needs_no_client_progress()
+
+    def test_refusal_does_not_wait_for_a_client_to_read_its_reply(self):
+        self._assert_refusal_needs_no_client_progress(full_buffer=True)
 
     def test_mixed_requests_with_apply_and_panic_finish_without_errors_or_deadlock(self):
         self.helper.release_apply.set()

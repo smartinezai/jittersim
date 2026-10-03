@@ -1,6 +1,7 @@
 """Root-private installer source comes only from the verified archive copy."""
 
 import hashlib
+import gzip
 import io
 import json
 import os
@@ -115,4 +116,103 @@ def test_pax_sparse_maps_are_refused_before_tarfile_processes_them(tmp_path):
     with patch.object(tarfile.TarInfo, "_proc_gnusparse_10", side_effect=AssertionError("sparse map ran")):
         with pytest.raises(RuntimeError, match="sparse"):
             prepare(path, target, hashlib.sha256(path.read_bytes()).hexdigest())
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("damage", ["large-metadata", "physical-sparse", "pax-sparse"])
+def test_raw_bounds_run_before_any_tarfile_member_parser(tmp_path, damage):
+    path = tmp_path / "release.tar.gz"
+    if damage == "physical-sparse":
+        path, _ = archive(tmp_path, "src/sparse", tarfile.GNUTYPE_SPARSE)
+    else:
+        with tarfile.open(path, "w:gz", format=tarfile.PAX_FORMAT) as output:
+            item = tarfile.TarInfo("src/member")
+            item.pax_headers = {"comment": "x" * (64 * 1024 + 1)} if damage == "large-metadata" else \
+                {"GNU.sparse.major": "1", "GNU.sparse.minor": "0"}
+            output.addfile(item)
+    target = tmp_path / "source"
+    # This models a library dispatch change independently of private methods.
+    # The physical scan must refuse these bytes before entering any member parser.
+    with patch.object(tarfile.TarInfo, "fromtarfile", side_effect=AssertionError("member parser ran")):
+        with pytest.raises(RuntimeError):
+            prepare(path, target, hashlib.sha256(path.read_bytes()).hexdigest())
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("kind", [tarfile.DIRTYPE, tarfile.AREGTYPE])
+def test_directory_payload_cannot_hide_a_sparse_header_from_the_physical_scan(tmp_path, kind):
+    path = tmp_path / "release.tar.gz"
+    hidden = tarfile.TarInfo("src/sparse")
+    hidden.type = tarfile.GNUTYPE_SPARSE
+    with tarfile.open(path, "w:gz", format=tarfile.GNU_FORMAT) as output:
+        directory = tarfile.TarInfo("src/")
+        directory.type = kind
+        directory.size = 512
+        output.addfile(directory, io.BytesIO(hidden.tobuf(tarfile.GNU_FORMAT)))
+    target = tmp_path / "source"
+    with patch.object(tarfile.TarInfo, "fromtarfile", side_effect=AssertionError("member parser ran")):
+        with pytest.raises(RuntimeError, match="directory"):
+            prepare(path, target, hashlib.sha256(path.read_bytes()).hexdigest())
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("format", [tarfile.GNU_FORMAT, tarfile.PAX_FORMAT])
+def test_normal_long_names_and_git_metadata_survive_the_physical_scan(tmp_path, format):
+    path = tmp_path / "release.tar.gz"
+    name = "src/" + "long-name-" * 18 + ".py"
+    options = {"pax_headers": {"comment": "a" * 40}} if format == tarfile.PAX_FORMAT else {}
+    with tarfile.open(path, "w:gz", format=format, **options) as output:
+        item = tarfile.TarInfo(name)
+        item.size = len(b"source")
+        output.addfile(item, io.BytesIO(b"source"))
+    target = tmp_path / "source"
+    prepare(path, target, hashlib.sha256(path.read_bytes()).hexdigest())
+    assert (target / name).read_bytes() == b"source"
+
+
+def test_extended_header_recursion_is_bounded_before_the_member_parser(tmp_path):
+    path = tmp_path / "release.tar.gz"
+    header = tarfile.TarInfo("././@LongLink")
+    header.type = tarfile.GNUTYPE_LONGNAME
+    header.size = 1
+    with gzip.open(path, "wb") as output:
+        for _ in range(33):
+            output.write(header.tobuf(tarfile.GNU_FORMAT) + bytes(512))
+        output.write(tarfile.TarInfo("src/member").tobuf() + bytes(1024))
+    target = tmp_path / "source"
+    with patch.object(tarfile.TarInfo, "fromtarfile", side_effect=AssertionError("member parser ran")):
+        with pytest.raises(RuntimeError, match="metadata"):
+            prepare(path, target, hashlib.sha256(path.read_bytes()).hexdigest())
+    assert not target.exists()
+
+
+def test_trailing_compressed_padding_counts_toward_the_expansion_limit(tmp_path):
+    path = tmp_path / "release.tar.gz"
+    with gzip.open(path, "wb") as output:
+        output.write(tarfile.TarInfo("src/member").tobuf() + bytes(16 * 1024))
+    target = tmp_path / "source"
+    receiver = runpy.run_path(str(SCRIPT))["prepare_source"]
+    with patch.dict(receiver.__globals__, {"MAX_SOURCE": 1024, "MAX_ENTRIES": 1}), \
+            patch.object(tarfile.TarInfo, "fromtarfile", side_effect=AssertionError("member parser ran")):
+        with pytest.raises(RuntimeError, match="expanded"):
+            receiver(path, target, hashlib.sha256(path.read_bytes()).hexdigest(),
+                     {"version": "0.2.0", "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                      "commit": "a" * 40, "sequence": 100})
+    assert not target.exists()
+
+
+def test_bad_compressed_bytes_return_the_safe_cli_error(tmp_path, capsys):
+    path = tmp_path / "release.tar.gz"
+    # Gzip header followed by a reserved deflate block type.
+    path.write_bytes(b"\x1f\x8b\x08\x00" + bytes(6) + b"\x07")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    target = tmp_path / "source"
+    label = {"version": "0.2.0", "sha256": digest, "commit": "a" * 40, "sequence": 100}
+    main = runpy.run_path(str(SCRIPT))["main"]
+    owner = os.geteuid()
+    with patch.object(os, "geteuid", side_effect=[0, owner]), \
+            patch.object(main.__globals__["sys"], "argv",
+                         [str(SCRIPT), str(path), str(target), digest, json.dumps(label)]):
+        assert main() == 1
+    assert "The full installer did not run" in capsys.readouterr().err
     assert not target.exists()
