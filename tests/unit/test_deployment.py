@@ -104,16 +104,16 @@ class InstallerTests(unittest.TestCase):
 
     def test_installer_checks_the_pi_before_creating_the_test_wifi(self) -> None:
         # The helper manages a NetworkManager connection with this name.
-        self.assertIn("con-name jittersim-ap", self.installer)
+        self.assertIn("create-ap-profile.py", self.installer)
         self.assertIn("ipv4.method shared", self.installer)
         # The preflight refuses to take over a Wi-Fi connection in use, such as
         # one carrying this SSH session, before anything changes.
         preflight = self.installer.index("preflight.py")
         self.assertLess(preflight, self.installer.index("apt-get update"))
-        self.assertLess(preflight, self.installer.index("nmcli connection add"))
+        self.assertLess(preflight, self.installer.index('create --interface "$JITTERSIM_TEST_INTERFACE"'))
 
     def test_the_test_wifi_has_a_neutral_name_and_isolates_its_clients(self) -> None:
-        self.assertIn("JITTERSIM_AP_SSID=JitterSim", self.installer)
+        self.assertIn("JITTERSIM_AP_SSID=TestNet", self.installer)
         self.assertNotIn("JitterSim-Test", self.installer)
         # On unless ap.env turns it off, so an update keeps the owner's choice.
         self.assertIn('ap_isolation="${JITTERSIM_AP_ISOLATION:-yes}"', self.installer)
@@ -228,7 +228,7 @@ class AccessPointStartTests(unittest.TestCase):
         modify = modify[: modify.index("ap_settings_after")]
         self.assertIn("connection.autoconnect no", modify)
         self.assertNotIn("connection.autoconnect yes", self.installer)
-        self.assertIn("autoconnect no", self.installer.split("nmcli connection add", 1)[1][:200])
+        self.assertIn("create-ap-profile.py", self.installer)
 
     def test_an_installer_run_never_restarts_stops_or_drops_the_running_wifi(self):
         for forbidden in (

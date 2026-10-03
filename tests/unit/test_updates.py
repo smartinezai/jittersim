@@ -367,6 +367,10 @@ class UpdateTests(unittest.TestCase):
                 or line.startswith(("install ", "sed ", "ln ", "runuser "))
             ) or line.startswith(("SOURCE_DIR=", "INSTALL_DIR=", "if [ ", "echo ")):
                 continue
+            if any(name in line for name in ("install-lock.py", "create-ap-profile.py")):
+                # Manual setup owns its lock and creates the first AP. Updates
+                # already hold the shared lock and preserve the existing AP.
+                continue
             words = self.installer_words(line)
             with self.subTest(line=line):
                 if line.startswith("install -m "):

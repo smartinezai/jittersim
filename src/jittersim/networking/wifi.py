@@ -6,7 +6,7 @@ from .commands import Command
 from .executor import CommandExecutionError, CommandExecutor
 from .wifi_security import PREFIX, SECURITY_PROPERTIES, saved_security, security_settings
 
-DEFAULT_WIFI_NAME = "JitterSim"
+DEFAULT_WIFI_NAME = "TestNet"
 AP_CONNECTION = "jittersim-ap"
 RECOVERY_CONNECTION = "jittersim-ap-recovery"
 WPA3_SETTINGS = security_settings("WPA3")

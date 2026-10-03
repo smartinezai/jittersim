@@ -93,7 +93,7 @@ def run():
                     expect(page).to_have_title("JitterSim")
                     expect(page.locator("#brand-title")).to_have_text("JitterSim")
                     expect(page.locator("#measure-command")).to_have_text("jittersim measure --label normal")
-                    expect(page.locator("#access-point-ssid")).to_have_value("JitterSim")
+                    expect(page.locator("#access-point-ssid")).to_have_value("TestNet")
                     sidebar_control(page, "#open-admin-credentials").click()
                     page.locator("#remember-admin-token").check()
                     page.locator("#close-credentials").click()

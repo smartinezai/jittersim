@@ -122,7 +122,7 @@ class WifiRecoveryIntegrationTests(unittest.TestCase):
                    side_effect=AssertionError("database used")):
             code, _, errors = self.console("--yes")
         self.assertEqual(code, 0, errors)
-        self.assertEqual(self.executor.settings["802-11-wireless.ssid"], "JitterSim")
+        self.assertEqual(self.executor.settings["802-11-wireless.ssid"], "TestNet")
         self.assertEqual(self.executor.settings["802-11-wireless-security.psk"],
                          "fixture-wifi-password")
         self.assertEqual(self.repository.get_runtime_state(), state)
@@ -152,7 +152,7 @@ class WifiRecoveryIntegrationTests(unittest.TestCase):
         state = self.repository.get_runtime_state()
         status, body = self.request(headers)
         self.assertEqual(status, 200, body)
-        self.assertEqual(body["result"]["ssid"], "JitterSim")
+        self.assertEqual(body["result"]["ssid"], "TestNet")
         self.assertNotIn("fixture-wifi-password", json.dumps(body))
         self.assertEqual(self.repository.get_runtime_state(), state)
 
@@ -167,6 +167,21 @@ class WifiRecoveryIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 502)
         self.assertIn("recovery failed", body["error"])
         self.assertNotIn("fixture-wifi-password", json.dumps(body) + "".join(logs.output))
+
+    def test_old_helper_default_is_not_confirmed_or_replayed(self):
+        class OldHelper:
+            calls = 0
+
+            def reset_wifi_name(self):
+                self.calls += 1
+                return {"ssid": "JitterSim", "security": "WPA3"}
+
+        helper = OldHelper()
+        self.api.helper_client = helper
+        status, body = self.request({"Authorization": "Bearer wifi-test"})
+        self.assertEqual(status, 502)
+        self.assertIn("error", body)
+        self.assertEqual(helper.calls, 1)
 
     def test_competing_wifi_changes_are_refused_while_ping_still_answers(self):
         entered, release = threading.Event(), threading.Event()
@@ -185,7 +200,7 @@ class WifiRecoveryIntegrationTests(unittest.TestCase):
                 self.assertEqual(status, 409)
             finally:
                 release.set()
-            self.assertEqual(pending.result(timeout=3)["ssid"], "JitterSim")
+            self.assertEqual(pending.result(timeout=3)["ssid"], "TestNet")
 
     def test_idle_socket_clients_cannot_create_unbounded_workers(self):
         clients = []

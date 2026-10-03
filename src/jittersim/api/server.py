@@ -134,6 +134,7 @@ from jittersim.networking.router import (
     safe_router_import_message,
     safe_router_wifi_message,
 )
+from jittersim.networking.wifi import DEFAULT_WIFI_NAME
 from jittersim.networking.wifi_security import SECURITY_MODES
 from jittersim.api.router_operations import RouterOperations
 from jittersim.api.wifi_operations import WifiOperations, WifiOutcome, valid_request_id, issue_request_id
@@ -246,7 +247,7 @@ PRIORITY_WRITE_PATHS = frozenset(("/api/normal-access",))
 # The product name shown after the token is accepted. The public page never carries it.
 PRODUCT_NAME = "JitterSim"
 PRODUCT_COMMAND = "jittersim"
-DEFAULT_ACCESS_POINT_SSID = "JitterSim"
+DEFAULT_ACCESS_POINT_SSID = DEFAULT_WIFI_NAME
 
 
 def _neutral_icon() -> bytes:
@@ -13419,7 +13420,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
             try:
                 if kind == "reset-name":
                     result = self.helper_client.reset_wifi_name()
-                    if result.get("ssid") != "JitterSim" or result.get("security") not in SECURITY_MODES:
+                    if result.get("ssid") != DEFAULT_WIFI_NAME or result.get("security") not in SECURITY_MODES:
                         raise HelperClientError("The helper did not confirm the expected Wi-Fi settings.")
                     outcome = WifiOutcome(200, "Wi-Fi name restored.", ssid=result["ssid"], security=result["security"])
                 else:
@@ -13446,7 +13447,7 @@ class ControlServer(socketserver.ThreadingMixIn, HTTPServer):
     def _reset_wifi_name(self) -> WifiOutcome:
         try:
             result = self.helper_client.reset_wifi_name()
-            if result.get("ssid") != "JitterSim" or result.get("security") not in SECURITY_MODES:
+            if result.get("ssid") != DEFAULT_WIFI_NAME or result.get("security") not in SECURITY_MODES:
                 raise HelperClientError("The helper did not confirm the expected Wi-Fi settings.")
         except HelperClientError as error:
             return _wifi_failure(error, "Wi-Fi name reset failed",
