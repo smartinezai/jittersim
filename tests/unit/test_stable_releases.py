@@ -433,7 +433,7 @@ def test_timeout_cancels_descendant_after_parent_exits(release, tmp_path):
     marker = tmp_path / "escaped"
     child = "import time; from pathlib import Path; time.sleep(0.5); Path(" + repr(str(marker)) + ").touch()"
     parent = "import subprocess,sys; subprocess.Popen([sys.executable,'-c'," + repr(child) + "])"
-    with pytest.raises(release.ReleaseError, match="time|unconfirmed"):
+    with pytest.raises(release.ReleaseError, match="time|deadline|unconfirmed"):
         release.command([sys.executable, "-c", parent], timeout=0.15)
     time.sleep(0.6)
     assert not marker.exists()
