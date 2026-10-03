@@ -979,12 +979,13 @@ Router and Wi-Fi shows it and so does
 `jittersim status` on the Mac.
 
 A Pi without the update service (a release from before staged updates) needs
-the full installer once. `--use-installer` copies the archive, checks its
-checksum on the Pi and unpacks it to `~/jittersim-release-COMMIT` as the login
-user. It runs the installer by default. With `--stage-only` it prints the
-installer command. Use it
-as well for OS package or Wi-Fi changes. The unpacked folder stays in the home
-folder like a release unpacked by hand.
+the full installer once. `--use-installer` copies the archive then makes a
+root-private copy on the Pi and checks its checksum before unpacking to
+`/root/jittersim-install-source-COMMIT`. The source belongs to root so the
+installer can verify it safely. It runs the installer by default in the same
+sudo terminal. With `--stage-only` it prints the installer command. Use it
+as well for OS package or Wi-Fi changes. The source folder stays under `/root`
+for checking. An existing folder is refused rather than overwritten.
 
 Every ssh and scp call has a ten second connection timeout, notices a dead
 connection within 45 seconds and uses only the given key. All of them except
@@ -1084,8 +1085,8 @@ key must have signed exactly those bytes and the sequence must be newer than the
 high-water mark. Limits: Content-Length is required, the archive is at most 25 MiB,
 the signature at most 16 KiB and the whole upload must finish within 120 seconds.
 `jittersim remote update status|upload|install` does the same from the command
-line, and `deploy/raspberry-pi/publish-release.sh REF` publishes the two release
-files to GitHub for the online release source.
+line. Publishing stable releases requires the retained signed package and owner
+approval. Follow the [release guide](../../docs/releases/README.md).
 
 ### Who can do what
 

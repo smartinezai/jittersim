@@ -600,7 +600,10 @@ def _update_command(arguments) -> int:
         if not isinstance(retry, dict) or not isinstance(retry.get("id"), str):
             print(status.get("retry_unavailable_reason") or "No failed update is ready to retry.", file=sys.stderr)
             return 1
-        if not _confirm("Retry the failed update or recovery?", arguments.yes):
+        question = "Retry the failed update or recovery?"
+        if retry.get("recovering") is True or retry.get("kind") == "rollback":
+            question += " If recovery restores the saved backup, changes after that backup will be replaced."
+        if not _confirm(question, arguments.yes):
             print("Cancelled. The failed update was not retried.")
             return 0
         try:
@@ -651,7 +654,7 @@ def _update_command(arguments) -> int:
         print("No previous installation is available for recovery.", file=sys.stderr)
         return 1
     if not _confirm(
-        "Restore the previous installation and its settings backup?",
+        "Restore the previous installation and its settings backup? Changes after that backup will be replaced.",
         arguments.yes,
     ):
         print("Cancelled. The previous installation was not restored.")

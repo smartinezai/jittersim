@@ -55,6 +55,74 @@ def test_package_preparation_failure_does_not_stop_services(pi):
     assert (pi.data / "jittersim.db").read_text() == "original settings"
 
 
+def test_unknown_command_admission_never_runs_recovery_or_loses_intent(pi):
+    commands = []
+
+    def run(command, timeout):
+        commands.append(list(command))
+        if command[:2] == ["systemctl", "stop"]:
+            raise updates.OperationOwnershipUnknown("controlled unknown launch")
+
+    with pytest.raises(updates.OperationOwnershipUnknown):
+        pi.apply(run, lambda: True)
+    assert commands[-1][:2] == ["systemctl", "stop"], "unknown launch cannot authorize another command"
+    assert updates.read_json(pi.root / "request.json"), "the interrupted intent must be retained"
+    assert updates.read_json(pi.root / "status.json")["phase"] == "failed"
+
+
+def test_internal_recovery_preserves_unfinished_command_shared_fence(pi):
+    class Pending:
+        pid = 123
+
+    stop_calls = 0
+
+    def run(command, timeout):
+        nonlocal stop_calls
+        if command[:2] == ["systemctl", "stop"]:
+            stop_calls += 1
+            if stop_calls == 1:
+                raise updates.UpdateError("controlled initial stop failure")
+        if command[:2] == ["systemctl", "restart"]:
+            raise updates.CommandNotStopped("controlled recovery leaf", Pending())
+
+    with pytest.raises(updates.UpdateError):
+        pi.apply(run, lambda: False)
+    assert updates.read_json(pi.root / "operation-pending.json")["group"] == Pending.pid
+
+
+def test_current_manager_is_published_before_the_first_owned_command(pi):
+    commands, record = pi.recorder()
+
+    def run(command, timeout):
+        if not commands:
+            assert "OPERATION_FORMAT = 2" in pi.manager.read_text()
+        return record(command, timeout)
+
+    pi.apply(run, lambda: True)
+
+
+@pytest.mark.parametrize("boundary", ["configure", "fallback-stop"])
+def test_unknown_name_preparation_never_authorizes_a_later_command(pi, boundary):
+    commands = []
+    failure = updates.OperationOwnershipUnknown("controlled unknown name launch")
+
+    def run(command, timeout):
+        commands.append(list(command))
+        if command[1:4] == ["-m", "jittersim.mdnsname", "configure"]:
+            if boundary == "configure":
+                raise failure
+            raise updates.UpdateError("controlled name configuration failure")
+        if command[:3] == ["systemctl", "stop", "avahi-daemon.service"]:
+            raise failure
+
+    with pytest.raises(updates.OperationOwnershipUnknown) as caught:
+        pi.apply(run, lambda: True)
+    assert caught.value is failure
+    assert commands[-1][1:4] == ["-m", "jittersim.mdnsname", "configure"] if boundary == "configure" else \
+        commands[-1][:3] == ["systemctl", "stop", "avahi-daemon.service"]
+    assert updates.read_json(pi.root / "request.json")
+
+
 def test_interruption_during_replacement_keeps_the_previous_copy_discoverable(pi):
     previous = pi.root / "backup"
     previous.mkdir()
@@ -313,7 +381,7 @@ def test_build_outputs_exceeding_the_private_allowance_are_refused(tmp_path, mon
 
     with pytest.raises(updates.UpdateError, match="large"):
         updates.prepare_install(source, tmp_path / "prepared", Path(sys.executable),
-                                {"commit": "a" * 40, "version": "0.2.0"},
+                                {"commit": "a" * 40, "version": "0.2.0.dev+aaaaaaa"},
                                 build, updates.UpdateBudget())
 
 
@@ -389,9 +457,13 @@ def test_health_body_has_a_total_deadline_even_when_bytes_keep_arriving(monkeypa
     clock = [100.0]
     monkeypatch.setattr(updates.time, "monotonic", lambda: clock[0])
 
-    (tmp_path / "control.env").write_text(
-        "JITTERSIM_ADMIN_TOKEN=throwaway-health-test\n", encoding="utf-8"
-    )
+    class MemoryFile:
+        def read_text(self):
+            return "JITTERSIM_ADMIN_TOKEN=throwaway-health-test\n"
+
+    class MemoryConfig:
+        def __truediv__(self, name):
+            return MemoryFile() if name == "control.env" else tmp_path / name
 
     class Transport:
         def settimeout(self, value):
@@ -428,7 +500,7 @@ def test_health_body_has_a_total_deadline_even_when_bytes_keep_arriving(monkeypa
     monkeypatch.setattr(updates.ssl, "create_default_context", lambda **kwargs: Context())
     monkeypatch.setattr(updates.socket, "create_connection", lambda *args, **kwargs: Transport())
     monkeypatch.setattr(updates.http.client, "HTTPSConnection", Connection)
-    assert not updates.healthy(config=tmp_path, run=lambda *args: None)
+    assert not updates.healthy(config=MemoryConfig(), run=lambda *args: None)
     assert clock[0] >= 110, "the fixture must reach the body deadline"
     assert clock[0] <= 112, "continuing body bytes must not reset health's total allowance"
 
@@ -515,28 +587,33 @@ def test_manager_compatibility_requires_runnable_standalone_source(tmp_path):
         updates.compatible_manager(source)
 
 
-def test_manual_manager_publication_requires_the_shared_lock_and_is_atomic(tmp_path):
+def test_manual_manager_publication_requires_the_shared_lock_and_is_atomic(tmp_path, monkeypatch):
     import fcntl
+    import types
+    # This fixture holds only a format declaration. The real approved guard and
+    # candidate source publication have a separate default-caller check.
+    safety = types.SimpleNamespace(inspect=lambda *args: None, retain=lambda *args: None)
+    monkeypatch.setattr(updates, "PanicProtection", lambda *args, **kwargs: safety)
     root = tmp_path / "updates"
     root.mkdir(mode=0o700)
     destination = tmp_path / "installed.py"
     destination.write_text("previous manager")
     source = tmp_path / "manager.py"
-    source.write_text("RECOVERY_FORMAT = 2\n")
+    source.write_text("RECOVERY_FORMAT = 2\nOPERATION_FORMAT = 2\n")
     with (root / "lock").open("a+") as owner:
         fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
         with (root / "lock").open("a+") as unrelated:
             with pytest.raises(updates.UpdateError, match="ownership"):
                 updates.bootstrap_manager(source, destination, root=root, descriptor=unrelated.fileno())
         assert destination.read_text() == "previous manager"
-        original = updates.os.replace
+        original = Path.replace
 
         def interrupted(old, new):
             if Path(new) == destination:
                 raise OSError("controlled publication interruption")
             return original(old, new)
 
-        with patch.object(updates.os, "replace", interrupted), pytest.raises(OSError):
+        with patch.object(Path, "replace", interrupted), pytest.raises(OSError):
             updates.bootstrap_manager(source, destination, root=root, descriptor=owner.fileno())
         assert destination.read_text() == "previous manager"
         updates.bootstrap_manager(source, destination, root=root, descriptor=owner.fileno())
@@ -778,3 +855,38 @@ def test_captured_command_retains_unknown_group_completion(monkeypatch):
     monkeypatch.setattr(updates, "command_group_running", lambda *args: True)
     with pytest.raises(updates.CommandNotStopped):
         updates.capture_command([sys.executable, "-c", "pass"], timeout=0.3, limit=65536)
+
+
+
+def test_stable_source_without_locked_preparation_is_refused_before_commands(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    calls = []
+    with pytest.raises(updates.UpdateError, match="locked"):
+        updates.prepare_install(source, tmp_path / "prepared", Path(sys.executable),
+                                {"commit": "a" * 40, "version": "0.2.0"},
+                                lambda *args: calls.append(args), updates.UpdateBudget())
+    assert not calls
+
+
+
+def test_stable_preparation_uses_locked_builder_then_only_offline_installs(tmp_path):
+    source = tmp_path / "source"
+    scripts = source / "deploy/raspberry-pi"
+    (scripts / "release-locks").mkdir(parents=True)
+    (scripts / "prepare-locked-wheels.py").write_text("# controlled stand-in\n")
+    commands = []
+
+    def run(command, timeout):
+        commands.append(command)
+        if "--source" in command:
+            destination = Path(command[command.index("--output") + 1])
+            (destination / "jittersim-0.2.0-py3-none-any.whl").write_bytes(b"prepared wheel")
+
+    result = updates.prepare_install(source, tmp_path / "prepared", Path(sys.executable),
+                                     {"commit": "a" * 40, "version": "0.2.0"},
+                                     run, updates.UpdateBudget())
+    assert Path(commands[0][2]).name == "prepare-locked-wheels.py"
+    assert not any("wheel" in command for command in commands)
+    assert all("--no-index" in command and "--no-deps" in command for command in commands if "install" in command)
+    assert len(result) == 1

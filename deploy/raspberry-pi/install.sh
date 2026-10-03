@@ -44,6 +44,14 @@ python3 -I "$SOURCE_DIR/deploy/raspberry-pi/create-ap-profile.py" --help >/dev/n
 
 # Refuse source that cannot preserve recovery before changing packages or files.
 python3 -I "$SOURCE_DIR/src/jittersim/updates.py" check-manager "$SOURCE_DIR/src/jittersim/updates.py"
+python3 -I "$SOURCE_DIR/src/jittersim/updates.py" check-operation
+python3 -I "$SOURCE_DIR/src/jittersim/updates.py" prepare-installer "$SOURCE_DIR"
+
+# Fixed packages are prepared before live source replacement.
+locked_release_wheels=
+if [ -f "$SOURCE_DIR/deploy/raspberry-pi/prepare-locked-wheels.py" ]; then
+    python3 -I "$SOURCE_DIR/deploy/raspberry-pi/prepare-locked-wheels.py" --source "$SOURCE_DIR" --check
+fi
 
 # The passwordless rule is only safe with a trusted release signing key: check it before
 # anything changes.
@@ -101,10 +109,23 @@ if [ -x "$INSTALL_DIR/.venv/bin/jittersim-access-restore" ]; then
     previous_access_release=yes
 fi
 
+if [ -f "$SOURCE_DIR/deploy/raspberry-pi/prepare-locked-wheels.py" ]; then
+    locked_release_wheels=$(mktemp -d /var/tmp/jittersim-release-wheels.XXXXXX)
+    chmod 0700 "$locked_release_wheels"
+    trap 'rm -rf "$locked_release_wheels"' EXIT
+    python3 -I "$SOURCE_DIR/deploy/raspberry-pi/prepare-locked-wheels.py" \
+        --source "$SOURCE_DIR" --output "$locked_release_wheels"
+fi
+
 python3 "$SOURCE_DIR/deploy/raspberry-pi/replace-source.py" "$SOURCE_DIR" "$INSTALL_DIR"
 
 python3 -m venv "$INSTALL_DIR/.venv"
-"$INSTALL_DIR/.venv/bin/pip" install "$INSTALL_DIR"
+if [ -n "$locked_release_wheels" ]; then
+    "$INSTALL_DIR/.venv/bin/python" -I -m pip install --no-index --no-deps --force-reinstall "$locked_release_wheels"/*.whl
+    "$INSTALL_DIR/.venv/bin/python" -I -m pip check
+else
+    "$INSTALL_DIR/.venv/bin/pip" install "$INSTALL_DIR"
+fi
 # jittersim-helper runs as root from this directory, so only root may change it.
 chown -R root:root "$INSTALL_DIR"
 chmod -R go-w "$INSTALL_DIR"

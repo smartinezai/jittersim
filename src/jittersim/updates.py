@@ -36,6 +36,7 @@ import tarfile
 import tempfile
 import threading
 import time
+import types
 from collections import namedtuple
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
@@ -948,21 +949,353 @@ def _private_folder(root):
         raise UpdateError("update directory must be owned by the administrator")
 
 
+def _lock_anchor(descriptor, directory):
+    opened = os.fstat(descriptor)
+    named = os.stat("lock", dir_fd=directory, follow_symlinks=False)
+    if (not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(named.st_mode)
+            or opened.st_uid != os.geteuid() or opened.st_mode & 0o022 or opened.st_nlink != 1
+            or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)):
+        raise UpdateError("the operation has no safe update ownership")
+
+
+OPERATION_RECORDS = ("operation-pending.json", "installer-pending.json")
+PANIC_SOURCE_FILES = ("src/jittersim/panic_guard.py", "src/jittersim/networking/helper.py",
+                      "src/jittersim/networking/access.py")
+# The combined consumers were reviewed at 6fc3524. Labels cannot establish
+# compatibility with persistent stop intent.
+PANIC_APPROVED_SOURCES = ({
+    "src/jittersim/panic_guard.py": "ba481860bd364e5f548aa14381abe3392afc75959bbf6b8086a17169a4c99b3d",
+    "src/jittersim/networking/helper.py": "e9b0e6070c5bb27d2983711b808e33e541099c762fc562eaf5c73ede3d2045e4",
+    "src/jittersim/networking/access.py": "1d4edebe57877e6db6bbbcd0d1adaecfd9fa48573c0f8830b10a2dcdaaf04ec6",
+},)
+
+
+class PanicProtectionError(UpdateError):
+    """Keep the current installation and retained intent for management recovery."""
+
+
+def owned_source_bytes(source, relative, *, maximum):
+    """Read one fixed candidate module through owned non-following descriptors."""
+    parts = PurePosixPath(relative).parts
+    if not parts or relative.startswith("/") or ".." in parts or len(parts) > 6:
+        raise UpdateError("the candidate module path is invalid")
+    directories = []
+    try:
+        directory = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        directories.append(directory)
+        for name in parts[:-1]:
+            directory = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            directories.append(directory)
+        for directory in directories:
+            info = os.fstat(directory)
+            if info.st_uid != os.geteuid() or info.st_mode & 0o022:
+                raise UpdateError("the candidate module directory is not owned safely")
+        descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directories[-1])
+        with os.fdopen(descriptor, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                    or info.st_nlink != 1 or info.st_mode & 0o022 or info.st_size > maximum):
+                raise UpdateError("the candidate module is not owned safely")
+            raw = handle.read(maximum + 1)
+            after = os.fstat(handle.fileno())
+            if len(raw) > maximum or (info.st_size, info.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+                raise UpdateError("the candidate module changed while reading it")
+            return raw
+    except OSError as error:
+        raise UpdateError("the candidate module could not be verified") from error
+    finally:
+        for directory in reversed(directories):
+            os.close(directory)
+
+
 @contextmanager
-def update_lock(root=UPDATE_ROOT, *, wait=0):
+def identity_modules(source):
+    """Use fixed owned stdlib modules with this exact executing manager."""
+    current = sys.modules.get(__name__)
+    if current is None or current.__dict__ is not globals():
+        raise UpdateError("the executing recovery manager is unavailable")
+    names = ("localname", "localca", "mdnsname")
+    contents = {name: owned_source_bytes(source, "src/jittersim/" + name + ".py",
+                                         maximum=1024 * 1024) for name in names}
+    prefix = "_jittersim_identity_" + secrets.token_hex(16)
+    package = types.ModuleType(prefix)
+    package.__path__ = []
+    installed = {prefix: package, prefix + ".updates": current}
+    result = types.SimpleNamespace()
+    try:
+        sys.modules.update(installed)
+        for name in names:
+            module = types.ModuleType(prefix + "." + name)
+            module.__package__ = prefix
+            module.__file__ = str(source / "src/jittersim" / (name + ".py"))
+            installed[module.__name__] = module
+            sys.modules[module.__name__] = module
+            setattr(package, name, module)
+            exec(compile(contents[name], module.__file__, "exec"), module.__dict__)
+            setattr(result, name, module)
+        yield result
+    finally:
+        for name, module in installed.items():
+            if sys.modules.get(name) is module:
+                del sys.modules[name]
+
+
+def prepare_dashboard_identity(source, config, budget, *, group="jittersim"):
+    """Keep the update owner and total allowance during certificate setup."""
+    budget.check()
+    with identity_modules(source) as modules:
+        try:
+            name, _ = modules.localname.install_config(config, group=group)
+            modules.localca.prepare(config, host_name=socket.gethostname().split(".")[0] + ".local",
+                                    neutral_name=name, ethernet_ip=modules.localca.detect_ethernet_ip(),
+                                    budget=budget)
+            modules.localca.set_permissions(config, group)
+        except (CommandNotStopped, OperationOwnershipUnknown):
+            raise
+        except (OSError, ValueError, modules.localca.TrustError) as error:
+            raise UpdateError("the dashboard identity could not be prepared") from error
+    budget.check()
+
+
+def configure_dashboard_name(source, config):
+    with identity_modules(source) as modules:
+        try:
+            modules.mdnsname.configure_avahi(interfaces=runtime_interfaces(config))
+        except (OSError, ValueError, modules.mdnsname.ConfigureError) as error:
+            raise UpdateError("the dashboard name service could not be prepared") from error
+
+
+def _panic_candidate(source):
+    if not 1 <= len(PANIC_APPROVED_SOURCES) <= 32:
+        raise UpdateError("the candidate needs reviewed Panic protection")
+    contents = {name: owned_source_bytes(source, name, maximum=1024 * 1024)
+                for name in PANIC_SOURCE_FILES}
+    observed = {name: hashlib.sha256(raw).hexdigest() for name, raw in contents.items()}
+    if not any(bundle == observed for bundle in PANIC_APPROVED_SOURCES):
+        raise UpdateError("the candidate needs reviewed Panic protection")
+    return _panic_module(contents[PANIC_SOURCE_FILES[0]], source / PANIC_SOURCE_FILES[0])
+
+
+def _panic_module(raw, path):
+    digest = hashlib.sha256(raw).hexdigest()
+    if not any(bundle.get(PANIC_SOURCE_FILES[0]) == digest for bundle in PANIC_APPROVED_SOURCES):
+        raise UpdateError("the retained producer needs reviewed Panic protection")
+    module = types.ModuleType("_jittersim_installer_panic")
+    module.__file__ = str(path)
+    try:
+        exec(compile(raw, module.__file__, "exec"), module.__dict__)
+    except (SyntaxError, ValueError) as error:
+        raise UpdateError("the candidate stop protection cannot run") from error
+    module._verified_bytes = raw
+    return module
+
+
+class PanicProtection:
+    """Inspect before stopping then establish latest intent under quiescence."""
+
+    def __init__(self, source, *, retained=None, guard_path=None, legacy_path=None, owner_uid=None):
+        try:
+            if retained is not None and (retained.exists() or retained.is_symlink()):
+                raw = owned_source_bytes(retained.parent, retained.name, maximum=1024 * 1024)
+                module = _panic_module(raw, retained)
+            else:
+                module = _panic_candidate(source)
+            self.module = module
+            self.guard = module.PanicGuard(guard_path or module.PANIC_GUARD_PATH,
+                                          owner_uid=0 if owner_uid is None else owner_uid)
+            self.legacy = legacy_path or module.PANIC_LEGACY_PATH
+        except (OSError, UpdateError) as error:
+            raise PanicProtectionError("The selected package cannot preserve Panic protection.") from error
+
+    def inspect(self, *sources):
+        try:
+            state = self.guard.inspect_upgrade(self.legacy)
+            for source in sources:
+                self.module.check_panic_candidate(state, source, PANIC_APPROVED_SOURCES,
+                                                  owner_uid=self.guard.owner_uid)
+            return state
+        except OSError as error:
+            raise PanicProtectionError("The selected package cannot preserve current Panic protection.") from error
+
+    def provision(self, *sources):
+        self.inspect(*sources)
+        try:
+            self.guard.provision_upgrade(self.legacy)
+            # An independently established guard wins initialize-only publication.
+            self.inspect(*sources)
+        except OSError as error:
+            raise PanicProtectionError("Current Panic protection could not be saved.") from error
+
+    def retain(self, destination):
+        descriptor, name = tempfile.mkstemp(prefix=".panic-manager-", dir=destination.parent)
+        temporary = Path(name)
+        try:
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(self.module._verified_bytes)
+                output.flush()
+                os.fchmod(output.fileno(), 0o644)
+                os.fsync(output.fileno())
+            temporary.replace(destination)
+            _fsync_folder(destination.parent)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def prepare_manual_install(source, *, descriptor=9, root=UPDATE_ROOT):
+    """Prove fresh state or inspect known legacy intent before the shell starts."""
+    module = _panic_candidate(source)
+    guard = module.PanicGuard()
+    module.verify_fresh_installer_lock(root, descriptor, owner_uid=guard.owner_uid)
+    if guard.read() is not None:
+        return
+    legacy = module.PANIC_LEGACY_PATH
+    if legacy.exists() or legacy.is_symlink():
+        guard.inspect_upgrade(legacy)
+    else:
+        guard.provision_fresh()
+
+
+def _operation_record(root, name="operation-pending.json"):
+    if name not in OPERATION_RECORDS:
+        raise UpdateError("the command ownership record name is invalid")
+    path = root / name
+    if not path.exists() and not path.is_symlink():
+        return None
+    record = _recovery_record(path)
+    if type(record.get("format")) is not int:
+        raise UpdateError("the unfinished command ownership format is invalid")
+    if record.get("format") == 1 and set(record) == {"format", "group", "boot"}:
+        return record
+    if (record.get("format") != OPERATION_FORMAT
+            or set(record) != {"format", "state", "owner", "boot", "nonce", "group"}
+            or record["state"] not in ("launching", "running")
+            or type(record["owner"]) is not int or not 0 < record["owner"] < 2 ** 31
+            or not isinstance(record["nonce"], str) or not ATTEMPT.fullmatch(record["nonce"])
+            or (record["state"] == "launching" and record["group"] is not None)
+            or (record["state"] == "running" and
+                (type(record["group"]) is not int or not 0 < record["group"] < 2 ** 31))):
+        raise UpdateError("the unfinished command ownership record is invalid")
+    return record
+
+
+def _operation_busy(root, budget, name=None):
+    if name is None:
+        return any(_operation_busy(root, budget, item) for item in OPERATION_RECORDS)
+    record = _operation_record(root, name)
+    if record is None:
+        return False
+    if record.get("state") != "launching":
+        return command_still_running(record, budget)
+    # Before GO the child can only wait on its private pipe. Parent death
+    # closes that pipe and cannot authorize the requested executable.
+    if not _same_boot(record):
+        return False
+    budget.check()
+    try:
+        os.kill(record["owner"], 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _inherited_installer(record):
+    identity = os.environ.get("JITTERSIM_INSTALLER_NONCE", "")
+    return (record is not None and record.get("state") == "running" and _same_boot(record)
+            and record["group"] == os.getpgrp()
+            and ATTEMPT.fullmatch(identity) is not None
+            and secrets.compare_digest(record["nonce"], identity))
+
+
+def retain_command(root, error):
+    """Keep physical ownership before an internal recovery handler hides it."""
+    name = getattr(error, "lease_name", "operation-pending.json")
+    existing = _operation_record(root, name)
+    if existing is not None:
+        if existing.get("group") != error.process.pid:
+            raise OperationOwnershipUnknown("unfinished command ownership changed") from error
+        return
+    atomic_json(root / name, {
+        "format": OPERATION_FORMAT, "state": "running", "owner": os.getpid(),
+        "group": error.process.pid, "boot": _current_boot(), "nonce": secrets.token_hex(16),
+    })
+
+
+@contextmanager
+def update_lock(root=UPDATE_ROOT, *, wait=0, descriptor=None):
     if not isinstance(wait, (int, float)) or not math.isfinite(wait) or not 0 <= wait <= 15:
         raise UpdateError("update lock wait is invalid")
     deadline = time.monotonic() + wait
     _private_folder(root)
-    with (root / "lock").open("a") as handle:
+    directory = None
+    owned = descriptor is None
+    previous = getattr(COMMAND_CONTEXT, "operation", None)
+    previous_ready = getattr(COMMAND_CONTEXT, "operation_ready", False)
+    previous_lease = getattr(COMMAND_CONTEXT, "lease_name", "operation-pending.json")
+    entered = False
+    try:
+        directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+        folder = os.fstat(directory)
+        if folder.st_uid != os.geteuid() or folder.st_mode & 0o077:
+            raise UpdateError("update directory must be private to the administrator")
+        if owned:
+            descriptor = os.open("lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+                                 0o600, dir_fd=directory)
+        _lock_anchor(descriptor, directory)
         while True:
             try:
-                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except BlockingIOError as error:
                 if time.monotonic() >= deadline:
                     raise UpdateError("an update operation is already running") from error
                 time.sleep(min(0.02, max(0, deadline - time.monotonic())))
+        _lock_anchor(descriptor, directory)
+        budget = UpdateBudget()
+        budget.deadline = min(budget.deadline, time.monotonic() + 2)
+        for name in OPERATION_RECORDS:
+            pending = _operation_record(root, name)
+            if pending is None:
+                continue
+            inherited = not owned and name == "installer-pending.json" and _inherited_installer(pending)
+            if inherited:
+                continue
+            if _operation_busy(root, budget, name):
+                raise UpdateError("an unfinished command still owns the operation")
+            (root / name).unlink()
+            _fsync_folder(root)
+        COMMAND_CONTEXT.operation = (Path(root), descriptor)
+        COMMAND_CONTEXT.operation_ready = False
+        COMMAND_CONTEXT.lease_name = "operation-pending.json"
+        entered = True
+        try:
+            yield descriptor
+        except CommandNotStopped as error:
+            retain_command(root, error)
+            raise
+    except OSError as error:
+        if entered:
+            raise
+        raise UpdateError("the operation has no safe update ownership") from error
+    finally:
+        COMMAND_CONTEXT.operation = previous
+        COMMAND_CONTEXT.operation_ready = previous_ready
+        COMMAND_CONTEXT.lease_name = previous_lease
+        if directory is not None:
+            os.close(directory)
+        # A borrowed open file description remains owned by the installer.
+        # Closing our own descriptor also leaves inherited child ownership live.
+        if owned and descriptor is not None:
+            os.close(descriptor)
+
+
+@contextmanager
+def manual_identity_operation(root=UPDATE_ROOT, *, descriptor=None):
+    if descriptor is None and os.environ.get("JITTERSIM_INSTALL_LOCK_FD") == "9":
+        descriptor = 9
+    with update_lock(root, descriptor=descriptor):
+        request = root / "request.json"
+        if request.exists() or request.is_symlink():
+            raise UpdateError("a retained update must finish before changing dashboard access")
         yield
 
 
@@ -1669,6 +2002,106 @@ class CommandNotStopped(UpdateError):
     def __init__(self, name, process):
         super().__init__("release command did not stop: " + name)
         self.process = process
+        self.lease_name = getattr(COMMAND_CONTEXT, "lease_name", "operation-pending.json")
+
+
+class OperationOwnershipUnknown(UpdateError):
+    """Command admission did not establish a durable completion identity."""
+
+
+# This child owns no application code before its parent publishes its group.
+# EOF, a late GO or an invalid byte cannot execute the requested command.
+COMMAND_BARRIER = (
+    "import os,select,sys,time\n"
+    "fd=int(sys.argv[1]); deadline=float(sys.argv[2])\n"
+    "clock=lambda:time.clock_gettime(time.CLOCK_MONOTONIC)\n"
+    "ready=select.select([fd],[],[],max(0,deadline-clock()))[0]\n"
+    "go=os.read(fd,1) if ready else b''\n"
+    "os.close(fd)\n"
+    "if go!=b'G' or clock()>=deadline: sys.exit(124)\n"
+    "os.execvpe(sys.argv[3],sys.argv[3:],os.environ)\n"
+)
+
+
+def _owned_command_start(command, deadline, **options):
+    operation = getattr(COMMAND_CONTEXT, "operation", None)
+    if operation is None:
+        return subprocess.Popen(command, **options), None
+    root, descriptor = operation
+    lease_name = COMMAND_CONTEXT.lease_name
+    if _operation_record(root, lease_name) is not None:
+        raise OperationOwnershipUnknown("an unfinished command already owns the operation")
+    if root == UPDATE_ROOT and not COMMAND_CONTEXT.operation_ready:
+        # Older managers must never encounter an operation record they cannot
+        # honor. Manual identity commands use this same fixed recovery reader.
+        compatible_manager(Path(__file__))
+        if Path(__file__).resolve() != MANAGER_PATH.resolve():
+            install_manager(Path(__file__), MANAGER_PATH)
+        COMMAND_CONTEXT.operation_ready = True
+    lease = {"format": OPERATION_FORMAT, "state": "launching", "owner": os.getpid(),
+             "boot": _current_boot(), "nonce": secrets.token_hex(16), "group": None}
+    reader = writer = None
+    process = None
+    try:
+        atomic_json(root / lease_name, lease)
+        if time.monotonic() >= deadline:
+            raise UpdateError("release command has no time remaining")
+        reader, writer = os.pipe()
+        child_deadline = time.clock_gettime(time.CLOCK_MONOTONIC) + max(0, deadline - time.monotonic())
+        if lease_name == "installer-pending.json":
+            options["env"] = {**options["env"], "JITTERSIM_INSTALLER_NONCE": lease["nonce"],
+                              "JITTERSIM_INSTALL_LOCK_FD": str(descriptor)}
+        process = subprocess.Popen(
+            [sys.executable, "-I", "-S", "-c", COMMAND_BARRIER, str(reader), repr(child_deadline), *command],
+            pass_fds=(reader, descriptor), **options,
+        )
+        os.close(reader)
+        reader = None
+        lease = {**lease, "state": "running", "group": process.pid}
+        atomic_json(root / lease_name, lease)
+        if time.monotonic() >= deadline:
+            raise UpdateError("release command has no time remaining")
+        os.write(writer, b"G")
+        return process, (lease_name, lease["nonce"])
+    except BaseException as error:
+        # Close GO before waiting. The inert wrapper must see EOF if command
+        # publication was interrupted. Never run recovery on ambiguous state.
+        if writer is not None:
+            os.close(writer)
+            writer = None
+        if process is not None:
+            try:
+                process.wait(timeout=max(0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                # No GO was sent so this is exclusively our inert wrapper.
+                process.kill()
+                try:
+                    process.wait(timeout=max(0, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    pass
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
+        raise OperationOwnershipUnknown("release command ownership could not be confirmed") from error
+    finally:
+        for pipe in (reader, writer):
+            if pipe is not None:
+                os.close(pipe)
+
+
+def _completed_command(nonce):
+    if nonce is None:
+        return
+    root, _ = COMMAND_CONTEXT.operation
+    name, identity = nonce
+    current = _operation_record(root, name)
+    if current is None or current.get("nonce") != identity:
+        raise OperationOwnershipUnknown("completed command ownership changed")
+    try:
+        (root / name).unlink()
+        _fsync_folder(root)
+    except OSError as error:
+        raise OperationOwnershipUnknown("completed command ownership could not be saved") from error
 
 
 def _command_environment():
@@ -1726,8 +2159,8 @@ def _command_result(command, timeout, capture, *, input_bytes=b"", output_limit=
     # Leave a short part of the caller's allowance to cancel and reap our process.
     work_deadline = deadline - min(0.1, timeout / 5)
     try:
-        process = subprocess.Popen(
-            command, stdin=subprocess.PIPE if input_bytes else subprocess.DEVNULL,
+        process, nonce = _owned_command_start(
+            command, work_deadline, stdin=subprocess.PIPE if input_bytes else subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=True, env=_command_environment(), bufsize=0,
         )
@@ -1832,6 +2265,7 @@ def _command_result(command, timeout, capture, *, input_bytes=b"", output_limit=
             if isinstance(error, CommandNotStopped):
                 raise
             raise CommandNotStopped(name, process) from error
+        _completed_command(nonce)
     if failure is not None:
         raise failure
     if binary:
@@ -1854,6 +2288,23 @@ def capture_command(command, timeout=30, *, input=b"", limit=65536):
     """Return bounded bytes after the complete owned process group has ended."""
     return _command_result(command, timeout, True, input_bytes=input,
                            output_limit=limit, answer_limit=limit, binary=True)
+
+
+def run_installer(installer, source, *, root=UPDATE_ROOT, descriptor=9, prepare=None, timeout=900,
+                  enable_passwordless_staging=False):
+    """Own the complete shell session as well as independent nested leaf groups."""
+    prepare = prepare or prepare_manual_install
+    with manual_identity_operation(root, descriptor=descriptor):
+        prepare(source, root=root, descriptor=descriptor)
+        COMMAND_CONTEXT.lease_name = "installer-pending.json"
+        # The shell must inherit the anchor in its documented descriptor slot.
+        if descriptor != 9:
+            raise UpdateError("the installer needs its inherited descriptor 9")
+        command = ["/bin/sh", str(installer)]
+        if enable_passwordless_staging:
+            command.append("--enable-passwordless-staging")
+        command.append(str(source))
+        run_command(command, timeout=timeout)
 
 
 PUBLIC_REQUEST = re.compile(r"[0-9a-f]{32}\Z")
@@ -1920,6 +2371,8 @@ def _retry_info(root, status, query, *, budget=None, admission=False):
 def _inspect_retry(root, status, query, budget, admission):
     try:
         budget.check()
+        if _operation_busy(root, budget):
+            raise UpdateError("an unfinished command still owns the operation")
         request = _recovery_record(root / "request.json")
         fields = _operation_fields(request)
         if (fields["request_id"] is None
@@ -2448,6 +2901,8 @@ def _check_online(root, code, config, source):
                      MAX_API_ANSWER, deadline, what="answer")
     release = _parse_release(body)
     tag = release["tag"]
+    if not re.fullmatch(r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", tag):
+        raise OnlineError("the newest GitHub release does not have a stable version tag")
     installed = _record(code / ".jittersim-release.json")
     staged_record = _record(root / "staged" / ".jittersim-release.json")
     seen = _record(root / ONLINE_SEEN)
@@ -2476,7 +2931,7 @@ def _check_online(root, code, config, source):
                       "application/octet-stream", limit, deadline, target, what="file")
         try:
             record = stage_release(archive, signature=signature, root=root, code=code,
-                                   config=config, origin="github", tag=tag)
+                                   config=config, origin="github", tag=tag, version=tag[1:])
         except NotNewerError:
             atomic_json(root / ONLINE_SEEN, {"fingerprint": release["fingerprint"],
                                              "outcome": "not-newer"})
@@ -2666,6 +3121,7 @@ def run_fetch_job(*, root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT, sourc
 
 # A copied recovery manager must understand these records before they are published.
 RECOVERY_FORMAT = 2
+OPERATION_FORMAT = 2
 ATTEMPT = re.compile(r"[0-9a-f]{32}\Z")
 GENERATION = re.compile(r"backup-[0-9a-f]{32}\Z")
 PREPARATION = re.compile(r"prepare-[0-9a-f]{32}\Z")
@@ -3031,8 +3487,15 @@ def prepare_install(staged, path, python, record, run, budget):
                                    "PIP_NO_CACHE_DIR": "true"}
     COMMAND_CONTEXT.observe = lambda: _check_preparation(path, budget)
     try:
-        run([str(python), "-m", "pip", "wheel", "--no-input", "--disable-pip-version-check",
-             "--no-cache-dir", "--wheel-dir", str(path / "wheels"), str(staged)], budget.limit(300))
+        locked_builder = staged / "deploy/raspberry-pi/prepare-locked-wheels.py"
+        if locked_builder.is_file() and (locked_builder.parent / "release-locks").is_dir():
+            run([str(python), "-I", str(locked_builder), "--source", str(staged),
+                 "--output", str(path / "wheels")], budget.limit(300))
+        else:
+            if re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", record.get("version", "")):
+                raise UpdateError("a stable release must include its locked package preparation")
+            run([str(python), "-m", "pip", "wheel", "--no-input", "--disable-pip-version-check",
+                 "--no-cache-dir", "--wheel-dir", str(path / "wheels"), str(staged)], budget.limit(300))
         budget.check()
         _check_preparation(path, budget)
         rows = []
@@ -3074,34 +3537,35 @@ def compatible_manager(source):
                        for node in parsed.body)
         if not declared:
             raise UpdateError("the release needs a compatible recovery manager")
+        operation_declared = any(isinstance(node, ast.Assign)
+                                 and any(isinstance(target, ast.Name) and target.id == "OPERATION_FORMAT"
+                                         for target in node.targets)
+                                 and isinstance(node.value, ast.Constant)
+                                 and type(node.value.value) is int and node.value.value == OPERATION_FORMAT
+                                 for node in parsed.body)
+        if not operation_declared:
+            raise UpdateError("the release needs a compatible command ownership manager")
     except (OSError, SyntaxError, ValueError) as error:
         raise UpdateError("the release needs a runnable recovery manager") from error
 
 
 def bootstrap_manager(source, destination, *, root=UPDATE_ROOT, descriptor=9):
     """Publish standalone recovery code while the manual installer holds its lock."""
-    directory = None
     try:
-        directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
-        folder = os.fstat(directory)
-        opened = os.fstat(descriptor)
-        named = os.stat("lock", dir_fd=directory, follow_symlinks=False)
-        if (folder.st_uid != os.geteuid() or folder.st_mode & 0o077
-                or not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(named.st_mode)
-                or opened.st_uid != os.geteuid() or opened.st_mode & 0o022 or opened.st_nlink != 1
-                or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)):
-            raise UpdateError("the installer has no safe update ownership")
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        current = os.stat("lock", dir_fd=directory, follow_symlinks=False)
-        if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
-            raise UpdateError("the installer has no safe update ownership")
-    except OSError as error:
-        raise UpdateError("the installer has no safe update ownership") from error
-    finally:
-        if directory is not None:
-            os.close(directory)
-    compatible_manager(source)
-    install_manager(source, destination)
+        with manual_identity_operation(root, descriptor=descriptor):
+            compatible_manager(source)
+            safety = PanicProtection(source.parents[2])
+            safety.inspect(source.parents[2])
+            safety.retain(destination.with_name("jittersim-panic-guard.py"))
+            install_manager(source, destination)
+    except UpdateError as error:
+        raise UpdateError("the installer command has no safe update ownership") from error
+
+
+def check_operation(*, root=UPDATE_ROOT, descriptor=9):
+    """Check the manual installer's inherited ownership before any mutation."""
+    with manual_identity_operation(root, descriptor=descriptor):
+        pass
 
 
 WRITERS = (WATCHER, *reversed(SERVICES))
@@ -3118,6 +3582,32 @@ def writers_stopped(names, query, budget):
                 or state.get("TasksCurrent") not in ("0", "[not set]")):
             return False
     return True
+
+
+def quiesce_manual_install(source, *, root=UPDATE_ROOT, descriptor=9, units=UNITS_ROOT,
+                           run=run_command, query=read_command):
+    """Provision current intent only after the installer's writers have ended."""
+    with manual_identity_operation(root, descriptor=descriptor):
+        if not _inherited_installer(_operation_record(root, "installer-pending.json")):
+            raise UpdateError("the installer has no matching whole command ownership")
+        budget = UpdateBudget()
+        budget.deadline = min(budget.deadline, budget.started + 90)
+        module = _panic_candidate(source)
+        guard = module.PanicGuard()
+        if guard.read() is None:
+            guard.inspect_upgrade(module.PANIC_LEGACY_PATH)
+        names = [name for name in WRITERS if (units / name).exists()]
+        if names:
+            run(["systemctl", "stop", *names], budget.limit(60))
+        budget.check()
+        if not writers_stopped(names, query, budget):
+            raise UpdateError("the installer settings writers did not stop")
+        budget.check()
+        # Never publish the earlier preview. The real producer rereads latest
+        # intent after stop so a concurrent Panic cannot be lost in migration.
+        _panic_candidate(source)
+        guard.provision_upgrade(module.PANIC_LEGACY_PATH)
+        budget.check()
 
 
 def validate_recovery(backup, budget):
@@ -3173,18 +3663,22 @@ def _current_boot():
     return path.read_text().strip() if path.exists() else None
 
 
-def command_still_running(record, budget):
-    # Refuse restoration while an unknown cancelled group can still write. No
-    # signals are sent here, so an unrelated reused group can only delay retry.
-    if not isinstance(record, dict) or type(record.get("group")) is not int or record["group"] <= 0:
-        raise UpdateError("the unfinished command record is invalid")
+def _same_boot(record):
     current_boot = _current_boot()
     saved_boot = record.get("boot")
     if ("boot" not in record or (saved_boot is not None
             and (not isinstance(saved_boot, str) or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", saved_boot)))
             or (current_boot is not None and saved_boot is None)):
         raise UpdateError("the unfinished command boot record is invalid")
-    if saved_boot != current_boot:
+    return saved_boot == current_boot
+
+
+def command_still_running(record, budget):
+    # Read-only inspection cannot signal an unrelated reused process group.
+    if (not isinstance(record, dict) or type(record.get("group")) is not int
+            or not 0 < record["group"] < 2 ** 31):
+        raise UpdateError("the unfinished command record is invalid")
+    if not _same_boot(record):
         return False
     return command_group_running(record["group"], budget.deadline)
 
@@ -3289,7 +3783,7 @@ def healthy(*, config=CONFIG_ROOT, run=run_command, port=8080, budget=None):
                     and data.get("helper_reachable") is True)
         finally:
             connection.close()
-    except CommandNotStopped:
+    except (CommandNotStopped, OperationOwnershipUnknown):
         raise
     except (OSError, ValueError, StopIteration, UpdateError, http.client.HTTPException):
         return False
@@ -3381,20 +3875,15 @@ def apply_update(
             with its own settings, and the name service is not started.
             """
             try:
-                uplink, test_interface = runtime_interfaces(config)
-                run(
-                    [str(code / ".venv/bin/python"), "-m", "jittersim.mdnsname", "configure",
-                     "--uplink", uplink, "--test-interface", test_interface],
-                    60,
-                )
+                configure_dashboard_name(code, config)
                 run(["systemctl", "restart", "avahi-daemon.service"], 120)
                 return True
-            except CommandNotStopped:
+            except (CommandNotStopped, OperationOwnershipUnknown):
                 raise
             except UpdateError:
                 try:
                     run(["systemctl", "stop", "avahi-daemon.service", "avahi-daemon.socket"], 60)
-                except CommandNotStopped:
+                except (CommandNotStopped, OperationOwnershipUnknown):
                     raise
                 except UpdateError:
                     pass
@@ -3402,6 +3891,7 @@ def apply_update(
 
         def restart_services(prepare_name=False):
             """Run the systemctl steps of install.sh for the units installed now."""
+            panic_safety.inspect(code)
             name_ready = prepare_name_service() if prepare_name else True
             try:
                 wifi = query(
@@ -3409,7 +3899,7 @@ def apply_update(
                      runtime_interfaces(config)[1]],
                     10,
                 )
-            except CommandNotStopped:
+            except (CommandNotStopped, OperationOwnershipUnknown):
                 raise
             except (UpdateError, OSError):
                 # An unknown state must never restart the running Wi-Fi.
@@ -3425,7 +3915,7 @@ def apply_update(
                 for action, *names in NAME_STEPS:
                     try:
                         run(["systemctl", action, *names], 120)
-                    except CommandNotStopped:
+                    except (CommandNotStopped, OperationOwnershipUnknown):
                         raise
                     except UpdateError:
                         break
@@ -3481,6 +3971,7 @@ def apply_update(
             if not (backup / "complete.json").exists():
                 raise UpdateError("the recovery copy is incomplete")
             completed = validate_recovery(backup, budget)
+            panic_safety.inspect(backup / "code")
             ownership = completed.get("ownership", {})
             targets = []
             for name in completed.get("managed", ["units/" + unit for unit in LEGACY_UNITS]):
@@ -3498,7 +3989,7 @@ def apply_update(
                 str(request.get("version", "")).encode("utf-8")
             ).hexdigest()
             retained_certificate = prepare_certificate_restore(
-                root, config, transaction, deadline=certificate_deadline
+                root, config, transaction, deadline=certificate_deadline, budget=budget
             )
             keep = keep_trust_settings()
             for name, destination in (("code", code), ("config", config), ("data", data)):
@@ -3516,7 +4007,7 @@ def apply_update(
                         os.chown(entry, uid, gid, follow_symlinks=False)
             put_back_trust_settings(keep)
             restore_certificate_identity(
-                root, config, retained_certificate, deadline=certificate_deadline
+                root, config, retained_certificate, deadline=certificate_deadline, budget=budget
             )
             for name, destination in targets:
                 budget.check()
@@ -3535,7 +4026,7 @@ def apply_update(
                         keep = unit in (WIFI_UNIT, "jittersim-update.service")
                         try:
                             run(["systemctl", "disable", *([] if keep else ["--now"]), unit], 60)
-                        except CommandNotStopped:
+                        except (CommandNotStopped, OperationOwnershipUnknown):
                             raise
                         except UpdateError:
                             pass
@@ -3580,6 +4071,16 @@ def apply_update(
         keep_request = True
         stopped = bool(request.get("restart_only"))
         try:
+            # Even preflight is supervised by the new durable command lease.
+            compatible_manager(Path(__file__))
+            if Path(__file__).resolve() != manager.resolve():
+                install_manager(Path(__file__), manager)
+            staged = root / "staged"
+            panic_safety = PanicProtection(code if request.get("rollback") else staged,
+                                           retained=manager.with_name("jittersim-panic-guard.py"))
+            selected = (backup / "code",) if request.get("rollback") else (staged, code)
+            panic_safety.inspect(*selected)
+            panic_safety.retain(manager.with_name("jittersim-panic-guard.py"))
             if request.get("rollback"):
                 if "recovery" not in request:
                     request["recovery"] = recovery_identity(root, backup)
@@ -3622,9 +4123,6 @@ def apply_update(
                     raise UpdateError("not enough free space for update and recovery")
                 # Publish new record formats only after the installed recovery manager
                 # can read them. The current fixed manager is also kept on rollback.
-                compatible_manager(Path(__file__))
-                if Path(__file__).resolve() != manager.resolve():
-                    install_manager(Path(__file__), manager)
                 if "attempt" not in request:
                     request["attempt"] = secrets.token_hex(16)
                 if not isinstance(request["attempt"], str) or not ATTEMPT.fullmatch(request["attempt"]):
@@ -3659,6 +4157,7 @@ def apply_update(
             run(["systemctl", "stop", *names], 60)
             if not writers_stopped(names, query, budget):
                 raise UpdateError("the settings writers did not stop")
+            panic_safety.provision(*selected)
             if request.get("rollback"):
                 progress("rolling-back", "Restoring the previous installation and settings.")
                 restore()
@@ -3667,7 +4166,7 @@ def apply_update(
                 cleanup_generations(root, budget)
                 recovered = True
                 progress("rolled-back", "Previous installation restored and health check passed.")
-                finish_certificate_recovery(root)
+                finish_certificate_recovery(root, budget=budget)
                 keep_request = False
                 return
             progress("backing-up", "Saving the stopped installation and settings.")
@@ -3740,10 +4239,7 @@ def apply_update(
             run([python, str(code / BOOTSTRAP)], 60)
             # Like install.sh: keep the dashboard name setting and the local
             # certificate authority, and renew the dashboard certificates.
-            run([python, "-m", "jittersim.localname", "install",
-                 "--config-dir", str(config), "--group", "jittersim"], 60)
-            run([python, "-m", "jittersim.localca", "ensure",
-                 "--config-dir", str(config), "--group", "jittersim"], 120)
+            prepare_dashboard_identity(code, config, budget)
             link_command(str(code / ".venv/bin/jittersim"), command)
             render_firewall(staged / FIREWALL_TEMPLATE, config / FIREWALL_RULES,
                             uplink, test_interface)
@@ -3767,9 +4263,16 @@ def apply_update(
             install_manager(code / "src/jittersim/updates.py", manager)
             cleanup_generations(root, budget)
             progress("complete", "Release installed. Dashboard and helper health checks passed.")
-            finish_certificate_recovery(config / ".certificate-adoption")
+            finish_certificate_recovery(config / ".certificate-adoption", budget=budget)
             keep_request = False
+        except PanicProtectionError:
+            progress("failed", "Panic protection needs management access. The current package and update intent are kept.")
+            raise
+        except OperationOwnershipUnknown:
+            progress("failed", "An update command could not be confirmed. Recovery will wait for it.")
+            raise
         except CommandNotStopped as error:
+            retain_command(root, error)
             request["command_pending"] = pending_command(error.process)
             atomic_json(root / "request.json", request)
             progress("failed", "An update command has not stopped. Recovery will wait for it.")
@@ -3804,7 +4307,11 @@ def apply_update(
                     recovered = True
                 if recovered and (needs_recovery or stopped):
                     cleanup_generations(root, budget)
+            except OperationOwnershipUnknown:
+                progress("failed", "A recovery command could not be confirmed. Recovery will wait for it.")
+                raise
             except CommandNotStopped as error:
+                retain_command(root, error)
                 request["command_pending"] = pending_command(error.process)
                 atomic_json(root / "request.json", request)
                 recovered = False
@@ -3821,7 +4328,7 @@ def apply_update(
                 message = "Update or recovery failed. Check the update service log."
             progress("rolled-back" if recovered and needs_recovery else "failed", message)
             if recovered and needs_recovery:
-                finish_certificate_recovery(root)
+                finish_certificate_recovery(root, budget=budget)
             raise
         finally:
             if not keep_request:
@@ -3907,6 +4414,9 @@ def main(argv=None, prog=None):
     stage.add_argument("--version", help="also require this release label")
     commands.add_parser("apply", help="run a queued install (the update service runs it)")
     commands.add_parser("bootstrap-manager", help=argparse.SUPPRESS)
+    commands.add_parser("check-operation", help=argparse.SUPPRESS)
+    installer_prepare = commands.add_parser("prepare-installer", help=argparse.SUPPRESS)
+    installer_prepare.add_argument("source", type=Path)
     manager_check = commands.add_parser("check-manager", help=argparse.SUPPRESS)
     manager_check.add_argument("source", type=Path)
     trust = commands.add_parser(
@@ -3961,6 +4471,10 @@ def main(argv=None, prog=None):
             compatible_manager(args.source)
         elif args.command == "bootstrap-manager":
             bootstrap_manager(Path(__file__), MANAGER_PATH)
+        elif args.command == "check-operation":
+            check_operation()
+        elif args.command == "prepare-installer":
+            quiesce_manual_install(args.source)
         elif args.command == "apply":
             apply_update(root=UPDATE_ROOT, code=CODE_ROOT, config=CONFIG_ROOT)
         elif args.command == "set-token":

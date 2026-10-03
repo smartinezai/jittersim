@@ -318,3 +318,27 @@ def test_identified_install_wait_never_replays_service_start():
         helper.return_value.install_release.return_value = {"request_id": public_id, "request_kind": "install"}
         assert jittersim(["update", "install", "--yes", "--wait"]) == 0
     start.assert_not_called()
+
+
+@pytest.mark.parametrize("recovering,kind,warning", [(True, "install", True),
+                                                    (False, "rollback", True),
+                                                    (False, "install", False)])
+def test_retry_confirmation_explains_saved_copy_replacement(recovering, kind, warning):
+    initial = {"retry": {"id": "b" * 64, "recovering": recovering, "kind": kind}}
+    with patch.object(cli, "HelperClient") as helper, \
+            patch.object(cli.os, "geteuid", return_value=0), \
+            patch.object(cli, "_confirm", return_value=False) as confirm:
+        helper.return_value.release_status.return_value = initial
+        assert jittersim(["update", "retry"]) == 0
+    assert ("changes after that backup will be replaced" in confirm.call_args.args[0].lower()) is warning
+    helper.return_value.retry_update.assert_not_called()
+
+
+def test_rollback_confirmation_explains_later_settings_replacement():
+    with patch.object(cli, "HelperClient") as helper, \
+            patch.object(cli.os, "geteuid", return_value=0), \
+            patch.object(cli, "_confirm", return_value=False) as confirm:
+        helper.return_value.release_status.return_value = {"rollback_available": True}
+        assert jittersim(["update", "rollback"]) == 0
+    assert "Changes after that backup will be replaced" in confirm.call_args.args[0]
+    helper.return_value.install_release.assert_not_called()

@@ -11,6 +11,7 @@ import sys
 import tarfile
 import tempfile
 import threading
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -116,7 +117,7 @@ class UpdateTests(unittest.TestCase):
             "README.md": "Release",
             "deploy/RELEASE": manifest(sequence or self.sequence, version),
             "src/jittersim/api/server.py": "new code",
-            "src/jittersim/updates.py": "# new recovery manager\nRECOVERY_FORMAT = 2\n",
+            "src/jittersim/updates.py": "# new recovery manager\nRECOVERY_FORMAT = 2\nOPERATION_FORMAT = 2\n",
         }
         # The release ships this checkout's Pi files so the installer steps are real.
         files.update(
@@ -144,7 +145,7 @@ class UpdateTests(unittest.TestCase):
         path, digest = self.archive(sequence=sequence, version=version)
         self.stage_archive(path, sha256=digest)
 
-    def apply(self, run, health, query=None):
+    def apply(self, run, health, query=None, *, isolate_panic=True):
         def package_commands(command, timeout):
             result = run(command, timeout)
             # Only the external package commands are stand-ins. Preparation,
@@ -159,7 +160,29 @@ class UpdateTests(unittest.TestCase):
                 return "ActiveState=inactive\nMainPID=0\nControlPID=0\nTasksCurrent=0"
             return query(command, timeout) if query else self.wifi
 
-        return apply_update(
+        def identity(source, config, budget, **options):
+            # These archive tests use a minimal synthetic package. The verified
+            # in-process identity calls have separate real-source tests.
+            python = str(self.code / ".venv/bin/python")
+            run([python, "-m", "jittersim.localname", "install",
+                 "--config-dir", str(config), "--group", "jittersim"], budget.limit(60))
+            run([python, "-m", "jittersim.localca", "ensure",
+                 "--config-dir", str(config), "--group", "jittersim"], budget.limit(120))
+
+        def name_service(source, config):
+            run([str(self.code / ".venv/bin/python"), "-m", "jittersim.mdnsname", "configure",
+                 "--uplink", "eth7", "--test-interface", "wlan7"], 60)
+
+        from contextlib import nullcontext
+        # The historical recovery fixtures predate the persistent guard. Real
+        # default admission and provisioning are tested with reviewed sources.
+        safety = types.SimpleNamespace(inspect=lambda *args: None, provision=lambda *args: None,
+                                       retain=lambda *args: None)
+        panic = patch.object(updates, "PanicProtection", lambda *args, **kwargs: safety, create=True) \
+            if isolate_panic else nullcontext()
+        with panic, patch.object(updates, "prepare_dashboard_identity", identity), \
+                patch.object(updates, "configure_dashboard_name", name_service):
+            return apply_update(
             root=self.root,
             code=self.code,
             config=self.config,
@@ -418,7 +441,8 @@ class UpdateTests(unittest.TestCase):
                 or line.startswith(("install ", "sed ", "ln ", "runuser "))
             ) or line.startswith(("SOURCE_DIR=", "INSTALL_DIR=", "if [ ", "echo ")):
                 continue
-            if any(name in line for name in ("install-lock.py", "create-ap-profile.py")):
+            if any(name in line for name in ("install-lock.py", "create-ap-profile.py",
+                                             " check-operation", " prepare-installer")):
                 # Manual setup owns its lock and creates the first AP. Updates
                 # already hold the shared lock and preserve the existing AP.
                 continue
@@ -469,7 +493,12 @@ class UpdateTests(unittest.TestCase):
                     self.assertEqual(self.manager.read_bytes(),
                                      (self.code / "src/jittersim/updates.py").read_bytes())
                 elif re.search(r"deploy/raspberry-pi/[\w.-]+\.py", line):
-                    script = Path(words[1]).name
+                    script = Path(words[2] if words[1] == "-I" else words[1]).name
+                    if script == "prepare-locked-wheels.py":
+                        # This fixture represents a legacy development archive without locks.
+                        # Stable preparation is exercised separately with fixed packages.
+                        self.assertFalse((self.root / "staged/deploy/raspberry-pi/release-locks").exists())
+                        continue
                     if script == "retire-services.py":
                         # It refuses to run while the update service runs and no
                         # unit waits to be retired. A test below keeps that true.
@@ -507,13 +536,15 @@ class UpdateTests(unittest.TestCase):
                     self.assertIn(words, commands)
                     self.assertEqual(words[3:], [
                         "configure", "--uplink", "eth7", "--test-interface", "wlan7"])
-                elif Path(words[0]).name == "pip":
+                elif Path(words[0]).name == "pip" or ("pip" in words and "install" in words):
                     offline = [command for command in commands if command[:4] ==
                                [str(self.code / ".venv/bin/python"), "-m", "pip", "install"]]
                     self.assertEqual(len(offline), 1)
                     self.assertIn("--no-index", offline[0])
                     self.assertIn("--no-deps", offline[0])
                     self.assertTrue(offline[0][-1].endswith(".whl"))
+                elif "pip" in words and words[-1] == "check":
+                    self.assertIn([str(self.code / ".venv/bin/python"), "-m", "pip", "check"], commands)
                 elif words[:2] == ["chmod", "-R"]:
                     self.assertEqual(words[2], "go-w")
                     for entry in [self.code, *self.code.rglob("*")]:
@@ -522,7 +553,7 @@ class UpdateTests(unittest.TestCase):
                     # The update installs into the existing environment as root.
                     continue
                 else:
-                    self.fail("the dashboard update does not do this install.sh step")
+                    self.fail("the dashboard update does not do this install.sh step: " + line)
         self.assertEqual(installed_units, set(UNITS))
 
     def test_the_update_runs_the_installer_service_steps_in_order(self):
