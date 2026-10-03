@@ -127,16 +127,13 @@ def all_help_icons():
 
 
 def id_inputs():
-    """The inputs that hold an ID: every one with the ID pattern plus the device form's profile."""
+    """The text inputs that hold an ID use the shared ID pattern."""
 
     found = [
         node
         for node in PAGE.walk()
         if node.tag == "input" and (node.attrs.get("pattern") or "").startswith(ID_PATTERN_PREFIX)
     ]
-    found.extend(
-        node for node in PAGE.walk() if node.tag == "input" and node.attrs.get("id") == "device-profile"
-    )
     return found
 
 
@@ -217,11 +214,9 @@ def test_upload_and_download_get_a_copy_in_each_set():
 
 
 NAME_SENTENCES = ("is what people read", "are what people read")
-# Two fields explain their ID in another way: a schedule has no name so its ID is the title in
-# the list and the device form's Profile ID points at a profile saved on another card.
+# A schedule has no name so its ID is the title in the list.
 OTHER_SENTENCES = {
     "schedule-id": ("schedule list", "list below"),
-    "device-profile": ("share a name",),
 }
 CHARACTER_RULE = "Use only lowercase letters and digits and hyphens and underscores."
 

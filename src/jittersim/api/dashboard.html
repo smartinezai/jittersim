@@ -600,12 +600,18 @@
           <label>Reserved IPv4 address
             <input id="device-ip" required placeholder="192.168.50.10">
           </label>
-          <label><span class="field-label">Profile ID<span class="help-icon" tabindex="0" role="img" aria-label="Device profile ID help" data-help="The ID of a profile you already saved. It is the code you typed as Profile ID when saving that profile. Profile menus show the name, and add the code only when two profiles share a name.">?</span></span> <input id="device-profile" required></label>
+          <label><span class="field-label">Profile<span class="help-icon" tabindex="0" role="img" aria-label="Device profile help" data-help="Choose a saved profile for this device. Profiles with the same name show their codes so you can tell them apart. Save a profile first if the list is empty.">?</span></span>
+            <select id="device-profile" required disabled data-require-available-option aria-describedby="device-profile-note">
+              <option value="">Choose a saved profile</option>
+            </select>
+          </label>
           <label>MAC address (optional)
             <input id="device-mac" placeholder="aa:bb:cc:dd:ee:ff">
           </label>
         </div>
-        <button type="submit">Save device</button>
+        <p id="device-profile-note" class="form-note" role="status">Check the admin token to load saved profiles.</p>
+        <button id="save-device" type="submit" disabled>Save device</button>
+        <button id="device-profile-refresh" type="button" hidden>Refresh profiles</button>
       </form>
     </section>
     <section class="card">
