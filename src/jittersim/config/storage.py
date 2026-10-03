@@ -201,7 +201,11 @@ class ConfigRepository:
         else:
             self._transaction_depth -= 1
             if depth == 0:
-                self._connection.commit()
+                try:
+                    self._connection.commit()
+                except BaseException:
+                    self._connection.rollback()
+                    raise
             else:
                 self._connection.execute(f"RELEASE {savepoint}")
 
@@ -477,6 +481,11 @@ class ConfigRepository:
             );
             CREATE INDEX IF NOT EXISTS domain_observations_last_seen_idx
                 ON domain_observations (last_seen);
+            CREATE TABLE IF NOT EXISTS domain_list_clearing (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                cleared_at INTEGER NOT NULL,
+                rows_cleared INTEGER NOT NULL CHECK (rows_cleared > 0)
+            );
             CREATE TABLE IF NOT EXISTS random_website_analytics (
                 event_day_utc INTEGER NOT NULL,
                 device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
@@ -624,9 +633,35 @@ class ConfigRepository:
                 "SELECT 1 FROM unaffected_devices LIMIT 1"
             ).fetchone()
             if added and protected is not None:
-                self._connection.execute(
+                cleared = self._connection.execute(
                     "DELETE FROM domain_observations WHERE mac_address IS NULL"
-                )
+                ).rowcount
+                if cleared > 0:
+                    self._record_domain_list_cleared(cleared)
+
+    def _record_domain_list_cleared(self, rows_cleared: int) -> None:
+        """Remember that an upgrade emptied the Traffic list so the dashboard can say so.
+
+        This runs in the transaction that clears the rows. A crash keeps both or neither and
+        the next start clears the rows again and records it once.
+        """
+
+        self._connection.execute(
+            "INSERT OR IGNORE INTO domain_list_clearing (id, cleared_at, rows_cleared) VALUES (1, ?, ?)",
+            (int(time.time()), rows_cleared),
+        )
+
+    def get_domain_list_clearing(self) -> Optional[Tuple[int, int]]:
+        """Return when an upgrade cleared the Traffic list and how many names it held.
+
+        The record goes with the first new observation, so a list that is empty with a record
+        has had no sighting since the upgrade. It returns None otherwise.
+        """
+
+        row = self._connection.execute(
+            "SELECT cleared_at, rows_cleared FROM domain_list_clearing WHERE id = 1"
+        ).fetchone()
+        return None if row is None else (row["cleared_at"], row["rows_cleared"])
 
     def _migrate_unaffected_devices(self) -> None:
         """Upgrade the original protection list without losing saved identities."""
@@ -3142,6 +3177,9 @@ class ConfigRepository:
                     """,
                     (str(observation.ipv4_address), observation.query_count, 2**62),
                 )
+            if observations:
+                # The list fills again so the note about the cleared list is no longer true.
+                self._connection.execute("DELETE FROM domain_list_clearing")
             self._prune_domain_observations(now=current_time)
             self._commit()
         except (sqlite3.IntegrityError, sqlite3.OperationalError) as error:

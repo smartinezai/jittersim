@@ -1,4 +1,5 @@
-FROM python:3.13-slim-bookworm
+ARG BROWSER_BASE_IMAGE=python:3.13-slim-bookworm
+FROM ${BROWSER_BASE_IMAGE}
 WORKDIR /jittersim
 RUN pip install --no-cache-dir playwright==1.63.0 \
     && python -m playwright install --with-deps chromium

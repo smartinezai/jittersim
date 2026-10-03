@@ -186,10 +186,10 @@ the newer version so the older dashboard restores the reset state.
 
 ## Device visibility features
 
-Three dashboard features ask the root helper for new actions. Traffic discovery
-needs `protected_dns_capture` so protected devices are skipped. The router Wi-Fi
-copy buttons need `router-wifi-credentials`. The **Impact** card in Diagnostics
-needs `queue-stats`. An update restarts the helper so all three arrive
+Traffic discovery needs `protected_dns_capture` so protected devices are
+skipped. The **Impact** card in Diagnostics needs `queue-stats`. The sidebar's
+**Copy router Wi-Fi to Pi** button uses the existing `router-preview-ap` and
+`router-sync-ap` actions. An update restarts the helper so these features arrive
 together. If the dashboard still says the helper needs updating after an update,
 restart the services or run the installer again:
 
@@ -211,9 +211,10 @@ Check the features on the Pi after an update:
    and watch the **Impact** card while the phone loads a video. The loss line
    and the cap line fill in and the verdict turns to `Affected in the last
    minute`.
-4. Enter the router admin password then press **Copy Wi-Fi name** and **Copy
-   Wi-Fi password** in the sidebar. Paste each one somewhere harmless to check
-   then copy something else so the password does not stay on the clipboard.
+4. Keep a separate management connection and record the current Pi Wi-Fi
+   settings privately. Enter the router admin password then press **Copy
+   router Wi-Fi to Pi** in the sidebar. Check the security preview and confirm
+   the copy. Verify the copied name, password and security with a test client.
 
 ## Connected device details
 

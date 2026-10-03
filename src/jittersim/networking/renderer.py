@@ -245,10 +245,9 @@ def _render_nft_script(
         f'add rule netdev {DOWNLOAD_TABLE} download meta mark {DASHBOARD_REPLY_MARK} '
         'meta mark set 0 return comment "keep local dashboard replies usable"',
     ])
-    # Each MAC mode enforces only its own list. The persistent access policy
-    # renders these rules too; the copy here keeps the protected bypass below
-    # them while an experiment runs.
-    if plan.mac_policy.mode == "denylist" and plan.mac_policy.denylist:
+    # Household MAC rules belong to the persistent access table. Standalone
+    # experiment plans keep their own legacy MAC policy.
+    if plan.access is None and plan.mac_policy.mode == "denylist" and plan.mac_policy.denylist:
         lines.append(
             f'add rule inet {PROJECT_TABLE} input iifname "{test_interface}" '
             f"ether saddr {_render_set(plan.mac_policy.denylist)} drop "
@@ -259,7 +258,7 @@ def _render_nft_script(
             f"ether saddr {_render_set(plan.mac_policy.denylist)} drop "
             'comment "deny listed test client"'
         )
-    if plan.mac_policy.mode == "allowlist":
+    if plan.access is None and plan.mac_policy.mode == "allowlist":
         lines.append(
             f'add rule inet {PROJECT_TABLE} input iifname "{test_interface}" '
             f"ether saddr != {_render_set(plan.mac_policy.allowlist)} drop "
@@ -434,6 +433,20 @@ def _render_nft_script(
     for list_rule in plan.service_list_rules:
         set_name = service_list_set_name(list_rule)
         download_mark = SERVICE_DOWNLOAD_MARK_BASE + list_rule.mark
+        if list_rule.outage_active:
+            # A random outage of the list cuts its services for every affected
+            # client. Protected clients already returned above in the forward
+            # and download hooks. The input hook is left alone so the Pi's DNS,
+            # DHCP and dashboard keep working. The output rule catches browser
+            # proxy sockets that carry the list's mark, over IPv4 and IPv6.
+            lines.extend((
+                f'add rule inet {PROJECT_TABLE} forward iifname "{test_interface}" '
+                f'ip daddr @{set_name} drop comment "service list outage"',
+                f"add rule netdev {DOWNLOAD_TABLE} download meta mark {download_mark} "
+                'drop comment "service list outage"',
+                f'add rule inet {PROJECT_TABLE} output oifname "{topology.uplink_interface}" '
+                f'meta mark {list_rule.mark} drop comment "service list outage"',
+            ))
         lines.extend((
             f'add rule inet {PROJECT_TABLE} forward iifname "{test_interface}" '
             f"ip daddr @{set_name} meta mark set {list_rule.mark} counter "

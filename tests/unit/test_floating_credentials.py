@@ -33,7 +33,7 @@ def served_functions():
             'element("refresh-diagnostics").addEventListener',
             'element("download-backup").addEventListener',
         )
-        + block("async function copyText(", 'element("sync-router-ap").addEventListener')
+        + block("function renderRouterWifi(", 'element("sync-router-ap").addEventListener')
     )
 
 
@@ -227,11 +227,11 @@ CASES = {
       adminTokenVerified = true;
       const pending = deferred();
       network = () => pending.promise;
-      const loading = show("/api/profiles", "profiles", "profiles");
+      const loading = show("/api/profiles", "profiles-json", "profiles");
       enter("admin-token", "replacement token");
       pending.resolve({ok:true, json:async () => ({profiles:["stale private profile"]})});
       await assert.rejects(loading, /Token changed/);
-      assert.ok(!element("profiles").textContent.includes("stale private profile"));
+      assert.ok(!element("profiles-json").textContent.includes("stale private profile"));
       const count = networkCalls.length;
       await assert.rejects(request("/api/groups", "GET"), /Check token/);
       assert.equal(networkCalls.length, count);
@@ -241,7 +241,9 @@ CASES = {
       assert.equal(element("credentials-panel").hidden, false);
     """,
     "router_replacements_and_failure": r"""
+      helperConfigured = true;
       enter("admin-token", "fixture token");
+      adminTokenVerified = true;
       enter("router-admin-password", "fixture password");
       const pending = deferred();
       network = () => pending.promise;
@@ -331,7 +333,9 @@ CASES = {
       assert.equal(element("check-router-password").disabled, false);
     """,
     "router_check_runs_alone_and_ignores_stale_results": r"""
+      helperConfigured = true;
       enter("admin-token", "fixture token");
+      adminTokenVerified = true;
       enter("router-admin-password", "fixture password");
       const pending = deferred();
       network = () => pending.promise;

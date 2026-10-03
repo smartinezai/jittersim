@@ -52,6 +52,9 @@ python3 "$SOURCE_DIR/deploy/raspberry-pi/preflight.py" \
     --uplink "$JITTERSIM_UPLINK" --test-interface "$JITTERSIM_TEST_INTERFACE"
 python3 "$SOURCE_DIR/deploy/raspberry-pi/retire-services.py" --check
 
+# An upgrade clears the saved DNS names once when protected devices exist. Say so before it happens.
+python3 "$SOURCE_DIR/deploy/raspberry-pi/upgrade-notice.py" "$DATA_DIR/jittersim.db" || true
+
 existing_unbound=no
 if dpkg-query -W -f='${Status}' unbound 2>/dev/null | grep -q 'install ok installed'; then
     existing_unbound=yes

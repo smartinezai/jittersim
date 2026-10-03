@@ -258,22 +258,20 @@ bytes.
 ### Pi and router controls
 
 The left sidebar, visible on every page, includes one **Router Wi-Fi** switch.
-It shows the router's confirmed On or Off state and the last check time.
+On a phone the switch sits in the bar at the bottom of the screen next to
+**Panic**. It shows the router's confirmed On or Off state and the last check time.
 Enter the router admin password to start automatic checks while the page is
 visible. A change shows **Changing** until the router confirms it. An
 unavailable status disables the switch instead of guessing. Keep the Pi
 connected by Ethernet when changing router Wi-Fi.
 
-Under the switch **Copy Wi-Fi name** and **Copy Wi-Fi password** put the
-router's own Wi-Fi name or password on the clipboard. The Pi reads them from
-the router with the router admin password and sends them to the page only when
-you press the button. The name button never requests the password. JitterSim
-does not store the password or log it or keep it in the page. The clipboard
-keeps whatever it holds until something else replaces it so paste it where you
-need it then copy something else. A wrong router password disables both
-buttons until the password changes so repeated guesses cannot lock the router
-login. Without a router password the buttons open the **Router password**
-panel. Use them on a computer that you trust.
+Under the switch **Copy router Wi-Fi to Pi** applies the router's Wi-Fi name,
+password and security together to the Pi's test network. Its progress and
+result appear beside the button on every page. Without a router password the
+button opens the **Router password** panel. A rejected password disables the
+button until the password changes. Test clients disconnect while the Pi Wi-Fi
+restarts so keep a separate management connection. The copy action keeps the
+Wi-Fi password out of the page and clipboard.
 
 The sidebar also shows a short status block once the admin token is accepted.
 **General profile** says which saved profile is the general profile and whether
@@ -448,12 +446,34 @@ list from the device's own profile does not cut a listed service. A device in
 a random outage still loses the Pi's DNS and browser proxy so it reaches a
 listed service only through addresses it already has.
 
-Only the profile's delay, jitter, loss, speed limit, reordering, duplication and
-corruption settings are used. Its website list and random outages are not. A
-service list uses the saved profile as it is, so random variation in that
-profile is not rerolled. All affected devices share one speed limit for each
-list in the same way the general profile shares its limit. Delay, jitter and
-loss apply to each packet.
+The list uses the profile's delay, jitter, loss, speed limit, reordering,
+duplication and corruption and also its random variation and random outages.
+Its website list is not used. All affected devices share one speed limit for
+each list in the same way the general profile shares its limit. Delay, jitter
+and loss apply to each packet.
+
+Random variation works for the whole list. With **Reroll every** set the list
+gets new values at that interval such as `200 ± 30%` and every affected device
+gets the same new values. The first start uses the saved values and the first
+new values come one interval later. The same **Random seed** gives the list the
+same values in the same order each time. Two lists with the same profile get
+different values. Editing the profile or choosing another one starts again
+from the saved values. So do **Reset network** and **Panic**.
+
+A random outage also works for the whole list. At each outage check the
+profile's **Outage chance** decides whether the listed services go away for
+the **Outage length**. During the outage every affected device loses them in
+both directions and the browser proxy refuses their hostnames. The Pi's DNS
+and the dashboard and all other sites keep working and devices in **Unaffected
+by profiles** still reach the listed services. Other sites on the same server
+address as a listed service go away too. The **Service lists** card shows
+`random outage now` for the list and the activity log records when an outage
+starts and ends. The **Impact** card shows no traffic for the list while the
+outage lasts.
+
+New values and the start and end of an outage reach the Pi like a saved change
+within a few seconds. Connections that are shaped carry on with the new values.
+Browser proxy tunnels close so the browser opens them again.
 
 Matching is by destination address. A small service on the Pi reads the DNS
 answers that leave the Pi towards the test Wi-Fi. When an answer names a listed
@@ -494,6 +514,25 @@ The line under the button counts what is saved. The message after a start counts
 what JitterSim really started. Access rules also run after a start so a start
 with no profiles saved says that they apply. Without the Pi helper the dashboard
 says that it needs the helper to run.
+
+**Active profile** above the button names the general profile that is active
+right now. When none is active choose a saved profile in the list. Nothing
+changes until you press **Apply to all devices**. While that profile is active
+the button reads **Stop**. It works like **Apply to all** and **Stop** on the
+Profiles page and protected devices stay untouched.
+
+### On a phone
+
+Up to a width of 768 pixels the dashboard uses a phone layout. The top of the
+page shows the name, the mode, every page in one row that scrolls sideways and
+one line of status. Tap the status line to open the full status block. A page
+link shows the start of that page. **Panic** and the **Router Wi-Fi** switch
+stay in a bar at the bottom of the screen on every page. **Controls** in that
+bar opens a sheet with **Active profile**, **Start with saved settings**,
+**Reset network**, the status and message lines, the two copy buttons and the
+**Admin token** and **Router password** buttons. Tap outside the sheet or press
+Escape to close it. Buttons, fields and the page links are at least 44 pixels
+tall.
 
 ### General profile
 
@@ -618,7 +657,9 @@ buttons. A group opened stays open when the page refreshes.
   **Unblock blocked names** removes blocks from such a group.
 - **Add to profile** switches a profile to **Allow only listed domains** and
   lists only that name when the profile was not an allow-list already. Every
-  other site stops working for devices that use it. Check the profile first.
+  other site stops working for devices that use it. The page asks you to
+  confirm first and says so. **Add all to profile** asks the same. A profile
+  that already is an allow-list adds the names without a question.
 
 A block or profile change from this card is saved at once. It applies on its
 own while JitterSim is running. After Reset or Panic choose **Start with saved
@@ -778,6 +819,15 @@ The installer preserves your saved Wi-Fi name and password. Use it when
 upgrading an older release so it can add new system services. A code-only
 update does not install those services.
 
+An upgrade from a release that did not record the hardware address of each
+device clears the DNS names listed under Traffic once when any device is
+protected. Those names cannot be tied to a device and a protected device may
+have moved to another address since they were saved. The installer prints a
+notice with the number of names before it happens. The Traffic page then says
+when the list was cleared until the first new name arrives and `jittersim
+traffic` says the same. The list fills again as devices browse. Names are kept
+for 30 days from their last sighting. Nothing else is lost.
+
 The test network requires WPA3 with AES and protected Wi-Fi management messages.
 Upgrades save the stronger security settings and report when an active network
 needs a planned restart. Manual
@@ -825,7 +875,8 @@ network namespaces. Run them in a privileged Linux container with:
 tests/kernel/run-in-docker.sh
 ```
 
-The browser checks exercise the dashboard on desktop and phone-sized screens.
+The browser checks exercise the dashboard on desktop and phone-sized screens
+(390, 360 and 320 pixels wide, also with wider fonts).
 GitHub Actions runs the Python, Linux and browser checks for each pull
 request.
 

@@ -9,6 +9,8 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.phone import close_controls, is_phone, open_controls, sidebar_control
+
 MAC_ADDRESS = "02:00:00:00:00:01"
 IP_ADDRESS = "192.168.50.184"
 PROFILE_NAME = "Fixture slow"
@@ -144,7 +146,7 @@ WIDE_PAGE = os.environ.get("JITTERSIM_BROWSER_TEST_WIDE_FONTS") == "1"
 # tall window and for the reach of every control on the others.
 TALL_WINDOW = (1920, 1000)
 REACH_SIZES = ((1280, 700), (1280, 721), (1280, 760), (1280, 800), (390, 844))
-REACH_TARGETS = ("#panic-button", "#router-wifi-toggle", "#copy-wifi-name", "#copy-wifi-password")
+REACH_TARGETS = ("#panic-button", "#router-wifi-toggle", "#sync-router-ap")
 LONG_MESSAGE = (
     "Started: 12 devices with a profile · 3 groups · 2 service lists · 4 protected devices stay"
     " untouched. Profiles were skipped for devices whose current Wi-Fi identity could not be"
@@ -182,16 +184,24 @@ def assert_no_overlap_or_overflow(page, what):
     """No control of the sidebar sits on another and nothing runs sideways."""
 
     boxes = page.evaluate(
-        """() => Array.from(document.querySelectorAll(
-            '.sidebar button, .sidebar a, .sidebar .help-icon, .sidebar p, .sidebar summary'
-        )).map((node) => {
-            const box = node.getBoundingClientRect();
-            return {
-                name: node.id || node.textContent.trim().slice(0, 24),
-                shown: box.width > 0 && box.height > 0 && node.offsetParent !== null,
-                left: box.left, top: box.top, right: box.right, bottom: box.bottom,
-            };
-        }).filter((box) => box.shown)"""
+        """() => {
+            // On a short window the page list scrolls inside itself. A link scrolled out of the
+            // list is cut off by it, so only the part inside the list counts.
+            const list = document.querySelector('.sidebar-nav').getBoundingClientRect();
+            return Array.from(document.querySelectorAll(
+                '.sidebar button, .sidebar a, .sidebar .help-icon, .sidebar p, .sidebar summary'
+            )).map((node) => {
+                const box = node.getBoundingClientRect();
+                const clip = node.closest('.sidebar-nav') ? list
+                    : {top: -Infinity, bottom: Infinity, left: -Infinity, right: Infinity};
+                const top = Math.max(box.top, clip.top), bottom = Math.min(box.bottom, clip.bottom);
+                return {
+                    name: node.id || node.textContent.trim().slice(0, 24),
+                    shown: box.width > 0 && box.height > 0 && node.offsetParent !== null && bottom - top > 1,
+                    left: box.left, top: top, right: box.right, bottom: bottom,
+                };
+            }).filter((box) => box.shown);
+        }"""
     )
     for index, first in enumerate(boxes):
         for second in boxes[index + 1 :]:
@@ -247,6 +257,22 @@ def assert_reachable(page, what):
         assert_no_overlap_or_overflow(page, what)
 
 
+def assert_reachable_on_a_phone(page, what):
+    """Panic and the router switch are in the bar at the bottom and the rest in the sheet."""
+
+    for selector in ("#panic-button", "#router-wifi-toggle"):
+        inside_window(page, selector, what)
+    open_controls(page)
+    bar = page.locator(".safety-bar").bounding_box()
+    for selector in REACH_TARGETS[2:] + ("#apply-button", "#reset-button", "#runtime-summary"):
+        page.locator(selector).scroll_into_view_if_needed()
+        found = inside_window(page, selector, what)
+        assert found["y"] + found["height"] <= bar["y"] + 0.5, (what, selector, "is under the bar", found)
+    overflow = page.evaluate("document.documentElement.scrollWidth - window.innerWidth")
+    assert overflow <= 1, (what, "runs sideways", overflow)
+    close_controls(page)
+
+
 def assert_whole_sidebar_in_window(page, what):
     """On a tall window the buttons that act on the network are in view with no scrolling."""
 
@@ -279,7 +305,10 @@ def assert_sidebar_everywhere(page, state):
             assert_whole_sidebar_in_window(page, f"{state} at {width}x{height}")
         for width, height in REACH_SIZES:
             page.set_viewport_size({"width": width, "height": height})
-            assert_reachable(page, f"{state} with {stress} at {width}x{height}")
+            if is_phone(page):
+                assert_reachable_on_a_phone(page, f"{state} with {stress} at {width}x{height}")
+            else:
+                assert_reachable(page, f"{state} with {stress} at {width}x{height}")
     set_font_stress(page, "")
     page.set_viewport_size(start)
 
@@ -309,6 +338,8 @@ def check_tips(browser):
             page.reload()
             wait_for_automatic_token_check(page)
             expect(page.locator("#apply-summary")).to_have_text(NOTHING_SAVED)
+            # On a phone the buttons and their tips are in the Controls sheet.
+            sidebar_control(page, "#apply-button")
             apply_icon.hover()
             box = assert_tip_inside_window(page, apply_icon, f"apply tip at {width}x{height}")
             page.wait_for_timeout(200)
@@ -500,8 +531,8 @@ def check_width(browser, width, height):
         assert_old_wording_is_gone(page)
         shoot("not-started")
 
-        # Reset network switches it off
-        page.locator("#reset-button").click()
+        # Reset network switches it off. On a phone it is in the Controls sheet.
+        sidebar_control(page, "#reset-button").click()
         expect(runtime).to_have_text(OFF)
         expect(apply_button).to_have_text(START)
         expect(summary).to_have_text(SAVED_DEVICE)
@@ -531,7 +562,7 @@ def check_width(browser, width, height):
         assert not tip_of(page, reset_icon)["shown"]
 
         # Start with saved settings
-        apply_button.click()
+        sidebar_control(page, "#apply-button").click()
         expect(message).to_contain_text("Started: 1 device with a profile.")
         expect(runtime).to_have_text(RUNNING)
         expect(apply_button).to_have_text(REAPPLY)
@@ -548,7 +579,7 @@ def check_width(browser, width, height):
                 name, stopped_geometry, running_geometry)
 
         # applying again while it runs
-        apply_button.click()
+        sidebar_control(page, "#apply-button").click()
         expect(message).to_contain_text("Re-applied: 1 device with a profile.")
         expect(runtime).to_have_text(RUNNING)
         expect(apply_button).to_have_text(REAPPLY)
@@ -656,7 +687,7 @@ def check_width(browser, width, height):
         shoot("off")
 
         # a locked dashboard keeps nothing private under the button
-        page.locator("#open-admin-credentials").click()
+        sidebar_control(page, "#open-admin-credentials").click()
         page.locator("#clear-admin-token").click()
         expect(summary).to_be_hidden()
         expect(summary).to_have_text("")

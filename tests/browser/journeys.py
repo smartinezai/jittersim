@@ -10,6 +10,8 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
+from tests.browser.phone import close_controls, sidebar_control
+from tests.browser.service_list_focus import check_service_list_contexts
 
 ROUTER_LINK = re.compile("^Router and Wi-Fi")
 DEVICES_LINK = re.compile("^Devices")
@@ -324,9 +326,11 @@ def run():
                 page.get_by_role("link", name="Access and rules", exact=True).click()
                 draft = page.get_by_label("Global blocked domains (comma separated)", exact=True)
                 draft.fill("unsaved.example")
-                page.locator("#apply-button").click()
+                # On a phone Start is in the Controls sheet of the bar at the bottom.
+                sidebar_control(page, "#apply-button").click()
                 expect(page.locator("#message")).to_contain_text(re.compile(r"^(Started|Re-applied)"))
                 expect(draft).to_have_value("unsaved.example")
+                close_controls(page)
                 page.get_by_role("link", name=DEVICES_LINK).click()
                 page.get_by_role("button", name="Open Test phone", exact=True).click()
                 page.get_by_role("combobox", name="Temporary profile", exact=True).select_option(
@@ -573,6 +577,7 @@ def run():
                 page.screenshot(
                     path="test-results/experience-overview-phone.png", full_page=False
                 )
+                check_service_list_contexts(browser, f"http://127.0.0.1:{port}/")
                 check_wifi_recovery(page)
                 page.set_viewport_size({"width": 1440, "height": 1000})
                 page.screenshot(path="test-results/wifi-recovery-desktop.png", full_page=True)
