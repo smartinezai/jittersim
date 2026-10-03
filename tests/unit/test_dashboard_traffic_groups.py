@@ -1019,7 +1019,7 @@ def test_the_header_profile_button_adds_the_missing_names_to_the_selected_profil
     assert out["calls"] == [
         ["message", "Adding 7 ImmoScout24 names to the profile...", "working"],
         ["request", "/api/observations/add-to-profile", "POST",
-         {"domains": names, "profile_id": "slow"}],
+         {"domains": names, "profile_id": "slow", "confirm_allow_only": True}],
         ["success", "Added 7 ImmoScout24 names to the profile."],
     ]
     assert out["header"] == "All already in Slow"
@@ -1884,7 +1884,7 @@ def test_confirming_adds_the_name_with_the_same_request_and_later_adds_ask_nothi
     assert out["afterFirst"]["calls"] == [
         ["message", "Adding a.test to the profile...", "working"],
         ["request", "/api/observations/add-to-profile", "POST",
-         {"domain": "a.test", "profile_id": "open"}],
+         {"domain": "a.test", "profile_id": "open", "confirm_allow_only": True}],
         ["success", "Added a.test to the profile."],
     ]
     # The profile is an allow list now, so the second name is added without a question.
@@ -1892,7 +1892,7 @@ def test_confirming_adds_the_name_with_the_same_request_and_later_adds_ask_nothi
     assert out["calls"][3:] == [
         ["message", "Adding b.test to the profile...", "working"],
         ["request", "/api/observations/add-to-profile", "POST",
-         {"domain": "b.test", "profile_id": "open"}],
+         {"domain": "b.test", "profile_id": "open", "confirm_allow_only": False}],
         ["success", "Added b.test to the profile."],
     ]
     assert out["mode"] == "allow_only"
@@ -1914,7 +1914,7 @@ def test_an_allow_list_profile_is_never_asked_about():
     assert out["confirmations"] == []
     assert out["calls"][1] == [
         "request", "/api/observations/add-to-profile", "POST",
-        {"domain": "a.test", "profile_id": "slow"}]
+        {"domain": "a.test", "profile_id": "slow", "confirm_allow_only": False}]
 
 
 @NODE
@@ -1933,7 +1933,7 @@ def test_the_card_select_decides_which_profile_the_question_names():
     )
 
     assert out["confirmations"] == ["Adding a.test " + CONFIRM_TEXT]
-    assert out["calls"][1][3] == {"domain": "a.test", "profile_id": "open"}
+    assert out["calls"][1][3] == {"domain": "a.test", "profile_id": "open", "confirm_allow_only": True}
 
 
 @NODE
@@ -1982,7 +1982,7 @@ def test_confirming_add_all_sends_the_same_request_and_then_stops_asking():
     assert out["first"]["calls"] == [
         ["message", "Adding 7 ImmoScout24 names to the profile...", "working"],
         ["request", "/api/observations/add-to-profile", "POST",
-         {"domains": names, "profile_id": "open"}],
+         {"domains": names, "profile_id": "open", "confirm_allow_only": True}],
         ["success", "Added 7 ImmoScout24 names to the profile."],
     ]
     # The profile came back as an allow list, so the Netflix group asks nothing.
@@ -2026,3 +2026,84 @@ def test_the_choice_map_is_module_level_and_stored_when_the_select_changes():
     body = function_body("renderObservations")
     assert "chosenObservationProfile(" in body
     assert "observationProfileChoice.set(" in body
+
+
+@NODE
+@pytest.mark.parametrize("grouped", [False, True], ids=["single", "group"])
+def test_stale_profile_conflict_waits_for_a_new_click_and_explicit_confirmation(grouped):
+    steps = """
+      const button = GROUPED ? groupParts(cards()[0], 0).profileButton
+        : topList(cards()[0]).children[0].children[2];
+      request = async (path, method, body) => {
+        calls.push(["request", path, method, body]);
+        const error = new Error("Nothing was added. Choose Add again to confirm restricting it.");
+        error.status = 409;
+        error.code = "allow_only_confirmation_required";
+        error.profile = {id: "slow", name: "Changed", website_mode: "unrestricted", website_domains: []};
+        throw error;
+      };
+      await click(button);
+      const afterConflict = {calls: calls.slice(), confirmations: confirmations.slice(),
+        mode: profiles[0].website_mode, disabled: button.disabled};
+      confirmAnswer = false;
+      await click(button);
+      const afterDecline = {calls: calls.slice(), confirmations: confirmations.slice()};
+      confirmAnswer = true;
+      request = async (path, method, body) => {
+        calls.push(["request", path, method, body]);
+        return {profile: {id: "slow", name: "Changed", website_mode: "allow_only", website_domains: []}};
+      };
+      await click(button);
+      console.log(JSON.stringify({afterConflict, afterDecline, calls, confirmations}));
+    """
+    steps = "const GROUPED = " + json.dumps(grouped) + ";\n" + steps
+    items = immo() if grouped else [item("a.test", 1)]
+    out = run_dashboard(steps, [device("192.168.50.124", with_labels(items))])
+
+    first = out["afterConflict"]
+    posts = [call for call in first["calls"] if call[0] == "request"]
+    assert len(posts) == 1
+    assert posts[0][2] == "POST"
+    assert posts[0][3]["confirm_allow_only"] is False
+    assert first["confirmations"] == []
+    assert first["mode"] == "unrestricted"
+    assert first["disabled"] is False
+    assert out["afterDecline"]["calls"] == first["calls"]
+    assert len(out["afterDecline"]["confirmations"]) == 1
+    assert "turns the profile Changed into an allow list" in out["confirmations"][0]
+    posts = [call for call in out["calls"] if call[0] == "request"]
+    assert len(posts) == 2
+    assert posts[1][3]["confirm_allow_only"] is True
+    assert len(out["confirmations"]) == 2
+
+
+@NODE
+@pytest.mark.parametrize("grouped", [False, True], ids=["single", "group"])
+@pytest.mark.parametrize("conflict", [False, True], ids=["network-error", "other-profile"])
+def test_failed_profile_add_does_not_retry_or_replace_a_different_profile(grouped, conflict):
+    steps = """
+      request = async (path, method, body) => {
+        calls.push(["request", path, method, body]);
+        const error = new Error("The request failed.");
+        if (CONFLICT) {
+          error.status = 409;
+          error.code = "allow_only_confirmation_required";
+          error.profile = {id: "fast", name: "Other", website_mode: "unrestricted", website_domains: []};
+        }
+        throw error;
+      };
+      const button = GROUPED ? groupParts(cards()[0], 0).profileButton
+        : topList(cards()[0]).children[0].children[2];
+      await click(button);
+      console.log(JSON.stringify({calls, confirmations, profiles, disabled: button.disabled}));
+    """
+    steps = "const GROUPED = %s; const CONFLICT = %s;\n" % (
+        json.dumps(grouped), json.dumps(conflict)
+    ) + steps
+    items = immo() if grouped else [item("a.test", 1)]
+    out = run_dashboard(steps, [device("192.168.50.124", with_labels(items))])
+
+    assert len([call for call in out["calls"] if call[0] == "request"]) == 1
+    assert out["confirmations"] == []
+    assert out["profiles"] == [SLOW_PROFILE, FAST_PROFILE]
+    assert out["disabled"] is False

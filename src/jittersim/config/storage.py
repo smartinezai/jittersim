@@ -201,7 +201,11 @@ class ConfigRepository:
         else:
             self._transaction_depth -= 1
             if depth == 0:
-                self._connection.commit()
+                try:
+                    self._connection.commit()
+                except BaseException:
+                    self._connection.rollback()
+                    raise
             else:
                 self._connection.execute(f"RELEASE {savepoint}")
 

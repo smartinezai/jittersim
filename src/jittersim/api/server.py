@@ -11,6 +11,7 @@ import os
 import re
 import select
 import socket
+import sqlite3
 import ssl
 import threading
 import time
@@ -2372,6 +2373,8 @@ DASHBOARD_HTML = r"""<!doctype html>
             : data.error || response.statusText;
           const error = new Error(applyHint);
           error.status = response.status;
+          error.code = data.code;
+          error.profile = data.profile;
           throw error;
         }
         if (submitForm && drafts && drafts.get(submitForm.id) === submittedDraft) {
@@ -4973,6 +4976,15 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
     }
 
+    function showProfileAddError(error, profileId) {
+      if (error.status === 409 && error.code === "allow_only_confirmation_required" &&
+          error.profile && error.profile.id === profileId) {
+        const index = profiles.findIndex((profile) => profile.id === profileId);
+        if (index !== -1) profiles[index] = error.profile;
+      }
+      showMessage(error.message, "error");
+    }
+
     const ENFORCE_NOTE = "It applies on its own while JitterSim is running. " +
       "After Reset or Panic choose Start with saved settings. After Panic also turn household blocking back on.";
 
@@ -5497,19 +5509,21 @@ DASHBOARD_HTML = r"""<!doctype html>
     async function addDomainToProfile(domain, profileId, button, onChange) {
       if (!profileId) return;
       const profile = profiles.find((item) => item.id === profileId);
-      if (needsAllowOnlyConfirm(profile) && !await askAllowOnly(domain, profile)) return;
+      const confirmAllowOnly = needsAllowOnlyConfirm(profile);
+      if (confirmAllowOnly && !await askAllowOnly(domain, profile)) return;
       setButtonBusy(button, true);
       showMessage("Adding " + domain + " to the profile...", "working");
       try {
         const result = await request("/api/observations/add-to-profile", "POST", {
           domain: domain,
-          profile_id: profileId
+          profile_id: profileId,
+          confirm_allow_only: confirmAllowOnly
         });
         const index = profiles.findIndex((profile) => profile.id === profileId);
         if (index !== -1 && result.profile) profiles[index] = result.profile;
         refreshAfterSuccess("Added " + domain + " to the profile.");
       } catch (error) {
-        showMessage(error.message, "error");
+        showProfileAddError(error, profileId);
       } finally {
         setButtonBusy(button, false);
         if (onChange) onChange();
@@ -5557,20 +5571,22 @@ DASHBOARD_HTML = r"""<!doctype html>
       const action = groupProfileAction(group, profile);
       if (action.disabled) return;
       const messages = groupProfileMessages(group, action);
-      if (needsAllowOnlyConfirm(profile) &&
+      const confirmAllowOnly = needsAllowOnlyConfirm(profile);
+      if (confirmAllowOnly &&
           !await askAllowOnly(groupSubject(group, action.domains.length), profile)) return;
       setButtonBusy(button, true);
       showMessage(messages.busy, "working");
       try {
         const result = await request("/api/observations/add-to-profile", "POST", {
           domains: action.domains,
-          profile_id: profile.id
+          profile_id: profile.id,
+          confirm_allow_only: confirmAllowOnly
         });
         const index = profiles.findIndex((item) => item.id === profile.id);
         if (index !== -1 && result.profile) profiles[index] = result.profile;
         refreshAfterSuccess(messages.done);
       } catch (error) {
-        showMessage(error.message, "error");
+        showProfileAddError(error, profile.id);
       } finally {
         setButtonBusy(button, false);
         if (onChange) onChange();
@@ -12927,18 +12943,38 @@ class ControlServer(HTTPServer):
         try:
             profile_id = payload["profile_id"]
             names = _domains_from_payload(payload)
-            profile = self.repository.get_profile(profile_id)
-            if profile is None:
-                raise ValueError("profile does not exist")
-            listed = tuple(dict.fromkeys(profile.website_domains + names))
-            if len(listed) > MAX_LISTED_DOMAINS:
-                return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
-                    {"error": "A profile can list %d websites. Remove some first." % MAX_LISTED_DOMAINS}
-                )
-            updated = replace(profile, website_mode="allow_only", website_domains=listed)
-            self.repository.save_profile(updated)
+            confirm_allow_only = payload.get("confirm_allow_only", False)
+            if not isinstance(confirm_allow_only, bool):
+                raise ValueError("confirm_allow_only must be true or false")
+            with self.repository.transaction():
+                profile = self.repository.get_profile(profile_id)
+                if profile is None:
+                    raise ValueError("profile does not exist")
+                if profile.website_mode != "allow_only" and not confirm_allow_only:
+                    return HTTPStatus.CONFLICT, "application/json", _json_bytes(
+                        {
+                            "code": "allow_only_confirmation_required",
+                            "error": (
+                                "This profile no longer allows only listed sites. "
+                                "Nothing was added. Choose Add again to confirm restricting it."
+                            ),
+                            "profile": _profile_payload(profile),
+                        }
+                    )
+                listed = tuple(dict.fromkeys(profile.website_domains + names))
+                if len(listed) > MAX_LISTED_DOMAINS:
+                    return HTTPStatus.BAD_REQUEST, "application/json", _json_bytes(
+                        {"error": "A profile can list %d websites. Remove some first." % MAX_LISTED_DOMAINS}
+                    )
+                updated = replace(profile, website_mode="allow_only", website_domains=listed)
+                self.repository.save_profile(updated)
         except (KeyError, TypeError, ValueError, StorageError) as error:
             return _bad_request("could not add domain to profile", error)
+        except sqlite3.Error:
+            LOGGER.exception("could not save observed websites to a profile")
+            return HTTPStatus.SERVICE_UNAVAILABLE, "application/json", _json_bytes(
+                {"error": "The profile could not be saved. Try again."}
+            )
         return HTTPStatus.OK, "application/json", _json_bytes(
             {"profile": _profile_payload(updated)}
         )

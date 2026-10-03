@@ -32,7 +32,7 @@ The acknowledgment records permission to make this restrictive transition. It is
 3. Verify the API rejects an unrestricted profile with absent or false acknowledgment and accepts an intentional true acknowledgment. Reject strings, numbers and null. Preserve existing lists and other settings. Retain caps, malformed-name rejection and missing-profile behavior.
 4. Use two connections to the same temporary SQLite database to prove another profile writer cannot enter between the checked read and save. Verify rollback on a save failure. Keep test waits bounded and release all threads in cleanup.
 5. Run actual served dashboard functions for both actions. Verify initial decline, confirmation, existing allow lists, a stale conflict, the next-click question and no repeated POST after a conflict or network failure.
-6. Run real authenticated API and Chromium single/group stale-tab scenarios including intentional confirmation after rejection. Use the local fixture only. No physical Pi or Docker work in this repair scope.
+6. Run real authenticated API and Chromium single/group stale-tab scenarios including intentional confirmation after rejection. Use the local fixture only. Add this journey to the existing Pi release browser job so CI protects both actions. No physical Pi or Docker work in this repair scope.
 7. Run affected API, storage, workflow and dashboard suites plus required lint and whitespace checks. Ask an independent reviewer to inspect the complete patch and failure cases.
 8. Commit the focused ready repair and report exact source and results to the release coordinator. The coordinator runs the final combined Mac/Linux and installed-package checks before publication and green-CI merge.
 

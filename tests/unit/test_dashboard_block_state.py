@@ -511,7 +511,7 @@ def test_a_finished_add_updates_the_profile_list_and_the_button_at_once():
             "request",
             "/api/observations/add-to-profile",
             "POST",
-            {"domain": "b.example", "profile_id": "slow"},
+            {"domain": "b.example", "profile_id": "slow", "confirm_allow_only": False},
         ],
         ["success", "Added b.example to the profile."],
     ]
